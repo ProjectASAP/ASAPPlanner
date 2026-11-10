@@ -1,9 +1,11 @@
 //! Group scope: memo groups, the distinct logical sub-expressions of the
 //! workload, and the properties every candidate of a group shares.
 
+use std::collections::BTreeSet;
+
 use super::column_properties::output_column_sign;
-use crate::ir::operator::arguments::{AtModifier, TimeShift};
-use crate::ir::operator::input::{reads_only_time_series, OperatorInput};
+use crate::ir::operator::arguments::{AtModifier, Source, TimeShift};
+use crate::ir::operator::input::{scanned_sources, OperatorInput};
 use crate::ir::properties::summary_coverage::SummaryCoverage;
 use crate::ir::schema::Schema;
 use crate::ir::ASAPOp;
@@ -77,10 +79,19 @@ pub struct GroupProperties {
     /// Whether two equal expressions return the same rows for the same
     /// input rows, so they may be one group (not an unordered `LIMIT`).
     pub shareable_when_equal: bool,
-    /// Whether every `Scan` below reads a time series (PromQL rows): a
-    /// `Scan` of a `Source::TimeSeries`, or any other operator all of whose
-    /// input groups do. A PromQL top-k ranks one row per series.
-    pub reads_only_time_series: bool,
+    /// The sources the `Scan`s below this group read: a `Scan`'s own, else
+    /// the union over its input groups.
+    pub scanned_sources: BTreeSet<Source>,
+}
+
+impl GroupProperties {
+    /// Whether every scanned source is a time series (PromQL rows): a
+    /// PromQL top-k ranks one row per series.
+    pub fn scans_only_time_series(&self) -> bool {
+        self.scanned_sources
+            .iter()
+            .all(|source| matches!(source, Source::TimeSeries { .. }))
+    }
 }
 
 /// The sign of one column's values, a group property derived from the
@@ -136,13 +147,15 @@ pub(super) fn derive_group_properties(
     let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
     let (schema, aggregate_coverage) = check_node_rules(&operator)?;
     Ok(GroupProperties {
-        column_sign: output_column_sign(&operator, &schema, &memo.declared_column_signs),
+        column_sign: output_column_sign(&operator, &schema, &memo.source_facts),
         depends_on_evaluation_time: depends_on_evaluation_time(&operator),
         schema,
         result_kind: operator.output_kind(),
         aggregate_coverage,
         shareable_when_equal: operator.is_shareable_when_equal(),
-        reads_only_time_series: reads_only_time_series(&operator),
+        scanned_sources: scanned_sources(&operator, |input| {
+            input.group_properties().scanned_sources.clone()
+        }),
     })
 }
 
@@ -216,9 +229,5 @@ impl OperatorInput for MemoGroupAsInput<'_> {
 
     fn aggregate_coverage(&self) -> Option<&SummaryCoverage> {
         self.group().group_properties.aggregate_coverage.as_ref()
-    }
-
-    fn reads_only_time_series(&self) -> bool {
-        self.group().group_properties.reads_only_time_series
     }
 }

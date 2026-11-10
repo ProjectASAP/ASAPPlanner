@@ -313,26 +313,7 @@ impl DataWorkload {
         &self,
         series: &str,
     ) -> Option<(&SourceFacts, Option<PrometheusMetricType>)> {
-        use PrometheusMetricType::{Counter, Histogram, Summary};
-        for (suffix, series_type) in [
-            ("_bucket", None),
-            ("_sum", Some(Counter)),
-            ("_count", Some(Counter)),
-        ] {
-            let Some(family) = series.strip_suffix(suffix) else {
-                continue;
-            };
-            let Some(facts) = self.sources.get(family) else {
-                continue;
-            };
-            match (facts.metric_type, series_type) {
-                (Some(Histogram), None) => return Some((facts, Some(Histogram))),
-                (Some(Histogram | Summary), Some(counter)) => return Some((facts, Some(counter))),
-                _ => {}
-            }
-        }
-        let facts = self.sources.get(series)?;
-        Some((facts, facts.metric_type))
+        series_facts(&self.sources, series)
     }
 
     /// Data of unknown arrival whose `metrics` are each sampled every
@@ -425,6 +406,35 @@ impl DataWorkload {
         }
         Ok(())
     }
+}
+
+/// [`DataWorkload::series_facts`] over `sources`, a data workload's
+/// [`DataWorkload::sources`]: the facts of the source a PromQL selector over
+/// `series` reads, and that series' own type.
+pub(crate) fn series_facts<'a>(
+    sources: &'a BTreeMap<String, SourceFacts>,
+    series: &str,
+) -> Option<(&'a SourceFacts, Option<PrometheusMetricType>)> {
+    use PrometheusMetricType::{Counter, Histogram, Summary};
+    for (suffix, series_type) in [
+        ("_bucket", None),
+        ("_sum", Some(Counter)),
+        ("_count", Some(Counter)),
+    ] {
+        let Some(family) = series.strip_suffix(suffix) else {
+            continue;
+        };
+        let Some(facts) = sources.get(family) else {
+            continue;
+        };
+        match (facts.metric_type, series_type) {
+            (Some(Histogram), None) => return Some((facts, Some(Histogram))),
+            (Some(Histogram | Summary), Some(counter)) => return Some((facts, Some(counter))),
+            _ => {}
+        }
+    }
+    let facts = sources.get(series)?;
+    Some((facts, facts.metric_type))
 }
 
 fn validate_optional_rate(rate: Option<Rate>) -> Result<(), WorkloadError> {

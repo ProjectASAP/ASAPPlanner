@@ -16,20 +16,21 @@ use crate::ir::schema::{aggregate_output_columns, FieldDataType, OutputColumnSou
 use crate::ir::{ASAPOp, NonASAPOp, Operator};
 use crate::summary_type::{ExactKind, SketchStatistic, SummaryInputExpr, SummaryUpdate};
 use crate::workload::bounds::source_name;
+use crate::workload::{series_facts, PrometheusMetricType, SourceFacts};
 
 use ValueSign::{NonNegative, NonPositive, Unknown};
 
 type Input<'m> = MemoGroupAsInput<'m>;
 
 /// The sign of each column of `output`, the output schema of `operator`,
-/// from its input groups' `column_sign` and, for a `Scan`, `declared`.
+/// from its input groups' `column_sign` and, for a `Scan`, `source_facts`.
 pub(crate) fn output_column_sign(
     operator: &Operator<Input<'_>>,
     output: &Schema,
-    declared: &BTreeMap<String, BTreeMap<String, ValueSign>>,
+    source_facts: &BTreeMap<String, SourceFacts>,
 ) -> Vec<ValueSign> {
     let signs = match operator {
-        Operator::NonASAP(op) => non_asap_signs(op, output, declared),
+        Operator::NonASAP(op) => non_asap_signs(op, output, source_facts),
         Operator::ASAP(op) => asap_signs(op, output),
     };
     debug_assert_eq!(
@@ -48,21 +49,29 @@ fn signs_of(input: &Input<'_>) -> Vec<ValueSign> {
 fn non_asap_signs(
     op: &NonASAPOp<Input<'_>>,
     output: &Schema,
-    declared: &BTreeMap<String, BTreeMap<String, ValueSign>>,
+    source_facts: &BTreeMap<String, SourceFacts>,
 ) -> Vec<ValueSign> {
     use NonASAPOp::*;
     let unknown = || vec![Unknown; output.fields.len()];
     match op {
+        // The signs its source's facts declare (a histogram's or summary's
+        // series reads its family's); a counter's `value` is non-negative
+        // without a declaration.
         Scan { source, schema, .. } => {
-            let declared = declared.get(source_name(source));
+            let facts = series_facts(source_facts, source_name(source));
             schema
                 .fields
                 .iter()
-                .map(|field| {
-                    declared
-                        .and_then(|columns| columns.get(&field.name))
+                .map(|field| match facts {
+                    Some((facts, series_type)) => facts
+                        .column_signs
+                        .get(&field.name)
                         .copied()
-                        .unwrap_or(Unknown)
+                        .or((field.name == "value"
+                            && series_type == Some(PrometheusMetricType::Counter))
+                        .then_some(NonNegative))
+                        .unwrap_or(Unknown),
+                    None => Unknown,
                 })
                 .collect()
         }

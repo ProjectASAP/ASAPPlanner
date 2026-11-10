@@ -8,6 +8,7 @@ pub mod parsed_workload;
 mod planning;
 mod query;
 
+pub(crate) use data::series_facts;
 pub use data::{
     DataArrival, DataWorkload, LabelSetDistinctValues, PrometheusMetricType, Rate, SourceFacts,
     StreamNorms,

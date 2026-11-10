@@ -13,8 +13,9 @@ use crate::ir::QueryRoot;
 use crate::ir::SchemaDerivationError;
 use crate::stages::{
     CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, LogicalRequirements, MemoGroup,
-    MemoGroupId, ValueSign,
+    MemoGroupId,
 };
+use crate::workload::{DataWorkload, SourceFacts};
 use hash_consing::{
     expression_hash, same_expression_and_logical_properties, same_serialized_expression,
     serialized_operator,
@@ -34,10 +35,9 @@ pub struct Memo {
     /// [`expression_hash`] of their expression: every group whose sharing
     /// is legal ([`GroupProperties::shareable_when_equal`]).
     groups_by_expression_hash: HashMap<u64, Vec<(MemoGroupId, Option<String>)>>,
-    /// The sign the data workload declares for each source column it
-    /// declares one for, by source, then column name: a `Scan`'s
-    /// [`GroupProperties::column_sign`].
-    pub(super) declared_column_signs: BTreeMap<String, BTreeMap<String, ValueSign>>,
+    /// The data workload's facts per source (`DataWorkload::sources`), fixed
+    /// at construction: a `Scan` group's column signs read them.
+    pub(super) source_facts: BTreeMap<String, SourceFacts>,
 }
 
 /// One query of the memo: its root over groups, its accuracy target and
@@ -55,17 +55,14 @@ pub struct MemoQuery {
 }
 
 impl Memo {
-    /// Declares the sign of each column of `source` its data declares
-    /// (`column_signs`, by column name), which every `Scan` of `source`
-    /// added afterwards reads; an undeclared source column's sign is
-    /// `Unknown`. Stage 0 declares each source before its first `Scan`.
-    pub fn declare_column_signs(
-        &mut self,
-        source: &str,
-        column_signs: BTreeMap<String, ValueSign>,
-    ) {
-        self.declared_column_signs
-            .insert(source.to_owned(), column_signs);
+    /// A memo without groups over the sources `data` describes: a `Scan`
+    /// group's column signs are the ones `data` declares for its source
+    /// (`GroupProperties::column_sign`).
+    pub fn new(data: &DataWorkload) -> Self {
+        Self {
+            source_facts: data.sources.clone(),
+            ..Self::default()
+        }
     }
 
     /// The groups, by id.

@@ -7,7 +7,7 @@
 //! requests_total  [ts, value, host]   a counter: value non-negative
 //! gauge           [ts, value, host]   nothing declared
 //! ```
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use asap_types::ir::operator::arguments::{AtModifier, GroupKeys, JoinKind, Reduction, Source};
 use asap_types::ir::operator::AggIntent;
@@ -21,6 +21,7 @@ use asap_types::ir::{
 };
 use asap_types::stages::{Memo, MemoGroupId, ValueSign};
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
+use asap_types::workload::{DataWorkload, PrometheusMetricType, SourceFacts};
 
 use ValueSign::{NonNegative, NonPositive, Unknown};
 
@@ -30,13 +31,27 @@ const HOST: usize = 2;
 const MINUTE_MS: i64 = 60_000;
 
 /// The memo of every example: `latency.value` declared non-negative, and
-/// `requests_total.value` as Stage 0 declares a counter's.
+/// `requests_total` a declared counter, whose `value` is non-negative.
 fn memo() -> Memo {
-    let mut memo = Memo::default();
-    for source in ["latency", "requests_total"] {
-        memo.declare_column_signs(source, BTreeMap::from([("value".into(), NonNegative)]));
-    }
-    memo
+    Memo::new(&DataWorkload {
+        sources: BTreeMap::from([
+            (
+                "latency".to_string(),
+                SourceFacts {
+                    column_signs: BTreeMap::from([("value".to_string(), NonNegative)]),
+                    ..SourceFacts::default()
+                },
+            ),
+            (
+                "requests_total".to_string(),
+                SourceFacts {
+                    metric_type: Some(PrometheusMetricType::Counter),
+                    ..SourceFacts::default()
+                },
+            ),
+        ]),
+        ..DataWorkload::default()
+    })
 }
 
 fn add(memo: &mut Memo, expression: Operator<MemoGroupId>) -> MemoGroupId {
@@ -408,12 +423,14 @@ fn a_result_depends_on_the_evaluation_time_under_a_time_range_or_now() {
     }
 }
 
-/// `reads_only_time_series`, derived once per group: a PromQL `Scan` of a
-/// time series reads one, and so does a `TimeRange` over it; a SQL table
-/// `Scan` does not, nor a `Join` reading it (a SQL join reads relations
-/// only, so a time series cannot be one of its inputs).
+/// `scanned_sources`, derived once per group: a `Scan` its source, any other
+/// group the union over its input groups. A PromQL `Scan` of a time series
+/// and a `TimeRange` over it scan only time series
+/// (`scans_only_time_series`); a SQL table `Scan` does not, nor a `Join`
+/// reading two (a SQL join reads relations only, so a time series cannot be
+/// one of its inputs).
 #[test]
-fn a_group_reads_only_time_series_when_every_scan_below_reads_one() {
+fn a_group_scans_the_sources_of_the_scans_below_it() {
     let mut memo = memo();
     let series = add(&mut memo, series("latency"));
     let window = add(&mut memo, range(MINUTE_MS, series));
@@ -440,11 +457,21 @@ fn a_group_reads_only_time_series_when_every_scan_below_reads_one() {
             right: hosts,
         }),
     );
-    let reads = |group: MemoGroupId| {
-        memo.groups()[group.0 as usize]
-            .group_properties
-            .reads_only_time_series
+    let properties = |group: MemoGroupId| &memo.groups()[group.0 as usize].group_properties;
+    let table_source = |name: &str| Source::Table {
+        table_ref: name.into(),
     };
+    assert_eq!(
+        properties(join).scanned_sources,
+        BTreeSet::from([table_source("hosts"), table_source("requests")])
+    );
+    assert_eq!(
+        properties(window).scanned_sources,
+        BTreeSet::from([Source::TimeSeries {
+            metric: "latency".into()
+        }])
+    );
+    let reads = |group: MemoGroupId| properties(group).scans_only_time_series();
     assert!(reads(series));
     assert!(reads(window));
     assert!(!reads(requests));

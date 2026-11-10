@@ -1,5 +1,6 @@
 //! Ranked-row output contract shared by logical TopK and its implementations.
-use crate::ir::operator::input::OperatorInput;
+use crate::ir::operator::arguments::Source;
+use crate::ir::operator::input::{scanned_sources, OperatorInput};
 use crate::ir::operator::Reduction;
 use crate::ir::scalar::column_resolution::{resolve_column_ref, ResolveError};
 use crate::ir::scalar::{ColumnRef, ProjectItem};
@@ -55,6 +56,18 @@ pub fn ranked_column<I: OperatorInput>(child: &I) -> Result<ColumnId, ResolveErr
     }
 }
 
+/// Whether every source the `Scan`s below `input` read is a time series
+/// (PromQL rows), over its operators ([`scanned_sources`]): a node tree
+/// stores no group property, so the rule is applied down the tree.
+fn scans_only_time_series<I: OperatorInput>(input: &I) -> bool {
+    fn sources_below<I: OperatorInput>(input: &I) -> std::collections::BTreeSet<Source> {
+        scanned_sources(&input.operator(), sources_below)
+    }
+    sources_below(input)
+        .iter()
+        .all(|source| matches!(source, Source::TimeSeries { .. }))
+}
+
 /// Ordered projection of ranked rows: partition keys, ranked value, then
 /// item identity. TopK retains rows; partition keys alone are not unique.
 pub(crate) fn ranked_row_projection<I: OperatorInput>(
@@ -85,7 +98,7 @@ pub(crate) fn ranked_row_projection<I: OperatorInput>(
         alias: Some(output_name.into()),
         expr: ScalarExpr::Column(value),
     });
-    let promql = child.reads_only_time_series();
+    let promql = scans_only_time_series(child);
     for (index, field) in child.schema().fields.iter().enumerate() {
         let names_item = !promql || field.dtype == FieldDataType::Plain(DataType::Utf8);
         if names_item

@@ -4,6 +4,7 @@
 //! `GroupProperties` (concepts doc `memo-groups-properties-requirements.md`,
 //! section 3).
 
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use super::arguments::Source;
@@ -22,24 +23,23 @@ pub trait OperatorInput: Sized + Clone {
     /// What the input covers when it is an aggregate group in the memo;
     /// `None` for any other input.
     fn aggregate_coverage(&self) -> Option<&SummaryCoverage>;
-    /// Whether every `Scan` below it reads a time series (PromQL rows):
-    /// [`reads_only_time_series`] of its operator, a memo group's stored
-    /// property.
-    fn reads_only_time_series(&self) -> bool;
 }
 
-/// Whether every `Scan` at or below `operator` reads a time series: a
-/// `Scan` of a `Source::TimeSeries`, or any other operator all of whose
-/// inputs do.
-pub(crate) fn reads_only_time_series<I: OperatorInput>(operator: &Operator<I>) -> bool {
+/// The sources the `Scan`s at or below `operator` read: a `Scan`'s own,
+/// else the union over its inputs, `sources_of(input)` for each. A memo
+/// group stores it (`GroupProperties::scanned_sources`); a node tree
+/// recomputes it.
+pub(crate) fn scanned_sources<I>(
+    operator: &Operator<I>,
+    sources_of: impl Fn(&I) -> BTreeSet<Source>,
+) -> BTreeSet<Source> {
     match operator {
-        Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
-            matches!(source, Source::TimeSeries { .. })
-        }
+        Operator::NonASAP(NonASAPOp::Scan { source, .. }) => BTreeSet::from([source.clone()]),
         operator => operator
             .children()
             .into_iter()
-            .all(OperatorInput::reads_only_time_series),
+            .flat_map(sources_of)
+            .collect(),
     }
 }
 
@@ -59,10 +59,6 @@ impl OperatorInput for Rc<OperatorNode> {
 
     fn aggregate_coverage(&self) -> Option<&SummaryCoverage> {
         None
-    }
-
-    fn reads_only_time_series(&self) -> bool {
-        reads_only_time_series(&self.operator)
     }
 }
 
@@ -137,13 +133,6 @@ impl<I: OperatorInput> OperatorInput for InputOrTemporaryBuild<I> {
         match self {
             Self::Input(input) => input.aggregate_coverage(),
             Self::TemporaryBuild(_) => None,
-        }
-    }
-
-    fn reads_only_time_series(&self) -> bool {
-        match self {
-            Self::Input(input) => input.reads_only_time_series(),
-            Self::TemporaryBuild(build) => reads_only_time_series(&build.operator),
         }
     }
 }

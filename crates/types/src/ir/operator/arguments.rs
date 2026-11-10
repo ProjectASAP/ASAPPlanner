@@ -170,7 +170,7 @@ impl<'de, C: Deserialize<'de>> Deserialize<'de> for GroupKeys<C> {
 /// The leaf data source of a `Scan`. The schema itself rides on the
 /// `Scan.schema` field (built by the schema resolver); `Source` carries only the leaf's
 /// identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Source {
     /// Time-series leaf — PromQL / DC lifecycle. Produces `(ts, value, *labels)`.
     TimeSeries { metric: String },
