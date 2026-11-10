@@ -8,6 +8,7 @@ mod planner_layering_common;
 mod accuracy_at_query_roots;
 mod aggregate;
 mod binary_op;
+mod contracts;
 mod crate_graph;
 mod filtered_aggregates;
 mod finer_aggregate_reuse;

@@ -14,7 +14,7 @@ planner's own costing.
 | Layer | Asserts | Inputs | Where |
 |---|---|---|---|
 | Rule unit tests | one rule over a minimal memo: the candidates, edges or prune causes it adds | a one- or two-query workload planned up to the stage under test through the production frontends and Stage 0 | each stage crate's tests |
-| Contracts | invariants of every stage's output (below) | every workload of the corpus registry | one suite in `crates/integration-tests` |
+| Contracts | invariants of every stage's output (below) | every workload of the corpus registry | `crates/integration-tests/tests/contracts.rs` |
 | Oracles | the planner's cost or answers against a computation that does not use the planner's costing | canonical shapes and small synthetic data sets | `crates/integration-tests` |
 | Metamorphic relations | how the cost of two related workloads must compare | `planner_fuzz` with fixed seeds | `crates/devtools/tests/planner_fuzz.rs`, the `planner_fuzz` bin |
 | Regressions | one bug stays fixed | one minimal workload per issue | next to the code the bug was in, or `crates/integration-tests` |
@@ -57,7 +57,12 @@ Checked on every corpus registry workload:
   error contracts, is within its target.
 
 A contract that fails on one workload names the workload id and the
-violated invariant. MILP objective = `plan_cost` is a consistency check, not
+violated invariant. `contracts::contract_violations(&planned)` checks one
+planned workload, so a regression test can check its own workload too
+(`milp_objective.rs` does). (K) is recomputed over the plan, not read from
+the MILP: per node and metric, the node's readout requirement plus β times
+each input's error (`LogicalRequirements::error_propagation`), and at each
+query root within the target's ε and per-value δ. MILP objective = `plan_cost` is a consistency check, not
 an oracle: Stage 3 and `plan_cost` share `node_resource_usage_and_cost`, so a
 costing bug can leave them equal (Example 1 of #1253).
 

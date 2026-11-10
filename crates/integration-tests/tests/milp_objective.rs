@@ -1,6 +1,7 @@
-//! The selection MILP models the selected plan's cost exactly: its optimal
-//! objective is `asap_cost::plan_cost` of the plan it builds, under cost
-//! model 1 (concepts doc, section 5, "Cost and retention").
+//! Regressions of MILP objective = `asap_cost::plan_cost` (concepts doc,
+//! section 5, "Cost and retention"): two workloads where they differed,
+//! checked with the contracts (`contracts.rs`).
+use crate::contracts::contract_violations;
 use asap_cost::CostInputs;
 use asap_devtools::corpus_registry::{plan_workload, repeating_promql_workload};
 use asap_devtools::planning_stages::RunUntil;
@@ -11,8 +12,8 @@ use serde_json::json;
 /// Two windowed quantiles over one metric (1 m and 5 m, every 10 s; 10,000
 /// series every 15 s), accuracy not enforced: the selected plan shares
 /// one query-time scan, whose execution reads the 5 m window once and
-/// retains it (h_v, constraint (R)). The MILP's objective equals the plan's
-/// cost to 1e-6 of it.
+/// retains it (h_v, constraint (R)). The plan meets the contracts, MILP
+/// objective = plan cost (relative 1e-9) among them.
 #[test]
 fn the_milp_objective_is_the_plan_cost_on_a_shared_scan() {
     let workload = repeating_promql_workload(
@@ -63,8 +64,8 @@ fn the_milp_objective_is_the_plan_cost_on_an_offset_range_query() {
 }
 
 /// Plans `workload` (accuracy not enforced when `ignore_accuracy`) on the
-/// default deployment and checks the MILP's objective equals `plan_cost`
-/// of the selected plan to 1e-6 of it; returns that cost per second.
+/// default deployment and checks the contracts (`contracts.rs`), MILP
+/// objective = `plan_cost` among them; returns that cost per second.
 fn milp_objective_equals_plan_cost(workload: &PlanningWorkload, ignore_accuracy: bool) -> f64 {
     let planned = plan_workload(
         workload,
@@ -75,22 +76,18 @@ fn milp_objective_equals_plan_cost(workload: &PlanningWorkload, ignore_accuracy:
         RunUntil::Stage3,
     )
     .unwrap();
-    let (plan, selection) = planned
+    let violations = contract_violations(&planned);
+    assert!(violations.is_empty(), "{violations:#?}");
+    let (plan, _) = planned
         .stages
         .run
         .selection
         .as_ref()
         .expect("a plan is selected");
-    let plan_cost = asap_integration_tests::planning::plan_cost_per_second(
+    asap_integration_tests::planning::plan_cost_per_second(
         plan,
         &planned.entries,
         &planned.data,
         &planned.cost_inputs,
-    );
-    assert!(
-        (selection.milp_objective - plan_cost).abs() <= 1e-6 * plan_cost,
-        "MILP objective {} vs plan cost {plan_cost}",
-        selection.milp_objective
-    );
-    plan_cost
+    )
 }
