@@ -314,14 +314,6 @@ rule's origin, and gives each reader a candidate that reads that group.
 | `TumblingWindows` | Chain groups: `add_chain_groups` (`stage1-pass2-reuse-candidates/src/rules/chains.rs`) | A chain group `SummaryTumblingWindowChain[w](X)` per width the reaching queries' evaluation grids allow, one build per surviving θ, the `TimeShift`/`TimeRange` groups over it, and the `SummaryMerge` over them in the state group. A chain has an edge only into a group whose evaluation grid its width divides, so a 15 s chain never serves a state also read every 10 s. |
 | `TopKReuse` | Exact top-k reuse: `add_topk_candidates` (`stage1-pass2-reuse-candidates/src/rules/topk.rs`) | For each exact top-k, `Aggregate[TopK k]` over the ranked rows of the top-k group of the same input and partition with the largest `k`, partitioned by that group's leading key columns: the `k` highest of the `k_max` highest rows are the `k` highest. |
 | `Rollup` | Rollup from the finest common group: `add_rollup_candidates` (`stage1-pass2-reuse-candidates/src/rules/rollup.rs`) | A coarse group computed from a finer group's values or states (through a compensating `Filter` on the finer group's keys), and the builds of a cluster's finest common group. |
-| `SummaryResult` | `factor_summary_results` (`pass2/memo/rules/summary_results.rs`) | A summary readout factored out of a composite implementation, so that other readers can read it. |
-| `SharedBuild` | Summary capability: `add_shared_summary_state_groups` (`pass2/memo/state_groups.rs`), Pass 2's last step | For each build made two or more times (by different candidates, or twice within one), one concrete summary-state group with one `SharedBuild` candidate; and for each candidate making such builds, one `SharedBuild` copy that reads the groups instead of building its own states. |
-
-The state-configuration rule (`pass2/memo/rules/shared_configuration_readers.rs`) runs just
-before the shared builds are found. It rewrites readers to each shared size
-and to the newest tumbling windows of each tumbling-window chain layout they may read, so that
-equal builds appear, and a rewrite keeps the origin of the candidate it
-rewrites.
 
 **Each stage over the memo.** Each stage keeps its decision, on groups
 instead of whole candidates:

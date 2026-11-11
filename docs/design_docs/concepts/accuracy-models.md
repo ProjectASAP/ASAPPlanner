@@ -9,7 +9,7 @@ of its inputs. A locally accurate sketch does not automatically make an entire
 query accurate.
 
 Planner owns the interpretation of accuracy targets, estimator models, error
-propagation, budget allocation and candidate legality. Deployments provide
+propagation, readout requirements and candidate legality. Deployments provide
 source contracts and evidence with a defensible scope. Cost models compare
 resource costs; runtime implementations execute the selected semantics and
 must honor the conditions attached to them.
@@ -26,7 +26,7 @@ These three concepts have different roles:
 | Concept | Meaning | Owner |
 |---|---|---|
 | Accuracy target | What the caller requires of the result | Query requirements and aggregate intent |
-| Result guarantee | What a particular computation can establish | Estimator and composition models in Planner |
+| Result guarantee | What a particular computation can establish | Estimator models and error propagation in Planner |
 | Evidence | Facts or trusted contracts needed to establish that guarantee | Source or deployment evidence provider |
 
 `AccuracyTarget` is the authoritative requirement type:
@@ -65,25 +65,26 @@ share meets a target over a larger share but not a per-value target, and only
 a per-value guarantee is restated over a scope.
 
 A scope bounds only the failure probability; the error bound is unchanged.
-Every estimator and composition produces a per-value guarantee (for a grouped
+Every estimator produces a per-value guarantee (for a grouped
 query, one per group: a Kmv or HLL distinct count per group, a KLL or DDSketch
 quantile per group, a Count-Min or Count Sketch frequency per key, a Hydra
 estimate per subpopulation; an exact value fails with probability 0). Stated
 over a scope, a per-value failure probability `δ` becomes `V · δ` by the union
 bound, without assuming independence, so a sketch shared by several groups
 (Hydra, a keyed Count-Min) is covered the same way
-(`AccuracyGuarantee::over_scope`). A guarantee whose own failure probability is
+(`AccuracyScope::max_values_covered` gives `V`). A guarantee whose own failure probability is
 unknown (generic HLL) stays unmet under every scope with a δ, and top-k
 membership needs its own evidence under every scope.
 
-Pass 1 sizes each approximate input of a candidate with `n` accuracy-budget
-parts for `δ / (n · V)`, so the union bound gives δ over the covered values.
-A candidate several queries reach is sized for the smallest `δ / (n · V)`
-among them, and a build Pass 2 shares among several readers takes the
-strictest reader's size. Stage 3 only checks the composed guarantee; it never
-resizes. At equal δ and `n`, the scope covering the most values is the
-strictest: every group (`G`, when `G` is above 100), then a 1% share (100),
-then a 5% share (20), then a single value (1). A whole-result target with an unbound `G`
+Pass 2 gives each sketch readout the error and per-value failure probability
+`δ / V` it must meet, so the union bound gives δ over the covered values;
+Pass 1's candidate takes the first requirement level and Pass 2 adds a copy
+per further level. A readout several queries reach gets the union of their
+levels, and a build Pass 2 shares among several readers takes the strictest
+reader's size. Stage 3 only checks the guarantee; it never resizes. At equal
+δ, the scope covering the most values is the strictest: every group (`G`,
+when `G` is above 100), then a 1% share (100), then a 5% share (20), then a
+single value (1). A whole-result target with an unbound `G`
 enlarges nothing and stays unmet. A grouped result's `G` is bound by the
 distinct values its sources declare for its group keys
 (`SourceFacts.distinct_values_per_label`, and
@@ -116,8 +117,8 @@ rule and any evidence that rule needs.
 
 Bounds and probabilities can remain symbolic. An unknown population size,
 normalization factor or failure probability stays unknown; it is not replaced
-by zero. Provenance records estimator parameters and contracts, child
-guarantees, composition steps, allocated targets and unavailable evidence.
+by zero. Provenance records that a value is exact, or the sketch evaluation with its
+estimator parameters and contract.
 This makes an accuracy decision explainable without reconstructing it from
 query text or cost estimates.
 
@@ -129,12 +130,12 @@ flowchart TD
     Evidence[Scoped source contracts and evidence] --> Generate
     Generate --> Local[Derive local evaluation guarantees]
     Evidence --> Local
-    Local --> Compose[Propagate guarantees through the DAG]
+    Local --> Compose[Propagate required errors through the DAG]
     Evidence --> Compose
     Compose --> Check[Check the composed target]
     Check -->|Satisfied with sufficient evidence| Eligible[Eligible for cost comparison]
     Check -->|Evidence missing| Pending[Retain an uncertified candidate for explanation]
-    Check -->|Known violation or unsupported composition| Reject[Reject with a reason]
+    Check -->|Known violation or unsupported propagation| Reject[Reject with a reason]
     Eligible --> Select[Select compatible candidates across the workload]
     Select --> Bind[Bind implementations and deployment resources]
 ```
@@ -171,9 +172,9 @@ The built-in models currently include:
 
 | Model | Current accuracy contract and limits |
 |---|---|
-| Exact computation | Exact over exact inputs under the supported operation's semantics; approximate inputs still require propagation |
+| Exact computation | Exact over exact inputs under the supported operation's semantics; approximate inputs still require error propagation |
 | KLL | Normalized rank error from the empirical 99% calibration `2.296 / k^0.9723`, fitted on Apache DataSketches' C++ KLL (`a9b42755072b`); below a failure probability of 0.01 that error is scaled by the Gaussian quantile ratio `z(1 − δ/2) / z(1 − 0.01/2)`, a model rather than a measurement, and the guarantee names that contract apart |
-| DDSketch | Relative value error from alpha under the supported estimator/domain contract; sensitive compositions require additional domain evidence |
+| DDSketch | Relative value error from alpha under the supported estimator/domain contract; operators sensitive to sign or range require additional domain evidence |
 | Generic HLL | RSE magnitude with unknown failure probability; not a general confidence theorem |
 | Bounded Classic HLL | Source-conditioned relative-error/failure-probability bound and precision sizing for the linear-counting branch |
 | CMS | L1-normalized frequency bound from width and depth; does not by itself certify TopK membership |
@@ -200,70 +201,79 @@ sizing: Stage 3 checks the guarantee derived from the committed parameters.
 The design boundary is that sizing never grants accuracy authority to the
 cost model.
 
-## Composing guarantees through a DAG
+## Propagating errors through a DAG
 
 The accuracy crate supplies theoretical guarantees (`theoretical_guarantee`),
-propagation rules and the comparison limit of a target (`target_limit`); the
-deployment's measurements (`AccuracyEvidence::measured_guarantee`) take precedence over a
-theoretical guarantee. The rules are conservative: an unregistered
-composition over approximate inputs is rejected rather than treated as exact.
+each operator's error contract (`error_propagation`) and the comparison limit
+of a target (`target_limit`); the deployment's measurements
+(`AccuracyEvidence::measured_guarantee`) take precedence over a theoretical
+guarantee. Only a sketch readout introduces error. Every other operator
+passes its inputs' errors on through a contract, and the contracts are
+conservative: an operator with no contract for a metric gives no edge for an
+input whose error is in that metric, so an approximate value is never treated
+as exact.
 
-The principal composition rules are:
+A contract is a linear bound: the consumer's output error is at most
+`Σ β_i · ε_i` over its inputs' errors `ε_i`, valid while each input stays
+within its validity cap `b_i`. The principal contracts are:
 
-| Computation | Accuracy reasoning |
+| Operator | Contract |
 |---|---|
-| Supported computation over exact inputs | Only its own local estimator error remains; a supported exact operation remains exact |
-| Additive absolute-error composition | Add compatible error bounds and union-bound their failure events |
-| Relative-error composition | Include the multiplicative cross term, subject to the required sign/domain conditions |
-| Registered Lipschitz transform | Scale the input bound by the registered constant and include local error |
-| Exact sum over approximate values | Convert compatible errors to absolute units and account for input multiplicity; missing scale/count evidence remains unknown |
-| Exact average or extremum over approximate values | Use the registered absolute-error bound and account for failures across the input population |
-| Division | Two relative errors (or an exact numerator over a relative error) compose in closed form, `(a + b)/(1 − b)` for `b < 1`, with no domain evidence; any other approximate denominator needs enforced operand domains bounded away from zero; rank-error division is unsupported |
-| Counter rate/increase over approximate samples | No general distribution-free rule for reset detection and extrapolation; exact inputs remain a distinct supported case |
-| Candidate-based TopK | Require membership/completeness evidence; frequency accuracy and exact reranking alone are insufficient |
+| Project of columns and literals, Sort, TimeRange, TimeShift, Concat, a readout, a finalize, a summary merge | `β = 1` in any metric |
+| Filter on columns copied from a source (labels and keys) | `β = 1` in any metric; a filter comparing a computed value has none |
+| Project computing `abs`, `clamp` or a negation | Absolute error, `β = 1` |
+| Aggregate or exact-accumulator build of counts, min, max, avg | Counts `β = 0`; min and max absolute or relative with `β = 1`; avg absolute with `β = 1`; none with measure filters or `HAVING` |
+| `+`, `-` | Absolute error, `β = 1` |
+| `/` | Relative error, `β = 1/(1 − b)` on both operands, the denominator capped at `b` |
+| `*` | Relative error, `β = (1 + b, 1)`, the right operand capped at `b` |
+| Sum, comparison, ranking, counter rate or increase, any other function | No contract: an approximate input gives no edge |
+| Top-k over a sketch | The heap holds its `k` whatever the requirement; membership needs its own evidence |
 
-Probability composition uses union bounds, without assuming independence
-between child errors. Estimator-local assumptions, such as independent bucket
-hashing, must be stated separately. Shared DAG nodes do not create independent
-errors merely because several consumers reference them, and sharing does not
-justify reducing the failure budget. Per-result guarantees also do not imply
-a simultaneous guarantee across every query or evaluation time in a dashboard.
+`b` is `RELATIVE_OPERAND_VALIDITY_CAP`, 0.1, the weakest error of every
+algorithm's list, so it never excludes a listed θ. For relative errors `x`
+and `y` with `y ≤ b`, `(1 + x)(1 + y) − 1 ≤ (1 + b)·x + y`, and a ratio of
+relative errors `a` over `b` is within `(a + b)/(1 − b)`. A relative bound
+below 1 keeps zero at zero and keeps the sign, so a zero denominator gives the
+same non-finite answer exactly and approximately. The ratio rule relies on
+each operand's own relative guarantee (for DDSketch, its estimator contract:
+one-signed values within the mapping's range). A sum or difference of
+relative errors has no relative bound (cancellation), and a rank error (KLL)
+has no value bound, so neither passes through division. Likewise, an exact
+sum above approximate values retains their uncertainty: exact arithmetic does
+not recover information lost below it.
 
-For relative errors, two eligible layers with errors `e1` and `e2` compose as
-`(1 + e1)(1 + e2) - 1`, not simply `e1 + e2`. A ratio of relative errors `a`
-over `b` is within `max((1 + a)/(1 − b) − 1, 1 − (1 − a)/(1 + b)) = (a + b)/(1 − b)`.
-A relative bound below 1 keeps zero at zero and keeps the sign, so a zero
-denominator gives the same non-finite answer exactly and approximately. The
-rule relies on each operand's own relative guarantee (for DDSketch, its
-estimator contract: one-signed values within the mapping's range). A ratio
-of operands whose relative bound is still symbolic in Stage 1 (e.g. a sum of
-quantiles gated on the values' sign) gets no guarantee. A sum or difference of relative
-errors has no relative bound (cancellation), and a rank error (KLL) has no
-value bound, so neither composes through division. Likewise, an exact sum above
-approximate values retains their uncertainty: exact arithmetic does not
-recover information lost below it.
+Probability is not propagated through operators. A query's failure
+probability is split into a per-value one for each readout; a composed query
+whose readouts' failure events add up (a ratio of two quantiles) reads each at
+a level of a failure-probability grid, and the levels sum within the query's
+per-value failure probability by the union bound, without assuming
+independence between child errors. Estimator-local assumptions, such as
+independent bucket hashing, must be stated separately. Shared DAG nodes do
+not create independent errors merely because several consumers reference
+them, and sharing does not justify reducing the failure budget. Per-result
+guarantees also do not imply a simultaneous guarantee across every query or
+evaluation time in a dashboard.
 
-## Allocating an end-to-end budget
+## Readout requirements for composed queries
 
-`AccuracyBudgetAllocator` proposes local targets for a composition. These
-allocations create candidates; they are not proofs that the candidates work.
-Every proposed composition is checked again using the actual guarantees.
+Pass 2 gives each readout the accuracy it is required to meet. A query's
+target error is divided by the factors `β` of the consumers on the path from
+the readout to the query root, and capped by the validity caps on the way: the
+largest error the readout's output may have for that query.
 
-The default equal-split allocator divides an additive error budget across the
-approximate layers. For relative error, it uses local error
-`1 - (1 + epsilon)^(-1/n)` for `n` layers. The true error of any mix of
-products and quotients stays within the target (each layer contributes at most
-`1/(1 - e)`); the composed bound meets it for one product or quotient of two
-layers, not for a nested quotient or an exact numerator over a lone
-approximate denominator. When the target includes delta, it
-splits that budget across the layers for union-bound composition. An exact
-target does not receive an approximate allocation.
+- A query whose path reads one readout gives one requirement level: the
+  target divided by the path's factor, at the target's failure probability per
+  value.
+- A composed query (several readouts, such as a ratio) gives every level of
+  the error grid (10%, 5%, 2%, 1%, 0.5%, 0.2%, 0.1%) and the failure-probability
+  grid (powers of ten from 1e-2 down to a tenth of the query's per-value
+  failure probability) not looser than the cap. The logical-edge check then
+  keeps the levels a producer's θ meets.
+- A readout reached by several queries gets the union of their levels.
 
-For example, under a supported two-layer relative-error composition, a 10%
-end-to-end budget gives each layer approximately 4.65%, not 5%. If the failure
-budget is 1%, each layer receives 0.5%. A model with only a fixed 1% failure
-contract cannot automatically satisfy that allocation; another supported
-configuration or candidate is needed.
+An exact target gets no approximate level. A model with only a fixed 1%
+failure contract cannot meet a level that needs a smaller failure probability;
+another supported configuration or candidate is needed.
 
 ## Evidence and trust boundaries
 
@@ -369,8 +379,8 @@ for 1% rank error at a 1% failure probability (`k = 269` alone) and B for
 `k` is therefore grown to 412 (rank error 0.997% at 0.01%), and the shared KLL is
 `k = 412` at 0.01%, which meets both. A distinct-count UnivMon's heap is shared
 the same way. Checking each consumer at its own failure probability against
-a smaller shared summary would need a guarantee per consumer, which the
-current composition does not carry.
+a smaller shared summary would need a guarantee per consumer, which a shared
+summary's guarantee does not carry.
 
 ## Organization and extension contract
 
@@ -383,7 +393,6 @@ accuracy/src/
 ├── requirements.rs     # producer_satisfies_logical_requirements (α^log), accepted_metrics,
 │                       # readout_metric, target_limit
 ├── error_propagation.rs # error_propagation: each operator's error contract per metric
-├── sizing.rs           # The statistic a summary is read for
 └── guarantee/
     ├── mod.rs          # Family/evaluation dispatch and source-contract integration
     ├── kll.rs
@@ -401,13 +410,13 @@ contain a second copy of their mathematics. Serializable guarantee and metric
 types live in `asap-types` so planning, explanations and downstream binding
 share the same contract.
 
-Adding an estimator or composition requires:
+Adding an estimator or an operator's error contract requires:
 
 1. A precisely defined error metric, estimator/evaluation semantics and assumptions.
 2. Sizing behavior and a guarantee derived from the committed parameters, including unsupported parameter domains.
 3. Explicit evidence requirements, population scope and provenance.
 4. Propagation rules where supported; rejection or retained unknowns elsewhere.
-5. Tests from target and evidence through sizing, composition and selection, including missing evidence and infeasible targets.
+5. Tests from target and evidence through sizing, error propagation and selection, including missing evidence and infeasible targets.
 
 Algorithm-specific mathematics belongs behind this common contract. It does
 not require a new selection rule for every sketch. A deployment's measured

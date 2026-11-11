@@ -69,8 +69,9 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 - A target with no `accuracy_metric` accepts a guarantee in any metric that
   meets its ε, δ and scope; Stage 3 reports the metric it accepted
   (`AcceptedAccuracy`).
-- An approximate input split across several inputs gets its share through
-  `accuracy::budget::per_input_target`.
+- A query that composes several readouts gives each readout a level of an
+  error and failure-probability grid, within the cap its path's consumers
+  (`accuracy::error_propagation`) leave it.
 - Facts come only from the declared `DataWorkload`; an undeclared fact is
   unknown, never zero.
 

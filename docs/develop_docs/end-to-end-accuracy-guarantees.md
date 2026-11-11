@@ -19,9 +19,9 @@ aggregate intent and AccuracyTarget
     -> choose and commit concrete summary parameters
     -> derive the local guarantee from those committed parameters
     -> realize the child and obtain its finalized guarantee
-    -> propagate guarantees through the registered composition rule
+    -> propagate required errors through the operators' error contracts
     -> check the final guarantee against AccuracyTarget
-    -> keep legal candidate or record AccuracyError
+    -> keep legal candidate or record the pruning reason
     -> Stage 3 prices the valid candidates under the cost model (cost does not prove accuracy)
 ```
 
@@ -75,14 +75,17 @@ pub trait AccuracyEvidence {
 }
 ```
 
-`accuracy::budget::per_input_target` splits a target equally among the
-approximate inputs of one composition (ε / n for an additive metric,
-1 − (1 + ε)^(−1/n) for a relative one, δ / n). The relative share meets the
-composed bound of one product or quotient of two inputs: a ratio of two
-relative errors `a` and `b` is within `(a + b) / (1 − b)`, so ε = 0.05 gives
-each side 0.0241. A nested quotient (`x / (y / z)`) or an exact numerator over a
-lone approximate denominator composes a bound above ε and is rejected. Every candidate must then be resized, propagated, and
-checked before being treated as satisfying the target. This is distinct from
+Pass 2 gives each sketch readout the accuracy it is required to meet: a
+query's target divided by the propagation factors of the consumers on the path
+from the readout to the query root (`accuracy::error_propagation`, a linear
+bound per operator and metric, with a validity cap on an operand where the
+bound holds only below it, such as the denominator of a ratio). A query that
+reads one readout gives it one level; a query that composes several readouts
+(a ratio of two quantiles) gives every level of an error and failure-probability
+grid not looser than the cap, and each logical edge is then checked against
+the levels. A consumer with no contract for a metric gives no edge, so an
+approximate value is never treated as exact. Every candidate is
+checked against the target before being treated as satisfying it. This is distinct from
 candidate visibility: a Stage 1 candidate whose output has no guarantee is
 still enumerated and appears in the stage document, but Stage 3 rejects it
 for any approximate target. Presence and cost are not accuracy certification.
@@ -261,12 +264,11 @@ with probability at most `1/3`. Zero or even depth has no modeled guarantee.
 ASAPPlanner contains the guarantee algebra and parameter-derived contracts.
 Planner is not a query executor. Data- or runtime-dependent evidence enters
 through `AccuracyEvidence` (measured guarantees) or the data workload's
-declared facts, is exposed to propagation as typed `PropagationStats`, and
-is recorded in provenance. The default evidence has no measurements. Guarantee derivation remains conservative.
+declared facts, and is recorded in provenance. The default evidence has no measurements. Guarantee derivation remains conservative.
 
 ### TopK membership
 
-`PropagationStats` supplies:
+The membership certificate needs:
 
 - the lower confidence bound of the kth selected item;
 - the greatest upper confidence bound among excluded items; and
