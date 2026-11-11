@@ -35,7 +35,6 @@ fn fixture() -> (planner_types::ir::NonASAPOp, SchemaRef, Vec<Batch>) {
         unique_keys: vec![],
         closed: false,
         fields: vec![Field {
-            table: None,
             name: "value".into(),
             dtype: FieldDataType::Plain(DataType::Int64),
             nullable: true,
@@ -829,7 +828,6 @@ fn windowed_count_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
     dag.edges.retain(|edge| edge.consumer < 3);
     let family = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
     let state = planner_types::ir::schema::Schema::new(vec![Field {
-        table: None,
         name: "count".into(),
         dtype: family.clone(),
         nullable: false,

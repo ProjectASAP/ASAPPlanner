@@ -75,7 +75,6 @@ pub struct Field {
     pub name: String,
     pub dtype: FieldDataType,          // Plain(DataType) | ExactAggregate(..) | Sketch(..) | SummarySample(..) | Wavelet(..) | StatModel(..)
     pub nullable: bool,
-    pub table: Option<String>,         // SQL table/alias qualifier; None for PromQL labels
 }
 ```
 
@@ -156,9 +155,10 @@ gated by `NonASAPOp::is_shareable_when_equal` for non-ASAP producers.
 
 ## Fields and column references
 
-`Schema` holds `Field` metadata (name, type, nullability, qualifier) and no
-values; an unresolved `ColumnRef` resolves to a positional `ColumnId` within one
-schema. The design, including how the same position selects a runtime value, is
+`Schema` holds `Field` metadata (name, type, nullability) and no values; an
+unresolved `ColumnRef` resolves to a positional `ColumnId` within one schema. A
+front end binds a qualified `table.column` with its own `Scope` while it
+lowers; the IR keeps no qualifier. The design, including how the same position selects a runtime value, is
 in [Schema and physical data for ASAP primitives](../design_docs/proposals/asap-primitive-schema.md#3-proposed-schema-design).
 
 ## Node index
@@ -567,7 +567,6 @@ SELECT srcip, dstip FROM packets
 
 **Fields:**
 - `cols` — the output column list (expression + optional alias per column).
-- `qualifier` — a table alias re-qualifying every output column, for a derived table; `None` for an ordinary `SELECT` list.
 - `child` — the input being projected.
 
 ### BinaryOp

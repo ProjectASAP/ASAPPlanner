@@ -16,7 +16,7 @@ pub use candidate::{
     CandidateError, CandidateExpression, CandidateForMemoGroup, CandidateForMemoGroupId,
     LogicalProperties, LogicalPropertiesError, OriginOfCandidateForMemoGroup,
 };
-pub use column_properties::ValueSign;
+pub use column_properties::{ColumnLineage, ValueSign};
 pub use edge::LogicalEdge;
 pub use group::{GroupProperties, MemoGroup, MemoGroupError, MemoGroupId};
 pub use memo::{Memo, MemoQuery};

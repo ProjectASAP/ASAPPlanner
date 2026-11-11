@@ -1,7 +1,8 @@
 //! `column_signs`, `depends_on_evaluation_time` and `scanned_sources`,
 //! derived once per memo group from its input groups (concepts doc, section
 //! 3, "Value sign" and `GroupProperties`; `aggregate_coverage` is in
-//! `memo_aggregate_coverage.rs`). Every example reads one of three sources:
+//! `memo_aggregate_coverage.rs`; column lineage, derived with the signs,
+//! is in `column_lineage.rs`). Every example reads one of three sources:
 //!
 //! ```text
 //! latency         [ts, value, host]   value declared non-negative
@@ -106,7 +107,6 @@ fn map_value(expr: ScalarExpr<MemoGroupId>, child: MemoGroupId) -> Operator<Memo
             item(expr, "value"),
             item(ScalarExpr::Column(HOST), "host"),
         ],
-        qualifier: None,
         child,
     })
 }

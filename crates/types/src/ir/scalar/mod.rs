@@ -12,7 +12,7 @@ pub mod column_resolution;
 pub mod expr_ir;
 pub mod scalar_type_rules;
 
-pub use column_resolution::{resolve_column_ref, resolve_column_refs, ResolveError};
+pub use column_resolution::{resolve_column_ref, ResolveError};
 pub use expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 
 use std::rc::Rc;
@@ -905,7 +905,6 @@ mod tests {
                 alias: Some("result".into()),
                 expr,
             }],
-            qualifier: None,
             child: OperatorNode::new_shared(crate::ir::Operator::NonASAP(NonASAPOp::Scan {
                 source: Source::Table {
                     table_ref: "t".into(),

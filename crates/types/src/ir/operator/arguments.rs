@@ -186,6 +186,19 @@ impl Source {
     }
 }
 
+/// A column of one scan of a source (a `Scan`'s metric or table), by name:
+/// the lineage of a column copied unchanged from a scan, and the key a
+/// selection names a column by.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceColumn {
+    pub source: Source,
+    /// Which scan of `source`: 0 for the first, counted left to right
+    /// across joins (a self-join's right side is 1).
+    pub scan_ordinal: u32,
+    pub column: String,
+}
+
 /// Operator on the query-level `BinaryOp` node. Reuses the scalar IR's
 /// [`ArithmeticOpKind`] / [`CompareOpKind`] so every arithmetic/comparison
 /// operator has exactly one representation (and one `Display`) across the IR.
@@ -521,7 +534,7 @@ mod tests {
     use super::*;
     use crate::ir::schema::{DataType, Field, Schema};
 
-    /// A key moves to the input's column of the same name and qualifier; a
+    /// A key moves to the input's column of the same name; a
     /// key that is missing or ambiguous there, or a `without` grouping, has no
     /// partitions over the input.
     #[test]
@@ -540,11 +553,6 @@ mod tests {
         let ambiguous = Schema::new(vec![field("job"), field("job")]);
         assert_eq!(
             Reduction::by(vec![0]).partitions_over(&inner, &ambiguous),
-            None
-        );
-        let qualified = Schema::new(vec![field("job").with_table("t")]);
-        assert_eq!(
-            Reduction::by(vec![0]).partitions_over(&inner, &qualified),
             None
         );
         assert_eq!(

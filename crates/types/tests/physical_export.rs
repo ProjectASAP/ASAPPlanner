@@ -175,7 +175,6 @@ fn a_reference_read_twice_is_one_scalar_ref_edge() {
                 semantics: ExprSemantics::Promql,
             },
         }],
-        qualifier: None,
         child: series("a"),
     }))
     .unwrap();

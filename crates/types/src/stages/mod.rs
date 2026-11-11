@@ -14,7 +14,7 @@ mod pruning;
 
 pub use logical::{
     view_coverage, AggregateCoverage, AggregateDefinition, CandidateError, CandidateExpression,
-    CandidateForMemoGroup, CandidateForMemoGroupId, CoverageError, GroupProperties,
+    CandidateForMemoGroup, CandidateForMemoGroupId, ColumnLineage, CoverageError, GroupProperties,
     LogicalASAPMemoCandidates, LogicalEdge, LogicalProperties, LogicalPropertiesError,
     LogicalRequirements, Memo, MemoGroup, MemoGroupError, MemoGroupId, MemoQuery,
     OriginOfCandidateForMemoGroup, RequiredAccuracy, ValueSign,

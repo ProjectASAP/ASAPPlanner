@@ -20,8 +20,8 @@ use std::rc::Rc;
 
 use thiserror::Error;
 
-use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction};
-use asap_types::ir::scalar::{resolve_column_ref, resolve_column_refs, ColumnRef, ResolveError};
+use asap_types::ir::operator::{AggIntent, GroupKeys, JoinKind, Reduction};
+use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, ResolveError};
 use asap_types::ir::schema::{ColumnId, Schema};
 use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{NonASAPOp, OperatorNode, Predicate, ProjectItem, ScalarExpr, SortKey};
@@ -43,23 +43,121 @@ pub enum ResolveDAGError {
 
 use crate::canonicalize::canonicalize;
 
+/// The names an operator's parent resolves against: the operator's output
+/// schema and, per column, the SQL table or alias that qualifies it (`None`
+/// when unqualified; [`Scope::unqualified`]'s empty list qualifies no
+/// column). A qualified reference (`f.src`) binds here, while lowering; the
+/// IR keeps no qualifier.
+#[derive(Clone, Copy)]
+struct Scope<'a> {
+    schema: &'a Schema,
+    qualifiers: &'a [Option<String>],
+}
+
+impl<'a> Scope<'a> {
+    /// A scope whose columns have no qualifier.
+    fn unqualified(schema: &'a Schema) -> Self {
+        Self {
+            schema,
+            qualifiers: &[],
+        }
+    }
+
+    /// The column `column` names: a qualified name by the column with that
+    /// qualifier and name, else by the unique column of that name whose
+    /// qualifier is not known (lost through a `Project` without alias or an
+    /// aggregate's measures); a column of that name qualified by another
+    /// table never matches. Any other name by its unique name.
+    fn resolve(&self, column: &ColumnRef) -> Result<ColumnId, ResolveError> {
+        let ColumnRef::Qualified { table, name } = column else {
+            return resolve_column_ref(column, self.schema);
+        };
+        let named = |wanted: Option<&str>| {
+            self.schema
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(id, field)| field.name == *name && self.qualifier(*id) == wanted)
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>()
+        };
+        let qualified = named(Some(table.as_str()));
+        let candidates = if qualified.is_empty() {
+            named(None)
+        } else {
+            qualified
+        };
+        match candidates.as_slice() {
+            [id] => Ok(*id),
+            [] => Err(ResolveError::NotFound {
+                name: format!("{table}.{name}"),
+                available: self.schema.fields.iter().map(|f| f.name.clone()).collect(),
+            }),
+            _ => Err(ResolveError::Ambiguous {
+                name: format!("{table}.{name}"),
+            }),
+        }
+    }
+
+    fn resolve_all(&self, columns: &[ColumnRef]) -> Result<Vec<ColumnId>, ResolveError> {
+        columns.iter().map(|column| self.resolve(column)).collect()
+    }
+
+    /// The qualifier of column `column`.
+    fn qualifier(&self, column: ColumnId) -> Option<&'a str> {
+        self.qualifiers.get(column).and_then(Option::as_deref)
+    }
+}
+
+/// A resolved operator with the qualifier of each output column: the scope
+/// its parent resolves names in.
+struct Bound {
+    node: Rc<OperatorNode>,
+    qualifiers: Vec<Option<String>>,
+}
+
+impl Bound {
+    /// `node` with `qualifiers`, one per column.
+    fn new(node: Rc<OperatorNode>, qualifiers: Vec<Option<String>>) -> Self {
+        debug_assert_eq!(
+            qualifiers.len(),
+            node.schema.fields.len(),
+            "one qualifier per column"
+        );
+        Self { node, qualifiers }
+    }
+
+    fn unqualified(node: Rc<OperatorNode>) -> Self {
+        let qualifiers = vec![None; node.schema.fields.len()];
+        Self::new(node, qualifiers)
+    }
+
+    fn scope(&self) -> Scope<'_> {
+        Scope {
+            schema: &self.node.schema,
+            qualifiers: &self.qualifiers,
+        }
+    }
+}
+
 /// Resolve the whole tree rooted at `tree`: bind every `ColumnRef` to a
 /// `ColumnId` via the usage-derived schema resolver, then canonicalize the result.
 pub fn resolve_root(tree: &UnresolvedOp) -> Result<Rc<OperatorNode>, ResolveDAGError> {
-    resolve_root_with_inherited(tree, &[])
+    Ok(resolve_root_with_inherited(tree, &[])?.node)
 }
 
 /// [`resolve_root`] with label names inherited from an enclosing scope seeded
 /// into the leaf schema (a `BinaryOp` side, a scalar operand's operator).
+/// Canonicalizing keeps the root's output columns, so their qualifiers.
 fn resolve_root_with_inherited(
     tree: &UnresolvedOp,
     inherited: &[String],
-) -> Result<Rc<OperatorNode>, ResolveDAGError> {
+) -> Result<Bound, ResolveDAGError> {
     let usage_derived_schema = resolve_schema_with_inherited(tree, inherited);
     let root = resolve(tree, &usage_derived_schema)?;
-    let root = canonicalize(root)?;
-    root.validate_structure()?;
-    Ok(root)
+    let node = canonicalize(root.node)?;
+    node.validate_structure()?;
+    Ok(Bound::new(node, root.qualifiers))
 }
 
 /// Bind `tree` as a root in its own scope, inheriting from `enclosing` the
@@ -73,7 +171,7 @@ fn resolve_nested_root(
         .into_iter()
         .filter(|n| !own.contains(n))
         .collect();
-    resolve_root_with_inherited(tree, &inherited)
+    Ok(resolve_root_with_inherited(tree, &inherited)?.node)
 }
 
 fn node(op: NonASAPOp) -> Result<Rc<OperatorNode>, ResolveDAGError> {
@@ -83,31 +181,33 @@ fn node(op: NonASAPOp) -> Result<Rc<OperatorNode>, ResolveDAGError> {
 }
 
 /// The generic substitution walk. `usage_derived_schema` is the schema a
-/// schemaless `Scan` in this scope binds to.
-fn resolve(
-    tree: &UnresolvedOp,
-    usage_derived_schema: &Schema,
-) -> Result<Rc<OperatorNode>, ResolveDAGError> {
+/// schemaless `Scan` in this scope binds to. Qualifiers follow the columns:
+/// a `Scan` qualifies its columns by its own; an operator that passes
+/// columns through, a join and an aggregate's group keys keep them; a
+/// `Project` qualifies all its columns by its own or none.
+fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, ResolveDAGError> {
     use UnresolvedOp as U;
-    let expr =
-        |e: &UnresolvedScalar, schema: &Schema| resolve_expr_in(e, schema, usage_derived_schema);
-    let pred = |p: &UnresolvedScalar, schema: &Schema| {
-        Ok::<_, ResolveDAGError>(Predicate(expr(p, schema)?))
-    };
-    let sort_keys = |keys: &[UnresolvedSortKey], schema: &Schema| {
+    let expr = |e: &UnresolvedScalar, scope: Scope| resolve_expr_in(e, scope, usage_derived_schema);
+    let pred =
+        |p: &UnresolvedScalar, scope: Scope| Ok::<_, ResolveDAGError>(Predicate(expr(p, scope)?));
+    let sort_keys = |keys: &[UnresolvedSortKey], scope: Scope| {
         keys.iter()
             .map(|k| {
                 Ok::<_, ResolveDAGError>(SortKey {
-                    expr: expr(&k.expr, schema)?,
+                    expr: expr(&k.expr, scope)?,
                     ascending: k.ascending,
                     nulls_first: k.nulls_first,
                 })
             })
             .collect::<Result<Vec<_>, _>>()
     };
+    // A node over a child with the child's columns and `qualifiers`.
+    let passing =
+        |op: NonASAPOp, qualifiers: Vec<Option<String>>| Ok(Bound::new(node(op)?, qualifiers));
+    let unqualified = |op: NonASAPOp| Ok(Bound::unqualified(node(op)?));
     // A PromQL child over an open schema gets an opaque series-identity column.
     let promql_series = |child: &UnresolvedOp| -> Result<Rc<OperatorNode>, ResolveDAGError> {
-        let child = resolve(child, usage_derived_schema)?;
+        let child = resolve(child, usage_derived_schema)?.node;
         if child.schema.closed {
             return Ok(child);
         }
@@ -119,19 +219,28 @@ fn resolve(
             source,
             predicates,
             schema,
+            qualifier,
         } => {
             let schema = schema
                 .clone()
                 .unwrap_or_else(|| usage_derived_schema.clone());
+            let qualifiers = vec![qualifier.clone(); schema.fields.len()];
+            let scope = Scope {
+                schema: &schema,
+                qualifiers: &qualifiers,
+            };
             let predicates = predicates
                 .iter()
-                .map(|p| pred(&p.0, &schema))
+                .map(|p| pred(&p.0, scope))
                 .collect::<Result<Vec<_>, _>>()?;
-            node(NonASAPOp::Scan {
-                source: source.clone(),
-                predicates,
-                schema,
-            })
+            Ok(Bound::new(
+                node(NonASAPOp::Scan {
+                    source: source.clone(),
+                    predicates,
+                    schema,
+                })?,
+                qualifiers,
+            ))
         }
 
         // Row expressions have no input-column scope.
@@ -141,11 +250,11 @@ fn resolve(
                 .iter()
                 .map(|row| {
                     row.iter()
-                        .map(|e| expr(e, &empty))
+                        .map(|e| expr(e, Scope::unqualified(&empty)))
                         .collect::<Result<Vec<_>, _>>()
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            node(NonASAPOp::Values {
+            unqualified(NonASAPOp::Values {
                 rows,
                 schema: schema.clone(),
             })
@@ -162,7 +271,13 @@ fn resolve(
         } => {
             let child = promql_series(child)?;
             let scalar = resolve_expr(scalar, &Schema::default())?;
-            lower_scalar_vector(child, scalar, op, *scalar_left, *return_bool)
+            Ok(Bound::unqualified(lower_scalar_vector(
+                child,
+                scalar,
+                op,
+                *scalar_left,
+                *return_bool,
+            )?))
         }
         U::PromqlMap {
             child,
@@ -171,42 +286,61 @@ fn resolve(
         } => {
             let child = promql_series(child)?;
             let sample = resolve_expr(sample, &child.schema)?;
-            project_sample(child, sample, *drop_metric_name)
+            Ok(Bound::unqualified(project_sample(
+                child,
+                sample,
+                *drop_metric_name,
+            )?))
         }
-        U::PromqlVectorFromScalar(inner) => node(NonASAPOp::PromqlVectorFromScalar(expr(
+        U::PromqlVectorFromScalar(inner) => unqualified(NonASAPOp::PromqlVectorFromScalar(expr(
             inner,
-            usage_derived_schema,
+            Scope::unqualified(usage_derived_schema),
         )?)),
 
         U::PromqlRelabel { dst, value, child } => {
             let child = resolve(child, usage_derived_schema)?;
-            let value = expr(value, &child.schema)?;
-            node(NonASAPOp::PromqlRelabel {
+            let value = expr(value, child.scope())?;
+            unqualified(NonASAPOp::PromqlRelabel {
                 dst: dst.clone(),
                 value,
-                child,
+                child: child.node,
             })
         }
 
-        U::PromqlInfoEnrich { selector, child } => node(NonASAPOp::PromqlInfoEnrich {
-            selector: selector.clone(),
-            child: resolve(child, usage_derived_schema)?,
-        }),
+        U::PromqlInfoEnrich { selector, child } => {
+            let child = resolve(child, usage_derived_schema)?;
+            passing(
+                NonASAPOp::PromqlInfoEnrich {
+                    selector: selector.clone(),
+                    child: child.node,
+                },
+                child.qualifiers,
+            )
+        }
 
         U::PromqlSeriesSample { by, kind, child } => {
             let child = resolve(child, usage_derived_schema)?;
-            let by = resolve_group_keys(by, &child.schema)?;
-            node(NonASAPOp::PromqlSeriesSample {
-                by,
-                kind: *kind,
-                child,
-            })
+            let by = resolve_group_keys(by, child.scope())?;
+            passing(
+                NonASAPOp::PromqlSeriesSample {
+                    by,
+                    kind: *kind,
+                    child: child.node,
+                },
+                child.qualifiers,
+            )
         }
 
         U::Filter { pred: p, child } => {
             let child = resolve(child, usage_derived_schema)?;
-            let pred = pred(&p.0, &child.schema)?;
-            node(NonASAPOp::Filter { pred, child })
+            let pred = pred(&p.0, child.scope())?;
+            passing(
+                NonASAPOp::Filter {
+                    pred,
+                    child: child.node,
+                },
+                child.qualifiers,
+            )
         }
 
         U::Project {
@@ -220,15 +354,18 @@ fn resolve(
                 .map(|item| {
                     Ok::<_, ResolveDAGError>(ProjectItem {
                         alias: item.alias.clone(),
-                        expr: expr(&item.expr, &child.schema)?,
+                        expr: expr(&item.expr, child.scope())?,
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            node(NonASAPOp::Project {
-                cols,
-                qualifier: qualifier.clone(),
-                child,
-            })
+            let qualifiers = vec![qualifier.clone(); cols.len()];
+            Ok(Bound::new(
+                node(NonASAPOp::Project {
+                    cols,
+                    child: child.node,
+                })?,
+                qualifiers,
+            ))
         }
 
         U::Aggregate {
@@ -240,42 +377,75 @@ fn resolve(
             child,
         } => {
             let child = resolve(child, usage_derived_schema)?;
-            let reduction = resolve_reduction(reduction, &child.schema)?;
+            let scope = child.scope();
+            let reduction = resolve_reduction(reduction, scope)?;
             let measures = measures
                 .iter()
-                .map(|m| resolve_agg_intent(m, &child.schema))
+                .map(|m| resolve_agg_intent(m, scope))
                 .collect::<Result<Vec<_>, ResolveError>>()?;
             let filters = filters
                 .iter()
-                .map(|p| p.as_ref().map(|p| pred(&p.0, &child.schema)).transpose())
+                .map(|p| p.as_ref().map(|p| pred(&p.0, scope)).transpose())
                 .collect::<Result<Vec<_>, _>>()?;
+            // A `by` key keeps its qualifier; a per-series reduction keeps
+            // its input's columns in place. A top-k emits ranked rows, and a
+            // measure that adds label columns (`count_values`, `absent`)
+            // breaks the keys-then-measures layout: no column is qualified.
+            let out_schema =
+                aggregate_output_schema(&child.node.schema, &reduction, &measures, output_names)?;
+            let keyed: Option<Vec<Option<String>>> = match &reduction {
+                _ if matches!(measures.as_slice(), [AggIntent::TopK { .. }]) => None,
+                Reduction::PerEntity => Some(child.qualifiers.clone()),
+                Reduction::Reduce(by) if by.is_without() => None,
+                Reduction::Reduce(by) => Some(
+                    by.keys()
+                        .iter()
+                        .map(|&key| scope.qualifier(key).map(str::to_owned))
+                        .chain(std::iter::repeat_n(None, measures.len()))
+                        .collect(),
+                ),
+            };
+            let qualifiers_of = |columns: usize| {
+                keyed
+                    .clone()
+                    .filter(|keyed| keyed.len() == columns)
+                    .unwrap_or_else(|| vec![None; columns])
+            };
             // HAVING is evaluated over the aggregate's own output.
             let having = having
                 .as_ref()
                 .map(|h| {
-                    let out_schema = aggregate_output_schema(
-                        &child.schema,
-                        &reduction,
-                        &measures,
-                        output_names,
-                    )?;
-                    pred(&h.0, &out_schema)
+                    pred(
+                        &h.0,
+                        Scope {
+                            schema: &out_schema,
+                            qualifiers: &qualifiers_of(out_schema.fields.len()),
+                        },
+                    )
                 })
                 .transpose()?;
-            node(NonASAPOp::Aggregate {
+            let aggregate = node(NonASAPOp::Aggregate {
                 reduction,
                 measures,
                 output_names: output_names.clone(),
                 filters,
                 having,
-                child,
-            })
+                child: child.node,
+            })?;
+            let qualifiers = qualifiers_of(aggregate.schema.fields.len());
+            Ok(Bound::new(aggregate, qualifiers))
         }
 
         U::Dedup { cols, child } => {
             let child = resolve(child, usage_derived_schema)?;
-            let cols = resolve_column_refs(cols, &child.schema)?;
-            node(NonASAPOp::Dedup { cols, child })
+            let cols = child.scope().resolve_all(cols)?;
+            passing(
+                NonASAPOp::Dedup {
+                    cols,
+                    child: child.node,
+                },
+                child.qualifiers,
+            )
         }
 
         U::Concat { children } => {
@@ -283,7 +453,15 @@ fn resolve(
                 .iter()
                 .map(|c| resolve(c, usage_derived_schema))
                 .collect::<Result<Vec<_>, _>>()?;
-            node(NonASAPOp::Concat { children })
+            let qualifiers = children
+                .first()
+                .map_or_else(Vec::new, |first| first.qualifiers.clone());
+            Ok(Bound::new(
+                node(NonASAPOp::Concat {
+                    children: children.into_iter().map(|child| child.node).collect(),
+                })?,
+                qualifiers,
+            ))
         }
 
         U::Join {
@@ -296,15 +474,32 @@ fn resolve(
             // sets); the predicate sees left ++ right.
             let left = resolve_root_with_inherited(left, &[])?;
             let right = resolve_root_with_inherited(right, &[])?;
-            let mut concat = left.schema.clone();
-            concat.fields.extend(right.schema.fields.iter().cloned());
-            let pred = pred(&p.0, &concat)?;
-            node(NonASAPOp::Join {
-                kind: kind.clone(),
-                pred,
-                left,
-                right,
-            })
+            let mut concat = left.node.schema.clone();
+            concat
+                .fields
+                .extend(right.node.schema.fields.iter().cloned());
+            let mut qualifiers = left.qualifiers;
+            qualifiers.extend(right.qualifiers);
+            let pred = pred(
+                &p.0,
+                Scope {
+                    schema: &concat,
+                    qualifiers: &qualifiers,
+                },
+            )?;
+            // A semi or anti join outputs the left side's columns.
+            if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+                qualifiers.truncate(left.node.schema.fields.len());
+            }
+            Ok(Bound::new(
+                node(NonASAPOp::Join {
+                    kind: kind.clone(),
+                    pred,
+                    left: left.node,
+                    right: right.node,
+                })?,
+                qualifiers,
+            ))
         }
 
         U::SetOp {
@@ -312,12 +507,19 @@ fn resolve(
             all,
             left,
             right,
-        } => node(NonASAPOp::SetOp {
-            kind: kind.clone(),
-            all: *all,
-            left: resolve_root_with_inherited(left, &[])?,
-            right: resolve_root_with_inherited(right, &[])?,
-        }),
+        } => {
+            let left = resolve_root_with_inherited(left, &[])?;
+            let right = resolve_root_with_inherited(right, &[])?;
+            Ok(Bound::new(
+                node(NonASAPOp::SetOp {
+                    kind: kind.clone(),
+                    all: *all,
+                    left: left.node,
+                    right: right.node,
+                })?,
+                left.qualifiers,
+            ))
+        }
 
         U::Sort {
             keys,
@@ -325,13 +527,16 @@ fn resolve(
             child,
         } => {
             let child = resolve(child, usage_derived_schema)?;
-            let keys = sort_keys(keys, &child.schema)?;
-            let partition_by = resolve_group_keys(partition_by, &child.schema)?;
-            node(NonASAPOp::Sort {
-                keys,
-                partition_by,
-                child,
-            })
+            let keys = sort_keys(keys, child.scope())?;
+            let partition_by = resolve_group_keys(partition_by, child.scope())?;
+            passing(
+                NonASAPOp::Sort {
+                    keys,
+                    partition_by,
+                    child: child.node,
+                },
+                child.qualifiers,
+            )
         }
 
         U::Limit {
@@ -341,35 +546,56 @@ fn resolve(
             child,
         } => {
             let child = resolve(child, usage_derived_schema)?;
-            let partition_by = resolve_group_keys(partition_by, &child.schema)?;
-            node(NonASAPOp::Limit {
-                n: *n,
-                offset: *offset,
-                partition_by,
-                child,
-            })
+            let partition_by = resolve_group_keys(partition_by, child.scope())?;
+            passing(
+                NonASAPOp::Limit {
+                    n: *n,
+                    offset: *offset,
+                    partition_by,
+                    child: child.node,
+                },
+                child.qualifiers,
+            )
         }
 
         U::PromqlSubquery {
             range,
             resolution,
             child,
-        } => node(NonASAPOp::PromqlSubquery {
-            range: *range,
-            resolution: *resolution,
-            child: resolve(child, usage_derived_schema)?,
-        }),
+        } => {
+            let child = resolve(child, usage_derived_schema)?;
+            passing(
+                NonASAPOp::PromqlSubquery {
+                    range: *range,
+                    resolution: *resolution,
+                    child: child.node,
+                },
+                child.qualifiers,
+            )
+        }
 
-        U::TimeRange { range, kind, child } => node(NonASAPOp::TimeRange {
-            range: *range,
-            kind: *kind,
-            child: resolve(child, usage_derived_schema)?,
-        }),
+        U::TimeRange { range, kind, child } => {
+            let child = resolve(child, usage_derived_schema)?;
+            passing(
+                NonASAPOp::TimeRange {
+                    range: *range,
+                    kind: *kind,
+                    child: child.node,
+                },
+                child.qualifiers,
+            )
+        }
 
-        U::TimeShift { shift, child } => node(NonASAPOp::TimeShift {
-            shift: *shift,
-            child: resolve(child, usage_derived_schema)?,
-        }),
+        U::TimeShift { shift, child } => {
+            let child = resolve(child, usage_derived_schema)?;
+            passing(
+                NonASAPOp::TimeShift {
+                    shift: *shift,
+                    child: child.node,
+                },
+                child.qualifiers,
+            )
+        }
 
         U::SQLWindowFunc {
             func,
@@ -383,19 +609,25 @@ fn resolve(
             let child = resolve(child, usage_derived_schema)?;
             let args = args
                 .iter()
-                .map(|a| expr(a, &child.schema))
+                .map(|a| expr(a, child.scope()))
                 .collect::<Result<Vec<_>, _>>()?;
-            let partition_by = resolve_group_keys(partition_by, &child.schema)?;
-            let order_by = sort_keys(order_by, &child.schema)?;
-            node(NonASAPOp::SQLWindowFunc {
-                func: func.clone(),
-                args,
-                partition_by,
-                order_by,
-                frame: frame.clone(),
-                output_name: output_name.clone(),
-                child,
-            })
+            let partition_by = resolve_group_keys(partition_by, child.scope())?;
+            let order_by = sort_keys(order_by, child.scope())?;
+            // The window function's own column comes last, unqualified.
+            let mut qualifiers = child.qualifiers.clone();
+            qualifiers.push(None);
+            Ok(Bound::new(
+                node(NonASAPOp::SQLWindowFunc {
+                    func: func.clone(),
+                    args,
+                    partition_by,
+                    order_by,
+                    frame: frame.clone(),
+                    output_name: output_name.clone(),
+                    child: child.node,
+                })?,
+                qualifiers,
+            ))
         }
 
         U::BinaryOp {
@@ -414,11 +646,11 @@ fn resolve(
                 .into_iter()
                 .filter(|n| !own.contains(n))
                 .collect();
-            node(NonASAPOp::BinaryOp {
+            unqualified(NonASAPOp::BinaryOp {
                 operator: operator.clone(),
                 return_bool: *return_bool,
-                lhs: resolve_root_with_inherited(lhs, &inherited)?,
-                rhs: resolve_root_with_inherited(rhs, &inherited)?,
+                lhs: resolve_root_with_inherited(lhs, &inherited)?.node,
+                rhs: resolve_root_with_inherited(rhs, &inherited)?.node,
             })
         }
     }
@@ -442,28 +674,29 @@ pub(crate) fn resolve_expr(
     expr: &UnresolvedScalar,
     schema: &Schema,
 ) -> Result<ScalarExpr, ResolveDAGError> {
-    resolve_expr_in(expr, schema, schema)
+    resolve_expr_in(expr, Scope::unqualified(schema), schema)
 }
 
-/// [`resolve_expr`] where the operators the expression reads inherit from
-/// `enclosing` (the owning root's usage-derived schema) rather than from `schema`.
+/// [`resolve_expr`] in `scope`, where the operators the expression reads
+/// inherit from `enclosing` (the owning root's usage-derived schema) rather
+/// than from the scope's schema.
 fn resolve_expr_in(
     expr: &UnresolvedScalar,
-    schema: &Schema,
+    scope: Scope,
     enclosing: &Schema,
 ) -> Result<ScalarExpr, ResolveDAGError> {
     use UnresolvedScalar as S;
     let bx = |e: &UnresolvedScalar| -> Result<Box<ScalarExpr>, ResolveDAGError> {
-        Ok(Box::new(resolve_expr_in(e, schema, enclosing)?))
+        Ok(Box::new(resolve_expr_in(e, scope, enclosing)?))
     };
     let each = |es: &[UnresolvedScalar]| -> Result<Vec<ScalarExpr>, ResolveDAGError> {
         es.iter()
-            .map(|e| resolve_expr_in(e, schema, enclosing))
+            .map(|e| resolve_expr_in(e, scope, enclosing))
             .collect()
     };
     let op = |o: &UnresolvedOp| resolve_nested_root(o, enclosing);
     Ok(match expr {
-        S::Column(c) => ScalarExpr::Column(resolve_column_ref(c, schema)?),
+        S::Column(c) => ScalarExpr::Column(scope.resolve(c)?),
         S::Literal(s) => ScalarExpr::Literal(s.clone()),
         S::EvalTimestamp => ScalarExpr::EvalTimestamp,
         S::CurrentTimestamp => ScalarExpr::CurrentTimestamp,
@@ -492,7 +725,7 @@ fn resolve_expr_in(
         // nanosecond timestamp, which is the same IR type.
         S::Cast { expr, to, try_cast } => {
             let operand = bx(expr)?;
-            if matches!(operand.scalar_type(schema), Ok((dtype, _)) if dtype == *to) {
+            if matches!(operand.scalar_type(scope.schema), Ok((dtype, _)) if dtype == *to) {
                 *operand
             } else {
                 ScalarExpr::Cast {
@@ -536,8 +769,8 @@ fn resolve_expr_in(
                 .iter()
                 .map(|(w, t)| {
                     Ok((
-                        resolve_expr_in(w, schema, enclosing)?,
-                        resolve_expr_in(t, schema, enclosing)?,
+                        resolve_expr_in(w, scope, enclosing)?,
+                        resolve_expr_in(t, scope, enclosing)?,
                     ))
                 })
                 .collect::<Result<Vec<_>, ResolveDAGError>>()?,
@@ -564,9 +797,9 @@ fn resolve_expr_in(
 /// Resolve name-based group keys positionally, preserving `by`/`without`.
 fn resolve_group_keys(
     keys: &GroupKeys<ColumnRef>,
-    schema: &Schema,
+    scope: Scope,
 ) -> Result<GroupKeys<ColumnId>, ResolveError> {
-    let ids = resolve_column_refs(keys.keys(), schema)?;
+    let ids = scope.resolve_all(keys.keys())?;
     Ok(if keys.is_without() {
         GroupKeys::without(ids)
     } else {
@@ -587,15 +820,15 @@ fn resolve_group_keys(
 /// may exist at runtime, and PromQL leaves seed every referenced label via the
 /// schema resolver, so an unresolved key over an open schema indicates a resolution bug,
 /// not an absent label. (SQL is unaffected — its `GROUP BY` resolves through
-/// the strict [`resolve_column_refs`], and DataFusion has already validated
+/// the strict [`resolve_group_keys`], and DataFusion has already validated
 /// the columns anyway.)
 fn resolve_group_keys_promql(
     cols: &[ColumnRef],
-    schema: &Schema,
+    scope: Scope,
 ) -> Result<Vec<ColumnId>, ResolveError> {
     cols.iter()
-        .filter_map(|c| match resolve_column_ref(c, schema) {
-            Err(ResolveError::NotFound { .. }) if schema.closed => None,
+        .filter_map(|c| match scope.resolve(c) {
+            Err(ResolveError::NotFound { .. }) if scope.schema.closed => None,
             other => Some(other),
         })
         .collect()
@@ -610,11 +843,11 @@ fn resolve_group_keys_promql(
 /// path is a no-op difference there.
 fn resolve_reduction(
     reduction: &Reduction<ColumnRef>,
-    schema: &Schema,
+    scope: Scope,
 ) -> Result<Reduction<ColumnId>, ResolveError> {
     Ok(match reduction {
         Reduction::Reduce(by) => {
-            let ids = resolve_group_keys_promql(by.keys(), schema)?;
+            let ids = resolve_group_keys_promql(by.keys(), scope)?;
             Reduction::Reduce(if by.is_without() {
                 GroupKeys::without(ids)
             } else {
@@ -630,18 +863,16 @@ fn resolve_reduction(
 /// convention); every other field carries through unchanged.
 fn resolve_agg_intent(
     intent: &AggIntent<ColumnRef>,
-    schema: &Schema,
+    scope: Scope,
 ) -> Result<AggIntent<ColumnId>, ResolveError> {
     let col = |c: &Option<ColumnRef>| -> Result<Option<ColumnId>, ResolveError> {
-        c.as_ref()
-            .map(|r| resolve_column_ref(r, schema))
-            .transpose()
+        c.as_ref().map(|r| scope.resolve(r)).transpose()
     };
     Ok(match intent {
         AggIntent::Count => AggIntent::Count,
         AggIntent::PearsonCorr { left, right } => AggIntent::PearsonCorr {
-            left: resolve_column_ref(left, schema)?,
-            right: resolve_column_ref(right, schema)?,
+            left: scope.resolve(left)?,
+            right: scope.resolve(right)?,
         },
         AggIntent::Sum { col: c } => AggIntent::Sum { col: col(c)? },
         AggIntent::Min { col: c } => AggIntent::Min { col: col(c)? },
@@ -661,10 +892,7 @@ fn resolve_agg_intent(
         },
         AggIntent::TopK { k } => AggIntent::TopK { k: *k },
         AggIntent::Cardinality { cols } => AggIntent::Cardinality {
-            cols: cols
-                .iter()
-                .map(|c| resolve_column_ref(c, schema))
-                .collect::<Result<_, _>>()?,
+            cols: scope.resolve_all(cols)?,
         },
         AggIntent::FrequencyL2 { col: c } => AggIntent::FrequencyL2 { col: col(c)? },
         AggIntent::FrequencyEntropy { col: c } => AggIntent::FrequencyEntropy { col: col(c)? },
@@ -692,7 +920,7 @@ fn resolve_agg_intent(
         },
         AggIntent::HistogramQuantile { q, le } => AggIntent::HistogramQuantile {
             q: *q,
-            le: resolve_column_ref(le, schema)?,
+            le: scope.resolve(le)?,
         },
         AggIntent::Math(f) => AggIntent::Math(f.clone()),
         AggIntent::Absent { labels } => AggIntent::Absent {
@@ -832,11 +1060,7 @@ fn project_sample(
             }
         })
         .collect();
-    node(NonASAPOp::Project {
-        child,
-        cols,
-        qualifier: None,
-    })
+    node(NonASAPOp::Project { child, cols })
 }
 
 #[cfg(test)]
@@ -859,11 +1083,53 @@ mod tests {
             },
             predicates: vec![],
             schema: None,
+            qualifier: None,
         }
     }
 
     fn named(n: &str) -> UnresolvedScalar {
         UnresolvedScalar::Column(ColumnRef::Named(n.into()))
+    }
+
+    fn qualified(table: &str, name: &str) -> ColumnRef {
+        ColumnRef::Qualified {
+            table: table.into(),
+            name: name.into(),
+        }
+    }
+
+    /// A qualified name binds the column of that qualifier; a column of that
+    /// name qualified by another table never matches, so `x.src` over
+    /// `[u.src]` is an error, not `u.src`; a column whose qualifier is not
+    /// known matches by its unique name.
+    #[test]
+    fn a_qualified_name_never_binds_another_tables_column() {
+        let schema = Schema::new(vec![
+            Field::plain("src", DataType::Utf8, false),
+            Field::plain("src", DataType::Utf8, false),
+            Field::plain("dst", DataType::Utf8, false),
+        ]);
+        let qualifiers = [Some("f".to_string()), Some("u".to_string()), None];
+        let scope = Scope {
+            schema: &schema,
+            qualifiers: &qualifiers,
+        };
+        assert_eq!(scope.resolve(&qualified("u", "src")), Ok(1));
+        assert!(matches!(
+            scope.resolve(&qualified("x", "src")),
+            Err(ResolveError::NotFound { .. })
+        ));
+        assert_eq!(scope.resolve(&qualified("f", "dst")), Ok(2));
+        // Before, a unique name matched whatever its qualifier.
+        let users = Schema::new(vec![Field::plain("src", DataType::Utf8, false)]);
+        let users_scope = Scope {
+            schema: &users,
+            qualifiers: &[Some("u".to_string())],
+        };
+        assert!(matches!(
+            users_scope.resolve(&qualified("f", "src")),
+            Err(ResolveError::NotFound { .. })
+        ));
     }
 
     fn eq_lit(col: UnresolvedScalar, v: &str) -> UnresolvedScalar {
@@ -888,9 +1154,14 @@ mod tests {
     #[test]
     fn resolve_pearson_corr_inputs() {
         let schema = Schema::new(vec![
-            Field::plain("x", DataType::Float64, true).with_table("a"),
-            Field::plain("x", DataType::Float64, true).with_table("b"),
+            Field::plain("x", DataType::Float64, true),
+            Field::plain("x", DataType::Float64, true),
         ]);
+        let qualifiers = [Some("a".to_string()), Some("b".to_string())];
+        let scope = Scope {
+            schema: &schema,
+            qualifiers: &qualifiers,
+        };
         let intent = AggIntent::PearsonCorr {
             left: ColumnRef::Qualified {
                 table: "a".into(),
@@ -902,7 +1173,7 @@ mod tests {
             },
         };
         assert_eq!(
-            resolve_agg_intent(&intent, &schema).unwrap(),
+            resolve_agg_intent(&intent, scope).unwrap(),
             AggIntent::PearsonCorr { left: 0, right: 1 }
         );
         let missing = AggIntent::PearsonCorr {
@@ -912,7 +1183,7 @@ mod tests {
             },
             right: ColumnRef::Named("missing".into()),
         };
-        assert!(resolve_agg_intent(&missing, &schema).is_err());
+        assert!(resolve_agg_intent(&missing, scope).is_err());
     }
 
     // Every leg resolves independently, qualifiers included; one unknown leg
@@ -920,9 +1191,14 @@ mod tests {
     #[test]
     fn resolve_distinct_tuple_columns() {
         let schema = Schema::new(vec![
-            Field::plain("k", DataType::Int64, true).with_table("a"),
-            Field::plain("k", DataType::Int64, true).with_table("b"),
+            Field::plain("k", DataType::Int64, true),
+            Field::plain("k", DataType::Int64, true),
         ]);
+        let qualifiers = [Some("a".to_string()), Some("b".to_string())];
+        let scope = Scope {
+            schema: &schema,
+            qualifiers: &qualifiers,
+        };
         let qualified = |table: &str| ColumnRef::Qualified {
             table: table.into(),
             name: "k".into(),
@@ -931,13 +1207,13 @@ mod tests {
             cols: vec![qualified("b"), qualified("a")],
         };
         assert_eq!(
-            resolve_agg_intent(&intent, &schema).unwrap(),
+            resolve_agg_intent(&intent, scope).unwrap(),
             AggIntent::Cardinality { cols: vec![1, 0] }
         );
         let missing = AggIntent::Cardinality {
             cols: vec![qualified("a"), ColumnRef::Named("missing".into())],
         };
-        assert!(resolve_agg_intent(&missing, &schema).is_err());
+        assert!(resolve_agg_intent(&missing, scope).is_err());
     }
 
     // `<vector> > <scalar>`: the bridged literal comes through unchanged, the
@@ -1028,6 +1304,7 @@ mod tests {
                 },
                 predicates: vec![],
                 schema: Some(input),
+                qualifier: None,
             }),
         };
         let resolved = resolve_root(&unresolved).expect("resolves");
@@ -1051,9 +1328,8 @@ mod tests {
                 table_ref: table.into(),
             },
             predicates: vec![],
-            schema: Some(Schema::new(vec![
-                Field::plain("k", DataType::Int64, false).with_table(table)
-            ])),
+            schema: Some(Schema::new(vec![Field::plain("k", DataType::Int64, false)])),
+            qualifier: Some(table.into()),
         };
         let qualified = |table: &str| {
             UnresolvedScalar::Column(ColumnRef::Qualified {
@@ -1093,6 +1369,7 @@ mod tests {
             source: Source::TimeSeries { metric: "x".into() },
             predicates: vec![UnresolvedPredicate(eq_lit(named("a"), "1"))],
             schema: None,
+            qualifier: None,
         };
         let unresolved = UnresolvedOp::PromqlScalarOp {
             child: Rc::new(scan("m")),
@@ -1182,7 +1459,7 @@ mod tests {
             closed: true,
         };
         assert_eq!(
-            resolve_group_keys_promql(&[ColumnRef::Named("job".into())], &s),
+            resolve_group_keys_promql(&[ColumnRef::Named("job".into())], Scope::unqualified(&s)),
             Ok(vec![])
         );
         // Present keys still resolve positionally; absent ones drop around them.
@@ -1192,7 +1469,7 @@ mod tests {
                     ColumnRef::Named("job".into()),
                     ColumnRef::Named("group".into())
                 ],
-                &s
+                Scope::unqualified(&s)
             ),
             Ok(vec![0])
         );
@@ -1205,7 +1482,7 @@ mod tests {
         // absent label. Keep the strict error.
         let open = ts_value_schema(); // closed: false
         assert!(matches!(
-            resolve_group_keys_promql(&[ColumnRef::Named("job".into())], &open),
+            resolve_group_keys_promql(&[ColumnRef::Named("job".into())], Scope::unqualified(&open)),
             Err(ResolveError::NotFound { .. })
         ));
     }

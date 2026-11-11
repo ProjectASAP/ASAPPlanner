@@ -124,11 +124,11 @@ impl Memo {
         {
             return Ok(*group);
         }
-        let group_properties = derive_group_properties(self, &expression)?;
-        let shareable = group_properties.shareable_when_equal;
         let id = MemoGroupId(
             u32::try_from(self.groups.len()).expect("a memo has at most u32::MAX groups"),
         );
+        let group_properties = derive_group_properties(self, id, &expression)?;
+        let shareable = group_properties.shareable_when_equal;
         for &input in expression.children() {
             add_parent(&mut self.groups[input.0 as usize], id);
         }
