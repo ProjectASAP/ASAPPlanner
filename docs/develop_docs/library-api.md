@@ -295,7 +295,7 @@ let models = PlanningModels::builtin().with_cost_inputs(&settings);
 
 The `asap_planner` devtool runs the same stages and writes every stage's
 output as text or, with `--format json`, as one JSON document; see the
-[Stage Viewer guide](../user_guide_docs/stage-viewer.md).
+[Plan Viewer guide](../user_guide_docs/plan-viewer.md).
 
 ## Workload inputs and defaults
 
