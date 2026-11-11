@@ -13,7 +13,7 @@ use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::properties::selection::Constraint;
 use asap_types::ir::scalar::{CompareOpKind, ExprSemantics, Predicate, ScalarExpr, ScalarValue};
 use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorResultKind};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::stages::{
     AggregateDefinition, ColumnLineage, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
 };
@@ -319,38 +319,26 @@ fn rollup_from(memo: &mut Memo, coarse: &Member, fine: &Member) -> Result<(), Pa
     if compensation.is_empty() && coarse.keys.len() == fine.keys.len() {
         return Ok(());
     }
-    let fine_properties = &memo.groups()[fine.group.0 as usize].group_properties;
-    let lineage = fine_properties.column_lineage.clone();
-    let semantics = if fine_properties.result_kind == OperatorResultKind::Relation {
-        ExprSemantics::Sql
-    } else {
-        ExprSemantics::Promql
-    };
+    let lineage = memo.groups()[fine.group.0 as usize]
+        .group_properties
+        .column_lineage
+        .clone();
     let mut conjuncts = Vec::new();
     for (column, constraint) in &compensation {
         let Some(at) = column_of(&lineage, column) else {
             return Ok(());
+        };
+        // The comparison of the frontend that reads the column's source.
+        let semantics = if column.source.is_time_series() {
+            ExprSemantics::Promql
+        } else {
+            ExprSemantics::Sql
         };
         let Some(conjunct) = selecting(at, constraint, semantics) else {
             return Ok(());
         };
         conjuncts.push(conjunct);
     }
-    let input = match conjuncts.len() {
-        0 => fine.group,
-        _ => add_group_computing_itself(
-            memo,
-            Operator::NonASAP(NonASAPOp::Filter {
-                pred: Predicate(if conjuncts.len() == 1 {
-                    conjuncts.remove(0)
-                } else {
-                    ScalarExpr::BoolAnd(conjuncts)
-                }),
-                child: fine.group,
-            }),
-            OriginOfCandidateForMemoGroup::Rollup,
-        )?,
-    };
     let Some(group_by) = coarse
         .keys
         .iter()
@@ -358,6 +346,29 @@ fn rollup_from(memo: &mut Memo, coarse: &Member, fine: &Member) -> Result<(), Pa
         .collect::<Option<Vec<_>>>()
     else {
         return Ok(());
+    };
+    // The compensating `Filter` stays pending, named by the id it would get
+    // as a new group, until the rollup over it derives the coarse group's
+    // schema (`Memo::output_schema_of_pending_expression`): a rollup the
+    // memo would reject adds no group.
+    let filter = (!conjuncts.is_empty()).then(|| {
+        Operator::NonASAP(NonASAPOp::Filter {
+            pred: Predicate(if conjuncts.len() == 1 {
+                conjuncts.remove(0)
+            } else {
+                ScalarExpr::BoolAnd(conjuncts)
+            }),
+            child: fine.group,
+        })
+    });
+    let mut pending = Vec::new();
+    let input = match &filter {
+        None => fine.group,
+        Some(filter) => {
+            let schema = memo.output_schema_of_pending_expression(&[], filter)?;
+            pending.push((filter.clone(), schema));
+            MemoGroupId(u32::try_from(memo.groups().len()).expect("at most u32::MAX groups"))
+        }
     };
     let rollup = match &coarse.expression {
         Operator::ASAP(ASAPOp::SummaryAgg { .. }) => Operator::ASAP(ASAPOp::SummaryMerge {
@@ -388,6 +399,26 @@ fn rollup_from(memo: &mut Memo, coarse: &Member, fine: &Member) -> Result<(), Pa
             })
         }
         _ => unreachable!("a member is a SummaryAgg or an Aggregate"),
+    };
+    if memo
+        .output_schema_of_pending_expression(&pending, &rollup)
+        .ok()
+        .as_ref()
+        != Some(
+            &memo.groups()[coarse.group.0 as usize]
+                .group_properties
+                .schema,
+        )
+    {
+        return Ok(());
+    }
+    let rollup = match filter {
+        None => rollup,
+        Some(filter) => {
+            let filter =
+                add_group_computing_itself(memo, filter, OriginOfCandidateForMemoGroup::Rollup)?;
+            rollup.map_children(|_| filter)
+        }
     };
     add_candidates_per_input_parameters(
         memo,

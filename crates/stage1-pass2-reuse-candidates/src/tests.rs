@@ -647,6 +647,120 @@ fn a_coarse_exact_sum_rolls_up_the_finer_sum() {
     );
 }
 
+/// A scan of the SQL table `flows(src, dst, bytes)` with `predicates`.
+fn flows(memo: &mut Memo, predicates: Vec<Predicate<MemoGroupId>>) -> MemoGroupId {
+    group(
+        memo,
+        Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::Table {
+                table_ref: "flows".into(),
+            },
+            predicates,
+            schema: Schema::new(vec![
+                Field::plain("src", DataType::Utf8, false),
+                Field::plain("dst", DataType::Utf8, false),
+                Field::plain("bytes", DataType::Float64, false),
+            ]),
+        }),
+    )
+}
+
+/// `column = value`, SQL semantics.
+fn sql_equals(column: usize, value: &str) -> ScalarExpr<MemoGroupId> {
+    ScalarExpr::Compare {
+        left: Box::new(ScalarExpr::Column(column)),
+        op: CompareOpKind::Eq,
+        right: Box::new(ScalarExpr::Literal(ScalarValue::Utf8(value.into()))),
+        semantics: ExprSemantics::Sql,
+    }
+}
+
+/// A compensating filter compares with the semantics of the frontend of
+/// the source it reads: `SUM(bytes) WHERE dst = 'x' GROUP BY src` over a
+/// SQL table rolls up the exact sum state by (src, dst) through
+/// `Filter(dst = 'x')` with SQL semantics, not PromQL's.
+#[test]
+fn a_compensating_filter_over_a_sql_table_has_sql_semantics() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let all = flows(&mut memo, vec![]);
+    let x = flows(&mut memo, vec![Predicate(sql_equals(1, "x"))]);
+    let sum_state = |memo: &mut Memo, rows: MemoGroupId, keys: Vec<usize>| {
+        group(
+            memo,
+            Operator::ASAP(ASAPOp::SummaryAgg {
+                child: rows,
+                summary_type: FieldDataType::exact(ExactKind::Sum),
+                input: SummaryUpdate::column(ColumnRef::Named("bytes".into())),
+                reduction: Reduction::by(keys),
+                filter: None,
+            }),
+        )
+    };
+    let fine = sum_state(&mut memo, all, vec![0, 1]);
+    let coarse = sum_state(&mut memo, x, vec![0]);
+    for state in [fine, coarse] {
+        let root = group(
+            &mut memo,
+            Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: state }),
+        );
+        query(&mut memo, root, Some(AccuracyTarget::exact()));
+    }
+    let logical = pass2(memo, &[entry(60_000), entry(60_000)]);
+    let filters = groups_where(
+        &logical.memo,
+        |e| matches!(e, Operator::NonASAP(NonASAPOp::Filter { child, .. }) if *child == fine),
+    );
+    let [filter] = filters[..] else {
+        panic!("one compensating filter: {filters:?}");
+    };
+    assert_eq!(
+        logical.memo.groups()[filter.0 as usize].expression,
+        Operator::NonASAP(NonASAPOp::Filter {
+            pred: Predicate(sql_equals(1, "x")),
+            child: fine,
+        })
+    );
+}
+
+/// A rollup the memo rejects adds nothing: `COUNT(*) WHERE src = 'a'` (one
+/// row, 0 when no row matches) does not roll up from `COUNT(*) GROUP BY
+/// src` (a sum of counts, NULL over no row), and no compensating
+/// `Filter(src = 'a')` group is left without a reader.
+#[test]
+fn a_rejected_rollup_leaves_no_compensating_filter() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let all = flows(&mut memo, vec![]);
+    let a = flows(&mut memo, vec![Predicate(sql_equals(0, "a"))]);
+    let count_by = |memo: &mut Memo, rows: MemoGroupId, keys: Vec<usize>| {
+        group(
+            memo,
+            Operator::NonASAP(NonASAPOp::Aggregate {
+                child: rows,
+                reduction: Reduction::by(keys),
+                measures: vec![AggIntent::Count],
+                output_names: vec!["count".into()],
+                filters: vec![None],
+                having: None,
+            }),
+        )
+    };
+    let by_src = count_by(&mut memo, all, vec![0]);
+    let only_a = count_by(&mut memo, a, vec![]);
+    query(&mut memo, by_src, Some(AccuracyTarget::exact()));
+    query(&mut memo, only_a, Some(AccuracyTarget::exact()));
+    let logical = pass2(memo, &[entry(60_000), entry(60_000)]);
+    let memo = &logical.memo;
+    assert!(candidates_of(memo, only_a)
+        .iter()
+        .all(|c| c.origin != OriginOfCandidateForMemoGroup::Rollup));
+    let roots = memo.root_groups();
+    let orphans: Vec<MemoGroupId> = (0..memo.groups().len())
+        .map(|index| MemoGroupId(index as u32))
+        .filter(|g| !roots.contains(g) && memo.groups()[g.0 as usize].parent_groups().is_empty())
+        .collect();
+    assert!(orphans.is_empty(), "groups without a reader: {orphans:?}");
+}
+
 // ── Step 2: top-k reuse ───────────────────────────────────────────────────
 
 /// `topk(5, x)` reads `topk(10, x)`'s ranked rows: the 5 highest of the 10
