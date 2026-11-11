@@ -50,9 +50,9 @@ use asap_types::ir::{
     ProjectItem, ScalarExpr,
 };
 use asap_types::stages::{
-    raw_data_samples_of_metric_of_group, CandidateError, CandidateExpression,
-    CandidateForMemoGroup, LogicalProperties, LogicalRequirements, Memo, MemoGroupId,
-    OriginOfCandidateForMemoGroup,
+    output_schemas_of_pending_expressions, raw_data_samples_of_metric_of_group,
+    CandidateExpression, CandidateForMemoGroup, LogicalProperties, LogicalRequirements, Memo,
+    MemoGroupId, OriginOfCandidateForMemoGroup,
 };
 use asap_types::summary_type::parameter_list;
 use asap_types::summary_type::{
@@ -184,15 +184,15 @@ struct AggregateWays<'a> {
 }
 
 /// One measure of an aggregate, computed on its own over `input`.
-struct SingleMeasure<'a> {
-    input: MemoGroupId,
-    reduction: &'a Reduction,
-    intent: &'a AggIntent,
-    filter: Option<&'a Predicate<MemoGroupId>>,
+pub(crate) struct SingleMeasure<'a> {
+    pub(crate) input: MemoGroupId,
+    pub(crate) reduction: &'a Reduction,
+    pub(crate) intent: &'a AggIntent,
+    pub(crate) filter: Option<&'a Predicate<MemoGroupId>>,
     /// The metric whose raw data samples, or plain sums of them, are every
     /// value the aggregate reads: a heap-sketch weight read from them
     /// carries the open requirement `WeightDomain::RawDataSamplesOfMetric`.
-    raw_data_samples_of: Option<&'a str>,
+    pub(crate) raw_data_samples_of: Option<&'a str>,
 }
 
 /// Adds `ways.result_group`'s candidates that compute it from
@@ -246,14 +246,15 @@ fn add_aggregate_candidates(
             return Ok(());
         };
         for way in &target.ways_to_compute {
-            if *way == HowToComputeAggregateMeasure::Exact {
-                continue;
+            if *way != HowToComputeAggregateMeasure::Exact {
+                unless_unsupported(add_measure_way(
+                    memo,
+                    &measure(0),
+                    way,
+                    ways.result_group,
+                    ways.above,
+                ))?;
             }
-            unless_unsupported(
-                measure_output(memo, &measure(0), way, ways.result_group).and_then(|output| {
-                    add_output_candidate(memo, ways.result_group, output, ways.above)
-                }),
-            )?;
         }
         if let Some(fused) = &target.fused_computation {
             for way in &fused.ways_to_compute {
@@ -276,51 +277,149 @@ fn add_aggregate_candidates(
     {
         return Ok(());
     }
-    let mut parts = Vec::with_capacity(measures.len());
-    for (index, intent) in measures.iter().enumerate() {
-        let part = add_group(
-            memo,
-            Operator::NonASAP(NonASAPOp::Aggregate {
-                child: input,
-                reduction: reduction.clone(),
-                measures: vec![intent.clone()],
-                output_names: vec![output_names.get(index).cloned().unwrap_or_default()],
-                filters: vec![filters.get(index).cloned().flatten()],
-                having: None,
-            }),
-        )?;
+    let mut pending = Vec::new();
+    let parts: Vec<MemoGroupId> = measures
+        .iter()
+        .enumerate()
+        .map(|(index, intent)| {
+            push_pending(
+                memo,
+                &mut pending,
+                Operator::NonASAP(NonASAPOp::Aggregate {
+                    child: input,
+                    reduction: reduction.clone(),
+                    measures: vec![intent.clone()],
+                    output_names: vec![output_names.get(index).cloned().unwrap_or_default()],
+                    filters: vec![filters.get(index).cloned().flatten()],
+                    having: None,
+                }),
+            )
+        })
+        .collect();
+    let joined = unless_unsupported_way(
+        join_measures(memo, &mut pending, &reduction, ways.result_group, &parts).and_then(
+            |output| add_output_candidate(memo, ways.result_group, pending, output, ways.above),
+        ),
+    )?;
+    // Each measure's own group gets its ways once the join adds it.
+    let Some(group_of) = joined else {
+        return Ok(());
+    };
+    for (index, part) in parts.iter().enumerate() {
+        let part = group_of(*part);
         if let Some(target) = target_of(index) {
             for way in &target.ways_to_compute {
-                if *way == HowToComputeAggregateMeasure::Exact {
-                    continue;
+                if *way != HowToComputeAggregateMeasure::Exact {
+                    unless_unsupported(add_measure_way(memo, &measure(index), way, part, &[]))?;
                 }
-                unless_unsupported(
-                    measure_output(memo, &measure(index), way, part)
-                        .and_then(|output| add_output_candidate(memo, part, output, &[])),
-                )?;
             }
         }
-        parts.push(part);
     }
-    unless_unsupported(
-        join_measures(memo, &reduction, ways.result_group, parts)
-            .and_then(|output| add_output_candidate(memo, ways.result_group, output, ways.above)),
-    )
+    Ok(())
 }
 
-/// `added`, with a way Pass 1 cannot build (`Unsupported`) not offered:
-/// its checks run before the groups it reads are added, so the memo is
-/// unchanged, except for the rare checks that need a group's schema (a
-/// top-k estimate without its item columns, a per-series `avg` that is not
-/// Float64, an output a `Project` cannot rename to the group's columns),
-/// which leave groups no query reaches.
+/// `added`, with a way Pass 1 cannot build (`Unsupported`) not offered.
+/// Every check that returns `Unsupported` runs before the way adds its
+/// first group or candidate (its groups are pending until then,
+/// [`commit_pending`]), so an unsupported way leaves the memo unchanged.
 fn unless_unsupported(
     added: Result<(), PerComputationCandidateError>,
 ) -> Result<(), PerComputationCandidateError> {
+    unless_unsupported_way(added).map(|_| ())
+}
+
+/// [`unless_unsupported`] for a way whose result the caller reads: `None`
+/// when the way is not offered.
+fn unless_unsupported_way<T>(
+    added: Result<T, PerComputationCandidateError>,
+) -> Result<Option<T>, PerComputationCandidateError> {
     match added {
-        Err(PerComputationCandidateError::Unsupported(_)) => Ok(()),
-        added => added,
+        Err(PerComputationCandidateError::Unsupported(_)) => Ok(None),
+        added => added.map(Some),
     }
+}
+
+/// Adds `measure`'s way `way` (not `Exact`) as candidates of
+/// `result_group`, then the `above` filters over it: its groups are built
+/// pending ([`measure_output`]), checked, and only then added.
+pub(crate) fn add_measure_way(
+    memo: &mut Memo,
+    measure: &SingleMeasure<'_>,
+    way: &HowToComputeAggregateMeasure,
+    result_group: MemoGroupId,
+    above: &[Predicate<MemoGroupId>],
+) -> Result<(), PerComputationCandidateError> {
+    let mut pending = Vec::new();
+    let output = measure_output(memo, &mut pending, measure, way, result_group)?;
+    add_output_candidate(memo, result_group, pending, output, above).map(|_| ())
+}
+
+/// The expressions of one way to compute a group, not yet in the memo, in
+/// the order they are added: each reads memo groups or earlier pending
+/// expressions, by the id [`push_pending`] returns.
+type Pending = Vec<Operator<MemoGroupId>>;
+
+/// Appends `operator` to `pending` and returns the id that names it there:
+/// the id it would get as a new group (`output_schemas_of_pending_expressions`).
+fn push_pending(
+    memo: &Memo,
+    pending: &mut Pending,
+    operator: Operator<MemoGroupId>,
+) -> MemoGroupId {
+    let id = MemoGroupId(
+        u32::try_from(memo.groups().len() + pending.len())
+            .expect("a memo has at most u32::MAX groups"),
+    );
+    pending.push(operator);
+    id
+}
+
+/// The output schema of `group`: a memo group's, or a pending expression's
+/// as the memo derives it.
+fn schema_of(
+    memo: &Memo,
+    pending: &Pending,
+    group: MemoGroupId,
+) -> Result<Schema, PerComputationCandidateError> {
+    let groups = memo.groups().len();
+    Ok(match (group.0 as usize).checked_sub(groups) {
+        None => schema(memo, group).clone(),
+        Some(index) => output_schemas_of_pending_expressions(memo, &pending[..=index])?
+            .pop()
+            .expect("one schema per pending expression"),
+    })
+}
+
+/// Adds `pending` to `memo` in order, each pending input replaced by the
+/// group it became: a summary build as a state group with its build
+/// candidates, listing `fused_groups` ([`add_state_group`]), any other
+/// expression as its own group's candidate ([`add_group`]). Returns what
+/// each id names now: a memo group stays, a pending id becomes the group its
+/// expression became. The caller has already checked the way, so a failure
+/// here is a bug.
+fn commit_pending(
+    memo: &mut Memo,
+    pending: Pending,
+    fused_groups: &[MemoGroupId],
+) -> Result<impl Fn(MemoGroupId) -> MemoGroupId, PerComputationCandidateError> {
+    let first_pending = memo.groups().len();
+    let mut groups: Vec<MemoGroupId> = Vec::with_capacity(pending.len());
+    let group_of = move |groups: &[MemoGroupId], id: MemoGroupId| {
+        (id.0 as usize)
+            .checked_sub(first_pending)
+            .map_or(id, |index| groups[index])
+    };
+    for operator in pending {
+        let operator = operator.map_children(|&input| group_of(&groups, input));
+        let group = match operator {
+            Operator::ASAP(ASAPOp::SummaryAgg { .. }) => {
+                add_state_group(memo, operator, fused_groups)?
+            }
+            _ => add_group(memo, operator)?,
+        };
+        groups.push(group);
+    }
+    Ok(move |id| group_of(&groups, id))
 }
 
 /// Adds the fused computation `way` of `ways`' single measure: a whole-
@@ -343,8 +442,10 @@ fn add_fused_candidate(
             let query = sketch_statistic(measure.intent).ok_or(
                 PerComputationCandidateError::Unsupported("sketch evaluation"),
             )?;
-            let state = add_state_group(
+            let mut pending = Vec::new();
+            let state = push_pending(
                 memo,
+                &mut pending,
                 Operator::ASAP(ASAPOp::SummaryAgg {
                     child: rows,
                     input: with_raw_data_samples_requirement(update, measure.raw_data_samples_of),
@@ -352,16 +453,23 @@ fn add_fused_candidate(
                     reduction: partitions,
                     filter: None,
                 }),
-                absorbed_groups,
-            )?;
-            let estimate = add_group(
+            );
+            let estimate = push_pending(
                 memo,
+                &mut pending,
                 Operator::ASAP(ASAPOp::SummaryEstimate {
                     summary_input: state,
                     query,
                 }),
+            );
+            let output = ranked_as_topk(
+                measure.reduction,
+                schema(memo, ways.result_group),
+                &schema_of(memo, &pending, estimate)?,
+                estimate,
             )?;
-            let output = ranked_as_topk(memo, measure.reduction, ways.result_group, estimate)?;
+            let group_of = commit_pending(memo, pending, absorbed_groups)?;
+            let output = output.map_children(|&input| group_of(input));
             add_candidate(memo, ways.result_group, output, None, Vec::new())?;
         }
         HowToComputeAggregateMeasure::ExactAccumulator(_) => {
@@ -372,7 +480,7 @@ fn add_fused_candidate(
                 nested_distributive_input(memo, ways.aggregate_group).ok_or(
                     PerComputationCandidateError::Unsupported("nested distributive merge input"),
                 )?;
-            let outer_state = accumulator_state(
+            let outer_build = accumulator_build(
                 memo,
                 kind,
                 measure.intent,
@@ -386,8 +494,14 @@ fn add_fused_candidate(
                 filter: None,
                 raw_data_samples_of: None,
             };
-            let read = measure_input(&inner, memo, rows, None)?;
-            let merged = accumulator_build(memo, kind, &inner, &below_inner, read)?;
+            let merged = accumulator_build(
+                memo,
+                kind,
+                &inner,
+                &below_inner,
+                measure_input(&inner, memo, rows, None)?,
+            )?;
+            let outer_state = add_state_group(memo, outer_build, &[])?;
             add_candidate(memo, outer_state, merged, None, absorbed_groups.to_vec())?;
         }
         HowToComputeAggregateMeasure::Exact => {
@@ -401,10 +515,11 @@ fn add_fused_candidate(
 
 /// The operator that computes `measure` by `way` (not `Exact`) for
 /// `result_group`: its value after its group keys, its column names not
-/// yet the group's ([`add_output_candidate`] renames them). Every group it
-/// reads is added with its candidates.
+/// yet the group's ([`add_output_candidate`] renames them). The groups it
+/// reads are appended to `pending`; nothing is added to `memo`.
 fn measure_output(
-    memo: &mut Memo,
+    memo: &Memo,
+    pending: &mut Pending,
     measure: &SingleMeasure<'_>,
     way: &HowToComputeAggregateMeasure,
     result_group: MemoGroupId,
@@ -417,8 +532,9 @@ fn measure_output(
         }
         HowToComputeAggregateMeasure::ExactAccumulator(kinds) if kinds.len() == 1 => {
             let read = measure_input(measure.intent, memo, measure.input, measure.filter)?;
+            let build = accumulator_build(memo, kinds[0], measure.intent, measure, read)?;
             Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
-                child: accumulator_state(memo, kinds[0], measure.intent, measure, read)?,
+                child: push_pending(memo, pending, build),
             })
         }
         HowToComputeAggregateMeasure::Summary(algorithm) => {
@@ -437,8 +553,9 @@ fn measure_output(
                 )?,
                 measure.raw_data_samples_of,
             );
-            let state = add_state_group(
+            let state = push_pending(
                 memo,
+                pending,
                 Operator::ASAP(ASAPOp::SummaryAgg {
                     child: measure.input,
                     input: update,
@@ -446,16 +563,20 @@ fn measure_output(
                     reduction: measure.reduction.clone(),
                     filter: measure.filter.cloned(),
                 }),
-                &[],
-            )?;
+            );
             let estimate = Operator::ASAP(ASAPOp::SummaryEstimate {
                 summary_input: state,
                 query,
             });
             match measure.intent {
                 AggIntent::TopK { .. } => {
-                    let estimate = add_group(memo, estimate)?;
-                    ranked_as_topk(memo, measure.reduction, result_group, estimate)?
+                    let estimate = push_pending(memo, pending, estimate);
+                    ranked_as_topk(
+                        measure.reduction,
+                        schema(memo, result_group),
+                        &schema_of(memo, pending, estimate)?,
+                        estimate,
+                    )?
                 }
                 _ => estimate,
             }
@@ -474,16 +595,20 @@ fn measure_output(
             let sum_intent = AggIntent::Sum { col: *col };
             let count_intent = AggIntent::Count;
             let read = measure_input(&sum_intent, memo, measure.input, measure.filter)?;
-            let sum = accumulator_state(memo, ExactKind::Sum, &sum_intent, measure, read.clone())?;
-            let count = accumulator_state(memo, ExactKind::Count, &count_intent, measure, read)?;
-            let sum = add_group(
+            let sum = accumulator_build(memo, ExactKind::Sum, &sum_intent, measure, read.clone())?;
+            let count = accumulator_build(memo, ExactKind::Count, &count_intent, measure, read)?;
+            let sum = push_pending(memo, pending, sum);
+            let count = push_pending(memo, pending, count);
+            let sum = push_pending(
                 memo,
+                pending,
                 Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: sum }),
-            )?;
-            let count = add_group(
+            );
+            let count = push_pending(
                 memo,
+                pending,
                 Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: count }),
-            )?;
+            );
             if memo.groups()[measure.input.0 as usize]
                 .group_properties
                 .result_kind
@@ -491,6 +616,7 @@ fn measure_output(
             {
                 return sql_avg(
                     memo,
+                    pending,
                     measure.reduction,
                     measure.filter.is_some(),
                     sum,
@@ -505,12 +631,12 @@ fn measure_output(
             // Float64.
             let (sum, count) = match measure.reduction {
                 Reduction::Reduce(by) => (
-                    last_as_float64(memo, by.len(), sum)?,
-                    last_as_float64(memo, by.len(), count)?,
+                    last_as_float64(memo, pending, by.len(), sum)?,
+                    last_as_float64(memo, pending, by.len(), count)?,
                 ),
                 Reduction::PerEntity => {
-                    let sum_schema = schema(memo, sum);
-                    let value = resolve_column_ref(&ColumnRef::SampleValue, sum_schema)
+                    let sum_schema = schema_of(memo, pending, sum)?;
+                    let value = resolve_column_ref(&ColumnRef::SampleValue, &sum_schema)
                         .ok()
                         .and_then(|column| sum_schema.fields.get(column));
                     if value.map(|field| &field.dtype)
@@ -539,20 +665,6 @@ fn measure_output(
     })
 }
 
-/// The accumulator-state group of `kind` for `intent` (`measure`'s own, or
-/// one of its states, such as `avg`'s `sum`), reading `read` from
-/// `measure`'s input, with its build candidate.
-fn accumulator_state(
-    memo: &mut Memo,
-    kind: ExactKind,
-    intent: &AggIntent,
-    measure: &SingleMeasure<'_>,
-    read: SummaryInputExpr,
-) -> Result<MemoGroupId, PerComputationCandidateError> {
-    let build = accumulator_build(memo, kind, intent, measure, read)?;
-    add_state_group(memo, build, &[])
-}
-
 /// The accumulator build of `kind` for `intent` over `measure`'s input,
 /// filtered and grouped as `measure`.
 fn accumulator_build(
@@ -578,66 +690,65 @@ fn accumulator_build(
     }))
 }
 
-/// Adds `output` as a candidate of `result_group`, then the `above` filters
-/// over it. When its column names differ from the group's,
+/// Adds `output` (over memo groups and `pending`) as a candidate of
+/// `result_group`, then the `above` filters over it, and returns what each
+/// id names once `pending` is added ([`commit_pending`]). When its column names differ from the group's,
 /// `output` becomes its own group, read through a `Project` that names its
 /// columns as the group does ([`renaming_project`]). With `above`
 /// predicates the output (named as the group) is a group, read by one
 /// `Filter` group per predicate but the last, whose `Filter` is the
-/// candidate.
+/// candidate. Every check runs on the pending expressions before any is
+/// added.
 fn add_output_candidate(
     memo: &mut Memo,
     result_group: MemoGroupId,
+    mut pending: Pending,
     output: Operator<MemoGroupId>,
     above: &[Predicate<MemoGroupId>],
-) -> Result<(), PerComputationCandidateError> {
-    let Some((last, filters)) = above.split_last() else {
-        match add_candidate(memo, result_group, output.clone(), None, Vec::new()) {
-            Err(PerComputationCandidateError::Candidate(
-                CandidateError::OutputDiffersFromGroup { .. },
-            )) => {}
-            added => return added.map(|_| ()),
-        }
-        let output = add_group(memo, output)?;
-        let renamed = renaming_project(memo, output, result_group)?;
-        add_candidate(memo, result_group, renamed, None, Vec::new())?;
-        return Ok(());
-    };
-    let mut named = add_group(memo, output)?;
-    if schema(memo, named) != schema(memo, result_group) {
-        let renamed = renaming_project(memo, named, result_group)?;
-        named = add_group(memo, renamed)?;
-    }
-    for pred in filters {
-        named = add_group(
-            memo,
+) -> Result<impl Fn(MemoGroupId) -> MemoGroupId, PerComputationCandidateError> {
+    let to = schema(memo, result_group).clone();
+    let output_group = push_pending(memo, &mut pending, output);
+    let from = schema_of(memo, &pending, output_group)?;
+    let candidate = match above.split_last() {
+        None if from == to => pending.pop().expect("the output was pushed"),
+        None => renaming_project(&from, &to, output_group)?,
+        Some((last, filters)) => {
+            let mut named = output_group;
+            if from != to {
+                let renamed = renaming_project(&from, &to, output_group)?;
+                named = push_pending(memo, &mut pending, renamed);
+            }
+            for pred in filters {
+                named = push_pending(
+                    memo,
+                    &mut pending,
+                    Operator::NonASAP(NonASAPOp::Filter {
+                        pred: pred.clone(),
+                        child: named,
+                    }),
+                );
+            }
             Operator::NonASAP(NonASAPOp::Filter {
-                pred: pred.clone(),
+                pred: last.clone(),
                 child: named,
-            }),
-        )?;
-    }
-    add_candidate(
-        memo,
-        result_group,
-        Operator::NonASAP(NonASAPOp::Filter {
-            pred: last.clone(),
-            child: named,
-        }),
-        None,
-        Vec::new(),
-    )?;
-    Ok(())
+            })
+        }
+    };
+    let group_of = commit_pending(memo, pending, &[])?;
+    let candidate = candidate.map_children(|&input| group_of(input));
+    add_candidate(memo, result_group, candidate, None, Vec::new())?;
+    Ok(group_of)
 }
 
-/// A `Project` over `output` that names its columns as `result_group`'s. `output` must have the group's number of columns,
-/// and the group's schema must be closed (list every column its rows carry).
+/// A `Project` over `output` (schema `from`) that names its columns as a
+/// group of schema `to` does. `output` must have the group's number of
+/// columns, and the group's schema must be closed (list every column its
+/// rows carry).
 fn renaming_project(
-    memo: &Memo,
+    from: &Schema,
+    to: &Schema,
     output: MemoGroupId,
-    result_group: MemoGroupId,
 ) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
-    let (from, to) = (schema(memo, output), schema(memo, result_group));
     // An open schema's rows carry columns it does not list (a PromQL
     // series whose identity is not realized as a column): a `Project` lists
     // its columns, so it would drop them, and its rows are not the group's.
@@ -666,32 +777,31 @@ fn renaming_project(
     }))
 }
 
-/// A heap's top-k `estimate` group (`[partitions.., items.., topk]`, one
-/// row per ranked item) in `result_group`'s columns, as a `Project`: its
-/// `[keys.., topk_k]`, with `topk_k` the estimated Float64 weight, then the
-/// item columns. This is the exact top-k's physical shape (its ranked rows'
-/// value, then the columns naming each ranked item: PromQL labels, SQL
-/// group keys), so consumers of `[keys.., topk_k]` find those columns where
-/// they were.
+/// A heap's top-k `estimate` (schema `estimated`: `[partitions.., items..,
+/// topk]`, one row per ranked item) in the columns of a result group of
+/// schema `to`, as a `Project`: its `[keys.., topk_k]`, with `topk_k` the
+/// estimated Float64 weight, then the item columns. This is the exact
+/// top-k's physical shape (its ranked rows' value, then the columns naming
+/// each ranked item: PromQL labels, SQL group keys), so consumers of
+/// `[keys.., topk_k]` find those columns where they were.
 fn ranked_as_topk(
-    memo: &Memo,
     reduction: &Reduction,
-    result_group: MemoGroupId,
+    to: &Schema,
+    estimated: &Schema,
     estimate: MemoGroupId,
 ) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
     let ranked_index = reduction.group_keys().map_or(0, |keys| keys.len());
-    let fields = &schema(memo, estimate).fields;
-    let estimated = fields.len() - 1;
-    let to = schema(memo, result_group);
+    let fields = &estimated.fields;
+    let estimated_value = fields.len() - 1;
     let cols = to
         .fields
         .iter()
         .enumerate()
         .map(|(index, field)| {
             let source = if index == ranked_index {
-                estimated
+                estimated_value
             } else {
-                fields[..estimated]
+                fields[..estimated_value]
                     .iter()
                     .position(|input| input.name == field.name)
                     .ok_or(PerComputationCandidateError::Unsupported(
@@ -793,15 +903,19 @@ fn add_candidate(
     Ok(())
 }
 
-/// `group`, a grouped aggregate's `keys` group keys and then its value,
-/// with the value cast to Float64 unless it already is one (a `Project`
-/// group over it).
+/// `group` (a memo group or pending), a grouped aggregate's `keys` group
+/// keys and then its value, with the value cast to Float64 unless it
+/// already is one (a pending `Project` over it).
 fn last_as_float64(
-    memo: &mut Memo,
+    memo: &Memo,
+    pending: &mut Pending,
     keys: usize,
     group: MemoGroupId,
 ) -> Result<MemoGroupId, PerComputationCandidateError> {
-    if schema(memo, group).fields.last().map(|field| &field.dtype)
+    if schema_of(memo, pending, group)?
+        .fields
+        .last()
+        .map(|field| &field.dtype)
         == Some(&FieldDataType::Plain(DataType::Float64))
     {
         return Ok(group);
@@ -815,18 +929,20 @@ fn last_as_float64(
             try_cast: false,
         },
     });
-    add_group(
+    Ok(push_pending(
         memo,
+        pending,
         Operator::NonASAP(NonASAPOp::Project { cols, child: group }),
-    )
+    ))
 }
 
-/// SQL `avg` from its finalized `sum` and `count` groups: joined on the
-/// group keys (NULL keys match), then `sum / count` as Float64. A group
-/// with no row passing the measure filter, or an empty global input, counts
-/// 0 and its `avg` is NULL.
+/// SQL `avg` from its finalized `sum` and `count` groups (memo groups or
+/// pending): joined on the group keys (NULL keys match), then
+/// `sum / count` as Float64. A group with no row passing the measure
+/// filter, or an empty global input, counts 0 and its `avg` is NULL.
 fn sql_avg(
-    memo: &mut Memo,
+    memo: &Memo,
+    pending: &mut Pending,
     reduction: &Reduction,
     filtered: bool,
     sum: MemoGroupId,
@@ -872,23 +988,25 @@ fn sql_avg(
         alias: None,
         expr: avg,
     });
-    let joined = add_group(memo, join_on_keys(memo, keys, sum, count))?;
+    let join = join_on_keys(memo, pending, keys, sum, count)?;
+    let joined = push_pending(memo, pending, join);
     Ok(Operator::NonASAP(NonASAPOp::Project {
         cols,
         child: joined,
     }))
 }
 
-/// `left` joined with `right` on their leading `keys` columns; NULL keys
-/// match each other, as grouping treats them.
+/// `left` joined with `right` (memo groups or pending) on their leading
+/// `keys` columns; NULL keys match each other, as grouping treats them.
 fn join_on_keys(
     memo: &Memo,
+    pending: &Pending,
     keys: usize,
     left: MemoGroupId,
     right: MemoGroupId,
-) -> Operator<MemoGroupId> {
-    let width = schema(memo, left).fields.len();
-    let right_schema = schema(memo, right);
+) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
+    let width = schema_of(memo, pending, left)?.fields.len();
+    let right_schema = schema_of(memo, pending, right)?;
     let column = |id| Box::new(ScalarExpr::Column(id));
     let matches = (0..keys)
         .map(|key| {
@@ -918,23 +1036,25 @@ fn join_on_keys(
         ),
         _ => (JoinKind::Inner, ScalarExpr::BoolAnd(matches)),
     };
-    Operator::NonASAP(NonASAPOp::Join {
+    Ok(Operator::NonASAP(NonASAPOp::Join {
         kind,
         pred: Predicate(pred),
         left,
         right,
-    })
+    }))
 }
 
-/// Joins single-measure `parts` (each a group: group keys, then one value)
-/// on their group keys, and projects `result_group`'s output columns. Every
-/// part has the same groups, so an inner join keeps them all; NULL keys
-/// match each other, as grouping treats them.
+/// Joins single-measure `parts` (each a group, memo or pending: group
+/// keys, then one value) on their group keys, appending the joins to
+/// `pending`, and projects `result_group`'s output columns. Every part has
+/// the same groups, so an inner join keeps them all; NULL keys match each
+/// other, as grouping treats them.
 fn join_measures(
-    memo: &mut Memo,
+    memo: &Memo,
+    pending: &mut Pending,
     reduction: &Reduction,
     result_group: MemoGroupId,
-    parts: Vec<MemoGroupId>,
+    parts: &[MemoGroupId],
 ) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
     let Some(by) = reduction.group_keys().filter(|by| !by.is_without()) else {
         return Err(PerComputationCandidateError::Unsupported(
@@ -943,11 +1063,11 @@ fn join_measures(
     };
     let keys = by.len();
     let width = keys + 1;
-    let mut parts = parts.into_iter();
-    let mut joined = parts.next().expect("an aggregate has measures");
-    for part in parts {
-        let join = join_on_keys(memo, keys, joined, part);
-        joined = add_group(memo, join)?;
+    let (&first, rest) = parts.split_first().expect("an aggregate has measures");
+    let mut joined = first;
+    for &part in rest {
+        let join = join_on_keys(memo, pending, keys, joined, part)?;
+        joined = push_pending(memo, pending, join);
     }
     let to = schema(memo, result_group);
     let mut cols = key_items(keys);

@@ -12,12 +12,13 @@ mod physical;
 mod pruning;
 
 pub use logical::{
-    ranked_column_of_group, raw_data_samples_of_metric_of_group, view_coverage, AggregateCoverage,
-    AggregateDefinition, CandidateError, CandidateExpression, CandidateForMemoGroup,
-    CandidateForMemoGroupId, ColumnLineage, CoverageError, GroupProperties,
-    LogicalASAPMemoCandidates, LogicalEdge, LogicalProperties, LogicalPropertiesError,
-    LogicalRequirements, Memo, MemoGroup, MemoGroupError, MemoGroupId, MemoQuery,
-    OriginOfCandidateForMemoGroup, RequiredAccuracy, ValueSign,
+    output_schemas_of_pending_expressions, ranked_column_of_group,
+    raw_data_samples_of_metric_of_group, view_coverage, AggregateCoverage, AggregateDefinition,
+    CandidateError, CandidateExpression, CandidateForMemoGroup, CandidateForMemoGroupId,
+    ColumnLineage, CoverageError, GroupProperties, LogicalASAPMemoCandidates, LogicalEdge,
+    LogicalProperties, LogicalPropertiesError, LogicalRequirements, Memo, MemoGroup,
+    MemoGroupError, MemoGroupId, MemoQuery, OriginOfCandidateForMemoGroup, RequiredAccuracy,
+    ValueSign,
 };
 pub use physical::{
     output_references, producer_satisfies_physical_requirements, EvaluationGrid, ExecutionContext,

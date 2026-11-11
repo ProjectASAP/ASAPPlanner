@@ -19,8 +19,8 @@ pub use candidate::{
 pub use column_properties::{ColumnLineage, ValueSign};
 pub use edge::LogicalEdge;
 pub use group::{
-    ranked_column_of_group, raw_data_samples_of_metric_of_group, GroupProperties, MemoGroup,
-    MemoGroupError, MemoGroupId,
+    output_schemas_of_pending_expressions, ranked_column_of_group,
+    raw_data_samples_of_metric_of_group, GroupProperties, MemoGroup, MemoGroupError, MemoGroupId,
 };
 pub use memo::{Memo, MemoQuery};
 pub use memo_candidates::LogicalASAPMemoCandidates;
