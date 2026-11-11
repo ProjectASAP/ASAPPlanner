@@ -390,11 +390,15 @@ The `asap_accuracy` crate separates these responsibilities:
 accuracy/src/
 ├── lib.rs              # Re-exports: the public interfaces
 ├── evidence.rs         # AccuracyEvidence: the deployment's measured accuracy
-├── requirements.rs     # producer_satisfies_logical_requirements (α^log), accepted_metrics,
-│                       # readout_metric, target_limit
 ├── error_propagation.rs # error_propagation: each operator's error contract per metric
+├── metric_rule.rs      # accepted_metrics (the metric rule), readout_metric,
+│                       # sketch_readout_metric
+├── readout_caps.rs     # readout_levels: caps through the error contracts, each
+│                       # readout's required-accuracy levels
+├── logical_edge.rs     # producer_satisfies_logical_requirements (α^log)
 └── guarantee/
-    ├── mod.rs          # Family/evaluation dispatch and source-contract integration
+    ├── mod.rs          # theoretical_guarantee (one lookup at a failure
+    │                   # probability per algorithm), target_limit
     ├── kll.rs
     ├── ddsketch.rs
     ├── hll.rs          # Generic HLL and bounded Classic HLL

@@ -92,65 +92,67 @@ for any approximate target. Presence and cost are not accuracy certification.
 See the [workflow design](../design_docs/architecture/input-output-workflow.md#planning-evidence-inputs)
 for this boundary.
 
-## Composition contracts
+## Error contracts
 
-### Exact values
-
-An exact value contributes zero error and zero failure probability:
-
-```text
-B_exact = 0
-delta_exact = 0
-```
-
-An exact input does not exempt a local approximate sketch from target checking.
-
-### Additive and Lipschitz composition
-
-Compatible absolute bounds compose without an independence assumption:
+Only a sketch readout (`SummaryEstimate` over a sketch state) introduces
+error. Every other operator passes its inputs' errors on through its error
+contract, `asap_accuracy::error_propagation(memo, consumer, metric)`
+(`accuracy/src/error_propagation.rs`): a linear bound on the output error
+from the input errors in one metric,
 
 ```text
-B_total <= B_input + B_local
-delta_total <= delta_input + delta_local
+error_output <= sum_i factor_i * error_i    while error_i <= validity_cap_i
 ```
 
-For a registered `L`-Lipschitz transformation:
+or `None` when the operator has no contract for that metric. A contract
+keeps the metric: an input's error and the output's are in the same one.
 
-```text
-B_output <= L * B_input + B_local
-delta_output <= delta_input + delta_local
-```
+| Operator | Metric | Factor per input | Validity cap |
+| --- | --- | --- | --- |
+| `Project` of columns and literals, `Sort`, `TimeRange`, `TimeShift`, `Concat`, a readout, a finalize, `SummaryMerge` | any | 1 | none |
+| `Filter` whose predicate reads only columns copied from a source (labels, keys) | any | 1 | none |
+| `Project` computing `abs`, `clamp`, `clamp_min`, `clamp_max` or a negation of a column | absolute | 1 | none |
+| `Aggregate` (or exact accumulator build) by keys copied from a source, without measure filters or `HAVING`: `count` | any | 0 | none |
+| the same: `min`, `max` | absolute, relative | 1 | none |
+| the same: `avg` | absolute | 1 | none |
+| `+`, `-` | absolute | 1 | none |
+| `/` | relative | `1 / (1 - b)` on both | `b` on the denominator |
+| `*` | relative | `1 + b` on the left, 1 on the right | `b` on the right operand |
 
-Failure probabilities use a union bound.
+`b` is `RELATIVE_OPERAND_VALIDITY_CAP` (0.1, the weakest error of every
+parameter list). Every other operator has no contract: a filter or grouping
+on a computed value, a ranking, a `sum`, a comparison, any other function.
 
-### Relative composition
+The contracts are used in three places:
 
-For a registered multiplicative rule whose values are known to be
-non-negative:
+- **The metric rule** (`asap_accuracy::accepted_metrics`,
+  `accuracy/src/metric_rule.rs`): a query root accepts its target's metric
+  (every metric when the target names none); an input of a candidate
+  accepts the metrics its output accepts that the candidate's contract
+  carries. An edge from a readout whose metric its consumer does not
+  accept fails (`RootPruneReason::MetricRule`), so an approximate value
+  never reaches an operator with no contract for its error. Where no query
+  with a target reaches a group, no metric rule applies.
+- **Readout requirements** (`asap_accuracy::readout_levels`,
+  `accuracy/src/readout_caps.rs`): each query's target is passed from its
+  root down to the readouts, divided by each consumer's factor and capped
+  by its validity cap, keeping per group the largest cap of each query
+  and metric. A query that reads one readout gives it one level, its cap
+  at the target's failure probability per value (a whole-result δ split
+  over the values one evaluation returns); a query that combines several
+  readouts (a ratio of two quantiles) gives every level of the grid
+  `MAX_ERROR_LEVELS` × a failure-probability grid that is not looser than
+  the cap and the per-value δ. Pass 2 writes each level on a readout
+  candidate of its own.
+- **$\alpha^{\log}$** (`asap_accuracy::producer_satisfies_logical_requirements`,
+  `accuracy/src/logical_edge.rs`): an edge into a readout holds when the
+  producer's θ has a guarantee (measured, else `theoretical_guarantee`)
+  in the required metric within the required error at the required
+  failure probability, and a merged state keeps the guarantee of a build.
 
-```text
-epsilon_total =
-    epsilon_input
-  + epsilon_local
-  + epsilon_input * epsilon_local
-```
-
-Reject the rule when sign information is missing or values may cross zero.
-
-### Exact aggregation over approximate values
-
-For an exact sum, sum the input bounds and union-bound input failures. If the
-number of folded rows is required but unknown, keep the result symbolic.
-
-For exact minimum or maximum, use the maximum input value-error bound and
-union-bound failures. This does not prove the identity of a winning key.
-
-### Unsupported composition
-
-Accept approximate-over-approximate composition only when a rule exists for
-the operator and metric. Cross-metric and unregistered same-metric composition
-must return `UnsupportedComposition`; never treat an approximate child as
-exact.
+A value that is exact has no error and needs no contract. Nothing composes
+failure probabilities across readouts beyond the per-value split and the
+grid above, and nothing adds a local error at a non-readout operator.
 
 ## Built-in sketch contracts
 
@@ -310,23 +312,26 @@ optional `accuracy_metric` and an `accuracy_scope`; built with `exact()` or
 2. Define the parameters and evidence needed to prove satisfaction.
 3. Add the satisfaction rule, including invalid, unknown, and unsupported
    behavior.
-4. Add allocation behavior where the target can be divided across layers; do
-   not invent allocation for non-divisible semantics.
+4. Add how the target passes through the error contracts down to the
+   readouts; do not invent a split for a target that does not divide.
 5. Add serialization, DAG explanation, and compatibility behavior.
-6. Add local and composition contracts for summaries that claim the target.
+6. Add the readout guarantee for summaries that claim the target, and an
+   error contract for each operator its error must pass through.
 7. Keep candidates fail-closed until the end-to-end guarantee path is implemented
    and tested.
 
 Do not coerce membership, distributional, or another non-epsilon requirement
 into an existing variant merely to reuse its API.
 
-## Adding a summary or composition
+## Adding a summary or an error contract
 
-For a new summary, register its error metric and a local contract tied to the
-same parameters that sizing commits. Record estimator/version premises in
-provenance. For a new composition, specify compatible input and output metrics,
-the bound rule, failure composition, required statistics, and unsupported
-cases. Missing evidence must stay symbolic or produce a structured rejection.
+For a new summary, give its readouts a guarantee per listed θ at a failure
+probability (`guarantee/`) in one metric, tied to the parameters its list
+commits. Record estimator/version premises in provenance. For a new error
+contract, add the operator's row to `error_propagation`: the metric it
+keeps, the factor per input and any validity cap. An operator without a
+row has no contract, so an approximate input never reaches it. Missing
+evidence must stay symbolic or produce a structured rejection.
 
 Update DAG export whenever new guarantee or rejection data is introduced.
 
@@ -334,8 +339,9 @@ Update DAG export whenever new guarantee or rejection data is introduced.
 
 Tests must cover:
 
-- exact, additive, relative, Lipschitz, sum, and extremum propagation;
-- incompatible metrics and unsupported composition;
+- each operator's error contract per metric, and operators without one;
+- the metric rule and the readout levels a target gives through the
+  contracts;
 - malformed and unknown symbolic values;
 - target checking after parameter clamps;
 - CountSketch L2 sizing distinct from CMS L1 sizing;
