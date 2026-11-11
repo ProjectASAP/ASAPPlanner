@@ -13,8 +13,9 @@ mod view_coverage;
 
 pub use aggregate_coverage::{AggregateCoverage, AggregateDefinition, CoverageError};
 pub use candidate::{
-    CandidateError, CandidateExpression, CandidateForMemoGroup, CandidateForMemoGroupId,
-    LogicalProperties, LogicalPropertiesError, OriginOfCandidateForMemoGroup,
+    listed_build_parameters, CandidateError, CandidateExpression, CandidateForMemoGroup,
+    CandidateForMemoGroupId, LogicalProperties, LogicalPropertiesError,
+    OriginOfCandidateForMemoGroup,
 };
 pub use column_properties::{ColumnLineage, ValueSign};
 pub use edge::LogicalEdge;

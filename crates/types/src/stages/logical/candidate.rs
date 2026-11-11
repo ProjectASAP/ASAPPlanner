@@ -4,7 +4,7 @@
 
 use crate::ir::operator::asap::summary_type_of_operator;
 use crate::ir::schema::FieldDataType;
-use crate::ir::{ASAPOp, NonASAPOp, Operator};
+use crate::ir::Operator;
 use crate::stages::{LogicalRequirements, MemoGroupError, MemoGroupId};
 use crate::summary_type::{parameter_list, SketchAlgorithm, SketchParams};
 
@@ -37,6 +37,42 @@ pub struct CandidateForMemoGroup {
     /// Which rule added it. Not in the formulation: kept for
     /// `stage_pipeline --text` and the viewer (approved 2026-11-05).
     pub origin: OriginOfCandidateForMemoGroup,
+}
+
+impl CandidateForMemoGroup {
+    /// The candidate computing `operator` with θ `parameters`, added by
+    /// rule `origin`, fusing `fused_groups`. Its inputs have no requirement
+    /// yet: Pass 2 sets each readout's
+    /// (`Memo::set_candidate_input_requirements`).
+    pub fn new(
+        operator: Operator<MemoGroupId>,
+        parameters: Option<SketchParams>,
+        origin: OriginOfCandidateForMemoGroup,
+        fused_groups: Vec<MemoGroupId>,
+    ) -> Self {
+        let input_requirements = vec![LogicalRequirements::default(); operator.children().len()];
+        Self {
+            expression: CandidateExpression { operator },
+            logical_properties: LogicalProperties::new(parameters),
+            input_requirements,
+            fused_groups,
+            origin,
+        }
+    }
+}
+
+/// The θ of each build candidate of `build`: every listed θ
+/// (`parameter_list`) of a sketch build, `[None]` for any other operator
+/// (an exact build). A group gets one build candidate per entry.
+pub fn listed_build_parameters(build: &Operator<MemoGroupId>) -> Vec<Option<SketchParams>> {
+    match summary_type_of_operator(build) {
+        Some(FieldDataType::Sketch(algorithm)) => parameter_list(*algorithm)
+            .iter()
+            .cloned()
+            .map(Some)
+            .collect(),
+        _ => vec![None],
+    }
 }
 
 /// Which rule added a candidate. Nothing in planning reads it.
@@ -83,12 +119,9 @@ pub enum CandidateError {
 /// argument, not a property, and a tumbling-window chain's width is the
 /// chain operator's argument. A candidate passing states on without building
 /// them (`SummaryMerge`, and a `Filter`, `TimeRange` or `TimeShift` over
-/// states) carries the θ of the states it reads. [`Self::new`] rejects
-/// parameters of another algorithm, not in the algorithm's list or missing
-/// on a sketch build (a chain included), and parameters on an operator that
-/// neither builds nor passes on states;
-/// [`Memo::add_candidate`](crate::stages::Memo::add_candidate) checks a
-/// pass-through's θ against its group's state.
+/// states) carries the θ of the states it reads.
+/// [`Memo::add_candidate`](crate::stages::Memo::add_candidate) checks θ
+/// against the candidate's group's output ([`parameters_fit`]).
 #[derive(Debug, Clone)]
 pub struct LogicalProperties {
     /// $\boldsymbol\theta_v$, from the algorithm's predefined list; `None` for
@@ -97,27 +130,8 @@ pub struct LogicalProperties {
 }
 
 impl LogicalProperties {
-    pub fn new(
-        expression: &CandidateExpression,
-        parameters: Option<SketchParams>,
-    ) -> Result<Self, LogicalPropertiesError> {
-        let passes_states_on = matches!(
-            expression.operator,
-            Operator::ASAP(ASAPOp::SummaryMerge { .. })
-                | Operator::NonASAP(
-                    NonASAPOp::Filter { .. }
-                        | NonASAPOp::TimeRange { .. }
-                        | NonASAPOp::TimeShift { .. }
-                )
-        );
-        if !passes_states_on {
-            let algorithm = match summary_type_of_operator(&expression.operator) {
-                Some(FieldDataType::Sketch(algorithm)) => Some(*algorithm),
-                _ => None,
-            };
-            parameters_fit(algorithm, parameters.as_ref())?;
-        }
-        Ok(Self { parameters })
+    pub fn new(parameters: Option<SketchParams>) -> Self {
+        Self { parameters }
     }
 
     /// $\boldsymbol\theta_v$.
@@ -142,8 +156,8 @@ pub(super) fn parameters_fit(
     }
 }
 
-/// Logical properties that do not fit their operator: bad input to
-/// [`LogicalProperties::new`].
+/// θ that does not fit the output of a candidate's group, as
+/// [`Memo::add_candidate`](crate::stages::Memo::add_candidate) rejects it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LogicalPropertiesError {
     #[error("an exact operator has no summary parameters")]
@@ -159,125 +173,18 @@ mod tests {
     use super::*;
     use crate::ir::operator::arguments::Reduction;
     use crate::ir::scalar::expr_ir::ColumnRef;
-    use crate::summary_type::{ExactKind, HydraParams, SummaryUpdate};
+    use crate::ir::ASAPOp;
+    use crate::summary_type::{ExactKind, SummaryUpdate};
 
     /// `SummaryAgg` over group 0 building a state of `summary_type`.
-    fn summary_agg(summary_type: FieldDataType) -> CandidateExpression {
-        CandidateExpression {
-            operator: Operator::ASAP(ASAPOp::SummaryAgg {
-                child: MemoGroupId(0),
-                summary_type,
-                input: SummaryUpdate::column(ColumnRef::SampleValue),
-                reduction: Reduction::PerEntity,
-                filter: None,
-            }),
-        }
-    }
-
-    const KLL_269: SketchParams = SketchParams::Kll { k: 269 };
-
-    const CMS: SketchParams = SketchParams::Cms {
-        width: 272,
-        depth: 5,
-    };
-
-    const HYDRA_CMS: SketchParams = SketchParams::Hydra(HydraParams::HydraCms {
-        width: 272,
-        depth: 5,
-        shared_rows: 3,
-        shared_columns: 1_024,
-    });
-
-    /// `LogicalProperties::new` over every operator kind and parameters: a
-    /// sketch build (a chain included) needs parameters of its algorithm from
-    /// its list; a merge may carry any (its group decides); parameters are
-    /// rejected on an operator that neither builds nor passes on states.
-    #[test]
-    fn logical_properties_new_over_every_operator_and_parameters() {
-        use LogicalPropertiesError as Invalid;
-        let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
-        let kll_chain = CandidateExpression {
-            operator: Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                child: MemoGroupId(0),
-                summary_type: kll.clone(),
-                input: SummaryUpdate::column(ColumnRef::SampleValue),
-                reduction: Reduction::PerEntity,
-                filter: None,
-                tumbling_window_width_ms: 5_000,
-            }),
-        };
-        let readout = CandidateExpression {
-            operator: Operator::ASAP(ASAPOp::SummaryEstimate {
-                summary_input: MemoGroupId(0),
-                query: crate::summary_type::SketchStatistic::Quantile { q: 0.5 },
-            }),
-        };
-        let merge = CandidateExpression {
-            operator: Operator::ASAP(ASAPOp::SummaryMerge {
-                children: vec![MemoGroupId(0)],
-                group_by: None,
-            }),
-        };
-        // k = 270 is KLL's structure but not in its list.
-        let parameters = [
-            None,
-            Some(KLL_269),
-            Some(CMS),
-            Some(HYDRA_CMS),
-            Some(SketchParams::Kll { k: 270 }),
-        ];
-        let no_parameters = Err(Invalid::ParametersOnExactOperator);
-        let needs_parameters = Err(Invalid::SketchBuildWithoutParameters);
-        let not_in_list = Err(Invalid::ParametersNotInList);
-        let exact = [
-            Ok(()),
-            no_parameters,
-            no_parameters,
-            no_parameters,
-            no_parameters,
-        ];
-        // Another algorithm's parameters are not in KLL's list either.
-        let kll_build = [
-            needs_parameters,
-            Ok(()),
-            not_in_list,
-            not_in_list,
-            not_in_list,
-        ];
-        // Per operator: the result for each of `parameters`.
-        let table = [
-            (summary_agg(kll), kll_build),
-            // No Hydra θ is listed yet, so no Hydra build is valid.
-            (
-                summary_agg(FieldDataType::Sketch(SketchAlgorithm::HydraCms)),
-                [
-                    needs_parameters,
-                    not_in_list,
-                    not_in_list,
-                    not_in_list,
-                    not_in_list,
-                ],
-            ),
-            (summary_agg(FieldDataType::exact(ExactKind::Sum)), exact),
-            (kll_chain, kll_build),
-            (readout, exact),
-            // A merge's θ is checked against its group by `add_candidate`.
-            (merge, [Ok(()); 5]),
-        ];
-        for (expression, by_parameters) in table {
-            for (parameters, expected) in parameters.iter().zip(by_parameters) {
-                let properties = LogicalProperties::new(&expression, parameters.clone());
-                assert_eq!(
-                    properties.as_ref().map(|_| ()).map_err(|e| *e),
-                    expected,
-                    "{:?} {parameters:?}",
-                    expression.operator.kind_name()
-                );
-                if let Ok(properties) = properties {
-                    assert_eq!(properties.parameters(), parameters.as_ref());
-                }
-            }
-        }
+    fn summary_agg(summary_type: FieldDataType) -> Operator<MemoGroupId> {
+        Operator::ASAP(ASAPOp::SummaryAgg {
+            child: MemoGroupId(0),
+            summary_type,
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+        })
     }
 
     /// `summary_type_of_operator` reads the summary type of a `SummaryAgg`
@@ -298,10 +205,29 @@ mod tests {
             group_by: None,
         });
         assert_eq!(
-            summary_type_of_operator(&summary_agg(kll.clone()).operator),
+            summary_type_of_operator(&summary_agg(kll.clone())),
             Some(&kll)
         );
         assert_eq!(summary_type_of_operator(&chain), Some(&kll));
         assert_eq!(summary_type_of_operator(&merge), None);
+    }
+
+    /// A sketch build has one entry per listed θ, an exact build one
+    /// without θ.
+    #[test]
+    fn listed_build_parameters_lists_a_sketch_builds_parameters() {
+        let kll = SketchAlgorithm::Kll;
+        assert_eq!(
+            listed_build_parameters(&summary_agg(FieldDataType::Sketch(kll))),
+            parameter_list(kll)
+                .iter()
+                .cloned()
+                .map(Some)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            listed_build_parameters(&summary_agg(FieldDataType::exact(ExactKind::Sum))),
+            vec![None]
+        );
     }
 }

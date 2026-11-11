@@ -39,6 +39,7 @@ mod tests {
             &SketchAlgorithm::CmsWithHeap,
             &cms_heap,
             &SketchStatistic::TopK { k: 10 },
+            1.0,
         )
         .expect("heap sketch still provides per-key frequency intervals");
         assert_eq!(

@@ -5,9 +5,6 @@ use asap_types::accuracy::{
 use asap_types::ir::schema::FieldDataType;
 use asap_types::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
 
-#[cfg(test)]
-use crate::requirements::meets;
-use crate::target_limit;
 use asap_types::summary_type::SummaryTypeCapability;
 
 pub(crate) mod cardinality;
@@ -18,13 +15,32 @@ pub mod hll;
 pub(crate) mod kll;
 pub mod univmon;
 
-pub(super) fn sketch_guarantee(
+/// The guarantee of reading `query` from a state of `algorithm` with
+/// parameters `params` at failure probability `failure_probability`
+/// ([`theoretical_guarantee`], without its capability check). A Hydra
+/// state reads each subpopulation's state, so it has that state's
+/// guarantee.
+fn sketch_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
+    failure_probability: f64,
 ) -> Option<AccuracyGuarantee> {
-    match params {
-        SketchParams::Kll { .. } => kll::guarantee(algorithm, params, query),
+    let fixed = match params {
+        SketchParams::Kll { .. } => {
+            return kll::guarantee(algorithm, params, query, failure_probability)
+        }
+        SketchParams::Kmv { .. } => {
+            return cardinality::guarantee(algorithm, params, query, failure_probability)
+        }
+        SketchParams::Hydra(hydra) => {
+            return sketch_guarantee(
+                algorithm,
+                &hydra.per_subpopulation(),
+                query,
+                failure_probability,
+            )
+        }
         SketchParams::DDSketch { .. } => ddsketch::guarantee(algorithm, params, query),
         SketchParams::Hll { .. } => hll::generic_guarantee(algorithm, params, query),
         SketchParams::Cms { .. } | SketchParams::CmsWithHeap { .. } => {
@@ -33,12 +49,17 @@ pub(super) fn sketch_guarantee(
         SketchParams::CountSketch { .. } | SketchParams::CountSketchWithHeap { .. } => {
             count_sketch::guarantee(algorithm, params, query)
         }
-        SketchParams::Kmv { .. } => cardinality::guarantee(algorithm, params, query),
         SketchParams::UnivMon { .. } => univmon::guarantee(algorithm, params, query),
-        SketchParams::Hydra(hydra) => {
-            sketch_guarantee(algorithm, &hydra.per_subpopulation(), query)
-        }
-    }
+    };
+    // Structural parameters set the failure probability: the bound holds
+    // only when θ fails at most that rarely.
+    fixed.filter(|guarantee| {
+        guarantee
+            .spec
+            .failure_probability
+            .evaluate()
+            .is_some_and(|own| own <= target_limit(failure_probability))
+    })
 }
 
 fn bounded_guarantee(
@@ -87,21 +108,19 @@ pub fn theoretical_guarantee(
     if !SummaryTypeCapability::of(summary_type).answers(statistic) {
         return None;
     }
-    match parameters {
-        SketchParams::Kll { .. } => {
-            kll::guarantee_at(algorithm, parameters, statistic, failure_probability)
-        }
-        SketchParams::Kmv { .. } => {
-            cardinality::guarantee_at(algorithm, parameters, statistic, failure_probability)
-        }
-        _ => sketch_guarantee(algorithm, parameters, statistic).filter(|guarantee| {
-            guarantee
-                .spec
-                .failure_probability
-                .evaluate()
-                .is_some_and(|own| own <= target_limit(failure_probability))
-        }),
-    }
+    sketch_guarantee(algorithm, parameters, statistic, failure_probability)
+}
+
+/// Small relative tolerance for comparing an evaluated bound against a
+/// target, so a parameter sized by `⌈·⌉` to *exactly* meet ε is not rejected
+/// by floating-point noise.
+const SATISFACTION_TOLERANCE: f64 = 1e-9;
+
+/// The largest evaluated error (or failure probability) that meets a
+/// required `limit`: `limit` widened by [`SATISFACTION_TOLERANCE`], so a
+/// bound equal to it up to floating-point noise meets it.
+pub fn target_limit(limit: f64) -> f64 {
+    limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON
 }
 
 /// `P(Binomial(n, p) ≥ k)`, summed term by term in log space and rounded
@@ -127,10 +146,30 @@ pub(crate) fn binomial_upper_tail(n: u32, p: f64, k: u32) -> f64 {
     (tail * (1.0 + 1e-12)).min(1.0)
 }
 
+/// Whether `guarantee`'s evaluated error is within `max_error` and, when
+/// `failure_probability` is set, its evaluated failure probability within
+/// it ([`target_limit`]); unknown values do not meet.
+#[cfg(test)]
+fn meets(guarantee: &AccuracyGuarantee, max_error: f64, failure_probability: Option<f64>) -> bool {
+    let within = |value: Option<f64>, limit: f64| value.is_some_and(|v| v <= target_limit(limit));
+    within(guarantee.spec.error.evaluate(), max_error)
+        && failure_probability
+            .is_none_or(|delta| within(guarantee.spec.failure_probability.evaluate(), delta))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use asap_types::ir::scalar::expr_ir::ColumnRef;
+
+    /// A bound equal to the limit up to floating-point noise meets it; a
+    /// bound one part in a million above it does not.
+    #[test]
+    fn target_limit_admits_only_floating_point_noise() {
+        assert!(0.01 * (1.0 + 1e-12) <= target_limit(0.01));
+        assert!(0.01 * (1.0 + 1e-6) > target_limit(0.01));
+        assert!(0.0 <= target_limit(0.0));
+    }
 
     /// Every listed θ has a theoretical guarantee for the statistic its
     /// algorithm is listed for, at failure probability 0.01, in the

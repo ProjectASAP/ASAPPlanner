@@ -12,9 +12,9 @@ mod physical;
 mod pruning;
 
 pub use logical::{
-    ranked_column_of_group, raw_data_samples_of_metric_of_group, view_coverage, AggregateCoverage,
-    AggregateDefinition, CandidateError, CandidateExpression, CandidateForMemoGroup,
-    CandidateForMemoGroupId, ColumnLineage, CoverageError, GroupProperties,
+    listed_build_parameters, ranked_column_of_group, raw_data_samples_of_metric_of_group,
+    view_coverage, AggregateCoverage, AggregateDefinition, CandidateError, CandidateExpression,
+    CandidateForMemoGroup, CandidateForMemoGroupId, ColumnLineage, CoverageError, GroupProperties,
     LogicalASAPMemoCandidates, LogicalEdge, LogicalProperties, LogicalPropertiesError,
     LogicalRequirements, Memo, MemoGroup, MemoGroupError, MemoGroupId, MemoQuery,
     OriginOfCandidateForMemoGroup, RequiredAccuracy, ValueSign,

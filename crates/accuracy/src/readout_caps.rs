@@ -1,21 +1,17 @@
-//! Step 3 (concepts doc, section 3, "Reach, caps and readout requirements";
-//! section 4, "Readout requirements" and "Validity caps and pruning caps"):
-//! each readout's required accuracy, from the caps the queries that reach
-//! it pass down through their consumers' error contracts.
+//! Readout requirements (concepts doc, section 4, "Readout requirements"
+//! and "Validity caps and pruning caps"): the caps the queries that reach
+//! a readout pass down through their consumers' error contracts, and the
+//! required-accuracy levels each readout gets from them.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::rules::Pass2RuleError;
-use asap_accuracy::{error_propagation, readout_metric};
 use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
-use asap_types::ir::operator::asap::summary_type_of_operator;
-use asap_types::ir::{ASAPOp, Operator, QueryRoot};
-use asap_types::stages::{
-    CandidateForMemoGroupId, LogicalRequirements, Memo, MemoGroupId, RequiredAccuracy,
-};
+use asap_types::ir::{Operator, QueryRoot};
+use asap_types::stages::{Memo, MemoGroupId, RequiredAccuracy};
+use asap_types::summary_type::MAX_ERROR_LEVELS;
 
-/// The error grid of the readouts of a composed query.
-const MAX_ERROR_LEVELS: [f64; 7] = [0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001];
+use crate::{error_propagation, sketch_readout_metric};
+
 /// The failure-probability grid of the readouts of a composed query: the
 /// powers of ten from 1e-2 down to 1e-5, continued down to the first one at
 /// or below a tenth of the query's per-value failure probability, so that up
@@ -30,16 +26,16 @@ fn failure_probability_levels(per_value: f64) -> Vec<f64> {
         .collect()
 }
 
-/// Per group, by group id: per (query, index in `AccuracyMetric::ALL`), the
-/// largest error in that metric the group's output may have for the query,
+/// Per group, by group id: per metric, per query, the largest error in that
+/// metric the group's output may have for the query,
 /// $\max_q \varepsilon_q / \lambda_{q,c,i}$ capped by the validity caps on
 /// the way.
-type Caps = Vec<BTreeMap<(usize, usize), f64>>;
+type Caps = Vec<HashMap<AccuracyMetric, BTreeMap<usize, f64>>>;
 
-/// Gives every sketch readout (`SummaryEstimate` over a sketch state) its
-/// required accuracy, one readout candidate per requirement level: Pass 1's
-/// candidate takes the first level and a copy is added per further level,
-/// each written with `Memo::set_candidate_input_requirements`.
+/// The required-accuracy levels of the sketch readouts
+/// ([`sketch_readout_metric`]) without a requirement yet, per readout
+/// group and the readout's metric. `order` is the memo's topological order
+/// (`Memo::topological_order`).
 /// - A query whose path reads one readout group gives one level: its target
 ///   divided by the path's factor, the readout group's cap, at the target's
 ///   failure probability per value.
@@ -49,39 +45,47 @@ type Caps = Vec<BTreeMap<(usize, usize), f64>>;
 ///   itself when no error level is), one δ level of 1 when the target sets
 ///   no failure probability.
 /// - A readout group reached by several queries gets the union of their
-///   levels; one no query with a target reaches in the readout's metric
-///   gets none.
+///   levels, in query order; one no query with a target reaches in the
+///   readout's metric gets none.
 ///
-/// Returns the readouts that no query gives a level while one reaching
-/// them has a whole-result failure probability without a per-value one
-/// ($n_q$ unknown), each with that query: Pass 2 prunes them
+/// `Err(query)` when no query gives a level while `query`, which reaches
+/// the readout, has a whole-result failure probability without a per-value
+/// one ($n_q$ unknown): Pass 2 prunes such a readout
 /// (`RootPruneReason::ValuesPerEvaluationUnknown`). A readout another
-/// query gives a level stays.
-pub(crate) fn set_readout_requirements(
-    memo: &mut Memo,
-) -> Result<BTreeMap<CandidateForMemoGroupId, usize>, Pass2RuleError> {
-    let mut without_per_value_failure_probability = BTreeMap::new();
-    let order = memo
-        .topological_order()
-        .ok_or(Pass2RuleError::CyclicDependencies)?;
-    let caps = caps(memo, &order);
-    let readout_groups: BTreeSet<MemoGroupId> = (0..memo.groups().len())
-        .map(|index| MemoGroupId(index as u32))
-        .filter(|&group| !sketch_readouts(memo, group).is_empty())
-        .collect();
-    let composed = composed_queries(memo, &order, &readout_groups);
-    for &group in &readout_groups {
-        for (index_in_group, metric) in sketch_readouts(memo, group) {
-            let metric_index = AccuracyMetric::ALL
-                .iter()
-                .position(|known| *known == metric)
-                .expect("every metric is listed");
+/// query gives a level gets its levels.
+pub fn readout_levels(
+    memo: &Memo,
+    order: &[MemoGroupId],
+) -> HashMap<(MemoGroupId, AccuracyMetric), Result<Vec<RequiredAccuracy>, usize>> {
+    let caps = caps(memo, order);
+    let mut readout_metrics: BTreeMap<MemoGroupId, Vec<AccuracyMetric>> = BTreeMap::new();
+    for (index, group) in memo.groups().iter().enumerate() {
+        for candidate in &group.candidates {
+            if candidate
+                .input_requirements
+                .first()
+                .is_some_and(|input| input.required_accuracy.is_none())
+            {
+                if let Some(metric) = sketch_readout_metric(memo, candidate) {
+                    let metrics = readout_metrics
+                        .entry(MemoGroupId(index as u32))
+                        .or_default();
+                    if !metrics.contains(&metric) {
+                        metrics.push(metric);
+                    }
+                }
+            }
+        }
+    }
+    let readout_groups: BTreeSet<MemoGroupId> = readout_metrics.keys().copied().collect();
+    let composed = composed_queries(memo, order, &readout_groups);
+    let mut levels_of_readouts = HashMap::new();
+    for (group, metrics) in readout_metrics {
+        for metric in metrics {
             let mut levels: Vec<RequiredAccuracy> = Vec::new();
             let mut unknown_values_of = None;
-            for (&(query, index), &cap) in &caps[group.0 as usize] {
-                if index != metric_index {
-                    continue;
-                }
+            let group_caps = caps[group.0 as usize].get(&metric).into_iter().flatten();
+            for (&query, &cap) in group_caps {
                 let Some(target) = &memo.queries()[query].accuracy_target else {
                     continue;
                 };
@@ -103,15 +107,14 @@ pub(crate) fn set_readout_requirements(
             }
             // Only a readout no query gives a level is pruned: one with a
             // level serves the queries that gave it.
-            let unknown_values_of = unknown_values_of.filter(|_| levels.is_empty());
-            for readout in write_levels(memo, group, index_in_group, levels)? {
-                if let Some(query) = unknown_values_of {
-                    without_per_value_failure_probability.insert(readout, query);
-                }
-            }
+            let levels = match unknown_values_of {
+                Some(query) if levels.is_empty() => Err(query),
+                _ => Ok(levels),
+            };
+            levels_of_readouts.insert((group, metric), levels);
         }
     }
-    Ok(without_per_value_failure_probability)
+    levels_of_readouts
 }
 
 /// The requirement levels one query gives a readout in `metric` whose cap
@@ -170,66 +173,6 @@ fn query_levels(
     )
 }
 
-/// Writes `levels` on readout `index_in_group` of `group`: the first on it,
-/// each further one on a copy added to the group. No level leaves it
-/// without a requirement. Returns the readout and its copies.
-fn write_levels(
-    memo: &mut Memo,
-    group: MemoGroupId,
-    index_in_group: usize,
-    levels: Vec<RequiredAccuracy>,
-) -> Result<Vec<CandidateForMemoGroupId>, Pass2RuleError> {
-    let readout = CandidateForMemoGroupId {
-        group,
-        index_in_group,
-    };
-    let unset = memo.candidate(readout).clone();
-    let mut written = vec![readout];
-    for (n, level) in levels.into_iter().enumerate() {
-        let id = if n == 0 {
-            readout
-        } else {
-            memo.add_candidate(group, unset.clone())
-                .map_err(Pass2RuleError::Candidate)?
-        };
-        if n > 0 {
-            written.push(id);
-        }
-        memo.set_candidate_input_requirements(
-            id,
-            vec![LogicalRequirements {
-                required_accuracy: Some(level),
-            }],
-        );
-    }
-    Ok(written)
-}
-
-/// The sketch readouts of `group` without a requirement yet, each with the
-/// metric of its error ([`readout_metric`]).
-fn sketch_readouts(memo: &Memo, group: MemoGroupId) -> Vec<(usize, AccuracyMetric)> {
-    memo.groups()[group.0 as usize]
-        .candidates
-        .iter()
-        .enumerate()
-        .filter_map(|(index_in_group, candidate)| {
-            let Operator::ASAP(ASAPOp::SummaryEstimate {
-                summary_input,
-                query,
-            }) = &candidate.expression.operator
-            else {
-                return None;
-            };
-            if candidate.input_requirements[0].required_accuracy.is_some() {
-                return None;
-            }
-            let summary_type =
-                summary_type_of_operator(&memo.groups()[summary_input.0 as usize].expression)?;
-            Some((index_in_group, readout_metric(summary_type, query)?))
-        })
-        .collect()
-}
-
 /// Each group's caps ([`Caps`]): each query root group's target, in the
 /// target's metric (every metric when it names none), then, consumers
 /// before producers, every candidate's caps passed to its inputs through
@@ -237,20 +180,16 @@ fn sketch_readouts(memo: &Memo, group: MemoGroupId) -> Vec<(usize, AccuracyMetri
 /// the largest per query and metric (the bottleneck over paths). A scalar
 /// root's operands get none.
 fn caps(memo: &Memo, order: &[MemoGroupId]) -> Caps {
-    let mut caps: Caps = vec![BTreeMap::new(); memo.groups().len()];
+    let mut caps: Caps = vec![HashMap::new(); memo.groups().len()];
     for (query, memo_query) in memo.queries().iter().enumerate() {
         let (Some(target), QueryRoot::Operator(group)) =
             (&memo_query.accuracy_target, &memo_query.root)
         else {
             continue;
         };
-        for (metric_index, metric) in AccuracyMetric::ALL.iter().enumerate() {
-            if target.accuracy_metric.is_none_or(|named| named == *metric) {
-                raise(
-                    &mut caps[group.0 as usize],
-                    (query, metric_index),
-                    target.max_error,
-                );
+        for metric in AccuracyMetric::ALL {
+            if target.accuracy_metric.is_none_or(|named| named == metric) {
+                raise(&mut caps[group.0 as usize], metric, query, target.max_error);
             }
         }
     }
@@ -261,22 +200,22 @@ fn caps(memo: &Memo, order: &[MemoGroupId]) -> Caps {
         }
         for consumer in &memo.groups()[group.0 as usize].candidates {
             let operator = &consumer.expression.operator;
-            for (&(query, metric_index), &cap) in &group_caps {
-                let Some(propagation) =
-                    error_propagation(memo, operator, AccuracyMetric::ALL[metric_index])
-                else {
+            for (&metric, caps_per_query) in &group_caps {
+                let Some(propagation) = error_propagation(memo, operator, metric) else {
                     continue;
                 };
-                for (input, &child) in operator.children().into_iter().enumerate() {
-                    let factor = propagation.factor_per_input[input];
-                    let validity =
-                        propagation.validity_cap_per_input[input].unwrap_or(f64::INFINITY);
-                    let passed = if factor > 0.0 {
-                        validity.min(cap / factor)
-                    } else {
-                        validity
-                    };
-                    raise(&mut caps[child.0 as usize], (query, metric_index), passed);
+                for (&query, &cap) in caps_per_query {
+                    for (input, &child) in operator.children().into_iter().enumerate() {
+                        let factor = propagation.factor_per_input[input];
+                        let validity =
+                            propagation.validity_cap_per_input[input].unwrap_or(f64::INFINITY);
+                        let passed = if factor > 0.0 {
+                            validity.min(cap / factor)
+                        } else {
+                            validity
+                        };
+                        raise(&mut caps[child.0 as usize], metric, query, passed);
+                    }
                 }
             }
         }
@@ -323,8 +262,13 @@ fn composed_queries(
     composed
 }
 
-/// Keeps the larger of `cap` and the known cap of `key`.
-fn raise(caps: &mut BTreeMap<(usize, usize), f64>, key: (usize, usize), cap: f64) {
-    let known = caps.entry(key).or_insert(cap);
+/// Keeps the larger of `cap` and the known cap of `query` in `metric`.
+fn raise(
+    caps: &mut HashMap<AccuracyMetric, BTreeMap<usize, f64>>,
+    metric: AccuracyMetric,
+    query: usize,
+    cap: f64,
+) {
+    let known = caps.entry(metric).or_default().entry(query).or_insert(cap);
     *known = known.max(cap);
 }

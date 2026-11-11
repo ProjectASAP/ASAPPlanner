@@ -219,7 +219,8 @@ const RELATIVE_OPERAND_VALIDITY_CAP: f64 = 0.1;
 /// The local error propagation of one consumer: its output error is at
 /// most $\sum_i \beta_{c,i}\varepsilon_{c,i}$ while each input's error stays
 /// within its validity cap (concepts doc, section 4; approved 2026-11-05).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct ErrorPropagation {
     /// $\beta_{c,i}$ per input, for that input's metric.
     pub factor_per_input: Vec<f64>,
@@ -250,7 +251,7 @@ mod tests {
         }
     }
 
-    /// Decided 2026-11-07 (E1): constant error contracts. A `Filter` whose
+    /// Constant error contracts. A `Filter` whose
     /// predicate reads only columns copied from a source keeps or drops
     /// whole rows: β = 1 in every metric. Over a readout of a KLL state of
     /// `latency` by `job`, `job = "api"` reads such a column; `value > 0.5`
@@ -258,7 +259,7 @@ mod tests {
     /// `abs`, `clamp` or a negation of the value changes it by at most its
     /// error: β = 1 for absolute errors only.
     #[test]
-    fn e1_key_filters_and_value_preserving_projects_have_unit_contracts() {
+    fn key_filters_and_value_preserving_projects_have_unit_contracts() {
         let mut memo = Memo::new(&DataWorkload::default());
         let g1 = memo
             .find_or_add_group(scan("latency", &[("job", DataType::Utf8)], vec![]))

@@ -1,7 +1,8 @@
 //! Step 2, top-k reuse: an exact top-k reads a larger top-k of the same
 //! input and partition, whose ranked rows hold its own.
 
-use crate::rules::{add_candidate, Pass2RuleError};
+use crate::rules::add_candidate_if_output_matches;
+use crate::Pass2RuleError;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
@@ -47,7 +48,7 @@ pub(crate) fn add_topk_candidates(memo: &mut Memo) -> Result<(), Pass2RuleError>
             continue;
         };
         let keys = reduction.group_keys().map_or(0, |by| by.keys().len());
-        add_candidate(
+        add_candidate_if_output_matches(
             memo,
             *group,
             Operator::NonASAP(NonASAPOp::Aggregate {

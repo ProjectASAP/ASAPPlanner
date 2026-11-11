@@ -6,8 +6,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::rules::{
-    add_candidate, add_candidates_per_input_parameters, add_group_computing_itself, Pass2RuleError,
+    add_candidate_if_output_matches, add_candidates_per_input_parameters,
+    add_group_computing_itself,
 };
+use crate::Pass2RuleError;
 use asap_types::ir::operator::arguments::SourceColumn;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::properties::selection::{constraint_of, Constraint};
@@ -15,9 +17,9 @@ use asap_types::ir::scalar::{CompareOpKind, ExprSemantics, Predicate, ScalarExpr
 use asap_types::ir::schema::{DataType, FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::stages::{
-    AggregateDefinition, ColumnLineage, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
+    listed_build_parameters, AggregateDefinition, ColumnLineage, Memo, MemoGroupId,
+    OriginOfCandidateForMemoGroup,
 };
-use asap_types::summary_type::parameter_list;
 use asap_types::summary_type::SummaryTypeCapability;
 
 /// Adds, to each aggregate group $G_c$, a candidate computing it from each
@@ -60,7 +62,6 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<(), Pass2RuleErro
 }
 
 /// One aggregate group as a rollup rule reads it.
-#[derive(Debug, Clone)]
 struct Member {
     group: MemoGroupId,
     /// The group's expression.
@@ -347,19 +348,8 @@ fn finest_common_group(
         _ => unreachable!("a member is a SummaryAgg or an Aggregate"),
     }
     let finest = memo.find_or_add_group(expression.clone())?;
-    let parameters: Vec<_> = match &expression {
-        Operator::ASAP(ASAPOp::SummaryAgg {
-            summary_type: FieldDataType::Sketch(algorithm),
-            ..
-        }) => parameter_list(*algorithm)
-            .iter()
-            .cloned()
-            .map(Some)
-            .collect(),
-        _ => vec![None],
-    };
-    for theta in parameters {
-        add_candidate(
+    for theta in listed_build_parameters(&expression) {
+        add_candidate_if_output_matches(
             memo,
             finest,
             expression.clone(),

@@ -4,19 +4,10 @@
 use super::*;
 use asap_types::summary_type::KLL_MAX_K;
 
-/// The calibrated guarantee, at failure probability 0.01.
-pub(super) fn guarantee(
-    algorithm: &SketchAlgorithm,
-    params: &SketchParams,
-    query: &SketchStatistic,
-) -> Option<AccuracyGuarantee> {
-    guarantee_at(algorithm, params, query, KLL_CALIBRATED_FAILURE_PROBABILITY)
-}
-
 /// The rank error of `k` at failure probability `failure_probability`: the
 /// calibration at 0.01 and above, scaled by [`delta_scale`] below. `None`
 /// for a `k` above the library's cap or a probability outside (0, 1].
-pub(super) fn guarantee_at(
+pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
@@ -143,6 +134,7 @@ mod tests {
                 &SketchAlgorithm::Kll,
                 &SketchParams::Kll { k },
                 &SketchStatistic::Quantile { q: 0.99 },
+                KLL_CALIBRATED_FAILURE_PROBABILITY,
             )
         };
         assert!(g(KLL_MAX_K).is_some());

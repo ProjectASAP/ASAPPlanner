@@ -3,14 +3,19 @@
 
 use super::{SketchAlgorithm, SketchParams};
 
+/// The errors the parameter lists span, loosest first; also the error grid
+/// of the readouts of a query that combines several
+/// (`asap_accuracy::readout_levels`).
+pub const MAX_ERROR_LEVELS: [f64; 7] = [0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001];
+
 /// The algorithm's predefined $\boldsymbol\theta$ list: structures only; the
 /// error of each, for a statistic at a failure probability, is its guarantee
 /// (`asap_accuracy::theoretical_guarantee`).
 ///
 /// The widths, `k`s, precisions, `alpha`s and heap sizes span the errors
-/// ε = 0.1, 0.05, 0.02, 0.01, 0.005, 0.002 and 0.001, smallest first,
-/// without repeats; an `asap_accuracy` test checks every entry has a
-/// guarantee at δ = 0.01. Distinct counts (KMV,
+/// [`MAX_ERROR_LEVELS`], smallest structure first, without repeats; an
+/// `asap_accuracy` test checks every entry has a guarantee at δ = 0.01.
+/// Distinct counts (KMV,
 /// and UnivMon's distinct-count shapes) stop at ε = 0.01. Where δ is set by
 /// a structural parameter, the list covers the δ levels with it: Count-Min
 /// lists each width with each depth of [`CMS_DEPTHS`], Count Sketch with

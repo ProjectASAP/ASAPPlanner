@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use crate::CandidateEdge;
+use crate::edges::CandidateEdge;
 use asap_types::stages::{
     CandidateForMemoGroupId, Memo, MemoGroupId, PruneCause, PrunedLogicalCandidate, RootPruneReason,
 };
@@ -147,18 +147,15 @@ impl<'a> EdgeGraph<'a> {
         let mut visited = BTreeSet::from([candidate]);
         let mut queue = VecDeque::from([(candidate, Vec::new())]);
         while let Some((at, path)) = queue.pop_front() {
-            let (edges, next): (
-                &[&CandidateEdge],
-                fn(&CandidateEdge) -> CandidateForMemoGroupId,
-            ) = match dead[&at] {
-                Some(input) => (
-                    self.by_consumer_input
-                        .get(&(at, input))
-                        .map_or(&[], Vec::as_slice),
-                    |edge| edge.producer,
-                ),
+            // A candidate cut off from an input is traced to its producers,
+            // any other to its consumers.
+            let edges = match dead[&at] {
+                Some(input) => self
+                    .by_consumer_input
+                    .get(&(at, input))
+                    .map_or(&[][..], Vec::as_slice),
                 None => match self.by_producer.get(&at) {
-                    Some(edges) => (edges.as_slice(), |edge| edge.consumer),
+                    Some(edges) => edges.as_slice(),
                     None => {
                         causes.push(PruneCause {
                             through_pruned_candidates: path,
@@ -177,10 +174,14 @@ impl<'a> EdgeGraph<'a> {
                     // A satisfied edge of a dead candidate leads to a dead
                     // consumer or producer.
                     Ok(()) => {
-                        if visited.insert(next(edge)) {
+                        let next = match dead[&at] {
+                            Some(_) => edge.producer,
+                            None => edge.consumer,
+                        };
+                        if visited.insert(next) {
                             let mut further = path.clone();
-                            further.push(next(edge));
-                            queue.push_back((next(edge), further));
+                            further.push(next);
+                            queue.push_back((next, further));
                         }
                     }
                 }

@@ -10,7 +10,7 @@ use crate::ir::scalar::{ProjectItem, SortKey};
 use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
 use crate::ir::{ExprSemantics, NonASAPOp, Predicate, ScalarExpr};
 use crate::stages::logical::group::MemoGroupAsInput;
-use crate::stages::{CandidateExpression, LogicalProperties, OriginOfCandidateForMemoGroup};
+use crate::stages::{LogicalPropertiesError, OriginOfCandidateForMemoGroup};
 use crate::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
 use crate::test_support::memo_fixtures::{aggregate_with, readout, scan, state};
 
@@ -41,20 +41,12 @@ fn candidate(
     operator: Operator<MemoGroupId>,
     parameters: Option<SketchParams>,
 ) -> CandidateForMemoGroup {
-    let input_requirements = vec![LogicalRequirements::default(); operator.children().len()];
-    CandidateForMemoGroup {
-        logical_properties: LogicalProperties::new(
-            &CandidateExpression {
-                operator: operator.clone(),
-            },
-            parameters,
-        )
-        .unwrap(),
-        expression: CandidateExpression { operator },
-        input_requirements,
-        fused_groups: vec![],
-        origin: OriginOfCandidateForMemoGroup::Pass1,
-    }
+    CandidateForMemoGroup::new(
+        operator,
+        parameters,
+        OriginOfCandidateForMemoGroup::Pass1,
+        vec![],
+    )
 }
 
 /// A query rooted at `group`, without an accuracy target or $n_q$.
@@ -641,7 +633,7 @@ fn required(max_error: f64) -> Vec<LogicalRequirements> {
     }]
 }
 
-/// Decided 2026-11-07 (D3): `Memo::set_candidate_input_requirements`
+/// `Memo::set_candidate_input_requirements`
 /// replaces $r^{\log}$ of the one candidate it names; two readouts of one
 /// state with different required accuracy are two candidates.
 #[test]
@@ -668,7 +660,7 @@ fn set_candidate_input_requirements_replaces_only_the_named_candidate() {
     assert_eq!(requirements, vec![required(0.01), required(0.02)]);
 }
 
-/// Decided 2026-11-09 (A1): a merge of KLL states carries the θ of the
+/// A merge of KLL states carries the θ of the
 /// states it reads. Without one it is rejected; `merge[k=547]` reads only
 /// the k = 547 build of its input group.
 #[test]
@@ -691,7 +683,7 @@ fn a_merge_carries_the_parameters_of_the_states_it_reads() {
     assert!(matches!(
         memo.add_candidate(g3, candidate(merge.clone(), None)),
         Err(CandidateError::LogicalProperties(
-            crate::stages::LogicalPropertiesError::SketchBuildWithoutParameters
+            LogicalPropertiesError::SketchBuildWithoutParameters
         ))
     ));
     let merged = memo
@@ -706,8 +698,7 @@ fn a_merge_carries_the_parameters_of_the_states_it_reads() {
     );
 }
 
-/// Decided 2026-11-07 (D3): one requirement per input group, or a
-/// panic.
+/// One requirement per input group, or a panic.
 #[test]
 #[should_panic(expected = "one input requirement per input group")]
 fn set_candidate_input_requirements_panics_on_a_length_mismatch() {
@@ -721,4 +712,102 @@ fn set_candidate_input_requirements_panics_on_a_length_mismatch() {
         .add_candidate(g2, candidate(kll_state(), kll_k(269)))
         .unwrap();
     memo.set_candidate_input_requirements(build, Vec::new());
+}
+
+/// `add_candidate` checks θ against the group's output, for every operator
+/// kind: a sketch state's candidates (a build, a chain, a merge) need θ of
+/// its algorithm from its list; any other candidate (an exact build, a
+/// readout) has none. No Hydra θ is listed yet, so no Hydra build is valid.
+#[test]
+fn add_candidate_checks_parameters_against_the_groups_output() {
+    use crate::ir::operator::arguments::Reduction;
+    use crate::ir::scalar::expr_ir::ColumnRef;
+    use crate::ir::ASAPOp;
+    use crate::summary_type::{ExactKind, HydraParams, SummaryUpdate};
+    use LogicalPropertiesError as Invalid;
+    let mut memo = Memo::new(&DataWorkload::default());
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let kll_state = memo.find_or_add_group(state(kll.clone(), g1)).unwrap();
+    let kll_chain = Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+        child: g1,
+        summary_type: kll.clone(),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::PerEntity,
+        filter: None,
+        tumbling_window_width_ms: 5_000,
+    });
+    let merge = Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![kll_state],
+        group_by: None,
+    });
+    // k = 270 is KLL's structure but not in its list.
+    let parameters = [
+        None,
+        kll_k(269),
+        Some(SketchParams::Cms {
+            width: 272,
+            depth: 5,
+        }),
+        Some(SketchParams::Hydra(HydraParams::HydraCms {
+            width: 272,
+            depth: 5,
+            shared_rows: 3,
+            shared_columns: 1_024,
+        })),
+        kll_k(270),
+    ];
+    let no_parameters = Err(Invalid::ParametersOnExactOperator);
+    let needs_parameters = Err(Invalid::SketchBuildWithoutParameters);
+    let not_in_list = Err(Invalid::ParametersNotInList);
+    let exact = [
+        Ok(()),
+        no_parameters,
+        no_parameters,
+        no_parameters,
+        no_parameters,
+    ];
+    // Another algorithm's parameters are not in KLL's list either.
+    let kll_state_output = [
+        needs_parameters,
+        Ok(()),
+        not_in_list,
+        not_in_list,
+        not_in_list,
+    ];
+    // Per operator: the result for each of `parameters`.
+    let table = [
+        (state(kll, g1), kll_state_output),
+        (
+            state(FieldDataType::Sketch(SketchAlgorithm::HydraCms), g1),
+            [
+                needs_parameters,
+                not_in_list,
+                not_in_list,
+                not_in_list,
+                not_in_list,
+            ],
+        ),
+        (state(FieldDataType::exact(ExactKind::Sum), g1), exact),
+        (kll_chain, kll_state_output),
+        (
+            readout(SketchStatistic::Quantile { q: 0.5 }, kll_state),
+            exact,
+        ),
+        (merge, kll_state_output),
+    ];
+    for (operator, by_parameters) in table {
+        let group = memo.find_or_add_group(operator.clone()).unwrap();
+        for (parameters, expected) in parameters.iter().zip(by_parameters) {
+            let added = memo.add_candidate(group, candidate(operator.clone(), parameters.clone()));
+            let added = match added {
+                Ok(_) => Ok(()),
+                Err(CandidateError::LogicalProperties(error)) => Err(error),
+                Err(error) => panic!("{error}"),
+            };
+            assert_eq!(added, expected, "{:?} {parameters:?}", operator.kind_name());
+        }
+    }
 }

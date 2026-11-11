@@ -26,36 +26,17 @@
 //! Neither bound depends on `N`, so no distinct bound is needed: the
 //! failure probability ([`kmv_failure_probability`]) is their sum, per
 //! output row (each group's estimate). The guarantee at a failure
-//! probability δ ([`guarantee_at`]) is the smallest `ε` with that sum at
+//! probability δ ([`guarantee`]) is the smallest `ε` with that sum at
 //! most δ.
 use super::*;
 
 /// The smallest `k` `asap_sketchlib`'s KMV estimate `(k-1)/U` is defined for.
 const KMV_MIN_K: u32 = 2;
 
-pub(super) fn guarantee(
-    algorithm: &SketchAlgorithm,
-    params: &SketchParams,
-    query: &SketchStatistic,
-) -> Option<AccuracyGuarantee> {
-    let SketchParams::Kmv { k } = params else {
-        return None;
-    };
-    // Its relative standard error.
-    let eps = 1.0 / f64::from(k.saturating_sub(2).max(1)).sqrt();
-    Some(kmv_guarantee(
-        algorithm,
-        params,
-        query,
-        eps,
-        kmv_failure_probability(*k, eps),
-    ))
-}
-
 /// The smallest relative error `k` misses with probability at most
 /// `failure_probability` ([`kmv_failure_probability`], by bisection);
 /// `None` when no error up to 1 does.
-pub(super) fn guarantee_at(
+pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,

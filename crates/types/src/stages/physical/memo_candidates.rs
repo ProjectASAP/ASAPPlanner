@@ -128,8 +128,8 @@ mod tests {
     use crate::stages::physical::execution_context::EvaluationGrid;
 
     use crate::stages::{
-        CandidateExpression, CandidateForMemoGroup, LogicalASAPMemoCandidates, LogicalProperties,
-        LogicalRequirements, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
+        CandidateForMemoGroup, LogicalASAPMemoCandidates, Memo, MemoGroupId,
+        OriginOfCandidateForMemoGroup,
     };
 
     use ExecutionTiming::{IngestionTime, QueryTime};
@@ -201,18 +201,12 @@ mod tests {
         };
         for operator in [build, chain(5_000), chain(10_000)] {
             let group = memo.find_or_add_group(operator.clone()).unwrap();
-            let expression = CandidateExpression { operator };
-            let candidate = CandidateForMemoGroup {
-                logical_properties: LogicalProperties::new(
-                    &expression,
-                    Some(SketchParams::Kll { k: 269 }),
-                )
-                .unwrap(),
-                expression,
-                input_requirements: vec![LogicalRequirements::default()],
-                fused_groups: vec![],
-                origin: OriginOfCandidateForMemoGroup::Pass1,
-            };
+            let candidate = CandidateForMemoGroup::new(
+                operator,
+                Some(SketchParams::Kll { k: 269 }),
+                OriginOfCandidateForMemoGroup::Pass1,
+                vec![],
+            );
             memo.add_candidate(group, candidate).unwrap();
         }
         let operator = Operator::NonASAP(NonASAPOp::TimeRange {
@@ -221,14 +215,12 @@ mod tests {
             child: scan,
         });
         let group = memo.find_or_add_group(operator.clone()).unwrap();
-        let expression = CandidateExpression { operator };
-        let candidate = CandidateForMemoGroup {
-            logical_properties: LogicalProperties::new(&expression, None).unwrap(),
-            expression,
-            input_requirements: vec![LogicalRequirements::default()],
-            fused_groups: vec![],
-            origin: OriginOfCandidateForMemoGroup::Pass1,
-        };
+        let candidate = CandidateForMemoGroup::new(
+            operator,
+            None,
+            OriginOfCandidateForMemoGroup::Pass1,
+            vec![],
+        );
         memo.add_candidate(group, candidate).unwrap();
         memo
     }

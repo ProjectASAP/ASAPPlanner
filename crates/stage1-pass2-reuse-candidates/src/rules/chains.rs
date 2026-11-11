@@ -6,14 +6,16 @@
 use std::collections::BTreeSet;
 
 use crate::rules::{
-    add_candidate, add_candidates_per_input_parameters, add_group_computing_itself, Pass2RuleError,
+    add_candidate_if_output_matches, add_candidates_per_input_parameters,
+    add_group_computing_itself, distinct_parameters,
 };
+use crate::{query_evaluation_grid_ms, Pass2RuleError};
 use asap_types::ir::operator::arguments::{AtModifier, TimeShift};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::stages::{
     CandidateForMemoGroupId, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
 };
-use asap_types::summary_type::{SketchParams, SummaryTypeCapability};
+use asap_types::summary_type::SummaryTypeCapability;
 use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
 
 /// For each summary state group S = `SummaryAgg(TimeRange(W,
@@ -28,7 +30,7 @@ use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
 ///
 /// The widths are the gcd closure of $\gcd(g_q, W, o_1, \ldots)$ over the
 /// queries reaching S that repeat on a known evaluation grid $g_q$
-/// (`QueryRecurrence::evaluation_grid_ms`), with the offsets $o_j$ on S's
+/// ([`query_evaluation_grid_ms`]), with the offsets $o_j$ on S's
 /// path; no query with a grid, no chain. A chain whose width does not
 /// divide the evaluation grid of the group reading it (the gcd over all its
 /// readers) gets no edge (`candidate_edges`), so the merge over it is
@@ -50,21 +52,21 @@ pub(crate) fn add_chain_groups(
         let Some(path) = chain_path(memo, state) else {
             continue;
         };
-        let parameters: Vec<Option<SketchParams>> = {
-            let mut parameters = Vec::new();
-            for (index_in_group, candidate) in memo.groups()[index].candidates.iter().enumerate() {
-                let survived = !pruned.contains(&CandidateForMemoGroupId {
-                    group: state,
-                    index_in_group,
-                });
-                let own = candidate.expression.operator == memo.groups()[index].expression;
-                let theta = candidate.logical_properties.parameters().cloned();
-                if survived && own && !parameters.contains(&theta) {
-                    parameters.push(theta);
-                }
-            }
-            parameters
-        };
+        let state_expression = &memo.groups()[index].expression;
+        let parameters = distinct_parameters(
+            memo.groups()[index]
+                .candidates
+                .iter()
+                .enumerate()
+                .filter(|&(index_in_group, candidate)| {
+                    let survived = !pruned.contains(&CandidateForMemoGroupId {
+                        group: state,
+                        index_in_group,
+                    });
+                    survived && candidate.expression.operator == *state_expression
+                })
+                .map(|(_, candidate)| candidate),
+        );
         if parameters.is_empty() {
             continue;
         }
@@ -78,10 +80,7 @@ pub(crate) fn add_chain_groups(
                 .collect(),
             None => gcd_closure(memo.groups()[index].reached_by_queries().iter().filter_map(
                 |&query| {
-                    let entry = entries.get(query)?;
-                    let grid = entry
-                        .recurrence
-                        .evaluation_grid_ms(entry.range_evaluation)?;
+                    let grid = query_evaluation_grid_ms(entries, query)?;
                     Some(greatest_common_divisor(grid, divisor))
                 },
             )),
@@ -91,7 +90,7 @@ pub(crate) fn add_chain_groups(
             let chain = path.chain(width);
             let chain_group = memo.find_or_add_group(chain.clone())?;
             for theta in &parameters {
-                add_candidate(
+                add_candidate_if_output_matches(
                     memo,
                     chain_group,
                     chain.clone(),

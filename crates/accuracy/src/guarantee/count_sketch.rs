@@ -96,6 +96,7 @@ mod tests {
                 key: asap_types::ir::scalar::expr_ir::ColumnRef::SampleValue,
                 value: Some("1".into()),
             },
+            1.0,
         )
         .expect("CountSketch has a parameter-derived L2 guarantee");
         assert_eq!(

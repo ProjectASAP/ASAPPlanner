@@ -453,9 +453,7 @@ impl SelectionBox {
     pub fn columns(&self) -> &BTreeMap<SourceColumn, Constraint> {
         &self.columns
     }
-}
 
-impl SelectionBox {
     /// Whether no row lies in both boxes: some column is restricted by both
     /// and the restrictions are disjoint.
     pub(crate) fn disjoint(&self, other: &Self) -> bool {

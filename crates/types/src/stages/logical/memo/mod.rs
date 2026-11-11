@@ -13,14 +13,13 @@ use super::group::{
 };
 use crate::accuracy::AccuracyTarget;
 use crate::ir::operator::input::InputOrTemporaryBuild;
-use crate::ir::schema::{FieldDataType, Schema};
+use crate::ir::schema::Schema;
+use crate::ir::Operator;
 use crate::ir::QueryRoot;
-use crate::ir::{Operator, OperatorResultKind};
 use crate::stages::{
-    CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, GroupProperties,
-    LogicalRequirements, MemoGroup, MemoGroupId,
+    CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, LogicalRequirements, MemoGroup,
+    MemoGroupId,
 };
-use crate::summary_type::SketchAlgorithm;
 use crate::workload::{DataWorkload, SourceFacts};
 use hash_consing::{
     expression_hash, same_candidate, same_serialized_expression, serialized_expression,
@@ -242,7 +241,7 @@ impl Memo {
             return Err(CandidateError::OutputDiffersFromGroup { group });
         }
         parameters_fit(
-            sketch_algorithm_of_state(group_properties),
+            group_properties.sketch_algorithm_of_state(),
             candidate.logical_properties.parameters(),
         )
         .map_err(CandidateError::LogicalProperties)?;
@@ -392,22 +391,6 @@ impl Memo {
         }
         (order.len() == count).then_some(order)
     }
-}
-
-/// The sketch algorithm of the state a group outputs; `None` for rows,
-/// values and exact states.
-fn sketch_algorithm_of_state(group: &GroupProperties) -> Option<SketchAlgorithm> {
-    if group.result_kind != OperatorResultKind::State {
-        return None;
-    }
-    group
-        .schema
-        .fields
-        .iter()
-        .find_map(|field| match field.dtype {
-            FieldDataType::Sketch(algorithm) => Some(algorithm),
-            _ => None,
-        })
 }
 
 /// Lists `parent` among `group`'s parents, once.

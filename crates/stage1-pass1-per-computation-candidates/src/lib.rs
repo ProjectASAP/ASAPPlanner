@@ -37,9 +37,7 @@ mod tests;
 use asap_types::deployment_capabilities::SupportedSummary;
 use asap_types::ir::schema::Schema;
 use asap_types::ir::{Operator, SchemaDerivationError};
-use asap_types::stages::{
-    CandidateError, LogicalPropertiesError, Memo, MemoGroupError, MemoGroupId,
-};
+use asap_types::stages::{CandidateError, Memo, MemoGroupError, MemoGroupId};
 use thiserror::Error;
 
 use candidates::add_pass1_candidates;
@@ -62,10 +60,6 @@ pub enum PerComputationCandidateError {
     /// its group's result: a bug in the rule that built it.
     #[error(transparent)]
     Candidate(#[from] CandidateError),
-    /// A candidate Pass 1 built has logical properties that cannot go
-    /// together: a bug in the rule that built it.
-    #[error(transparent)]
-    LogicalProperties(#[from] LogicalPropertiesError),
     #[error("unsupported substitution in logical ASAP-aware optimization: {0}")]
     Unsupported(&'static str),
 }

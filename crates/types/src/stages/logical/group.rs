@@ -9,12 +9,13 @@ use crate::ir::operator::arguments::{AtModifier, Source, TimeShift};
 use crate::ir::operator::input::OperatorInput;
 use crate::ir::scalar::column_resolution::ResolveError;
 use crate::ir::schema::topk::ranked_column;
-use crate::ir::schema::{ColumnId, Schema};
+use crate::ir::schema::{ColumnId, FieldDataType, Schema};
 use crate::ir::ASAPOp;
 use crate::ir::SchemaDerivationError;
 use crate::ir::{NonASAPOp, ScalarExpr};
 use crate::ir::{Operator, OperatorResultKind};
 use crate::stages::{CandidateForMemoGroup, Memo};
+use crate::summary_type::SketchAlgorithm;
 
 /// A group, by index in the memo's groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
@@ -90,6 +91,23 @@ pub struct GroupProperties {
     /// The sources the `Scan`s below this group read: a `Scan`'s own, else
     /// the union over its input groups.
     pub scanned_sources: BTreeSet<Source>,
+}
+
+impl GroupProperties {
+    /// The sketch algorithm of the state the group outputs; `None` for
+    /// rows, values and exact states.
+    pub(super) fn sketch_algorithm_of_state(&self) -> Option<SketchAlgorithm> {
+        if self.result_kind != OperatorResultKind::State {
+            return None;
+        }
+        self.schema
+            .fields
+            .iter()
+            .find_map(|field| match field.dtype {
+                FieldDataType::Sketch(algorithm) => Some(algorithm),
+                _ => None,
+            })
+    }
 }
 
 /// Why an expression is not valid over its input groups: what

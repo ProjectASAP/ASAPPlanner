@@ -9,6 +9,10 @@ edition = "2021"
 # stage crate.
 [dependencies]
 asap-types = { path = "../types" }
-# The deployment's measured accuracy (`AccuracyEvidence`) Pass 2 reads.
+# The accuracy rules Pass 2 applies: readout levels, the metric rule,
+# alpha^log and the deployment's measured accuracy (`AccuracyEvidence`).
 asap-accuracy = { path = "../accuracy" }
 thiserror = "2"
+
+[dev-dependencies]
+asap-types = { path = "../types", features = ["test-support"] }
