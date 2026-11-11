@@ -37,7 +37,6 @@ thiserror = "2"
 [dev-dependencies]
 asap-stage3-plan-selection = { path = "../stage3-plan-selection" }
 asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
-asap-accuracy = { path = "../accuracy", features = ["test-support"] }
 # Tests read a plan's roots as IR (`PhysicalASAPDAG::query_roots`).
 asap-types = { path = "../types", features = ["test-support"] }
 # The SQL frontend plans through DataFusion, which is async; `e2e_plan` is

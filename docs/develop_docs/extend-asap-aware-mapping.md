@@ -24,10 +24,10 @@ A new sketch that Pass 1 can offer for an intent.
    evaluates is its own declaration, `EVALUATED_READOUTS`
    (`crates/executor/src/capability.rs`); add the family's readouts there
    once the executor answers them.
-3. **Offer and size.** Place it in `summary_realization::FAMILY_PREFERENCE`
+3. **Offer and size.** Place it in `summary_realization::ALGORITHM_PREFERENCE`
    (`crates/stage1-pass1-per-computation-candidates`): `summary_candidates` offers it, in
    that order, for every intent whose statistic its capability row answers.
-   Size it in `asap_accuracy::sizing::default_size_params`.
+   To size it, add its list in `crates/types/src/summary_type/parameter_lists.rs` (`parameter_list`).
 4. **Accuracy.** Add its error model under
    `crates/accuracy/src/guarantee/` and return
    it from `theoretical_guarantee`, evaluated at the required failure
@@ -44,9 +44,9 @@ A new sketch that Pass 1 can offer for an intent.
    not with a local copy.
 7. **Labels.** Name it in `asap_devtools::candidate_labels`.
 
-Tests: a Pass 1 test in `crates/stage1-pass1-per-computation-candidates/src/per_computation_candidates_tests.rs`
+Tests: a Pass 1 test in `crates/stage1-pass1-per-computation-candidates/src/tests.rs`
 that the intent gets the new candidate (and that a deployment without it
-prunes it with `UnsupportedByDeployment`); an estimator test beside the
+is not offered it); an estimator test beside the
 estimator; an execution test in `crates/integration-tests/tests/` such as
 `frequency_execution.rs` or `kll_tumbling_window_execution.rs`.
 

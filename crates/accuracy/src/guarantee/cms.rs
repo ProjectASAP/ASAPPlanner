@@ -1,4 +1,4 @@
-//! Count-Min Sketch L1 frequency error and parameter sizing.
+//! Count-Min Sketch L1 frequency error.
 use super::*;
 
 pub(super) fn guarantee(
@@ -24,25 +24,13 @@ pub(super) fn guarantee(
     ))
 }
 
-/// CMS: over-count ≤ ε·N with width `w = ⌈e/ε⌉` columns.
-#[cfg(test)]
-pub(crate) fn cms_width(eps: f64) -> u32 {
-    saturating_ceil(std::f64::consts::E / eps, 2, 1 << 26)
-}
-
-/// CMS: failure probability ≤ δ with depth `d = ⌈ln(1/δ)⌉` rows.
-/// δ = 0.01 → depth 5.
-pub(crate) fn cms_depth(delta: f64) -> u32 {
-    saturating_ceil((1.0 / delta).ln(), 1, 32)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn local_guarantee_inverts_frequency_sizing() {
-        use crate::guarantee::size_params;
+        use crate::guarantee::sizing_oracle::size_params;
         let c = asap_types::ir::operator::agg_intent::default_cardinality();
         let params = size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
         let g = sketch_guarantee(
@@ -74,21 +62,6 @@ mod tests {
         assert_eq!(
             topk_frequency.spec.accuracy_metric,
             AccuracyMetric::ABSOLUTE_STREAM_L1
-        );
-    }
-
-    /// A top-k heap holds `max(k, ⌈1/ε⌉)` entries over a CMS sized as for counts.
-    #[test]
-    fn topk_heap_capacity_respects_accuracy_and_output_count() {
-        use crate::guarantee::size_params;
-        let intent = AggIntent::TopK { k: 25 };
-        assert_eq!(
-            size_params(SketchAlgorithm::CmsWithHeap, &intent, 0.01, 0.01),
-            SketchParams::CmsWithHeap {
-                width: 272, // ⌈e/0.01⌉
-                depth: 5,
-                heap_size: 100,
-            }
         );
     }
 }

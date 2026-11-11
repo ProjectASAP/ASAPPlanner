@@ -1,60 +1,73 @@
-//! `asap-stage1-pass1-per-computation-candidates` — #509 Stage 1, Pass 1:
-//! per-computation candidate generation and the summary realizations it
-//! offers. Its one entry is [`pass1_memo`], which fills the
-//! memo groups of Stage 0's [`Memo`](asap_types::stages::Memo) with their
-//! initial candidates; Pass 2 extends that memo.
+//! `asap-stage1-pass1-per-computation-candidates` — Stage 1, Pass 1:
+//! each memo group's initial candidates. Its one entry is [`pass1_memo`],
+//! which fills the memo groups of Stage 0's
+//! [`Memo`] with their initial candidates (exact,
+//! exact accumulator, one summary build per listed parameter configuration
+//! with separate readouts, fused builds), every intermediate result its own
+//! group; Pass 2 extends that memo.
 //!
 //! It depends only on `asap-types` (its input and output memo are in
-//! `asap_types::stages`) and the shared accuracy model (`asap-accuracy`).
-//! It depends on no other stage crate, and the planner facade calls it
-//! after Stage 0. It depends on no query-language frontend either; its own
-//! tests lower PromQL through `asap-frontend-promql` (a dev-dependency).
-//! The `test-support` feature exports the Pass 1 internals other crates'
-//! tests call (`test_support`).
+//! `asap_types::stages`) and the shared accuracy model (`asap-accuracy`,
+//! for the statistic each intent reads). It depends on no other stage
+//! crate, and the planner facade calls it after Stage 0. It depends on no
+//! query-language frontend either; its tests build their input memo through
+//! `Memo::find_or_add_group` and `Memo::add_query`.
 //!
-//! Accuracy guarantees come from the built-in analytical accuracy rules in
-//! `asap-accuracy` (per-family estimators, composition and budget
-//! allocation). They derive a machine-readable
-//! [`AccuracyGuarantee`](asap_types::accuracy::AccuracyGuarantee)
-//! for every finalized value and propagate it through
-//! approximate-over-approximate compositions under conservative rules (no
-//! independence assumptions, unknown statistics stay unknown). A
-//! composition with no rule leaves the guarantee `None` and keeps the
-//! candidate. Pass 1 prunes nothing for accuracy; Pass 2 gives each readout
-//! its required accuracy and eliminates the candidates no query can use,
-//! with the deployment's measured accuracy (`AccuracyEvidence`) read before
-//! each summary's theoretical guarantee.
+//! Pass 1 reads no accuracy target and sets no input requirement: the error
+//! of each build follows from its parameters (`parameter_list`), and Pass 2
+//! gives each readout its required accuracy, decides the logical edges and
+//! eliminates the candidates no query can use.
 
-/// Stage 1, Pass 1's computation targets. No execution timing is assigned: that is a Stage 2
-/// materialization decision. Its target list
-/// (`PerComputationCandidates`) is Pass 1's working form, public only to
-/// tests (`crate::test_support`, feature `test-support`).
+/// Stage 1, Pass 1's candidates: each way to compute a group, added to the
+/// memo for the computation targets.
+mod candidates;
+/// Stage 1, Pass 1's computation targets over the memo groups.
 mod computation_targets;
-/// The summary families that can serve an aggregate intent, the input a
-/// summary consumes and the column a top-k ranks.
+/// How a summary realizes an aggregate intent: the sketch algorithms that
+/// serve it, the input a summary consumes and the keyed heap over a larger
+/// sub-expression.
 mod summary_realization;
 /// Fixtures this crate's own tests share.
 #[cfg(test)]
 mod test_fixtures;
-/// Test helpers other crates' tests call (feature `test-support`).
-#[cfg(any(test, feature = "test-support"))]
-pub mod test_support;
-/// Frontend-to-Pass-1 acceptance tests over Pass 1's working form.
+/// Pass 1's tests over memos built through the `Memo` methods.
 #[cfg(test)]
 mod tests;
 
 use asap_types::deployment_capabilities::SupportedSummary;
-use asap_types::stages::Memo;
-use computation_targets::generate_per_computation_candidates;
-pub use computation_targets::PerComputationCandidateError;
+use asap_types::ir::schema::Schema;
+use asap_types::ir::{Operator, SchemaDerivationError};
+use asap_types::stages::{
+    CandidateError, LogicalPropertiesError, Memo, MemoGroupError, MemoGroupId,
+};
+use thiserror::Error;
 
-/// Why [`pass1_memo`] failed.
-#[derive(Debug, thiserror::Error)]
-pub enum Pass1Error {
-    /// A query's DAG cannot be planned: it already holds ASAP or physical
-    /// annotations, or a measure's accuracy target is invalid.
+use candidates::add_pass1_candidates;
+use computation_targets::computation_targets;
+
+/// Why Pass 1 could not add a group's candidates.
+#[derive(Debug, Error)]
+pub enum PerComputationCandidateError {
+    /// A query's DAG breaks the node rules (the planner facade's
+    /// `QueryRoot::validate_structure` before Stage 0).
     #[error(transparent)]
-    PerComputation(#[from] PerComputationCandidateError),
+    Structure(#[from] SchemaDerivationError),
+    /// A group Pass 1 built is not valid over its input groups
+    /// (`Memo::find_or_add_group`): a bug in the rule that built it.
+    #[error(transparent)]
+    MemoGroup(#[from] MemoGroupError),
+    #[error("logical candidate input already contains ASAP operators")]
+    ContainsAsap,
+    /// A candidate Pass 1 built breaks the node rules or does not output
+    /// its group's result: a bug in the rule that built it.
+    #[error(transparent)]
+    Candidate(#[from] CandidateError),
+    /// A candidate Pass 1 built has logical properties that cannot go
+    /// together: a bug in the rule that built it.
+    #[error(transparent)]
+    LogicalProperties(#[from] LogicalPropertiesError),
+    #[error("unsupported substitution in logical ASAP-aware optimization: {0}")]
+    Unsupported(&'static str),
 }
 
 /// Stage 1, Pass 1: the initial candidates of the memo groups of `memo`
@@ -64,14 +77,26 @@ pub enum Pass1Error {
 /// (`supported_summaries`, the deployment's
 /// `DeploymentCapabilities::supported_summaries`; `None` supports every
 /// one), and adds each way to compute a group as candidates, through
-/// `Memo::find_or_add_group` and `Memo::add_candidate`. Accuracy prunes
-/// nothing here: Pass 2's dead-candidate elimination does.
+/// `Memo::find_or_add_group` and `Memo::add_candidate`: every group's own
+/// expression, exact accumulators, one summary build per configuration of
+/// the algorithm's predefined list with separate readouts, and fused builds.
+/// Accuracy prunes nothing here: Pass 2 gives each readout its required
+/// accuracy and eliminates the candidates no query can use.
 pub fn pass1_memo(
-    memo: Memo,
+    mut memo: Memo,
     supported_summaries: Option<&[SupportedSummary]>,
-) -> Result<Memo, Pass1Error> {
-    let per_computation = generate_per_computation_candidates(&memo)?
-        .without_unsupported_summaries(supported_summaries);
-    let _ = (memo, per_computation);
-    todo!("#1207 PR 3: add each way to compute as candidates, one per listed θ")
+) -> Result<Memo, PerComputationCandidateError> {
+    let targets = computation_targets(&memo, supported_summaries)?;
+    add_pass1_candidates(&mut memo, &targets)?;
+    Ok(memo)
+}
+
+/// The expression of group `group`.
+fn expression(memo: &Memo, group: MemoGroupId) -> &Operator<MemoGroupId> {
+    &memo.groups()[group.0 as usize].expression
+}
+
+/// The output schema of group `group`.
+fn schema(memo: &Memo, group: MemoGroupId) -> &Schema {
+    &memo.groups()[group.0 as usize].group_properties.schema
 }

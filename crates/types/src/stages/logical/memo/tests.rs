@@ -12,7 +12,7 @@ use crate::ir::{ExprSemantics, NonASAPOp, Predicate, ScalarExpr};
 use crate::stages::logical::group::MemoGroupAsInput;
 use crate::stages::{CandidateExpression, LogicalProperties, OriginOfCandidateForMemoGroup};
 use crate::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
-use crate::test_support::memo_fixtures::{aggregate_where, readout, scan, state};
+use crate::test_support::memo_fixtures::{aggregate_with, readout, scan, state};
 
 /// An unordered `LIMIT 10` over `input`, whose copies may return
 /// different rows.
@@ -411,10 +411,10 @@ fn quantile_agg(
     filter: Option<Predicate<MemoGroupId>>,
 ) -> impl FnOnce(&mut Memo) -> MemoGroupId {
     over_scan(move |child| {
-        aggregate_where(
+        aggregate_with(
             Reduction::by(by),
-            AggIntent::Quantile { col, q },
-            filter,
+            vec![(AggIntent::Quantile { col, q }, filter)],
+            None,
             child,
         )
     })
@@ -579,4 +579,49 @@ fn signed_zero_and_non_finite_literals_are_different_groups() {
         assert!(!one_group(literal(a), literal(b)), "{a} and {b}");
     }
     assert!(one_group(literal(f64::INFINITY), literal(f64::INFINITY)));
+}
+
+/// A KLL state over the latency scan and its p99 readout, both pending: the
+/// readout's schema is the one its group gets once both are added, and
+/// nothing is added while deriving it.
+#[test]
+fn output_schema_of_a_pending_expression_is_its_groups_schema() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let latency = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let state_expression = state(FieldDataType::Sketch(SketchAlgorithm::Kll), latency);
+    let pending_state = MemoGroupId(memo.groups().len() as u32);
+    let readout_expression = readout(SketchStatistic::Quantile { q: 0.99 }, pending_state);
+    let before = format!("{memo:?}");
+    let state_schema = memo
+        .output_schema_of_pending_expression(&[], &state_expression)
+        .unwrap();
+    let readout_schema = memo
+        .output_schema_of_pending_expression(
+            &[(state_expression.clone(), state_schema.clone())],
+            &readout_expression,
+        )
+        .unwrap();
+    assert_eq!(format!("{memo:?}"), before);
+    let state_group = memo.find_or_add_group(state_expression).unwrap();
+    let readout_group = memo
+        .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.99 }, state_group))
+        .unwrap();
+    let schema_of = |group: MemoGroupId| &memo.groups()[group.0 as usize].group_properties.schema;
+    assert_eq!(schema_of(state_group), &state_schema);
+    assert_eq!(schema_of(readout_group), &readout_schema);
+}
+
+/// A pending expression whose schema does not derive (a readout of a scan,
+/// not of a summary state) is an error, as `find_or_add_group` gives it.
+#[test]
+fn output_schema_of_a_pending_expression_rejects_what_find_or_add_group_rejects() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let latency = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let bad = readout(SketchStatistic::Quantile { q: 0.99 }, latency);
+    assert!(memo.output_schema_of_pending_expression(&[], &bad).is_err());
+    assert!(memo.find_or_add_group(bad).is_err());
 }

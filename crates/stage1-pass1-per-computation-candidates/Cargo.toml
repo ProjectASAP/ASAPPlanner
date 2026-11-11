@@ -13,10 +13,5 @@ asap-types = { path = "../types" }
 asap-accuracy = { path = "../accuracy" }
 thiserror = "2"
 
-[features]
-# The test helpers (`test_support`) other crates' tests share.
-test-support = []
-
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
-asap-accuracy = { path = "../accuracy", features = ["test-support"] }

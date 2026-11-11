@@ -22,6 +22,6 @@ pub use parameters::{
     StatModelParams, WaveletKind, WaveletParams, EXACT_ACCUMULATOR_STATE_BYTES, KLL_MAX_K,
 };
 pub use statistic::{
-    EntityIdentity, NonNegativeWeightProof, SketchStatistic, SummaryInputExpr, SummaryUpdate,
-    WeightDomain,
+    raw_data_samples_of_metric, EntityIdentity, NonNegativeWeightProof, SketchStatistic,
+    SummaryInputExpr, SummaryUpdate, WeightDomain,
 };

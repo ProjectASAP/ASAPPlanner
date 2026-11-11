@@ -77,7 +77,7 @@ pub fn parse_classic_failure_statistic(statistic: &str) -> Option<(u8, f64, &str
 /// (one instance per group, over the source's scan at most behind filters
 /// and windows): relative error at most the one its precision was sized for
 /// ([`classic_relative_error`]), with a failure probability
-/// ([`ClassicHllConfidence`]) at that error left symbolic in the source's
+/// (`ClassicHllConfidence`) at that error left symbolic in the source's
 /// distinct bound ([`classic_failure_statistic`]). The failure probability
 /// is per output row: each group's estimate fails with at most it. `None`
 /// for a precision outside the contract's.
@@ -117,7 +117,12 @@ pub(crate) fn classic_guarantee(
 /// (`classic_failure_statistic`) names, given the
 /// source's distinct bound: `1` (no certificate) when the bound is outside
 /// the contract's range for this precision and relative error.
-pub fn classic_failure_probability(precision: u8, relative_error: f64, max_distinct: u64) -> f64 {
+#[cfg(test)]
+pub(crate) fn classic_failure_probability(
+    precision: u8,
+    relative_error: f64,
+    max_distinct: u64,
+) -> f64 {
     u32::try_from(max_distinct)
         .ok()
         .and_then(|n| ClassicHllConfidence::new(n, relative_error))
@@ -132,18 +137,21 @@ const CLASSIC_CONTRACT: &str = "classic_hll_linear_counting_collision_bound_v1";
 
 /// The largest distinct bound the contract supports at any precision:
 /// `m/2` at precision 18. Evaluating a bound is O(bound).
-const MAX_CONTRACT_DISTINCT: u32 = 1 << 17;
+#[cfg(test)]
+pub(super) const MAX_CONTRACT_DISTINCT: u32 = 1 << 17;
 
 /// A finite-population contract for `m * ln(m / zero_registers)` with the
 /// classic HLL small-range switch. Hashing is assumed independent and uniform.
 /// The deployment must establish the population bound; observations alone do
 /// not establish it. Unsupported precisions/populations return no certificate.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ClassicHllConfidence {
     max_distinct: u32,
     relative_error: f64,
 }
 
+#[cfg(test)]
 impl ClassicHllConfidence {
     pub(crate) fn new(max_distinct: u32, relative_error: f64) -> Option<Self> {
         (max_distinct > 0
@@ -154,35 +162,6 @@ impl ClassicHllConfidence {
             max_distinct,
             relative_error,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn guarantee(&self, precision: u8) -> Option<AccuracyGuarantee> {
-        let delta = self.failure_probability(precision)?;
-        Some(AccuracyGuarantee::new(
-            AccuracyMetric::Relative,
-            BoundExpr::Constant {
-                value: self.relative_error,
-            },
-            ProbabilityExpr::Constant { value: delta },
-            vec![GuaranteeSource::SketchEvaluation {
-                algorithm: "Hll".into(),
-                contract: CLASSIC_CONTRACT.into(),
-                params: serde_json::json!({"precision": precision,
-                    "max_distinct": self.max_distinct, "relative_error": self.relative_error,
-                    "hash_assumption": "independent_uniform_buckets",
-                    "population_scope": "complete_evaluation_including_merged_tumbling_windows"}),
-                query: "Cardinality".into(),
-            }],
-        ))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn precision(&self, delta: f64) -> Option<u8> {
-        if !delta.is_finite() || !(0.0..1.0).contains(&delta) || delta == 0.0 {
-            return None;
-        }
-        (4..=18).find(|&p| self.failure_probability(p).is_some_and(|d| d <= delta))
     }
 
     /// Finite bound, not an asymptotic RSE fit. With N distinct hashes and K
@@ -197,7 +176,7 @@ impl ClassicHllConfidence {
     /// deterministically; underestimation implies C>epsilon*N.
     /// We maximize the collision bound over EVERY integer N in the contract,
     /// not just its upper endpoint (small-cardinality tails matter).
-    fn failure_probability(&self, precision: u8) -> Option<f64> {
+    pub(super) fn failure_probability(&self, precision: u8) -> Option<f64> {
         if !(4..=MAX_PRECISION).contains(&precision) {
             return None;
         }
@@ -224,47 +203,6 @@ impl ClassicHllConfidence {
         // Never return a spurious zero from underflow or numeric cancellation.
         Some((worst * (1.0 + 1e-10) + 1e-12).min(1.0))
     }
-}
-
-/// The smallest precision, at least `at_least`, whose classic failure
-/// probability at `relative_error` over a source of at most `max_distinct`
-/// distinct items is at most `failure_probability`; `at_least` when none up
-/// to 18 is. Pass 1's sizing for a failure probability
-/// (`sizing::sized_for_failure_probability`)
-/// applies this rule to the source's bound, its sizing for `ε`
-/// (`hll_precision`) to a bound of `⌈1/ε⌉`.
-pub fn min_precision(
-    relative_error: f64,
-    failure_probability: f64,
-    max_distinct: u64,
-    at_least: u8,
-) -> u8 {
-    (at_least..=18)
-        .find(|&p| {
-            classic_failure_probability(p, relative_error, max_distinct) <= failure_probability
-        })
-        .unwrap_or(at_least)
-}
-
-/// Classic HLL's precision for relative error `eps` with failure
-/// probability `delta`, without data (#694). Below `1/ε` distinct items a
-/// single bucket collision already exceeds the error, and the chance of
-/// one is about `N²/(2m)`; a certificate for any bound of at least `1/ε`
-/// therefore needs `m ≥ 1/(2ε²δ)`. This is the smallest such precision at
-/// which [`ClassicHllConfidence`] certifies `delta` at `eps` for every
-/// bound up to `⌈1/ε⌉` (18 when none up to 18 does). Pass 1 then raises
-/// the precision by the same rule ([`min_precision`]) when the source's own
-/// bound or a smaller failure probability needs it.
-#[cfg(test)]
-pub(crate) fn hll_precision(eps: f64, delta: f64) -> u8 {
-    if !(eps.is_finite() && eps > 0.0 && delta.is_finite() && delta > 0.0) {
-        return 18;
-    }
-    let start = saturating_ceil((1.0 / (2.0 * eps * eps * delta.min(1.0))).log2(), 4, 18) as u8;
-    let reference = (1.0 / eps).ceil().min(f64::from(MAX_CONTRACT_DISTINCT)) as u64;
-    (start..=18)
-        .find(|&p| classic_failure_probability(p, eps, reference) <= delta)
-        .unwrap_or(18)
 }
 
 #[cfg(test)]
@@ -347,37 +285,6 @@ mod tests {
         }
     }
 
-    /// A supported estimator contract supplies a probability, unlike generic HLL RSE.
-    #[test]
-    fn bounded_classic_hll_has_a_feasible_confidence_target() {
-        let model = ClassicHllConfidence::new(128, 0.05).unwrap();
-        let precision = model.precision(0.01).expect("finite confidence-sized HLL");
-        let guarantee = model.guarantee(precision).unwrap();
-        assert!(!guarantee.has_unknown());
-        assert!(guarantee.spec.failure_probability.evaluate().unwrap() <= 0.01);
-        assert_eq!(guarantee.spec.error.evaluate(), Some(0.05));
-    }
-    /// Tighter confidence must increase precision or explicitly become unavailable.
-    #[test]
-    fn sizing_and_domain_limits_are_consistent() {
-        let model = ClassicHllConfidence::new(128, 0.05).unwrap();
-        assert!(model.precision(0.001).unwrap() > model.precision(0.01).unwrap());
-        assert!(model.precision(1e-12).is_none());
-        assert!(model.precision(0.0).is_none());
-        assert!(model.precision(f64::NAN).is_none());
-        assert!(model.guarantee(3).is_none());
-        assert!(model.guarantee(19).is_none());
-        assert!(model.guarantee(7).is_none());
-        for (n, e) in [
-            (0, 0.05),
-            (MAX_CONTRACT_DISTINCT + 1, 0.05),
-            (128, 0.0),
-            (128, f64::NAN),
-        ] {
-            assert!(ClassicHllConfidence::new(n, e).is_none());
-        }
-    }
-
     /// Exact occupancy probabilities independently check both tails for every N.
     #[test]
     fn probability_bound_dominates_exact_occupancy_distribution() {
@@ -419,16 +326,7 @@ mod tests {
     fn native_classic_estimator_and_merged_registers_use_the_same_contract() {
         use asap_sketchlib::sketches::hll::{Classic, HyperLogLogP16};
         let model = ClassicHllConfidence::new(128, 0.05).unwrap();
-        assert!(
-            model
-                .guarantee(16)
-                .unwrap()
-                .spec
-                .failure_probability
-                .evaluate()
-                .unwrap()
-                < 0.01
-        );
+        assert!(model.failure_probability(16).unwrap() < 0.01);
         let mut single = HyperLogLogP16::<Classic>::new();
         let mut left = HyperLogLogP16::<Classic>::new();
         let mut right = HyperLogLogP16::<Classic>::new();
@@ -456,26 +354,9 @@ mod tests {
         assert_eq!(left.estimate(), expected);
         assert!((expected as f64 - 128.0).abs() / 128.0 <= 0.05);
     }
-    /// Pass 1 sizes classic HLL from (ε, δ) without data (#694): the
-    /// smallest precision with `m ≥ 1/(2ε²δ)` that the tail formula
-    /// certifies at the target ε, which its guarantee states as its error
-    /// bound.
-    #[test]
-    fn precision_is_sized_from_epsilon_and_delta() {
-        use crate::guarantee::size_params;
-        use asap_types::ir::operator::agg_intent::default_cardinality;
-        for (eps, delta, precision) in [(0.05, 0.01, 15), (0.02, 0.01, 17)] {
-            let params = size_params(SketchAlgorithm::Hll, &default_cardinality(), eps, delta);
-            let SketchParams::Hll { precision: sized } = params else {
-                panic!("{params:?}")
-            };
-            assert_eq!(sized, precision);
-        }
-    }
-
     #[test]
     fn generic_rse_sizing_does_not_certify_confidence() {
-        use crate::guarantee::size_params;
+        use crate::guarantee::sizing_oracle::size_params;
         use asap_types::ir::operator::agg_intent::default_cardinality;
         let c = default_cardinality();
         let params = size_params(SketchAlgorithm::Hll, &c, 0.01, 0.01);

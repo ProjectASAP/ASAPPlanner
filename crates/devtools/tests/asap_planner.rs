@@ -889,10 +889,9 @@ fn aws_fargate_prices_example_4_in_dollars() {
 /// the document's `deployment_capabilities` shows (defaults filled in;
 /// without the flag, every summary supported, raw data retained, no
 /// query-time result retained). For Pattern B with KLL only and query-time
-/// results retained: no DDSketch candidate is offered, and Stage 1's
-/// `pruned_candidates` says why. Without raw data, a plan is still selected
-/// with guarantees enforced, from materialized views. A deployment with an
-/// unknown field is refused.
+/// results retained: no DDSketch candidate is offered. Without raw data, a
+/// plan is still selected with guarantees enforced, from materialized
+/// views. A deployment with an unknown field is refused.
 #[test]
 fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
     let with_capabilities = |capabilities: &str, extra: &[&str]| {
@@ -931,12 +930,6 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
             "query_time_results_retained": true,
         })
     );
-    // Pass 1 lists why DDSketch is gone.
-    assert_eq!(
-        pass1_pruned(&kll_kept),
-        [("DDSketch".into(), "UnsupportedByDeployment".into())]
-    );
-    assert!(pass1_pruned(&default).is_empty());
     assert!(selects_a_plan(&kll_kept["stage3_plan_selection"]));
     let physical = kll_kept["stage2_physical_asap_optimization"]["candidates"]
         .as_array()

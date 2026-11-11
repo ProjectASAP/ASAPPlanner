@@ -46,10 +46,10 @@ asap-types ◄── asap-executor (Stage 4; no stage crate depends on it)
 
 ```text
 QueryRoots (Stage 0)
-  │  asap_stage0_memo::memo_of_queries → DagOfLogicalMemoGroups, then
+  │  asap_stage0_memo::memo_of_queries → Memo (groups, no candidates), then
   │  asap_stage1_pass1_per_computation_candidates::pass1_memo
   ▼                                                                     Stage 1, Pass 1
-PerComputationLogicalMemoCandidates (Memo + pruned_candidates)
+Memo (each group's initial candidates)
   │  asap_stage1_pass2_reuse_candidates::generate_logical_asap_memo_candidates
   │    the memo rules (memo/rules/) over the candidate memo       Stage 1, Pass 2
   ▼
@@ -70,7 +70,7 @@ same pipeline behind the `OptimizationPass` trait.
 
 | Concern | Where it lives |
 | --- | --- |
-| Pass 1: which computations a query has (`ComputationTarget`), how each can be computed (`HowToComputeAggregateMeasure`: `Exact`, `ExactAccumulator`, `Summary`), fused computations (`FusedComputation`), pruning (`PruneReason`) | `asap-stage1-pass1-per-computation-candidates`, `computation_targets.rs` |
+| Pass 1: which computations a query has (`ComputationTarget`), how each can be computed (`HowToComputeAggregateMeasure`: `Exact`, `ExactAccumulator`, `Summary`), fused computations (`FusedComputation`); the candidates that compute them | `asap-stage1-pass1-per-computation-candidates`, `computation_targets.rs`, `candidates/` |
 | Which summary families serve an intent (`summary_candidates`) | `asap-stage1-pass1-per-computation-candidates`, `summary_realization.rs` |
 | Pass 2 steps: rollup from the finest common group (shared producers across group keys), top-k reuse, readout requirements, dead-candidate elimination, chain groups (tumbling windows) and the logical edges | `asap-stage1-pass2-reuse-candidates`, `lib.rs` (the steps in order) and `rules/` (`rollup.rs`, `topk.rs`, `chains.rs`) |
 | Enumeration of the plans a memo stands for (reference pricer, DAG viewer) | none today (deleted in #1207 PR 0) |
@@ -122,12 +122,12 @@ No stage caps the candidates it plans, and neither does `asap_planner`.
   asap-stage0-memo -p asap-stage1-pass1-per-computation-candidates -p
   asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p
   asap-stage3-plan-selection -E 'test(<pattern>)'`).
-- `crates/stage1-pass1-per-computation-candidates/src/per_computation_candidates_tests.rs` covers
+- `crates/stage1-pass1-per-computation-candidates/src/tests.rs` covers
   Pass 1.
 - `crates/integration-tests/tests/planner_layering_example{1,2,3,4}.rs` pin
   the design document's examples through every stage;
   `reuse_rules.rs`, `deployment_capabilities.rs`, `physical_properties_e2e.rs`
-  and `stage1_logical_asap_optimization.rs` cover single rules end to end.
+  and `pass1_candidates.rs` cover single rules end to end.
 - `crates/devtools/tests/asap_planner.rs` checks the stage document and the
   committed viewer examples; `asap_planner_acceptance.rs` checks
   `--run-until` and the refused flags.

@@ -7,7 +7,9 @@ use super::aggregate_coverage::{aggregate_coverage, AggregateCoverage, CoverageE
 use super::column_properties::{column_lineage_and_signs, ColumnLineage, ValueSign};
 use crate::ir::operator::arguments::{AtModifier, Source, TimeShift};
 use crate::ir::operator::input::OperatorInput;
-use crate::ir::schema::Schema;
+use crate::ir::scalar::column_resolution::ResolveError;
+use crate::ir::schema::topk::ranked_column;
+use crate::ir::schema::{ColumnId, Schema};
 use crate::ir::ASAPOp;
 use crate::ir::SchemaDerivationError;
 use crate::ir::{NonASAPOp, ScalarExpr};
@@ -221,3 +223,25 @@ impl OperatorInput for MemoGroupAsInput<'_> {
         self.group().group_properties.scanned_sources.clone()
     }
 }
+
+/// The column a top-k reading memo group `group` ranks it by
+/// ([`ranked_column`](crate::ir::schema::topk) over the group as an input).
+pub fn ranked_column_of_group(memo: &Memo, group: MemoGroupId) -> Result<ColumnId, ResolveError> {
+    ranked_column(&MemoGroupAsInput {
+        memo,
+        group_id: group,
+    })
+}
+
+/// [`raw_data_samples_of_metric`](crate::summary_type::raw_data_samples_of_metric)
+/// of memo group `group`: the metric whose raw data samples, or plain sums of
+/// them, are every value the group outputs.
+pub fn raw_data_samples_of_metric_of_group(memo: &Memo, group: MemoGroupId) -> Option<String> {
+    crate::summary_type::raw_data_samples_of_metric(&MemoGroupAsInput {
+        memo,
+        group_id: group,
+    })
+}
+
+#[cfg(test)]
+mod tests;

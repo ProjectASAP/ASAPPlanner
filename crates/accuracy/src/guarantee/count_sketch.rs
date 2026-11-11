@@ -28,7 +28,7 @@ pub(super) fn guarantee(
 /// probability at most `q/ε² = q w/3` (Chebyshev, `Var ≤ q F2`), with `q`
 /// the column collision probability ([`column_collision`]): `1/3` to
 /// within `w/(3 · 2^32)`.
-fn row_failure_probability(width: u32) -> f64 {
+pub(super) fn row_failure_probability(width: u32) -> f64 {
     column_collision(width) * f64::from(width.max(1)) / 3.0
 }
 
@@ -45,7 +45,7 @@ fn column_collision(cols: u32) -> f64 {
 
 /// The median of an odd `depth` of independent rows misses only when at
 /// least `(depth + 1)/2` rows miss: `P(Binomial(depth, p) ≥ (depth+1)/2)`.
-fn count_sketch_failure_probability(width: u32, depth: u32) -> Option<f64> {
+pub(super) fn count_sketch_failure_probability(width: u32, depth: u32) -> Option<f64> {
     if depth == 0 || depth.is_multiple_of(2) {
         return None;
     }
@@ -56,46 +56,9 @@ fn count_sketch_failure_probability(width: u32, depth: u32) -> Option<f64> {
     ))
 }
 
-/// CountSketch `L2` point-query width: ε = sqrt(3/w).
-#[cfg(test)]
-pub(crate) fn count_sketch_width(eps: f64) -> u32 {
-    saturating_ceil(3.0 / (eps * eps), 2, 1 << 26)
-}
-
-/// The smallest positive odd depth whose binomial median failure
-/// probability at `width` is at most `delta`, capped at 255.
-#[cfg(test)]
-pub(crate) fn count_sketch_depth(width: u32, delta: f64) -> u32 {
-    if !(delta.is_finite() && delta > 0.0 && delta < 1.0) {
-        return 255;
-    }
-    (1..=255)
-        .step_by(2)
-        .find(|&depth| {
-            count_sketch_failure_probability(width, depth).is_some_and(|tail| tail <= delta)
-        })
-        .unwrap_or(255)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The executor's `CountSketch<_, RegularPath>` takes a column as the
-    /// low 32 hash bits modulo the width, so a row fails with probability
-    /// `1/3` (to within `2^-32`) at any width, not `3/8` off powers of two:
-    /// ε = 0.05 (width 1200) needs depth 47 at δ = 0.01, 81 at 1e-3 and
-    /// 117 at 1e-4, not 85, 149 and 215.
-    #[test]
-    fn depth_follows_the_libraries_modulo_column_hash() {
-        let width = count_sketch_width(0.05);
-        assert_eq!(width, 1200);
-        assert!((row_failure_probability(width) - 1.0 / 3.0).abs() < 1e-6);
-        assert_eq!(
-            [0.01, 1e-3, 1e-4].map(|delta| count_sketch_depth(width, delta)),
-            [47, 81, 117]
-        );
-    }
 
     /// Measured on the library's own `CountSketch<_, RegularPath>`: two
     /// keys share a column of a 1536-wide row about `1/1536` of the time.
@@ -124,6 +87,7 @@ mod tests {
     /// most a δ share of keys missing.
     #[test]
     fn sized_sketch_meets_its_guarantee_on_a_seeded_stream() {
+        use crate::guarantee::sizing_oracle::{count_sketch_depth, count_sketch_width};
         use asap_sketchlib::{CountSketch, DataInput, RegularPath, Vector2D};
         let (eps, delta) = (0.05, 0.01);
         let width = count_sketch_width(eps);
@@ -157,7 +121,7 @@ mod tests {
 
     #[test]
     fn count_sketch_uses_an_l2_guarantee() {
-        use crate::guarantee::size_params;
+        use crate::guarantee::sizing_oracle::size_params;
         use asap_types::ir::operator::agg_intent::default_cardinality;
         let intent = default_cardinality();
         let count_sketch = size_params(SketchAlgorithm::CountSketch, &intent, 0.01, 0.01);
@@ -175,34 +139,5 @@ mod tests {
             AccuracyMetric::ABSOLUTE_STREAM_L2
         );
         assert!(meets(&guarantee, 0.01, Some(0.01)));
-    }
-
-    /// The depth is the smallest odd one whose binomial tail meets δ. Each
-    /// is at most Hoeffding's `ln(1/δ) / (2 (1/2 − p)²)` at the row's
-    /// failure probability `p ≈ 1/3`: `18 ln(1/δ)` at any width.
-    #[test]
-    fn count_sketch_depth_is_the_smallest_meeting_the_binomial_tail() {
-        for width in [1024, 3000, 30_000] {
-            let hoeffding = 18.0 * (1.0 + 1e-4);
-            for delta in [0.1, 0.01, 0.001] {
-                let depth = count_sketch_depth(width, delta);
-                assert!(depth % 2 == 1);
-                assert!(count_sketch_failure_probability(width, depth).unwrap() <= delta);
-                if depth > 1 {
-                    assert!(count_sketch_failure_probability(width, depth - 2).unwrap() > delta);
-                }
-                assert!(
-                    f64::from(depth) <= hoeffding * (1.0 / delta).ln(),
-                    "{width} {delta}"
-                );
-            }
-        }
-        // Any width fails a row with probability 1/3 (to within 2^-32 w/3):
-        // P(Bin(3, 1/3) ≥ 2) = 7/27.
-        for width in [1024, 1000] {
-            let tail = count_sketch_failure_probability(width, 3).unwrap();
-            assert!((tail - 7.0 / 27.0).abs() < 1e-6, "{width}");
-        }
-        assert_eq!(count_sketch_failure_probability(1000, 4), None);
     }
 }

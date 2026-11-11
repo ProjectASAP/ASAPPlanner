@@ -80,7 +80,7 @@
 //     Stage 2 implements). Each
 //     step lists its groups (`id`, `label`, `children`, `parents`,
 //     `queries`, `roots_of`, `node`) and their candidates (`index`,
-//     `implements`, `children`, `origin`, `accuracy_budget_parts`, `added`
+//     `implements`, `children`, `origin`, `added`
 //     (not in the group at the step before), `label`, `node`,
 //     `group_of_node`). With `stage3`, `selected_choice` maps each group the
 //     plan uses to its candidate's index, or is null with

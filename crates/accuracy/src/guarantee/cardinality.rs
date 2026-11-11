@@ -25,16 +25,14 @@
 //!
 //! Neither bound depends on `N`, so no distinct bound is needed: the
 //! failure probability ([`kmv_failure_probability`]) is their sum, per
-//! output row (each group's estimate). Sizing ([`kmv_k`]) takes the
-//! smallest `k` with that sum at most `δ`, about
+//! output row (each group's estimate). Sizing (test-only
+//! `sizing_oracle::kmv_k`) takes the smallest `k` with that sum at most
+//! `δ`, about
 //! `1 + (1+ε)(2+ε)·ln(2/δ)/ε²` (below `3·ln(2/δ)/ε² + 1` for `ε ≤ 1`).
 use super::*;
 
 /// The smallest `k` `asap_sketchlib`'s KMV estimate `(k-1)/U` is defined for.
-const KMV_MIN_K: u32 = 2;
-/// The largest `k` sizing returns.
-#[cfg(test)]
-const KMV_MAX_K: u32 = 1 << 26;
+pub(super) const KMV_MIN_K: u32 = 2;
 
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
@@ -77,38 +75,6 @@ pub(crate) fn kmv_failure_probability(k: u32, eps: f64) -> f64 {
     };
     // Rounded up, so rounding never certifies a smaller probability.
     ((over + under) * (1.0 + 1e-12)).min(1.0)
-}
-
-/// The smallest `k` whose KMV failure probability at relative error `eps`
-/// is at most `delta` ([`kmv_failure_probability`]), up to `2^26`; a
-/// degenerate `eps` or `delta` saturates to `2^26`.
-#[cfg(test)]
-pub(crate) fn kmv_k(eps: f64, delta: f64) -> u32 {
-    if !(eps.is_finite() && eps > 0.0 && delta.is_finite() && delta > 0.0) {
-        return KMV_MAX_K;
-    }
-    // The overestimate term alone at most `δ` bounds `k` below; both terms
-    // at most `δ/2` bound it above.
-    let k_at = |ln_inverse: f64| {
-        saturating_ceil(
-            1.0 + (1.0 + eps) * (2.0 + eps) * ln_inverse / (eps * eps),
-            KMV_MIN_K,
-            KMV_MAX_K,
-        )
-    };
-    let (mut lo, mut hi) = (k_at((1.0 / delta).ln()), k_at((2.0 / delta).ln()));
-    if kmv_failure_probability(hi, eps) > delta {
-        return KMV_MAX_K;
-    }
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if kmv_failure_probability(mid, eps) <= delta {
-            hi = mid;
-        } else {
-            lo = mid + 1;
-        }
-    }
-    hi
 }
 
 #[cfg(test)]

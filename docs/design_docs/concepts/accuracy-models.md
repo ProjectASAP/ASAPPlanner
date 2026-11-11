@@ -188,8 +188,9 @@ another implementation with the same algorithm name. In particular, a named
 empirical calibration is different from an arbitrary benchmark's maximum
 observed error; both its confidence and applicability must remain explicit.
 
-Default sizing is `asap_accuracy::sizing::default_size_params`, which dispatches to the
-estimator modules; a summary shared by several readers is sized with each
+Sizing is each algorithm's predefined parameter list, `parameter_list`
+(`crates/types/src/summary_type/parameter_lists.rs`), which a test keeps equal
+to the estimator modules' closed-form sizing over an error grid; a summary shared by several readers is sized with each
 parameter's largest value among them. Where an error bound grows as the failure
 probability shrinks (a KLL's `k`, a distinct-count UnivMon's heap), each
 reader's parameter is first resized to the readers' smallest failure

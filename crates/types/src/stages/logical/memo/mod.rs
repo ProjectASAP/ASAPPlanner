@@ -11,6 +11,8 @@ use super::group::{
     MemoGroupError,
 };
 use crate::accuracy::AccuracyTarget;
+use crate::ir::operator::input::InputOrTemporaryBuild;
+use crate::ir::schema::Schema;
 use crate::ir::Operator;
 use crate::ir::QueryRoot;
 use crate::stages::{
@@ -146,6 +148,52 @@ impl Memo {
                 .push((id, serialized));
         }
         Ok(id)
+    }
+
+    /// The output schema `expression` would have as a new group, without
+    /// adding anything: the dry run of [`Self::find_or_add_group`], which a
+    /// rule calls to decide whether a way to compute a group can be built
+    /// before it adds any of the way's groups. `expression` reads memo
+    /// groups or pending expressions, not yet in the memo: the input
+    /// `MemoGroupId(n + k)`, `n` the memo's group count, is
+    /// `pending[k]`, the id it would get as a new group, with its output
+    /// schema (from earlier calls). The expression's output schema must
+    /// derive and its inputs pass validation.
+    ///
+    /// It mirrors `validate_expression_over_input_groups`, minus the merge
+    /// coverage check, which runs when a merge is added.
+    ///
+    /// # Panics
+    ///
+    /// When a pending expression reads one at or after it.
+    pub fn output_schema_of_pending_expression(
+        &self,
+        pending: &[(Operator<MemoGroupId>, Schema)],
+        expression: &Operator<MemoGroupId>,
+    ) -> Result<Schema, MemoGroupError> {
+        fn input<'m>(
+            memo: &'m Memo,
+            built: &[InputOrTemporaryBuild<MemoGroupAsInput<'m>>],
+            group_id: MemoGroupId,
+        ) -> InputOrTemporaryBuild<MemoGroupAsInput<'m>> {
+            match (group_id.0 as usize).checked_sub(memo.groups.len()) {
+                None => InputOrTemporaryBuild::Input(MemoGroupAsInput { memo, group_id }),
+                Some(index) => built
+                    .get(index)
+                    .expect("a pending expression reads only earlier ones")
+                    .clone(),
+            }
+        }
+        let mut built = Vec::with_capacity(pending.len());
+        for (pending_expression, schema) in pending {
+            let operator =
+                pending_expression.map_children(|&group_id| input(self, &built, group_id));
+            built.push(InputOrTemporaryBuild::with_schema(operator, schema.clone()));
+        }
+        let operator = expression.map_children(|&group_id| input(self, &built, group_id));
+        let schema = operator.output_schema()?;
+        operator.validate_inputs()?;
+        Ok(schema)
     }
 
     /// Adds `candidate` to `group`'s candidates and returns its id, unless

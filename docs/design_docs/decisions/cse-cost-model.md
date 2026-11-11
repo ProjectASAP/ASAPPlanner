@@ -16,7 +16,9 @@ elimination) to identify eligible, structurally identical computations. A
 shared logical node records an opportunity for reuse; selecting maintained
 state or independent execution is a separate planning decision.
 
-[`share_common_sub_dags`](../../../crates/stage0-memo/src/cse.rs)
+`share_common_sub_dags` (now Stage 0's
+[`memo_of_queries`](../../../crates/stage0-memo/src/lib.rs), hash-consing through
+`Memo::find_or_add_group`)
 (issue #223 stages 1-2, PR #235) already *detects* every structurally-identical,
 legally-shareable (`Schema::unique_keys`-gated) sub-DAG and shares it
 **unconditionally** — there is no cost gate on top of legality. This document
@@ -75,7 +77,8 @@ same way a real cost-based optimizer would.
 
 ## Layering constraint
 
-`share_common_sub_dags` lives in `asap-types::pre_asap` — a lower layer that
+`share_common_sub_dags` (now `memo_of_queries` in `asap_stage0_memo`, with
+`Memo::find_or_add_group` in `asap_types::stages`) lives in `asap-types::pre_asap` — a lower layer that
 `asap-aware-mapping` (which owns `CostModel`) depends on, never the reverse.
 Detection therefore cannot consult cost even if it wanted to. This is why
 stage 1/2's detection stays unconditional (correctly, as a legality-only
