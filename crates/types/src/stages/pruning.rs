@@ -71,6 +71,16 @@ pub enum RootPruneReason {
         consumer: CandidateForMemoGroupId,
         query: usize,
     },
+    /// The producer is a candidate over a tumbling-window chain whose width
+    /// does not divide the consumer group's evaluation period (or the group
+    /// has no known evaluation grid): the chain's windows do not end at the
+    /// consumer's evaluation times.
+    ChainWidthDoesNotDivideEvaluationGrid {
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+        tumbling_window_width_ms: u64,
+        evaluation_period_ms: Option<u64>,
+    },
     /// The candidate never had a consumer and is not a query output. A
     /// candidate whose consumers were eliminated is traced to their causes.
     NoConsumer,

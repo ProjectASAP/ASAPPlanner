@@ -6,7 +6,7 @@ use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::operator::arguments::{AtModifier, Reduction, TimeShift};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::stages::{
-    CandidateForMemoGroupId, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
+    CandidateForMemoGroupId, Memo, MemoGroupId, OriginOfCandidateForMemoGroup, RootPruneReason,
 };
 use asap_types::summary_type::parameter_list;
 use asap_types::summary_type::{ExactKind, SketchAlgorithm};
@@ -95,7 +95,7 @@ fn no_chain_without_a_merge_an_anchor_or_a_grid() {
 /// others are pruned (a 15 s chain would answer the 10 s reader at times
 /// it does not end on).
 #[test]
-fn a_chain_whose_width_does_not_divide_the_readers_grid_has_no_edge() {
+fn a_chain_whose_width_does_not_divide_the_readers_grid_fails_its_edge() {
     let mut memo = Memo::new(&DataWorkload::default());
     let (_, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.9, 30);
     query(&mut memo, readout, None);
@@ -121,8 +121,18 @@ fn a_chain_whose_width_does_not_divide_the_readers_grid_has_no_edge() {
             group: state,
             index_in_group,
         };
-        if pruned_entry(&logical, merge).is_none() {
-            live_widths.extend(chain_width_below(memo, children[0]));
+        match pruned_entry(&logical, merge) {
+            None => live_widths.extend(chain_width_below(memo, children[0])),
+            Some(pruned) => assert!(
+                pruned.causes.iter().any(|cause| matches!(
+                    cause.root,
+                    RootPruneReason::ChainWidthDoesNotDivideEvaluationGrid {
+                        evaluation_period_ms: Some(5_000),
+                        ..
+                    }
+                )),
+                "{pruned:?}"
+            ),
         }
     }
     assert_eq!(live_widths, BTreeSet::from([5_000]));

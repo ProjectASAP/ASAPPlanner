@@ -23,10 +23,11 @@ pub(crate) struct CandidateEdge {
 /// Every $(u, c, i)$ of `memo` (`Memo::producers`), grouped by consumer and
 /// input, producers in group order. An edge into a readout of
 /// `unknown_values` fails with `ValuesPerEvaluationUnknown`. A chain
-/// `SummaryTumblingWindowChain[w]` has an edge only into a consumer group
-/// whose result does not depend on the evaluation time or whose
-/// evaluation grid ([`evaluation_grids`]) $w$ divides: a chain of another
-/// reader's width does not end at this reader's evaluations.
+/// `SummaryTumblingWindowChain[w]` read by a consumer group whose result
+/// depends on the evaluation time fails its edges with
+/// `ChainWidthDoesNotDivideEvaluationGrid` unless $w$ divides that group's
+/// evaluation grid ([`evaluation_grids`]): a chain of another reader's width
+/// does not end at this reader's evaluations.
 pub(crate) fn candidate_edges(
     memo: &Memo,
     entries: &[QueryWorkloadEntry],
@@ -37,16 +38,22 @@ pub(crate) fn candidate_edges(
     let evaluation_grid_of_group = evaluation_grids(memo, entries);
     let mut edges = Vec::new();
     for (group, memo_group) in memo.groups().iter().enumerate() {
-        let ends_on_the_evaluations =
+        // The width of a chain input whose windows do not end at this
+        // group's evaluation times, and the group's evaluation period.
+        let chain_off_the_evaluation_grid =
             |input_group: MemoGroupId| match memo.groups()[input_group.0 as usize].expression {
                 Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                     tumbling_window_width_ms,
                     ..
                 }) if memo_group.group_properties.depends_on_evaluation_time => {
-                    evaluation_grid_of_group[group]
-                        .is_some_and(|grid| grid.period_ms.is_multiple_of(tumbling_window_width_ms))
+                    let evaluation_period_ms =
+                        evaluation_grid_of_group[group].map(|grid| grid.period_ms);
+                    (!evaluation_period_ms.is_some_and(|period_ms| {
+                        period_ms.is_multiple_of(tumbling_window_width_ms)
+                    }))
+                    .then_some((tumbling_window_width_ms, evaluation_period_ms))
                 }
-                _ => true,
+                _ => None,
             };
         for (index_in_group, candidate) in memo_group.candidates.iter().enumerate() {
             let consumer = CandidateForMemoGroupId {
@@ -60,19 +67,25 @@ pub(crate) fn candidate_edges(
                 .into_iter()
                 .enumerate()
             {
-                if !ends_on_the_evaluations(input_group) {
-                    continue;
-                }
+                let chain_off_the_grid = chain_off_the_evaluation_grid(input_group);
                 for producer in memo.producers(consumer, input) {
                     edges.push(CandidateEdge {
                         producer,
                         consumer,
                         input,
-                        satisfies: match unknown_values.get(&consumer) {
-                            Some(&query) => {
+                        satisfies: match (chain_off_the_grid, unknown_values.get(&consumer)) {
+                            (Some((tumbling_window_width_ms, evaluation_period_ms)), _) => {
+                                Err(RootPruneReason::ChainWidthDoesNotDivideEvaluationGrid {
+                                    consumer,
+                                    input,
+                                    tumbling_window_width_ms,
+                                    evaluation_period_ms,
+                                })
+                            }
+                            (None, Some(&query)) => {
                                 Err(RootPruneReason::ValuesPerEvaluationUnknown { consumer, query })
                             }
-                            None => producer_satisfies_logical_requirements(
+                            (None, None) => producer_satisfies_logical_requirements(
                                 memo, &accepted, producer, consumer, input, evidence,
                             ),
                         },
