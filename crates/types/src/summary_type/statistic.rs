@@ -176,8 +176,8 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    /// The raw data samples of `m` reach a node through a range and a plain
-    /// `sum`; a rate ends them.
+    /// The raw data samples of `m` reach a node through a range, an
+    /// `offset`-only time shift and a plain `sum`; a rate ends them.
     #[test]
     fn raw_data_samples_of_metric_follows_ranges_shifts_and_plain_sums() {
         let node =
@@ -210,6 +210,14 @@ mod tests {
             }))
         };
         assert_eq!(raw_data_samples_of_metric(&window), Some("m".to_string()));
+        let shifted = node(Operator::NonASAP(NonASAPOp::TimeShift {
+            shift: crate::ir::operator::arguments::TimeShift {
+                offset_ms: 60_000,
+                at: None,
+            },
+            child: Rc::clone(&window),
+        }));
+        assert_eq!(raw_data_samples_of_metric(&shifted), Some("m".to_string()));
         assert_eq!(
             raw_data_samples_of_metric(&per_series(AggIntent::Sum { col: None })),
             Some("m".to_string())
