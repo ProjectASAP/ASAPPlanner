@@ -110,19 +110,3 @@ pub(crate) fn binomial_upper_tail(n: u32, p: f64, k: u32) -> f64 {
     }
     (tail * (1.0 + 1e-12)).min(1.0)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Classic HLL's precision grows until its failure probability over the
-    /// source's distinct bound meets the target, up to 18.
-    #[test]
-    fn classic_hll_precision_grows_for_its_failure_probability() {
-        let p = hll::min_precision(0.05, 0.01, 64, 4);
-        assert!(p > 4);
-        assert!(hll::classic_failure_probability(p, 0.05, 64) <= 0.01);
-        assert!(hll::classic_failure_probability(p - 1, 0.05, 64) > 0.01);
-        assert_eq!(hll::min_precision(0.05, 1e-30, 4096, 12), 12);
-    }
-}

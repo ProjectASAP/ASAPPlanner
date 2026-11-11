@@ -430,10 +430,8 @@ document `tools/dag-viewer/examples/memo-ratio-of-quantiles.json` (made by
 the former `stage_pipeline` from `tools/dag-viewer/memo-examples/promql/ratio-of-quantiles-5m.json`,
 with accuracy guarantees enforced and the `aws-fargate-us-east-1` cost model). The Stage 1, Pass 1 row is
 `memo_of_queries` then `pass1_memo` run on that workload with the
-executor's summary families, at the current Pass 1 sizing.
-`crates/integration-tests/tests/memo_enumeration.rs` lowers the query as
-production does (with the series-identity column) and reads the memo from the
-production run. It asserts the Stage 0 and Pass 1 numbers above. The last
+executor's summary families, at the current Pass 1 sizing. No test asserts
+these numbers. The last
 step is Pass 2's memo over the complete tumbling-window-width domain, which
 gives 438 groups and 2158 candidates.
 

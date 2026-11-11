@@ -20,7 +20,7 @@ use asap_types::summary_type::{
     WeightDomain,
 };
 
-use crate::candidates::{add_measure_way, Pending, SingleMeasure};
+use crate::candidates::{add_measure_way, key_only_having, Pending, SingleMeasure};
 use crate::computation_targets::{
     computation_candidates_for_intent, computation_targets, HowToComputeAggregateMeasure,
 };
@@ -699,6 +699,78 @@ fn global_aggregate_having_stays_above() {
     assert!(pushed_below(&memo, rows).is_empty());
 }
 
+/// Which `HAVING` conjuncts of a grouped aggregate (`by (job)`) are pushed
+/// below it: a key conjunct, and a column-free one built of literals and
+/// comparison and boolean operators (`1 = 0`); not a column-free one with a
+/// function call, which may be volatile (`random() < 0.5`, built in the IR
+/// directly: the frontends and schema derivation reject `random`), nor
+/// one over the aggregate's value, nor any of a global aggregate's.
+#[test]
+fn key_only_having_pushes_keys_and_constants_but_no_function_call() {
+    let literal = |value| Box::new(ScalarExpr::Literal(value));
+    let one_equals_zero = ScalarExpr::Compare {
+        left: literal(ScalarValue::Int64(1)),
+        op: CompareOpKind::Eq,
+        right: literal(ScalarValue::Int64(0)),
+        semantics: ExprSemantics::Sql,
+    };
+    let random_below_half = ScalarExpr::Compare {
+        left: Box::new(ScalarExpr::FunctionCall {
+            name: "random".into(),
+            args: vec![],
+        }),
+        op: CompareOpKind::Lt,
+        right: literal(ScalarValue::Float64(0.5)),
+        semantics: ExprSemantics::Sql,
+    };
+    let job_is_a = compare(0, CompareOpKind::Eq, ScalarValue::Utf8("a".into())).0;
+    let value_above_ten = compare(1, CompareOpKind::Gt, ScalarValue::Float64(10.0)).0;
+    let by_job = Reduction::by(vec![2]);
+    assert!(key_only_having(&by_job, &job_is_a));
+    assert!(key_only_having(&by_job, &one_equals_zero));
+    assert!(key_only_having(
+        &by_job,
+        &ScalarExpr::Not(Box::new(one_equals_zero.clone()))
+    ));
+    assert!(!key_only_having(&by_job, &random_below_half));
+    assert!(!key_only_having(&by_job, &value_above_ten));
+    let global = Reduction::by(vec![]);
+    assert!(!key_only_having(&global, &one_equals_zero));
+}
+
+/// A grouped aggregate's constant `HAVING 1 = 0` is pushed below it.
+#[test]
+fn a_constant_having_of_a_grouped_aggregate_is_pushed_below() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);
+    let by_job = aggregate_group(
+        &mut memo,
+        rows,
+        Reduction::by(vec![2]),
+        vec![quantile(0.9)],
+        None,
+    );
+    let having = filter(
+        &mut memo,
+        by_job,
+        Predicate(ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Literal(ScalarValue::Int64(1))),
+            op: CompareOpKind::Eq,
+            right: Box::new(ScalarExpr::Literal(ScalarValue::Int64(0))),
+            semantics: ExprSemantics::Sql,
+        }),
+    );
+    query(&mut memo, having);
+    let memo = pass1_memo(memo, None).unwrap();
+    assert_eq!(
+        pushed_below(&memo, rows).len(),
+        1,
+        "{}",
+        memo_printout(&memo)
+    );
+    assert_eq!(candidates(&memo, having).len(), 3);
+}
+
 /// The aggregate's own value `having` is a `Filter` above each readout:
 /// the aggregate group's summary candidates are `Filter`s over a readout.
 #[test]
@@ -777,6 +849,73 @@ fn whole_expression_topk_heaps_read_the_raw_samples() {
             parameter_list(algorithm).len()
         );
     }
+}
+
+/// `topk(5, sum by (job) (sum_over_time(m[5m])))`: the whole-expression
+/// heap's candidates, built through the readout and output path every
+/// summary way takes. The top-k group gets one `Project` per heap
+/// algorithm, ranking the estimate read from that heap's state; only the
+/// state's builds list the absorbed groups.
+#[test]
+fn whole_expression_topk_heap_candidates() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let rows = selector(&mut memo, TimeRangeKind::Range, "m", &["job"]);
+    let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![sum()], None);
+    let by_job = aggregate_group(
+        &mut memo,
+        per_series,
+        Reduction::by(vec![2]),
+        vec![sum()],
+        None,
+    );
+    let ranked = aggregate_group(
+        &mut memo,
+        by_job,
+        Reduction::by(vec![]),
+        vec![topk(5)],
+        None,
+    );
+    query(&mut memo, ranked);
+    let memo = pass1_memo(memo, None).unwrap();
+    // The top-k group's own expression, then one ranked `Project` per heap.
+    let ranked_candidates = candidates(&memo, ranked);
+    let kinds: Vec<&str> = ranked_candidates
+        .iter()
+        .map(|c| c.expression.operator.kind_name())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["Aggregate", "Project", "Project"],
+        "{}",
+        memo_printout(&memo)
+    );
+    for (project, algorithm) in ranked_candidates[1..].iter().zip([
+        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountSketchWithHeap,
+    ]) {
+        assert!(project.fused_groups.is_empty());
+        let estimate = *project.expression.operator.children()[0];
+        let [estimate_candidate] = candidates(&memo, estimate) else {
+            panic!("one readout candidate: {}", memo_printout(&memo));
+        };
+        assert!(matches!(
+            estimate_candidate.expression.operator,
+            Operator::ASAP(ASAPOp::SummaryEstimate { .. })
+        ));
+        assert!(estimate_candidate.fused_groups.is_empty());
+        let (state, _) = state_group(&memo, algorithm);
+        assert_eq!(*estimate_candidate.expression.operator.children()[0], state);
+        assert_eq!(
+            candidates(&memo, state).len(),
+            parameter_list(algorithm).len()
+        );
+        for build in candidates(&memo, state) {
+            assert_eq!(build.fused_groups, [by_job, per_series]);
+        }
+    }
+    // Scan, range, the two sums, the top-k, the sums' two accumulator
+    // states, and per heap its state and readout: no other group.
+    assert_eq!(memo.groups().len(), 11, "{}", memo_printout(&memo));
 }
 
 /// A top-k over a `count` ranks the counted items with unit weight, proven
@@ -960,11 +1099,14 @@ fn algorithms(choices: &[HowToComputeAggregateMeasure]) -> Vec<SketchAlgorithm> 
         .collect()
 }
 
-/// Example 2 preserves specialized distinct summaries and the universal alternative.
+/// Example 2 preserves specialized distinct summaries and the universal
+/// alternative; plain exact execution is the group's own expression.
 #[test]
-fn cardinality_keeps_exact_specialized_and_universal_candidates() {
+fn cardinality_keeps_specialized_and_universal_summaries() {
     let choices = computation_candidates_for_intent(&AggIntent::Cardinality { cols: vec![0] });
-    assert_eq!(choices[0], HowToComputeAggregateMeasure::Exact);
+    assert!(choices
+        .iter()
+        .all(|choice| matches!(choice, HowToComputeAggregateMeasure::Summary(_))));
     assert_eq!(
         algorithms(&choices),
         vec![
@@ -977,7 +1119,7 @@ fn cardinality_keeps_exact_specialized_and_universal_candidates() {
     assert!(!algorithms(&tuple).contains(&SketchAlgorithm::UnivMon));
 }
 
-/// Frequency moments retain exact execution and a universal sketch without certification.
+/// Frequency moments offer a universal sketch without certification.
 #[test]
 fn frequency_statistics_keep_universal_choices() {
     for intent in [
@@ -985,8 +1127,12 @@ fn frequency_statistics_keep_universal_choices() {
         AggIntent::FrequencyEntropy { col: Some(0) },
     ] {
         let choices = computation_candidates_for_intent(&intent);
-        assert_eq!(choices[0], HowToComputeAggregateMeasure::Exact);
-        assert_eq!(algorithms(&choices), vec![SketchAlgorithm::UnivMon]);
+        assert_eq!(
+            choices,
+            [HowToComputeAggregateMeasure::Summary(
+                SketchAlgorithm::UnivMon
+            )]
+        );
     }
 }
 
@@ -994,7 +1140,6 @@ fn frequency_statistics_keep_universal_choices() {
 #[test]
 fn topk_keeps_both_specialized_heap_choices() {
     let choices = computation_candidates_for_intent(&topk(10));
-    assert_eq!(choices[0], HowToComputeAggregateMeasure::Exact);
     assert_eq!(
         algorithms(&choices),
         vec![
@@ -1004,12 +1149,11 @@ fn topk_keeps_both_specialized_heap_choices() {
     );
 }
 
-/// Approximate count lists one exact option, its accumulator, beside the
+/// Approximate count lists its exact accumulator first, beside the
 /// summaries (the plain aggregate is the group's own expression).
 #[test]
 fn approximate_count_lists_its_accumulator_and_summaries() {
     let choices = computation_candidates_for_intent(&AggIntent::Count);
-    assert!(!choices.contains(&HowToComputeAggregateMeasure::Exact));
     assert_eq!(
         choices[0],
         HowToComputeAggregateMeasure::ExactAccumulator(vec![ExactKind::Count])
@@ -1033,11 +1177,11 @@ fn a_count_offers_no_count_sketch() {
 // ── Summary realization ──────────────────────────────────────────────────────
 
 /// A quantile outside [0, 1] is answered -Inf or +Inf: it gets no summary,
-/// only the plain exact aggregate.
+/// so no way besides the plain exact aggregate.
 #[test]
 fn a_quantile_outside_the_unit_interval_offers_no_summary() {
     let choices = computation_candidates_for_intent(&AggIntent::Quantile { col: None, q: 1.5 });
-    assert_eq!(choices, [HowToComputeAggregateMeasure::Exact]);
+    assert!(choices.is_empty());
 }
 
 /// A heap sketch consumes every raw row, so the keyed input rule refuses
@@ -1161,7 +1305,7 @@ fn assert_unsupported_way_adds_nothing(
 ) {
     let groups = memo.groups().len();
     let before = format!("{memo:?}");
-    let added = add_measure_way(memo, Pending::new(memo), measure, &way, result_group, &[]);
+    let added = add_measure_way(memo, Pending::new(memo), measure, &way, result_group, None);
     assert!(
         matches!(added, Err(PerComputationCandidateError::Unsupported(_))),
         "{added:?}"

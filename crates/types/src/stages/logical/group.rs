@@ -242,3 +242,6 @@ pub fn raw_data_samples_of_metric_of_group(memo: &Memo, group: MemoGroupId) -> O
         group_id: group,
     })
 }
+
+#[cfg(test)]
+mod tests;

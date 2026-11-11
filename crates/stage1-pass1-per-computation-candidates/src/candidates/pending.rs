@@ -22,9 +22,9 @@ use crate::{schema, PerComputationCandidateError};
 pub(crate) struct Pending {
     /// The memo's group count when the way was started.
     first_id: usize,
-    expressions: Vec<Operator<MemoGroupId>>,
-    /// `expressions[k]`'s output schema, derived once when it was pushed.
-    schemas: Vec<Schema>,
+    /// Each pending expression with its output schema, derived once when it
+    /// was pushed.
+    expressions_with_schemas: Vec<(Operator<MemoGroupId>, Schema)>,
 }
 
 impl Pending {
@@ -32,8 +32,7 @@ impl Pending {
     pub(crate) fn new(memo: &Memo) -> Self {
         Self {
             first_id: memo.groups().len(),
-            expressions: Vec::new(),
-            schemas: Vec::new(),
+            expressions_with_schemas: Vec::new(),
         }
     }
 
@@ -45,25 +44,23 @@ impl Pending {
         memo: &Memo,
         expression: Operator<MemoGroupId>,
     ) -> Result<MemoGroupId, PerComputationCandidateError> {
-        let schema = memo.output_schema_of_pending_expression(
-            &self.expressions,
-            &self.schemas,
-            &expression,
-        )?;
+        let schema =
+            memo.output_schema_of_pending_expression(&self.expressions_with_schemas, &expression)?;
         let id = MemoGroupId(
-            u32::try_from(self.first_id + self.expressions.len())
+            u32::try_from(self.first_id + self.expressions_with_schemas.len())
                 .expect("a memo has at most u32::MAX groups"),
         );
-        self.expressions.push(expression);
-        self.schemas.push(schema);
+        self.expressions_with_schemas.push((expression, schema));
         Ok(id)
     }
 
     /// The last pushed expression, removed: it becomes a candidate rather
     /// than a group.
     pub(crate) fn pop(&mut self) -> Operator<MemoGroupId> {
-        self.schemas.pop();
-        self.expressions.pop().expect("an expression was pushed")
+        self.expressions_with_schemas
+            .pop()
+            .expect("an expression was pushed")
+            .0
     }
 
     /// The output schema of `group`: a memo group's, or a pending
@@ -71,7 +68,7 @@ impl Pending {
     pub(crate) fn schema<'a>(&'a self, memo: &'a Memo, group: MemoGroupId) -> &'a Schema {
         match (group.0 as usize).checked_sub(self.first_id) {
             None => schema(memo, group),
-            Some(index) => &self.schemas[index],
+            Some(index) => &self.expressions_with_schemas[index].1,
         }
     }
 }
@@ -98,13 +95,13 @@ pub(crate) fn commit_pending(
         first_id,
         "no group is added between starting and adding a way"
     );
-    let mut groups: Vec<MemoGroupId> = Vec::with_capacity(pending.expressions.len());
+    let mut groups: Vec<MemoGroupId> = Vec::with_capacity(pending.expressions_with_schemas.len());
     let group_of = move |groups: &[MemoGroupId], id: MemoGroupId| {
         (id.0 as usize)
             .checked_sub(first_id)
             .map_or(id, |index| groups[index])
     };
-    for expression in pending.expressions {
+    for (expression, _) in pending.expressions_with_schemas {
         let expression = expression.map_children(|&input| group_of(&groups, input));
         let group = match expression {
             Operator::ASAP(ASAPOp::SummaryAgg { .. }) => {

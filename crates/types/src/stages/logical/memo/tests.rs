@@ -12,7 +12,7 @@ use crate::ir::{ExprSemantics, NonASAPOp, Predicate, ScalarExpr};
 use crate::stages::logical::group::MemoGroupAsInput;
 use crate::stages::{CandidateExpression, LogicalProperties, OriginOfCandidateForMemoGroup};
 use crate::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
-use crate::test_support::memo_fixtures::{aggregate, aggregate_with, range, readout, scan, state};
+use crate::test_support::memo_fixtures::{aggregate_with, readout, scan, state};
 
 /// An unordered `LIMIT 10` over `input`, whose copies may return
 /// different rows.
@@ -595,12 +595,11 @@ fn output_schema_of_a_pending_expression_is_its_groups_schema() {
     let readout_expression = readout(SketchStatistic::Quantile { q: 0.99 }, pending_state);
     let before = format!("{memo:?}");
     let state_schema = memo
-        .output_schema_of_pending_expression(&[], &[], &state_expression)
+        .output_schema_of_pending_expression(&[], &state_expression)
         .unwrap();
     let readout_schema = memo
         .output_schema_of_pending_expression(
-            std::slice::from_ref(&state_expression),
-            std::slice::from_ref(&state_schema),
+            &[(state_expression.clone(), state_schema.clone())],
             &readout_expression,
         )
         .unwrap();
@@ -623,49 +622,6 @@ fn output_schema_of_a_pending_expression_rejects_what_find_or_add_group_rejects(
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
     let bad = readout(SketchStatistic::Quantile { q: 0.99 }, latency);
-    assert!(memo
-        .output_schema_of_pending_expression(&[], &[], &bad)
-        .is_err());
+    assert!(memo.output_schema_of_pending_expression(&[], &bad).is_err());
     assert!(memo.find_or_add_group(bad).is_err());
-}
-
-/// A top-k over a one-measure grouped aggregate ranks its value, the last
-/// column; over per-series rows, the sample value.
-#[test]
-fn ranked_column_of_group_is_the_measure_or_the_sample_value() {
-    let mut memo = Memo::new(&DataWorkload::default());
-    let rows = memo
-        .find_or_add_group(scan("m", &[("job", DataType::Utf8)], vec![]))
-        .unwrap();
-    let by_job = memo
-        .find_or_add_group(aggregate(
-            Reduction::by(vec![2]),
-            AggIntent::Sum { col: None },
-            rows,
-        ))
-        .unwrap();
-    assert_eq!(crate::stages::ranked_column_of_group(&memo, by_job), Ok(1));
-    assert_eq!(crate::stages::ranked_column_of_group(&memo, rows), Ok(1));
-}
-
-/// The raw data samples of `m` reach a group through a range and a plain
-/// sum, not through a rate.
-#[test]
-fn raw_data_samples_of_metric_of_group_follows_ranges_and_plain_sums() {
-    let mut memo = Memo::new(&DataWorkload::default());
-    let rows = memo.find_or_add_group(scan("m", &[], vec![])).unwrap();
-    let window = memo.find_or_add_group(range(60_000, rows)).unwrap();
-    let summed = memo
-        .find_or_add_group(aggregate(
-            Reduction::PerEntity,
-            AggIntent::Sum { col: None },
-            window,
-        ))
-        .unwrap();
-    let rated = memo
-        .find_or_add_group(aggregate(Reduction::PerEntity, AggIntent::Rate, window))
-        .unwrap();
-    let metric = |group| crate::stages::raw_data_samples_of_metric_of_group(&memo, group);
-    assert_eq!(metric(summed), Some("m".to_string()));
-    assert_eq!(metric(rated), None);
 }

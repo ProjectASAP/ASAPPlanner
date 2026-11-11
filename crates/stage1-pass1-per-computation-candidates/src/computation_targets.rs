@@ -32,18 +32,12 @@ use asap_types::deployment_capabilities::{summary_supported, SupportedSummary};
 use crate::summary_realization::{realize_keyed_additive_summary_input, summary_candidates};
 use crate::{expression, schema, PerComputationCandidateError};
 
-/// How one Pass 1 target is computed: exact or a summary.
-///
-/// Each target lists one exact option: `ExactAccumulator` when the intent
-/// has an exact mergeable state and it can be built, otherwise `Exact`.
-/// The plain exact computation is always offered too, as the aggregate
-/// group's own expression.
+/// How one Pass 1 target is computed besides plain exact execution: by
+/// exact accumulator states or a summary. Plain exact execution is not a
+/// way here: it is always offered, as the aggregate group's own
+/// expression.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum HowToComputeAggregateMeasure {
-    /// Plain exact execution: the aggregate group's own expression; the
-    /// listed exact option only when the intent has no exact accumulator
-    /// form or that form is pruned.
-    Exact,
     /// One or more exact mergeable accumulator states, by accumulator kind,
     /// finalized and combined into the measure: one state for `sum`,
     /// `count`, `min`, `max`, `rate`, `irate` and `increase`; `[Sum, Count]`,
@@ -62,7 +56,9 @@ pub(crate) struct ComputationTarget {
     pub aggregate_group: MemoGroupId,
     /// Index into the aggregate's measures.
     pub measure_index: usize,
-    /// The measure's unranked ways to compute it, the exact option first.
+    /// The measure's unranked ways to compute it besides plain exact
+    /// execution, the exact accumulator first when it has one; empty when
+    /// Pass 1 pruned every one.
     pub ways_to_compute: Vec<HowToComputeAggregateMeasure>,
     /// The fused computation of this measure together with the target
     /// directly beneath it, offered beside this target's own candidates;
@@ -87,36 +83,20 @@ pub(crate) struct FusedComputation {
     /// (sum_over_time(m[W])))`), the per-series aggregate beneath that, then
     /// the groups any of these targets' own fused computations replace.
     pub absorbed_groups: Vec<MemoGroupId>,
-    /// How the fused computation is computed: exact or a summary. Empty
+    /// How the fused computation is computed: by an exact accumulator or a
+    /// summary. Empty
     /// when Pass 1 pruned every one (today only for an algorithm the deployment
     /// does not support); the fusion is then not offered.
     pub ways_to_compute: Vec<HowToComputeAggregateMeasure>,
 }
 
-/// Removes from a measure's own `candidates` the ones `applies` matches
-/// (never `Exact`); a removed exact accumulator form is replaced by plain
-/// `Exact`, so the measure keeps one exact option.
-fn prune_own(
-    candidates: &mut Vec<HowToComputeAggregateMeasure>,
-    applies: impl Fn(&HowToComputeAggregateMeasure) -> bool,
-) {
-    let mut removed_accumulator = false;
-    candidates.retain(|choice| {
-        let remove = *choice != HowToComputeAggregateMeasure::Exact && applies(choice);
-        removed_accumulator |=
-            remove && matches!(choice, HowToComputeAggregateMeasure::ExactAccumulator(_));
-        !remove
-    });
-    if removed_accumulator {
-        candidates.insert(0, HowToComputeAggregateMeasure::Exact);
-    }
-}
-
-/// Enumerate exact, rewrite and summary choices of one measure in stable catalog
-/// order, without ranking or empirical assessment. A summary is not a claim that
-/// a deployment meets the measure's accuracy requirement. The one exact option
-/// comes first: the exact accumulator form if the intent has one, else `Exact`.
-/// A quantile outside [0, 1] gets no summary: its answer is -Inf or +Inf.
+/// Enumerate the exact accumulator and summary choices of one measure in
+/// stable catalog order, without ranking or empirical assessment. A summary
+/// is not a claim that a deployment meets the measure's accuracy
+/// requirement. The exact accumulator form comes first when the intent has
+/// one; plain exact execution is not listed (it is the group's own
+/// expression). A quantile outside [0, 1] gets no summary: its answer is
+/// -Inf or +Inf.
 pub(crate) fn computation_candidates_for_intent(
     intent: &AggIntent,
 ) -> Vec<HowToComputeAggregateMeasure> {
@@ -131,12 +111,10 @@ pub(crate) fn computation_candidates_for_intent(
         AggIntent::Avg { .. } => vec![ExactKind::Sum, ExactKind::Count],
         _ => vec![],
     };
-    let exact = if states.is_empty() {
-        HowToComputeAggregateMeasure::Exact
-    } else {
-        HowToComputeAggregateMeasure::ExactAccumulator(states)
-    };
-    let mut choices = vec![exact];
+    let mut choices = Vec::new();
+    if !states.is_empty() {
+        choices.push(HowToComputeAggregateMeasure::ExactAccumulator(states));
+    }
     let quantile_outside_unit_interval =
         matches!(intent, AggIntent::Quantile { q, .. } if !(0.0..=1.0).contains(q));
     if sketch_statistic(intent).is_some() && !quantile_outside_unit_interval {
@@ -225,23 +203,22 @@ pub(crate) fn computation_targets(
         let aggregate_group = MemoGroupId(index as u32);
         for (measure, intent) in measures.iter().enumerate() {
             let mut choices = computation_candidates_for_intent(intent);
-            if choices == [HowToComputeAggregateMeasure::Exact] {
+            if choices.is_empty() {
                 continue;
             }
             if matches!(intent, AggIntent::Avg { .. })
                 && nullable_avg_input(schema(memo, *child), intent)
             {
-                prune_own(&mut choices, |choice| {
-                    matches!(choice, HowToComputeAggregateMeasure::ExactAccumulator(_))
+                choices.retain(|choice| {
+                    !matches!(choice, HowToComputeAggregateMeasure::ExactAccumulator(_))
                 });
             }
             if matches!(intent, AggIntent::Count)
                 && memo.groups()[child.0 as usize].group_properties.result_kind
                     == OperatorResultKind::Relation
             {
-                prune_own(&mut choices, |choice| {
-                    matches!(choice, HowToComputeAggregateMeasure::Summary(_))
-                });
+                choices
+                    .retain(|choice| !matches!(choice, HowToComputeAggregateMeasure::Summary(_)));
             }
             targets.push(ComputationTarget {
                 aggregate_group,
@@ -282,7 +259,7 @@ fn without_unsupported_summaries(
             matches!(candidate, HowToComputeAggregateMeasure::Summary(algorithm)
                 if !summary_supported(supported_summaries, algorithm, readout))
         };
-        prune_own(&mut target.ways_to_compute, unsupported);
+        target.ways_to_compute.retain(|way| !unsupported(way));
         if let Some(fused) = &mut target.fused_computation {
             fused.ways_to_compute.retain(|way| !unsupported(way));
         }
@@ -648,8 +625,8 @@ fn prune_topk_heaps_over_one_row_per_item(memo: &Memo, targets: &mut [Computatio
         {
             continue;
         }
-        prune_own(&mut target.ways_to_compute, |candidate| {
-            matches!(candidate, HowToComputeAggregateMeasure::Summary(algorithm)
+        target.ways_to_compute.retain(|candidate| {
+            !matches!(candidate, HowToComputeAggregateMeasure::Summary(algorithm)
                 if algorithm.capability().answers(StatisticKind::TopK))
         });
     }

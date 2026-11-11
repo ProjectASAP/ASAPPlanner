@@ -36,8 +36,8 @@
 //! `having` or a consumer `Filter` group directly above the aggregate group,
 //! read from the memo: its key-only conjuncts (`key_only_having`) are pushed
 //! below the aggregate by the candidates that compute the filtered result
-//! (the aggregate group, or that `Filter` group); the other conjuncts stay a
-//! `Filter` above the output.
+//! (the aggregate group, or that `Filter` group); the other conjuncts stay
+//! one `Filter` above the output.
 //!
 //! Each way is built pending (`Pending`) and added only once
 //! every check that can find it unsupported has passed, so an unsupported
@@ -54,16 +54,14 @@ use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorResultKind, Predicate, ScalarExpr};
 use asap_types::stages::{raw_data_samples_of_metric_of_group, Memo, MemoGroupId};
 
-use asap_accuracy::sizing::sketch_statistic;
-
 use crate::computation_targets::{
     having_filter_groups, nested_distributive_input, whole_expression_input, ComputationTarget,
     HowToComputeAggregateMeasure,
 };
 use crate::summary_realization::{measure_input, with_raw_data_samples_requirement};
-use crate::{expression, schema, PerComputationCandidateError};
+use crate::{expression, PerComputationCandidateError};
 use measure_output::{
-    accumulator_build, add_output_candidate, join_measures, measure_output, ranked_as_topk,
+    accumulator_build, add_output_candidate, join_measures, measure_output, summary_readout,
 };
 pub(crate) use pending::Pending;
 use pending::{add_candidate, commit_pending};
@@ -101,35 +99,34 @@ pub(crate) fn add_pass1_candidates(
         else {
             continue;
         };
-        let (below, above) = having
-            .as_ref()
-            .map_or_else(Default::default, |having| split_having(reduction, having));
+        let (below, above) = split_having(reduction, having);
         // Each consumer `Filter` group whose `HAVING` has key-only conjuncts
-        // gets the candidates that compute its rows with them pushed below;
-        // its other conjuncts stay above.
+        // gets the candidates that compute its rows with them pushed below,
+        // after the aggregate's own; the other conjuncts of both stay above,
+        // as one `Filter`.
         let pushed_down: Vec<_> = having_filter_groups(memo, aggregate_group)
             .filter(|&(filter, _)| (filter.0 as usize) < stage0_groups)
-            .map(|(filter, pred)| {
-                let (key_only, rest) = split_having(reduction, pred);
-                (filter, key_only, rest)
+            .filter(|(_, pred)| {
+                pred.0
+                    .conjuncts()
+                    .iter()
+                    .any(|conjunct| key_only_having(reduction, conjunct))
             })
-            .filter(|(_, key_only, _)| !key_only.is_empty())
+            .map(|(filter, pred)| (filter, split_having(reduction, having.iter().chain([pred]))))
             .collect();
         let ways = AggregateWays {
             aggregate_group,
             result_group: aggregate_group,
             below: &below,
-            above: &above,
+            above: above.as_ref(),
             targets: group_targets,
         };
         add_aggregate_candidates(memo, &ways)?;
-        for (filter, key_only, rest) in pushed_down {
-            let below = [below.clone(), key_only].concat();
-            let above = [above.clone(), rest].concat();
+        for (filter, (below, above)) in pushed_down {
             let filtered = AggregateWays {
                 result_group: filter,
                 below: &below,
-                above: &above,
+                above: above.as_ref(),
                 ..ways
             };
             add_aggregate_candidates(memo, &filtered)?;
@@ -138,43 +135,64 @@ pub(crate) fn add_pass1_candidates(
     Ok(())
 }
 
-/// `having`'s conjuncts over an aggregate's output, split into those that
-/// read only its group keys ([`key_only_having`]), which can filter its
-/// input rows, and the others, as one predicate (none when every conjunct
-/// is key-only).
-fn split_having(
+/// The conjuncts of `havings` over an aggregate's output, in order, split
+/// into those that read only its group keys ([`key_only_having`]), which
+/// can filter its input rows, and the others, joined as one predicate
+/// (`None` when every conjunct is key-only).
+fn split_having<'a>(
     reduction: &Reduction,
-    having: &Predicate<MemoGroupId>,
-) -> (Vec<Predicate<MemoGroupId>>, Vec<Predicate<MemoGroupId>>) {
-    let conjuncts = match &having.0 {
-        ScalarExpr::BoolAnd(conjuncts) => conjuncts.clone(),
-        conjunct => vec![conjunct.clone()],
-    };
-    let (key_only, mut rest): (Vec<_>, Vec<_>) = conjuncts
+    havings: impl IntoIterator<Item = &'a Predicate<MemoGroupId>>,
+) -> (Vec<Predicate<MemoGroupId>>, Option<Predicate<MemoGroupId>>) {
+    let (key_only, mut rest): (Vec<_>, Vec<_>) = havings
         .into_iter()
-        .map(Predicate)
+        .flat_map(|having| having.0.conjuncts())
+        .cloned()
         .partition(|conjunct| key_only_having(reduction, conjunct));
     let rest = match rest.len() {
-        0 | 1 => rest,
-        _ => vec![Predicate(ScalarExpr::BoolAnd(
-            rest.drain(..).map(|conjunct| conjunct.0).collect(),
-        ))],
+        0 => None,
+        1 => rest.pop().map(Predicate),
+        _ => Some(Predicate(ScalarExpr::BoolAnd(rest))),
     };
-    (key_only, rest)
+    (key_only.into_iter().map(Predicate).collect(), rest)
 }
 
-/// Whether `having` over an aggregate's output reads only its `by(...)`
-/// group keys. A global aggregate (no group keys) never qualifies: its one
-/// output row exists even when no input row does, so no row predicate can
-/// stand in.
-fn key_only_having(reduction: &Reduction, having: &Predicate<MemoGroupId>) -> bool {
+/// Whether the `HAVING` conjunct `conjunct` over an aggregate's output can
+/// filter its input rows instead: it reads no other operator, and either
+/// reads only its `by(...)` group keys, at least one of them, or is a
+/// constant built of literals and comparison and boolean operators (such as
+/// `1 = 0`), which no input row changes. A column-free conjunct with
+/// anything else, such as a function call, may be volatile (`random() <
+/// 0.5`) and stays above. A global aggregate (no group keys) never
+/// qualifies: its one output row exists even when no input row does, so no
+/// row predicate can stand in.
+pub(crate) fn key_only_having(reduction: &Reduction, conjunct: &ScalarExpr<MemoGroupId>) -> bool {
     let keys = match reduction {
         Reduction::Reduce(by) if !by.is_without() => by.len(),
         _ => 0,
     };
+    let columns = conjunct.columns_referenced();
     keys > 0
-        && having.0.operator_refs().is_empty()
-        && having.0.columns_referenced().iter().all(|id| *id < keys)
+        && conjunct.operator_refs().is_empty()
+        && columns.iter().all(|id| *id < keys)
+        && (!columns.is_empty() || literal_comparison_or_boolean(conjunct))
+}
+
+/// Whether `expr` is built only of literals and comparison and boolean
+/// operators: no column, function call or timestamp.
+fn literal_comparison_or_boolean(expr: &ScalarExpr<MemoGroupId>) -> bool {
+    matches!(
+        expr,
+        ScalarExpr::Literal(_)
+            | ScalarExpr::Compare { .. }
+            | ScalarExpr::BoolAnd(_)
+            | ScalarExpr::BoolOr(_)
+            | ScalarExpr::Not(_)
+            | ScalarExpr::IsNull(_)
+            | ScalarExpr::IsNotNull(_)
+    ) && expr
+        .children()
+        .into_iter()
+        .all(literal_comparison_or_boolean)
 }
 
 /// The ways to compute one result from an aggregate group's targets.
@@ -187,8 +205,8 @@ struct AggregateWays<'a> {
     /// Key-only predicates over the aggregate's output, applied to its
     /// input rows (their key columns renumbered to the input's).
     below: &'a [Predicate<MemoGroupId>],
-    /// Predicates applied as `Filter`s above the output.
-    above: &'a [Predicate<MemoGroupId>],
+    /// The predicate applied as a `Filter` above the output, if any.
+    above: Option<&'a Predicate<MemoGroupId>>,
     /// The aggregate's targets, one per measure that has one.
     targets: &'a [&'a ComputationTarget],
 }
@@ -229,9 +247,7 @@ fn add_aggregate_candidates(
         ..
     }) = expression(memo, ways.aggregate_group).clone()
     else {
-        return Err(PerComputationCandidateError::Unsupported(
-            "target is not an aggregate",
-        ));
+        unreachable!("add_pass1_candidates passes only aggregate groups");
     };
     let keys: Vec<usize> = reduction
         .group_keys()
@@ -269,31 +285,28 @@ fn add_aggregate_candidates(
             return Ok(());
         };
         for way in &target.ways_to_compute {
-            if *way != HowToComputeAggregateMeasure::Exact {
-                unless_unsupported(start_way(memo).and_then(|(pending, input)| {
-                    add_measure_way(
-                        memo,
-                        pending,
-                        &measure(0, input),
-                        way,
-                        ways.result_group,
-                        ways.above,
-                    )
-                }))?;
-            }
+            unless_unsupported(start_way(memo).and_then(|(pending, input)| {
+                add_measure_way(
+                    memo,
+                    pending,
+                    &measure(0, input),
+                    way,
+                    ways.result_group,
+                    ways.above,
+                )
+            }))?;
         }
+        // A fused computation has no `HAVING`, so nothing filters its input.
         if let Some(fused) = &target.fused_computation {
             for way in &fused.ways_to_compute {
-                unless_unsupported(start_way(memo).and_then(|(pending, input)| {
-                    add_fused_candidate(
-                        memo,
-                        pending,
-                        ways,
-                        &measure(0, input),
-                        way,
-                        &fused.absorbed_groups,
-                    )
-                }))?;
+                unless_unsupported(add_fused_candidate(
+                    memo,
+                    ways.aggregate_group,
+                    ways.result_group,
+                    &measure(0, child),
+                    way,
+                    &fused.absorbed_groups,
+                ))?;
             }
         }
         return Ok(());
@@ -323,7 +336,8 @@ fn add_aggregate_candidates(
             })
             .collect::<Result<Vec<_>, _>>()?;
         let output = join_measures(memo, &mut pending, &reduction, ways.result_group, &parts)?;
-        let group_of = add_output_candidate(memo, ways.result_group, pending, output, ways.above)?;
+        let group_of =
+            add_output_candidate(memo, ways.result_group, pending, output, ways.above, &[])?;
         Ok((
             group_of(input),
             parts.into_iter().map(group_of).collect::<Vec<_>>(),
@@ -336,16 +350,14 @@ fn add_aggregate_candidates(
     for (index, part) in parts.into_iter().enumerate() {
         if let Some(target) = target_of(index) {
             for way in &target.ways_to_compute {
-                if *way != HowToComputeAggregateMeasure::Exact {
-                    unless_unsupported(add_measure_way(
-                        memo,
-                        Pending::new(memo),
-                        &measure(index, input),
-                        way,
-                        part,
-                        &[],
-                    ))?;
-                }
+                unless_unsupported(add_measure_way(
+                    memo,
+                    Pending::new(memo),
+                    &measure(index, input),
+                    way,
+                    part,
+                    None,
+                ))?;
             }
         }
     }
@@ -394,8 +406,8 @@ fn unless_unsupported<T>(
     }
 }
 
-/// Adds `measure`'s way `way` (not `Exact`), started in `pending`, as
-/// candidates of `result_group`, then the `above` filters over it: its
+/// Adds `measure`'s way `way`, started in `pending`, as candidates of
+/// `result_group`, filtered by `above` when there is one: its
 /// groups are built pending ([`measure_output`](fn@measure_output)), checked, and only then
 /// added.
 pub(crate) fn add_measure_way(
@@ -404,69 +416,57 @@ pub(crate) fn add_measure_way(
     measure: &SingleMeasure<'_>,
     way: &HowToComputeAggregateMeasure,
     result_group: MemoGroupId,
-    above: &[Predicate<MemoGroupId>],
+    above: Option<&Predicate<MemoGroupId>>,
 ) -> Result<(), PerComputationCandidateError> {
     let output = measure_output(memo, &mut pending, measure, way, result_group)?;
-    add_output_candidate(memo, result_group, pending, output, above).map(|_| ())
+    add_output_candidate(memo, result_group, pending, output, above, &[]).map(|_| ())
 }
 
-/// Adds the fused computation `way` of `ways`' single measure, started in
-/// `pending`: a whole-expression heap (a summary way) or a nested
-/// distributive merge (an exact accumulator way). Its builds list
-/// `absorbed_groups`, the groups of the operators it replaces, in
-/// `fused_groups`.
+/// Adds the fused computation `way` of `aggregate_group`'s single measure
+/// `measure`, as candidates of `result_group`: a whole-expression heap (a
+/// summary way) or a nested distributive merge (an exact accumulator way).
+/// Its builds list `absorbed_groups`, the groups of the operators it
+/// replaces, in `fused_groups`.
 fn add_fused_candidate(
     memo: &mut Memo,
-    mut pending: Pending,
-    ways: &AggregateWays<'_>,
+    aggregate_group: MemoGroupId,
+    result_group: MemoGroupId,
     measure: &SingleMeasure<'_>,
     way: &HowToComputeAggregateMeasure,
     absorbed_groups: &[MemoGroupId],
 ) -> Result<(), PerComputationCandidateError> {
+    let mut pending = Pending::new(memo);
     match way {
         HowToComputeAggregateMeasure::Summary(algorithm) => {
-            let (rows, update, partitions) = whole_expression_input(memo, ways.aggregate_group)
-                .ok_or(PerComputationCandidateError::Unsupported(
-                    "whole-expression top-k input",
-                ))?;
-            let query = sketch_statistic(measure.intent).ok_or(
-                PerComputationCandidateError::Unsupported("sketch evaluation"),
+            let (rows, update, partitions) = whole_expression_input(memo, aggregate_group).ok_or(
+                PerComputationCandidateError::Unsupported("whole-expression top-k input"),
             )?;
-            let state = pending.push(
+            let build = Operator::ASAP(ASAPOp::SummaryAgg {
+                child: rows,
+                input: with_raw_data_samples_requirement(update, measure.raw_data_samples_of),
+                summary_type: FieldDataType::Sketch(*algorithm),
+                reduction: partitions,
+                filter: None,
+            });
+            let output = summary_readout(
                 memo,
-                Operator::ASAP(ASAPOp::SummaryAgg {
-                    child: rows,
-                    input: with_raw_data_samples_requirement(update, measure.raw_data_samples_of),
-                    summary_type: FieldDataType::Sketch(*algorithm),
-                    reduction: partitions,
-                    filter: None,
-                }),
-            )?;
-            let estimate = pending.push(
-                memo,
-                Operator::ASAP(ASAPOp::SummaryEstimate {
-                    summary_input: state,
-                    query,
-                }),
-            )?;
-            let output = ranked_as_topk(
+                &mut pending,
+                build,
+                measure.intent,
                 measure.reduction,
-                schema(memo, ways.result_group),
-                pending.schema(memo, estimate),
-                estimate,
+                result_group,
             )?;
-            let group_of = commit_pending(memo, pending, absorbed_groups)?;
-            let output = output.map_children(|&input| group_of(input));
-            add_candidate(memo, ways.result_group, output, None, Vec::new())?;
+            add_output_candidate(memo, result_group, pending, output, None, absorbed_groups)
+                .map(|_| ())?;
         }
         HowToComputeAggregateMeasure::ExactAccumulator(_) => {
             // The merged build computes the outer aggregate's own
             // accumulator state, from the rows below the inner aggregate: a
             // candidate of that state group.
-            let (rows, inner, partitions, kind) =
-                nested_distributive_input(memo, ways.aggregate_group).ok_or(
-                    PerComputationCandidateError::Unsupported("nested distributive merge input"),
-                )?;
+            let (rows, inner, partitions, kind) = nested_distributive_input(memo, aggregate_group)
+                .ok_or(PerComputationCandidateError::Unsupported(
+                    "nested distributive merge input",
+                ))?;
             let outer_build = accumulator_build(
                 memo,
                 kind,
@@ -503,11 +503,6 @@ fn add_fused_candidate(
                 None,
                 absorbed_groups.to_vec(),
             )?;
-        }
-        HowToComputeAggregateMeasure::Exact => {
-            unreachable!(
-                "a fused computation is a summary or an exact accumulator, never plain exact"
-            )
         }
     }
     Ok(())

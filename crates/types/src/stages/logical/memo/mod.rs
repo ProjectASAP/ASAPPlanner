@@ -156,26 +156,21 @@ impl Memo {
     /// before it adds any of the way's groups. `expression` reads memo
     /// groups or pending expressions, not yet in the memo: the input
     /// `MemoGroupId(n + k)`, `n` the memo's group count, is
-    /// `pending_expressions[k]`, the id it would get as a new group, with
-    /// output schema `pending_schemas[k]` (from earlier calls). The
-    /// expression's output schema must derive and its inputs pass
-    /// validation; a merge's coverage is checked only when it is added.
+    /// `pending[k]`, the id it would get as a new group, with its output
+    /// schema (from earlier calls). The expression's output schema must
+    /// derive and its inputs pass validation.
+    ///
+    /// It mirrors `validate_expression_over_input_groups`, minus the merge
+    /// coverage check, which runs when a merge is added.
     ///
     /// # Panics
     ///
-    /// When the two pending lists differ in length, or a pending
-    /// expression reads one at or after it.
+    /// When a pending expression reads one at or after it.
     pub fn output_schema_of_pending_expression(
         &self,
-        pending_expressions: &[Operator<MemoGroupId>],
-        pending_schemas: &[Schema],
+        pending: &[(Operator<MemoGroupId>, Schema)],
         expression: &Operator<MemoGroupId>,
     ) -> Result<Schema, MemoGroupError> {
-        assert_eq!(
-            pending_expressions.len(),
-            pending_schemas.len(),
-            "one schema per pending expression"
-        );
         fn input<'m>(
             memo: &'m Memo,
             built: &[InputOrTemporaryBuild<MemoGroupAsInput<'m>>],
@@ -189,9 +184,10 @@ impl Memo {
                     .clone(),
             }
         }
-        let mut built = Vec::with_capacity(pending_expressions.len());
-        for (pending, schema) in pending_expressions.iter().zip(pending_schemas) {
-            let operator = pending.map_children(|&group_id| input(self, &built, group_id));
+        let mut built = Vec::with_capacity(pending.len());
+        for (pending_expression, schema) in pending {
+            let operator =
+                pending_expression.map_children(|&group_id| input(self, &built, group_id));
             built.push(InputOrTemporaryBuild::with_schema(operator, schema.clone()));
         }
         let operator = expression.map_children(|&group_id| input(self, &built, group_id));

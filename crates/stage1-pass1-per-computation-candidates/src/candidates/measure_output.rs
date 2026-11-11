@@ -25,7 +25,7 @@ use crate::summary_realization::{
 };
 use crate::{schema, PerComputationCandidateError};
 
-/// The operator that computes `measure` by `way` (not `Exact`) for
+/// The operator that computes `measure` by `way` for
 /// `result_group`: its value after its group keys, its column names not
 /// yet the group's ([`add_output_candidate`] renames them). The groups it
 /// reads are pushed onto `pending`; nothing is added to `memo`.
@@ -37,11 +37,6 @@ pub(super) fn measure_output(
     result_group: MemoGroupId,
 ) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
     Ok(match way {
-        HowToComputeAggregateMeasure::Exact => {
-            unreachable!(
-                "plain exact execution is the group's own expression, not a measure output"
-            )
-        }
         HowToComputeAggregateMeasure::ExactAccumulator(kinds) if kinds.len() == 1 => {
             let read = measure_input(
                 measure.intent,
@@ -55,9 +50,6 @@ pub(super) fn measure_output(
             })
         }
         HowToComputeAggregateMeasure::Summary(algorithm) => {
-            let query = sketch_statistic(measure.intent).ok_or(
-                PerComputationCandidateError::Unsupported("sketch evaluation"),
-            )?;
             let summary_type = FieldDataType::Sketch(*algorithm);
             let read = measure_input(
                 measure.intent,
@@ -75,32 +67,21 @@ pub(super) fn measure_output(
                 )?,
                 measure.raw_data_samples_of,
             );
-            let state = pending.push(
-                memo,
-                Operator::ASAP(ASAPOp::SummaryAgg {
-                    child: measure.input,
-                    input: update,
-                    summary_type,
-                    reduction: measure.reduction.clone(),
-                    filter: measure.filter.cloned(),
-                }),
-            )?;
-            let estimate = Operator::ASAP(ASAPOp::SummaryEstimate {
-                summary_input: state,
-                query,
+            let build = Operator::ASAP(ASAPOp::SummaryAgg {
+                child: measure.input,
+                input: update,
+                summary_type,
+                reduction: measure.reduction.clone(),
+                filter: measure.filter.cloned(),
             });
-            match measure.intent {
-                AggIntent::TopK { .. } => {
-                    let estimate = pending.push(memo, estimate)?;
-                    ranked_as_topk(
-                        measure.reduction,
-                        schema(memo, result_group),
-                        pending.schema(memo, estimate),
-                        estimate,
-                    )?
-                }
-                _ => estimate,
-            }
+            summary_readout(
+                memo,
+                pending,
+                build,
+                measure.intent,
+                measure.reduction,
+                result_group,
+            )?
         }
         HowToComputeAggregateMeasure::ExactAccumulator(kinds) => {
             let (AggIntent::Avg { col }, [ExactKind::Sum, ExactKind::Count]) =
@@ -187,6 +168,38 @@ pub(super) fn measure_output(
     })
 }
 
+/// The readout of `intent` from the summary state `build` computes, for
+/// `result_group` (an aggregate of `intent` grouped by `reduction`): its
+/// estimate, as a top-k's ranked rows for a top-k ([`ranked_as_topk`]).
+/// The state and, for a top-k, the estimate are pushed onto `pending`.
+pub(super) fn summary_readout(
+    memo: &Memo,
+    pending: &mut Pending,
+    build: Operator<MemoGroupId>,
+    intent: &AggIntent,
+    reduction: &Reduction,
+    result_group: MemoGroupId,
+) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
+    let query = sketch_statistic(intent).ok_or(PerComputationCandidateError::Unsupported(
+        "sketch evaluation",
+    ))?;
+    let state = pending.push(memo, build)?;
+    let estimate = Operator::ASAP(ASAPOp::SummaryEstimate {
+        summary_input: state,
+        query,
+    });
+    let AggIntent::TopK { .. } = intent else {
+        return Ok(estimate);
+    };
+    let estimate = pending.push(memo, estimate)?;
+    ranked_as_topk(
+        reduction,
+        schema(memo, result_group),
+        pending.schema(memo, estimate),
+        estimate,
+    )
+}
+
 /// The accumulator build of `kind` for `intent` over `measure`'s input,
 /// filtered and grouped as `measure`.
 pub(super) fn accumulator_build(
@@ -213,49 +226,46 @@ pub(super) fn accumulator_build(
 }
 
 /// Adds `output` (over memo groups and `pending`) as a candidate of
-/// `result_group`, then the `above` filters over it, and returns what each
-/// id names once `pending` is added ([`commit_pending`]). When its column
-/// names differ from the group's, `output` becomes its own group, read
-/// through a `Project` that names its columns as the group does
-/// ([`renaming_project`]). With `above` predicates the output (named as the
-/// group) is a group, read by one `Filter` group per predicate but the last,
-/// whose `Filter` is the candidate. Every check runs on the pending
-/// expressions before any is added.
+/// `result_group`, filtered by `above` when there is one, and returns what
+/// each id names once `pending` is added ([`commit_pending`], its summary
+/// builds listing `fused_groups`). When its column names differ from the
+/// group's, `output` becomes its own group, read through a `Project` that
+/// names its columns as the group does ([`renaming_project`]). With an
+/// `above` predicate the output (named as the group) is a group, and the
+/// `Filter` over it is the candidate. The candidate's schema is checked
+/// against the group's on the pending expressions, before any is added: a
+/// mismatch is `Unsupported`.
 pub(super) fn add_output_candidate(
     memo: &mut Memo,
     result_group: MemoGroupId,
     mut pending: Pending,
     output: Operator<MemoGroupId>,
-    above: &[Predicate<MemoGroupId>],
+    above: Option<&Predicate<MemoGroupId>>,
+    fused_groups: &[MemoGroupId],
 ) -> Result<impl Fn(MemoGroupId) -> MemoGroupId, PerComputationCandidateError> {
     let to = schema(memo, result_group).clone();
     let output_group = pending.push(memo, output)?;
     let from = pending.schema(memo, output_group).clone();
-    let candidate = match above.split_last() {
-        None if from == to => pending.pop(),
-        None => renaming_project(&from, &to, output_group)?,
-        Some((last, filters)) => {
-            let mut named = output_group;
-            if from != to {
-                let renamed = renaming_project(&from, &to, output_group)?;
-                named = pending.push(memo, renamed)?;
-            }
-            for pred in filters {
-                named = pending.push(
-                    memo,
-                    Operator::NonASAP(NonASAPOp::Filter {
-                        pred: pred.clone(),
-                        child: named,
-                    }),
-                )?;
-            }
-            Operator::NonASAP(NonASAPOp::Filter {
-                pred: last.clone(),
-                child: named,
-            })
-        }
+    let named = if from == to {
+        pending.pop()
+    } else {
+        renaming_project(&from, &to, output_group)?
     };
-    let group_of = commit_pending(memo, pending, &[])?;
+    let candidate = match above {
+        None => named,
+        Some(pred) => Operator::NonASAP(NonASAPOp::Filter {
+            pred: pred.clone(),
+            child: pending.push(memo, named)?,
+        }),
+    };
+    let checked = pending.push(memo, candidate)?;
+    if pending.schema(memo, checked) != &to {
+        return Err(PerComputationCandidateError::Unsupported(
+            "a candidate whose schema differs from its group's",
+        ));
+    }
+    let candidate = pending.pop();
+    let group_of = commit_pending(memo, pending, fused_groups)?;
     let candidate = candidate.map_children(|&input| group_of(input));
     add_candidate(memo, result_group, candidate, None, Vec::new())?;
     Ok(group_of)
@@ -305,7 +315,7 @@ fn renaming_project(
 /// top-k's physical shape (its ranked rows' value, then the columns naming
 /// each ranked item: PromQL labels, SQL group keys), so consumers of
 /// `[keys.., topk_k]` find those columns where they were.
-pub(super) fn ranked_as_topk(
+fn ranked_as_topk(
     reduction: &Reduction,
     to: &Schema,
     estimated: &Schema,

@@ -83,7 +83,7 @@ pub(super) fn size_params(
         | SketchAlgorithm::HydraKll
         | SketchAlgorithm::HydraHll
         | SketchAlgorithm::HydraUnivMon => {
-            unreachable!("Pass 1 offers only the families in FAMILY_PREFERENCE, not {kind:?}")
+            unreachable!("Pass 1 offers only the families in ALGORITHM_PREFERENCE, not {kind:?}")
         }
     }
 }
@@ -185,9 +185,7 @@ fn kmv_k(eps: f64, delta: f64) -> u32 {
 /// about `N²/(2m)`; a certificate for any bound of at least `1/ε`
 /// therefore needs `m ≥ 1/(2ε²δ)`. This is the smallest such precision at
 /// which [`hll::ClassicHllConfidence`] certifies `delta` at `eps` for every
-/// bound up to `⌈1/ε⌉` (18 when none up to 18 does). Pass 1 then raises
-/// the precision by the same rule ([`hll::min_precision`]) when the
-/// source's own bound or a smaller failure probability needs it.
+/// bound up to `⌈1/ε⌉` (18 when none up to 18 does).
 fn hll_precision(eps: f64, delta: f64) -> u8 {
     if !(eps.is_finite() && eps > 0.0 && delta.is_finite() && delta > 0.0) {
         return 18;
@@ -199,6 +197,36 @@ fn hll_precision(eps: f64, delta: f64) -> u8 {
     (start..=18)
         .find(|&p| hll::classic_failure_probability(p, eps, reference) <= delta)
         .unwrap_or(18)
+}
+
+/// The smallest precision, at least `at_least`, whose classic failure
+/// probability at `relative_error` over a source of at most `max_distinct`
+/// distinct items is at most `failure_probability`; `at_least` when none up
+/// to 18 is: [`hll_precision`]'s rule for a source's own distinct bound.
+fn min_precision(
+    relative_error: f64,
+    failure_probability: f64,
+    max_distinct: u64,
+    at_least: u8,
+) -> u8 {
+    (at_least..=18)
+        .find(|&p| {
+            hll::classic_failure_probability(p, relative_error, max_distinct) <= failure_probability
+        })
+        .unwrap_or(at_least)
+}
+
+/// The smallest precision at which classic HLL certifies failure
+/// probability `delta` at `relative_error` over at most `max_distinct`
+/// distinct items ([`hll::ClassicHllConfidence`]); `None` when `delta` is
+/// not in (0, 1), the bound or error is outside the contract, or no
+/// precision up to 18 certifies it.
+fn classic_hll_precision(max_distinct: u32, relative_error: f64, delta: f64) -> Option<u8> {
+    if !(delta.is_finite() && delta > 0.0 && delta < 1.0) {
+        return None;
+    }
+    let model = hll::ClassicHllConfidence::new(max_distinct, relative_error)?;
+    (4..=hll::MAX_PRECISION).find(|&p| model.failure_probability(p).is_some_and(|d| d <= delta))
 }
 
 // KLL.
@@ -348,10 +376,60 @@ fn univmon_params(intent: &AggIntent, eps: f64, delta: f64) -> SketchParams {
     }
 }
 
-#[cfg(test)]
 mod tests {
     use super::*;
     use asap_types::ir::operator::agg_intent::{default_cardinality, default_quantile};
+
+    /// Classic HLL's precision grows until its failure probability over the
+    /// source's distinct bound meets the target, up to 18.
+    #[test]
+    fn classic_hll_precision_grows_for_its_failure_probability() {
+        let p = min_precision(0.05, 0.01, 64, 4);
+        assert!(p > 4);
+        assert!(hll::classic_failure_probability(p, 0.05, 64) <= 0.01);
+        assert!(hll::classic_failure_probability(p - 1, 0.05, 64) > 0.01);
+        assert_eq!(min_precision(0.05, 1e-30, 4096, 12), 12);
+    }
+
+    /// A supported estimator contract supplies a probability, unlike
+    /// generic HLL RSE: sized for δ = 0.01 over at most 128 distinct items,
+    /// the classic guarantee binds to a known failure probability.
+    #[test]
+    fn bounded_classic_hll_has_a_feasible_confidence_target() {
+        let precision =
+            classic_hll_precision(128, 0.05, 0.01).expect("finite confidence-sized HLL");
+        let guarantee = hll::classic_guarantee(precision, Some(0.05), "m")
+            .unwrap()
+            .bind(&|statistic| {
+                let (precision, eps, _) = hll::parse_classic_failure_statistic(statistic)?;
+                Some(hll::classic_failure_probability(precision, eps, 128))
+            });
+        assert!(!guarantee.has_unknown());
+        assert!(guarantee.spec.failure_probability.evaluate().unwrap() <= 0.01);
+        assert_eq!(guarantee.spec.error.evaluate(), Some(0.05));
+    }
+
+    /// Tighter confidence must increase precision or explicitly become unavailable.
+    #[test]
+    fn sizing_and_domain_limits_are_consistent() {
+        let model = hll::ClassicHllConfidence::new(128, 0.05).unwrap();
+        let precision = |delta| classic_hll_precision(128, 0.05, delta);
+        assert!(precision(0.001).unwrap() > precision(0.01).unwrap());
+        assert!(precision(1e-12).is_none());
+        assert!(precision(0.0).is_none());
+        assert!(precision(f64::NAN).is_none());
+        assert!(model.failure_probability(3).is_none());
+        assert!(model.failure_probability(19).is_none());
+        assert!(model.failure_probability(7).is_none());
+        for (n, e) in [
+            (0, 0.05),
+            (hll::MAX_CONTRACT_DISTINCT + 1, 0.05),
+            (128, 0.0),
+            (128, f64::NAN),
+        ] {
+            assert!(hll::ClassicHllConfidence::new(n, e).is_none());
+        }
+    }
 
     /// Each algorithm's predefined list (`parameter_list`) is this sizing
     /// over the error grid ε = 0.1 … 0.001 at failure probability 0.01,
