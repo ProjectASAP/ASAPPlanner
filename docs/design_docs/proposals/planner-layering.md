@@ -271,19 +271,19 @@ lists each stage's input and output types.
 
 | Component | Code | What it is |
 |---|---|---|
-| Memo group | `MemoGroup`, numbered by `MemoGroupId` | One distinct logical sub-expression: its logical node, its child groups, the groups that read it (`parent_groups()`) and the queries that reach it (`reached_by_queries()`). Groups are numbered children first; `DagOfLogicalMemoGroups::query_roots` holds each query's root over groups. |
-| DAG of logical memo groups | `DagOfLogicalMemoGroups` | Stage 0's groups, before any implementation choice: the workload's logical DAG hash-consed (below). |
-| Memo | `Memo` | The groups, each query's root over them, and the candidates for each memo group (`candidates[group]`). Pass 1 creates it from the DAG of logical memo groups; the Pass 2 rules add candidates and groups. |
-| Candidate for a memo group | `CandidateForMemoGroup` | One way to implement a group over child groups. `fused_groups`: for a fused computation, the groups it absorbs beyond the group whose candidate it is; empty otherwise. `root_node`: its own nodes, down to the nodes of the groups it reads. `input_groups`: the groups it reads, whose implementations are chosen separately. `origin`: the rule that made it (`OriginOfCandidateForMemoGroup`, below). `accuracy_budget_parts`: the number of equal shares of the accuracy budget its summaries are sized for, 1 for the whole budget and `n` when it is one of `n` approximate inputs of a query. |
+| Memo group | `MemoGroup`, numbered by `MemoGroupId` | One distinct logical sub-expression: its logical node, its child groups, the groups that read it (`parent_groups()`) and the queries that reach it (`reached_by_queries()`). Groups are numbered children first; `Memo::queries` holds each query's root over groups (`MemoQuery::root`), `Memo::root_groups` the groups the roots read and `Memo::queries_rooted_at` the queries whose root reads a group. |
+| Memo | `Memo` | The groups, each query's root over them, and the candidates for each memo group (`MemoGroup::candidates`). Stage 0 creates it without candidates, before any implementation choice: the workload's logical DAG hash-consed (below). Pass 1 adds each group's initial candidates and the groups they read; the Pass 2 rules add candidates and groups. |
+| Candidate for a memo group | `CandidateForMemoGroup` | One way to implement a group over child groups. `expression`: one operator, with its arguments, whose children are the groups it reads, whose implementations are chosen separately. `logical_properties`: its summary build's parameters, one configuration of the algorithm's predefined list (`parameter_list`); none for an exact operator. `input_requirements`: one per group it reads; Pass 1 leaves them empty. `fused_groups`: for a fused computation, the groups it absorbs beyond the group whose candidate it is; empty otherwise. `origin`: the rule that made it (`OriginOfCandidateForMemoGroup`, below). |
 | Concrete summary-state group | a `MemoGroup` whose node is a `SummaryAgg` or a `SummaryTumblingWindowChain` | One summary state at one size, or one tumbling-window chain at one layout, that several readers may share. A choice several groups depend on, such as a shared size or a tumbling-window grid, is one concrete group per value, when two or more readers may read that value, and each of them gets a candidate reading that group: of two readers needing a KLL with `k ≥ 345` and `k ≥ 200`, both may read a group `KLL(345)`, and the second may also keep its own private `KLL(200)`. Choosing a value is choosing a group, so the memo has no separate type for such a choice. The other Pass 2 rules add groups too (below). |
 
 **Stage 0: hash-consing.** Hash-consing merges structurally equal nodes into
 one. It makes no implementation choice, so this section counts it as Stage 0
 (its output); the code runs it as Stage 1 starts, which is why
 [Stage inputs and outputs](#stage-inputs-and-outputs-whole-workload-candidates-and-memo)
-lists `memo_of_queries` with Pass 1. `memo_of_queries` runs
-`share_common_sub_dags` (`crates/stage0-memo/src/cse.rs`) over the frontends'
-roots and numbers the shared nodes as groups. Two structurally equal nodes
+lists `memo_of_queries` with Pass 1. `memo_of_queries`
+(`crates/stage0-memo/src/lib.rs`) visits the frontends' roots children first
+and finds or adds each node's group with `Memo::find_or_add_group`, whose
+expression equality is in `crates/types/src/stages/logical/memo/hash_consing.rs`. Two structurally equal nodes
 become one group only when sharing them is legal, that is, when every reader
 of the shared node reads the rows it would read alone. Equal nodes are
 interned children first, so they always read one input, and a node is legal
@@ -330,8 +330,8 @@ instead of whole candidates:
 
 | Stage | Over the memo |
 |---|---|
-| 0 | Hash-conses the frontends' roots into groups (`DagOfLogicalMemoGroups`). |
-| 1, Pass 1 | Emits the candidates for each memo group: exact, exact accumulator, each summary family and size, fused computations. |
+| 0 | Hash-conses the frontends' roots into groups: a `Memo` without candidates (`memo_of_queries`). |
+| 1, Pass 1 | Emits the candidates for each memo group: exact, exact accumulator, each summary family with one build per configuration of its `parameter_list`, fused computations. |
 | 1, Pass 2 | Each rule adds candidates to groups. Identical expression is group identity (nothing to add). Summary capability: a reader reading a concrete summary-state group shared with other groups, one group per shared size. Window composition: tumbling windows, and the newest tumbling windows of a shared chain, one concrete group per chain layout (grid, longest window, size). Rollup and exact top-k reuse: a candidate that reads another group (a finer grouping, a ranking). Scan widening: a reader of a metric's scans widened to a shared label set. |
 | 2 | Chooses each candidate's materialization, once for a group however many parents read it. A scan read through one window is built once; one read through different windows may also be read per reader. |
 | 3 | Chooses one candidate per needed group, and costs each candidate's own nodes, per node, given its readers; plan-level charges are added once per plan. A source's retained raw data is a concrete group `raw window(S, H)`, one per distinct lookback `H` of the source's query-time readers (a window plus any offset); its storage of `H` of raw data is charged once when it is chosen (planned). |
@@ -364,28 +364,36 @@ operands. A unique key is not needed (the PromQL planning path happens to
 give this output one, series identity and timestamp); an unordered `LIMIT`
 would stay one group per reader.
 
-**Step 2, Stage 1 Pass 1.** `pass1_memo` gives G2 and G4 seven
-candidates each. G0, G1, G3 and G5 get one each, their own node. G6 gets
-one: `avg` computed from exact sum and count accumulators. The memo now has
-19 candidates.
+**Step 2, Stage 1 Pass 1.** `pass1_memo` adds 12 groups, 19 in all, with
+36 candidates. Every group of step 1 keeps its own expression as its exact
+candidate. Each summary state is a group with one build per configuration of
+its algorithm's `parameter_list`, and each readout is a group over it:
 
-| Candidate of G2 or G4 | `accuracy_budget_parts` |
-|---|---|
-| Exact | 1 |
-| KLL, `k` 345 (`failure_probability` 0.001) | 1 |
-| KLL, `k` 746 (`failure_probability` 0.0005) | 2 |
-| DDSketch, `alpha` 0.01 | 1 |
-| DDSketch, `alpha` 0.004963 | 2 |
-| KLL, `k` 567 (`failure_probability` 1e-7) | 1 |
-| KLL, `k` 1184 (`failure_probability` 5e-8) | 2 |
+| Group | Logical sub-expression | Reads | Candidates |
+|---|---|---|---|
+| G7 | KLL state, per series (`SummaryAgg`) | G1 | 7 builds: `k` 26, 52, 132, 269, 547, 1404, 2863 |
+| G8, G11 | KLL readouts `quantile 0.5` and `quantile 0.9` (`SummaryEstimate`) | G7 | 1 each |
+| G9 | DDSketch state, per series (`SummaryAgg`) | G1 | 7 builds: `alpha` 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001 |
+| G10, G12 | DDSketch readouts `quantile 0.5` and `quantile 0.9` | G9 | 1 each |
+| G13, G14 | exact `sum` and `count` accumulator states by `job` (`SummaryAgg`) | G5 | 1 each |
+| G15, G16 | their readouts (`FinalizeExactAccumulator`) | G13, G14 | 1 each |
+| G17 | G16's count cast to `Float64` (`Project`) | G16 | 1 |
+| G18 | `G15 / G17` | G15, G17 | 1 |
 
-The query has two approximate inputs (G2 and G4), so each summary comes
-sized for the whole accuracy budget and for a half of it. Pass 1 offers each
-KLL at two scopes: per value (the first two KLL candidates) and for the
-whole result (the last two), where the per-value `failure_probability` is the
-target's 0.001 divided over the source's 10,000 series. The memo stands for 7 × 7 = 49 candidate DAGs, all different:
-- 16 = 4 × 4 use only `accuracy_budget_parts` 1.
-- 33 size at least one operand's summary for half of the budget.
+G2 and G4 get 3 candidates each: exact, and a `Project` renaming the KLL or
+the DDSketch readout (G8 or G10, G11 or G12) to the group's columns. G6 gets
+2: exact, and a `Project` over G18, `avg` computed from exact `sum` and
+`count` accumulators. G0, G1, G3 and G5 keep their one. Pass 1 reads no
+accuracy target: each build's error follows from its parameters, and Pass 2
+gives each readout its required accuracy. Both quantiles read one KLL state
+group and one DDSketch state group, so a candidate DAG builds each family
+at most once. Choosing one candidate per group a DAG reaches, the memo
+stands for 282 = 2 × (1 + 2 × 7 + 2 × 7 + 7 + 7 + 2 × 7 × 7) candidate
+DAGs: G6 exact or from accumulators, times G2 and G4 both exact, one exact
+and the other from KLL or DDSketch, both from one family, or one from each.
+
+Steps 3 and 4, and their rows in the table after step 4, predate this Pass 1
+sizing; their counts are not recomputed here.
 
 **Step 3, Stage 1 Pass 2: window composition.** The groups stay the same 7.
 G2 and G4 get 120 `TumblingWindows` candidates each (6 summary candidates × 20 tumbling window
@@ -402,10 +410,9 @@ all; the memo has 259 candidates.
   accumulators; and 2 `FinalizeExactAccumulator` groups (G6's sum and count
   readouts).
 - 1738 candidates. G2 and G4 have 691 each: 10 `Pass1` (the 7 above and
-  3 copies of the `accuracy_budget_parts` 1 KLL `k` 567 that the state-configuration
-  rule rewrote to the shared configurations with `k` 567, 1156 and 1184; each
-  keeps `accuracy_budget_parts` 1, and the `k` 1184 one composes the same DAG as the
-  `accuracy_budget_parts` 2 KLL),
+  3 copies of the KLL `k` 567 that the state-configuration
+  rule rewrote to the shared configurations with `k` 567, 1156 and 1184; the
+  `k` 1184 one composes the same DAG as the KLL `k` 1184),
   336 `TumblingWindows` and 345 `SharedBuild`. G6 has 3: `Pass1`, `SummaryResult` and
   `SharedBuild`.
 - Enumeration stops at the former `stage_pipeline`'s default limit of 1,000 candidate
@@ -414,14 +421,16 @@ all; the memo has 259 candidates.
 | After | Groups | Candidates for memo groups | Candidate DAGs |
 |---|---|---|---|
 | Stage 0 | 7 | – (each group is its own node) | 1 |
-| Stage 1, Pass 1 | 7 | 19 | 49 = 16 whole-budget + 33 budget-share variants |
+| Stage 1, Pass 1 | 19 | 36 | 282 |
 | Stage 1, Pass 2 window composition | 7 | 259 | over 1,000 (enumeration stopped at its limit) |
 | Stage 1, Pass 2 rules and concrete summary-state groups | 354 | 1738 | over 1,000 (enumeration stopped at its limit) |
 
 These numbers are the production planner's, read from the stage-pipeline
 document `tools/dag-viewer/examples/memo-ratio-of-quantiles.json` (made by
 the former `stage_pipeline` from `tools/dag-viewer/memo-examples/promql/ratio-of-quantiles-5m.json`,
-with accuracy guarantees enforced and the `aws-fargate-us-east-1` cost model).
+with accuracy guarantees enforced and the `aws-fargate-us-east-1` cost model). The Stage 1, Pass 1 row is
+`memo_of_queries` then `pass1_memo` run on that workload with the
+executor's summary families, at the current Pass 1 sizing.
 `crates/integration-tests/tests/memo_enumeration.rs` lowers the query as
 production does (with the series-identity column) and reads the memo from the
 production run. It asserts the Stage 0 and Pass 1 numbers above. The last
@@ -473,18 +482,16 @@ that vector.
 | Group needed only under some choices | A group joins the choice only when a chosen candidate reads it. | A `SummaryTumblingWindowChain` group is needed only when a `SharedBuild` candidate reading it is chosen; a choice of `Pass1` candidates needs none of the 347 added groups. |
 | Fused candidate | The groups a fused candidate implements are computed inside it and never become pending. | None (the example has no fused computation). |
 
-In Pass 1 of the example the count happens to be a product, 7 × 7,
-because only G2 and G4 have more than one candidate and both read only G1.
+In Pass 1 of the example the count is not a product either: G2 and G4
+read the KLL state group G7 and the DDSketch state group G9 through their
+readouts, so a choice that reads one family for both picks its build once
+(step 2).
 
 **Correctness.** Every recorded choice composes unless the memo has a
-construction bug (`ChildNotInCandidate`). For Pass 1 of the example
-each of the 49 choices composes a different DAG. The whole-budget
-choices and the whole-workload plans are not the same set: 9 of the 27
-whole-workload plans are memo DAGs (those that give both `quantile 0.5` the
-same choice, since the memo has one group for them), and 7 of the 16
-whole-budget choices take the KLL sized for the whole result, which the
-whole-workload inventory does not offer. `memo_enumeration.rs` checks this
-(also on a three-query workload). `enumerate` counts
+construction bug (`ChildNotInCandidate`). For Pass 1 of the example,
+`memo_enumeration.rs` checked that each choice composes a different DAG
+(also on a three-query workload); that check predates the current Pass 1
+sizing. `enumerate` counts
 choices, not DAGs: two candidates of a group that differ only in what
 recomposing re-derives compose equal DAGs. It does not check validity: input
 contracts, accuracy at the query roots, Stage 2 legality and Stage 3
@@ -521,12 +528,12 @@ candidates is in `crates/stage3-plan-selection/src/` (`lib.rs`, `groups/`, `milp
 
 | Step | Entry point | Path |
 |---|---|---|
-| Stage 0 | `memo_of_queries` → `DagOfLogicalMemoGroups`, `MemoGroup`, `MemoGroupId` | `stage0.rs` (the types: `asap_types::stages`); hash-consing is `share_common_sub_dags` in `stage0/cse.rs` |
-| Pass 1 | `pass1_memo` → `Memo`, the one entry: inside it, the computation targets (walking the memo groups, less the summaries the deployment does not support; `ComputationTarget` is Pass 1's private working type), then each target's ways to compute added as candidates of the groups, a summary with one build per configuration of its `parameter_list` | `stage1-pass1-per-computation-candidates/src/lib.rs`; `computation_targets.rs`; `candidates.rs` |
+| Stage 0 | `memo_of_queries` → `Memo` (without candidates), `MemoGroup`, `MemoGroupId` | `stage0-memo/src/lib.rs` (the types: `asap_types::stages`); hash-consing is `Memo::find_or_add_group` in `types/src/stages/logical/memo/mod.rs`, its expression equality in `memo/hash_consing.rs` |
+| Pass 1 | `pass1_memo` → `Memo`, the one entry: inside it, the computation targets (walking the memo groups, less the summaries the deployment does not support; `ComputationTarget` is Pass 1's private working type), then each target's ways to compute added as candidates of the groups, a summary with one build per configuration of its `parameter_list` | `stage1-pass1-per-computation-candidates/src/lib.rs`; `computation_targets.rs`; `candidates/` (`mod.rs`, `pending.rs`, `measure_output.rs`); `summary_realization.rs` builds the summary inputs (the sketch algorithms that serve an intent, each row's update) |
 | Memo types | `Memo`, `MemoGroup`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
 | Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, from Pass 1's output. It calls in this order: 1. window composition for every legal tumbling-window width (`add_local_window_composition`); 2–9. the rules in `pass2/memo/rules/`: scan widening, summary inputs, top-k reuse, finer aggregate, rollup, window rollup, summary results, state configurations; 10. `add_shared_summary_state_groups`, the shared builds | `stage1-pass2-reuse-candidates/src/lib.rs` (`LogicalASAPMemoCandidates` itself: `asap_types::stages`); `pass2/memo/window_candidates.rs`, `pass2/memo/rules/`, `pass2/memo/state_groups.rs`, `pass2/memo/shared_configurations.rs` |
 | Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalASAPDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (re-exported at the crate root) |
-| Production memo build and search | The facade's `run_planning` builds the DAG of logical memo groups and runs Pass 1 (`pass1_memo`) once; then `generate_logical_asap_memo_candidates`, `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`, once each; `select_plan` builds the plan. Behind `select_plan`: the group selection MILP (#1095), `groups/` and `milp/` | `crates/planner/src/run.rs`; `crates/stage3-plan-selection/src/lib.rs` |
+| Production memo build and search | The facade's `run_planning` builds Stage 0's memo (`memo_of_queries`) and runs Pass 1 (`pass1_memo`) once; then `generate_logical_asap_memo_candidates`, `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`, once each; `select_plan` builds the plan. Behind `select_plan`: the group selection MILP (#1095), `groups/` and `milp/` | `crates/planner/src/run.rs`; `crates/stage3-plan-selection/src/lib.rs` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 
@@ -837,14 +844,12 @@ decides which builds each reader can use. Pass 2 never resizes a summary for its
 tumbling-window chain inherits the size of the build it replaces (a merge of equal-size
 tumbling windows keeps the guarantee when the family's merged error is `Exact` or
 `AsIfBuiltOverUnion`), and a build shared by several readers takes the
-strictest reader's size, one state group per distinct size. The failure
-probability is part of Pass 1's size too
-(`pass1_memo`): each approximate input
-of a candidate with `n` budget parts is sized for `δ / (n · V)`, the smallest
-over the queries reaching its group, where `V` is the number of values the
-query's accuracy scope covers (1 per value, at most `⌊1 / share⌋` for a record
-share, and `G` from the workload-derived bounds for the whole result), and a
-classic HLL's precision is raised for its source's declared distinct bound.
+strictest reader's size, one state group per distinct size. Pass 1
+(`pass1_memo`) reads no accuracy target, so no failure probability sizes its
+builds: each build's error follows from its configuration, and Pass 2 gives
+each readout its required accuracy, turning a whole-result failure
+probability into a per-value one with the number of values one evaluation
+returns.
 Stage 3 never resizes: a candidate whose sizes miss the composed accuracy
 target is rejected.
 Pass 1 creates no merge nodes: each candidate summarizes exactly its own
