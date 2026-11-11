@@ -311,8 +311,8 @@ rule's origin, and gives each reader a candidate that reads that group.
 | `OriginOfCandidateForMemoGroup` | Added by | Candidates |
 |---|---|---|
 | `Pass1` | `pass1_memo` (`stage1-pass1-per-computation-candidates`: `computation_targets.rs`, `candidates/`) | Every Pass 1 way to compute the group's measures: exact, exact accumulator, each summary algorithm with one build per configuration of its predefined list (`parameter_list`), and fused computations. A fused candidate lists the groups of the operators it replaces in `fused_groups`; those groups keep their own candidates for their other readers. |
-| `TumblingWindows` | Chain groups: `add_chain_groups` (`stage1-pass2-reuse-candidates/src/rules/chains.rs`) | A chain group `SummaryTumblingWindowChain[w](X)` per width the reaching queries' evaluation grids allow, one build per surviving θ, the `TimeShift`/`TimeRange` groups over it, and the `SummaryMerge` over them in the state group. |
-| `TopKReuse` | Exact top-k reuse: `add_topk_candidates` (`stage1-pass2-reuse-candidates/src/rules/topk.rs`) | One ranking (`Limit(k_max)` over `Sort`), and each top-k reading its first `k` rows from it. |
+| `TumblingWindows` | Chain groups: `add_chain_groups` (`stage1-pass2-reuse-candidates/src/rules/chains.rs`) | A chain group `SummaryTumblingWindowChain[w](X)` per width the reaching queries' evaluation grids allow, one build per surviving θ, the `TimeShift`/`TimeRange` groups over it, and the `SummaryMerge` over them in the state group. A chain has an edge only into a group whose evaluation grid its width divides, so a 15 s chain never serves a state also read every 10 s. |
+| `TopKReuse` | Exact top-k reuse: `add_topk_candidates` (`stage1-pass2-reuse-candidates/src/rules/topk.rs`) | For each exact top-k, `Aggregate[TopK k]` over the ranked rows of the top-k group of the same input and partition with the largest `k`, partitioned by that group's leading key columns: the `k` highest of the `k_max` highest rows are the `k` highest. |
 | `Rollup` | Rollup from the finest common group: `add_rollup_candidates` (`stage1-pass2-reuse-candidates/src/rules/rollup.rs`) | A coarse group computed from a finer group's values or states (through a compensating `Filter` on the finer group's keys), and the builds of a cluster's finest common group. |
 | `SummaryResult` | `factor_summary_results` (`pass2/memo/rules/summary_results.rs`) | A summary readout factored out of a composite implementation, so that other readers can read it. |
 | `SharedBuild` | Summary capability: `add_shared_summary_state_groups` (`pass2/memo/state_groups.rs`), Pass 2's last step | For each build made two or more times (by different candidates, or twice within one), one concrete summary-state group with one `SharedBuild` candidate; and for each candidate making such builds, one `SharedBuild` copy that reads the groups instead of building its own states. |
@@ -1224,8 +1224,10 @@ agree, and the interval and a declared phase are multiples of the window:
 `m[5m]` every 5 minutes is one tumbling 5-minute window maintained at
 ingestion time and read at each evaluation, as a one-tumbling-window chain would be, while `m[20s]` every 20 s at phase
 5 s, or every 30 s, is not kept whole (Pass 2 offers 5 s or 10 s tumbling windows). A
-reader whose phase is not declared is taken to evaluate at multiples of its
-interval, as for a tumbling-window chain.
+reader whose phase is not declared has no known evaluation grid
+(`QueryRecurrence::evaluation_grid_ms` is `None`: Prometheus staggers rule groups
+by a hash, so a fixed interval does not mean phase 0), and Pass 2 adds no
+tumbling-window chain for a state it reads.
 
 #### Physical operator implementation
 
