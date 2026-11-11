@@ -3,7 +3,7 @@
 //! `memo_aggregate_coverage`) build their examples from.
 use std::time::Duration;
 
-use crate::ir::operator::arguments::{AtModifier, Reduction, Source, TimeShift};
+use crate::ir::operator::arguments::{AtModifier, Reduction, Source, SourceColumn, TimeShift};
 use crate::ir::operator::AggIntent;
 use crate::ir::scalar::ColumnRef;
 use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
@@ -35,6 +35,28 @@ pub fn scan(
         predicates: predicates.into_iter().map(Predicate).collect(),
         schema: Schema::with_time_index(fields, 0, vec![]),
     })
+}
+
+/// Column `column` of scan `scan_ordinal` of the series `metric`.
+pub fn series_column(metric: &str, scan_ordinal: u32, column: &str) -> SourceColumn {
+    SourceColumn {
+        source: Source::TimeSeries {
+            metric: metric.into(),
+        },
+        scan_ordinal,
+        column: column.into(),
+    }
+}
+
+/// Column `column` of scan `scan_ordinal` of the table `table`.
+pub fn table_column(table: &str, scan_ordinal: u32, column: &str) -> SourceColumn {
+    SourceColumn {
+        source: Source::Table {
+            table_ref: table.into(),
+        },
+        scan_ordinal,
+        column: column.into(),
+    }
 }
 
 pub fn filter(pred: ScalarExpr<MemoGroupId>, child: MemoGroupId) -> Operator<MemoGroupId> {

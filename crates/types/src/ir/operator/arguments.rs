@@ -187,9 +187,8 @@ impl Source {
 }
 
 /// A column of one scan of a source (a `Scan`'s metric or table), by name:
-/// the lineage of a column copied from it (`ColumnLineage::SourceColumn`, a
-/// memo-group property in `crate::stages`), and the key an aggregate
-/// coverage's selection names a column by.
+/// the lineage of a column copied unchanged from a scan, and the key a
+/// selection names a column by.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceColumn {

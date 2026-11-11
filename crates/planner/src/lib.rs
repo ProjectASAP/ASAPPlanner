@@ -57,7 +57,6 @@ pub use asap_stage3_plan_selection::{
     AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, Selection,
 };
 pub use asap_types::deployment_capabilities::{DeploymentCapabilities, SupportedSummary};
-pub use asap_types::ir::operator::arguments::SourceColumn;
 pub use asap_types::ir::properties::selection::{
     Constraint, IntervalConstraintLimit, SelectionBox,
 };

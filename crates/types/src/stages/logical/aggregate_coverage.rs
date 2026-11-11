@@ -160,9 +160,7 @@ fn stored_coverage<'m>(input: &MemoGroupAsInput<'m>) -> Option<&'m AggregateCove
 /// ([`MergeInputRule::MayOverlap`] in the family-capability table) may
 /// also merge overlapping selections, and a counter family
 /// ([`MergeInputRule::DisjointInTime`]) needs disjoint time windows.
-/// `group` is the memo group `operator` computes.
 pub(super) fn aggregate_coverage<'m>(
-    group: MemoGroupId,
     operator: &Operator<MemoGroupAsInput<'m>>,
 ) -> Result<AggregateCoverage, CoverageError> {
     let as_built = |op: &ASAPOp<MemoGroupAsInput<'m>>| -> ASAPOp<Built<'m>> {
@@ -172,7 +170,7 @@ pub(super) fn aggregate_coverage<'m>(
         Operator::NonASAP(NonASAPOp::Aggregate { child, .. }) => {
             let top =
                 unlifted(&operator.map_children(|input| InputOrTemporaryBuild::Input(*input)));
-            of_aggregate(group, &InputOrTemporaryBuild::Input(*child), None, |_| top)
+            of_aggregate(&InputOrTemporaryBuild::Input(*child), None, |_| top)
         }
         Operator::NonASAP(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeShift { .. })
             if operator.output_kind() == OperatorResultKind::State =>
@@ -180,12 +178,12 @@ pub(super) fn aggregate_coverage<'m>(
             of_window_selection(operator)
         }
         Operator::NonASAP(_) => match selected_build(operator)? {
-            Some(build) => of_summary_agg(group, &build),
+            Some(build) => of_summary_agg(&build),
             None => Err(CoverageError::NoCoverage),
         },
         Operator::ASAP(
             op @ (ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }),
-        ) => of_summary_agg(group, &as_built(op)),
+        ) => of_summary_agg(&as_built(op)),
         Operator::ASAP(ASAPOp::SummaryMerge {
             children, group_by, ..
         }) => {
@@ -371,8 +369,8 @@ fn regrouped(
                         .fields
                         .get(key)
                         .is_some_and(|field| field.is_plain())
-                        && state.column_lineage.get(key).is_some()
-                        && state.column_lineage.get(key) == rows_lineage.get(column)
+                        && matches!(state.column_lineage.get(key),
+                            Some(lineage) if Some(lineage) == rows_lineage.get(column))
                 })
                 .ok_or(CoverageError::NotAGroupKey { key })
         })
@@ -419,20 +417,20 @@ fn build_input<'m>(state: &MemoGroupAsInput<'m>) -> Option<MemoGroupAsInput<'m>>
 /// reads ([`build_input`]), as a selection names it.
 fn time_column_of_build_input(state: &MemoGroupAsInput<'_>) -> Option<SourceColumn> {
     let rows = build_input(state)?;
-    source_column(
-        &rows.group_properties().column_lineage,
-        rows.schema().time_index?,
-    )
+    let lineage: Vec<Option<ColumnLineage>> = rows
+        .group_properties()
+        .column_lineage
+        .iter()
+        .cloned()
+        .map(Some)
+        .collect();
+    source_column(&lineage, rows.schema().time_index?)
 }
 
 /// The coverage of `build`, a `SummaryAgg` or `SummaryTumblingWindowChain`
 /// over inputs (or over an input a rule built over them): a chain covers
-/// what its `SummaryAgg` over the same input would. `group` is the memo
-/// group being derived.
-fn of_summary_agg(
-    group: MemoGroupId,
-    build: &ASAPOp<Built<'_>>,
-) -> Result<AggregateCoverage, CoverageError> {
+/// what its `SummaryAgg` over the same input would.
+fn of_summary_agg(build: &ASAPOp<Built<'_>>) -> Result<AggregateCoverage, CoverageError> {
     let (ASAPOp::SummaryAgg {
         child,
         summary_type: family,
@@ -451,7 +449,7 @@ fn of_summary_agg(
     else {
         unreachable!("called on a SummaryAgg or a chain");
     };
-    of_aggregate(group, child, filter.as_ref(), |residual_filter| {
+    of_aggregate(child, filter.as_ref(), |residual_filter| {
         Operator::ASAP(ASAPOp::SummaryAgg {
             child: None,
             summary_type: family.clone(),
@@ -466,9 +464,8 @@ fn of_summary_agg(
 /// down through the liftable operators of its inputs' operators.
 /// `filter` is the aggregate's own row filter (a `SummaryAgg`'s), and
 /// `unlifted_top` makes the aggregate's unlifted operator from that filter's
-/// residual. `group` is the memo group being derived.
+/// residual.
 fn of_aggregate<'m>(
-    group: MemoGroupId,
     child: &Built<'m>,
     filter: Option<&Predicate<Built<'m>>>,
     unlifted_top: impl FnOnce(Option<Predicate<Option<MemoGroupId>>>) -> Operator<Option<MemoGroupId>>,
@@ -500,7 +497,7 @@ fn of_aggregate<'m>(
     let InputOrTemporaryBuild::Input(base_input) = &base else {
         unreachable!("a rule builds only liftable operators over real inputs");
     };
-    let top = lineage_at_top(group, &base_input.group_properties().column_lineage, &chain);
+    let top = lineage_at_top(&base_input.group_properties().column_lineage, &chain);
     let top = top.as_slice();
     // Top-down: decide which conjuncts are lifted. `kept[d]` is the residual
     // of `chain[d]` when it is a `Filter`.
@@ -600,7 +597,7 @@ fn of_aggregate<'m>(
 /// bottom. A conjunct on a column [`source_column`] cannot name stays.
 fn residual(
     pred: &Predicate<Built<'_>>,
-    top: &[ColumnLineage],
+    top: &[Option<ColumnLineage>],
     above: &[Operator<Built<'_>>],
     lifted: &mut BTreeMap<ColumnId, Constraint>,
 ) -> Option<Predicate<Option<MemoGroupId>>> {
@@ -667,29 +664,24 @@ fn column_at_top<C>(mut column: ColumnId, above: &[Operator<C>]) -> Option<Colum
 /// The lineage of the aggregate's input columns: the lineage of `base`
 /// (the group below the liftable `chain`, top down), carried up through
 /// it: a `Filter`, `TimeRange` or `TimeShift` keeps its input's, and a
-/// `Project`'s is [`project_lineage`]'s. The chain may hold a rule's
-/// temporary build, which is no memo group, so a column computed in it is
-/// `Computed` by `group`, the memo group being derived.
-fn lineage_at_top<C>(
-    group: MemoGroupId,
-    base: &[ColumnLineage],
-    chain: &[Operator<C>],
-) -> Vec<ColumnLineage> {
-    let mut lineage = base.to_vec();
+/// `Project`'s is [`project_lineage`]'s. `None` is a column computed in the
+/// chain, which no selection names.
+fn lineage_at_top<C>(base: &[ColumnLineage], chain: &[Operator<C>]) -> Vec<Option<ColumnLineage>> {
+    let mut lineage: Vec<Option<ColumnLineage>> = base.iter().cloned().map(Some).collect();
     for link in chain.iter().rev() {
         if let Operator::NonASAP(NonASAPOp::Project { cols, .. }) = link {
-            lineage = project_lineage(group, cols, &lineage);
+            lineage = project_lineage(cols, &lineage);
         }
     }
     lineage
 }
 
 /// The source column a selection names column `column` by: its lineage, one
-/// of `lineage` (per column). `None` when the column is `Computed`, or
-/// another column has the same lineage (`Project [a AS k, a AS k2]`), so a
-/// selection cannot name it apart.
-fn source_column(lineage: &[ColumnLineage], column: ColumnId) -> Option<SourceColumn> {
-    let ColumnLineage::SourceColumn(source_column) = lineage.get(column)? else {
+/// of `lineage` (per column; `None` computed). `None` when the column is
+/// computed, or another column has the same lineage (`Project [a AS k, a AS
+/// k2]`), so a selection cannot name it apart.
+fn source_column(lineage: &[Option<ColumnLineage>], column: ColumnId) -> Option<SourceColumn> {
+    let Some(ColumnLineage::SourceColumn(source_column)) = lineage.get(column)? else {
         return None;
     };
     let namesakes = lineage

@@ -31,8 +31,10 @@ pub enum ResolveError {
 pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<ColumnId, ResolveError> {
     match col {
         // A name must be unique: after a join `k` could be either side's.
-        // A schema carries no qualifier; the front end binds a qualified
-        // name with its own scope before it calls this.
+        // A schema carries no qualifier, so a qualified name that reaches
+        // here (an extension intent's payload column, a SQL temporal
+        // aggregate's argument) resolves by its unique name; the front end
+        // binds every other qualified name with its own scope.
         ColumnRef::Named(name) | ColumnRef::Qualified { name, .. } => {
             match schema.fields.iter().filter(|c| &c.name == name).count() {
                 0 => Err(ResolveError::NotFound {
@@ -70,14 +72,6 @@ pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<ColumnId, 
             }),
         ColumnRef::Wildcard => Err(ResolveError::WildcardNotPositional),
     }
-}
-
-/// Resolve every entry, short-circuiting on the first error.
-pub fn resolve_column_refs(
-    cols: &[ColumnRef],
-    schema: &Schema,
-) -> Result<Vec<ColumnId>, ResolveError> {
-    cols.iter().map(|c| resolve_column_ref(c, schema)).collect()
 }
 
 #[cfg(test)]

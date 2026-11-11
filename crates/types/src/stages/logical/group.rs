@@ -108,18 +108,16 @@ pub enum MemoGroupError {
 /// Whether `operator` is a valid expression over its input groups
 /// ([`MemoGroupAsInput`]), never a node tree: its output schema derives, its
 /// inputs pass validation, and a merge reads only states it may merge.
-/// `group` is the memo group the expression computes (new or existing).
 /// Returns the output schema and, for a merge, the coverage its check
 /// derived.
 pub(super) fn validate_expression_over_input_groups(
-    group: MemoGroupId,
     operator: &Operator<MemoGroupAsInput<'_>>,
 ) -> Result<(Schema, Option<AggregateCoverage>), MemoGroupError> {
     let schema = operator.output_schema()?;
     operator.validate_inputs()?;
     // A merge is valid only over states of one definition it may merge.
     let merge_coverage = match operator {
-        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => Some(aggregate_coverage(group, operator)?),
+        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => Some(aggregate_coverage(operator)?),
         _ => None,
     };
     Ok((schema, merge_coverage))
@@ -135,8 +133,8 @@ pub(super) fn derive_group_properties(
     expression: &Operator<MemoGroupId>,
 ) -> Result<GroupProperties, MemoGroupError> {
     let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
-    let (schema, merge_coverage) = validate_expression_over_input_groups(group, &operator)?;
-    let aggregate_coverage = merge_coverage.or_else(|| aggregate_coverage(group, &operator).ok());
+    let (schema, merge_coverage) = validate_expression_over_input_groups(&operator)?;
+    let aggregate_coverage = merge_coverage.or_else(|| aggregate_coverage(&operator).ok());
     let (column_lineage, column_signs) =
         column_lineage_and_signs(group, &operator, &schema, &memo.source_facts);
     Ok(GroupProperties {

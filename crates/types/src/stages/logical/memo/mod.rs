@@ -182,7 +182,7 @@ impl Memo {
                 memo: self,
                 group_id,
             });
-        let (schema, _) = validate_expression_over_input_groups(group, &operator)
+        let (schema, _) = validate_expression_over_input_groups(&operator)
             .map_err(CandidateError::NotValidOverInputGroups)?;
         let result_kind = operator.output_kind();
         let group_properties = &self.groups[group.0 as usize].group_properties;

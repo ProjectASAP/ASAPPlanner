@@ -60,7 +60,7 @@ pub enum ValueSign {
 /// they hold the same values: the same column of the same scan, or the
 /// same computation. Aggregate coverage names a selection's column by its
 /// source column.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ColumnLineage {
     /// Copied unchanged from a column of one scan of a source.
     SourceColumn(SourceColumn),
@@ -79,12 +79,24 @@ use ValueSign::{NonNegative, NonPositive, Unknown};
 type Input<'m> = MemoGroupAsInput<'m>;
 
 /// One output column's lineage and sign.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 struct ColumnProperties {
     /// `None` for a column the group being derived computes: its lineage
     /// is `Computed` by that group at the column's final position.
     lineage: Option<ColumnLineage>,
     sign: ValueSign,
+}
+
+/// A column the operator computes, with no sign known.
+impl Default for ColumnProperties {
+    fn default() -> Self {
+        Self::computed(Unknown)
+    }
+}
+
+/// `columns` columns the operator computes, with no sign known.
+fn all_computed(columns: usize) -> Vec<ColumnProperties> {
+    vec![ColumnProperties::default(); columns]
 }
 
 impl ColumnProperties {
@@ -119,7 +131,7 @@ pub(super) fn column_lineage_and_signs(
     source_facts: &BTreeMap<String, SourceFacts>,
 ) -> (Vec<ColumnLineage>, Vec<ValueSign>) {
     let columns = match operator {
-        Operator::NonASAP(op) => non_asap_columns(group, op, output, source_facts),
+        Operator::NonASAP(op) => non_asap_columns(op, output, source_facts),
         Operator::ASAP(op) => asap_columns(op, output),
     };
     debug_assert_eq!(
@@ -182,13 +194,11 @@ fn after_left_scans(
 }
 
 fn non_asap_columns(
-    group: MemoGroupId,
     op: &NonASAPOp<Input<'_>>,
     output: &Schema,
     source_facts: &BTreeMap<String, SourceFacts>,
 ) -> Vec<ColumnProperties> {
     use NonASAPOp::*;
-    let unknown = || vec![ColumnProperties::computed(Unknown); output.fields.len()];
     match op {
         // Each column copied from its source, with the sign its source's
         // facts declare (a histogram's or summary's series reads its
@@ -219,10 +229,10 @@ fn non_asap_columns(
                 })
                 .collect()
         }
-        Values { .. } => unknown(),
+        Values { .. } => all_computed(output.fields.len()),
         // The scalar's value, every other column `Unknown`.
         PromqlVectorFromScalar(expr) => {
-            let mut columns = unknown();
+            let mut columns = all_computed(output.fields.len());
             if let Ok(value) = resolve_column_ref(&ColumnRef::SampleValue, output) {
                 columns[value] = ColumnProperties::computed(expression_sign(expr, &[]));
             }
@@ -240,14 +250,14 @@ fn non_asap_columns(
         // The relabeled column is written; every other column is copied.
         PromqlRelabel { dst, child, .. } => {
             let mut columns = columns_of(child);
-            let written = ColumnProperties::computed(Unknown);
+            let written = ColumnProperties::default();
             match child.schema().column_id(dst) {
                 Some(column) => columns[column] = written,
                 None => columns.push(written),
             }
             columns
         }
-        Project { cols, child, .. } => project_columns(group, cols, child),
+        Project { cols, child, .. } => project_columns(cols, child),
         Aggregate {
             reduction,
             measures,
@@ -259,8 +269,8 @@ fn non_asap_columns(
                 // The ranked rows, projected: each column copied.
                 let name = topk_output_name(*k, output_names);
                 return match ranked_row_projection(child, reduction, &name) {
-                    Ok(cols) => project_columns(group, &cols, child),
-                    Err(_) => unknown(),
+                    Ok(cols) => project_columns(&cols, child),
+                    Err(_) => all_computed(output.fields.len()),
                 };
             }
             aggregate_columns(child, reduction, measures, output)
@@ -279,14 +289,15 @@ fn non_asap_columns(
         Concat { children } => agreed(&children.iter().map(columns_of).collect::<Vec<_>>()),
         SQLWindowFunc { child, .. } => {
             let mut columns = columns_of(child);
-            columns.push(ColumnProperties::computed(Unknown));
+            columns.push(ColumnProperties::default());
             columns
         }
         // The output side's columns (the left's; the right's, the "many"
         // side, for `group_right`), its value computed per the operator,
         // then the right side's labels the match adds. A matched label has
         // equal values on both sides, so it takes the output side's lineage
-        // and sign; `or`, a union, keeps what both sides agree on. A label
+        // and sign; `or`, a union, keeps what both sides agree on (a label
+        // one side lacks is computed). A label
         // `group_left(...)` names comes from the right ("one") side and one
         // `group_right(...)` names from the left, overwriting a column of
         // that name. The output does not concatenate both sides' columns,
@@ -301,7 +312,7 @@ fn non_asap_columns(
                     .schema()
                     .column_id(name)
                     .and_then(|column| columns.get(column).cloned())
-                    .unwrap_or(ColumnProperties::computed(Unknown))
+                    .unwrap_or_default()
             };
             let grouping = operator
                 .vector_match
@@ -343,8 +354,16 @@ fn non_asap_columns(
                     BinaryOpKind::Arithmetic(op) => arithmetic_sign(op, left_sign, right_sign),
                 });
             }
+            // Under `or` a label only the right side has is null on the left
+            // side's rows: computed, like a label only the left side has.
             let added = output.fields.get(columns.len()..).unwrap_or_default();
-            columns.extend(added.iter().map(|field| named(rhs, &right, &field.name)));
+            columns.extend(added.iter().map(|field| {
+                if is_or {
+                    ColumnProperties::default()
+                } else {
+                    named(rhs, &right, &field.name)
+                }
+            }));
             columns.truncate(output.fields.len());
             if let Some(grouping) = grouping {
                 let (one_side, one_side_columns) = match grouping.side {
@@ -364,7 +383,6 @@ fn non_asap_columns(
 
 fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties> {
     use ASAPOp::*;
-    let unknown = || vec![ColumnProperties::computed(Unknown); output.fields.len()];
     match op {
         SummaryAgg {
             child,
@@ -373,7 +391,7 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
             reduction,
             ..
         } => state_columns(child, summary_type, input, reduction)
-            .map_or_else(unknown, |(_, columns)| columns),
+            .map_or_else(|| all_computed(output.fields.len()), |(_, columns)| columns),
         // The build's layout without its own time column, after the
         // computed `window_end` (column 0).
         SummaryTumblingWindowChain {
@@ -387,10 +405,10 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
                 if let Some(time) = build.time_index {
                     columns.remove(time);
                 }
-                columns.insert(0, ColumnProperties::computed(Unknown));
+                columns.insert(0, ColumnProperties::default());
                 columns
             }
-            None => unknown(),
+            None => all_computed(output.fields.len()),
         },
         SummaryMerge { children, group_by } => {
             // The windows a `TimeRange` over a chain selects merge into the
@@ -405,7 +423,7 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
                 }) = summary_build(child)
                 {
                     return state_columns(&child, &summary_type, &input, &reduction)
-                        .map_or_else(unknown, |(_, columns)| columns);
+                        .map_or_else(|| all_computed(output.fields.len()), |(_, columns)| columns);
                 }
             }
             let merged = agreed(&children.iter().map(columns_of).collect::<Vec<_>>());
@@ -414,12 +432,7 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
                 // The keys copied; the state, merged across the inputs'
                 // groups, computed with the sign they agree on.
                 Some(keys) => {
-                    let column_at = |column: usize| {
-                        merged
-                            .get(column)
-                            .cloned()
-                            .unwrap_or(ColumnProperties::computed(Unknown))
-                    };
+                    let column_at = |column: usize| merged.get(column).cloned().unwrap_or_default();
                     let state = children[0]
                         .schema()
                         .fields
@@ -469,45 +482,38 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
         | SummarySubtract { .. }
         | SummaryDelete { .. }
         | SummaryJoin { .. }
-        | Extension { .. } => unknown(),
+        | Extension { .. } => all_computed(output.fields.len()),
     }
 }
 
-/// The columns of `cols`, a `Project` computed by memo group `group`, over
-/// `child`: lineage by [`project_lineage`], sign by [`expression_sign`].
-fn project_columns<C>(
-    group: MemoGroupId,
-    cols: &[ProjectItem<C>],
-    child: &Input<'_>,
-) -> Vec<ColumnProperties> {
+/// The columns of `cols`, a `Project` over `child`: lineage by
+/// [`project_lineage`], sign by [`expression_sign`].
+fn project_columns<C>(cols: &[ProjectItem<C>], child: &Input<'_>) -> Vec<ColumnProperties> {
     let input = child.group_properties();
-    project_lineage(group, cols, &input.column_lineage)
+    let input_lineage: Vec<Option<ColumnLineage>> =
+        input.column_lineage.iter().cloned().map(Some).collect();
+    project_lineage(cols, &input_lineage)
         .into_iter()
         .zip(cols)
         .map(|(lineage, item)| ColumnProperties {
-            lineage: Some(lineage),
+            lineage,
             sign: expression_sign(&item.expr, &input.column_signs),
         })
         .collect()
 }
 
-/// The lineage of the output columns of `cols`, a `Project` computed by
-/// memo group `group` over input columns of lineage `input`: a column
-/// item, renamed or not, copies its input column's; an expression item is
-/// `Computed` by `group` at its position.
+/// The lineage of the output columns of `cols`, a `Project` over input
+/// columns of lineage `input` (`None`: computed by the group being
+/// derived): a column item, renamed or not, copies its input column's; an
+/// expression item is `None`, computed by the `Project`'s group.
 pub(super) fn project_lineage<C>(
-    group: MemoGroupId,
     cols: &[ProjectItem<C>],
-    input: &[ColumnLineage],
-) -> Vec<ColumnLineage> {
+    input: &[Option<ColumnLineage>],
+) -> Vec<Option<ColumnLineage>> {
     cols.iter()
-        .enumerate()
-        .map(|(column, item)| {
-            match item.expr {
-                ScalarExpr::Column(input_column) => input.get(input_column).cloned(),
-                _ => None,
-            }
-            .unwrap_or(ColumnLineage::Computed { group, column })
+        .map(|item| match item.expr {
+            ScalarExpr::Column(column) => input.get(column).cloned().flatten(),
+            _ => None,
         })
         .collect()
 }
@@ -550,7 +556,7 @@ fn aggregate_columns(
     output: &Schema,
 ) -> Vec<ColumnProperties> {
     let Ok((_, sources)) = aggregate_output(child.schema(), reduction, measures, &[]) else {
-        return vec![ColumnProperties::computed(Unknown); output.fields.len()];
+        return all_computed(output.fields.len());
     };
     columns_from_sources(child, &sources, |index, input| {
         measure_sign(&measures[index], input)
@@ -569,7 +575,7 @@ fn columns_from_sources(
     let column_at = |column: Option<usize>| {
         column
             .and_then(|column| input.get(column).cloned())
-            .unwrap_or(ColumnProperties::computed(Unknown))
+            .unwrap_or_default()
     };
     sources
         .iter()
@@ -579,7 +585,7 @@ fn columns_from_sources(
                 index,
                 input_column,
             } => ColumnProperties::computed(measure(*index, column_at(*input_column).sign)),
-            OutputColumnSource::AddedLabel => ColumnProperties::computed(Unknown),
+            OutputColumnSource::AddedLabel => ColumnProperties::default(),
         })
         .collect()
 }
@@ -645,7 +651,7 @@ fn readout_columns(
 ) -> Vec<ColumnProperties> {
     let input = state.schema();
     if input.fields.len() != output.fields.len() {
-        return vec![ColumnProperties::computed(Unknown); output.fields.len()];
+        return all_computed(output.fields.len());
     }
     columns_of(state)
         .into_iter()
@@ -697,12 +703,7 @@ fn agreed(inputs: &[Vec<ColumnProperties>]) -> Vec<ColumnProperties> {
         .enumerate()
         .map(|(column, properties)| {
             rest.iter().fold(properties.clone(), |agreed, other| {
-                agreed.agreed_with(
-                    &other
-                        .get(column)
-                        .cloned()
-                        .unwrap_or(ColumnProperties::computed(Unknown)),
-                )
+                agreed.agreed_with(&other.get(column).cloned().unwrap_or_default())
             })
         })
         .collect()

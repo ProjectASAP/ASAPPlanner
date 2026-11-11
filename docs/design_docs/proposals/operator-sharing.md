@@ -105,7 +105,7 @@ enum NonASAPOp {
     Values { rows: Vec<Vec<ScalarExpr>>, schema: Schema },
     Filter { child: Rc<OperatorNode>, pred: Predicate },
     Project {
-        child: Rc<OperatorNode>, cols: Vec<ProjectItem>, qualifier: Option<String>,
+        child: Rc<OperatorNode>, cols: Vec<ProjectItem>,
     },
     Aggregate {
         child: Rc<OperatorNode>, reduction: Reduction, measures: Vec<AggIntent>,

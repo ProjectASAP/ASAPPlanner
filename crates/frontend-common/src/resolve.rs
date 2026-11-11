@@ -45,8 +45,9 @@ use crate::canonicalize::canonicalize;
 
 /// The names an operator's parent resolves against: the operator's output
 /// schema and, per column, the SQL table or alias that qualifies it (`None`
-/// when unqualified; an empty list qualifies no column). A qualified
-/// reference (`f.src`) binds here, while lowering; the IR keeps no qualifier.
+/// when unqualified; [`Scope::unqualified`]'s empty list qualifies no
+/// column). A qualified reference (`f.src`) binds here, while lowering; the
+/// IR keeps no qualifier.
 #[derive(Clone, Copy)]
 struct Scope<'a> {
     schema: &'a Schema,
@@ -76,7 +77,7 @@ impl<'a> Scope<'a> {
                 .fields
                 .iter()
                 .enumerate()
-                .filter(|(id, field)| field.name == *name && self.qualifier_ref(*id) == wanted)
+                .filter(|(id, field)| field.name == *name && self.qualifier(*id) == wanted)
                 .map(|(id, _)| id)
                 .collect::<Vec<_>>()
         };
@@ -103,11 +104,7 @@ impl<'a> Scope<'a> {
     }
 
     /// The qualifier of column `column`.
-    fn qualifier(&self, column: ColumnId) -> Option<String> {
-        self.qualifier_ref(column).map(str::to_owned)
-    }
-
-    fn qualifier_ref(&self, column: ColumnId) -> Option<&str> {
+    fn qualifier(&self, column: ColumnId) -> Option<&'a str> {
         self.qualifiers.get(column).and_then(Option::as_deref)
     }
 }
@@ -120,19 +117,19 @@ struct Bound {
 }
 
 impl Bound {
-    /// `node` with `qualifiers`: one per column, or none (unqualified).
+    /// `node` with `qualifiers`, one per column.
     fn new(node: Rc<OperatorNode>, qualifiers: Vec<Option<String>>) -> Self {
-        debug_assert!(
-            qualifiers.is_empty() || qualifiers.len() == node.schema.fields.len(),
-            "{} qualifiers for {} columns",
+        debug_assert_eq!(
             qualifiers.len(),
-            node.schema.fields.len()
+            node.schema.fields.len(),
+            "one qualifier per column"
         );
         Self { node, qualifiers }
     }
 
     fn unqualified(node: Rc<OperatorNode>) -> Self {
-        Self::new(node, Vec::new())
+        let qualifiers = vec![None; node.schema.fields.len()];
+        Self::new(node, qualifiers)
     }
 
     fn scope(&self) -> Scope<'_> {
@@ -204,8 +201,9 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
             })
             .collect::<Result<Vec<_>, _>>()
     };
-    // A node over `child` with `child`'s columns and qualifiers.
-    let passing = |op: NonASAPOp, child: Bound| Ok(Bound::new(node(op)?, child.qualifiers));
+    // A node over a child with the child's columns and `qualifiers`.
+    let passing =
+        |op: NonASAPOp, qualifiers: Vec<Option<String>>| Ok(Bound::new(node(op)?, qualifiers));
     let unqualified = |op: NonASAPOp| Ok(Bound::unqualified(node(op)?));
     // A PromQL child over an open schema gets an opaque series-identity column.
     let promql_series = |child: &UnresolvedOp| -> Result<Rc<OperatorNode>, ResolveDAGError> {
@@ -314,9 +312,9 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
             passing(
                 NonASAPOp::PromqlInfoEnrich {
                     selector: selector.clone(),
-                    child: Rc::clone(&child.node),
+                    child: child.node,
                 },
-                child,
+                child.qualifiers,
             )
         }
 
@@ -327,9 +325,9 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
                 NonASAPOp::PromqlSeriesSample {
                     by,
                     kind: *kind,
-                    child: Rc::clone(&child.node),
+                    child: child.node,
                 },
-                child,
+                child.qualifiers,
             )
         }
 
@@ -339,9 +337,9 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
             passing(
                 NonASAPOp::Filter {
                     pred,
-                    child: Rc::clone(&child.node),
+                    child: child.node,
                 },
-                child,
+                child.qualifiers,
             )
         }
 
@@ -390,27 +388,28 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
                 .map(|p| p.as_ref().map(|p| pred(&p.0, scope)).transpose())
                 .collect::<Result<Vec<_>, _>>()?;
             // A `by` key keeps its qualifier; a per-series reduction keeps
-            // its input's columns in place. A top-k emits ranked rows.
+            // its input's columns in place. A top-k emits ranked rows, and a
+            // measure that adds label columns (`count_values`, `absent`)
+            // breaks the keys-then-measures layout: no column is qualified.
             let out_schema =
                 aggregate_output_schema(&child.node.schema, &reduction, &measures, output_names)?;
-            let qualifiers: Vec<Option<String>> = match &reduction {
-                _ if matches!(measures.as_slice(), [AggIntent::TopK { .. }]) => Vec::new(),
-                Reduction::PerEntity => child.qualifiers.clone(),
-                Reduction::Reduce(by) if by.is_without() => Vec::new(),
-                Reduction::Reduce(by) => by
-                    .keys()
-                    .iter()
-                    .map(|&key| scope.qualifier(key))
-                    .chain(std::iter::repeat_n(None, measures.len()))
-                    .collect(),
+            let keyed: Option<Vec<Option<String>>> = match &reduction {
+                _ if matches!(measures.as_slice(), [AggIntent::TopK { .. }]) => None,
+                Reduction::PerEntity => Some(child.qualifiers.clone()),
+                Reduction::Reduce(by) if by.is_without() => None,
+                Reduction::Reduce(by) => Some(
+                    by.keys()
+                        .iter()
+                        .map(|&key| scope.qualifier(key).map(str::to_owned))
+                        .chain(std::iter::repeat_n(None, measures.len()))
+                        .collect(),
+                ),
             };
-            // A measure that adds label columns (`count_values`, `absent`)
-            // breaks the keys-then-measures layout: then no column is
-            // qualified.
-            let qualifiers = if qualifiers.len() == out_schema.fields.len() {
-                qualifiers
-            } else {
-                Vec::new()
+            let qualifiers_of = |columns: usize| {
+                keyed
+                    .clone()
+                    .filter(|keyed| keyed.len() == columns)
+                    .unwrap_or_else(|| vec![None; columns])
             };
             // HAVING is evaluated over the aggregate's own output.
             let having = having
@@ -420,22 +419,21 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
                         &h.0,
                         Scope {
                             schema: &out_schema,
-                            qualifiers: &qualifiers,
+                            qualifiers: &qualifiers_of(out_schema.fields.len()),
                         },
                     )
                 })
                 .transpose()?;
-            Ok(Bound::new(
-                node(NonASAPOp::Aggregate {
-                    reduction,
-                    measures,
-                    output_names: output_names.clone(),
-                    filters,
-                    having,
-                    child: child.node,
-                })?,
-                qualifiers,
-            ))
+            let aggregate = node(NonASAPOp::Aggregate {
+                reduction,
+                measures,
+                output_names: output_names.clone(),
+                filters,
+                having,
+                child: child.node,
+            })?;
+            let qualifiers = qualifiers_of(aggregate.schema.fields.len());
+            Ok(Bound::new(aggregate, qualifiers))
         }
 
         U::Dedup { cols, child } => {
@@ -444,9 +442,9 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
             passing(
                 NonASAPOp::Dedup {
                     cols,
-                    child: Rc::clone(&child.node),
+                    child: child.node,
                 },
-                child,
+                child.qualifiers,
             )
         }
 
@@ -476,17 +474,12 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
             // sets); the predicate sees left ++ right.
             let left = resolve_root_with_inherited(left, &[])?;
             let right = resolve_root_with_inherited(right, &[])?;
-            let qualify = |side: &Bound| {
-                (0..side.node.schema.fields.len())
-                    .map(|column| side.scope().qualifier(column))
-                    .collect::<Vec<_>>()
-            };
             let mut concat = left.node.schema.clone();
             concat
                 .fields
                 .extend(right.node.schema.fields.iter().cloned());
-            let mut qualifiers = qualify(&left);
-            qualifiers.extend(qualify(&right));
+            let mut qualifiers = left.qualifiers;
+            qualifiers.extend(right.qualifiers);
             let pred = pred(
                 &p.0,
                 Scope {
@@ -540,9 +533,9 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
                 NonASAPOp::Sort {
                     keys,
                     partition_by,
-                    child: Rc::clone(&child.node),
+                    child: child.node,
                 },
-                child,
+                child.qualifiers,
             )
         }
 
@@ -559,9 +552,9 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
                     n: *n,
                     offset: *offset,
                     partition_by,
-                    child: Rc::clone(&child.node),
+                    child: child.node,
                 },
-                child,
+                child.qualifiers,
             )
         }
 
@@ -575,9 +568,9 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
                 NonASAPOp::PromqlSubquery {
                     range: *range,
                     resolution: *resolution,
-                    child: Rc::clone(&child.node),
+                    child: child.node,
                 },
-                child,
+                child.qualifiers,
             )
         }
 
@@ -587,9 +580,9 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
                 NonASAPOp::TimeRange {
                     range: *range,
                     kind: *kind,
-                    child: Rc::clone(&child.node),
+                    child: child.node,
                 },
-                child,
+                child.qualifiers,
             )
         }
 
@@ -598,9 +591,9 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
             passing(
                 NonASAPOp::TimeShift {
                     shift: *shift,
-                    child: Rc::clone(&child.node),
+                    child: child.node,
                 },
-                child,
+                child.qualifiers,
             )
         }
 
@@ -622,9 +615,7 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
             let order_by = sort_keys(order_by, child.scope())?;
             // The window function's own column comes last, unqualified.
             let mut qualifiers = child.qualifiers.clone();
-            if !qualifiers.is_empty() {
-                qualifiers.push(None);
-            }
+            qualifiers.push(None);
             Ok(Bound::new(
                 node(NonASAPOp::SQLWindowFunc {
                     func: func.clone(),

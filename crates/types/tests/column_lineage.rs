@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use asap_types::ir::operator::arguments::{
-    AtModifier, BinaryOpKind, GroupSide, JoinKind, Reduction, Source, SourceColumn, VectorGrouping,
-    VectorMatch, VectorMatchKind,
+    AtModifier, BinaryOpKind, GroupSide, JoinKind, PromQLVectorSetOpKind, Reduction, Source,
+    SourceColumn, VectorGrouping, VectorMatch, VectorMatchKind,
 };
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::selection::Constraint;
@@ -23,7 +23,9 @@ use asap_types::stages::{
     LogicalRequirements, Memo, MemoGroupId, OriginOfCandidateForMemoGroup, ValueSign,
 };
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
-use asap_types::test_support::memo_fixtures::{aggregate, filter, range, shift};
+use asap_types::test_support::memo_fixtures::{
+    self, aggregate, filter, range, series_column, shift, table_column,
+};
 use asap_types::workload::{DataWorkload, SourceFacts};
 
 fn memo() -> Memo {
@@ -64,37 +66,6 @@ fn hll(child: MemoGroupId, keys: Vec<usize>, column: &str) -> Operator<MemoGroup
         input: SummaryUpdate::column(ColumnRef::Named(column.into())),
         reduction: Reduction::by(keys),
         filter: None,
-    })
-}
-
-/// The column `column` of the first scan of the table `table`.
-fn column_of(table: &str, column: &str) -> SourceColumn {
-    column_of_scan(table, 0, column)
-}
-
-/// The column `column` of scan `scan_ordinal` of the table `table`.
-fn column_of_scan(table: &str, scan_ordinal: u32, column: &str) -> SourceColumn {
-    SourceColumn {
-        source: Source::Table {
-            table_ref: table.into(),
-        },
-        scan_ordinal,
-        column: column.into(),
-    }
-}
-
-fn source_column(table: &str, column: &str) -> ColumnLineage {
-    ColumnLineage::SourceColumn(column_of(table, column))
-}
-
-/// The column `column` of the series `latency`.
-fn latency_column(column: &str) -> ColumnLineage {
-    ColumnLineage::SourceColumn(SourceColumn {
-        source: Source::TimeSeries {
-            metric: "latency".into(),
-        },
-        scan_ordinal: 0,
-        column: column.into(),
     })
 }
 
@@ -140,7 +111,8 @@ fn an_hll_readout_renamed_to_the_aggregate_column_is_its_candidate() {
             query: SketchStatistic::Cardinality,
         }))
         .unwrap();
-    let flows = ["src", "dst", "proto", "ts"].map(|column| source_column("flows", column));
+    let flows = ["src", "dst", "proto", "ts"]
+        .map(|column| ColumnLineage::SourceColumn(table_column("flows", 0, column)));
     assert_eq!(lineage(&memo, g1), flows);
     assert_eq!(lineage(&memo, g2), flows);
     // Each of the aggregate, the state and the readout computes its own
@@ -148,7 +120,10 @@ fn an_hll_readout_renamed_to_the_aggregate_column_is_its_candidate() {
     for group in [g3, g4, g5] {
         assert_eq!(
             lineage(&memo, group),
-            [source_column("flows", "src"), computed(group, 1)]
+            [
+                ColumnLineage::SourceColumn(table_column("flows", 0, "src")),
+                computed(group, 1)
+            ]
         );
     }
     // The state's selection names the filtered column by its lineage.
@@ -158,7 +133,7 @@ fn an_hll_readout_renamed_to_the_aggregate_column_is_its_candidate() {
         .as_ref()
         .expect("a summary state");
     assert_eq!(
-        coverage.selection()[0].columns()[&column_of("flows", "proto")],
+        coverage.selection()[0].columns()[&table_column("flows", 0, "proto")],
         Constraint::In(vec![ScalarValue::Utf8("tcp".into())])
     );
 
@@ -212,9 +187,9 @@ fn a_rename_keeps_lineage_and_the_rollup_key_check_compares_it() {
     assert_eq!(
         lineage(&memo, renamed),
         [
-            source_column("flows", "src"),
-            source_column("flows", "dst"),
-            source_column("flows", "region"),
+            ColumnLineage::SourceColumn(table_column("flows", 0, "src")),
+            ColumnLineage::SourceColumn(table_column("flows", 0, "dst")),
+            ColumnLineage::SourceColumn(table_column("flows", 0, "region")),
         ]
     );
 
@@ -236,7 +211,7 @@ fn a_rename_keeps_lineage_and_the_rollup_key_check_compares_it() {
         .as_ref()
         .expect("a summary state");
     assert_eq!(
-        coverage.selection()[0].columns()[&column_of("flows", "region")],
+        coverage.selection()[0].columns()[&table_column("flows", 0, "region")],
         Constraint::In(vec![ScalarValue::Utf8("us".into())])
     );
 
@@ -250,7 +225,10 @@ fn a_rename_keeps_lineage_and_the_rollup_key_check_compares_it() {
     // The regrouped state is computed by the merge, not its input's.
     assert_eq!(
         rolled_up.column_lineage,
-        [source_column("flows", "src"), computed(rolled_up_id, 1)]
+        [
+            ColumnLineage::SourceColumn(table_column("flows", 0, "src")),
+            computed(rolled_up_id, 1)
+        ]
     );
     assert!(rolled_up.aggregate_coverage.is_some());
 }
@@ -284,10 +262,10 @@ fn join_columns_of_one_name_have_distinct_lineage() {
     assert_eq!(
         lineage(&memo, joined),
         [
-            source_column("sales", "user"),
-            source_column("sales", "region"),
-            source_column("users", "id"),
-            source_column("users", "region"),
+            ColumnLineage::SourceColumn(table_column("sales", 0, "user")),
+            ColumnLineage::SourceColumn(table_column("sales", 0, "region")),
+            ColumnLineage::SourceColumn(table_column("users", 0, "id")),
+            ColumnLineage::SourceColumn(table_column("users", 0, "region")),
         ]
     );
 
@@ -308,11 +286,11 @@ fn join_columns_of_one_name_have_distinct_lineage() {
     };
     assert_eq!(
         selected_column(&mut memo, 1),
-        [column_of("sales", "region")]
+        [table_column("sales", 0, "region")]
     );
     assert_eq!(
         selected_column(&mut memo, 3),
-        [column_of("users", "region")]
+        [table_column("users", 0, "region")]
     );
 }
 
@@ -341,7 +319,10 @@ fn a_predicate_on_a_computed_column_stays_unlifted() {
         .unwrap();
     assert_eq!(
         lineage(&memo, tagged_rows),
-        [source_column("flows", "src"), computed(tagged_rows, 1)]
+        [
+            ColumnLineage::SourceColumn(table_column("flows", 0, "src")),
+            computed(tagged_rows, 1)
+        ]
     );
     let tagged = memo
         .find_or_add_group(filter(equals(1, "x"), tagged_rows))
@@ -361,21 +342,7 @@ fn a_predicate_on_a_computed_column_stays_unlifted() {
 
 /// `Scan latency`: `[ts, value, job]`, `ts` its time index.
 fn latency_series() -> Operator<MemoGroupId> {
-    Operator::NonASAP(NonASAPOp::Scan {
-        source: Source::TimeSeries {
-            metric: "latency".into(),
-        },
-        predicates: vec![],
-        schema: Schema::with_time_index(
-            vec![
-                Field::plain("ts", DataType::Timestamp, false),
-                Field::plain("value", DataType::Float64, false),
-                Field::plain("job", DataType::Utf8, false),
-            ],
-            0,
-            vec![],
-        ),
-    })
+    memo_fixtures::scan("latency", &[("job", DataType::Utf8)], vec![])
 }
 
 /// A chain of `SummaryAgg[KLL](by job; value)` windows: `[window_end, job,
@@ -399,7 +366,7 @@ fn a_chain_computes_window_end_and_state_and_its_window_selections_pass_lineage_
         .unwrap();
     let chain_lineage = [
         computed(chain, 0),
-        latency_column("job"),
+        ColumnLineage::SourceColumn(series_column("latency", 0, "job")),
         computed(chain, 2),
     ];
     assert_eq!(lineage(&memo, chain), chain_lineage);
@@ -419,7 +386,10 @@ fn a_chain_computes_window_end_and_state_and_its_window_selections_pass_lineage_
         .unwrap();
     assert_eq!(
         lineage(&memo, merged),
-        [latency_column("job"), computed(merged, 1)]
+        [
+            ColumnLineage::SourceColumn(series_column("latency", 0, "job")),
+            computed(merged, 1)
+        ]
     );
 }
 
@@ -432,7 +402,8 @@ fn a_time_shift_at_end_or_start_above_a_selector_passes_its_lineage_through() {
     let mut memo = memo();
     let series = memo.find_or_add_group(latency_series()).unwrap();
     let selector = memo.find_or_add_group(range(300_000, series)).unwrap();
-    let series_lineage = ["ts", "value", "job"].map(latency_column);
+    let series_lineage = ["ts", "value", "job"]
+        .map(|column| ColumnLineage::SourceColumn(series_column("latency", 0, column)));
     for at in [AtModifier::End, AtModifier::Start] {
         let pinned = memo
             .find_or_add_group(shift(0, Some(at), selector))
@@ -525,15 +496,15 @@ fn a_self_join_names_its_two_scans_apart() {
             (1, "dst"),
             (1, "proto")
         ]
-        .map(|(scan, column)| ColumnLineage::SourceColumn(column_of_scan("flows", scan, column)))
+        .map(|(scan, column)| ColumnLineage::SourceColumn(table_column("flows", scan, column)))
     );
 
-    let left_proto = [column_of_scan("flows", 0, "proto")];
+    let left_proto = [table_column("flows", 0, "proto")];
     assert_eq!(self_join_selection(&mut memo, "a", 2), left_proto);
     assert_eq!(self_join_selection(&mut memo, "x", 2), left_proto);
     assert_eq!(
         self_join_selection(&mut memo, "a", 5),
-        [column_of_scan("flows", 1, "proto")]
+        [table_column("flows", 1, "proto")]
     );
 }
 
@@ -555,22 +526,11 @@ fn match_grouping_memo() -> Memo {
 
 /// `Scan metric`: `[ts, value, *labels]`, `ts` its time index.
 fn series(metric: &str, labels: &[&str]) -> Operator<MemoGroupId> {
-    let mut fields = vec![
-        Field::plain("ts", DataType::Timestamp, false),
-        Field::plain("value", DataType::Float64, false),
-    ];
-    fields.extend(
-        labels
-            .iter()
-            .map(|label| Field::plain(*label, DataType::Utf8, false)),
-    );
-    Operator::NonASAP(NonASAPOp::Scan {
-        source: Source::TimeSeries {
-            metric: metric.into(),
-        },
-        predicates: vec![],
-        schema: Schema::with_time_index(fields, 0, vec![]),
-    })
+    let labels: Vec<(&str, DataType)> = labels
+        .iter()
+        .map(|&label| (label, DataType::Utf8))
+        .collect();
+    memo_fixtures::scan(metric, &labels, vec![])
 }
 
 /// `lhs * on(job) group_<side>(team) rhs`.
@@ -608,16 +568,6 @@ fn lineage_and_sign_of(memo: &Memo, group: MemoGroupId, name: &str) -> (ColumnLi
     )
 }
 
-fn series_column(metric: &str, column: &str) -> ColumnLineage {
-    ColumnLineage::SourceColumn(SourceColumn {
-        source: Source::TimeSeries {
-            metric: metric.into(),
-        },
-        scan_ordinal: 0,
-        column: column.into(),
-    })
-}
-
 /// `a * on(job) group_left(team) b`: `team`, which only `b` has, takes
 /// `b.team`'s lineage and sign (the "one" side's).
 #[test]
@@ -632,7 +582,10 @@ fn a_group_left_label_comes_from_the_right_side() {
         .unwrap();
     assert_eq!(
         lineage_and_sign_of(&memo, product, "team"),
-        (series_column("b", "team"), ValueSign::NonPositive)
+        (
+            ColumnLineage::SourceColumn(series_column("b", 0, "team")),
+            ValueSign::NonPositive
+        )
     );
 }
 
@@ -655,7 +608,10 @@ fn a_group_left_label_overwrites_the_left_sides_column_of_that_name() {
     assert_eq!(schema.fields.len(), 4, "no second `team` column");
     assert_eq!(
         lineage_and_sign_of(&memo, product, "team"),
-        (series_column("b", "team"), ValueSign::NonPositive)
+        (
+            ColumnLineage::SourceColumn(series_column("b", 0, "team")),
+            ValueSign::NonPositive
+        )
     );
 }
 
@@ -675,7 +631,10 @@ fn a_group_right_label_comes_from_the_left_side() {
         .unwrap();
     assert_eq!(
         lineage_and_sign_of(&memo, product, "team"),
-        (series_column("a", "team"), ValueSign::NonNegative)
+        (
+            ColumnLineage::SourceColumn(series_column("a", 0, "team")),
+            ValueSign::NonNegative
+        )
     );
 }
 
@@ -712,7 +671,7 @@ fn a_same_source_binary_op_keeps_its_labels_scan() {
         .unwrap();
     assert_eq!(
         lineage_and_sign_of(&memo, ratio, "job").0,
-        series_column("x", "job")
+        ColumnLineage::SourceColumn(series_column("x", 0, "job"))
     );
 }
 
@@ -731,7 +690,41 @@ fn a_same_source_group_right_takes_the_right_sides_labels() {
     for label in ["job", "team"] {
         assert_eq!(
             lineage_and_sign_of(&memo, product, label).0,
-            series_column("x", label)
+            ColumnLineage::SourceColumn(series_column("x", 0, label))
         );
     }
+}
+
+/// `a or b` with only `b` having `team`: on `a`'s rows `team` is null, so it
+/// is computed by the `or` with no sign, not `b.team` (before, it copied
+/// `b.team` and `b`'s sign).
+#[test]
+fn an_or_label_only_the_right_side_has_is_computed() {
+    let mut memo = match_grouping_memo();
+    let a = memo.find_or_add_group(series("a", &["job"])).unwrap();
+    let b = memo
+        .find_or_add_group(series("b", &["job", "team"]))
+        .unwrap();
+    let union = memo
+        .find_or_add_group(Operator::NonASAP(NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                checked_relative_division: false,
+                checked_finite_division: false,
+                kind: BinaryOpKind::Set(PromQLVectorSetOpKind::Or),
+                vector_match: None,
+            },
+            return_bool: false,
+            lhs: a,
+            rhs: b,
+        }))
+        .unwrap();
+    let team = memo.groups()[union.0 as usize]
+        .group_properties
+        .schema
+        .column_id("team")
+        .expect("`or` adds the right side's labels");
+    assert_eq!(
+        lineage_and_sign_of(&memo, union, "team"),
+        (computed(union, team), ValueSign::Unknown)
+    );
 }

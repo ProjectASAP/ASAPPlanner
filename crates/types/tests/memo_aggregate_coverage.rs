@@ -10,7 +10,7 @@
 //! ```
 use std::ops::Bound;
 
-use asap_types::ir::operator::arguments::{AtModifier, Reduction, Source, SourceColumn};
+use asap_types::ir::operator::arguments::{AtModifier, Reduction, SourceColumn};
 use asap_types::ir::operator::AggIntent;
 
 use asap_types::ir::properties::selection::{Constraint, IntervalConstraintLimit};
@@ -24,7 +24,7 @@ use asap_types::stages::{
     OriginOfCandidateForMemoGroup,
 };
 use asap_types::summary_type::{ExactKind, MergeInputRule, SketchAlgorithm, SummaryUpdate};
-use asap_types::test_support::memo_fixtures::{filter, range, scan, shift, state};
+use asap_types::test_support::memo_fixtures::{filter, range, scan, series_column, shift, state};
 use asap_types::workload::DataWorkload;
 
 const TS: usize = 0;
@@ -146,18 +146,7 @@ fn last_minute() -> Constraint {
 }
 
 fn ts() -> SourceColumn {
-    latency_column("ts")
-}
-
-/// The column `column` of the series `latency`.
-fn latency_column(column: &str) -> SourceColumn {
-    SourceColumn {
-        source: Source::TimeSeries {
-            metric: "latency".into(),
-        },
-        scan_ordinal: 0,
-        column: column.into(),
-    }
+    series_column("latency", 0, "ts")
 }
 
 /// The constraint on the timestamp column of `group`'s one selection box.
@@ -184,7 +173,10 @@ fn a_summary_agg_over_a_job_filter_lifts_it_into_the_selection() {
     let [selection] = coverage.selection() else {
         panic!("one box: {coverage:?}")
     };
-    assert_eq!(selection.columns()[&latency_column("job")], jobs(&["api"]));
+    assert_eq!(
+        selection.columns()[&series_column("latency", 0, "job")],
+        jobs(&["api"])
+    );
     assert_eq!(selection.columns()[&ts()], last_minute());
 }
 
@@ -207,7 +199,7 @@ fn states_with_equal_definitions_and_disjoint_selections_merge() {
         panic!("one box: {coverage:?}")
     };
     assert_eq!(
-        selection.columns()[&latency_column("job")],
+        selection.columns()[&series_column("latency", 0, "job")],
         jobs(&["api", "web"])
     );
 }
@@ -251,7 +243,7 @@ fn a_filter_that_is_no_selection_stays_unlifted() {
         ]
     );
     assert_eq!(
-        coverage_of_g10.selection()[0].columns()[&latency_column("job")],
+        coverage_of_g10.selection()[0].columns()[&series_column("latency", 0, "job")],
         jobs(&["api"])
     );
     assert!(matches!(
@@ -304,7 +296,7 @@ fn states_whose_definitions_read_the_same_subquery_merge() {
     assert_eq!(definition, coverage(&memo, web).definition());
     let merged = memo.find_or_add_group(merge(vec![api, web])).unwrap();
     assert_eq!(
-        coverage(&memo, merged).selection()[0].columns()[&latency_column("job")],
+        coverage(&memo, merged).selection()[0].columns()[&series_column("latency", 0, "job")],
         jobs(&["api", "web"])
     );
 }
@@ -324,7 +316,7 @@ fn scan_predicates_lift_and_their_states_merge() {
             memo.groups()[series.0 as usize]
                 .group_properties
                 .column_lineage[JOB],
-            ColumnLineage::SourceColumn(latency_column("job"))
+            ColumnLineage::SourceColumn(series_column("latency", 0, "job"))
         );
         let last_minute = memo.find_or_add_group(range(MINUTE_MS, series)).unwrap();
         memo.find_or_add_group(kll(last_minute)).unwrap()
@@ -338,12 +330,12 @@ fn scan_predicates_lift_and_their_states_merge() {
         vec![kll_unlifted(), latency(vec![]).map_children(|_| None)]
     );
     assert_eq!(
-        coverage(&memo, api).selection()[0].columns()[&latency_column("job")],
+        coverage(&memo, api).selection()[0].columns()[&series_column("latency", 0, "job")],
         jobs(&["api"])
     );
     let merged = memo.find_or_add_group(merge(vec![api, web])).unwrap();
     assert_eq!(
-        coverage(&memo, merged).selection()[0].columns()[&latency_column("job")],
+        coverage(&memo, merged).selection()[0].columns()[&series_column("latency", 0, "job")],
         jobs(&["api", "web"])
     );
 }
@@ -507,7 +499,7 @@ fn value_and_absolute_timestamp_filters_lift_with_fixed_value_limits() {
         }
     );
     assert_eq!(
-        coverage(&memo, g3).selection()[0].columns()[&latency_column("value")],
+        coverage(&memo, g3).selection()[0].columns()[&series_column("latency", 0, "value")],
         Constraint::Interval {
             lower: Bound::Excluded(IntervalConstraintLimit::FixedValue(ScalarValue::Float64(
                 10.0
@@ -587,7 +579,10 @@ fn an_exact_aggregate_has_coverage() {
     let [selection] = coverage.selection() else {
         panic!("one box: {coverage:?}")
     };
-    assert_eq!(selection.columns()[&latency_column("job")], jobs(&["api"]));
+    assert_eq!(
+        selection.columns()[&series_column("latency", 0, "job")],
+        jobs(&["api"])
+    );
     assert_eq!(selection.columns()[&ts()], last_minute());
 }
 
