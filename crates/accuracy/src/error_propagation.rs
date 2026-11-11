@@ -3,8 +3,9 @@
 
 use asap_types::accuracy::AccuracyMetric;
 use asap_types::ir::operator::arguments::BinaryOpKind;
-use asap_types::ir::operator::AggIntent;
+use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
+use asap_types::ir::scalar::{resolve_column_ref, ColumnRef};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, BinaryOperator, NonASAPOp, Operator, ScalarExpr};
 use asap_types::stages::{ColumnLineage, Memo, MemoGroupId};
@@ -26,7 +27,9 @@ use asap_types::summary_type::ExactKind;
 ///   `clamp_max` or a negation of a column: absolute, $\beta = 1$;
 /// - an `Aggregate` (or exact accumulator build) of counts ($\beta = 0$),
 ///   min and max (absolute or relative, $\beta = 1$) and avg (absolute,
-///   $\beta = 1$), without measure filters or `HAVING`;
+///   $\beta = 1$), without measure filters or `HAVING`, whose group-by
+///   keys are copied from a source as a `Filter`'s predicate columns are
+///   (a count by an estimate has no bound);
 /// - `+` and `-`: absolute, $\beta = 1$; `/`: relative,
 ///   $\beta = 1/(1-b)$ on both, the denominator capped at $b$; `*`:
 ///   relative, $(1+b, 1)$, the right operand capped at $b$
@@ -65,22 +68,20 @@ pub fn error_propagation(
                     .all(|item| preserves(&item.expr) || (absolute && one_lipschitz(&item.expr)))
                     .then(|| uniform(1.0))
             }
-            NonASAPOp::Filter { pred, child } => {
-                let lineage = &memo.groups()[child.0 as usize]
-                    .group_properties
-                    .column_lineage;
-                (pred.0.operator_refs().is_empty()
-                    && pred.0.columns_referenced().iter().all(|&column| {
-                        matches!(lineage.get(column), Some(ColumnLineage::SourceColumn(_)))
-                    }))
-                .then(|| uniform(1.0))
-            }
+            NonASAPOp::Filter { pred, child } => (pred.0.operator_refs().is_empty()
+                && copied_from_a_source(memo, *child, pred.0.columns_referenced()))
+            .then(|| uniform(1.0)),
             NonASAPOp::Aggregate {
                 measures,
                 filters,
                 having: None,
+                reduction,
+                child,
                 ..
-            } if filters.iter().all(Option::is_none) && !measures.is_empty() => {
+            } if filters.iter().all(Option::is_none)
+                && !measures.is_empty()
+                && keys_copied_from_a_source(memo, *child, reduction) =>
+            {
                 let mut factor: f64 = 0.0;
                 for measure in measures {
                     match measure {
@@ -129,13 +130,17 @@ pub fn error_propagation(
             ASAPOp::SummaryAgg {
                 summary_type: FieldDataType::ExactAggregate(kind, _),
                 filter: None,
+                reduction,
+                child,
                 ..
             }
             | ASAPOp::SummaryTumblingWindowChain {
                 summary_type: FieldDataType::ExactAggregate(kind, _),
                 filter: None,
+                reduction,
+                child,
                 ..
-            } => match kind {
+            } if keys_copied_from_a_source(memo, *child, reduction) => match kind {
                 ExactKind::Count => Some(uniform(0.0)),
                 ExactKind::Min | ExactKind::Max if extremum_metric => Some(uniform(1.0)),
                 _ => None,
@@ -143,6 +148,46 @@ pub fn error_propagation(
             _ => None,
         },
     }
+}
+
+/// Whether each of `columns` of `group`'s output is copied from a source
+/// (lineage `SourceColumn`: a label or key), not computed: an estimate's
+/// error can change which rows a predicate or a grouping on it selects.
+fn copied_from_a_source(
+    memo: &Memo,
+    group: MemoGroupId,
+    columns: impl IntoIterator<Item = usize>,
+) -> bool {
+    let lineage = &memo.groups()[group.0 as usize]
+        .group_properties
+        .column_lineage;
+    columns
+        .into_iter()
+        .all(|column| matches!(lineage.get(column), Some(ColumnLineage::SourceColumn(_))))
+}
+
+/// Whether every key `reduction` groups `child`'s rows by is copied from a
+/// source ([`copied_from_a_source`]): `by` keys as listed; a `without`
+/// grouping keys by every column of `child` but the time, the sample value
+/// and the excluded ones; a per-entity reduction keeps each row's group.
+fn keys_copied_from_a_source(memo: &Memo, child: MemoGroupId, reduction: &Reduction) -> bool {
+    let Reduction::Reduce(by) = reduction else {
+        return true;
+    };
+    if !by.is_without() {
+        return copied_from_a_source(memo, child, by.keys().iter().copied());
+    }
+    let schema = &memo.groups()[child.0 as usize].group_properties.schema;
+    let value = resolve_column_ref(&ColumnRef::SampleValue, schema).ok();
+    copied_from_a_source(
+        memo,
+        child,
+        (0..schema.fields.len()).filter(|&column| {
+            schema.time_index != Some(column)
+                && value != Some(column)
+                && !by.keys().contains(&column)
+        }),
+    )
 }
 
 /// Whether `expr` changes a column's value by at most its error: `abs`,
@@ -314,6 +359,85 @@ mod tests {
                 None,
                 "{expr:?}"
             );
+        }
+    }
+
+    /// A count (and min, max, avg) grouped by a column that is itself an
+    /// estimate has no contract: an estimate's error moves rows between
+    /// groups, so a count by it has no bound, as for a filter comparing it.
+    /// Over a readout of a KLL state of `latency` by `job`, `count by
+    /// (estimate)` and an exact count accumulator by it have none, while
+    /// `count by (job)` reads no value (factor 0).
+    #[test]
+    fn a_reduction_keyed_by_an_estimate_has_no_contract() {
+        let mut memo = Memo::new(&DataWorkload::default());
+        let g1 = memo
+            .find_or_add_group(scan("latency", &[("job", DataType::Utf8)], vec![]))
+            .unwrap();
+        let state = memo
+            .find_or_add_group(Operator::ASAP(ASAPOp::SummaryAgg {
+                child: g1,
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+                input: SummaryUpdate::column(asap_types::ir::scalar::ColumnRef::SampleValue),
+                reduction: Reduction::by(vec![2]),
+                filter: None,
+            }))
+            .unwrap();
+        let readout = memo
+            .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.99 }, state))
+            .unwrap();
+        let lineage = &memo.groups()[readout.0 as usize]
+            .group_properties
+            .column_lineage;
+        let column_where = |copied: bool| {
+            lineage
+                .iter()
+                .position(|l| matches!(l, ColumnLineage::SourceColumn(_)) == copied)
+                .expect("the readout has a label and an estimate")
+        };
+        let (job, estimate) = (column_where(true), column_where(false));
+        let exact_count_by = |key: usize| {
+            Operator::ASAP(ASAPOp::SummaryAgg {
+                child: readout,
+                summary_type: FieldDataType::exact(ExactKind::Count),
+                input: SummaryUpdate::column(asap_types::ir::scalar::ColumnRef::SampleValue),
+                reduction: Reduction::by(vec![key]),
+                filter: None,
+            })
+        };
+        for metric in AccuracyMetric::ALL {
+            for measure in [
+                AggIntent::Count,
+                AggIntent::Min { col: None },
+                AggIntent::Max { col: None },
+                AggIntent::Avg { col: None },
+            ] {
+                assert_eq!(
+                    error_propagation(
+                        &memo,
+                        &aggregate(Reduction::by(vec![estimate]), measure.clone(), readout),
+                        metric
+                    ),
+                    None,
+                    "{measure:?} by the estimate, {metric:?}"
+                );
+            }
+            assert_eq!(
+                error_propagation(&memo, &exact_count_by(estimate), metric),
+                None,
+                "an exact count by the estimate, {metric:?}"
+            );
+            for count_by_job in [
+                aggregate(Reduction::by(vec![job]), AggIntent::Count, readout),
+                exact_count_by(job),
+            ] {
+                assert_eq!(
+                    error_propagation(&memo, &count_by_job, metric)
+                        .map(|propagation| propagation.factor_per_input),
+                    Some(vec![0.0]),
+                    "a count by job, {metric:?}"
+                );
+            }
         }
     }
 
