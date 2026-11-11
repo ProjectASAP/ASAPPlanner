@@ -111,12 +111,24 @@ pub fn aggregate_where(
     filter: Option<Predicate<MemoGroupId>>,
     child: MemoGroupId,
 ) -> Operator<MemoGroupId> {
+    aggregate_with(reduction, vec![(measure, filter)], None, child)
+}
+
+/// `Aggregate(reduction; measures)` over `child` with `having`: each measure
+/// unnamed, over the rows its filter keeps (`None`: every row).
+pub fn aggregate_with(
+    reduction: Reduction,
+    measures: Vec<(AggIntent, Option<Predicate<MemoGroupId>>)>,
+    having: Option<Predicate<MemoGroupId>>,
+    child: MemoGroupId,
+) -> Operator<MemoGroupId> {
+    let (measures, filters): (Vec<_>, Vec<_>) = measures.into_iter().unzip();
     Operator::NonASAP(NonASAPOp::Aggregate {
         reduction,
-        measures: vec![measure],
-        output_names: vec![],
-        filters: filter.map_or_else(Vec::new, |filter| vec![Some(filter)]),
-        having: None,
+        output_names: vec![String::new(); measures.len()],
+        measures,
+        filters,
+        having,
         child,
     })
 }

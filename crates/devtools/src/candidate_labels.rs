@@ -6,30 +6,6 @@
 
 use serde_json::Value;
 
-use asap_types::stages::HowToComputeAggregateMeasure;
-use asap_types::summary_type::SketchAlgorithm;
-
-/// A Pass 1 per-computation candidate, e.g. "exact", "Sum acc" or "Kll".
-pub fn computation_label(candidate: &HowToComputeAggregateMeasure) -> String {
-    match candidate {
-        HowToComputeAggregateMeasure::Exact => "exact".to_string(),
-        HowToComputeAggregateMeasure::ExactAccumulator(kinds) => {
-            let kinds: Vec<String> = kinds.iter().map(|kind| format!("{kind:?}")).collect();
-            format!("{} acc", kinds.join("/"))
-        }
-        HowToComputeAggregateMeasure::Summary(algorithm) => sketch_name(algorithm),
-    }
-}
-
-/// A sketch algorithm's display name, e.g. "CMS+heap" or "Kll".
-fn sketch_name(algorithm: &SketchAlgorithm) -> String {
-    match algorithm {
-        SketchAlgorithm::CmsWithHeap => "CMS+heap".to_string(),
-        SketchAlgorithm::CountSketchWithHeap => "CountSketch+heap".to_string(),
-        other => format!("{other:?}"),
-    }
-}
-
 /// One node's operator kind with its sketch family and parameters, its
 /// summary query, its time range and its tumbling-window layout, when it has them: e.g.
 /// `SummaryAgg Kll(k=200)`, `SummaryEstimate Quantile(q=0.5)`.

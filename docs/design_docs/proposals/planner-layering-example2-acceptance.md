@@ -67,18 +67,22 @@ workload itself.
 
 | Invariant | Test | Status |
 |---|---|---|
-| Once recognized, the SQL workload has the stand-in's Pass 1 options | `stage1_logical_asap_optimization_sql_has_the_standin_options` | passes |
-| Each statistic has an exact and a UnivMon option | `stage1_logical_asap_optimization_pass1_offers_exact_and_univmon_for_each_statistic` | passes |
-| Q1 has a specialized distinct-count summary (HLL or KMV) | `stage1_logical_asap_optimization_pass1_offers_a_distinct_count_summary` | passes |
-| Q2 and Q3 have a specialized entropy and norm summary | `stage1_logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summaries` | ignored: needs Pass 1 specialized entropy and L2 summary families (#444) |
-| Every combination of the queries' own options is kept, with no shared summary | `stage1_logical_asap_optimization_keeps_every_independent_combination` | passes |
-| A candidate has one UnivMon build read by all three queries, feeding a distinct-count, an entropy and an L2 estimate | `stage1_logical_asap_optimization_summary_capability_adds_one_univmon_for_all_three` | passes |
-| For each pair, a candidate shares one UnivMon between the two while the third takes each of its own options | `stage1_logical_asap_optimization_summary_capability_adds_pairwise_shared_univmons` | passes |
-| A shared UnivMon takes each parameter's largest value among its consumers, each sized alone | `stage1_logical_asap_optimization_shared_univmon_takes_each_parameters_largest_own_size` | passes |
-| UnivMon is sized per target: Q3's (ε = 0.01) is larger than Q2's (ε = 0.05) | `stage1_logical_asap_optimization_univmon_is_sized_per_accuracy_target` | passes |
-| Only a UnivMon is ever shared across statistics | `stage1_logical_asap_optimization_only_univmon_is_shared_across_statistics` | passes |
-| Stage 1 does not read the distinct bound; Q1's HLL failure probability stays symbolic in the source's bound | `stage1_logical_asap_optimization_leaves_the_hll_failure_probability_symbolic` | passes |
-| Candidates are valid DAGs with unique ids | `stage1_logical_asap_optimization_candidates_are_valid_and_uniquely_named` | passes |
+| Once recognized, the SQL workload has the stand-in's Pass 1 options | `stage1_logical_asap_optimization_sql_has_the_standin_options` | deleted |
+| Each statistic has an exact and a UnivMon option | `stage1_logical_asap_optimization_pass1_offers_exact_and_univmon_for_each_statistic` | deleted |
+| Q1 has a specialized distinct-count summary (HLL or KMV) | `stage1_logical_asap_optimization_pass1_offers_a_distinct_count_summary` | deleted |
+| Q2 and Q3 have a specialized entropy and norm summary | `stage1_logical_asap_optimization_pass1_offers_specialized_entropy_and_l2_summaries` | deleted |
+| Every combination of the queries' own options is kept, with no shared summary | `stage1_logical_asap_optimization_keeps_every_independent_combination` | deleted |
+| A candidate has one UnivMon build read by all three queries, feeding a distinct-count, an entropy and an L2 estimate | `stage1_logical_asap_optimization_summary_capability_adds_one_univmon_for_all_three` | deleted |
+| For each pair, a candidate shares one UnivMon between the two while the third takes each of its own options | `stage1_logical_asap_optimization_summary_capability_adds_pairwise_shared_univmons` | deleted |
+| A shared UnivMon takes each parameter's largest value among its consumers, each sized alone | `stage1_logical_asap_optimization_shared_univmon_takes_each_parameters_largest_own_size` | deleted |
+| UnivMon is sized per target: Q3's (ε = 0.01) is larger than Q2's (ε = 0.05) | `stage1_logical_asap_optimization_univmon_is_sized_per_accuracy_target` | deleted |
+| Only a UnivMon is ever shared across statistics | `stage1_logical_asap_optimization_only_univmon_is_shared_across_statistics` | deleted |
+| Stage 1 does not read the distinct bound; Q1's HLL failure probability stays symbolic in the source's bound | `stage1_logical_asap_optimization_leaves_the_hll_failure_probability_symbolic` | deleted |
+| Candidates are valid DAGs with unique ids | `stage1_logical_asap_optimization_candidates_are_valid_and_uniquely_named` | deleted |
+
+The tests in this table no longer exist. Pass 1 is tested over memo groups instead: the
+Pass 1 crate's `tests.rs`, and `pass1_candidates.rs` and `pass1_candidates_sql.rs` in
+`crates/integration-tests/tests/`.
 
 ### Physical ASAP-aware optimization
 

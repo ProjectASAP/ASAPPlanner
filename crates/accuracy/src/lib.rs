@@ -28,8 +28,6 @@ pub mod propagation;
 mod propagation_stats;
 mod requirements;
 pub mod sizing;
-#[cfg(feature = "test-support")]
-pub mod test_support;
 
 pub use budget::per_input_target;
 pub use error_propagation::{error_propagation, ErrorPropagation};

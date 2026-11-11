@@ -44,7 +44,7 @@ A new sketch that Pass 1 can offer for an intent.
    not with a local copy.
 7. **Labels.** Name it in `asap_devtools::candidate_labels`.
 
-Tests: a Pass 1 test in `crates/stage1-pass1-per-computation-candidates/src/per_computation_candidates_tests.rs`
+Tests: a Pass 1 test in `crates/stage1-pass1-per-computation-candidates/src/tests.rs`
 that the intent gets the new candidate (and that a deployment without it
 prunes it with `UnsupportedByDeployment`); an estimator test beside the
 estimator; an execution test in `crates/integration-tests/tests/` such as

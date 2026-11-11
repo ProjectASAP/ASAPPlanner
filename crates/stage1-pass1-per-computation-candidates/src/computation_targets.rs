@@ -1,8 +1,8 @@
 //! Stage 1, Pass 1's computation targets over the memo groups (concepts doc
 //! `memo-groups-properties-requirements.md`, section 3, "Stage 1, Pass 1").
 //!
-//! [`computation_targets`] walks the memo groups and finds, for every
-//! aggregate group, one target ([`ComputationTarget`]) per measure whose
+//! [`computation_targets`](fn@crate::computation_targets::computation_targets) walks the memo groups and finds, for every
+//! aggregate group, one target ([`ComputationTarget`](crate::computation_targets::ComputationTarget)) per measure whose
 //! intent has a realization besides plain exact execution, once however
 //! many queries read the group, with the ways to compute it and its fused
 //! computations: a whole-expression top-k (a heap over the rows below a
@@ -19,27 +19,44 @@ use asap_types::ir::operator::arguments::Source;
 use asap_types::ir::operator::non_asap::any_measure_filtered;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef};
-use asap_types::ir::schema::{FieldDataType, Schema};
-use asap_types::ir::{NonASAPOp, Operator, OperatorResultKind, Predicate, SchemaDerivationError};
-use asap_types::stages::MemoGroupError;
-use asap_types::stages::{
-    CandidateError, HowToComputeAggregateMeasure, LogicalPropertiesError, Memo, MemoGroupId,
-};
+use asap_types::ir::schema::Schema;
+use asap_types::ir::{NonASAPOp, Operator, OperatorResultKind, Predicate};
+use asap_types::stages::{Memo, MemoGroupId};
 use asap_types::summary_type::{
     ExactKind, SketchAlgorithm, StatisticKind, SummaryInputExpr, SummaryUpdate,
 };
-use thiserror::Error;
 
 use asap_accuracy::sizing::sketch_statistic;
 use asap_types::deployment_capabilities::{summary_supported, SupportedSummary};
 
-use crate::summary_realization::{
-    expression, realize_keyed_additive_summary_input, schema, summary_candidates,
-};
+use crate::summary_realization::{realize_keyed_additive_summary_input, summary_candidates};
+use crate::{expression, schema, PerComputationCandidateError};
+
+/// How one Pass 1 target is computed: exact or a summary.
+///
+/// Each target lists one exact option: `ExactAccumulator` when the intent
+/// has an exact mergeable state and it can be built, otherwise `Exact`.
+/// The plain exact computation is always offered too, as the aggregate
+/// group's own expression.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum HowToComputeAggregateMeasure {
+    /// Plain exact execution: the aggregate group's own expression; the
+    /// listed exact option only when the intent has no exact accumulator
+    /// form or that form is pruned.
+    Exact,
+    /// One or more exact mergeable accumulator states, by accumulator kind,
+    /// finalized and combined into the measure: one state for `sum`,
+    /// `count`, `min`, `max`, `rate`, `irate` and `increase`; `[Sum, Count]`,
+    /// divided, for `avg`.
+    ExactAccumulator(Vec<ExactKind>),
+    /// A sketch algorithm: its state group gets one build candidate per
+    /// configuration of the algorithm's predefined list (`parameter_list`).
+    Summary(SketchAlgorithm),
+}
 
 /// One measure of an aggregate group with at least one realization besides
 /// exact execution.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ComputationTarget {
     /// The memo group of the `Aggregate` the measure belongs to.
     pub aggregate_group: MemoGroupId,
@@ -60,7 +77,7 @@ pub(crate) struct ComputationTarget {
 /// a nested distributive aggregate, a grouped `sum`, `min` or `max` over the
 /// same reduction (`ExactAccumulator([Sum])`, `[Min]` or `[Max]`). It has
 /// the outer target's aggregate, measure, filter and `HAVING`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub(crate) struct FusedComputation {
     /// The groups of the operators it replaces, which its builds list in
     /// `fused_groups`: the aggregate directly beneath, then, for a
@@ -75,70 +92,33 @@ pub(crate) struct FusedComputation {
     pub ways_to_compute: Vec<HowToComputeAggregateMeasure>,
 }
 
-/// Unranked candidates of one measure and the candidates pruned for it.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct ComputationChoices {
-    pub candidates: Vec<HowToComputeAggregateMeasure>,
-    pub pruned: Vec<HowToComputeAggregateMeasure>,
-}
-
-impl ComputationChoices {
-    /// Prune matching candidates; a pruned exact accumulator form is replaced by
-    /// plain `Exact`, so the target keeps one exact option.
-    fn prune(&mut self, applies: impl Fn(&HowToComputeAggregateMeasure) -> bool) {
-        let pruned = prune_own(&mut self.candidates, applies);
-        self.pruned.extend(pruned);
-    }
-}
-
 /// Removes from a measure's own `candidates` the ones `applies` matches
-/// (never `Exact`) and returns them; a pruned exact accumulator form is
-/// replaced by plain `Exact`, so the measure keeps one exact option.
+/// (never `Exact`); a removed exact accumulator form is replaced by plain
+/// `Exact`, so the measure keeps one exact option.
 fn prune_own(
     candidates: &mut Vec<HowToComputeAggregateMeasure>,
     applies: impl Fn(&HowToComputeAggregateMeasure) -> bool,
-) -> Vec<HowToComputeAggregateMeasure> {
-    let (pruned, kept): (Vec<_>, _) = std::mem::take(candidates)
-        .into_iter()
-        .partition(|choice| *choice != HowToComputeAggregateMeasure::Exact && applies(choice));
-    *candidates = kept;
-    if pruned
-        .iter()
-        .any(|choice| matches!(choice, HowToComputeAggregateMeasure::ExactAccumulator(_)))
-    {
+) {
+    let mut removed_accumulator = false;
+    candidates.retain(|choice| {
+        let remove = *choice != HowToComputeAggregateMeasure::Exact && applies(choice);
+        removed_accumulator |=
+            remove && matches!(choice, HowToComputeAggregateMeasure::ExactAccumulator(_));
+        !remove
+    });
+    if removed_accumulator {
         candidates.insert(0, HowToComputeAggregateMeasure::Exact);
     }
-    pruned
-}
-
-/// Why Pass 1 could not add a group's candidates.
-#[derive(Debug, Error)]
-pub enum PerComputationCandidateError {
-    #[error(transparent)]
-    Structure(#[from] SchemaDerivationError),
-    /// A group Pass 1 built is not valid over its input groups
-    /// (`Memo::find_or_add_group`): a bug in the rule that built it.
-    #[error(transparent)]
-    MemoGroup(#[from] MemoGroupError),
-    #[error("logical candidate input already contains ASAP operators")]
-    ContainsAsap,
-    /// A candidate Pass 1 built breaks the node rules or does not output
-    /// its group's result: a bug in the rule that built it.
-    #[error(transparent)]
-    Candidate(#[from] CandidateError),
-    /// A candidate Pass 1 built has logical properties that cannot go
-    /// together: a bug in the rule that built it.
-    #[error(transparent)]
-    LogicalProperties(#[from] LogicalPropertiesError),
-    #[error("unsupported substitution in logical ASAP-aware optimization: {0}")]
-    Unsupported(&'static str),
 }
 
 /// Enumerate exact, rewrite and summary choices of one measure in stable catalog
 /// order, without ranking or empirical assessment. A summary is not a claim that
 /// a deployment meets the measure's accuracy requirement. The one exact option
 /// comes first: the exact accumulator form if the intent has one, else `Exact`.
-pub(super) fn computation_candidates_for_intent(intent: &AggIntent) -> ComputationChoices {
+/// A quantile outside [0, 1] gets no summary: its answer is -Inf or +Inf.
+pub(crate) fn computation_candidates_for_intent(
+    intent: &AggIntent,
+) -> Vec<HowToComputeAggregateMeasure> {
     let states = match intent {
         AggIntent::Count => vec![ExactKind::Count],
         AggIntent::Sum { .. } => vec![ExactKind::Sum],
@@ -155,21 +135,15 @@ pub(super) fn computation_candidates_for_intent(intent: &AggIntent) -> Computati
     } else {
         HowToComputeAggregateMeasure::ExactAccumulator(states)
     };
-    let mut choices = ComputationChoices {
-        candidates: vec![exact],
-        pruned: vec![],
-    };
-    if sketch_statistic(intent).is_some() {
-        let summaries = summary_candidates(intent).into_iter();
-        if matches!(intent, AggIntent::Quantile { q, .. } if !(0.0..=1.0).contains(q)) {
-            choices
-                .pruned
-                .extend(summaries.map(HowToComputeAggregateMeasure::Summary));
-        } else {
-            choices
-                .candidates
-                .extend(summaries.map(HowToComputeAggregateMeasure::Summary));
-        }
+    let mut choices = vec![exact];
+    let quantile_outside_unit_interval =
+        matches!(intent, AggIntent::Quantile { q, .. } if !(0.0..=1.0).contains(q));
+    if sketch_statistic(intent).is_some() && !quantile_outside_unit_interval {
+        choices.extend(
+            summary_candidates(intent)
+                .into_iter()
+                .map(HowToComputeAggregateMeasure::Summary),
+        );
     }
     choices
 }
@@ -184,20 +158,6 @@ fn nullable_avg_input(input: &Schema, intent: &AggIntent) -> bool {
     column
         .and_then(|column| input.fields.get(column))
         .is_none_or(|field| field.nullable)
-}
-
-/// Whether `having` over an aggregate's output reads only its `by(...)`
-/// group keys. A global aggregate (no group keys) never qualifies: its one
-/// output row exists even when no input row does, so no row predicate can
-/// stand in.
-pub(crate) fn key_only_having(reduction: &Reduction, having: &Predicate<MemoGroupId>) -> bool {
-    let keys = match reduction {
-        Reduction::Reduce(by) if !by.is_without() => by.len(),
-        _ => 0,
-    };
-    keys > 0
-        && having.0.operator_refs().is_empty()
-        && having.0.columns_referenced().iter().all(|id| *id < keys)
 }
 
 /// The consumer `Filter` groups directly above `aggregate_group` (its
@@ -264,15 +224,13 @@ pub(crate) fn computation_targets(
         let aggregate_group = MemoGroupId(index as u32);
         for (measure, intent) in measures.iter().enumerate() {
             let mut choices = computation_candidates_for_intent(intent);
-            if choices.candidates == [HowToComputeAggregateMeasure::Exact]
-                && choices.pruned.is_empty()
-            {
+            if choices == [HowToComputeAggregateMeasure::Exact] {
                 continue;
             }
             if matches!(intent, AggIntent::Avg { .. })
                 && nullable_avg_input(schema(memo, *child), intent)
             {
-                choices.prune(|choice| {
+                prune_own(&mut choices, |choice| {
                     matches!(choice, HowToComputeAggregateMeasure::ExactAccumulator(_))
                 });
             }
@@ -280,12 +238,14 @@ pub(crate) fn computation_targets(
                 && memo.groups()[child.0 as usize].group_properties.result_kind
                     == OperatorResultKind::Relation
             {
-                choices.prune(|choice| matches!(choice, HowToComputeAggregateMeasure::Summary(_)));
+                prune_own(&mut choices, |choice| {
+                    matches!(choice, HowToComputeAggregateMeasure::Summary(_))
+                });
             }
             targets.push(ComputationTarget {
                 aggregate_group,
                 measure_index: measure,
-                ways_to_compute: choices.candidates,
+                ways_to_compute: choices,
                 fused_computation: None,
             });
         }
@@ -380,20 +340,16 @@ fn close_absorptions(targets: &mut [ComputationTarget]) {
 /// of the inner groups' values is that of their rows), absorbing the inner
 /// target. Offered whatever else reads the inner aggregate: its group keeps
 /// its own candidates for its other consumers. Applied when neither has a
-/// filter or `HAVING` ([`nested_distributive_input`]), and when the outer
-/// aggregate is not itself absorbed by a merge and has no fused computation
-/// yet, and the inner one has none, so merges do not stack. An outer sum a
+/// filter or `HAVING` ([`nested_distributive_input`]), and when neither the
+/// outer aggregate nor the inner one has a fused computation yet, so merges
+/// do not stack. Targets follow the memo's group order, inputs first, so an
+/// outer aggregate is reached before any merge above it. An outer sum a
 /// whole-expression top-k absorbs (`topk(k, sum by (G)
 /// (sum_over_time(m[W])))`) keeps its merge for the top-k's own candidates.
 fn add_nested_distributive_targets(memo: &Memo, targets: &mut [ComputationTarget]) {
-    // The targets a merge absorbs.
-    let mut absorbed: Vec<usize> = Vec::new();
     for t in 0..targets.len() {
         let target = &targets[t];
-        if absorbed.contains(&t)
-            || target.fused_computation.is_some()
-            || has_having(memo, target.aggregate_group)
-        {
+        if target.fused_computation.is_some() || has_having(memo, target.aggregate_group) {
             continue;
         }
         let Operator::NonASAP(NonASAPOp::Aggregate { child, .. }) =
@@ -415,7 +371,6 @@ fn add_nested_distributive_targets(memo: &Memo, targets: &mut [ComputationTarget
         let Some((_, _, _, kind)) = nested_distributive_input(memo, target.aggregate_group) else {
             continue;
         };
-        absorbed.push(inner);
         targets[t].fused_computation = Some(FusedComputation {
             absorbed_groups: vec![*child],
             ways_to_compute: vec![HowToComputeAggregateMeasure::ExactAccumulator(vec![kind])],
@@ -426,7 +381,7 @@ fn add_nested_distributive_targets(memo: &Memo, targets: &mut [ComputationTarget
 /// The accumulator kind and input column of a distributive measure, one
 /// whose value over a union of groups is that of their values: `sum`, `min`
 /// and `max`.
-pub(crate) fn distributive(intent: &AggIntent) -> Option<(ExactKind, Option<usize>)> {
+fn distributive(intent: &AggIntent) -> Option<(ExactKind, Option<usize>)> {
     match intent {
         AggIntent::Sum { col } => Some((ExactKind::Sum, *col)),
         AggIntent::Min { col } => Some((ExactKind::Min, *col)),
@@ -621,7 +576,7 @@ fn prune_topk_heaps_over_one_row_per_item(memo: &Memo, targets: &mut [Computatio
 /// The input, update and partitions of a whole-expression top-k over
 /// `target`'s inner aggregate, by the keyed-additive rule, or `None` when it
 /// does not apply. Rows that carry the full series identity rank it as a
-/// column, as [`summary_update`] does. The partitions are `target`'s, moved
+/// column, as `candidates::summary_update` does. The partitions are `target`'s, moved
 /// onto the input the heap reads ([`Reduction::partitions_over`]).
 pub(crate) fn whole_expression_input(
     memo: &Memo,
@@ -639,20 +594,13 @@ pub(crate) fn whole_expression_input(
         return None;
     };
     let child = *child;
-    let [intent @ AggIntent::TopK { .. }] = measures.as_slice() else {
+    let [AggIntent::TopK { .. }] = measures.as_slice() else {
         return None;
     };
     if any_measure_filtered(filters) {
         return None;
     }
-    // The rule reads only the summary type's algorithm, and rejects Count-Min over
-    // weights it cannot prove non-negative. Ask with CountSketch so one
-    // update serves both heap algorithms; plan selection decides whether
-    // Count-Min is admissible, as for every other Count-Min candidate.
-    let summary_type = FieldDataType::Sketch(SketchAlgorithm::CountSketchWithHeap);
-    let realized =
-        realize_keyed_additive_summary_input(memo, intent, &summary_type, reduction, child)?;
-    let mut input = realized.input;
+    let (rows, mut input) = realize_keyed_additive_summary_input(memo, reduction, child)?;
     let per_series = matches!(
         expression(memo, child),
         Operator::NonASAP(NonASAPOp::Aggregate {
@@ -660,14 +608,13 @@ pub(crate) fn whole_expression_input(
             ..
         })
     );
-    let partitions =
-        reduction.partitions_over(schema(memo, child), schema(memo, realized.child))?;
-    if per_series && schema(memo, realized.child).has_promql_series_identity() {
+    let partitions = reduction.partitions_over(schema(memo, child), schema(memo, rows))?;
+    if per_series && schema(memo, rows).has_promql_series_identity() {
         input.item = Some(asap_types::ir::schema::topk::series_identity_item(
-            schema(memo, realized.child),
+            schema(memo, rows),
             partitions.group_keys().map_or(&[][..], |keys| keys.keys()),
         ));
-    } else if schema(memo, realized.child).closed
+    } else if schema(memo, rows).closed
         && matches!(input.item, Some(SummaryInputExpr::EntityIdentity(_)))
     {
         // An encoded label set needs an open PromQL schema. PromQL rows that
@@ -676,5 +623,5 @@ pub(crate) fn whole_expression_input(
         // keyed heap can consume raw rows without a per-key aggregate first.
         return None;
     }
-    Some((realized.child, input, partitions))
+    Some((rows, input, partitions))
 }

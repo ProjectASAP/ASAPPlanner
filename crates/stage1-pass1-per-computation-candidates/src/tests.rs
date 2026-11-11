@@ -13,22 +13,23 @@ use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr,
     TimeRangeKind,
 };
-use asap_types::stages::{
-    CandidateForMemoGroup, HowToComputeAggregateMeasure, LogicalRequirements, Memo, MemoGroupId,
-};
-use asap_types::summary_type::parameter_list;
+use asap_types::stages::{CandidateForMemoGroup, LogicalRequirements, Memo, MemoGroupId};
+use asap_types::summary_type::{parameter_list, SummaryTypeCapability};
 use asap_types::summary_type::{
     ExactKind, SketchAlgorithm, SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate,
     WeightDomain,
 };
 
 use crate::computation_targets::{
-    computation_candidates_for_intent, computation_targets, PerComputationCandidateError,
+    computation_candidates_for_intent, computation_targets, HowToComputeAggregateMeasure,
 };
-use crate::pass1_memo;
-use crate::test_fixtures::{
-    aggregate_group, group, metric_schema, query, scan_group, scan_operator,
+use crate::summary_realization::{
+    candidates_by, realize_keyed_additive_summary_input, summarised_input, summary_candidates,
+    ALGORITHM_PREFERENCE,
 };
+use crate::test_fixtures::{aggregate_group, group, query, scan_group};
+use crate::{pass1_memo, PerComputationCandidateError};
+use asap_types::test_support::memo_fixtures::scan;
 use asap_types::workload::DataWorkload;
 
 /// A compact printout of every group and its candidates: the expression's
@@ -311,7 +312,7 @@ fn an_open_per_series_aggregate_offers_no_renamed_readout() {
     let mut memo = Memo::new(&DataWorkload::default());
     let scan = group(
         &mut memo,
-        scan_operator("latency", metric_schema(&["job"], vec![])),
+        scan("latency", &[("job", DataType::Utf8)], vec![]),
     );
     let rows = group(
         &mut memo,
@@ -949,10 +950,6 @@ fn update_weights_follow_the_measure() {
 
 // ── Intents ────────────────────────────────────────────────────────────────
 
-fn candidates_for(intent: AggIntent) -> Vec<HowToComputeAggregateMeasure> {
-    computation_candidates_for_intent(&intent).candidates
-}
-
 fn algorithms(choices: &[HowToComputeAggregateMeasure]) -> Vec<SketchAlgorithm> {
     choices
         .iter()
@@ -966,7 +963,7 @@ fn algorithms(choices: &[HowToComputeAggregateMeasure]) -> Vec<SketchAlgorithm> 
 /// Example 2 preserves specialized distinct summaries and the universal alternative.
 #[test]
 fn cardinality_keeps_exact_specialized_and_universal_candidates() {
-    let choices = candidates_for(AggIntent::Cardinality { cols: vec![0] });
+    let choices = computation_candidates_for_intent(&AggIntent::Cardinality { cols: vec![0] });
     assert_eq!(choices[0], HowToComputeAggregateMeasure::Exact);
     assert_eq!(
         algorithms(&choices),
@@ -976,7 +973,7 @@ fn cardinality_keeps_exact_specialized_and_universal_candidates() {
             SketchAlgorithm::UnivMon
         ]
     );
-    let tuple = candidates_for(AggIntent::Cardinality { cols: vec![0, 1] });
+    let tuple = computation_candidates_for_intent(&AggIntent::Cardinality { cols: vec![0, 1] });
     assert!(!algorithms(&tuple).contains(&SketchAlgorithm::UnivMon));
 }
 
@@ -987,7 +984,7 @@ fn frequency_statistics_keep_universal_choices() {
         AggIntent::FrequencyL2 { col: Some(0) },
         AggIntent::FrequencyEntropy { col: Some(0) },
     ] {
-        let choices = candidates_for(intent);
+        let choices = computation_candidates_for_intent(&intent);
         assert_eq!(choices[0], HowToComputeAggregateMeasure::Exact);
         assert_eq!(algorithms(&choices), vec![SketchAlgorithm::UnivMon]);
     }
@@ -996,7 +993,7 @@ fn frequency_statistics_keep_universal_choices() {
 /// TopK keeps both declared heap substrates without choosing an implementation.
 #[test]
 fn topk_keeps_both_specialized_heap_choices() {
-    let choices = candidates_for(topk(10));
+    let choices = computation_candidates_for_intent(&topk(10));
     assert_eq!(choices[0], HowToComputeAggregateMeasure::Exact);
     assert_eq!(
         algorithms(&choices),
@@ -1011,7 +1008,7 @@ fn topk_keeps_both_specialized_heap_choices() {
 /// summaries (the plain aggregate is the group's own expression).
 #[test]
 fn approximate_count_lists_its_accumulator_and_summaries() {
-    let choices = candidates_for(AggIntent::Count);
+    let choices = computation_candidates_for_intent(&AggIntent::Count);
     assert!(!choices.contains(&HowToComputeAggregateMeasure::Exact));
     assert_eq!(
         choices[0],
@@ -1027,8 +1024,136 @@ fn approximate_count_lists_its_accumulator_and_summaries() {
 #[test]
 fn a_count_offers_no_count_sketch() {
     assert!(
-        !candidates_for(AggIntent::Count).contains(&HowToComputeAggregateMeasure::Summary(
-            SketchAlgorithm::CountSketch
-        ))
+        !computation_candidates_for_intent(&AggIntent::Count).contains(
+            &HowToComputeAggregateMeasure::Summary(SketchAlgorithm::CountSketch)
+        )
     );
+}
+
+// ── Summary realization ──────────────────────────────────────────────────────
+
+/// A quantile outside [0, 1] is answered -Inf or +Inf: it gets no summary,
+/// only the plain exact aggregate.
+#[test]
+fn a_quantile_outside_the_unit_interval_offers_no_summary() {
+    let choices = computation_candidates_for_intent(&AggIntent::Quantile { col: None, q: 1.5 });
+    assert_eq!(choices, [HowToComputeAggregateMeasure::Exact]);
+}
+
+/// A heap sketch consumes every raw row, so the keyed input rule refuses
+/// a TopK over a filtered count.
+#[test]
+fn keyed_heap_input_refuses_a_filtered_count() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let rows = scan_group(&mut memo, "m", &["job"]);
+    let mut count_by_job = |filter: Option<Predicate<MemoGroupId>>| {
+        group(
+            &mut memo,
+            Operator::NonASAP(NonASAPOp::Aggregate {
+                reduction: Reduction::by(vec![2]),
+                measures: vec![AggIntent::Count],
+                output_names: vec![String::new()],
+                filters: vec![filter],
+                having: None,
+                child: rows,
+            }),
+        )
+    };
+    let unfiltered = count_by_job(None);
+    let value_above_one = Predicate(ScalarExpr::Compare {
+        left: Box::new(ScalarExpr::Column(1)),
+        op: CompareOpKind::Gt,
+        right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(1.0))),
+        semantics: ExprSemantics::Promql,
+    });
+    let filtered = count_by_job(Some(value_above_one));
+    let output = Reduction::Reduce(asap_types::ir::operator::arguments::GroupKeys::none());
+    assert!(realize_keyed_additive_summary_input(&memo, &output, unfiltered).is_some());
+    assert!(realize_keyed_additive_summary_input(&memo, &output, filtered).is_none());
+}
+
+/// A summary reads the intent's own input columns: one column by name,
+/// none as the sample value, several as one hashed tuple.
+#[test]
+fn summarised_input_reads_the_intents_columns() {
+    // Columns [ts=0, value=1, job=2].
+    let Operator::NonASAP(NonASAPOp::Scan { schema, .. }) =
+        scan("m", &[("job", DataType::Utf8)], vec![])
+    else {
+        unreachable!("a scan")
+    };
+    let column = |name: &str| SummaryInputExpr::Column(ColumnRef::Named(name.into()));
+    let cases = [
+        (vec![2], column("job")),
+        (vec![1], column("value")),
+        (vec![], SummaryInputExpr::Column(ColumnRef::SampleValue)),
+        (
+            vec![1, 2],
+            SummaryInputExpr::Tuple(vec![column("value"), column("job")]),
+        ),
+    ];
+    for (cols, want) in cases {
+        let intent = AggIntent::Cardinality { cols: cols.clone() };
+        assert_eq!(
+            summarised_input(&intent, &schema),
+            Some(want),
+            "wrong summarised input for cols={cols:?}"
+        );
+    }
+}
+
+/// Each approximable intent is offered the algorithms it was offered when
+/// the list was written by hand, in the same order; a non-sketch intent
+/// is offered none.
+#[test]
+fn summary_candidates_keep_the_hand_written_lists() {
+    use SketchAlgorithm as S;
+    let cardinality = |cols: Vec<usize>| AggIntent::Cardinality { cols };
+    let cases = [
+        (
+            AggIntent::Quantile { col: None, q: 0.99 },
+            vec![S::Kll, S::DDSketch],
+        ),
+        (cardinality(vec![]), vec![S::Hll, S::Kmv, S::UnivMon]),
+        (cardinality(vec![1]), vec![S::Hll, S::Kmv, S::UnivMon]),
+        (cardinality(vec![1, 2]), vec![S::Hll, S::Kmv]),
+        (AggIntent::FrequencyL2 { col: None }, vec![S::UnivMon]),
+        (AggIntent::FrequencyEntropy { col: None }, vec![S::UnivMon]),
+        (
+            AggIntent::TopK { k: 10 },
+            vec![S::CmsWithHeap, S::CountSketchWithHeap],
+        ),
+        (AggIntent::Count, vec![S::Cms, S::UnivMon]),
+        (AggIntent::Sum { col: None }, vec![]),
+    ];
+    for (intent, want) in cases {
+        assert_eq!(summary_candidates(&intent), want, "{intent:?}");
+    }
+}
+
+/// Dropping a readout from an algorithm's table row drops the algorithm from
+/// the candidates of the intents that read it, with no other edit.
+#[test]
+fn a_dropped_readout_drops_the_algorithm() {
+    // Count-Min-with-heap answered from Count-Min's row: no top-k readout.
+    let heap_without_top_k = |algorithm: &SketchAlgorithm| {
+        SummaryTypeCapability::of(&FieldDataType::Sketch(match algorithm {
+            SketchAlgorithm::CmsWithHeap => SketchAlgorithm::Cms,
+            other => *other,
+        }))
+    };
+    let top_k = AggIntent::TopK { k: 10 };
+    assert_eq!(
+        candidates_by(&top_k, heap_without_top_k),
+        vec![SketchAlgorithm::CountSketchWithHeap]
+    );
+}
+
+/// The preference order names each algorithm it offers once.
+#[test]
+fn preference_order_names_each_algorithm_once() {
+    let mut seen = std::collections::HashSet::new();
+    for algorithm in ALGORITHM_PREFERENCE {
+        assert!(seen.insert(algorithm), "{algorithm:?} twice");
+    }
 }

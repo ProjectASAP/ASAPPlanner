@@ -1,19 +1,18 @@
-//! Summary realization helpers of Pass 1 (`computation_targets`, `candidates`):
-//! which sketch kinds can serve an intent,
-//! the column/tuple a summary consumes, the column a top-k ranks, and the
-//! keyed-additive rule for a heap sketch that reads a larger sub-DAG.
+//! How a summary realizes an aggregate intent in Pass 1: the sketch
+//! algorithms that serve the intent, the column or tuple a summary
+//! consumes, the column a top-k ranks, and the keyed-additive rule for a
+//! heap sketch that reads a larger sub-expression.
 
 use asap_types::ir::operator::agg_intent::AggIntent;
-use asap_types::ir::operator::arguments::Source;
 use asap_types::ir::operator::non_asap::any_measure_filtered;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::scalar::column_resolution::{resolve_column_ref, ResolveError};
 use asap_types::ir::scalar::expr_ir::ColumnRef;
-use asap_types::ir::schema::ColumnId;
 use asap_types::ir::schema::{Field, FieldDataType, Schema};
 use asap_types::ir::{NonASAPOp, Operator};
-use asap_types::stages::ranked_column_of_group;
-use asap_types::stages::{Memo, MemoGroupId};
+use asap_types::stages::{
+    ranked_column_of_group, raw_data_samples_of_metric_of_group, Memo, MemoGroupId,
+};
 use asap_types::summary_type::{
     EntityIdentity, NonNegativeWeightProof, SketchAlgorithm, SummaryInputExpr,
     SummaryTypeCapability, SummaryUpdate, WeightDomain,
@@ -21,10 +20,12 @@ use asap_types::summary_type::{
 
 use asap_accuracy::sizing::sketch_statistic;
 
+use crate::{expression, schema};
+
 /// The sketch algorithms the planner sizes and offers, in the order Pass 1
 /// offers those that answer an intent's statistic: the specialized algorithms
 /// before the universal UnivMon.
-const ALGORITHM_PREFERENCE: &[SketchAlgorithm] = &[
+pub(crate) const ALGORITHM_PREFERENCE: &[SketchAlgorithm] = &[
     SketchAlgorithm::Kll,
     SketchAlgorithm::DDSketch,
     SketchAlgorithm::Hll,
@@ -48,7 +49,7 @@ pub(crate) fn summary_candidates(intent: &AggIntent) -> Vec<SketchAlgorithm> {
 }
 
 /// [`summary_candidates`] with each algorithm's table row read from `capability`.
-fn candidates_by(
+pub(crate) fn candidates_by(
     intent: &AggIntent,
     capability: impl Fn(&SketchAlgorithm) -> SummaryTypeCapability,
 ) -> Vec<SketchAlgorithm> {
@@ -69,54 +70,40 @@ fn candidates_by(
         .collect()
 }
 
-/// The column fed into a *single-column* summary: the intent's leading
-/// positional input resolved to a name against the child schema, or the PromQL
-/// sample value when it reads none. Callers are responsible for only reaching
-/// here with a one-column intent — [`summarised_input`] is the general form.
-pub(crate) fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> ColumnRef {
-    match intent
-        .input_cols()
-        .first()
-        .and_then(|id| child_schema.fields.get(*id))
-    {
-        Some(c) => c.column_ref(),
-        None => ColumnRef::SampleValue,
-    }
-}
-
 /// The column a top-k ranks group `child` by ([`ranked_column_of_group`]),
-/// also as a reference: the sample value when it is that column, else the
-/// column by name.
-pub(crate) fn ranked_value(
-    memo: &Memo,
-    child: MemoGroupId,
-) -> Result<(ColumnId, ColumnRef), ResolveError> {
+/// as a reference: the sample value when it is that column, else the column
+/// by name.
+pub(crate) fn ranked_value(memo: &Memo, child: MemoGroupId) -> Result<ColumnRef, ResolveError> {
     let ranked = ranked_column_of_group(memo, child)?;
-    let column = match resolve_column_ref(&ColumnRef::SampleValue, schema(memo, child)) {
-        Ok(value) if value == ranked => ColumnRef::SampleValue,
-        _ => schema(memo, child).fields[ranked].column_ref(),
-    };
-    Ok((ranked, column))
+    Ok(
+        match resolve_column_ref(&ColumnRef::SampleValue, schema(memo, child)) {
+            Ok(value) if value == ranked => ColumnRef::SampleValue,
+            _ => schema(memo, child).fields[ranked].column_ref(),
+        },
+    )
 }
 
-/// What the summary consumes per input row. An intent that reads one column (or
-/// none) feeds that column; `COUNT(DISTINCT a, b)` feeds the whole tuple as one
-/// item, so the distinct-count sketch hashes `(a, b)` rather than `a` — the
-/// difference between tuple cardinality and single-column cardinality.
+/// What the summary consumes per input row. An intent that reads one column
+/// feeds that column by name, or the sample value when it reads none or its
+/// column is outside the child schema; `COUNT(DISTINCT a, b)` feeds the whole
+/// tuple as one item, so the distinct-count sketch hashes `(a, b)` rather
+/// than `a` — the difference between tuple cardinality and single-column
+/// cardinality.
 ///
-/// A tuple leg outside the child schema is an error rather than
-/// [`summarised_column`]'s sample-value fallback: a leg has no sample-value
-/// reading, and silently dropping one would under-count: `None` then.
+/// A tuple leg outside the child schema gives `None` rather than the
+/// sample-value fallback: a leg has no sample-value reading, and silently
+/// dropping one would under-count.
 pub(crate) fn summarised_input(
     intent: &AggIntent,
     child_schema: &Schema,
 ) -> Option<SummaryInputExpr> {
     let cols = intent.input_cols();
     if cols.len() < 2 {
-        return Some(SummaryInputExpr::Column(summarised_column(
-            intent,
-            child_schema,
-        )));
+        let column = cols
+            .first()
+            .and_then(|id| child_schema.fields.get(*id))
+            .map_or(ColumnRef::SampleValue, Field::column_ref);
+        return Some(SummaryInputExpr::Column(column));
     }
     let legs = cols
         .iter()
@@ -127,40 +114,18 @@ pub(crate) fn summarised_input(
     ))
 }
 
-/// The physical input consumed by one summary realization. Most summaries
-/// consume the logical aggregate's immediate child and summarize its declared
-/// input value. Composite realizations can instead consume a larger
-/// logical sub-DAG and bind a different key or value.
-pub(crate) struct PhysicalSummaryInput {
-    pub(crate) child: MemoGroupId,
-    pub(crate) input: SummaryUpdate,
-}
-
-/// Realize the composite heavy-hitter realization for
-/// `TopK(Count GROUP BY key)`. The heap sketch consumes the raw keyed stream;
-/// it does not consume an independently materialized Count result. `None`
-/// when the rule does not apply or the shape is unsupported (each reason is
-/// noted where it returns).
+/// The keyed-additive rule for a heap top-k over aggregate group `child`
+/// (`TopK(Count GROUP BY key)`, `TopK(Sum GROUP BY key)`): the group the heap
+/// reads and its update, one keyed heap over the raw rows rather than over
+/// an independently materialized per-item result. The update serves both
+/// heap algorithms; whether Count-Min is admissible over its weights is plan
+/// selection's question. `None` when the rule does not apply or the shape is
+/// unsupported (each reason is noted where it returns).
 pub(crate) fn realize_keyed_additive_summary_input(
     memo: &Memo,
-    intent: &AggIntent,
-    summary_type: &FieldDataType,
     output_reduction: &Reduction,
     child: MemoGroupId,
-) -> Option<PhysicalSummaryInput> {
-    if !matches!(intent, AggIntent::TopK { .. }) {
-        return None;
-    }
-    let FieldDataType::Sketch(kind) = summary_type else {
-        return None;
-    };
-    let heap_algorithm = kind;
-    if !matches!(
-        heap_algorithm,
-        SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
-    ) {
-        return None;
-    }
+) -> Option<(MemoGroupId, SummaryUpdate)> {
     let Operator::NonASAP(NonASAPOp::Aggregate {
         reduction,
         measures,
@@ -193,7 +158,7 @@ pub(crate) fn realize_keyed_additive_summary_input(
             [AggIntent::Rate | AggIntent::Increase | AggIntent::IRate]
         ) =>
         {
-            Some(raw_data_samples_of_metric(memo, *samples))
+            Some(raw_data_samples_of_metric_of_group(memo, *samples))
         }
         _ => None,
     };
@@ -235,15 +200,6 @@ pub(crate) fn realize_keyed_additive_summary_input(
         Some(Some(metric)) => WeightDomain::CounterDerivativeOfMetric { metric },
         _ => WeightDomain::UnknownOrSigned,
     };
-    if matches!(heap_algorithm, SketchAlgorithm::CmsWithHeap)
-        && !matches!(
-            weight_domain,
-            WeightDomain::NonNegative { .. } | WeightDomain::CounterDerivativeOfMetric { .. }
-        )
-    {
-        // Unsupported: value-weighted CMS requires non-negative update evidence; use CountSketch for arbitrary values.
-        return None;
-    }
     let subpopulation_columns = match output_reduction {
         Reduction::PerEntity => vec![],
         Reduction::Reduce(keys) => keys
@@ -297,14 +253,14 @@ pub(crate) fn realize_keyed_additive_summary_input(
             return None;
         }
     };
-    Some(PhysicalSummaryInput {
-        child: samples.map_or(raw_child, |(rows, _)| rows),
-        input: SummaryUpdate {
+    Some((
+        samples.map_or(raw_child, |(rows, _)| rows),
+        SummaryUpdate {
             item: Some(item),
             weight,
             weight_domain,
         },
-    })
+    ))
 }
 
 /// The raw data sample rows and the per-series `sum` or `count` over them when
@@ -369,182 +325,4 @@ fn summed_per_series_samples(
         return None;
     }
     Some((*rows, inner.clone()))
-}
-
-/// The expression of group `group`.
-pub(crate) fn expression(memo: &Memo, group: MemoGroupId) -> &Operator<MemoGroupId> {
-    &memo.groups()[group.0 as usize].expression
-}
-
-/// The output schema of group `group`.
-pub(crate) fn schema(memo: &Memo, group: MemoGroupId) -> &Schema {
-    &memo.groups()[group.0 as usize].group_properties.schema
-}
-
-/// The metric whose raw data samples, or plain sums of them, are every value
-/// group `group` outputs, or `None`: walking down the groups' expressions
-/// through a time range, an `offset`-only time shift (it moves the window,
-/// not the samples) and a plain `sum`, to a time-series scan. Any other
-/// operator (rate and arithmetic included) ends it. Whether the metric's
-/// samples are non-negative is plan selection's question
-/// ([`WeightDomain::RawDataSamplesOfMetric`]).
-pub(crate) fn raw_data_samples_of_metric(memo: &Memo, group: MemoGroupId) -> Option<String> {
-    let Operator::NonASAP(operator) = expression(memo, group) else {
-        return None;
-    };
-    match operator {
-        NonASAPOp::Scan {
-            source: Source::TimeSeries { metric },
-            ..
-        } => Some(metric.clone()),
-        NonASAPOp::TimeRange { child, .. } => raw_data_samples_of_metric(memo, *child),
-        NonASAPOp::TimeShift { shift, child } if shift.at.is_none() => {
-            raw_data_samples_of_metric(memo, *child)
-        }
-        NonASAPOp::Aggregate {
-            measures, child, ..
-        } if matches!(measures.as_slice(), [AggIntent::Sum { col: None }]) => {
-            raw_data_samples_of_metric(memo, *child)
-        }
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_fixtures::{group, metric_schema, scan_group};
-    use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
-    use asap_types::ir::{ExprSemantics, Predicate, ScalarExpr};
-    use asap_types::workload::DataWorkload;
-
-    /// A heap sketch consumes every raw row, so the keyed input rule refuses
-    /// a TopK over a filtered count.
-    #[test]
-    fn keyed_heap_input_refuses_a_filtered_count() {
-        let mut memo = Memo::new(&DataWorkload::default());
-        let rows = scan_group(&mut memo, "m", &["job"]);
-        let mut count_by_job = |filter: Option<Predicate<MemoGroupId>>| {
-            group(
-                &mut memo,
-                Operator::NonASAP(NonASAPOp::Aggregate {
-                    reduction: Reduction::by(vec![2]),
-                    measures: vec![AggIntent::Count],
-                    output_names: vec![String::new()],
-                    filters: vec![filter],
-                    having: None,
-                    child: rows,
-                }),
-            )
-        };
-        let unfiltered = count_by_job(None);
-        let value_above_one = Predicate(ScalarExpr::Compare {
-            left: Box::new(ScalarExpr::Column(1)),
-            op: CompareOpKind::Gt,
-            right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(1.0))),
-            semantics: ExprSemantics::Promql,
-        });
-        let filtered = count_by_job(Some(value_above_one));
-        let intent = AggIntent::TopK { k: 5 };
-        let summary_type = FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap);
-        let output = Reduction::Reduce(asap_types::ir::operator::arguments::GroupKeys::none());
-        assert!(realize_keyed_additive_summary_input(
-            &memo,
-            &intent,
-            &summary_type,
-            &output,
-            unfiltered
-        )
-        .is_some());
-        assert!(realize_keyed_additive_summary_input(
-            &memo,
-            &intent,
-            &summary_type,
-            &output,
-            filtered
-        )
-        .is_none());
-    }
-
-    /// A summary reads the intent's own input columns: one column by name,
-    /// none as the sample value, several as one hashed tuple.
-    #[test]
-    fn summarised_input_reads_the_intents_columns() {
-        // `metric_schema(&["job"], ..)` → columns [ts=0, value=1, job=2].
-        let schema = metric_schema(&["job"], vec![]);
-        let column = |name: &str| SummaryInputExpr::Column(ColumnRef::Named(name.into()));
-        let cases = [
-            (vec![2], column("job")),
-            (vec![1], column("value")),
-            (vec![], SummaryInputExpr::Column(ColumnRef::SampleValue)),
-            (
-                vec![1, 2],
-                SummaryInputExpr::Tuple(vec![column("value"), column("job")]),
-            ),
-        ];
-        for (cols, want) in cases {
-            let intent = AggIntent::Cardinality { cols: cols.clone() };
-            assert_eq!(
-                summarised_input(&intent, &schema),
-                Some(want),
-                "wrong summarised input for cols={cols:?}"
-            );
-        }
-    }
-
-    /// Each approximable intent is offered the algorithms it was offered when
-    /// the list was written by hand, in the same order; a non-sketch intent
-    /// is offered none.
-    #[test]
-    fn summary_candidates_keep_the_hand_written_lists() {
-        use SketchAlgorithm as S;
-        let cardinality = |cols: Vec<usize>| AggIntent::Cardinality { cols };
-        let cases = [
-            (
-                AggIntent::Quantile { col: None, q: 0.99 },
-                vec![S::Kll, S::DDSketch],
-            ),
-            (cardinality(vec![]), vec![S::Hll, S::Kmv, S::UnivMon]),
-            (cardinality(vec![1]), vec![S::Hll, S::Kmv, S::UnivMon]),
-            (cardinality(vec![1, 2]), vec![S::Hll, S::Kmv]),
-            (AggIntent::FrequencyL2 { col: None }, vec![S::UnivMon]),
-            (AggIntent::FrequencyEntropy { col: None }, vec![S::UnivMon]),
-            (
-                AggIntent::TopK { k: 10 },
-                vec![S::CmsWithHeap, S::CountSketchWithHeap],
-            ),
-            (AggIntent::Count, vec![S::Cms, S::UnivMon]),
-            (AggIntent::Sum { col: None }, vec![]),
-        ];
-        for (intent, want) in cases {
-            assert_eq!(summary_candidates(&intent), want, "{intent:?}");
-        }
-    }
-
-    /// Dropping a readout from an algorithm's table row drops the algorithm from
-    /// the candidates of the intents that read it, with no other edit.
-    #[test]
-    fn a_dropped_readout_drops_the_algorithm() {
-        // Count-Min-with-heap answered from Count-Min's row: no top-k readout.
-        let heap_without_top_k = |algorithm: &SketchAlgorithm| {
-            SummaryTypeCapability::of(&FieldDataType::Sketch(match algorithm {
-                SketchAlgorithm::CmsWithHeap => SketchAlgorithm::Cms,
-                other => *other,
-            }))
-        };
-        let top_k = AggIntent::TopK { k: 10 };
-        assert_eq!(
-            candidates_by(&top_k, heap_without_top_k),
-            vec![SketchAlgorithm::CountSketchWithHeap]
-        );
-    }
-
-    /// The preference order names each algorithm it offers once.
-    #[test]
-    fn preference_order_names_each_algorithm_once() {
-        let mut seen = std::collections::HashSet::new();
-        for algorithm in ALGORITHM_PREFERENCE {
-            assert!(seen.insert(algorithm), "{algorithm:?} twice");
-        }
-    }
 }

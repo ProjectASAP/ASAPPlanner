@@ -1,7 +1,7 @@
-//! `asap-stage1-pass1-per-computation-candidates` — #509 Stage 1, Pass 1:
+//! `asap-stage1-pass1-per-computation-candidates` — Stage 1, Pass 1:
 //! each memo group's initial candidates. Its one entry is [`pass1_memo`],
 //! which fills the memo groups of Stage 0's
-//! [`Memo`](asap_types::stages::Memo) with their initial candidates (exact,
+//! [`Memo`] with their initial candidates (exact,
 //! exact accumulator, one summary build per listed parameter configuration
 //! with separate readouts, fused builds), every intermediate result its own
 //! group; Pass 2 extends that memo.
@@ -23,8 +23,9 @@
 mod candidates;
 /// Stage 1, Pass 1's computation targets over the memo groups.
 mod computation_targets;
-/// The sketch algorithms that can serve an aggregate intent, the input a
-/// summary consumes and the column a top-k ranks.
+/// How a summary realizes an aggregate intent: the sketch algorithms that
+/// serve it, the input a summary consumes and the keyed heap over a larger
+/// sub-expression.
 mod summary_realization;
 /// Fixtures this crate's own tests share.
 #[cfg(test)]
@@ -34,11 +35,40 @@ mod test_fixtures;
 mod tests;
 
 use asap_types::deployment_capabilities::SupportedSummary;
-use asap_types::stages::Memo;
+use asap_types::ir::schema::Schema;
+use asap_types::ir::{Operator, SchemaDerivationError};
+use asap_types::stages::{
+    CandidateError, LogicalPropertiesError, Memo, MemoGroupError, MemoGroupId,
+};
+use thiserror::Error;
 
 use candidates::add_pass1_candidates;
 use computation_targets::computation_targets;
-pub use computation_targets::PerComputationCandidateError;
+
+/// Why Pass 1 could not add a group's candidates.
+#[derive(Debug, Error)]
+pub enum PerComputationCandidateError {
+    /// A query's DAG breaks the node rules (the planner facade's
+    /// `QueryRoot::validate_structure` before Stage 0).
+    #[error(transparent)]
+    Structure(#[from] SchemaDerivationError),
+    /// A group Pass 1 built is not valid over its input groups
+    /// (`Memo::find_or_add_group`): a bug in the rule that built it.
+    #[error(transparent)]
+    MemoGroup(#[from] MemoGroupError),
+    #[error("logical candidate input already contains ASAP operators")]
+    ContainsAsap,
+    /// A candidate Pass 1 built breaks the node rules or does not output
+    /// its group's result: a bug in the rule that built it.
+    #[error(transparent)]
+    Candidate(#[from] CandidateError),
+    /// A candidate Pass 1 built has logical properties that cannot go
+    /// together: a bug in the rule that built it.
+    #[error(transparent)]
+    LogicalProperties(#[from] LogicalPropertiesError),
+    #[error("unsupported substitution in logical ASAP-aware optimization: {0}")]
+    Unsupported(&'static str),
+}
 
 /// Stage 1, Pass 1: the initial candidates of the memo groups of `memo`
 /// (Stage 0's, without candidates). It finds one computation target per
@@ -59,4 +89,14 @@ pub fn pass1_memo(
     let targets = computation_targets(&memo, supported_summaries)?;
     add_pass1_candidates(&mut memo, &targets)?;
     Ok(memo)
+}
+
+/// The expression of group `group`.
+fn expression(memo: &Memo, group: MemoGroupId) -> &Operator<MemoGroupId> {
+    &memo.groups()[group.0 as usize].expression
+}
+
+/// The output schema of group `group`.
+fn schema(memo: &Memo, group: MemoGroupId) -> &Schema {
+    &memo.groups()[group.0 as usize].group_properties.schema
 }

@@ -205,6 +205,7 @@ pub(crate) fn topk_capacity(k: usize, eps: f64) -> u32 {
 
 /// `⌈x⌉` clamped to `[lo, hi]`; NaN / non-positive x saturate to `hi`
 /// (a degenerate ε means "as accurate as this family goes").
+#[cfg(test)]
 pub(crate) fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
     if !x.is_finite() || x <= 0.0 {
         return hi;

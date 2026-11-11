@@ -15,4 +15,3 @@ thiserror = "2"
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
-asap-accuracy = { path = "../accuracy", features = ["test-support"] }

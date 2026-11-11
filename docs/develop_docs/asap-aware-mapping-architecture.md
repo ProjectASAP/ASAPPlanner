@@ -122,12 +122,12 @@ No stage caps the candidates it plans, and neither does `asap_planner`.
   asap-stage0-memo -p asap-stage1-pass1-per-computation-candidates -p
   asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p
   asap-stage3-plan-selection -E 'test(<pattern>)'`).
-- `crates/stage1-pass1-per-computation-candidates/src/per_computation_candidates_tests.rs` covers
+- `crates/stage1-pass1-per-computation-candidates/src/tests.rs` covers
   Pass 1.
 - `crates/integration-tests/tests/planner_layering_example{1,2,3,4}.rs` pin
   the design document's examples through every stage;
   `reuse_rules.rs`, `deployment_capabilities.rs`, `physical_properties_e2e.rs`
-  and `stage1_logical_asap_optimization.rs` cover single rules end to end.
+  and `pass1_candidates.rs` cover single rules end to end.
 - `crates/devtools/tests/asap_planner.rs` checks the stage document and the
   committed viewer examples; `asap_planner_acceptance.rs` checks
   `--run-until` and the refused flags.

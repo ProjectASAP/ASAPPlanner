@@ -2,7 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ir::operator::arguments::Source;
+use crate::ir::operator::input::OperatorInput;
+use crate::ir::operator::AggIntent;
 use crate::ir::scalar::ColumnRef;
+use crate::ir::{NonASAPOp, Operator};
 
 /// One summary-state update. `item` identifies a keyed item when the family
 /// is keyed; `weight` is the observation/update expression applied to state.
@@ -132,6 +136,35 @@ pub enum SketchStatistic {
     Cardinality,
     /// Read the top-k entries from a heap-backed summary.
     TopK { k: usize },
+}
+
+/// The metric whose raw data samples, or plain sums of them, are every value
+/// `input` outputs, or `None`: walking down through a time range, an
+/// `offset`-only time shift (it moves the window, not the samples) and a
+/// plain `sum`, to a time-series scan. Any other operator (rate and
+/// arithmetic included) ends it. The metric's type is not read here: whether
+/// its samples are non-negative is plan selection's question
+/// ([`WeightDomain::RawDataSamplesOfMetric`]).
+pub fn raw_data_samples_of_metric<I: OperatorInput>(input: &I) -> Option<String> {
+    let Operator::NonASAP(operator) = input.operator() else {
+        return None;
+    };
+    match operator {
+        NonASAPOp::Scan {
+            source: Source::TimeSeries { metric },
+            ..
+        } => Some(metric),
+        NonASAPOp::TimeRange { child, .. } => raw_data_samples_of_metric(&child),
+        NonASAPOp::TimeShift { shift, child } if shift.at.is_none() => {
+            raw_data_samples_of_metric(&child)
+        }
+        NonASAPOp::Aggregate {
+            measures, child, ..
+        } if matches!(measures.as_slice(), [AggIntent::Sum { col: None }]) => {
+            raw_data_samples_of_metric(&child)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

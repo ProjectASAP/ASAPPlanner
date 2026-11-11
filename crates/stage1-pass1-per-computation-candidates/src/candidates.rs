@@ -34,7 +34,7 @@
 //! A measure filter or `HAVING` prunes nothing. The measure filter is
 //! applied as `SummaryAgg.filter`. A `HAVING` is the aggregate's own
 //! `having` or a consumer `Filter` group directly above the aggregate group,
-//! read from the memo: a key-only predicate ([`key_only_having`]) is pushed
+//! read from the memo: a key-only predicate (`key_only_having`) is pushed
 //! below the aggregate by the candidates that compute the filtered result
 //! (the aggregate group, or that `Filter` group); any other stays a `Filter`
 //! above the output.
@@ -50,8 +50,9 @@ use asap_types::ir::{
     ProjectItem, ScalarExpr,
 };
 use asap_types::stages::{
-    CandidateError, CandidateExpression, CandidateForMemoGroup, HowToComputeAggregateMeasure,
-    LogicalProperties, LogicalRequirements, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
+    raw_data_samples_of_metric_of_group, CandidateError, CandidateExpression,
+    CandidateForMemoGroup, LogicalProperties, LogicalRequirements, Memo, MemoGroupId,
+    OriginOfCandidateForMemoGroup,
 };
 use asap_types::summary_type::parameter_list;
 use asap_types::summary_type::{
@@ -62,10 +63,11 @@ use asap_types::summary_type::{
 use asap_accuracy::sizing::sketch_statistic;
 
 use crate::computation_targets::{
-    having_filter_groups, key_only_having, nested_distributive_input, whole_expression_input,
-    ComputationTarget, PerComputationCandidateError,
+    having_filter_groups, nested_distributive_input, whole_expression_input, ComputationTarget,
+    HowToComputeAggregateMeasure,
 };
-use crate::summary_realization::{expression, raw_data_samples_of_metric, schema};
+use crate::summary_realization::{ranked_value, summarised_input};
+use crate::{expression, schema, PerComputationCandidateError};
 
 /// `update` with the open requirement that its weights are samples of
 /// `metric` ([`WeightDomain::RawDataSamplesOfMetric`]), when it is a keyed heap
@@ -151,6 +153,20 @@ pub(crate) fn add_pass1_candidates(
     Ok(())
 }
 
+/// Whether `having` over an aggregate's output reads only its `by(...)`
+/// group keys. A global aggregate (no group keys) never qualifies: its one
+/// output row exists even when no input row does, so no row predicate can
+/// stand in.
+fn key_only_having(reduction: &Reduction, having: &Predicate<MemoGroupId>) -> bool {
+    let keys = match reduction {
+        Reduction::Reduce(by) if !by.is_without() => by.len(),
+        _ => 0,
+    };
+    keys > 0
+        && having.0.operator_refs().is_empty()
+        && having.0.columns_referenced().iter().all(|id| *id < keys)
+}
+
 /// The ways to compute one result from an aggregate group's targets.
 struct AggregateWays<'a> {
     /// The aggregate group whose measures are computed.
@@ -212,7 +228,7 @@ fn add_aggregate_candidates(
             Operator::NonASAP(NonASAPOp::Filter { pred, child: input }),
         )?;
     }
-    let raw_data_samples = raw_data_samples_of_metric(memo, child);
+    let raw_data_samples = raw_data_samples_of_metric_of_group(memo, child);
     let measure = |index: usize| SingleMeasure {
         input,
         reduction: &reduction,
@@ -286,15 +302,18 @@ fn add_aggregate_candidates(
         }
         parts.push(part);
     }
-    let output = join_measures(memo, &reduction, ways.result_group, parts)?;
-    add_output_candidate(memo, ways.result_group, output, ways.above)
+    unless_unsupported(
+        join_measures(memo, &reduction, ways.result_group, parts)
+            .and_then(|output| add_output_candidate(memo, ways.result_group, output, ways.above)),
+    )
 }
 
 /// `added`, with a way Pass 1 cannot build (`Unsupported`) not offered:
 /// its checks run before the groups it reads are added, so the memo is
 /// unchanged, except for the rare checks that need a group's schema (a
 /// top-k estimate without its item columns, a per-series `avg` that is not
-/// Float64), which leave groups no query reaches.
+/// Float64, an output a `Project` cannot rename to the group's columns),
+/// which leave groups no query reaches.
 fn unless_unsupported(
     added: Result<(), PerComputationCandidateError>,
 ) -> Result<(), PerComputationCandidateError> {
@@ -348,13 +367,18 @@ fn add_fused_candidate(
         HowToComputeAggregateMeasure::ExactAccumulator(_) => {
             // The merged build computes the outer aggregate's own
             // accumulator state, from the rows below the inner aggregate: a
-            // candidate of that state group (#1203, fused builds).
+            // candidate of that state group.
             let (rows, inner, partitions, kind) =
                 nested_distributive_input(memo, ways.aggregate_group).ok_or(
                     PerComputationCandidateError::Unsupported("nested distributive merge input"),
                 )?;
-            let read = measure_input(measure.intent, memo, measure.input, measure.filter)?;
-            let outer_state = accumulator_state(memo, kind, measure.intent, measure, read)?;
+            let outer_state = accumulator_state(
+                memo,
+                kind,
+                measure.intent,
+                measure,
+                measure_input(measure.intent, memo, measure.input, measure.filter)?,
+            )?;
             let below_inner = SingleMeasure {
                 input: rows,
                 reduction: &partitions,
@@ -367,9 +391,9 @@ fn add_fused_candidate(
             add_candidate(memo, outer_state, merged, None, absorbed_groups.to_vec())?;
         }
         HowToComputeAggregateMeasure::Exact => {
-            return Err(PerComputationCandidateError::Unsupported(
-                "plain exact execution of a fused computation",
-            ))
+            unreachable!(
+                "a fused computation is a summary or an exact accumulator, never plain exact"
+            )
         }
     }
     Ok(())
@@ -387,9 +411,9 @@ fn measure_output(
 ) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
     Ok(match way {
         HowToComputeAggregateMeasure::Exact => {
-            return Err(PerComputationCandidateError::Unsupported(
-                "plain exact execution is the group's own expression",
-            ))
+            unreachable!(
+                "plain exact execution is the group's own expression, not a measure output"
+            )
         }
         HowToComputeAggregateMeasure::ExactAccumulator(kinds) if kinds.len() == 1 => {
             let read = measure_input(measure.intent, memo, measure.input, measure.filter)?;
@@ -808,16 +832,11 @@ fn sql_avg(
     sum: MemoGroupId,
     count: MemoGroupId,
 ) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
-    let Reduction::Reduce(by) = reduction else {
+    let Some(by) = reduction.group_keys().filter(|by| !by.is_without()) else {
         return Err(PerComputationCandidateError::Unsupported(
             "SQL avg without `by` keys",
         ));
     };
-    if by.is_without() {
-        return Err(PerComputationCandidateError::Unsupported(
-            "SQL avg without `by` keys",
-        ));
-    }
     let keys = by.len();
     let float = |column| {
         Box::new(ScalarExpr::Cast {
@@ -917,16 +936,11 @@ fn join_measures(
     result_group: MemoGroupId,
     parts: Vec<MemoGroupId>,
 ) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
-    let Reduction::Reduce(by) = reduction else {
+    let Some(by) = reduction.group_keys().filter(|by| !by.is_without()) else {
         return Err(PerComputationCandidateError::Unsupported(
             "multi-measure aggregate without `by` keys",
         ));
     };
-    if by.is_without() {
-        return Err(PerComputationCandidateError::Unsupported(
-            "multi-measure aggregate without `by` keys",
-        ));
-    }
     let keys = by.len();
     let width = keys + 1;
     let mut parts = parts.into_iter();
@@ -977,16 +991,14 @@ fn measure_input(
             SummaryInputExpr::Column(counted_column(schema, filter)?)
         }
         // A top-k ranks its child's aggregate output, not a column of its own.
-        AggIntent::TopK { .. } => SummaryInputExpr::Column(
-            crate::summary_realization::ranked_value(memo, input)
-                .map_err(|_| {
-                    PerComputationCandidateError::Unsupported("Top-K has no ranked column")
-                })?
-                .1,
-        ),
-        _ => crate::summary_realization::summarised_input(intent, schema).ok_or(
-            PerComputationCandidateError::Unsupported("input column outside child schema"),
-        )?,
+        AggIntent::TopK { .. } => {
+            SummaryInputExpr::Column(ranked_value(memo, input).map_err(|_| {
+                PerComputationCandidateError::Unsupported("Top-K has no ranked column")
+            })?)
+        }
+        _ => summarised_input(intent, schema).ok_or(PerComputationCandidateError::Unsupported(
+            "input column outside child schema",
+        ))?,
     };
     if let SummaryInputExpr::Column(column) = &read {
         resolve_column_ref(column, schema).map_err(|_| {

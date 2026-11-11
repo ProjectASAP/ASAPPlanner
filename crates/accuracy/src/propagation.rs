@@ -21,8 +21,8 @@ use asap_types::ir::{
     SchemaDerivationError,
 };
 use asap_types::summary_type::{
-    ExactKind, MergedError, NonNegativeWeightProof, SketchAlgorithm, SketchStatistic,
-    SummaryInputExpr, SummaryTypeCapability, SummaryUpdate, WeightDomain,
+    raw_data_samples_of_metric, ExactKind, MergedError, NonNegativeWeightProof, SketchAlgorithm,
+    SketchStatistic, SummaryInputExpr, SummaryTypeCapability, SummaryUpdate, WeightDomain,
 };
 
 use crate::composition::{
@@ -35,32 +35,6 @@ use crate::PropagationStats;
 
 /// A rebuilt node per original node, keyed by the original's address.
 type NodeToRewrittenNodeCache = HashMap<*const OperatorNode, Rc<OperatorNode>>;
-
-/// The metric whose raw data samples, or plain sums of them, are every value
-/// `node` outputs, or `None`. Only a time-series scan, a time range over it,
-/// an `offset`-only time shift (it moves the window, not the samples) and a
-/// plain `sum` keep that; any other operator (rate and arithmetic included)
-/// ends it. The metric's type is not read here: whether its
-/// samples are non-negative is plan selection's question
-/// ([`WeightDomain::RawDataSamplesOfMetric`]).
-pub fn raw_data_samples_of_metric(node: &OperatorNode) -> Option<String> {
-    match node.non_asap()? {
-        NonASAPOp::Scan {
-            source: Source::TimeSeries { metric },
-            ..
-        } => Some(metric.clone()),
-        NonASAPOp::TimeRange { child, .. } => raw_data_samples_of_metric(child),
-        NonASAPOp::TimeShift { shift, child } if shift.at.is_none() => {
-            raw_data_samples_of_metric(child)
-        }
-        NonASAPOp::Aggregate {
-            measures, child, ..
-        } if matches!(measures.as_slice(), [AggIntent::Sum { col: None }]) => {
-            raw_data_samples_of_metric(child)
-        }
-        _ => None,
-    }
-}
 
 /// The approximate inputs a query's value composes: every sketch summary
 /// state reachable from `root`, each once, when the value carries a
@@ -642,7 +616,7 @@ pub(crate) fn fold_stats(
 /// from its tumbling windows: it is one of them, or between two of them, so it
 /// shares their sign. Anything else (rate, arithmetic, other
 /// functions) ends it. Only the sign of the values is read from it.
-pub(crate) fn estimates_raw_data_samples_of(node: &OperatorNode) -> Option<String> {
+pub(crate) fn estimates_raw_data_samples_of(node: &Rc<OperatorNode>) -> Option<String> {
     match &node.operator {
         Operator::NonASAP(NonASAPOp::TimeRange { child, .. }) => {
             estimates_raw_data_samples_of(child)
@@ -1505,7 +1479,7 @@ fn interpolation_guarantee(
     family: &FieldDataType,
     update: &SummaryUpdate,
     query: &SketchStatistic,
-    input: &OperatorNode,
+    input: &Rc<OperatorNode>,
     mut guarantee: AccuracyGuarantee,
 ) -> Option<AccuracyGuarantee> {
     let interpolates = matches!(family, FieldDataType::Sketch(SketchAlgorithm::DDSketch))

@@ -32,6 +32,7 @@ pub(crate) fn cms_width(eps: f64) -> u32 {
 
 /// CMS: failure probability ≤ δ with depth `d = ⌈ln(1/δ)⌉` rows.
 /// δ = 0.01 → depth 5.
+#[cfg(test)]
 pub(crate) fn cms_depth(delta: f64) -> u32 {
     saturating_ceil((1.0 / delta).ln(), 1, 32)
 }
