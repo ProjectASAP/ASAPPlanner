@@ -167,7 +167,7 @@ mod limit_bound {
 
 /// `column = v`, `!=`, `<`, `<=`, `>`, `>=`, `[NOT] IN (...)` and `OR` of
 /// equalities on one column, with non-null literals.
-pub(crate) fn constraint_of<C>(expr: &ScalarExpr<C>) -> Option<(ColumnId, Constraint)> {
+pub fn constraint_of<C>(expr: &ScalarExpr<C>) -> Option<(ColumnId, Constraint)> {
     let literal = |e: &ScalarExpr<C>| match e {
         ScalarExpr::Literal(v) if *v != ScalarValue::Null => Some(v.clone()),
         _ => None,
