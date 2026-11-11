@@ -145,8 +145,9 @@ Ordinary payload fields have these roles:
   `measures` describes the requested aggregates. Grouping is distinct from ordering
   or limiting within groups, represented by `partition_by`.
 - Join/set kinds, vector matching, window frames and time selections preserve
-  source-language semantics. Output names, qualifiers and proven uniqueness also
-  survive optimization.
+  source-language semantics. Output names and proven uniqueness also survive
+  optimization; a column's source is its lineage (a memo-group property), not a
+  table qualifier on the schema.
 
 `ASAPOp` describes state construction, state operations and evaluation separately.
 `FieldDataType` (§2.1) types every output field; state-producing operations use its
