@@ -13,7 +13,6 @@ use std::ops::Bound;
 use serde::{Deserialize, Serialize};
 
 use crate::ir::operator::arguments::SourceColumn;
-
 use crate::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
 use crate::ir::scalar::ScalarExpr;
 use crate::ir::schema::ColumnId;
@@ -576,6 +575,7 @@ mod tests {
         assert_eq!(last_5m.intersect(&at), None);
         let column = SourceColumn {
             source: Source::TimeSeries { metric: "m".into() },
+            scan_ordinal: 0,
             column: "ts".into(),
         };
         let one = |constraint: Constraint| SelectionBox {

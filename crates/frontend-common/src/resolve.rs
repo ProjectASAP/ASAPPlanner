@@ -62,23 +62,40 @@ impl<'a> Scope<'a> {
         }
     }
 
-    /// The column `column` names: by qualifier and name when it is
-    /// qualified and a column has both, else by its unique name.
+    /// The column `column` names: a qualified name by the column with that
+    /// qualifier and name, else by the unique column of that name whose
+    /// qualifier is not known (lost through a `Project` without alias or an
+    /// aggregate's measures); a column of that name qualified by another
+    /// table never matches. Any other name by its unique name.
     fn resolve(&self, column: &ColumnRef) -> Result<ColumnId, ResolveError> {
-        if let ColumnRef::Qualified { table, name } = column {
-            let qualified =
-                self.schema
-                    .fields
-                    .iter()
-                    .zip(self.qualifiers)
-                    .position(|(field, qualifier)| {
-                        field.name == *name && qualifier.as_deref() == Some(table.as_str())
-                    });
-            if let Some(id) = qualified {
-                return Ok(id);
-            }
+        let ColumnRef::Qualified { table, name } = column else {
+            return resolve_column_ref(column, self.schema);
+        };
+        let named = |wanted: Option<&str>| {
+            self.schema
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(id, field)| field.name == *name && self.qualifier_ref(*id) == wanted)
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>()
+        };
+        let qualified = named(Some(table.as_str()));
+        let candidates = if qualified.is_empty() {
+            named(None)
+        } else {
+            qualified
+        };
+        match candidates.as_slice() {
+            [id] => Ok(*id),
+            [] => Err(ResolveError::NotFound {
+                name: format!("{table}.{name}"),
+                available: self.schema.fields.iter().map(|f| f.name.clone()).collect(),
+            }),
+            _ => Err(ResolveError::Ambiguous {
+                name: format!("{table}.{name}"),
+            }),
         }
-        resolve_column_ref(column, self.schema)
     }
 
     fn resolve_all(&self, columns: &[ColumnRef]) -> Result<Vec<ColumnId>, ResolveError> {
@@ -87,7 +104,11 @@ impl<'a> Scope<'a> {
 
     /// The qualifier of column `column`.
     fn qualifier(&self, column: ColumnId) -> Option<String> {
-        self.qualifiers.get(column).cloned().flatten()
+        self.qualifier_ref(column).map(str::to_owned)
+    }
+
+    fn qualifier_ref(&self, column: ColumnId) -> Option<&str> {
+        self.qualifiers.get(column).and_then(Option::as_deref)
     }
 }
 
@@ -99,13 +120,14 @@ struct Bound {
 }
 
 impl Bound {
-    /// `node` with `qualifiers`; unqualified unless there is one per column.
+    /// `node` with `qualifiers`: one per column, or none (unqualified).
     fn new(node: Rc<OperatorNode>, qualifiers: Vec<Option<String>>) -> Self {
-        let qualifiers = if qualifiers.len() == node.schema.fields.len() {
-            qualifiers
-        } else {
-            Vec::new()
-        };
+        debug_assert!(
+            qualifiers.is_empty() || qualifiers.len() == node.schema.fields.len(),
+            "{} qualifiers for {} columns",
+            qualifiers.len(),
+            node.schema.fields.len()
+        );
         Self { node, qualifiers }
     }
 
@@ -369,6 +391,8 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
                 .collect::<Result<Vec<_>, _>>()?;
             // A `by` key keeps its qualifier; a per-series reduction keeps
             // its input's columns in place. A top-k emits ranked rows.
+            let out_schema =
+                aggregate_output_schema(&child.node.schema, &reduction, &measures, output_names)?;
             let qualifiers: Vec<Option<String>> = match &reduction {
                 _ if matches!(measures.as_slice(), [AggIntent::TopK { .. }]) => Vec::new(),
                 Reduction::PerEntity => child.qualifiers.clone(),
@@ -380,26 +404,23 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
                     .chain(std::iter::repeat_n(None, measures.len()))
                     .collect(),
             };
+            // A measure that adds label columns (`count_values`, `absent`)
+            // breaks the keys-then-measures layout: then no column is
+            // qualified.
+            let qualifiers = if qualifiers.len() == out_schema.fields.len() {
+                qualifiers
+            } else {
+                Vec::new()
+            };
             // HAVING is evaluated over the aggregate's own output.
             let having = having
                 .as_ref()
                 .map(|h| {
-                    let out_schema = aggregate_output_schema(
-                        &child.node.schema,
-                        &reduction,
-                        &measures,
-                        output_names,
-                    )?;
-                    let out_qualifiers = if qualifiers.len() == out_schema.fields.len() {
-                        &qualifiers[..]
-                    } else {
-                        &[]
-                    };
                     pred(
                         &h.0,
                         Scope {
                             schema: &out_schema,
-                            qualifiers: out_qualifiers,
+                            qualifiers: &qualifiers,
                         },
                     )
                 })
@@ -1077,6 +1098,47 @@ mod tests {
 
     fn named(n: &str) -> UnresolvedScalar {
         UnresolvedScalar::Column(ColumnRef::Named(n.into()))
+    }
+
+    fn qualified(table: &str, name: &str) -> ColumnRef {
+        ColumnRef::Qualified {
+            table: table.into(),
+            name: name.into(),
+        }
+    }
+
+    /// A qualified name binds the column of that qualifier; a column of that
+    /// name qualified by another table never matches, so `x.src` over
+    /// `[u.src]` is an error, not `u.src`; a column whose qualifier is not
+    /// known matches by its unique name.
+    #[test]
+    fn a_qualified_name_never_binds_another_tables_column() {
+        let schema = Schema::new(vec![
+            Field::plain("src", DataType::Utf8, false),
+            Field::plain("src", DataType::Utf8, false),
+            Field::plain("dst", DataType::Utf8, false),
+        ]);
+        let qualifiers = [Some("f".to_string()), Some("u".to_string()), None];
+        let scope = Scope {
+            schema: &schema,
+            qualifiers: &qualifiers,
+        };
+        assert_eq!(scope.resolve(&qualified("u", "src")), Ok(1));
+        assert!(matches!(
+            scope.resolve(&qualified("x", "src")),
+            Err(ResolveError::NotFound { .. })
+        ));
+        assert_eq!(scope.resolve(&qualified("f", "dst")), Ok(2));
+        // Before, a unique name matched whatever its qualifier.
+        let users = Schema::new(vec![Field::plain("src", DataType::Utf8, false)]);
+        let users_scope = Scope {
+            schema: &users,
+            qualifiers: &[Some("u".to_string())],
+        };
+        assert!(matches!(
+            users_scope.resolve(&qualified("f", "src")),
+            Err(ResolveError::NotFound { .. })
+        ));
     }
 
     fn eq_lit(col: UnresolvedScalar, v: &str) -> UnresolvedScalar {

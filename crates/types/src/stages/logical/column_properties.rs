@@ -4,15 +4,15 @@
 //! its source's columns and the signs the data workload declares for them.
 //! One per-operator column layout says which input column each output
 //! column copies (lineage and sign kept) and which it computes (lineage
-//! `Computed`, the sign by the operator's rule). Error contracts that hold
-//! only for values of one sign read the sign; aggregate coverage names a
-//! selection's columns by the lineage.
+//! `Computed` by this group, the sign by the operator's rule). Error
+//! contracts that hold only for values of one sign read the sign;
+//! aggregate coverage names a selection's columns by the lineage.
 
 use std::collections::BTreeMap;
 
-use super::group::MemoGroupAsInput;
+use super::group::{MemoGroupAsInput, MemoGroupId};
 use crate::ir::operator::arguments::{
-    BinaryOpKind, GroupSide, JoinKind, PromQLVectorSetOpKind, Reduction, SourceColumn,
+    BinaryOpKind, GroupSide, JoinKind, PromQLVectorSetOpKind, Reduction, Source, SourceColumn,
 };
 use crate::ir::operator::asap::{summary_agg_layout, summary_build};
 use crate::ir::operator::input::OperatorInput;
@@ -21,7 +21,7 @@ use crate::ir::scalar::expr_ir::{ArithmeticOpKind, ScalarValue};
 use crate::ir::scalar::{resolve_column_ref, ColumnRef, ProjectItem, ScalarExpr};
 use crate::ir::schema::aggregate_schema::{aggregate_output, OutputColumnSource};
 use crate::ir::schema::topk::{ranked_row_projection, topk_output_name};
-use crate::ir::schema::{FieldDataType, Schema};
+use crate::ir::schema::{ColumnId, FieldDataType, Schema};
 use crate::ir::{ASAPOp, NonASAPOp, Operator};
 use crate::summary_type::{
     ExactKind, SketchStatistic, SummaryInputExpr, SummaryTypeCapability, SummaryUpdate,
@@ -53,16 +53,25 @@ pub enum ValueSign {
 /// Where an output column's values come from, a group property derived
 /// from the input groups (concepts doc, section 3, "Column lineage"). It
 /// names a column across groups where a schema field's name cannot: two
-/// join sides' columns of one name have different lineage, and a renamed
-/// column keeps its lineage. Aggregate coverage names a selection's column
-/// by it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+/// join sides' columns of one name have different lineage, a self-join's
+/// two scans of one source have different scan ordinals, and a renamed
+/// column keeps its lineage. A column passed through unchanged keeps its
+/// input column's lineage, so two columns have equal lineage only when
+/// they hold the same values: the same column of the same scan, or the
+/// same computation. Aggregate coverage names a selection's column by its
+/// source column.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnLineage {
-    /// Copied unchanged from a column of a source.
+    /// Copied unchanged from a column of one scan of a source.
     SourceColumn(SourceColumn),
-    /// Computed by an operator: a measure, an expression, a summary state or
-    /// a readout.
-    Computed,
+    /// Column `column` of memo group `group`, where it was computed: a
+    /// measure, an expression, a summary state or a readout, or a column
+    /// the inputs of a union-like operator (`SetOp`, `Concat`,
+    /// `SummaryMerge`) disagree on.
+    Computed {
+        group: MemoGroupId,
+        column: ColumnId,
+    },
 }
 
 use ValueSign::{NonNegative, NonPositive, Unknown};
@@ -72,7 +81,9 @@ type Input<'m> = MemoGroupAsInput<'m>;
 /// One output column's lineage and sign.
 #[derive(Debug, Clone, PartialEq)]
 struct ColumnProperties {
-    lineage: ColumnLineage,
+    /// `None` for a column the group being derived computes: its lineage
+    /// is `Computed` by that group at the column's final position.
+    lineage: Option<ColumnLineage>,
     sign: ValueSign,
 }
 
@@ -80,35 +91,35 @@ impl ColumnProperties {
     /// A column the operator computes, with values of `sign`.
     fn computed(sign: ValueSign) -> Self {
         Self {
-            lineage: ColumnLineage::Computed,
+            lineage: None,
             sign,
         }
     }
 
     /// What two inputs' columns at one position agree on: each property
-    /// where they are equal, else `Computed` / `Unknown`.
+    /// where they are equal, else computed by this group / `Unknown`.
     fn agreed_with(self, other: &Self) -> Self {
         Self {
-            lineage: if self.lineage == other.lineage {
-                self.lineage
-            } else {
-                ColumnLineage::Computed
-            },
+            lineage: self
+                .lineage
+                .filter(|lineage| other.lineage.as_ref() == Some(lineage)),
             sign: agree(self.sign, other.sign),
         }
     }
 }
 
 /// The lineage and sign of each column of `output`, the output schema of
-/// `operator`, from its input groups' `column_lineage` and `column_signs`
-/// and, for a `Scan`, its source and `source_facts`.
+/// `operator` computed by memo group `group`, from its input groups'
+/// `column_lineage` and `column_signs` and, for a `Scan`, its source and
+/// `source_facts`.
 pub(super) fn column_lineage_and_signs(
+    group: MemoGroupId,
     operator: &Operator<Input<'_>>,
     output: &Schema,
     source_facts: &BTreeMap<String, SourceFacts>,
 ) -> (Vec<ColumnLineage>, Vec<ValueSign>) {
     let columns = match operator {
-        Operator::NonASAP(op) => non_asap_columns(op, output, source_facts),
+        Operator::NonASAP(op) => non_asap_columns(group, op, output, source_facts),
         Operator::ASAP(op) => asap_columns(op, output),
     };
     debug_assert_eq!(
@@ -119,7 +130,14 @@ pub(super) fn column_lineage_and_signs(
     );
     columns
         .into_iter()
-        .map(|column| (column.lineage, column.sign))
+        .enumerate()
+        .map(|(index, properties)| {
+            let lineage = properties.lineage.unwrap_or(ColumnLineage::Computed {
+                group,
+                column: index,
+            });
+            (lineage, properties.sign)
+        })
         .unzip()
 }
 
@@ -131,13 +149,40 @@ fn columns_of(input: &Input<'_>) -> Vec<ColumnProperties> {
         .iter()
         .zip(&properties.column_signs)
         .map(|(lineage, &sign)| ColumnProperties {
-            lineage: lineage.clone(),
+            lineage: Some(lineage.clone()),
             sign,
         })
         .collect()
 }
 
+/// `right`, the right side's columns of an operator that concatenates two
+/// inputs' columns after `left`'s: a source column of a source `left` also
+/// scans moves to the scans after `left`'s (its scan ordinal shifted by
+/// `left`'s largest for that source, plus one), so a self-join's two sides
+/// name different scans.
+fn after_left_scans(
+    left: &[ColumnProperties],
+    mut right: Vec<ColumnProperties>,
+) -> Vec<ColumnProperties> {
+    let mut first_free_scan: BTreeMap<&Source, u32> = BTreeMap::new();
+    for column in left {
+        if let Some(ColumnLineage::SourceColumn(source_column)) = &column.lineage {
+            let free = first_free_scan.entry(&source_column.source).or_default();
+            *free = (*free).max(source_column.scan_ordinal + 1);
+        }
+    }
+    for column in &mut right {
+        if let Some(ColumnLineage::SourceColumn(source_column)) = &mut column.lineage {
+            if let Some(shift) = first_free_scan.get(&source_column.source) {
+                source_column.scan_ordinal += shift;
+            }
+        }
+    }
+    right
+}
+
 fn non_asap_columns(
+    group: MemoGroupId,
     op: &NonASAPOp<Input<'_>>,
     output: &Schema,
     source_facts: &BTreeMap<String, SourceFacts>,
@@ -166,10 +211,11 @@ fn non_asap_columns(
                             .unwrap_or(Unknown),
                         None => Unknown,
                     },
-                    lineage: ColumnLineage::SourceColumn(SourceColumn {
+                    lineage: Some(ColumnLineage::SourceColumn(SourceColumn {
                         source: source.clone(),
+                        scan_ordinal: 0,
                         column: field.name.clone(),
-                    }),
+                    })),
                 })
                 .collect()
         }
@@ -201,7 +247,7 @@ fn non_asap_columns(
             }
             columns
         }
-        Project { cols, child, .. } => project_columns(cols, &columns_of(child)),
+        Project { cols, child, .. } => project_columns(group, cols, child),
         Aggregate {
             reduction,
             measures,
@@ -213,7 +259,7 @@ fn non_asap_columns(
                 // The ranked rows, projected: each column copied.
                 let name = topk_output_name(*k, output_names);
                 return match ranked_row_projection(child, reduction, &name) {
-                    Ok(cols) => project_columns(&cols, &columns_of(child)),
+                    Ok(cols) => project_columns(group, &cols, child),
                     Err(_) => unknown(),
                 };
             }
@@ -224,7 +270,8 @@ fn non_asap_columns(
         } => {
             let mut columns = columns_of(left);
             if !matches!(kind, JoinKind::Semi | JoinKind::Anti) {
-                columns.extend(columns_of(right));
+                let right = after_left_scans(&columns, columns_of(right));
+                columns.extend(right);
             }
             columns
         }
@@ -238,30 +285,40 @@ fn non_asap_columns(
         // The left side's columns, its value computed per the operator,
         // then the right side's labels the match adds. A label that may
         // come from either side (`or`, `group_right`) keeps what both sides
-        // agree on.
+        // agree on; a label `group_left(...)` names comes from the right
+        // ("one") side and one `group_right(...)` names from the left,
+        // overwriting a column of that name. A vector match is a join, so
+        // the right side reads scans after the left's; `or` is a union.
         BinaryOp {
             operator, lhs, rhs, ..
         } => {
+            let is_or = matches!(operator.kind, BinaryOpKind::Set(PromQLVectorSetOpKind::Or));
             let left = columns_of(lhs);
-            let right = columns_of(rhs);
-            let mut columns = left.clone();
-            let right_named = |name: &str| {
-                rhs.schema()
+            let right = if is_or {
+                columns_of(rhs)
+            } else {
+                after_left_scans(&left, columns_of(rhs))
+            };
+            let named = |input: &Input<'_>, columns: &[ColumnProperties], name: &str| {
+                input
+                    .schema()
                     .column_id(name)
-                    .and_then(|column| right.get(column).cloned())
+                    .and_then(|column| columns.get(column).cloned())
                     .unwrap_or(ColumnProperties::computed(Unknown))
             };
-            let right_rows = matches!(operator.kind, BinaryOpKind::Set(PromQLVectorSetOpKind::Or))
-                || operator
-                    .vector_match
-                    .as_ref()
-                    .and_then(|m| m.grouping.as_ref())
-                    .is_some_and(|grouping| grouping.side == GroupSide::Right);
+            let grouping = operator
+                .vector_match
+                .as_ref()
+                .and_then(|m| m.grouping.as_ref());
+            let right_rows =
+                is_or || grouping.is_some_and(|grouping| grouping.side == GroupSide::Right);
+            let mut columns = left.clone();
             if right_rows {
                 for (column, field) in lhs.schema().fields.iter().enumerate() {
-                    columns[column] = columns[column]
-                        .clone()
-                        .agreed_with(&right_named(&field.name));
+                    columns[column] =
+                        columns[column]
+                            .clone()
+                            .agreed_with(&named(rhs, &right, &field.name));
                 }
             }
             if let Ok(value) = resolve_column_ref(&ColumnRef::SampleValue, lhs.schema()) {
@@ -282,8 +339,19 @@ fn non_asap_columns(
                 });
             }
             let added = output.fields.get(columns.len()..).unwrap_or_default();
-            columns.extend(added.iter().map(|field| right_named(&field.name)));
+            columns.extend(added.iter().map(|field| named(rhs, &right, &field.name)));
             columns.truncate(output.fields.len());
+            if let Some(grouping) = grouping {
+                let (one_side, one_side_columns) = match grouping.side {
+                    GroupSide::Left => (rhs, &right),
+                    GroupSide::Right => (lhs, &left),
+                };
+                for label in &grouping.labels {
+                    if let Some(column) = output.column_id(label) {
+                        columns[column] = named(one_side, one_side_columns, label);
+                    }
+                }
+            }
             columns
         }
     }
@@ -338,20 +406,24 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
             let merged = agreed(&children.iter().map(columns_of).collect::<Vec<_>>());
             match group_by {
                 None => merged,
+                // The keys copied; the state, merged across the inputs'
+                // groups, computed with the sign they agree on.
                 Some(keys) => {
+                    let column_at = |column: usize| {
+                        merged
+                            .get(column)
+                            .cloned()
+                            .unwrap_or(ColumnProperties::computed(Unknown))
+                    };
                     let state = children[0]
                         .schema()
                         .fields
                         .iter()
-                        .position(|field| !field.is_plain());
+                        .position(|field| !field.is_plain())
+                        .map(|state| ColumnProperties::computed(column_at(state).sign));
                     keys.iter()
-                        .chain(state.as_ref())
-                        .map(|&column| {
-                            merged
-                                .get(column)
-                                .cloned()
-                                .unwrap_or(ColumnProperties::computed(Unknown))
-                        })
+                        .map(|&key| column_at(key))
+                        .chain(state)
                         .collect()
                 }
             }
@@ -396,20 +468,41 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
     }
 }
 
-/// A column item, renamed or not, copies its input column; an expression
-/// item is computed, with [`expression_sign`]'s sign.
+/// The columns of `cols`, a `Project` computed by memo group `group`, over
+/// `child`: lineage by [`project_lineage`], sign by [`expression_sign`].
 fn project_columns<C>(
+    group: MemoGroupId,
     cols: &[ProjectItem<C>],
-    input: &[ColumnProperties],
+    child: &Input<'_>,
 ) -> Vec<ColumnProperties> {
-    let signs: Vec<ValueSign> = input.iter().map(|column| column.sign).collect();
+    let input = child.group_properties();
+    project_lineage(group, cols, &input.column_lineage)
+        .into_iter()
+        .zip(cols)
+        .map(|(lineage, item)| ColumnProperties {
+            lineage: Some(lineage),
+            sign: expression_sign(&item.expr, &input.column_signs),
+        })
+        .collect()
+}
+
+/// The lineage of the output columns of `cols`, a `Project` computed by
+/// memo group `group` over input columns of lineage `input`: a column
+/// item, renamed or not, copies its input column's; an expression item is
+/// `Computed` by `group` at its position.
+pub(super) fn project_lineage<C>(
+    group: MemoGroupId,
+    cols: &[ProjectItem<C>],
+    input: &[ColumnLineage],
+) -> Vec<ColumnLineage> {
     cols.iter()
-        .map(|item| match item.expr {
-            ScalarExpr::Column(column) => input
-                .get(column)
-                .cloned()
-                .unwrap_or(ColumnProperties::computed(Unknown)),
-            _ => ColumnProperties::computed(expression_sign(&item.expr, &signs)),
+        .enumerate()
+        .map(|(column, item)| {
+            match item.expr {
+                ScalarExpr::Column(input_column) => input.get(input_column).cloned(),
+                _ => None,
+            }
+            .unwrap_or(ColumnLineage::Computed { group, column })
         })
         .collect()
 }

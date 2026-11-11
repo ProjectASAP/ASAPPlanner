@@ -2,23 +2,29 @@
 //! (concepts doc `memo-groups-properties-requirements.md`, section 3,
 //! "Column lineage"): the doc's examples 1 to 3. Example 4 (PromQL label
 //! matchers) is `scan_predicates_lift_and_their_states_merge` in
-//! `memo_aggregate_coverage.rs`.
-use asap_types::ir::operator::arguments::{AtModifier, JoinKind, Reduction, Source, SourceColumn};
+//! `memo_aggregate_coverage.rs`. Then a self-join's two scans, and the
+//! lineage and sign of PromQL match-grouping labels.
+use std::collections::BTreeMap;
+
+use asap_types::ir::operator::arguments::{
+    AtModifier, BinaryOpKind, GroupSide, JoinKind, Reduction, Source, SourceColumn, VectorGrouping,
+    VectorMatch, VectorMatchKind,
+};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::selection::Constraint;
-use asap_types::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
+use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{
-    ASAPOp, ExprSemantics, NonASAPOp, Operator, Predicate, ProjectItem, ScalarExpr,
+    ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, Predicate, ProjectItem, ScalarExpr,
 };
 use asap_types::stages::{
     CandidateExpression, CandidateForMemoGroup, ColumnLineage, LogicalProperties,
-    LogicalRequirements, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
+    LogicalRequirements, Memo, MemoGroupId, OriginOfCandidateForMemoGroup, ValueSign,
 };
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
 use asap_types::test_support::memo_fixtures::{filter, range, shift};
-use asap_types::workload::DataWorkload;
+use asap_types::workload::{DataWorkload, SourceFacts};
 
 fn memo() -> Memo {
     Memo::new(&DataWorkload::default())
@@ -61,12 +67,18 @@ fn hll(child: MemoGroupId, keys: Vec<usize>, column: &str) -> Operator<MemoGroup
     })
 }
 
-/// The column `column` of the table `table`.
+/// The column `column` of the first scan of the table `table`.
 fn column_of(table: &str, column: &str) -> SourceColumn {
+    column_of_scan(table, 0, column)
+}
+
+/// The column `column` of scan `scan_ordinal` of the table `table`.
+fn column_of_scan(table: &str, scan_ordinal: u32, column: &str) -> SourceColumn {
     SourceColumn {
         source: Source::Table {
             table_ref: table.into(),
         },
+        scan_ordinal,
         column: column.into(),
     }
 }
@@ -81,8 +93,14 @@ fn latency_column(column: &str) -> ColumnLineage {
         source: Source::TimeSeries {
             metric: "latency".into(),
         },
+        scan_ordinal: 0,
         column: column.into(),
     })
+}
+
+/// Column `column` of memo group `group`, where it was computed.
+fn computed(group: MemoGroupId, column: usize) -> ColumnLineage {
+    ColumnLineage::Computed { group, column }
 }
 
 fn lineage(memo: &Memo, group: MemoGroupId) -> &[ColumnLineage] {
@@ -125,9 +143,13 @@ fn an_hll_readout_renamed_to_the_aggregate_column_is_its_candidate() {
     let flows = ["src", "dst", "proto", "ts"].map(|column| source_column("flows", column));
     assert_eq!(lineage(&memo, g1), flows);
     assert_eq!(lineage(&memo, g2), flows);
-    let key_then_computed = [source_column("flows", "src"), ColumnLineage::Computed];
+    // Each of the aggregate, the state and the readout computes its own
+    // second column.
     for group in [g3, g4, g5] {
-        assert_eq!(lineage(&memo, group), key_then_computed);
+        assert_eq!(
+            lineage(&memo, group),
+            [source_column("flows", "src"), computed(group, 1)]
+        );
     }
     // The state's selection names the filtered column by its lineage.
     let coverage = memo.groups()[g4.0 as usize]
@@ -218,16 +240,17 @@ fn a_rename_keeps_lineage_and_the_rollup_key_check_compares_it() {
         Constraint::In(vec![ScalarValue::Utf8("us".into())])
     );
 
-    let rolled_up = memo
+    let rolled_up_id = memo
         .find_or_add_group(Operator::ASAP(ASAPOp::SummaryMerge {
             children: vec![by_source_and_area],
             group_by: Some(vec![0]),
         }))
         .unwrap();
-    let rolled_up = &memo.groups()[rolled_up.0 as usize].group_properties;
+    let rolled_up = &memo.groups()[rolled_up_id.0 as usize].group_properties;
+    // The regrouped state is computed by the merge, not its input's.
     assert_eq!(
         rolled_up.column_lineage,
-        [source_column("flows", "src"), ColumnLineage::Computed]
+        [source_column("flows", "src"), computed(rolled_up_id, 1)]
     );
     assert!(rolled_up.aggregate_coverage.is_some());
 }
@@ -301,7 +324,7 @@ fn a_predicate_on_a_computed_column_stays_unlifted() {
     let g1 = memo
         .find_or_add_group(scan("flows", &["src", "dst"]))
         .unwrap();
-    let computed = memo
+    let tagged_rows = memo
         .find_or_add_group(Operator::NonASAP(NonASAPOp::Project {
             cols: vec![
                 ProjectItem {
@@ -317,11 +340,11 @@ fn a_predicate_on_a_computed_column_stays_unlifted() {
         }))
         .unwrap();
     assert_eq!(
-        lineage(&memo, computed),
-        [source_column("flows", "src"), ColumnLineage::Computed]
+        lineage(&memo, tagged_rows),
+        [source_column("flows", "src"), computed(tagged_rows, 1)]
     );
     let tagged = memo
-        .find_or_add_group(filter(equals(1, "x"), computed))
+        .find_or_add_group(filter(equals(1, "x"), tagged_rows))
         .unwrap();
     let state = memo.find_or_add_group(hll(tagged, vec![], "src")).unwrap();
     let coverage = memo.groups()[state.0 as usize]
@@ -375,9 +398,9 @@ fn a_chain_computes_window_end_and_state_and_its_window_selections_pass_lineage_
         }))
         .unwrap();
     let chain_lineage = [
-        ColumnLineage::Computed,
+        computed(chain, 0),
         latency_column("job"),
-        ColumnLineage::Computed,
+        computed(chain, 2),
     ];
     assert_eq!(lineage(&memo, chain), chain_lineage);
 
@@ -396,7 +419,7 @@ fn a_chain_computes_window_end_and_state_and_its_window_selections_pass_lineage_
         .unwrap();
     assert_eq!(
         lineage(&memo, merged),
-        [latency_column("job"), ColumnLineage::Computed]
+        [latency_column("job"), computed(merged, 1)]
     );
 }
 
@@ -416,4 +439,242 @@ fn a_time_shift_at_end_or_start_above_a_selector_passes_its_lineage_through() {
             .unwrap();
         assert_eq!(lineage(&memo, pinned), series_lineage);
     }
+}
+
+/// `SELECT approx_distinct(<p>_dst) FROM (SELECT a.src AS <p>_src, a.proto
+/// AS <p>_proto, b.dst AS <p>_dst, b.proto AS <p>_other_proto FROM flows a
+/// JOIN flows b ON a.src = b.src WHERE <side>.proto = 'tcp')`, aliases
+/// prefixed by `prefix`, filtering the left side's `proto` (column 2 of the
+/// join) or the right side's (column 5): the HLL state's selection keys.
+fn self_join_selection(memo: &mut Memo, prefix: &str, proto_column: usize) -> Vec<SourceColumn> {
+    let flows = memo
+        .find_or_add_group(scan("flows", &["src", "dst", "proto"]))
+        .unwrap();
+    let joined = memo
+        .find_or_add_group(Operator::NonASAP(NonASAPOp::Join {
+            kind: JoinKind::Inner,
+            pred: Predicate(ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(0)),
+                op: CompareOpKind::Eq,
+                right: Box::new(ScalarExpr::Column(3)),
+                semantics: ExprSemantics::Sql,
+            }),
+            left: flows,
+            right: flows,
+        }))
+        .unwrap();
+    let tcp = memo
+        .find_or_add_group(filter(equals(proto_column, "tcp"), joined))
+        .unwrap();
+    let renamed = memo
+        .find_or_add_group(Operator::NonASAP(NonASAPOp::Project {
+            cols: [("src", 0), ("proto", 2), ("dst", 4), ("other_proto", 5)]
+                .map(|(alias, column)| ProjectItem {
+                    alias: Some(format!("{prefix}_{alias}")),
+                    expr: ScalarExpr::Column(column),
+                })
+                .to_vec(),
+            child: tcp,
+        }))
+        .unwrap();
+    let state = memo
+        .find_or_add_group(hll(renamed, vec![], &format!("{prefix}_dst")))
+        .unwrap();
+    let coverage = memo.groups()[state.0 as usize]
+        .group_properties
+        .aggregate_coverage
+        .as_ref()
+        .expect("a summary state");
+    let [selection] = coverage.selection() else {
+        panic!("one box: {coverage:?}")
+    };
+    selection.columns().keys().cloned().collect()
+}
+
+/// A self-join's two scans of one source have different scan ordinals: the
+/// left side's columns are scan 0's, the right side's scan 1's. So a
+/// predicate on the left side's `proto` lifts keyed by `flows` scan 0
+/// `proto`, one on the right side's by scan 1, and renaming the columns
+/// (other aliases) keeps the key.
+#[test]
+fn a_self_join_names_its_two_scans_apart() {
+    let mut memo = memo();
+    let flows = memo
+        .find_or_add_group(scan("flows", &["src", "dst", "proto"]))
+        .unwrap();
+    let joined = memo
+        .find_or_add_group(Operator::NonASAP(NonASAPOp::Join {
+            kind: JoinKind::Inner,
+            pred: Predicate(ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(0)),
+                op: CompareOpKind::Eq,
+                right: Box::new(ScalarExpr::Column(3)),
+                semantics: ExprSemantics::Sql,
+            }),
+            left: flows,
+            right: flows,
+        }))
+        .unwrap();
+    assert_eq!(
+        lineage(&memo, joined),
+        [
+            (0, "src"),
+            (0, "dst"),
+            (0, "proto"),
+            (1, "src"),
+            (1, "dst"),
+            (1, "proto")
+        ]
+        .map(|(scan, column)| ColumnLineage::SourceColumn(column_of_scan("flows", scan, column)))
+    );
+
+    let left_proto = [column_of_scan("flows", 0, "proto")];
+    assert_eq!(self_join_selection(&mut memo, "a", 2), left_proto);
+    assert_eq!(self_join_selection(&mut memo, "x", 2), left_proto);
+    assert_eq!(
+        self_join_selection(&mut memo, "a", 5),
+        [column_of_scan("flows", 1, "proto")]
+    );
+}
+
+/// The memo of the match-grouping examples: `team` declared non-negative
+/// in `a` and non-positive in `b`.
+fn match_grouping_memo() -> Memo {
+    let declared = |sign| SourceFacts {
+        column_signs: BTreeMap::from([("team".to_string(), sign)]),
+        ..SourceFacts::default()
+    };
+    Memo::new(&DataWorkload {
+        sources: BTreeMap::from([
+            ("a".to_string(), declared(ValueSign::NonNegative)),
+            ("b".to_string(), declared(ValueSign::NonPositive)),
+        ]),
+        ..DataWorkload::default()
+    })
+}
+
+/// `Scan metric`: `[ts, value, *labels]`, `ts` its time index.
+fn series(metric: &str, labels: &[&str]) -> Operator<MemoGroupId> {
+    let mut fields = vec![
+        Field::plain("ts", DataType::Timestamp, false),
+        Field::plain("value", DataType::Float64, false),
+    ];
+    fields.extend(
+        labels
+            .iter()
+            .map(|label| Field::plain(*label, DataType::Utf8, false)),
+    );
+    Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries {
+            metric: metric.into(),
+        },
+        predicates: vec![],
+        schema: Schema::with_time_index(fields, 0, vec![]),
+    })
+}
+
+/// `lhs * on(job) group_<side>(team) rhs`.
+fn grouped_product(side: GroupSide, lhs: MemoGroupId, rhs: MemoGroupId) -> Operator<MemoGroupId> {
+    Operator::NonASAP(NonASAPOp::BinaryOp {
+        operator: BinaryOperator {
+            checked_relative_division: false,
+            checked_finite_division: false,
+            kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
+            vector_match: Some(VectorMatch {
+                kind: VectorMatchKind::On,
+                labels: vec!["job".into()],
+                grouping: Some(VectorGrouping {
+                    side,
+                    labels: vec!["team".into()],
+                }),
+            }),
+        },
+        return_bool: false,
+        lhs,
+        rhs,
+    })
+}
+
+/// The lineage and sign of column `name` of `group`.
+fn lineage_and_sign_of(memo: &Memo, group: MemoGroupId, name: &str) -> (ColumnLineage, ValueSign) {
+    let properties = &memo.groups()[group.0 as usize].group_properties;
+    let column = properties
+        .schema
+        .column_id(name)
+        .expect("a column of that name");
+    (
+        properties.column_lineage[column].clone(),
+        properties.column_signs[column],
+    )
+}
+
+fn series_column(metric: &str, column: &str) -> ColumnLineage {
+    ColumnLineage::SourceColumn(SourceColumn {
+        source: Source::TimeSeries {
+            metric: metric.into(),
+        },
+        scan_ordinal: 0,
+        column: column.into(),
+    })
+}
+
+/// `a * on(job) group_left(team) b`: `team`, which only `b` has, takes
+/// `b.team`'s lineage and sign (the "one" side's).
+#[test]
+fn a_group_left_label_comes_from_the_right_side() {
+    let mut memo = match_grouping_memo();
+    let a = memo.find_or_add_group(series("a", &["job"])).unwrap();
+    let b = memo
+        .find_or_add_group(series("b", &["job", "team"]))
+        .unwrap();
+    let product = memo
+        .find_or_add_group(grouped_product(GroupSide::Left, a, b))
+        .unwrap();
+    assert_eq!(
+        lineage_and_sign_of(&memo, product, "team"),
+        (series_column("b", "team"), ValueSign::NonPositive)
+    );
+}
+
+/// `a * on(job) group_left(team) b` with `a` having its own `team`: PromQL
+/// overwrites it with `b`'s, so the column takes `b.team`'s lineage and
+/// sign in place.
+#[test]
+fn a_group_left_label_overwrites_the_left_sides_column_of_that_name() {
+    let mut memo = match_grouping_memo();
+    let a = memo
+        .find_or_add_group(series("a", &["job", "team"]))
+        .unwrap();
+    let b = memo
+        .find_or_add_group(series("b", &["job", "team"]))
+        .unwrap();
+    let product = memo
+        .find_or_add_group(grouped_product(GroupSide::Left, a, b))
+        .unwrap();
+    let schema = &memo.groups()[product.0 as usize].group_properties.schema;
+    assert_eq!(schema.fields.len(), 4, "no second `team` column");
+    assert_eq!(
+        lineage_and_sign_of(&memo, product, "team"),
+        (series_column("b", "team"), ValueSign::NonPositive)
+    );
+}
+
+/// `a * on(job) group_right(team) b`: `team` takes `a.team`'s lineage and
+/// sign (the left, "one" side's).
+#[test]
+fn a_group_right_label_comes_from_the_left_side() {
+    let mut memo = match_grouping_memo();
+    let a = memo
+        .find_or_add_group(series("a", &["job", "team"]))
+        .unwrap();
+    let b = memo
+        .find_or_add_group(series("b", &["job", "team"]))
+        .unwrap();
+    let product = memo
+        .find_or_add_group(grouped_product(GroupSide::Right, a, b))
+        .unwrap();
+    assert_eq!(
+        lineage_and_sign_of(&memo, product, "team"),
+        (series_column("a", "team"), ValueSign::NonNegative)
+    );
 }

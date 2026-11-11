@@ -48,7 +48,7 @@ This section fixes the words used below. They follow relational databases and Ap
 |---|---|---|
 | **Relation / table** | A set (bag) of rows with the same columns. A base table is stored; a derived relation is the output of a query operator. | Every edge in the DAG carries a relation. A `Scan` reads a base table (SQL table or PromQL metric); every other operator outputs a derived relation. |
 | **Row / tuple** | One element of a relation: one value per column. | One output row of a node. For PromQL, one sample of one series at one time. |
-| **Column** | One position in every row, with a name and a type. Qualified as `table.column` when names can collide (DataFusion `Column { relation, name }`). | `ColumnId` refers to a column of the input schema; its memo group's column lineage, the source column `(source, column)` its values are copied from, identifies it across nodes (§4.2.2). A front end binds `table.column` with its own scope while it lowers. |
+| **Column** | One position in every row, with a name and a type. Qualified as `table.column` when names can collide (DataFusion `Column { relation, name }`). | `ColumnId` refers to a column of the input schema; its memo group's column lineage, the source column `(source, scan ordinal, column)` its values are copied from or the memo group and column that computed them, identifies it across nodes (§4.2.2). A front end binds `table.column` with its own scope while it lowers. |
 | **Schema** | The ordered list of columns of a relation: name, data type, nullability (Arrow `Schema` of `Field { name, data_type, nullable }`; DataFusion `DFSchema` adds the table qualifier). The schema is *metadata*: it describes rows, it contains none. | `Schema` of `Field { name, dtype, nullable }` in `crates/types/src/ir/schema/mod.rs`, with no table qualifier. Unlike Arrow, `dtype` can be a summary state type (§3). |
 | **Data type** | The type of a column's values (`Int64`, `Utf8`, `Timestamp`, …). | `DataType`, wrapped as `FieldDataType::Plain`. |
 | **Aggregate state** | The intermediate value of an aggregate function before its final result, e.g. `(sum, count)` for `AVG` (DataFusion `Accumulator::state`, partial/final aggregation). It is never exposed as a column type to users. | Summary state *is* a column type here (`FieldDataType::Sketch`, `ExactAggregate`, …), so state can flow along edges and be merged, stored and read by later operators. |
@@ -428,9 +428,10 @@ Any other shape stays in `definition`:
 
 **Which column a condition is on.**
 
-- A column is named by its **lineage** ([concepts doc, section 3](../concepts/memo-groups-properties-requirements.md#column-lineage)) in the group the `SummaryAgg` reads: the source column `(source, column)` its values are copied from, a `Scan`'s table or metric and its column there. Directly above a join, `shipping.region = 'us'` and `billing.region = 'us'` are different conditions, though both columns are named `region`.
+- A column is named by its **lineage** (concepts doc, section 3, Column lineage) in the group the `SummaryAgg` reads: the source column `(source, scan ordinal, column)` its values are copied from, a `Scan`'s table or metric, which scan of it, and its column there. Directly above a join, `shipping.region = 'us'` and `billing.region = 'us'` are different conditions, though both columns are named `region`.
+- The scan ordinal tells a self-join's two scans of one source apart: 0 for the first scan, counted left to right across joins. In `FROM flows a JOIN flows b`, `a.proto` is `(flows, 0, proto)` and `b.proto` is `(flows, 1, proto)`; table aliases do not appear, so renaming them keeps the condition.
 - A rename keeps lineage: after `Project [region AS r]`, `r` is still `t.region`, so the condition is `t.region ∈ {us}`. A memo group's schema is derived, so no other operator renames a column. Since the `definition` contains the same `Project`, two states that rename the same way still compare equal.
-- A condition on a computed column (a `Project` expression item, an aggregate's measure, a readout's value) has no source column to name and stays in `definition`.
+- A condition on a computed column (a `Project` expression item, an aggregate's measure, a readout's value) has no source column to name and stays in `definition`. Its lineage is `Computed { group, column }`, the memo group and output column that computed it, so two computed columns have equal lineage only when they are the same computation.
 - If two columns the `SummaryAgg` reads have the same lineage (for example `Project [a AS k, a AS k2]`), the selection cannot name one of them apart, and their conditions stay in `definition`.
 - A PromQL label is named by its metric and label: `latency.job`.
 - Values of different types are never treated as different: `1` and `1.0` might be equal, so `x = 1` and `x = 1.0` are treated as possibly overlapping.
@@ -1354,7 +1355,7 @@ pub struct CurrentSeriesInput {
 
 A finalized value's accuracy statement is `AccuracyGuarantee` (`accuracy/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
 
-### 6.6 Aggregate coverage (`crates/types/src/stages/logical/aggregate_coverage.rs`; selection algebra in `crates/types/src/ir/properties/selection.rs`; column lineage (`ColumnLineage`, a memo-group property) in `crates/types/src/stages/logical/column_properties.rs`; the plan's content id in `crates/types/src/stages/logical/view_coverage.rs`)
+### 6.6 Aggregate coverage (`crates/types/src/stages/logical/aggregate_coverage.rs`; selection algebra in `crates/types/src/ir/properties/selection.rs`; `SourceColumn` in `crates/types/src/ir/operator/arguments.rs`; column lineage (`ColumnLineage`, a memo-group property) in `crates/types/src/stages/logical/column_properties.rs`; the plan's content id in `crates/types/src/stages/logical/view_coverage.rs`)
 
 The code for §4. `AggregateDefinition` is shown in §4.2.2.
 
@@ -1383,8 +1384,19 @@ pub struct SelectionBox {
 pub struct SourceColumn {
     /// The table or metric a `Scan` reads.
     pub source: Source,
+    /// Which scan of `source`: 0 for the first, counted left to right
+    /// across joins (a self-join's right side is 1).
+    pub scan_ordinal: u32,
     /// The column's name in that source.
     pub column: String,
+}
+
+/// Where a memo group's output column's values come from.
+pub enum ColumnLineage {
+    /// Copied unchanged from a column of one scan of a source.
+    SourceColumn(SourceColumn),
+    /// Column `column` of memo group `group`, where it was computed.
+    Computed { group: MemoGroupId, column: ColumnId },
 }
 
 /// A constraint on one column.

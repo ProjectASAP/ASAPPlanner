@@ -124,11 +124,11 @@ impl Memo {
         {
             return Ok(*group);
         }
-        let group_properties = derive_group_properties(self, &expression)?;
-        let shareable = group_properties.shareable_when_equal;
         let id = MemoGroupId(
             u32::try_from(self.groups.len()).expect("a memo has at most u32::MAX groups"),
         );
+        let group_properties = derive_group_properties(self, id, &expression)?;
+        let shareable = group_properties.shareable_when_equal;
         for &input in expression.children() {
             add_parent(&mut self.groups[input.0 as usize], id);
         }
@@ -182,7 +182,7 @@ impl Memo {
                 memo: self,
                 group_id,
             });
-        let (schema, _) = validate_expression_over_input_groups(&operator)
+        let (schema, _) = validate_expression_over_input_groups(group, &operator)
             .map_err(CandidateError::NotValidOverInputGroups)?;
         let result_kind = operator.output_kind();
         let group_properties = &self.groups[group.0 as usize].group_properties;

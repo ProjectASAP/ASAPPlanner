@@ -155,6 +155,7 @@ fn latency_column(column: &str) -> SourceColumn {
         source: Source::TimeSeries {
             metric: "latency".into(),
         },
+        scan_ordinal: 0,
         column: column.into(),
     }
 }

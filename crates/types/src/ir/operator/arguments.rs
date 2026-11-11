@@ -178,23 +178,26 @@ pub enum Source {
     Table { table_ref: String },
 }
 
-/// A column of a source (a `Scan`'s metric or table), by name: the lineage
-/// of a column copied from it
-/// (`ColumnLineage::SourceColumn`, a memo-group property in `crate::stages`),
-/// and the key an aggregate coverage's selection names a column by.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceColumn {
-    pub source: Source,
-    pub column: String,
-}
-
 impl Source {
     /// Whether it is a time series (PromQL rows): a PromQL top-k over rows
     /// that scan only time series ranks one row per series.
     pub fn is_time_series(&self) -> bool {
         matches!(self, Self::TimeSeries { .. })
     }
+}
+
+/// A column of one scan of a source (a `Scan`'s metric or table), by name:
+/// the lineage of a column copied from it (`ColumnLineage::SourceColumn`, a
+/// memo-group property in `crate::stages`), and the key an aggregate
+/// coverage's selection names a column by.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceColumn {
+    pub source: Source,
+    /// Which scan of `source`: 0 for the first, counted left to right
+    /// across joins (a self-join's right side is 1).
+    pub scan_ordinal: u32,
+    pub column: String,
 }
 
 /// Operator on the query-level `BinaryOp` node. Reuses the scalar IR's

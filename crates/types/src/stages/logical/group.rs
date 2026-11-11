@@ -60,12 +60,13 @@ impl MemoGroup {
 /// operator nodes.
 #[derive(Debug, Clone)]
 pub struct GroupProperties {
-    /// Fields: name, type, nullability; no table qualifier.
+    /// Fields: name, type, nullability.
     pub schema: Schema,
     pub result_kind: OperatorResultKind,
-    /// Per output column, in schema order: the source column its values are
-    /// copied from, or `Computed` (concepts doc, "Column lineage"), from the
-    /// input groups' and, for a `Scan`, its source's columns.
+    /// Per output column, in schema order: the source column (of one scan)
+    /// its values are copied from, or the group and column where they were
+    /// computed (concepts doc, section 3, "Column lineage"), from the input
+    /// groups' and, for a `Scan`, its source's columns.
     pub column_lineage: Vec<ColumnLineage>,
     /// Per output column, in schema order: the sign of its values, from the
     /// input groups' and, for a `Scan`, the declared ones.
@@ -107,34 +108,37 @@ pub enum MemoGroupError {
 /// Whether `operator` is a valid expression over its input groups
 /// ([`MemoGroupAsInput`]), never a node tree: its output schema derives, its
 /// inputs pass validation, and a merge reads only states it may merge.
+/// `group` is the memo group the expression computes (new or existing).
 /// Returns the output schema and, for a merge, the coverage its check
 /// derived.
 pub(super) fn validate_expression_over_input_groups(
+    group: MemoGroupId,
     operator: &Operator<MemoGroupAsInput<'_>>,
 ) -> Result<(Schema, Option<AggregateCoverage>), MemoGroupError> {
     let schema = operator.output_schema()?;
     operator.validate_inputs()?;
     // A merge is valid only over states of one definition it may merge.
     let merge_coverage = match operator {
-        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => Some(aggregate_coverage(operator)?),
+        Operator::ASAP(ASAPOp::SummaryMerge { .. }) => Some(aggregate_coverage(group, operator)?),
         _ => None,
     };
     Ok((schema, merge_coverage))
 }
 
-/// The properties of a group computing `expression` over its input
-/// groups, once it is valid over them
+/// The properties of new memo group `group` computing `expression` over
+/// its input groups, once it is valid over them
 /// ([`validate_expression_over_input_groups`]), reading each input group's
 /// `group_properties` and `expression`.
 pub(super) fn derive_group_properties(
     memo: &Memo,
+    group: MemoGroupId,
     expression: &Operator<MemoGroupId>,
 ) -> Result<GroupProperties, MemoGroupError> {
     let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
-    let (schema, merge_coverage) = validate_expression_over_input_groups(&operator)?;
-    let aggregate_coverage = merge_coverage.or_else(|| aggregate_coverage(&operator).ok());
+    let (schema, merge_coverage) = validate_expression_over_input_groups(group, &operator)?;
+    let aggregate_coverage = merge_coverage.or_else(|| aggregate_coverage(group, &operator).ok());
     let (column_lineage, column_signs) =
-        column_lineage_and_signs(&operator, &schema, &memo.source_facts);
+        column_lineage_and_signs(group, &operator, &schema, &memo.source_facts);
     Ok(GroupProperties {
         column_lineage,
         column_signs,
