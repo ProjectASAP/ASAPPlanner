@@ -7,10 +7,7 @@
 mod guarantee;
 mod target;
 
-pub use guarantee::{
-    AccuracyError, AccuracyGuarantee, BoundExpr, CompositionOperator, GuaranteeSource,
-    ProbabilityExpr, VALUES_PER_RESULT,
-};
+pub use guarantee::{AccuracyGuarantee, BoundExpr, GuaranteeSource, ProbabilityExpr};
 pub use target::{
     default_metric_for_root, AccuracyMetric, AccuracyScope, AccuracySpec, AccuracyTarget, NormScale,
 };

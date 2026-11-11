@@ -1,4 +1,4 @@
-//! `asap-stage1-pass2-reuse-candidates` — #509 Stage 1, Pass 2: the reuse
+//! `asap-stage1-pass2-reuse-candidates` — Stage 1, Pass 2: the reuse
 //! rules over memo groups, the readouts' required accuracy, dead-candidate
 //! elimination and the logical edges. Its entry,
 //! [`generate_logical_asap_memo_candidates`], extends Pass 1's memo into

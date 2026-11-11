@@ -3,14 +3,14 @@
 //!
 //! A selected post-ASAP plan used to carry no statement about the error of
 //! the value it produces: every approximate layer was sized from its own
-//! [`AccuracyTarget`] as if its input were exact, so an approximate parent
+//! [`AccuracyTarget`](super::AccuracyTarget) as if its input were exact, so an approximate parent
 //! could silently consume an approximate child. This module is the
 //! *vocabulary* that fixes that — the typed metric, the symbolic bound and
-//! failure-probability expressions, the provenance trail, and the typed
-//! rejection reasons. The *algebra* that composes these (the built-in
-//! conservative rules and budget allocation) and the deployment's measured
-//! accuracy (`AccuracyEvidence`) live one layer up in `asap_accuracy`:
-//! this crate defines the shapes, the planning crates decide.
+//! failure-probability expressions and the provenance trail. The
+//! theoretical guarantee of a summary (`theoretical_guarantee`), each
+//! operator's error contract and the deployment's measured accuracy
+//! (`AccuracyEvidence`) live one layer up in `asap_accuracy`: this crate
+//! defines the shapes, the planning crates decide.
 //!
 //! ## What a guarantee says
 //!
@@ -30,7 +30,7 @@
 //! error. Metrics are **not** interchangeable: converting between them
 //! needs an explicit rule with evidence, never an implicit "compare the
 //! epsilons". [`AccuracyGuarantee`] shares its outer shape, [`AccuracySpec`],
-//! with the requirement it is checked against, [`AccuracyTarget`].
+//! with the requirement it is checked against, [`AccuracyTarget`](super::AccuracyTarget).
 //!
 //! ## Why expressions, not numbers
 //!
@@ -45,14 +45,13 @@
 //!
 //! ## What is deliberately *not* here
 //!
-//! No `CorrectnessPolicy`-style enum: [`AccuracyTarget`] remains the one
-//! authoritative requirement type, and [`AccuracyError`] is the typed reason
-//! a candidate failed against it. No independence assumptions: the only
+//! No `CorrectnessPolicy`-style enum: [`AccuracyTarget`](super::AccuracyTarget) remains the one
+//! authoritative requirement type. No independence assumptions: the only
 //! probability combinator is the union bound.
 
 use serde::{Deserialize, Serialize};
 
-use super::target::{AccuracyMetric, AccuracyScope, AccuracySpec, AccuracyTarget};
+use super::target::{AccuracyMetric, AccuracyScope, AccuracySpec};
 
 /// A symbolic, serializable error-bound expression. Non-negative real
 /// arithmetic only — there is no subtraction, so a bound can never be
@@ -270,54 +269,6 @@ impl ProbabilityExpr {
     }
 }
 
-/// How a parent operator consumes its inputs' values — the shape an
-/// `propagate` rule is registered against. `#[non_exhaustive]`
-/// for the same reason [`AccuracyMetric`] is.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum CompositionOperator {
-    /// Relative division with runtime finite/nonzero/range checks. For operand
-    /// bounds a,b the ratio bound is (a+b)/(1-b), with b < 1.
-    CheckedRelativeDivision,
-    /// An approximate summary built over its inputs' (approximate) values
-    /// — the sketch-over-sketch case. Its own `local` guarantee composes
-    /// with the inputs' under a same-metric rule.
-    ApproximateAggregate,
-    /// A deterministic transformation with an explicitly registered global
-    /// Lipschitz constant: `B_out ≤ constant · B_in + B_local`. The planner
-    /// never derives `constant` itself; only a caller that has proved it
-    /// may construct this operator.
-    Lipschitz { constant: f64 },
-    /// An exact sum over approximate inputs: `B ≤ Σ B_i`, `δ ≤ Σ δ_i`.
-    ExactSum,
-    /// An exact arithmetic mean over approximate values. For absolute-value
-    /// input guarantees, the output bound is the largest per-value bound.
-    ExactAverage,
-    /// An exact max/min over inputs carrying absolute-value guarantees — bounds the returned
-    /// *value* (`max` of the input bounds) but does not identify which key
-    /// is the true winner.
-    ExactExtremum,
-    /// Exact division of two relative-value estimates. For numerator bound
-    /// `a` and denominator bound `b < 1`, the output bound is
-    /// `(a + b) / (1 - b)`.
-    ExactDivision,
-    /// Exact multiplication of two estimates. For absolute errors `e_x`,
-    /// `e_y` the output bound is `|x|·e_y + |y|·e_x + e_x·e_y`, requiring
-    /// finite operand domains; for relative errors `a`, `b` it is
-    /// `(1 + a)(1 + b) − 1`.
-    ExactProduct,
-    /// PromQL `rate`: reset correction plus range-boundary extrapolation.
-    CounterRate,
-    /// PromQL `irate`: reset-aware slope over the final two samples.
-    InstantCounterRate,
-    /// PromQL `increase`: extrapolated reset-corrected increase over a range.
-    CounterIncrease,
-    /// A top-k selection over approximate inputs. Without a separated-margin
-    /// certificate the default model leaves membership accuracy unknown.
-    TopKSelection,
-}
-
 /// One entry in a [`AccuracyGuarantee`]'s provenance trail — enough for a
 /// reader to reconstruct *why* the bound is what it is without re-running
 /// the planner. `#[non_exhaustive]` so runtime evidence (issue #239) and
@@ -332,8 +283,6 @@ pub enum GuaranteeSource {
         /// `"RetainedExact"`).
         reason: String,
     },
-    /// The target this evaluation's sketch was sized against.
-    AccuracyTarget { target: AccuracyTarget },
     /// The concrete sketch a evaluation's local guarantee was derived from.
     SketchEvaluation {
         algorithm: String,
@@ -343,44 +292,7 @@ pub enum GuaranteeSource {
         params: serde_json::Value,
         query: String,
     },
-    /// A composed input's own guarantee, carried verbatim so the trail is
-    /// self-contained. `input_index` is the input's position in the
-    /// composition (0-based, in the parent's child order).
-    ChildGuarantee {
-        input_index: usize,
-        guarantee: Box<AccuracyGuarantee>,
-    },
-    /// The propagation rule that produced this guarantee from its inputs.
-    CompositionStep {
-        operator: CompositionOperator,
-        /// Stable rule name (e.g. `"additive_union_bound"`).
-        rule: String,
-    },
-    /// The budget split that produced this layer's local target — present
-    /// only when an equal budget split re-sized a layer.
-    BudgetAllocation {
-        allocator: String,
-        layer: usize,
-        layer_count: usize,
-        local_target: AccuracyTarget,
-        end_to_end_target: AccuracyTarget,
-    },
-    /// A statistic the bound needs but nothing supplied — the reason a
-    /// [`BoundExpr::Unknown`]/[`ProbabilityExpr::Unknown`] leaf exists.
-    UnavailableStatistic { statistic: String },
-    /// Query-time evidence (issue #239's posterior bounds). Never produced
-    /// at planning time; reserved so a runtime can append its observation
-    /// to the same trail instead of inventing a parallel one.
-    RuntimeObservation {
-        source: String,
-        detail: serde_json::Value,
-    },
 }
-
-/// The statistic an unbound number of values per result is left as
-/// ([`AccuracyGuarantee::over_scope`]); nothing binds it, so the
-/// failure probability stays unknown.
-pub const VALUES_PER_RESULT: &str = "values_per_result";
 
 /// The machine-readable accuracy statement attached to a finalized
 /// post-ASAP value — see the module docs for its semantics. Its
@@ -459,110 +371,10 @@ impl AccuracyGuarantee {
         )
     }
 
-    /// This guarantee stated over `scope`, for a result of
-    /// `values_per_result` values (`G`, `None` when unbound): a per-value
-    /// failure probability `δ` becomes `n · δ` by the union bound over the
-    /// `n` values the scope covers ([`AccuracyScope::max_values_covered`]),
-    /// whatever their dependence. The error is unchanged. A guarantee that
-    /// never fails (`δ = 0`) holds for every value at once; an unbound `n`
-    /// (the whole result of an unbound `G`) leaves the failure probability
-    /// symbolic in [`VALUES_PER_RESULT`]. A guarantee over any other scope
-    /// is returned as it is. Plan selection uses it to check a target over
-    /// `scope`.
-    pub fn over_scope(&self, scope: AccuracyScope, values_per_result: Option<u64>) -> Self {
-        let mut over = self.clone();
-        // Only a per-value statement extends to more values by the union
-        // bound: one over some groups says nothing about the others, so it
-        // is returned as it is and misses a scope it does not cover.
-        if self.spec.accuracy_scope != AccuracyScope::PerValue || scope == AccuracyScope::PerValue {
-            return over;
-        }
-        over.spec.accuracy_scope = scope;
-        if !self.spec.failure_probability.is_zero() {
-            over.spec.failure_probability = ProbabilityExpr::Scaled {
-                count: scope.max_values_covered(values_per_result).map_or_else(
-                    || BoundExpr::Unknown {
-                        statistic: VALUES_PER_RESULT.into(),
-                    },
-                    |values| BoundExpr::Constant {
-                        value: values as f64,
-                    },
-                ),
-                inner: Box::new(self.spec.failure_probability.clone()),
-            };
-        }
-        over
-    }
-
     /// `true` iff this guarantee promises zero error with certainty.
     pub fn is_exact(&self) -> bool {
         self.spec.error.is_zero() && self.spec.failure_probability.is_zero()
     }
-
-    /// How many approximate sketch evaluations contributed to this value —
-    /// `1` for a plain evaluation, `0` for an exact value, and the transitive
-    /// count through every [`GuaranteeSource::ChildGuarantee`] for a
-    /// composition.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn approximate_layer_count(&self) -> usize {
-        self.provenance
-            .iter()
-            .map(|source| match source {
-                GuaranteeSource::SketchEvaluation { .. } => 1,
-                GuaranteeSource::ChildGuarantee { guarantee, .. } => {
-                    guarantee.approximate_layer_count()
-                }
-                _ => 0,
-            })
-            .sum()
-    }
-}
-
-/// Why an accuracy check rejected a candidate. Typed, serializable, and
-/// carried through to DAG export so a rejection is as inspectable as a
-/// selection. Never a reason to "treat the child as exact".
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AccuracyError {
-    /// No registered propagation rule covers this operator over these
-    /// input metrics (or this local metric).
-    #[error(
-        "unsupported accuracy composition: {operator:?} over inputs {input_metrics:?} \
-         with local {local_metric:?} — {reason}"
-    )]
-    UnsupportedComposition {
-        operator: CompositionOperator,
-        input_metrics: Vec<AccuracyMetric>,
-        local_metric: Option<AccuracyMetric>,
-        reason: String,
-    },
-    /// An approximate input carries no guarantee at all, so nothing can be
-    /// composed over it.
-    #[error("input {input_index} of {operator:?} carries no accuracy guarantee")]
-    MissingInputGuarantee {
-        operator: CompositionOperator,
-        input_index: usize,
-    },
-    /// The composed guarantee does not satisfy the applicable
-    /// [`AccuracyTarget`]. `bound`/`failure_probability` are the evaluated
-    /// values when known.
-    #[error(
-        "composed guarantee ({metric:?}, bound {bound:?}, failure probability \
-         {failure_probability:?}) does not satisfy {target:?}"
-    )]
-    TargetNotSatisfied {
-        metric: AccuracyMetric,
-        bound: Option<f64>,
-        failure_probability: Option<f64>,
-        target: AccuracyTarget,
-    },
-    /// No budget allocation could make the composition legal under the
-    /// end-to-end target.
-    #[error("no legal accuracy-budget allocation for {target:?} across {layer_count} layers")]
-    NoLegalAllocation {
-        target: AccuracyTarget,
-        layer_count: usize,
-    },
 }
 
 #[cfg(test)]
@@ -648,13 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_guarantee_is_zero_layers() {
-        let g = AccuracyGuarantee::exact("test");
-        assert!(g.is_exact());
-        assert_eq!(g.approximate_layer_count(), 0);
-    }
-
-    #[test]
     fn guarantee_round_trips_through_json() {
         let g = AccuracyGuarantee::new(
             AccuracyMetric::ABSOLUTE_STREAM_L1,
@@ -670,9 +475,8 @@ mod tests {
             ProbabilityExpr::UnionBound {
                 terms: vec![ProbabilityExpr::Constant { value: 0.01 }],
             },
-            vec![GuaranteeSource::CompositionStep {
-                operator: CompositionOperator::Lipschitz { constant: 2.0 },
-                rule: "lipschitz".into(),
+            vec![GuaranteeSource::Exact {
+                reason: "test".into(),
             }],
         );
         let json = serde_json::to_value(&g).unwrap();
@@ -681,47 +485,6 @@ mod tests {
         assert_eq!(json["spec"]["error"]["op"], "sum");
         let back: AccuracyGuarantee = serde_json::from_value(json).unwrap();
         assert_eq!(back, g);
-    }
-
-    /// A per-value guarantee over the groups holding at least 5% of the
-    /// records fails with at most 20 times its per-value probability, even
-    /// when the number of values the result returns is unknown: at most 20
-    /// groups can hold 5% each. Fewer values bound it lower. The error is
-    /// unchanged, and a scope the guarantee already covers keeps it as it is.
-    #[test]
-    fn a_record_share_scope_union_bounds_over_one_over_share_groups() {
-        let per_value = AccuracyGuarantee::new(
-            AccuracyMetric::Relative,
-            BoundExpr::Constant { value: 0.05 },
-            ProbabilityExpr::Constant { value: 0.001 },
-            vec![],
-        );
-        let five_percent = AccuracyScope::GroupsWithRecordShareAtLeast(0.05);
-        let over = per_value.over_scope(five_percent, None);
-        assert_eq!(over.spec.accuracy_scope, five_percent);
-        assert_eq!(over.spec.error, per_value.spec.error);
-        assert!((over.spec.failure_probability.evaluate().unwrap() - 0.02).abs() < 1e-12);
-        let few = per_value.over_scope(five_percent, Some(4));
-        assert!((few.spec.failure_probability.evaluate().unwrap() - 0.004).abs() < 1e-12);
-        assert_eq!(
-            per_value.over_scope(AccuracyScope::PerValue, None),
-            per_value
-        );
-        let whole = per_value.over_scope(AccuracyScope::WholeResult, Some(10));
-        assert_eq!(whole.over_scope(five_percent, None), whole);
-        // A statement over the 5% groups says nothing about groups between
-        // 1% and 5%, nor about the whole result: it is not rescaled.
-        let one_percent = AccuracyScope::GroupsWithRecordShareAtLeast(0.01);
-        assert_eq!(over.over_scope(one_percent, None), over);
-        assert_eq!(over.over_scope(AccuracyScope::WholeResult, Some(10)), over);
-        assert_eq!(
-            per_value
-                .over_scope(AccuracyScope::WholeResult, None)
-                .spec
-                .failure_probability
-                .evaluate(),
-            None
-        );
     }
 
     /// A supplied statistic replaces its `Unknown` leaves, in the bound and

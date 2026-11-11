@@ -138,6 +138,25 @@ pub enum SketchStatistic {
     TopK { k: usize },
 }
 
+impl SketchStatistic {
+    /// The statistic a summary is read for to answer `intent`, or `None`
+    /// when no sketch statistic serves the intent.
+    pub fn for_intent(intent: &AggIntent) -> Option<Self> {
+        Some(match intent {
+            AggIntent::Quantile { q, .. } => Self::Quantile { q: *q },
+            AggIntent::Cardinality { .. } => Self::Cardinality,
+            AggIntent::FrequencyL2 { .. } => Self::FrequencyL2,
+            AggIntent::FrequencyEntropy { .. } => Self::FrequencyEntropy,
+            AggIntent::TopK { k, .. } => Self::TopK { k: *k },
+            AggIntent::Count => Self::PointCount {
+                key: ColumnRef::SampleValue,
+                value: None,
+            },
+            _ => return None,
+        })
+    }
+}
+
 /// The metric whose raw data samples, or plain sums of them, are every value
 /// `input` outputs, or `None`: walking down through a time range, an
 /// `offset`-only time shift (it moves the window, not the samples) and a

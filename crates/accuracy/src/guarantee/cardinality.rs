@@ -1,6 +1,6 @@
 //! KMV's provable distinct-count bound.
 //!
-//! # KMV (#694)
+//! # KMV
 //!
 //! `asap_sketchlib`'s KMV keeps the `k` smallest distinct 64-bit hashes of
 //! its items and estimates (`src/sketches/kmv.rs`):

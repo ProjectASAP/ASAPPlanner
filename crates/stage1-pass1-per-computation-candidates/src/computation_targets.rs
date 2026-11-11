@@ -23,10 +23,9 @@ use asap_types::ir::schema::{ColumnId, Schema};
 use asap_types::ir::{NonASAPOp, Operator, OperatorResultKind, Predicate, ScalarExpr};
 use asap_types::stages::{Memo, MemoGroupId};
 use asap_types::summary_type::{
-    ExactKind, SketchAlgorithm, StatisticKind, SummaryInputExpr, SummaryUpdate,
+    ExactKind, SketchAlgorithm, SketchStatistic, StatisticKind, SummaryInputExpr, SummaryUpdate,
 };
 
-use asap_accuracy::sizing::sketch_statistic;
 use asap_types::deployment_capabilities::{summary_supported, SupportedSummary};
 
 use crate::summary_realization::{realize_keyed_additive_summary_input, summary_candidates};
@@ -117,7 +116,7 @@ pub(crate) fn computation_candidates_for_intent(
     }
     let quantile_outside_unit_interval =
         matches!(intent, AggIntent::Quantile { q, .. } if !(0.0..=1.0).contains(q));
-    if sketch_statistic(intent).is_some() && !quantile_outside_unit_interval {
+    if SketchStatistic::for_intent(intent).is_some() && !quantile_outside_unit_interval {
         choices.extend(
             summary_candidates(intent)
                 .into_iter()
@@ -251,7 +250,8 @@ fn without_unsupported_summaries(
         else {
             continue;
         };
-        let Some(readout) = sketch_statistic(&measures[target.measure_index]).map(|s| s.kind())
+        let Some(readout) =
+            SketchStatistic::for_intent(&measures[target.measure_index]).map(|s| s.kind())
         else {
             continue;
         };

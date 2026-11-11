@@ -16,7 +16,6 @@ mod error_propagation;
 mod evidence;
 pub mod guarantee;
 mod requirements;
-pub mod sizing;
 
 pub use error_propagation::{error_propagation, ErrorPropagation};
 pub use evidence::{AccuracyEvidence, NoMeasuredGuarantees};

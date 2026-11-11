@@ -3,7 +3,7 @@ name = "asap-stage1-pass2-reuse-candidates"
 version = "0.1.0"
 edition = "2021"
 
-# #509 Stage 1, Pass 2: the reuse rules over memo groups and the logical
+# Stage 1, Pass 2: the reuse rules over memo groups and the logical
 # edges (`asap_types::stages::LogicalASAPMemoCandidates`) Stage 2 expands.
 # Reads Pass 1's memo through `asap_types::stages`; depends on no other
 # stage crate.

@@ -13,9 +13,7 @@ use asap_types::ir::{
     ProjectItem, ScalarExpr,
 };
 use asap_types::stages::{Memo, MemoGroupId};
-use asap_types::summary_type::{ExactKind, SummaryInputExpr};
-
-use asap_accuracy::sizing::sketch_statistic;
+use asap_types::summary_type::{ExactKind, SketchStatistic, SummaryInputExpr};
 
 use super::pending::{add_candidate, commit_pending, Pending};
 use super::SingleMeasure;
@@ -180,9 +178,9 @@ pub(super) fn summary_readout(
     reduction: &Reduction,
     result_group: MemoGroupId,
 ) -> Result<Operator<MemoGroupId>, PerComputationCandidateError> {
-    let query = sketch_statistic(intent).ok_or(PerComputationCandidateError::Unsupported(
-        "sketch evaluation",
-    ))?;
+    let query = SketchStatistic::for_intent(intent).ok_or(
+        PerComputationCandidateError::Unsupported("sketch evaluation"),
+    )?;
     let state = pending.push(memo, build)?;
     let estimate = Operator::ASAP(ASAPOp::SummaryEstimate {
         summary_input: state,
