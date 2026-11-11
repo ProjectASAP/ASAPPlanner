@@ -776,6 +776,33 @@ fn a_whole_result_failure_probability_without_values_per_evaluation_prunes_the_r
     }
 }
 
+/// A readout another query gives a level is not pruned for a query whose
+/// whole-result failure probability has no per-value one: Q0 (δ = 0.01,
+/// values per evaluation unknown) and Q1 (no δ) read one KLL readout, and
+/// the readout keeps Q1's level, live; Stage 3 picks a producer per query.
+#[test]
+fn a_readout_another_query_gives_a_level_survives_unknown_values_per_evaluation() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.9, 300);
+    memo.add_query(MemoQuery {
+        root: QueryRoot::Operator(readout),
+        accuracy_target: Some(AccuracyTarget::max_error(0.01).failure_probability(0.01)),
+        number_of_values_per_query_evaluation: None,
+    });
+    query(&mut memo, readout, Some(AccuracyTarget::max_error(0.01)));
+    let logical = pass2(memo, &[entry(60_000), entry(60_000)]);
+    assert_eq!(
+        requirements_of(&logical.memo, readout),
+        vec![Some(RequiredAccuracy {
+            metric: AccuracyMetric::Rank,
+            max_error: 0.01,
+            failure_probability: 1.0,
+        })]
+    );
+    let pruned = pruned_entry(&logical, own_candidate(readout));
+    assert!(pruned.is_none(), "{pruned:?}");
+}
+
 /// A ratio reads no rank error: with a relative target, the KLL readout's
 /// edges into the division and from its states fail the metric rule; it
 /// gets no requirement.

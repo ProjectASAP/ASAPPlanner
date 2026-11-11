@@ -52,9 +52,11 @@ type Caps = Vec<BTreeMap<(usize, usize), f64>>;
 ///   levels; one no query with a target reaches in the readout's metric
 ///   gets none.
 ///
-/// Returns the readouts reached by a query whose whole-result failure
-/// probability has no per-value one ($n_q$ unknown), each with that query:
-/// Pass 2 prunes them (`RootPruneReason::ValuesPerEvaluationUnknown`).
+/// Returns the readouts that no query gives a level while one reaching
+/// them has a whole-result failure probability without a per-value one
+/// ($n_q$ unknown), each with that query: Pass 2 prunes them
+/// (`RootPruneReason::ValuesPerEvaluationUnknown`). A readout another
+/// query gives a level stays.
 pub(crate) fn set_readout_requirements(
     memo: &mut Memo,
 ) -> Result<BTreeMap<CandidateForMemoGroupId, usize>, Pass2RuleError> {
@@ -99,6 +101,9 @@ pub(crate) fn set_readout_requirements(
                     }
                 }
             }
+            // Only a readout no query gives a level is pruned: one with a
+            // level serves the queries that gave it.
+            let unknown_values_of = unknown_values_of.filter(|_| levels.is_empty());
             for readout in write_levels(memo, group, index_in_group, levels)? {
                 if let Some(query) = unknown_values_of {
                     without_per_value_failure_probability.insert(readout, query);

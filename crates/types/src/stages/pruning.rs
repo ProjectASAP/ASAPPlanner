@@ -65,7 +65,8 @@ pub enum RootPruneReason {
     /// The readout `consumer` is reached by query `query`, whose target sets
     /// a failure probability over the whole result while the number of
     /// values one evaluation returns ($n_q$) is unknown: no per-value
-    /// failure probability follows, so no state meets it.
+    /// failure probability follows, so no state meets it; and no other
+    /// query reaching it gives it a level.
     ValuesPerEvaluationUnknown {
         consumer: CandidateForMemoGroupId,
         query: usize,
