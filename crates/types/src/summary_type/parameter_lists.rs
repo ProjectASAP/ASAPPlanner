@@ -7,10 +7,10 @@ use super::{SketchAlgorithm, SketchParams};
 /// error of each, for a statistic at a failure probability, is its guarantee
 /// (`asap_accuracy::theoretical_guarantee`).
 ///
-/// The widths, `k`s, precisions, `alpha`s and heap sizes are today's sizing
-/// (`asap_accuracy`'s test-only `guarantee::sizing_oracle`) over the errors ε = 0.1,
-/// 0.05, 0.02, 0.01, 0.005, 0.002 and 0.001, smallest first, without
-/// repeats; an `asap_accuracy` test keeps them equal. Distinct counts (KMV,
+/// The widths, `k`s, precisions, `alpha`s and heap sizes span the errors
+/// ε = 0.1, 0.05, 0.02, 0.01, 0.005, 0.002 and 0.001, smallest first,
+/// without repeats; an `asap_accuracy` test checks every entry has a
+/// guarantee at δ = 0.01. Distinct counts (KMV,
 /// and UnivMon's distinct-count shapes) stop at ε = 0.01. Where δ is set by
 /// a structural parameter, the list covers the δ levels with it: Count-Min
 /// lists each width with each depth of [`CMS_DEPTHS`], Count Sketch with

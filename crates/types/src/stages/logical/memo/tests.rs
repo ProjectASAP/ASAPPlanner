@@ -43,9 +43,13 @@ fn candidate(
 ) -> CandidateForMemoGroup {
     let input_requirements = vec![LogicalRequirements::default(); operator.children().len()];
     CandidateForMemoGroup {
-        // Built directly: the doc example's k = 200 and k = 345 are not
-        // in today's KLL list, which `LogicalProperties::new` checks.
-        logical_properties: LogicalProperties { parameters },
+        logical_properties: LogicalProperties::new(
+            &CandidateExpression {
+                operator: operator.clone(),
+            },
+            parameters,
+        )
+        .unwrap(),
         expression: CandidateExpression { operator },
         input_requirements,
         fused_groups: vec![],
@@ -144,44 +148,44 @@ fn find_or_add_group_lists_the_new_group_among_its_inputs_parents() {
     assert!(memo.groups()[g2.0 as usize].parent_groups().is_empty());
 }
 
-/// KLL builds with k = 200 and k = 345 are two candidates of one group
+/// KLL builds with k = 269 and k = 547 are two candidates of one group
 /// G2: θ is a logical property, not part of the expression.
 #[test]
-fn kll_builds_with_k_200_and_k_345_share_one_group() {
+fn kll_builds_with_k_269_and_k_547_share_one_group() {
     let mut memo = Memo::new(&DataWorkload::default());
     let g1 = memo
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
-    let k200_group = memo
+    let k269_group = memo
         .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
         .unwrap();
-    let k200 = memo
+    let k269 = memo
         .add_candidate(
-            k200_group,
+            k269_group,
             candidate(
                 state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
-                kll_k(200),
+                kll_k(269),
             ),
         )
         .unwrap();
-    let k345_group = memo
+    let k547_group = memo
         .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
         .unwrap();
-    let k345 = memo
+    let k547 = memo
         .add_candidate(
-            k345_group,
+            k547_group,
             candidate(
                 state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
-                kll_k(345),
+                kll_k(547),
             ),
         )
         .unwrap();
-    assert_eq!(k200_group, k345_group);
-    assert_ne!(k200, k345);
-    assert_eq!(memo.groups()[k200_group.0 as usize].candidates.len(), 2);
+    assert_eq!(k269_group, k547_group);
+    assert_ne!(k269, k547);
+    assert_eq!(memo.groups()[k269_group.0 as usize].candidates.len(), 2);
     assert_eq!(
-        memo.candidate(k345).logical_properties.parameters(),
-        kll_k(345).as_ref()
+        memo.candidate(k547).logical_properties.parameters(),
+        kll_k(547).as_ref()
     );
 }
 
@@ -201,7 +205,7 @@ fn add_candidate_returns_the_existing_candidate_for_a_duplicate() {
             g2,
             candidate(
                 state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
-                kll_k(200),
+                kll_k(269),
             ),
         )
         .unwrap();
@@ -210,7 +214,7 @@ fn add_candidate_returns_the_existing_candidate_for_a_duplicate() {
             g2,
             candidate(
                 state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
-                kll_k(200),
+                kll_k(269),
             ),
         )
         .unwrap();
@@ -224,7 +228,7 @@ fn add_candidate_returns_the_existing_candidate_for_a_duplicate() {
     );
     let other_size = candidate(
         state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
-        kll_k(345),
+        kll_k(547),
     );
     assert_ne!(memo.add_candidate(g2, other_size).unwrap(), first);
     assert_eq!(memo.groups()[g2.0 as usize].candidates.len(), 2);
@@ -624,4 +628,97 @@ fn output_schema_of_a_pending_expression_rejects_what_find_or_add_group_rejects(
     let bad = readout(SketchStatistic::Quantile { q: 0.99 }, latency);
     assert!(memo.output_schema_of_pending_expression(&[], &bad).is_err());
     assert!(memo.find_or_add_group(bad).is_err());
+}
+
+/// One readout's required accuracy.
+fn required(max_error: f64) -> Vec<LogicalRequirements> {
+    vec![LogicalRequirements {
+        required_accuracy: Some(crate::stages::RequiredAccuracy {
+            metric: crate::accuracy::AccuracyMetric::Rank,
+            max_error,
+            failure_probability: 1.0,
+        }),
+    }]
+}
+
+/// Decided 2026-11-07 (D3): `Memo::set_candidate_input_requirements`
+/// replaces $r^{\log}$ of the one candidate it names; two readouts of one
+/// state with different required accuracy are two candidates.
+#[test]
+fn set_candidate_input_requirements_replaces_only_the_named_candidate() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let g2 = memo
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .unwrap();
+    let p90 = || readout(SketchStatistic::Quantile { q: 0.9 }, g2);
+    let g3 = memo.find_or_add_group(p90()).unwrap();
+    let first = memo.add_candidate(g3, candidate(p90(), None)).unwrap();
+    memo.set_candidate_input_requirements(first, required(0.01));
+    let second = memo.add_candidate(g3, candidate(p90(), None)).unwrap();
+    assert_ne!(first, second, "an unset copy is a new candidate");
+    memo.set_candidate_input_requirements(second, required(0.02));
+    let requirements: Vec<_> = memo.groups()[g3.0 as usize]
+        .candidates
+        .iter()
+        .map(|c| c.input_requirements.clone())
+        .collect();
+    assert_eq!(requirements, vec![required(0.01), required(0.02)]);
+}
+
+/// Decided 2026-11-09 (A1): a merge of KLL states carries the θ of the
+/// states it reads. Without one it is rejected; `merge[k=547]` reads only
+/// the k = 547 build of its input group.
+#[test]
+fn a_merge_carries_the_parameters_of_the_states_it_reads() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let kll_state = || state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1);
+    let g2 = memo.find_or_add_group(kll_state()).unwrap();
+    for k in [269, 547] {
+        memo.add_candidate(g2, candidate(kll_state(), kll_k(k)))
+            .unwrap();
+    }
+    let merge = Operator::ASAP(crate::ir::ASAPOp::SummaryMerge {
+        children: vec![g2],
+        group_by: None,
+    });
+    let g3 = memo.find_or_add_group(merge.clone()).unwrap();
+    assert!(matches!(
+        memo.add_candidate(g3, candidate(merge.clone(), None)),
+        Err(CandidateError::LogicalProperties(
+            crate::stages::LogicalPropertiesError::SketchBuildWithoutParameters
+        ))
+    ));
+    let merged = memo
+        .add_candidate(g3, candidate(merge, kll_k(547)))
+        .unwrap();
+    assert_eq!(
+        memo.producers(merged, 0),
+        vec![CandidateForMemoGroupId {
+            group: g2,
+            index_in_group: 1
+        }]
+    );
+}
+
+/// Decided 2026-11-07 (D3): one requirement per input group, or a
+/// panic.
+#[test]
+#[should_panic(expected = "one input requirement per input group")]
+fn set_candidate_input_requirements_panics_on_a_length_mismatch() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let kll_state = || state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1);
+    let g2 = memo.find_or_add_group(kll_state()).unwrap();
+    let build = memo
+        .add_candidate(g2, candidate(kll_state(), kll_k(269)))
+        .unwrap();
+    memo.set_candidate_input_requirements(build, Vec::new());
 }

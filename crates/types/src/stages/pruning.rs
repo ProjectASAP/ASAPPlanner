@@ -22,12 +22,13 @@ pub struct PrunedLogicalCandidate {
     pub causes: Vec<PruneCause>,
 }
 
-/// One path from the candidate, through consumers that are themselves
+/// One path from the candidate, through candidates that are themselves
 /// eliminated, to the edge that fails. One shortest path per failing edge.
 #[derive(Debug, Clone)]
 pub struct PruneCause {
-    /// The eliminated consumers on the path, nearest first.
-    pub through_pruned_consumers: Vec<CandidateForMemoGroupId>,
+    /// The eliminated candidates on the path, nearest first: consumers
+    /// above, or, for a candidate cut off from an input, producers below.
+    pub through_pruned_candidates: Vec<CandidateForMemoGroupId>,
     pub root: RootPruneReason,
 }
 
@@ -42,12 +43,32 @@ pub enum RootPruneReason {
         input: usize,
         required: RequiredAccuracy,
     },
-    /// The consumer's error contract carries none of the producer's metrics.
+    /// The metric rule: the producer is a readout whose metric the
+    /// consumer does not accept on that input; or, on a readout's own input,
+    /// the readout's metric is not one its output accepts.
     MetricRule {
         consumer: CandidateForMemoGroupId,
         input: usize,
         producer_metric: AccuracyMetric,
-        consumer_carries: Vec<AccuracyMetric>,
+        /// The metrics accepted on that input (on a readout's own input: at
+        /// its output).
+        accepted_metrics: Vec<AccuracyMetric>,
+    },
+    /// The consumer is a top-k readout whose `k` exceeds the producer's
+    /// heap size: the heap cannot hold the k ranked keys, whatever accuracy
+    /// is required.
+    HeapSmallerThanTopK {
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+        k: usize,
+    },
+    /// The readout `consumer` is reached by query `query`, whose target sets
+    /// a failure probability over the whole result while the number of
+    /// values one evaluation returns ($n_q$) is unknown: no per-value
+    /// failure probability follows, so no state meets it.
+    ValuesPerEvaluationUnknown {
+        consumer: CandidateForMemoGroupId,
+        query: usize,
     },
     /// The candidate never had a consumer and is not a query output. A
     /// candidate whose consumers were eliminated is traced to their causes.

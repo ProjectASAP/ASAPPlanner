@@ -4,9 +4,9 @@
 
 use crate::ir::operator::asap::summary_type_of_operator;
 use crate::ir::schema::FieldDataType;
-use crate::ir::Operator;
+use crate::ir::{ASAPOp, NonASAPOp, Operator};
 use crate::stages::{LogicalRequirements, MemoGroupError, MemoGroupId};
-use crate::summary_type::{parameter_list, SketchParams};
+use crate::summary_type::{parameter_list, SketchAlgorithm, SketchParams};
 
 /// One candidate: position `index_in_group` in group `group`'s candidates
 /// ([`MemoGroup::candidates`](crate::stages::MemoGroup::candidates)).
@@ -44,17 +44,13 @@ pub struct CandidateForMemoGroup {
 pub enum OriginOfCandidateForMemoGroup {
     /// Pass 1: exact, exact accumulator, or a summary type.
     Pass1,
-    /// Canonical value preprocessing feeding a summary build.
-    SummaryInput,
     /// A tumbling-window chain, or a merge reading one, of a summary state group.
     TumblingWindows,
-    /// A coarse group regrouping a finer group.
+    /// A coarse group rolled up from a finer one, the compensating `Filter`
+    /// it reads, or a build of a finest common group.
     Rollup,
     /// A top-k read from another group's ranking.
     TopKReuse,
-    /// Its metric's scans widened to a shared label set, read through a
-    /// `Project` (scan widening).
-    WidenedScans,
 }
 
 /// $e_v = \operatorname{op}_v(G_{v,1}, \dots, G_{v,n})$: one operator, with
@@ -77,13 +73,22 @@ pub enum CandidateError {
     /// not compute the group's result (a bug in the rule that built it).
     #[error("the candidate's output differs from group {group:?}'s")]
     OutputDiffersFromGroup { group: MemoGroupId },
+    /// Its θ does not fit the group's output (a bug in the rule that built
+    /// it).
+    #[error("the candidate's parameters do not fit its group's output: {0}")]
+    LogicalProperties(LogicalPropertiesError),
 }
 
 /// $p^{\log}_v = \boldsymbol\theta_v$. The summary type is the operator's
 /// argument, not a property, and a tumbling-window chain's width is the
-/// chain operator's argument. [`Self::new`] rejects parameters of another
-/// algorithm, not in the algorithm's list, missing on a sketch build (a chain
-/// included) or present on an exact operator.
+/// chain operator's argument. A candidate passing states on without building
+/// them (`SummaryMerge`, and a `Filter`, `TimeRange` or `TimeShift` over
+/// states) carries the θ of the states it reads. [`Self::new`] rejects
+/// parameters of another algorithm, not in the algorithm's list or missing
+/// on a sketch build (a chain included), and parameters on an operator that
+/// neither builds nor passes on states;
+/// [`Memo::add_candidate`](crate::stages::Memo::add_candidate) checks a
+/// pass-through's θ against its group's state.
 #[derive(Debug, Clone)]
 pub struct LogicalProperties {
     /// $\boldsymbol\theta_v$, from the algorithm's predefined list; `None` for
@@ -96,19 +101,21 @@ impl LogicalProperties {
         expression: &CandidateExpression,
         parameters: Option<SketchParams>,
     ) -> Result<Self, LogicalPropertiesError> {
-        let algorithm = match summary_type_of_operator(&expression.operator) {
-            Some(FieldDataType::Sketch(algorithm)) => Some(*algorithm),
-            _ => None,
-        };
-        match (algorithm, &parameters) {
-            (Some(_), None) => return Err(LogicalPropertiesError::SketchBuildWithoutParameters),
-            (None, Some(_)) => return Err(LogicalPropertiesError::ParametersOnExactOperator),
-            (Some(algorithm), Some(parameters)) => {
-                if !parameter_list(algorithm).contains(parameters) {
-                    return Err(LogicalPropertiesError::ParametersNotInList);
-                }
-            }
-            (None, None) => {}
+        let passes_states_on = matches!(
+            expression.operator,
+            Operator::ASAP(ASAPOp::SummaryMerge { .. })
+                | Operator::NonASAP(
+                    NonASAPOp::Filter { .. }
+                        | NonASAPOp::TimeRange { .. }
+                        | NonASAPOp::TimeShift { .. }
+                )
+        );
+        if !passes_states_on {
+            let algorithm = match summary_type_of_operator(&expression.operator) {
+                Some(FieldDataType::Sketch(algorithm)) => Some(*algorithm),
+                _ => None,
+            };
+            parameters_fit(algorithm, parameters.as_ref())?;
         }
         Ok(Self { parameters })
     }
@@ -119,13 +126,29 @@ impl LogicalProperties {
     }
 }
 
+/// Whether θ `parameters` fit an output of sketch `algorithm` (`None`: no
+/// sketch state): from its list, and present exactly for a sketch.
+pub(super) fn parameters_fit(
+    algorithm: Option<SketchAlgorithm>,
+    parameters: Option<&SketchParams>,
+) -> Result<(), LogicalPropertiesError> {
+    match (algorithm, parameters) {
+        (Some(_), None) => Err(LogicalPropertiesError::SketchBuildWithoutParameters),
+        (None, Some(_)) => Err(LogicalPropertiesError::ParametersOnExactOperator),
+        (Some(algorithm), Some(parameters)) if !parameter_list(algorithm).contains(parameters) => {
+            Err(LogicalPropertiesError::ParametersNotInList)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Logical properties that do not fit their operator: bad input to
 /// [`LogicalProperties::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LogicalPropertiesError {
     #[error("an exact operator has no summary parameters")]
     ParametersOnExactOperator,
-    #[error("a sketch build needs parameters from its algorithm's list")]
+    #[error("a sketch build, or a candidate passing sketch states on, needs parameters from its algorithm's list")]
     SketchBuildWithoutParameters,
     #[error("the parameters are not in their algorithm's predefined list")]
     ParametersNotInList,
@@ -134,14 +157,8 @@ pub enum LogicalPropertiesError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::ASAPOp;
-    use crate::summary_type::SketchAlgorithm;
-
     use crate::ir::operator::arguments::Reduction;
-
     use crate::ir::scalar::expr_ir::ColumnRef;
-
-    use crate::ir::schema::FieldDataType;
     use crate::summary_type::{ExactKind, HydraParams, SummaryUpdate};
 
     /// `SummaryAgg` over group 0 building a state of `summary_type`.
@@ -173,8 +190,8 @@ mod tests {
 
     /// `LogicalProperties::new` over every operator kind and parameters: a
     /// sketch build (a chain included) needs parameters of its algorithm from
-    /// its list; parameters are rejected on an operator that builds no
-    /// sketch.
+    /// its list; a merge may carry any (its group decides); parameters are
+    /// rejected on an operator that neither builds nor passes on states.
     #[test]
     fn logical_properties_new_over_every_operator_and_parameters() {
         use LogicalPropertiesError as Invalid;
@@ -193,6 +210,12 @@ mod tests {
             operator: Operator::ASAP(ASAPOp::SummaryEstimate {
                 summary_input: MemoGroupId(0),
                 query: crate::summary_type::SketchStatistic::Quantile { q: 0.5 },
+            }),
+        };
+        let merge = CandidateExpression {
+            operator: Operator::ASAP(ASAPOp::SummaryMerge {
+                children: vec![MemoGroupId(0)],
+                group_by: None,
             }),
         };
         // k = 270 is KLL's structure but not in its list.
@@ -238,6 +261,8 @@ mod tests {
             (summary_agg(FieldDataType::exact(ExactKind::Sum)), exact),
             (kll_chain, kll_build),
             (readout, exact),
+            // A merge's θ is checked against its group by `add_candidate`.
+            (merge, [Ok(()); 5]),
         ];
         for (expression, by_parameters) in table {
             for (parameters, expected) in parameters.iter().zip(by_parameters) {

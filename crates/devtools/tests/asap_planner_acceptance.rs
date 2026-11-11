@@ -79,10 +79,7 @@ const SECTIONS: [(&str, &[&str]); 5] = [
     ("stage1_pass1", &["Stage 1 Pass 1 output: Memo"]),
     (
         "stage1_pass2",
-        &[
-            "Stage 1 Pass 2, after local window composition",
-            "Stage 1 Pass 2 output = Stage 2 input: LogicalASAPMemoCandidates",
-        ],
+        &["Stage 1 Pass 2 output = Stage 2 input: LogicalASAPMemoCandidates"],
     ),
     (
         "stage2",

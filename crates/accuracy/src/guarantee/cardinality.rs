@@ -25,38 +25,84 @@
 //!
 //! Neither bound depends on `N`, so no distinct bound is needed: the
 //! failure probability ([`kmv_failure_probability`]) is their sum, per
-//! output row (each group's estimate). Sizing (test-only
-//! `sizing_oracle::kmv_k`) takes the smallest `k` with that sum at most
-//! `δ`, about
-//! `1 + (1+ε)(2+ε)·ln(2/δ)/ε²` (below `3·ln(2/δ)/ε² + 1` for `ε ≤ 1`).
+//! output row (each group's estimate). The guarantee at a failure
+//! probability δ ([`guarantee_at`]) is the smallest `ε` with that sum at
+//! most δ.
 use super::*;
 
 /// The smallest `k` `asap_sketchlib`'s KMV estimate `(k-1)/U` is defined for.
-pub(super) const KMV_MIN_K: u32 = 2;
+const KMV_MIN_K: u32 = 2;
 
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
 ) -> Option<AccuracyGuarantee> {
-    match params {
-        SketchParams::Kmv { k } => {
-            // Its relative standard error.
-            let eps = 1.0 / f64::from(k.saturating_sub(2).max(1)).sqrt();
-            Some(super::bounded_guarantee(
-                algorithm,
-                params,
-                query,
-                AccuracyMetric::Relative,
-                eps,
-                ProbabilityExpr::Constant {
-                    value: kmv_failure_probability(*k, eps),
-                },
-                "kmv_exact_below_k_chernoff_v1",
-            ))
-        }
-        _ => None,
+    let SketchParams::Kmv { k } = params else {
+        return None;
+    };
+    // Its relative standard error.
+    let eps = 1.0 / f64::from(k.saturating_sub(2).max(1)).sqrt();
+    Some(kmv_guarantee(
+        algorithm,
+        params,
+        query,
+        eps,
+        kmv_failure_probability(*k, eps),
+    ))
+}
+
+/// The smallest relative error `k` misses with probability at most
+/// `failure_probability` ([`kmv_failure_probability`], by bisection);
+/// `None` when no error up to 1 does.
+pub(super) fn guarantee_at(
+    algorithm: &SketchAlgorithm,
+    params: &SketchParams,
+    query: &SketchStatistic,
+    failure_probability: f64,
+) -> Option<AccuracyGuarantee> {
+    let SketchParams::Kmv { k } = params else {
+        return None;
+    };
+    if kmv_failure_probability(*k, 1.0) > failure_probability {
+        return None;
     }
+    let (mut met, mut missed) = (1.0, 0.0);
+    for _ in 0..60 {
+        let eps = (met + missed) / 2.0;
+        if kmv_failure_probability(*k, eps) <= failure_probability {
+            met = eps;
+        } else {
+            missed = eps;
+        }
+    }
+    Some(kmv_guarantee(
+        algorithm,
+        params,
+        query,
+        met,
+        failure_probability,
+    ))
+}
+
+fn kmv_guarantee(
+    algorithm: &SketchAlgorithm,
+    params: &SketchParams,
+    query: &SketchStatistic,
+    eps: f64,
+    failure_probability: f64,
+) -> AccuracyGuarantee {
+    super::bounded_guarantee(
+        algorithm,
+        params,
+        query,
+        AccuracyMetric::Relative,
+        eps,
+        ProbabilityExpr::Constant {
+            value: failure_probability,
+        },
+        "kmv_exact_below_k_chernoff_v1",
+    )
 }
 
 /// The probability that `asap_sketchlib`'s KMV with `k` misses relative

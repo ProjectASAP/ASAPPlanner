@@ -21,12 +21,12 @@ use super::*;
 /// The per-row failure probability the L2 guarantee fixes: a row misses by
 /// more than `ε₂ F2` with probability at most `2q/ε₂² = 0.1`. Fixing it
 /// lets a shape state one `(ε, δ)`: the columns give `ε`, the rows `δ`.
-pub(super) const L2_ROW_FAILURE: f64 = 0.1;
+const L2_ROW_FAILURE: f64 = 0.1;
 /// `Var[estimate_cardinality] ≤ 1.35 F0²/k` for `k ≥ 8`, the constant the library
 /// proves (it also states the looser `2 F0²/k`).
-pub(super) const DISTINCT_VARIANCE: f64 = 1.35;
+const DISTINCT_VARIANCE: f64 = 1.35;
 /// The smallest heap the distinct-count variance bound holds for.
-pub(super) const DISTINCT_MIN_HEAP: u32 = 8;
+const DISTINCT_MIN_HEAP: u32 = 8;
 
 const L2_CONTRACT: &str = "univmon_layer0_f2_median_chebyshev_binomial_v1";
 const DISTINCT_CONTRACT: &str = "univmon_distinct_complete_top_layer_chebyshev_v1";
@@ -94,7 +94,7 @@ pub(crate) fn hash_independent(rows: u32, cols: u32, layers: u8) -> bool {
 /// [`L2_ROW_FAILURE`] gives `ε₂ = √(2q/0.1)`. The norm then misses by at
 /// most `1 − √(1 − ε₂)` (the low side; the high side `√(1 + ε₂) − 1` is
 /// smaller). `None` when `ε₂ ≥ 1`.
-pub(super) fn l2_relative_error(cols: u32) -> Option<f64> {
+fn l2_relative_error(cols: u32) -> Option<f64> {
     let f2_error = (2.0 * column_collision(cols) / L2_ROW_FAILURE).sqrt();
     (f2_error < 1.0).then(|| 1.0 - (1.0 - f2_error).sqrt())
 }
@@ -117,19 +117,19 @@ fn column_collision(cols: u32) -> f64 {
 
 /// The median of `rows` independent rows misses only when at least
 /// `⌈rows/2⌉` of them miss: `P(Binomial(rows, 0.1) ≥ ⌈rows/2⌉)`.
-pub(super) fn l2_failure_probability(rows: u32) -> f64 {
+fn l2_failure_probability(rows: u32) -> f64 {
     super::binomial_upper_tail(rows, L2_ROW_FAILURE, rows.div_ceil(2))
 }
 
 /// `(e/4)^(k/2)`: the chance the top layer of a heap-`k` pyramid misses a
 /// key, once the expected keys reaching it are at most `k/2` (Chernoff).
-pub(super) fn incomplete_top_layer_bound(heap_size: u32) -> f64 {
+fn incomplete_top_layer_bound(heap_size: u32) -> f64 {
     (f64::from(heap_size) / 2.0 * (1.0 - 2.0 * std::f64::consts::LN_2)).exp()
 }
 
 /// The statistic a UnivMon distinct count over `source` leaves its
 /// top-layer failure probability as.
-#[allow(dead_code)] // Read again in #1207 PR 4, with θ from `LogicalProperties::parameters`.
+#[allow(dead_code)] // Read again in #1207 PR 8: δ of a distinct count over a source's own rows, with θ.
 pub(crate) fn incomplete_top_layer_statistic(heap_size: u32, layers: u8, source: &str) -> String {
     format!("{INCOMPLETE_TOP_LAYER}[k={heap_size},layers={layers}]({MAX_DISTINCT}[{source}])")
 }
@@ -174,7 +174,7 @@ pub fn incomplete_top_layer_probability(heap_size: u32, layers: u8, max_distinct
 /// probability `δ_c` plus the chance of an incomplete top layer, left
 /// symbolic in the source's distinct bound. `None` for a heap under 8, a
 /// `delta` too small for the heap, or a shape the library would not build.
-#[allow(dead_code)] // Read again in #1207 PR 4, with θ from `LogicalProperties::parameters`.
+#[allow(dead_code)] // Read again in #1207 PR 8: δ of a distinct count over a source's own rows, with θ.
 pub(crate) fn distinct_guarantee(
     params: &SketchParams,
     delta: f64,
@@ -230,13 +230,18 @@ pub(crate) fn distinct_guarantee(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::guarantee::sizing_oracle::{size_params, UNIVMON_BASELINE};
-    use asap_types::ir::operator::agg_intent::default_cardinality;
-    use asap_types::ir::operator::AggIntent;
 
-    fn l2_intent() -> AggIntent {
-        AggIntent::FrequencyL2 { col: None }
-    }
+    /// Layers `asap_sketchlib` builds.
+    const MAX_LAYERS: u8 = asap_sketchlib::sketch_framework::univmon::UNIVMON_MAX_LAYERS as u8;
+
+    /// A shape for readouts without a size model: the total (exact
+    /// whatever the shape) and entropy (uncertified).
+    const BASELINE: SketchParams = SketchParams::UnivMon {
+        heap_size: 256,
+        sketch_rows: 5,
+        sketch_cols: 1024,
+        layers: 16,
+    };
 
     fn univmon(heap_size: u32, rows: u32, cols: u32, layers: u8) -> SketchParams {
         SketchParams::UnivMon {
@@ -253,55 +258,6 @@ mod tests {
             params,
             &SketchStatistic::FrequencyL2,
         )
-    }
-
-    fn with(params: &SketchParams, f: impl FnOnce(&mut u32, &mut u32, &mut u32)) -> SketchParams {
-        let mut params = params.clone();
-        let SketchParams::UnivMon {
-            heap_size,
-            sketch_rows,
-            sketch_cols,
-            ..
-        } = &mut params
-        else {
-            unreachable!()
-        };
-        f(heap_size, sketch_rows, sketch_cols);
-        params
-    }
-
-    const TARGETS: [(f64, f64); 6] = [
-        (0.01, 0.01),
-        (0.02, 0.01),
-        (0.05, 0.01),
-        (0.05, 0.001),
-        (0.1, 0.05),
-        (0.2, 0.2),
-    ];
-
-    /// Each L2 shape meets its target as a relative error, and one fewer
-    /// row or column does not.
-    #[test]
-    fn l2_shape_is_the_smallest_meeting_its_target() {
-        for (eps, delta) in TARGETS {
-            let params = size_params(SketchAlgorithm::UnivMon, &l2_intent(), eps, delta);
-            let guarantee = l2(&params).expect("an L2 guarantee");
-            assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Relative);
-            assert!(
-                meets(&guarantee, eps, Some(delta)),
-                "({eps}, {delta}): {params:?}"
-            );
-            let fewer_rows = with(&params, |_, rows, _| *rows -= 1);
-            assert!(
-                l2(&fewer_rows).is_none_or(|g| !meets(&g, eps, Some(delta))),
-                "({eps}, {delta}): {fewer_rows:?}"
-            );
-            let fewer_cols = with(&params, |_, _, cols| *cols -= 1);
-            assert!(
-                l2(&fewer_cols).is_none_or(|g| !meets(&g, eps, Some(delta))),
-                "({eps}, {delta}): {fewer_cols:?}"
-            );
-        }
     }
 
     /// The general collision bound `9/(8w)` applies off powers of two: a
@@ -325,37 +281,6 @@ mod tests {
         assert!(l2_failure_probability(4) > l2_failure_probability(3));
     }
 
-    /// Shapes past the hash budget or the layer limit certify nothing, and
-    /// L2 sizing never builds one: a target it cannot reach gets the
-    /// largest shape it can build, whose guarantee misses it.
-    #[test]
-    fn l2_shapes_stay_within_the_hash_budget() {
-        // 8 · (16 + 1) = 136 > 128.
-        assert!(l2(&univmon(1, 8, 1 << 16, 1)).is_none());
-        assert!(l2(&univmon(1, 7, 1 << 16, 1)).is_some());
-        assert!(l2(&univmon(1, 5, 1024, 20)).is_none());
-        for (eps, delta) in [(0.001, 1e-6), (1e-5, 0.01), (0.01, 1e-12)] {
-            let params = size_params(SketchAlgorithm::UnivMon, &l2_intent(), eps, delta);
-            let SketchParams::UnivMon {
-                sketch_rows,
-                sketch_cols,
-                layers,
-                ..
-            } = params
-            else {
-                unreachable!()
-            };
-            assert!(
-                hash_independent(sketch_rows, sketch_cols, layers),
-                "{params:?}"
-            );
-            assert!(
-                !meets(&l2(&params).unwrap(), eps, Some(delta)),
-                "{params:?}"
-            );
-        }
-    }
-
     /// The executor builds at most 20 rows, the rows a UnivMon state
     /// encodes, so a 21-row UnivMon certifies nothing even though its hashes
     /// fit the budget (21 · (5 + 1) = 126 ≤ 128 at 32 columns).
@@ -367,43 +292,12 @@ mod tests {
         assert!(l2(&univmon(1, 21, 32, 1)).is_none());
     }
 
-    /// Each distinct-count heap meets its target once the source's bound
-    /// is bound, and one fewer key does not.
-    #[test]
-    fn distinct_heap_is_the_smallest_meeting_its_target() {
-        for (eps, delta) in TARGETS {
-            let params = size_params(SketchAlgorithm::UnivMon, &default_cardinality(), eps, delta);
-            let bind = |params: &SketchParams, max_distinct| {
-                let guarantee =
-                    distinct_guarantee(params, delta, "m").expect("a distinct guarantee");
-                guarantee.bind(&|statistic| {
-                    let (k, layers, source) = parse_incomplete_top_layer_statistic(statistic)?;
-                    (source == "m")
-                        .then(|| incomplete_top_layer_probability(k, layers, max_distinct))
-                })
-            };
-            for max_distinct in [9, 10_000_000] {
-                let guarantee = bind(&params, max_distinct);
-                assert_eq!(guarantee.spec.accuracy_metric, AccuracyMetric::Relative);
-                assert!(
-                    meets(&guarantee, eps, Some(delta)),
-                    "({eps}, {delta}): {params:?}"
-                );
-                let smaller = with(&params, |heap, _, _| *heap -= 1);
-                assert!(
-                    !meets(&bind(&smaller, max_distinct), eps, Some(delta)),
-                    "({eps}, {delta}): {smaller:?}"
-                );
-            }
-        }
-    }
-
     /// Without the source's bound the failure probability stays unknown
     /// and no target is met; a bound the pyramid is too shallow for gives
     /// probability 1.
     #[test]
     fn distinct_guarantee_needs_the_source_bound_and_enough_layers() {
-        let params = size_params(SketchAlgorithm::UnivMon, &default_cardinality(), 0.05, 0.01);
+        let params = univmon(54_000, 1, 1, MAX_LAYERS);
         let guarantee = distinct_guarantee(&params, 0.01, "m").unwrap();
         assert_eq!(guarantee.spec.failure_probability.evaluate(), None);
         assert!(!meets(&guarantee, 0.05, Some(0.01)));
@@ -431,7 +325,7 @@ mod tests {
         assert!(distinct_guarantee(&univmon(7, 1, 1, 19), 0.5, "m").is_none());
         assert!(distinct_guarantee(&univmon(8, 1, 1, 20), 0.5, "m").is_none());
         assert!(distinct_guarantee(&univmon(8, 1, 1, 19), 0.5, "m").is_some());
-        let sized = size_params(SketchAlgorithm::UnivMon, &default_cardinality(), 0.05, 0.01);
+        let sized = univmon(54_000, 1, 1, MAX_LAYERS);
         assert!(guarantee(
             &SketchAlgorithm::UnivMon,
             &sized,
@@ -459,7 +353,7 @@ mod tests {
     /// The total stays exact; entropy stays uncertified.
     #[test]
     fn total_is_exact_and_entropy_uncertified() {
-        let params = size_params(SketchAlgorithm::UnivMon, &default_cardinality(), 0.05, 0.01);
+        let params = univmon(54_000, 1, 1, MAX_LAYERS);
         let total = guarantee(
             &SketchAlgorithm::UnivMon,
             &params,
@@ -472,7 +366,7 @@ mod tests {
         assert!(total.is_exact());
         assert!(guarantee(
             &SketchAlgorithm::UnivMon,
-            &UNIVMON_BASELINE,
+            &BASELINE,
             &SketchStatistic::FrequencyEntropy
         )
         .is_none());

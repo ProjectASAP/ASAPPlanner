@@ -380,12 +380,10 @@ The `asap_accuracy` crate separates these responsibilities:
 accuracy/src/
 ├── lib.rs              # Re-exports: the public interfaces
 ├── evidence.rs         # AccuracyEvidence: the deployment's measured accuracy
-├── requirements.rs     # producer_satisfies_logical_requirements (α^log), target_limit
-├── error_propagation.rs # ErrorPropagation: a consumer's output error from its inputs'
-├── propagation_stats.rs # Evidence and source contracts
-├── composition.rs      # Error propagation across computations
-├── budget.rs           # Splitting a query's accuracy budget across approximate inputs
-├── function_rules.rs   # Error composition of scalar functions over approximate inputs
+├── requirements.rs     # producer_satisfies_logical_requirements (α^log), accepted_metrics,
+│                       # readout_metric, target_limit
+├── error_propagation.rs # error_propagation: each operator's error contract per metric
+├── sizing.rs           # The statistic a summary is read for
 └── guarantee/
     ├── mod.rs          # Family/evaluation dispatch and source-contract integration
     ├── kll.rs
@@ -397,8 +395,8 @@ accuracy/src/
     └── univmon.rs
 ```
 
-Each estimator module owns its local accuracy formulas and associated sizing
-formulas. The unified entry point delegates to these models; it does not
+Each estimator module owns its local accuracy formulas: the guarantee of a
+listed θ at a failure probability. The unified entry point delegates to these models; it does not
 contain a second copy of their mathematics. Serializable guarantee and metric
 types live in `asap-types` so planning, explanations and downstream binding
 share the same contract.

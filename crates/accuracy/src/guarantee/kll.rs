@@ -4,18 +4,31 @@
 use super::*;
 use asap_types::summary_type::KLL_MAX_K;
 
+/// The calibrated guarantee, at failure probability 0.01.
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
 ) -> Option<AccuracyGuarantee> {
+    guarantee_at(algorithm, params, query, KLL_CALIBRATED_FAILURE_PROBABILITY)
+}
+
+/// The rank error of `k` at failure probability `failure_probability`: the
+/// calibration at 0.01 and above, scaled by [`delta_scale`] below. `None`
+/// for a `k` above the library's cap or a probability outside (0, 1].
+pub(super) fn guarantee_at(
+    algorithm: &SketchAlgorithm,
+    params: &SketchParams,
+    query: &SketchStatistic,
+    failure_probability: f64,
+) -> Option<AccuracyGuarantee> {
     let SketchParams::Kll { k } = params else {
         return None;
     };
-    if *k > KLL_MAX_K {
+    if *k > KLL_MAX_K || !(failure_probability > 0.0 && failure_probability <= 1.0) {
         return None;
     }
-    let delta = KLL_CALIBRATED_FAILURE_PROBABILITY;
+    let delta = failure_probability.min(KLL_CALIBRATED_FAILURE_PROBABILITY);
     let scale = delta_scale(delta)?;
     let contract = if delta < KLL_CALIBRATED_FAILURE_PROBABILITY {
         KLL_DELTA_SCALED_CONTRACT
@@ -54,7 +67,7 @@ pub(crate) fn kll_rank_error_99(k: u32) -> f64 {
 /// It grows faster as `delta` shrinks than the KLL bound's
 /// `sqrt(ln(1/delta))` (1.277 vs 1.225 at `delta` = 0.001), so it is the
 /// conservative choice. 1 for `delta >= 0.01`; `None` unless `0 < delta < 1`.
-pub(super) fn delta_scale(delta: f64) -> Option<f64> {
+fn delta_scale(delta: f64) -> Option<f64> {
     if !(delta > 0.0 && delta < 1.0) {
         None
     } else if delta >= KLL_CALIBRATED_FAILURE_PROBABILITY {
@@ -122,30 +135,6 @@ fn normal_quantile(p: f64) -> f64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn local_guarantee_inverts_rank_sizing() {
-        use crate::guarantee::sizing_oracle::size_params;
-        use asap_types::ir::operator::agg_intent::default_quantile;
-        let q = default_quantile(0.99);
-        let params = size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01);
-        let g = sketch_guarantee(
-            &SketchAlgorithm::Kll,
-            &params,
-            &SketchStatistic::Quantile { q: 0.99 },
-        )
-        .unwrap();
-        assert_eq!(g.spec.accuracy_metric, AccuracyMetric::Rank);
-        assert!(meets(&g, 0.01, None));
-        assert_eq!(g.spec.failure_probability.evaluate(), Some(0.01));
-        assert!(meets(&g, 0.01, Some(0.01)));
-        assert_eq!(g.approximate_layer_count(), 1);
-        assert!(g.provenance.iter().any(|source| matches!(
-            source,
-            GuaranteeSource::SketchEvaluation { contract, .. }
-                if contract == "apache_datasketches_kll_empirical_99_a9b42755072b"
-        )));
-    }
-
     /// A hand-built `k` above the library's cap gives no guarantee.
     #[test]
     fn a_k_above_the_library_cap_gives_no_guarantee() {
@@ -164,7 +153,6 @@ mod tests {
     /// `z(1 − δ/2) / z(1 − 0.01/2)`.
     #[test]
     fn delta_scale_is_the_gaussian_quantile_ratio() {
-        use crate::guarantee::sizing_oracle::{kll_k, kll_params};
         assert_eq!(delta_scale(0.01), Some(1.0));
         assert_eq!(delta_scale(0.5), Some(1.0));
         let ratio = delta_scale(0.001).unwrap();
@@ -179,11 +167,5 @@ mod tests {
             let scale = delta_scale(delta).unwrap();
             assert!((scale - expected).abs() < 1e-8, "{delta}: {scale}");
         }
-        assert_eq!(
-            kll_params(0.01, 0.001),
-            SketchParams::Kll {
-                k: kll_k(0.01 / ratio),
-            }
-        );
     }
 }

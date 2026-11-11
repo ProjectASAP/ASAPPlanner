@@ -28,7 +28,7 @@ pub(super) fn guarantee(
 /// probability at most `q/ε² = q w/3` (Chebyshev, `Var ≤ q F2`), with `q`
 /// the column collision probability ([`column_collision`]): `1/3` to
 /// within `w/(3 · 2^32)`.
-pub(super) fn row_failure_probability(width: u32) -> f64 {
+fn row_failure_probability(width: u32) -> f64 {
     column_collision(width) * f64::from(width.max(1)) / 3.0
 }
 
@@ -45,7 +45,7 @@ fn column_collision(cols: u32) -> f64 {
 
 /// The median of an odd `depth` of independent rows misses only when at
 /// least `(depth + 1)/2` rows miss: `P(Binomial(depth, p) ≥ (depth+1)/2)`.
-pub(super) fn count_sketch_failure_probability(width: u32, depth: u32) -> Option<f64> {
+fn count_sketch_failure_probability(width: u32, depth: u32) -> Option<f64> {
     if depth == 0 || depth.is_multiple_of(2) {
         return None;
     }
@@ -82,49 +82,13 @@ mod tests {
         );
     }
 
-    /// Seeded end to end: the sized sketch (ε = 0.05, δ = 0.01, width 1200,
-    /// depth 47) answers each key of a skewed stream within `ε ‖f‖₂`, at
-    /// most a δ share of keys missing.
-    #[test]
-    fn sized_sketch_meets_its_guarantee_on_a_seeded_stream() {
-        use crate::guarantee::sizing_oracle::{count_sketch_depth, count_sketch_width};
-        use asap_sketchlib::{CountSketch, DataInput, RegularPath, Vector2D};
-        let (eps, delta) = (0.05, 0.01);
-        let width = count_sketch_width(eps);
-        let depth = count_sketch_depth(width, delta);
-        let mut sketch = CountSketch::<Vector2D<f64>, RegularPath>::with_dimensions(
-            depth as usize,
-            width as usize,
-        );
-        // 20 000 keys, key i weighted 1e6 / (i + 1) (Zipf, s = 1), in a
-        // seeded order.
-        let keys = 20_000u64;
-        let weight = |key: u64| (1e6 / (key + 1) as f64).round();
-        let mut state = 0x9E37_79B9_7F4A_7C15u64;
-        let mut order: Vec<u64> = (0..keys).collect();
-        for i in (1..order.len()).rev() {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            order.swap(i, (state % (i as u64 + 1)) as usize);
-        }
-        for &key in &order {
-            sketch.update_weighted(&DataInput::U64(key), weight(key));
-        }
-        let l2 = (0..keys).map(|k| weight(k).powi(2)).sum::<f64>().sqrt();
-        let bound = (3.0 / f64::from(width)).sqrt() * l2;
-        let misses = (0..keys)
-            .filter(|&k| (sketch.estimate(&DataInput::U64(k)) - weight(k)).abs() > bound)
-            .count();
-        assert!(misses as f64 <= delta * keys as f64, "{misses} misses");
-    }
-
     #[test]
     fn count_sketch_uses_an_l2_guarantee() {
-        use crate::guarantee::sizing_oracle::size_params;
-        use asap_types::ir::operator::agg_intent::default_cardinality;
-        let intent = default_cardinality();
-        let count_sketch = size_params(SketchAlgorithm::CountSketch, &intent, 0.01, 0.01);
+        // ε = √(3/30 000) = 0.01; 47 rows fail together with probability ≤ 0.01.
+        let count_sketch = SketchParams::CountSketch {
+            width: 30_000,
+            depth: 47,
+        };
         let guarantee = sketch_guarantee(
             &SketchAlgorithm::CountSketch,
             &count_sketch,

@@ -1,6 +1,4 @@
-//! The statistic a summary is read for. (The predefined parameter lists
-//! are checked against the closed-form sizing for an `(ε, δ)` in
-//! `guarantee::sizing_oracle`, which is test-only.)
+//! The statistic a summary is read for.
 
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::ColumnRef;

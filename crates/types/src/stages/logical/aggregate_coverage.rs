@@ -71,7 +71,6 @@ pub struct AggregateCoverage {
     pub(crate) selection: Vec<SelectionBox>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
 impl AggregateCoverage {
     pub fn definition(&self) -> &AggregateDefinition {
         &self.definition

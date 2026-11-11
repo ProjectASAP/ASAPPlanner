@@ -60,15 +60,15 @@ pub(super) fn same_value<T: PartialEq + serde::Serialize>(left: &T, right: &T) -
 }
 
 /// Whether `left` and `right` are one candidate of a group: the same
-/// expression and logical properties (parameters), each by [`same_value`]:
-/// typed equality first, serialized only when typed-equal.
-pub(super) fn same_expression_and_logical_properties(
-    left: &CandidateForMemoGroup,
-    right: &CandidateForMemoGroup,
-) -> bool {
+/// expression and logical properties (parameters), each by [`same_value`]
+/// (typed equality first, serialized only when typed-equal), and the same
+/// input requirements, so two readouts of one state with different required
+/// accuracy are two candidates.
+pub(super) fn same_candidate(left: &CandidateForMemoGroup, right: &CandidateForMemoGroup) -> bool {
     same_value(&left.expression.operator, &right.expression.operator)
         && same_value(
             &left.logical_properties.parameters,
             &right.logical_properties.parameters,
         )
+        && left.input_requirements == right.input_requirements
 }

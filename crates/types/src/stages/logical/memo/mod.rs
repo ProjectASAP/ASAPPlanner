@@ -6,23 +6,24 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod hash_consing;
 
+use super::candidate::parameters_fit;
 use super::group::{
     derive_group_properties, validate_expression_over_input_groups, MemoGroupAsInput,
     MemoGroupError,
 };
 use crate::accuracy::AccuracyTarget;
 use crate::ir::operator::input::InputOrTemporaryBuild;
-use crate::ir::schema::Schema;
-use crate::ir::Operator;
+use crate::ir::schema::{FieldDataType, Schema};
 use crate::ir::QueryRoot;
+use crate::ir::{Operator, OperatorResultKind};
 use crate::stages::{
-    CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, LogicalRequirements, MemoGroup,
-    MemoGroupId,
+    CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, GroupProperties,
+    LogicalRequirements, MemoGroup, MemoGroupId,
 };
+use crate::summary_type::SketchAlgorithm;
 use crate::workload::{DataWorkload, SourceFacts};
 use hash_consing::{
-    expression_hash, same_expression_and_logical_properties, same_serialized_expression,
-    serialized_expression,
+    expression_hash, same_candidate, same_serialized_expression, serialized_expression,
 };
 
 /// The memo, Stage 0's and Stage 1's one type: the memo groups, each with
@@ -198,16 +199,19 @@ impl Memo {
 
     /// Adds `candidate` to `group`'s candidates and returns its id, unless
     /// the group already has a candidate with the same expression
-    /// (`same_expression`) and logical properties: then that candidate's
-    /// id, and `candidate` is dropped. A new candidate makes `group` a parent
-    /// of each of its input groups, and `group`'s queries reach each input
-    /// group and every group below it.
+    /// (`same_expression`), logical properties and input requirements: then
+    /// that candidate's id, and `candidate` is dropped. A new candidate makes
+    /// `group` a parent of each of its input groups, and `group`'s queries
+    /// reach each input group and every group below it.
     ///
     /// Fails, leaving the memo unchanged, when the candidate's expression
     /// is not valid over its input groups
     /// (`validate_expression_over_input_groups`),
-    /// or when its output schema or kind differs from the group's: then it
-    /// does not compute the group's result.
+    /// when its output schema or kind differs from the group's (then it
+    /// does not compute the group's result), or when its θ does not fit the
+    /// group's output: a candidate of a sketch state group (a build, or a
+    /// merge, `Filter`, `TimeRange` or `TimeShift` passing states on) has a
+    /// θ from that algorithm's list, any other candidate none.
     pub fn add_candidate(
         &mut self,
         group: MemoGroupId,
@@ -216,7 +220,7 @@ impl Memo {
         if let Some(index_in_group) = self.groups[group.0 as usize]
             .candidates
             .iter()
-            .position(|known| same_expression_and_logical_properties(known, &candidate))
+            .position(|known| same_candidate(known, &candidate))
         {
             return Ok(CandidateForMemoGroupId {
                 group,
@@ -237,6 +241,11 @@ impl Memo {
         if schema != group_properties.schema || result_kind != group_properties.result_kind {
             return Err(CandidateError::OutputDiffersFromGroup { group });
         }
+        parameters_fit(
+            sketch_algorithm_of_state(group_properties),
+            candidate.logical_properties.parameters(),
+        )
+        .map_err(CandidateError::LogicalProperties)?;
         let candidates = &mut self.groups[group.0 as usize].candidates;
         let input_groups: Vec<MemoGroupId> = candidate
             .expression
@@ -314,6 +323,34 @@ impl Memo {
         candidate.input_requirements = input_requirements;
     }
 
+    /// The candidates `consumer` may read on input `input`: those of the
+    /// input group, except that a consumer with a θ (a build, or a candidate
+    /// passing states on) reads only producers with the same θ or none.
+    pub fn producers(
+        &self,
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+    ) -> Vec<CandidateForMemoGroupId> {
+        let candidate = self.candidate(consumer);
+        let group = *candidate.expression.operator.children()[input];
+        let theta = candidate.logical_properties.parameters();
+        self.groups[group.0 as usize]
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(
+                |(_, producer)| match (theta, producer.logical_properties.parameters()) {
+                    (Some(theta), Some(produced)) => theta == produced,
+                    _ => true,
+                },
+            )
+            .map(|(index_in_group, _)| CandidateForMemoGroupId {
+                group,
+                index_in_group,
+            })
+            .collect()
+    }
+
     /// The groups, each after every group it or one of its candidates
     /// reads, the lower index first among those ready: a dependency order for
     /// candidate traversal, whatever order rules appended groups in. `None`
@@ -355,6 +392,22 @@ impl Memo {
         }
         (order.len() == count).then_some(order)
     }
+}
+
+/// The sketch algorithm of the state a group outputs; `None` for rows,
+/// values and exact states.
+fn sketch_algorithm_of_state(group: &GroupProperties) -> Option<SketchAlgorithm> {
+    if group.result_kind != OperatorResultKind::State {
+        return None;
+    }
+    group
+        .schema
+        .fields
+        .iter()
+        .find_map(|field| match field.dtype {
+            FieldDataType::Sketch(algorithm) => Some(algorithm),
+            _ => None,
+        })
 }
 
 /// Lists `parent` among `group`'s parents, once.
