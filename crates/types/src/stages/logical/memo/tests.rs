@@ -11,15 +11,8 @@ use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
 use crate::ir::{ExprSemantics, NonASAPOp, Predicate, ScalarExpr};
 use crate::stages::logical::group::MemoGroupAsInput;
 use crate::stages::{CandidateExpression, LogicalProperties, OriginOfCandidateForMemoGroup};
-use std::time::Duration;
-
-use crate::ir::scalar::ColumnRef;
-use crate::ir::schema::series_identity::with_promql_series_identity;
-use crate::ir::{ASAPOp, OperatorNode, TimeRangeKind};
-use crate::summary_type::{
-    SketchAlgorithm, SketchParams, SketchStatistic, SummaryUpdate, WeightDomain,
-};
-use crate::test_support::memo_fixtures::{aggregate_where, readout, scan, state};
+use crate::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
+use crate::test_support::memo_fixtures::{aggregate, aggregate_with, range, readout, scan, state};
 
 /// An unordered `LIMIT 10` over `input`, whose copies may return
 /// different rows.
@@ -418,10 +411,10 @@ fn quantile_agg(
     filter: Option<Predicate<MemoGroupId>>,
 ) -> impl FnOnce(&mut Memo) -> MemoGroupId {
     over_scan(move |child| {
-        aggregate_where(
+        aggregate_with(
             Reduction::by(by),
-            AggIntent::Quantile { col, q },
-            filter,
+            vec![(AggIntent::Quantile { col, q }, filter)],
+            None,
             child,
         )
     })
@@ -588,114 +581,91 @@ fn signed_zero_and_non_finite_literals_are_different_groups() {
     assert!(one_group(literal(f64::INFINITY), literal(f64::INFINITY)));
 }
 
-/// A memo group's output schema.
-fn schema_of_group(memo: &Memo, group: MemoGroupId) -> &Schema {
-    &memo.groups()[group.0 as usize].group_properties.schema
+/// A KLL state over the latency scan and its p99 readout, both pending: the
+/// readout's schema is the one its group gets once both are added, and
+/// nothing is added while deriving it.
+#[test]
+fn output_schema_of_a_pending_expression_is_its_groups_schema() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let latency = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
+        .unwrap();
+    let state_expression = state(FieldDataType::Sketch(SketchAlgorithm::Kll), latency);
+    let pending_state = MemoGroupId(memo.groups().len() as u32);
+    let readout_expression = readout(SketchStatistic::Quantile { q: 0.99 }, pending_state);
+    let before = format!("{memo:?}");
+    let state_schema = memo
+        .output_schema_of_pending_expression(&[], &[], &state_expression)
+        .unwrap();
+    let readout_schema = memo
+        .output_schema_of_pending_expression(
+            std::slice::from_ref(&state_expression),
+            std::slice::from_ref(&state_schema),
+            &readout_expression,
+        )
+        .unwrap();
+    assert_eq!(format!("{memo:?}"), before);
+    let state_group = memo.find_or_add_group(state_expression).unwrap();
+    let readout_group = memo
+        .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.99 }, state_group))
+        .unwrap();
+    let schema_of = |group: MemoGroupId| &memo.groups()[group.0 as usize].group_properties.schema;
+    assert_eq!(schema_of(state_group), &state_schema);
+    assert_eq!(schema_of(readout_group), &readout_schema);
 }
 
-/// `topk by (job) (10, sum_over_time(m[1m]))` over series whose identity
-/// is realized: the exact top-k's group and a heap's ranked readout of
-/// the same rows (a `Project` naming the estimate's columns as the
-/// top-k's) derive the same unique keys, one row per (job, series).
+/// A pending expression whose schema does not derive (a readout of a scan,
+/// not of a summary state) is an error, as `find_or_add_group` gives it.
 #[test]
-fn exact_topk_and_heap_readout_derive_the_same_unique_keys() {
-    let open = Schema::with_time_index(
-        vec![
-            Field::plain("ts", DataType::Timestamp, false),
-            Field::plain("value", DataType::Float64, false),
-            Field::plain("job", DataType::Utf8, true),
-        ],
-        0,
-        vec![],
-    );
-    fn scan<C>(schema: Schema) -> Operator<C> {
-        Operator::NonASAP(NonASAPOp::Scan {
-            source: Source::TimeSeries { metric: "m".into() },
-            predicates: vec![],
-            schema,
-        })
-    }
-    let realized = with_promql_series_identity(&OperatorNode::new_shared(scan(open)).unwrap())
-        .unwrap()
-        .schema
-        .clone();
+fn output_schema_of_a_pending_expression_rejects_what_find_or_add_group_rejects() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let rows = memo.find_or_add_group(scan(realized)).unwrap();
-    let window = memo
-        .find_or_add_group(Operator::NonASAP(NonASAPOp::TimeRange {
-            range: Duration::from_secs(60),
-            kind: TimeRangeKind::Range,
-            child: rows,
-        }))
+    let latency = memo
+        .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
-    let per_series = memo
-        .find_or_add_group(Operator::NonASAP(NonASAPOp::Aggregate {
-            child: window,
-            reduction: Reduction::PerEntity,
-            measures: vec![AggIntent::Sum { col: None }],
-            output_names: vec![String::new()],
-            filters: vec![None],
-            having: None,
-        }))
+    let bad = readout(SketchStatistic::Quantile { q: 0.99 }, latency);
+    assert!(memo
+        .output_schema_of_pending_expression(&[], &[], &bad)
+        .is_err());
+    assert!(memo.find_or_add_group(bad).is_err());
+}
+
+/// A top-k over a one-measure grouped aggregate ranks its value, the last
+/// column; over per-series rows, the sample value.
+#[test]
+fn ranked_column_of_group_is_the_measure_or_the_sample_value() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let rows = memo
+        .find_or_add_group(scan("m", &[("job", DataType::Utf8)], vec![]))
         .unwrap();
-    let topk = AggIntent::TopK { k: 10 };
-    let exact = memo
-        .find_or_add_group(Operator::NonASAP(NonASAPOp::Aggregate {
-            child: per_series,
-            reduction: Reduction::by(vec![2]),
-            measures: vec![topk],
-            output_names: vec![String::new()],
-            filters: vec![None],
-            having: None,
-        }))
+    let by_job = memo
+        .find_or_add_group(aggregate(
+            Reduction::by(vec![2]),
+            AggIntent::Sum { col: None },
+            rows,
+        ))
         .unwrap();
-    let heap = memo
-        .find_or_add_group(Operator::ASAP(ASAPOp::SummaryAgg {
-            child: window,
-            summary_type: FieldDataType::Sketch(SketchAlgorithm::CountSketchWithHeap),
-            input: SummaryUpdate {
-                item: Some(crate::ir::schema::topk::series_identity_item(
-                    schema_of_group(&memo, window),
-                    &[2],
-                )),
-                weight: crate::summary_type::SummaryInputExpr::Column(ColumnRef::SampleValue),
-                weight_domain: WeightDomain::UnknownOrSigned,
-            },
-            reduction: Reduction::by(vec![2]),
-            filter: None,
-        }))
+    assert_eq!(crate::stages::ranked_column_of_group(&memo, by_job), Ok(1));
+    assert_eq!(crate::stages::ranked_column_of_group(&memo, rows), Ok(1));
+}
+
+/// The raw data samples of `m` reach a group through a range and a plain
+/// sum, not through a rate.
+#[test]
+fn raw_data_samples_of_metric_of_group_follows_ranges_and_plain_sums() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let rows = memo.find_or_add_group(scan("m", &[], vec![])).unwrap();
+    let window = memo.find_or_add_group(range(60_000, rows)).unwrap();
+    let summed = memo
+        .find_or_add_group(aggregate(
+            Reduction::PerEntity,
+            AggIntent::Sum { col: None },
+            window,
+        ))
         .unwrap();
-    let estimate = memo
-        .find_or_add_group(Operator::ASAP(ASAPOp::SummaryEstimate {
-            summary_input: heap,
-            query: SketchStatistic::TopK { k: 10 },
-        }))
+    let rated = memo
+        .find_or_add_group(aggregate(Reduction::PerEntity, AggIntent::Rate, window))
         .unwrap();
-    let estimated = schema_of_group(&memo, estimate).fields.len() - 1;
-    let cols = schema_of_group(&memo, exact)
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| ProjectItem {
-            alias: Some(field.name.clone()),
-            expr: ScalarExpr::Column(if index == 1 {
-                estimated
-            } else {
-                schema_of_group(&memo, estimate)
-                    .fields
-                    .iter()
-                    .position(|input| input.name == field.name)
-                    .unwrap()
-            }),
-        })
-        .collect();
-    let readout = memo
-        .find_or_add_group(Operator::NonASAP(NonASAPOp::Project {
-            cols,
-            child: estimate,
-        }))
-        .unwrap();
-    let exact_keys = &schema_of_group(&memo, exact).unique_keys;
-    assert!(!exact_keys.is_empty());
-    assert_eq!(exact_keys, &schema_of_group(&memo, readout).unique_keys);
+    let metric = |group| crate::stages::raw_data_samples_of_metric_of_group(&memo, group);
+    assert_eq!(metric(summed), Some("m".to_string()));
+    assert_eq!(metric(rated), None);
 }

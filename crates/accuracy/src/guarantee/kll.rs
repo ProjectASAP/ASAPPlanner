@@ -48,26 +48,13 @@ pub(crate) fn kll_rank_error_99(k: u32) -> f64 {
     KLL_RANK_ERROR_COEFFICIENT_99 / f64::from(k).powf(KLL_RANK_ERROR_EXPONENT_99)
 }
 
-/// Invert Apache DataSketches' empirical 99th-percentile, single-sided KLL
-/// normalized rank-error fit: `epsilon = 2.296 / k^0.9723`. Capped at
-/// [`KLL_MAX_K`], the largest `k` `asap_sketchlib` builds; an `eps` that
-/// needs more gets that `k`, whose guarantee then misses the target.
-#[cfg(test)]
-pub(crate) fn kll_k(eps: f64) -> u32 {
-    saturating_ceil(
-        (KLL_RANK_ERROR_COEFFICIENT_99 / eps).powf(1.0 / KLL_RANK_ERROR_EXPONENT_99),
-        8,
-        KLL_MAX_K,
-    )
-}
-
 /// How much the rank error at failure probability `delta` exceeds the error
 /// at the calibrated 0.01, modelling the error as Gaussian: the ratio of the
 /// two-sided standard normal quantiles, `z(1 − delta/2) / z(1 − 0.01/2)`.
 /// It grows faster as `delta` shrinks than the KLL bound's
 /// `sqrt(ln(1/delta))` (1.277 vs 1.225 at `delta` = 0.001), so it is the
 /// conservative choice. 1 for `delta >= 0.01`; `None` unless `0 < delta < 1`.
-fn delta_scale(delta: f64) -> Option<f64> {
+pub(super) fn delta_scale(delta: f64) -> Option<f64> {
     if !(delta > 0.0 && delta < 1.0) {
         None
     } else if delta >= KLL_CALIBRATED_FAILURE_PROBABILITY {
@@ -131,26 +118,13 @@ fn normal_quantile(p: f64) -> f64 {
     }
 }
 
-/// `k` for rank error `eps` at failure probability `delta`: the empirical
-/// 99% calibration for `delta >= 0.01`; below, the calibration at
-/// `eps / delta_scale(delta)`, recording `delta` so the guarantee reports it.
-#[cfg(test)]
-pub(crate) fn size_params(eps: f64, delta: f64) -> SketchParams {
-    if delta.is_nan() || delta <= 0.0 || delta >= KLL_CALIBRATED_FAILURE_PROBABILITY {
-        return SketchParams::Kll { k: kll_k(eps) };
-    }
-    SketchParams::Kll {
-        k: kll_k(eps / delta_scale(delta).unwrap_or(1.0)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn local_guarantee_inverts_rank_sizing() {
-        use crate::guarantee::size_params;
+        use crate::guarantee::sizing_oracle::size_params;
         use asap_types::ir::operator::agg_intent::default_quantile;
         let q = default_quantile(0.99);
         let params = size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01);
@@ -172,14 +146,6 @@ mod tests {
         )));
     }
 
-    /// `k` never exceeds the 26 602 `asap_sketchlib` silently caps it at, so
-    /// a guarantee never claims a larger `k` than runs.
-    #[test]
-    fn kll_k_is_capped_at_the_library_maximum() {
-        assert_eq!(kll_k(1e-6), KLL_MAX_K);
-        assert_eq!(KLL_MAX_K, 26_602);
-    }
-
     /// A hand-built `k` above the library's cap gives no guarantee.
     #[test]
     fn a_k_above_the_library_cap_gives_no_guarantee() {
@@ -198,6 +164,7 @@ mod tests {
     /// `z(1 − δ/2) / z(1 − 0.01/2)`.
     #[test]
     fn delta_scale_is_the_gaussian_quantile_ratio() {
+        use crate::guarantee::sizing_oracle::{kll_k, kll_params};
         assert_eq!(delta_scale(0.01), Some(1.0));
         assert_eq!(delta_scale(0.5), Some(1.0));
         let ratio = delta_scale(0.001).unwrap();
@@ -213,37 +180,10 @@ mod tests {
             assert!((scale - expected).abs() < 1e-8, "{delta}: {scale}");
         }
         assert_eq!(
-            size_params(0.01, 0.001),
+            kll_params(0.01, 0.001),
             SketchParams::Kll {
                 k: kll_k(0.01 / ratio),
             }
-        );
-    }
-
-    /// KLL `k` inverts the rank-error fit: ε = 0.01 → 269, ε = 0.05 → 52.
-    #[test]
-    fn accuracy_target_drives_kll_k() {
-        use crate::guarantee::size_params;
-        use asap_types::ir::operator::agg_intent::default_quantile;
-        let q = default_quantile(0.99);
-        assert_eq!(
-            size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01),
-            SketchParams::Kll { k: 269 }
-        );
-        assert_eq!(
-            size_params(SketchAlgorithm::Kll, &q, 0.05, 0.01),
-            SketchParams::Kll { k: 52 }
-        );
-    }
-
-    /// A zero ε saturates KLL `k` to the tightest buildable value.
-    #[test]
-    fn degenerate_epsilon_saturates_to_tightest_kll_params() {
-        use crate::guarantee::size_params;
-        use asap_types::ir::operator::agg_intent::default_quantile;
-        assert_eq!(
-            size_params(SketchAlgorithm::Kll, &default_quantile(0.99), 0.0, 0.01),
-            SketchParams::Kll { k: 26_602 }
         );
     }
 }

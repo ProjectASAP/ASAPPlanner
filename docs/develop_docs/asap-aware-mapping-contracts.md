@@ -39,19 +39,17 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
   has a mergeable exact state, else `Exact`), then each `Summary(family)` from
   `summary_realization::summary_candidates`. Candidates are unranked: Pass 1 never
   compares cost.
-- **Pruning.** A candidate that cannot meet the target is moved to the
-  inventory's `pruned_ways_to_compute` (with its target) with a `PruneReason` (`RequiresExact`,
-  `NullableAvgInput`, `UnsupportedByDeployment`,
-  `QuantileOutsideUnitInterval`); it is never silently
-  dropped. Pass 1 prunes only what it can prove; accuracy that depends on
-  data facts is left to Stage 3.
-- **Fused computations.** `FusedComputation { absorbed_targets, ways_to_compute }`
-  replaces the targets beneath (the whole-expression top-k, the nested sum).
-  It absorbs the target directly beneath and, for a heap over the raw data samples
-  beneath a grouped sum of per-series sums or counts, the per-series target
-  too. A whole-workload choice keeps one digit per target; a fused pick with
-  a non-first digit on an absorbed target is skipped, so each plan is
-  enumerated once.
+- **Ways not offered.** A way the measure or the deployment cannot compute
+  (the exact accumulator of an `avg` over a nullable input, a count sketch
+  over relational rows, a summary the deployment does not support, a
+  quantile summary outside [0, 1], a top-k heap over one row per item) is
+  not offered, and Pass 1 records none. Accuracy is Pass 2's.
+- **Fused computations.** `FusedComputation { absorbed_groups, ways_to_compute }`
+  replaces the operators beneath (the whole-expression top-k, the nested
+  sum, min or max) in one appearance; its builds list `absorbed_groups` in
+  `fused_groups`. It absorbs the aggregate beneath and, for a heap over the
+  raw data samples beneath a grouped sum of per-series sums or counts, the
+  per-series aggregate too.
 - **Pass 2.** Each rule adds candidates; none removes a Pass 1 candidate, adds
   a summary family, or adds a readout. So a deployment that does not support a
   family never sees it again after Pass 1.

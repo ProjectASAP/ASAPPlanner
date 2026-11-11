@@ -20,13 +20,12 @@ use asap_types::summary_type::{
     WeightDomain,
 };
 
-use crate::candidates::{add_measure_way, SingleMeasure};
+use crate::candidates::{add_measure_way, Pending, SingleMeasure};
 use crate::computation_targets::{
     computation_candidates_for_intent, computation_targets, HowToComputeAggregateMeasure,
 };
 use crate::summary_realization::{
-    candidates_by, realize_keyed_additive_summary_input, summarised_input, summary_candidates,
-    ALGORITHM_PREFERENCE,
+    realize_keyed_additive_summary_input, summarised_input, summary_candidates,
 };
 use crate::test_fixtures::{aggregate_group, group, query, scan_group};
 use crate::{pass1_memo, PerComputationCandidateError};
@@ -1132,31 +1131,21 @@ fn summary_candidates_keep_the_hand_written_lists() {
     }
 }
 
-/// Dropping a readout from an algorithm's table row drops the algorithm from
-/// the candidates of the intents that read it, with no other edit.
+/// An algorithm is offered for an intent exactly when its capability table
+/// row answers the intent's statistic: Count-Min's row has no top-k readout,
+/// so a top-k is offered only the heap variants, whose rows have one.
 #[test]
-fn a_dropped_readout_drops_the_algorithm() {
-    // Count-Min-with-heap answered from Count-Min's row: no top-k readout.
-    let heap_without_top_k = |algorithm: &SketchAlgorithm| {
-        SummaryTypeCapability::of(&FieldDataType::Sketch(match algorithm {
-            SketchAlgorithm::CmsWithHeap => SketchAlgorithm::Cms,
-            other => *other,
-        }))
-    };
+fn an_algorithm_without_the_readout_is_not_offered() {
     let top_k = AggIntent::TopK { k: 10 };
-    assert_eq!(
-        candidates_by(&top_k, heap_without_top_k),
-        vec![SketchAlgorithm::CountSketchWithHeap]
-    );
-}
-
-/// The preference order names each algorithm it offers once.
-#[test]
-fn preference_order_names_each_algorithm_once() {
-    let mut seen = std::collections::HashSet::new();
-    for algorithm in ALGORITHM_PREFERENCE {
-        assert!(seen.insert(algorithm), "{algorithm:?} twice");
-    }
+    let statistic = SketchStatistic::TopK { k: 10 };
+    let answers = |algorithm| {
+        SummaryTypeCapability::of(&FieldDataType::Sketch(algorithm)).answers(&statistic)
+    };
+    assert!(!answers(SketchAlgorithm::Cms));
+    assert!(answers(SketchAlgorithm::CmsWithHeap));
+    let offered = summary_candidates(&top_k);
+    assert!(!offered.contains(&SketchAlgorithm::Cms));
+    assert!(offered.iter().all(|algorithm| answers(*algorithm)));
 }
 
 // ── Unsupported ways add nothing ─────────────────────────────────────────────
@@ -1172,7 +1161,7 @@ fn assert_unsupported_way_adds_nothing(
 ) {
     let groups = memo.groups().len();
     let before = format!("{memo:?}");
-    let added = add_measure_way(memo, measure, &way, result_group, &[]);
+    let added = add_measure_way(memo, Pending::new(memo), measure, &way, result_group, &[]);
     assert!(
         matches!(added, Err(PerComputationCandidateError::Unsupported(_))),
         "{added:?}"
@@ -1201,6 +1190,7 @@ fn a_heap_estimate_without_the_groups_columns_adds_nothing() {
     let intent = topk(5);
     let measure = SingleMeasure {
         input: by_host,
+        unfiltered_input: by_host,
         reduction: &reduction,
         intent: &intent,
         filter: None,
@@ -1242,6 +1232,7 @@ fn a_readout_an_open_group_cannot_rename_adds_nothing() {
     );
     let measure = SingleMeasure {
         input: rows,
+        unfiltered_input: rows,
         reduction: &Reduction::PerEntity,
         intent: &intent,
         filter: None,

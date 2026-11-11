@@ -310,7 +310,7 @@ rule's origin, and gives each reader a candidate that reads that group.
 
 | `OriginOfCandidateForMemoGroup` | Added by | Candidates |
 |---|---|---|
-| `Pass1` | `try_populate_pass1` (`pass1/memo_population.rs`) | Every Pass 1 choice of the group's measures: exact, exact accumulator, each summary family and size, and fused computations. Each summary choice comes at every `accuracy_budget_parts` from 1 to the most approximate inputs a query reaching the group has. A fused candidate implements the groups it absorbs only when no other reader needs them; otherwise they stay groups of their own. |
+| `Pass1` | `pass1_memo` (`stage1-pass1-per-computation-candidates`: `computation_targets.rs`, `candidates/`) | Every Pass 1 way to compute the group's measures: exact, exact accumulator, each summary algorithm with one build per configuration of its predefined list (`parameter_list`), and fused computations. A fused candidate lists the groups of the operators it replaces in `fused_groups`; those groups keep their own candidates for their other readers. |
 | `TumblingWindows` | Window composition: `add_local_window_composition` and `extend_local_window_composition` (`pass2/memo/window_candidates.rs`) | A window summary computed from tumbling windows, at each tumbling-window width the reader's evaluation grid allows. The tumbling-window chain stays private to the candidate. |
 | `WidenedScans` | Scan widening: `add_scan_label_candidates` (`pass2/memo/rules/scan_labels.rs`) | A reader of a metric's scans widened to a shared label set, read through a `Project`. |
 | `SummaryInput` | `factor_summary_inputs` (`pass2/memo/rules/summary_inputs.rs`) | Canonical value preprocessing feeding a summary build. |
@@ -364,7 +364,7 @@ operands. A unique key is not needed (the PromQL planning path happens to
 give this output one, series identity and timestamp); an unordered `LIMIT`
 would stay one group per reader.
 
-**Step 2, Stage 1 Pass 1.** `try_populate_pass1` gives G2 and G4 seven
+**Step 2, Stage 1 Pass 1.** `pass1_memo` gives G2 and G4 seven
 candidates each. G0, G1, G3 and G5 get one each, their own node. G6 gets
 one: `avg` computed from exact sum and count accumulators. The memo now has
 19 candidates.
@@ -574,10 +574,8 @@ candidates are renumbered after pruning and a pruned one has no
 timing and lifetime, and makes no copies of it, so (`operator_node`,
 `properties`) is unique. Operator
 nodes are kept whole, so `operator_node` indexes the output's
-`operator_nodes_of_candidates_for_memo_groups`. Pass 1's accuracy pruning
-(`NoErrorBoundForQueryTarget`) runs inside Pass 1's entry, before the
-candidates are attached to the memo groups, and records a `PrunedCandidate`
-like every other Pass 1 prune.
+`operator_nodes_of_candidates_for_memo_groups`. Pass 1 records no pruned
+candidate: a way it cannot compute is not offered.
 
 `asap_planner` writes both lists as `pruned_candidates` under
 `stage1_logical_asap_optimization` and `stage2_physical_asap_optimization`,
@@ -832,11 +830,10 @@ Output: Out — candidate replacement sub-DAGs for s
 
 Every size is decided in Stage 1; Stage 3 only checks the composed accuracy.
 Algorithm 1 checks whether a family can meet `acc(s)` at all and
-yields the family unsized (`HowToComputeAggregateMeasure::Summary`). When
-Pass 1 attaches the family to its memo group, it creates one sized candidate
-per split of the accuracy budget: `accuracy_budget_parts` from 1 to the most
-approximate inputs of a query reaching the group, each sized by the accuracy
-model for its share. Pass 2 never resizes a summary for its own readers: a
+yields the algorithm unsized (Pass 1's `HowToComputeAggregateMeasure::Summary`).
+When Pass 1 adds the algorithm to its memo group, it adds one build per
+configuration of the algorithm's predefined list (`parameter_list`); Pass 2
+decides which builds each reader can use. Pass 2 never resizes a summary for its own readers: a
 tumbling-window chain inherits the size of the build it replaces (a merge of equal-size
 tumbling windows keeps the guarantee when the family's merged error is `Exact` or
 `AsIfBuiltOverUnion`), and a build shared by several readers takes the

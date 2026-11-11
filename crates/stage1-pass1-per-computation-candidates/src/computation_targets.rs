@@ -19,8 +19,8 @@ use asap_types::ir::operator::arguments::Source;
 use asap_types::ir::operator::non_asap::any_measure_filtered;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef};
-use asap_types::ir::schema::Schema;
-use asap_types::ir::{NonASAPOp, Operator, OperatorResultKind, Predicate};
+use asap_types::ir::schema::{ColumnId, Schema};
+use asap_types::ir::{NonASAPOp, Operator, OperatorResultKind, Predicate, ScalarExpr};
 use asap_types::stages::{Memo, MemoGroupId};
 use asap_types::summary_type::{
     ExactKind, SketchAlgorithm, StatisticKind, SummaryInputExpr, SummaryUpdate,
@@ -80,7 +80,8 @@ pub(crate) struct ComputationTarget {
 #[derive(Debug)]
 pub(crate) struct FusedComputation {
     /// The groups of the operators it replaces, which its builds list in
-    /// `fused_groups`: the aggregate directly beneath, then, for a
+    /// `fused_groups`: the aggregate beneath (after the column-renaming
+    /// `Project` between them, when there is one), then, for a
     /// whole-expression heap over the raw data samples beneath a grouped sum
     /// of per-series sums or counts (`topk(k, sum by (G)
     /// (sum_over_time(m[W])))`), the per-series aggregate beneath that, then
@@ -352,27 +353,25 @@ fn add_nested_distributive_targets(memo: &Memo, targets: &mut [ComputationTarget
         if target.fused_computation.is_some() || has_having(memo, target.aggregate_group) {
             continue;
         }
-        let Operator::NonASAP(NonASAPOp::Aggregate { child, .. }) =
-            expression(memo, target.aggregate_group)
-        else {
+        let Some(nested) = nested_aggregates(memo, target.aggregate_group) else {
             continue;
         };
         let Some(inner) = targets
             .iter()
-            .position(|other| other.aggregate_group == *child)
+            .position(|other| other.aggregate_group == nested.inner)
         else {
             continue;
         };
         // Merges do not stack: the inner aggregate must not have a fused
         // computation of its own.
-        if has_having(memo, *child) || targets[inner].fused_computation.is_some() {
+        if has_having(memo, nested.inner) || targets[inner].fused_computation.is_some() {
             continue;
         }
         let Some((_, _, _, kind)) = nested_distributive_input(memo, target.aggregate_group) else {
             continue;
         };
         targets[t].fused_computation = Some(FusedComputation {
-            absorbed_groups: vec![*child],
+            absorbed_groups: nested.renaming.into_iter().chain([nested.inner]).collect(),
             ways_to_compute: vec![HowToComputeAggregateMeasure::ExactAccumulator(vec![kind])],
         });
     }
@@ -390,33 +389,76 @@ fn distributive(intent: &AggIntent) -> Option<(ExactKind, Option<usize>)> {
     }
 }
 
-/// The input rows, the inner measure, the outer grouping (moved onto the
-/// input rows by column, [`Reduction::partitions_over`]) and the
-/// accumulator kind of a nested distributive merge of `target`, or `None`
-/// when it does not apply: `target` is a grouped `sum`, `min` or `max` (not
-/// by `without`) of the value column of a per-series or grouped aggregate of
-/// the same reduction directly beneath it ([`distributive`]), neither
-/// filtered nor with its own `having`, and not grouped by the metric name a
-/// per-series inner aggregate drops.
-pub(crate) fn nested_distributive_input(
-    memo: &Memo,
-    target: MemoGroupId,
-) -> Option<(MemoGroupId, AggIntent, Reduction, ExactKind)> {
+/// An outer grouped aggregate of one measure over the value of a
+/// one-measure aggregate beneath it ([`nested_aggregates`]).
+pub(crate) struct NestedAggregates<'m> {
+    /// The outer aggregate's measure.
+    pub(crate) outer_measure: &'m AggIntent,
+    /// The outer aggregate's `by` keys, as columns of the inner aggregate's
+    /// output.
+    pub(crate) by: Vec<ColumnId>,
+    /// The group of a `Project` between them that only renames or reorders
+    /// columns (a SQL subquery's), or `None` when the outer aggregate reads
+    /// the inner one directly.
+    pub(crate) renaming: Option<MemoGroupId>,
+    /// The inner aggregate's group.
+    pub(crate) inner: MemoGroupId,
+    pub(crate) inner_reduction: &'m Reduction,
+    pub(crate) inner_measure: &'m AggIntent,
+    /// The inner aggregate's input.
+    pub(crate) rows: MemoGroupId,
+}
+
+/// `outer` as a grouped aggregate (not by `without`) of one unfiltered
+/// measure without `HAVING`, over the value column of a per-series or
+/// grouped (not by `without`) aggregate of one unfiltered measure without
+/// `HAVING` beneath it, read directly or through a `Project` that only
+/// renames or reorders columns and keeps the key names; not grouped by the
+/// value column, nor, over a per-series aggregate, by the metric name.
+/// `None` otherwise.
+///
+/// A per-series aggregate drops the metric name `__name__`, which the raw
+/// rows keep: an outer aggregate grouped by it over the per-series rows has
+/// one unnamed group where the same grouping of the raw rows has one per
+/// metric, so it is never one aggregate over the raw rows. A key whose
+/// column cannot be read is treated as the metric name.
+pub(crate) fn nested_aggregates(memo: &Memo, outer: MemoGroupId) -> Option<NestedAggregates<'_>> {
     let Operator::NonASAP(NonASAPOp::Aggregate {
-        child: inner,
-        reduction: reduction @ Reduction::Reduce(by),
+        child,
+        reduction: Reduction::Reduce(by),
         measures,
         filters,
         having: None,
         ..
-    }) = expression(memo, target)
+    }) = expression(memo, outer)
     else {
         return None;
     };
-    let [outer] = measures.as_slice() else {
+    let [outer_measure] = measures.as_slice() else {
         return None;
     };
-    let (kind, col) = distributive(outer)?;
+    if by.is_without() || any_measure_filtered(filters) {
+        return None;
+    }
+    // The inner aggregate's column each column the outer one reads is.
+    let (renaming, inner, inner_column): (Option<MemoGroupId>, MemoGroupId, Vec<ColumnId>) =
+        match expression(memo, *child) {
+            Operator::NonASAP(NonASAPOp::Project { cols, child: inner }) => (
+                Some(*child),
+                *inner,
+                cols.iter()
+                    .map(|item| match item.expr {
+                        ScalarExpr::Column(column) => Some(column),
+                        _ => None,
+                    })
+                    .collect::<Option<_>>()?,
+            ),
+            _ => (
+                None,
+                *child,
+                (0..schema(memo, *child).fields.len()).collect(),
+            ),
+        };
     let Operator::NonASAP(NonASAPOp::Aggregate {
         child: rows,
         reduction: inner_reduction,
@@ -424,51 +466,91 @@ pub(crate) fn nested_distributive_input(
         filters: inner_filters,
         having: None,
         ..
-    }) = expression(memo, *inner)
+    }) = expression(memo, inner)
     else {
         return None;
     };
     let [inner_measure] = inner_measures.as_slice() else {
         return None;
     };
-    if distributive(inner_measure).map(|(inner_kind, _)| inner_kind) != Some(kind)
-        || by.is_without()
-        || any_measure_filtered(filters)
-        || any_measure_filtered(inner_filters)
-    {
+    if any_measure_filtered(inner_filters) {
         return None;
     }
     // The inner aggregate's value column: a per-series one keeps its labels
     // and carries the value as the sample value; a grouped one ends with it.
     let value = match inner_reduction {
         Reduction::PerEntity => {
-            resolve_column_ref(&ColumnRef::SampleValue, schema(memo, *inner)).ok()?
+            resolve_column_ref(&ColumnRef::SampleValue, schema(memo, inner)).ok()?
         }
         Reduction::Reduce(keys) if !keys.is_without() => keys.len(),
         Reduction::Reduce(_) => return None,
     };
-    let reduced = match col {
-        None => resolve_column_ref(&ColumnRef::SampleValue, schema(memo, *inner)).ok()?,
-        Some(column) => column,
+    let read = match outer_measure.input_cols().first() {
+        Some(&column) => column,
+        None => resolve_column_ref(&ColumnRef::SampleValue, schema(memo, *child)).ok()?,
     };
-    if reduced != value || by.keys().contains(&value) {
+    if inner_column.get(read) != Some(&value) {
         return None;
     }
-    // A per-series aggregate drops the metric name, which the raw rows
-    // keep: grouping them by it would name groups the nested aggregates
-    // leave unnamed.
-    if matches!(inner_reduction, Reduction::PerEntity)
-        && by.keys().iter().any(|&key| {
-            schema(memo, *inner)
-                .fields
-                .get(key)
-                .is_some_and(|f| f.name == "__name__")
-        })
+    let outer_keys = by.keys();
+    let by: Vec<ColumnId> = outer_keys
+        .iter()
+        .map(|&key| inner_column.get(key).copied())
+        .collect::<Option<_>>()?;
+    if by.contains(&value) {
+        return None;
+    }
+    // A renaming keeps the key names, so a state over its rows and one over
+    // the raw rows have the same columns.
+    let name = |group: MemoGroupId, column: ColumnId| {
+        schema(memo, group)
+            .fields
+            .get(column)
+            .map(|field| field.name.as_str())
+    };
+    if outer_keys
+        .iter()
+        .zip(&by)
+        .any(|(&outer_key, &inner_key)| name(*child, outer_key) != name(inner, inner_key))
     {
         return None;
     }
-    let partitions = reduction.partitions_over(schema(memo, *inner), schema(memo, *rows))?;
-    Some((*rows, inner_measure.clone(), partitions, kind))
+    if matches!(inner_reduction, Reduction::PerEntity)
+        && by
+            .iter()
+            .any(|&key| name(inner, key).is_none_or(|name| name == "__name__"))
+    {
+        return None;
+    }
+    Some(NestedAggregates {
+        outer_measure,
+        by,
+        renaming,
+        inner,
+        inner_reduction,
+        inner_measure,
+        rows: *rows,
+    })
+}
+
+/// The input rows, the inner measure, the outer grouping (moved onto the
+/// input rows by column, [`Reduction::partitions_over`]) and the
+/// accumulator kind of a nested distributive merge of `target`, or `None`
+/// when it does not apply: `target` and the aggregate beneath it
+/// ([`nested_aggregates`]) are both `sum`, both `min` or both `max`
+/// ([`distributive`]).
+pub(crate) fn nested_distributive_input(
+    memo: &Memo,
+    target: MemoGroupId,
+) -> Option<(MemoGroupId, AggIntent, Reduction, ExactKind)> {
+    let nested = nested_aggregates(memo, target)?;
+    let (kind, _) = distributive(nested.outer_measure)?;
+    if distributive(nested.inner_measure).map(|(inner_kind, _)| inner_kind) != Some(kind) {
+        return None;
+    }
+    let partitions = Reduction::by(nested.by)
+        .partitions_over(schema(memo, nested.inner), schema(memo, nested.rows))?;
+    Some((nested.rows, nested.inner_measure.clone(), partitions, kind))
 }
 
 /// Whole-expression top-k (Example 1's Q2): a top-k over a per-item `sum`

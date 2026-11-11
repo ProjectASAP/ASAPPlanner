@@ -170,6 +170,55 @@ pub fn raw_data_samples_of_metric<I: OperatorInput>(input: &I) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::operator::arguments::Reduction;
+    use crate::ir::schema::{DataType, Field, Schema};
+    use crate::ir::{OperatorNode, TimeRangeKind};
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    /// The raw data samples of `m` reach a node through a range and a plain
+    /// `sum`; a rate ends them.
+    #[test]
+    fn raw_data_samples_of_metric_follows_ranges_shifts_and_plain_sums() {
+        let node =
+            |operator: Operator<Rc<OperatorNode>>| OperatorNode::new_shared(operator).unwrap();
+        let rows = node(Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                ],
+                0,
+                vec![],
+            ),
+        }));
+        let window = node(Operator::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(60),
+            kind: TimeRangeKind::Range,
+            child: rows,
+        }));
+        let per_series = |measure: AggIntent| {
+            node(Operator::NonASAP(NonASAPOp::Aggregate {
+                child: Rc::clone(&window),
+                reduction: Reduction::PerEntity,
+                measures: vec![measure],
+                output_names: vec![String::new()],
+                filters: vec![],
+                having: None,
+            }))
+        };
+        assert_eq!(raw_data_samples_of_metric(&window), Some("m".to_string()));
+        assert_eq!(
+            raw_data_samples_of_metric(&per_series(AggIntent::Sum { col: None })),
+            Some("m".to_string())
+        );
+        assert_eq!(
+            raw_data_samples_of_metric(&per_series(AggIntent::Rate)),
+            None
+        );
+    }
 
     #[test]
     fn keyed_summary_input_and_topk_evaluation_round_trip() {

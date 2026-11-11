@@ -7,7 +7,7 @@ use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, Predicate, QueryRoot, ScalarExpr};
 use asap_types::stages::Memo;
 use asap_types::summary_type::{SketchAlgorithm, SummaryInputExpr};
 
@@ -73,13 +73,30 @@ async fn global_constant_having_stays_above() {
     assert!(!having_pushed_below(&memo));
 }
 
-/// A `HAVING` that reads a key and a value stays above the output.
+/// A `HAVING` that reads a key and a value pushes its key conjunct below
+/// the aggregate and keeps its value conjunct above: some candidate of the
+/// `HAVING`'s `Filter` group filters by `count(*) > 10` alone.
 #[tokio::test]
-async fn mixed_key_and_value_having_stays_above() {
+async fn mixed_having_pushes_its_key_conjunct_below() {
     let memo =
         pass1("SELECT src, count(*) FROM flows GROUP BY src HAVING src = 'a' AND count(*) > 10")
             .await;
-    assert!(!having_pushed_below(&memo));
+    assert!(having_pushed_below(&memo));
+    let (filter, value_conjunct) = memo
+        .groups()
+        .iter()
+        .find_map(|group| match &group.expression {
+            Operator::NonASAP(NonASAPOp::Filter {
+                pred: Predicate(ScalarExpr::BoolAnd(conjuncts)),
+                ..
+            }) => Some((group, conjuncts[1].clone())),
+            _ => None,
+        })
+        .expect("the HAVING's Filter group");
+    assert!(filter.candidates.iter().any(|candidate| matches!(
+        &candidate.expression.operator,
+        Operator::NonASAP(NonASAPOp::Filter { pred, .. }) if pred.0 == value_conjunct
+    )));
 }
 
 /// Whether `node` reads a quantile sketch (KLL or DDSketch) anywhere below it.
@@ -101,7 +118,7 @@ fn reads_quantile_sketch(node: &std::rc::Rc<asap_types::ir::OperatorNode>) -> bo
 /// A measure filter or a grouping key that reads an approximate value
 /// decides which rows count, or which group a row joins, by an estimate, so
 /// an estimate near a threshold or a group boundary can change the result
-/// arbitrarily: the output has no guarantee (#669), whether the measure
+/// arbitrarily: the output has no guarantee, whether the measure
 /// counts rows or folds the estimate itself. So does a count of the
 /// estimates' distinct values, of non-null estimates, or a group key
 /// computed from an estimate.

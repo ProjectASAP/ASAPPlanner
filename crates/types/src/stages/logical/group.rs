@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use super::aggregate_coverage::{aggregate_coverage, AggregateCoverage, CoverageError};
 use super::column_properties::{column_lineage_and_signs, ColumnLineage, ValueSign};
 use crate::ir::operator::arguments::{AtModifier, Source, TimeShift};
-use crate::ir::operator::input::{InputOrTemporaryBuild, OperatorInput};
+use crate::ir::operator::input::OperatorInput;
 use crate::ir::scalar::column_resolution::ResolveError;
 use crate::ir::schema::topk::ranked_column;
 use crate::ir::schema::{ColumnId, Schema};
@@ -123,59 +123,6 @@ pub(super) fn validate_expression_over_input_groups(
         _ => None,
     };
     Ok((schema, merge_coverage))
-}
-
-/// The output schemas of `pending`, expressions not yet in `memo`, in
-/// order: each reads memo groups or earlier pending expressions, where the
-/// input `MemoGroupId(n + k)` (`n` the memo's group count) is `pending[k]`,
-/// the id it would get as a new group. Each must be valid as
-/// [`Memo::find_or_add_group`] checks it (its output schema derives and its
-/// inputs pass validation); a merge's coverage is checked here only when it
-/// reads memo groups alone, and otherwise when it is added. A rule calls it
-/// to decide whether a way to compute a group can be built before it adds
-/// any of the way's groups.
-///
-/// # Panics
-///
-/// When an input id names `pending[k]` at or after the expression reading it.
-pub fn output_schemas_of_pending_expressions(
-    memo: &Memo,
-    pending: &[Operator<MemoGroupId>],
-) -> Result<Vec<Schema>, MemoGroupError> {
-    let groups = memo.groups().len();
-    let mut built: Vec<InputOrTemporaryBuild<MemoGroupAsInput<'_>>> = Vec::new();
-    let mut schemas = Vec::with_capacity(pending.len());
-    for expression in pending {
-        let reads_pending = expression
-            .children()
-            .iter()
-            .any(|input| input.0 as usize >= groups);
-        let schema = if reads_pending {
-            let operator = expression.map_children(|&group_id| {
-                match (group_id.0 as usize).checked_sub(groups) {
-                    None => InputOrTemporaryBuild::Input(MemoGroupAsInput { memo, group_id }),
-                    Some(index) => built
-                        .get(index)
-                        .expect("a pending expression reads only earlier ones")
-                        .clone(),
-                }
-            });
-            let schema = operator.output_schema()?;
-            operator.validate_inputs()?;
-            built.push(InputOrTemporaryBuild::with_schema(operator, schema.clone()));
-            schema
-        } else {
-            let operator = expression.map_children(|&group_id| MemoGroupAsInput { memo, group_id });
-            let (schema, _) = validate_expression_over_input_groups(&operator)?;
-            built.push(InputOrTemporaryBuild::with_schema(
-                operator.map_children(|input| InputOrTemporaryBuild::Input(*input)),
-                schema.clone(),
-            ));
-            schema
-        };
-        schemas.push(schema);
-    }
-    Ok(schemas)
 }
 
 /// The properties of new memo group `group` computing `expression` over

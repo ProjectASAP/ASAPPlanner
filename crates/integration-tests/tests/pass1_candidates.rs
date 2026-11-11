@@ -5,6 +5,7 @@
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_stage1_pass1_per_computation_candidates::pass1_memo;
 use asap_types::accuracy::AccuracyTarget;
+use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::schema::{DataType, Field, Schema};
@@ -327,20 +328,107 @@ async fn filtered_sql_avg_is_null_without_matching_rows() {
     }
 }
 
-/// PromQL `avg` divides its `sum` and `count` vectors with a `BinaryOp`.
+/// PromQL `avg` divides its `sum` and `count` vectors with a `BinaryOp`,
+/// grouped, global and per series alike. Prometheus averages incrementally
+/// once a sum overflows, so the division stands in only for finite operands
+/// and quotient (`checked_finite_division`).
 #[test]
 fn promql_avg_divides_sum_and_count_vectors() {
-    let memo = pass1(promql("avg by (job) (m)"));
-    let root = &memo.groups()[root_group(&memo).0 as usize];
-    assert!(root.candidates.len() > 1);
-    let kinds: Vec<_> = avg_candidate_groups(&memo)
+    for query in ["avg by (job) (m)", "avg(m)", "avg_over_time(m[5m])"] {
+        let memo = pass1(promql(query));
+        let root = &memo.groups()[root_group(&memo).0 as usize];
+        assert!(root.candidates.len() > 1, "{query}");
+        let kinds: Vec<_> = avg_candidate_groups(&memo)
+            .iter()
+            .map(|group| memo.groups()[group.0 as usize].expression.kind_name())
+            .collect();
+        assert!(!kinds.contains(&"Join"), "{query}: {kinds:?}");
+        let divisions: Vec<bool> = memo
+            .groups()
+            .iter()
+            .flat_map(|group| &group.candidates)
+            .filter_map(|candidate| match &candidate.expression.operator {
+                Operator::NonASAP(NonASAPOp::BinaryOp { operator, .. }) => {
+                    Some(operator.checked_finite_division)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!divisions.is_empty(), "{query}");
+        assert!(divisions.iter().all(|checked| *checked), "{query}");
+    }
+}
+
+/// `count(*)` over `t(k, v)`, every column nullable, under a key-only
+/// `HAVING`: no count accumulator or sketch can be built, so Pass 1 adds no
+/// group, not even the `Filter` its candidates would push below the
+/// aggregate.
+#[tokio::test]
+async fn an_unsupported_way_under_a_key_only_having_adds_no_group() {
+    let root = lower_sql(
+        "SELECT k, count(*) FROM t GROUP BY k HAVING k > 'a'",
+        &table(&[("v", true)]),
+    )
+    .await
+    .unwrap();
+    let stage0 = stage0(QueryRoot::Operator(root));
+    let memo = pass1_memo(stage0.clone(), None).unwrap();
+    assert_eq!(memo.groups().len(), stage0.groups().len());
+    assert!(memo
+        .groups()
         .iter()
-        .map(|group| memo.groups()[group.0 as usize].expression.kind_name())
-        .collect();
-    assert!(
-        kinds.contains(&"BinaryOp") && !kinds.contains(&"Join"),
-        "{kinds:?}"
+        .all(|group| !group.reached_by_queries().is_empty()));
+}
+
+/// A multi-measure aggregate's `count(*)` is the same group as another
+/// query's `count(*)` over the same rows: Pass 1 writes the measure's own
+/// aggregate as the frontend writes one.
+#[tokio::test]
+async fn a_multi_measure_aggregates_part_is_the_equal_stage0_group() {
+    let roots = [
+        sql("SELECT src, count(*), sum(bytes) FROM flows GROUP BY src").await,
+        sql("SELECT src, count(*) FROM flows GROUP BY src").await,
+    ];
+    let stage0 =
+        asap_stage0_memo::memo_of_queries(&roots, &[None, None], &DataWorkload::default()).unwrap();
+    let memo = pass1_memo(stage0, None).unwrap();
+    let counts = memo
+        .groups()
+        .iter()
+        .filter(|group| {
+            matches!(
+                &group.expression,
+                Operator::NonASAP(NonASAPOp::Aggregate { measures, .. })
+                    if measures.as_slice() == [AggIntent::Count]
+            )
+        })
+        .count();
+    assert_eq!(counts, 1);
+}
+
+/// SQL `sum` of a subquery's `sum`, read through the subquery's renaming
+/// `Project`: the outer sum's state also gets one exact sum over the raw
+/// rows, a fused build listing the `Project` and the inner aggregate.
+#[tokio::test]
+async fn sql_sum_of_a_subquerys_sum_is_one_sum_over_the_rows() {
+    let memo = pass1(
+        sql("SELECT src, sum(s) FROM \
+             (SELECT src, dst, sum(bytes) AS s FROM flows GROUP BY src, dst) x GROUP BY src")
+        .await,
     );
+    let fused: Vec<_> = memo
+        .groups()
+        .iter()
+        .flat_map(|group| &group.candidates)
+        .filter(|candidate| {
+            matches!(
+                candidate.expression.operator,
+                Operator::ASAP(ASAPOp::SummaryAgg { .. })
+            ) && !candidate.fused_groups.is_empty()
+        })
+        .collect();
+    assert_eq!(fused.len(), 1);
+    assert_eq!(fused[0].fused_groups.len(), 2);
 }
 
 /// `t(k Utf8 NULL, <columns>)` as a catalog.

@@ -100,29 +100,22 @@ pub fn aggregate(
     measure: AggIntent,
     child: MemoGroupId,
 ) -> Operator<MemoGroupId> {
-    aggregate_where(reduction, measure, None, child)
-}
-
-/// `Aggregate(reduction; measure)` over `child`, the measure over the rows
-/// `filter` keeps (`None`: every row).
-pub fn aggregate_where(
-    reduction: Reduction,
-    measure: AggIntent,
-    filter: Option<Predicate<MemoGroupId>>,
-    child: MemoGroupId,
-) -> Operator<MemoGroupId> {
-    aggregate_with(reduction, vec![(measure, filter)], None, child)
+    aggregate_with(reduction, vec![(measure, None)], None, child)
 }
 
 /// `Aggregate(reduction; measures)` over `child` with `having`: each measure
-/// unnamed, over the rows its filter keeps (`None`: every row).
+/// unnamed, over the rows its filter keeps (`None`: every row). With no
+/// filter the filter list is empty, as the frontends write it.
 pub fn aggregate_with(
     reduction: Reduction,
     measures: Vec<(AggIntent, Option<Predicate<MemoGroupId>>)>,
     having: Option<Predicate<MemoGroupId>>,
     child: MemoGroupId,
 ) -> Operator<MemoGroupId> {
-    let (measures, filters): (Vec<_>, Vec<_>) = measures.into_iter().unzip();
+    let (measures, mut filters): (Vec<_>, Vec<_>) = measures.into_iter().unzip();
+    if filters.iter().all(Option::is_none) {
+        filters.clear();
+    }
     Operator::NonASAP(NonASAPOp::Aggregate {
         reduction,
         output_names: vec![String::new(); measures.len()],
