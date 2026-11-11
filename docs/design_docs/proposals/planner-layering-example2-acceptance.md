@@ -159,5 +159,5 @@ strictest size.
 is the `flows` table of `tools/dag-viewer/workloads/planner-layering/tables.json`,
 plans the SQL workload with the `flows(ts, src_ip)` catalog (with
 `--ignore-accuracy-guarantees`, none of the plans below is rejected for its
-guarantee). The stage viewer has no tab for it; open the
+guarantee). The plan viewer has no tab for it; open the
 document with **Open stage document…**.

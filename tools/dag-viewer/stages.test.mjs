@@ -79,17 +79,6 @@ test('summary types read as their algorithm or exact kind', () => {
   assert.deepEqual(call('stageNodeLines', chain, null), ['SummaryTumblingWindowChain', 'summary: Kll', 'tumbling windows of 24 h', 'per series']);
 });
 
-test('the plan row shows the plan\'s cost and accepted accuracy, or selection\'s error', () => {
-  const doc = fixture();
-  assert.deepEqual(call('selectedPlanRow', doc), {
-    status: 'selected', total: doc.stage3_plan_selection.cost.cost_per_second, accepted: 'q1: accepted rank (Kll)', reason: null,
-  });
-  doc.stage3_plan_selection = { plan: null, error: 'plan selection: no valid candidate', materialized_views: [] };
-  assert.deepEqual(call('selectedPlanRow', doc), { status: 'no plan', total: null, accepted: null, reason: 'plan selection: no valid candidate' });
-  assert.deepEqual(call('validateStagePipeline', doc), []);
-  assert.equal(call('selectedPlanRow', call('fillStagesNotRun', { stage3_plan_selection: null })), null);
-});
-
 test('the header shows why a stage failed and the selection\'s warnings', () => {
   assert.equal(call('planHeader', fixture()), '');
   const failed = {

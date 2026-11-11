@@ -1,6 +1,7 @@
 //! `asap_planner` writes valid stage documents: each stage's output over
 //! #509's examples and ad-hoc workloads, the deployment and cost inputs it
 //! plans with, and the inputs it refuses.
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -1762,7 +1763,7 @@ fn cost_input_files_match_their_presets() {
 /// its θ and a readout its required accuracy; Pass 2's and Stage 2's
 /// pruned candidates are listed with their causes; every `G<n>` named
 /// resolves to a printed group. Workload: two windowed quantiles every
-/// 10 s within 1 % (the shared-scan workload), printed with `--printing-full-candidates`.
+/// 10 s within 1 % (the shared-scan workload), printed with `--verbose`.
 #[test]
 fn the_text_memo_after_pass_2_prints_every_group_with_its_properties() {
     let workload = two_windowed_quantiles_within_1_percent();
@@ -1774,7 +1775,7 @@ fn the_text_memo_after_pass_2_prints_every_group_with_its_properties() {
         "stage3",
         "--format",
         "text",
-        "--printing-full-candidates",
+        "--verbose",
     ]);
     assert!(
         output.status.success(),
@@ -1810,8 +1811,7 @@ fn the_text_memo_after_pass_2_prints_every_group_with_its_properties() {
             "{properties}"
         );
         assert!(
-            properties.contains("evaluated every")
-                || properties.contains("no known evaluation grid"),
+            properties.contains("every ") || properties.contains("no known evaluation grid"),
             "{properties}"
         );
     }
@@ -1873,11 +1873,11 @@ fn two_windowed_quantiles_within_1_percent() -> serde_json::Value {
     })
 }
 
-/// Without `--printing-full-candidates` the text folds the candidates of a group that differ
+/// Without `--verbose` the text folds the candidates of a group that differ
 /// only in θ: a line with their indices (`[0..39]`), one with each θ
 /// parameter's values (`θ: k ∈ {...}`) and one with how many Pass 2 pruned
 /// by cause and kept, whose counts add up; the candidates Pass 2 kept are
-/// still printed with their θ. The folded text is shorter than `--printing-full-candidates`.
+/// still printed with their θ. The folded text is shorter than `--verbose`.
 #[test]
 fn the_text_folds_candidates_that_differ_only_in_theta() {
     let file = TempFile::json(&two_windowed_quantiles_within_1_percent());
@@ -1899,7 +1899,7 @@ fn the_text_folds_candidates_that_differ_only_in_theta() {
         );
         String::from_utf8(output.stdout).unwrap()
     };
-    let (folded, printed_in_full) = (text(&[]), text(&["--printing-full-candidates"]));
+    let (folded, printed_in_full) = (text(&[]), text(&["--verbose"]));
     assert!(folded.lines().count() < printed_in_full.lines().count());
     let pass2 = folded
         .split("==================== Stage 1 Pass 2 output")
@@ -1935,6 +1935,84 @@ fn the_text_folds_candidates_that_differ_only_in_theta() {
             .is_some_and(|next| next.starts_with("θ: "));
         if line.starts_with('[') && line.contains("SummaryAgg") && !fold_line {
             assert!(line.contains("θ="), "a kept build shows its θ: {line}");
+        }
+    }
+}
+
+/// Without `--verbose` the text leaves out what `--verbose` adds: no
+/// group-properties line, no per-producer edge rows, no `α^` rejection
+/// reasons. Every section starts with a legend; each non-root memo group
+/// names the groups that read it and every group the queries reaching it;
+/// a pruned Pass 2 candidate lists no inputs; Stage 2 prints each physical
+/// candidate once, under its logical candidate, with `★` on exactly the
+/// candidates the plan's nodes run.
+#[test]
+fn the_default_text_is_the_terse_form_and_verbose_adds_the_details() {
+    let file = TempFile::json(&two_windowed_quantiles_within_1_percent());
+    let text = |extra: &[&str]| {
+        let mut args = vec!["--workload", file.path(), "--run-until", "stage3"];
+        args.extend(extra);
+        let output = planner(&args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let (terse, verbose) = (text(&[]), text(&["--verbose"]));
+    for detail in ["reads only time series", "α^log", "α^phys"] {
+        assert!(!terse.contains(detail), "terse text has no {detail:?}");
+        assert!(verbose.contains(detail), "verbose text has {detail:?}");
+    }
+    let sections: Vec<&str> = terse.split("====================\n").skip(1).collect();
+    assert_eq!(sections.len(), 6, "one per stage boundary");
+    for section in &sections {
+        assert!(section.starts_with("legend: "), "{section}");
+    }
+    let pass2 = sections[3];
+    for line in pass2.lines().filter(|line| line.starts_with('G')) {
+        assert!(line.contains("reached by q"), "{line}");
+    }
+    assert!(pass2
+        .lines()
+        .any(|line| line.starts_with('G') && line.contains("used by G")));
+
+    let stage2 = sections[4];
+    let candidates: Vec<&str> = stage2
+        .lines()
+        .filter(|line| line.starts_with("    C"))
+        .collect();
+    let count: usize = stage2
+        .lines()
+        .find_map(|line| line.strip_prefix("physical candidates ("))
+        .and_then(|rest| rest.strip_suffix("):"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let name = |line: &&str| line.split_whitespace().next().unwrap().to_owned();
+    let listed: BTreeSet<String> = candidates.iter().map(name).collect();
+    assert_eq!(listed.len(), count, "each physical candidate once");
+    assert_eq!(listed, (0..count).map(|id| format!("C{id}")).collect());
+    let starred: BTreeSet<String> = candidates
+        .iter()
+        .filter(|line| line.ends_with('★'))
+        .map(name)
+        .collect();
+    // `n<k>:  C<c> = ...`: the candidate each plan node runs.
+    let in_plan: BTreeSet<String> = sections[5]
+        .lines()
+        .filter(|line| line.starts_with('n') && line.contains(":  C"))
+        .filter_map(|line| line.split_whitespace().nth(1).map(str::to_owned))
+        .collect();
+    assert!(!in_plan.is_empty());
+    assert_eq!(starred, in_plan, "★ on exactly the plan's candidates");
+
+    let pass2_lines: Vec<&str> = pass2.lines().collect();
+    for (index, line) in pass2_lines.iter().enumerate() {
+        if line.trim_start().starts_with('[') && line.contains(" pruned ") {
+            let next = pass2_lines.get(index + 1).copied().unwrap_or_default();
+            assert!(!next.trim_start().starts_with("input "), "{line}\n{next}");
         }
     }
 }

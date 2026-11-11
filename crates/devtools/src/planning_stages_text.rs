@@ -17,7 +17,8 @@
 //! `requires` its required accuracy per input. An edge is `✓` when its
 //! layer's requirement holds, else `✗` with why; a logical edge's producer
 //! is any candidate of the input group (eliminated ones included), a
-//! physical edge's a physical candidate whose logical edge holds:
+//! physical edge's a physical candidate whose logical edge holds. With
+//! `--verbose`:
 //!
 //! ```text
 //! G4:  SummaryEstimate Quantile(q=0.99)  <- G3
@@ -45,8 +46,9 @@ use asap_types::ir::QueryRoot;
 use asap_types::physical::PhysicalProperties;
 use asap_types::stages::{
     CandidateForMemoGroup, CandidateForMemoGroupId, ColumnLineage, EvaluationGrid,
-    LogicalASAPMemoCandidates, Memo, MemoGroup, MemoGroupId, PhysicalASAPMemoCandidates,
-    PhysicalCandidateId, PhysicalEdge, RequiredAccuracy, RootPruneReason,
+    LogicalASAPMemoCandidates, LogicalEdge, Memo, MemoGroup, MemoGroupId,
+    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalEdge,
+    PrunedCandidate, RequiredAccuracy, RootPruneReason,
 };
 
 use crate::candidate_labels::{operator_label, parameters_label};
@@ -58,16 +60,18 @@ use crate::planning_stages::{PlanningStagesRun, RunUntil};
 /// `plan_cost` the selected plan's `asap_cost::plan_cost`, printed with
 /// the plan when given. A failure ends the text with its error.
 ///
-/// Unless `printing_full_candidates`, the candidates of a memo group that differ only in θ
-/// are folded ([`write_memo`]): one line gives their indices, each θ
-/// parameter's values and how many Pass 2 pruned, by cause; those not
-/// pruned are still printed in full with their edges. The pruned lists of
-/// Pass 2 and Stage 2 are then counts per cause.
+/// Each section starts with a legend of the labels it prints. Unless
+/// `verbose`: the candidates of a memo group that differ only in θ are
+/// folded ([`write_memo`]); groups omit their properties line; Pass 2's
+/// edges are the stored ones as producer ids by $\alpha^{\log}$, without
+/// reasons; Stage 2 is printed per logical candidate
+/// ([`write_physical_by_logical_candidate`]); and the pruned lists are
+/// counts per cause.
 pub fn planning_stages_text(
     stages: &PlanningStagesRun,
     evidence: &dyn AccuracyEvidence,
     plan_cost: Option<&PlanCost>,
-    printing_full_candidates: bool,
+    verbose: bool,
 ) -> String {
     let mut out = String::new();
     let run = &stages.run;
@@ -82,14 +86,16 @@ pub fn planning_stages_text(
     section(
         &mut out,
         "Stage 0 output: the frontends' roots (Vec<QueryRoot>)",
+        &["n<k> = node k", "<- = the nodes it reads"],
     );
     write_dag(&mut out, &stages.stage0_query_language_frontends);
     section(
         &mut out,
         "Stage 0 → Stage 1: Memo (the roots hash-consed, without candidates)",
+        MEMO_LEGEND,
     );
     if let Some(memo) = &stages.stage0_memo_groups {
-        write_memo(&mut out, memo, None, None, printing_full_candidates);
+        write_memo(&mut out, memo, None, None, verbose);
     }
     if until == RunUntil::Stage0 {
         return out;
@@ -99,14 +105,12 @@ pub fn planning_stages_text(
         failure(&mut out);
         return out;
     };
-    section(&mut out, "Stage 1 Pass 1 output: Memo");
-    write_memo(
+    section(
         &mut out,
-        pass1,
-        Some(MemoStep::Pass1),
-        None,
-        printing_full_candidates,
+        "Stage 1 Pass 1 output: Memo",
+        &[MEMO_LEGEND, CANDIDATE_LEGEND].concat(),
     );
+    write_memo(&mut out, pass1, Some(MemoStep::Pass1), None, verbose);
     if until == RunUntil::Pass1 {
         return out;
     }
@@ -118,15 +122,26 @@ pub fn planning_stages_text(
     section(
         &mut out,
         "Stage 1 Pass 2 output = Stage 2 input: LogicalASAPMemoCandidates",
+        &[
+            MEMO_LEGEND,
+            CANDIDATE_LEGEND,
+            PASS2_LEGEND,
+            if verbose {
+                PASS2_VERBOSE_EDGES_LEGEND
+            } else {
+                PASS2_EDGES_LEGEND
+            },
+        ]
+        .concat(),
     );
     write_memo(
         &mut out,
         &logical.memo,
         Some(MemoStep::Pass2 { pass1, logical }),
         Some(evidence),
-        printing_full_candidates,
+        verbose,
     );
-    write_pass2_pruned(&mut out, logical, printing_full_candidates);
+    write_pass2_pruned(&mut out, logical, verbose);
     if until == RunUntil::Pass2 {
         return out;
     }
@@ -138,20 +153,83 @@ pub fn planning_stages_text(
     section(
         &mut out,
         "Stage 2 output = Stage 3 input: PhysicalASAPMemoCandidates",
+        if verbose {
+            STAGE2_VERBOSE_LEGEND
+        } else {
+            STAGE2_LEGEND
+        },
     );
     let plan = run.selection.as_ref().ok().map(|(plan, _)| plan);
-    write_physical(&mut out, physical, plan, printing_full_candidates);
+    write_physical(&mut out, physical, plan, verbose);
     if until == RunUntil::Stage2 {
         return out;
     }
 
-    section(&mut out, "Stage 3 output: PhysicalASAPDAG and Selection");
-    write_selection(&mut out, stages, plan_cost);
+    section(
+        &mut out,
+        "Stage 3 output: PhysicalASAPDAG and Selection",
+        &[
+            "n<k> = plan node k",
+            "C<n> = the physical candidate it runs",
+            "<- = the nodes it reads",
+        ],
+    );
+    write_selection(&mut out, stages, plan_cost, verbose);
     out
 }
 
-fn section(out: &mut String, title: &str) {
+const MEMO_LEGEND: &[&str] = &[
+    "G<n> = memo group n",
+    "<- = the groups it reads",
+    "used by = the groups that read it",
+    "reached by = the queries whose roots reach it",
+    "every <p> ms = the grid its result is evaluated on (from Pass 2)",
+];
+const CANDIDATE_LEGEND: &[&str] = &[
+    "[i] = candidate i, then the rule that added it",
+    "exact = no sketch",
+    "θ = sketch parameters",
+    "[a..b] = candidates that differ only in θ, folded (--verbose lists each)",
+];
+const PASS2_LEGEND: &[&str] = &[
+    "new = added by Pass 2",
+    "pruned = eliminated by Pass 2",
+    "requires = the accuracy required per input",
+];
+const PASS2_EDGES_LEGEND: &[&str] = &[
+    "input i <- G<k>: ✓ / ✗ = the edges Pass 2 kept, from producers in G<k> that do / do not meet the input's requirement",
+    "N other(s) = candidates of G<k> with no edge: pruned, or of another θ (--verbose lists each, with why)",
+    "a pruned candidate lists no inputs: Pass 2 keeps no edges into it",
+];
+const PASS2_VERBOSE_EDGES_LEGEND: &[&str] = &[
+    "input i <- G<k>: one row per candidate of G<k>, pruned ones included:",
+    "    ✓ = meets the input's requirement · ✗ = does not, and why · no edge = another θ",
+];
+const STAGE2_LEGEND: &[&str] = &[
+    "G<g>[<i>] = a logical candidate",
+    "C<n> = one of its physical candidates",
+    "(timing, lifetime) = when C runs, how long its result is kept",
+    "reads = the producers C can read on that input (--verbose: also those it cannot, and why)",
+    "★ = in Stage 3's plan",
+    "uses = the producer the plan reads",
+];
+const STAGE2_VERBOSE_LEGEND: &[&str] = &[
+    "C<n> = G<g>[<i>] (timing, lifetime) = physical candidate n: a logical candidate, when it runs and how long its result is kept",
+    "input i <- G<k>: one row per producer whose logical edge holds:",
+    "    ✓ = the consumer can read it · ✗ = it cannot, and why",
+    "selected = the edge Stage 3's plan uses",
+];
+
+/// A section header, then `legend` (the labels the section prints).
+fn section(out: &mut String, title: &str, legend: &[&str]) {
     let _ = writeln!(out, "\n==================== {title} ====================");
+    for (index, line) in legend.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "{}{line}",
+            if index == 0 { "legend: " } else { "        " }
+        );
+    }
 }
 
 /// One line per node of the DAG of `roots` (children before parents), then
@@ -250,18 +328,19 @@ fn group_properties_text(group: &MemoGroup, grid: Option<Option<&EvaluationGrid>
         true => " · reads only time series",
         false => " · reads a table",
     };
-    match grid {
-        Some(Some(grid)) => {
-            let _ = write!(
-                text,
-                " · evaluated every {} ms at {}",
-                grid.period_ms, grid.phase_ms
-            );
-        }
-        Some(None) => text += " · no known evaluation grid",
-        None => {}
+    if let Some(grid) = grid {
+        let _ = write!(text, " · {}", grid_text(grid));
     }
     text
+}
+
+/// `every 60000 ms`, `every 60000 ms at 15000`, or `no known evaluation grid`.
+fn grid_text(grid: Option<&EvaluationGrid>) -> String {
+    match grid {
+        Some(grid) if grid.phase_ms == 0 => format!("every {} ms", grid.period_ms),
+        Some(grid) => format!("every {} ms at {}", grid.period_ms, grid.phase_ms),
+        None => "no known evaluation grid".to_owned(),
+    }
 }
 
 /// `<- a, b`, or nothing when there is nothing read.
@@ -293,12 +372,12 @@ enum MemoStep<'a> {
 /// required accuracy per input; at Pass 2, under each candidate, the
 /// logical edges into each input with $\alpha^{\log}$ (from `evidence`).
 ///
-/// Unless `printing_full_candidates`, candidates that differ only in θ (same origin, `new`,
+/// Unless `verbose`, candidates that differ only in θ (same origin, `new`,
 /// operator, fused groups and requirements) are folded when there are
 /// several: at Pass 1 into one line, at Pass 2 when Pass 2 pruned some of
-/// them, into one line followed by those it kept, in full; their edges
-/// from pruned producers and producers of another θ are counted, not
-/// listed:
+/// them, into one line followed by those it kept, in full. Unless
+/// `verbose`, each kept candidate's inputs are the edges Pass 2 stored
+/// ([`write_stored_logical_edges`]), and a pruned one lists none:
 ///
 /// ```text
 /// G9:  SummaryAgg CmsWithHeap  <- G1
@@ -306,18 +385,21 @@ enum MemoStep<'a> {
 ///         θ: depth ∈ {5, 7, 10, 12}, heap_size ∈ {10..10000} (7 values), width ∈ {28..2719} (10 values)
 ///         280 candidates: 278 pruned (BelowRequiredAccuracy 270, MetricRule 8), 2 kept
 ///     [57]  Pass1  SummaryAgg CmsWithHeap <- G1  θ=CmsWithHeap(depth=7, heap_size=10, width=544)  fuses=[G4]
-///         input 0 <- G1:
-///             G1[0]  ✓
+///         input 0 <- G1: ✓ G1[0]
 /// ```
 fn write_memo(
     out: &mut String,
     memo: &Memo,
     step: Option<MemoStep<'_>>,
     evidence: Option<&dyn AccuracyEvidence>,
-    printing_full_candidates: bool,
+    verbose: bool,
 ) {
     // The group lines share one set of column widths, with each group's
     // candidates printed under its line.
+    let (earlier, logical) = match step {
+        Some(MemoStep::Pass2 { pass1, logical }) => (Some(pass1), Some(logical)),
+        _ => (None, None),
+    };
     let group_rows: Vec<Vec<String>> = memo
         .groups()
         .iter()
@@ -329,21 +411,56 @@ fn write_memo(
                 .into_iter()
                 .map(|child| format!("G{}", child.0))
                 .collect();
+            let mut context = Vec::new();
+            if !group.parent_groups().is_empty() {
+                let parents: Vec<String> = group
+                    .parent_groups()
+                    .iter()
+                    .map(|g| format!("G{}", g.0))
+                    .collect();
+                context.push(format!("used by {}", parents.join(", ")));
+            }
+            if !group.reached_by_queries().is_empty() {
+                let queries: Vec<String> = group
+                    .reached_by_queries()
+                    .iter()
+                    .map(|query| format!("q{}", query + 1))
+                    .collect();
+                context.push(format!("reached by {}", queries.join(", ")));
+            }
+            // Without `verbose` the properties line is not printed, but the
+            // grid is: Pass 2 derives it, so it is new at that step.
+            if let (false, Some(logical)) = (verbose, logical) {
+                context.push(grid_text(logical.evaluation_grid_of_group[id].as_ref()));
+            }
             vec![
                 format!("G{id}:"),
                 operator_label(&group.expression),
                 reads(&children),
+                context.join(" · "),
             ]
         })
         .collect();
     let mut group_lines = String::new();
     write_rows(&mut group_lines, "", group_rows);
-    let (earlier, logical) = match step {
-        Some(MemoStep::Pass2 { pass1, logical }) => (Some(pass1), Some(logical)),
-        _ => (None, None),
-    };
-    // The metric rule's accepted metrics of Pass 2's memo, once.
-    let accepted = logical.map(|logical| accepted_metrics(&logical.memo));
+    // Only `verbose` recomputes the logical edges, from the metric rule's
+    // accepted metrics; otherwise the stored edges are printed, by
+    // (consumer, input).
+    let accepted = logical
+        .filter(|_| verbose)
+        .map(|logical| accepted_metrics(&logical.memo));
+    let mut stored_edges: BTreeMap<(CandidateForMemoGroupId, usize), Vec<&LogicalEdge>> =
+        BTreeMap::new();
+    for edge in logical
+        .filter(|_| !verbose)
+        .iter()
+        .flat_map(|logical| &logical.edges)
+    {
+        stored_edges
+            .entry((edge.consumer_candidate_id, edge.input_index_of_consumer))
+            .or_default()
+            .push(edge);
+    }
     let pruned: BTreeMap<CandidateForMemoGroupId, &'static str> = logical
         .map(|logical| {
             logical
@@ -361,12 +478,14 @@ fn write_memo(
         .unwrap_or_default();
     for (id, line) in group_lines.lines().enumerate() {
         let _ = writeln!(out, "{line}");
-        let grid = logical.map(|logical| logical.evaluation_grid_of_group[id].as_ref());
-        let _ = writeln!(
-            out,
-            "    {}",
-            group_properties_text(&memo.groups()[id], grid)
-        );
+        if verbose {
+            let grid = logical.map(|logical| logical.evaluation_grid_of_group[id].as_ref());
+            let _ = writeln!(
+                out,
+                "    {}",
+                group_properties_text(&memo.groups()[id], grid)
+            );
+        }
         if step.is_none() {
             continue;
         }
@@ -388,7 +507,7 @@ fn write_memo(
                 text,
             ]
         };
-        // The candidates printed in full, in index order; unless `printing_full_candidates`,
+        // The candidates printed in full, in index order; unless `verbose`,
         // each class of candidates differing only in θ that is folded
         // prints its line where its first candidate is.
         let mut classes: Vec<(String, Vec<usize>)> = Vec::new();
@@ -410,9 +529,7 @@ fn write_memo(
                 .iter()
                 .filter(|&&index| pruned.contains_key(&id_of(index)))
                 .count();
-            let folded = !printing_full_candidates
-                && members.len() > 1
-                && (logical.is_none() || pruned_members > 0);
+            let folded = !verbose && members.len() > 1 && (logical.is_none() || pruned_members > 0);
             if !folded {
                 printed.extend(members.iter().map(|&index| (index, None)));
                 continue;
@@ -472,17 +589,15 @@ fn write_memo(
             );
             cells.insert(3, flag(pruned.contains_key(&candidate_id), "pruned"));
             write_rows(out, "    ", vec![cells]);
-            if let (Some(logical), Some(accepted), Some(evidence)) = (logical, &accepted, evidence)
-            {
-                let folded_producers = (!printing_full_candidates).then_some(&pruned);
-                write_logical_edges(
-                    out,
-                    &logical.memo,
-                    accepted,
-                    candidate_id,
-                    evidence,
-                    folded_producers,
-                );
+            match (logical, &accepted, evidence) {
+                (Some(logical), Some(accepted), Some(evidence)) => {
+                    write_logical_edges(out, &logical.memo, accepted, candidate_id, evidence)
+                }
+                // Pass 2 keeps no edges into a pruned candidate.
+                (Some(logical), ..) if !pruned.contains_key(&candidate_id) => {
+                    write_stored_logical_edges(out, &logical.memo, &stored_edges, candidate_id)
+                }
+                _ => {}
             }
         }
     }
@@ -497,17 +612,52 @@ fn write_memo(
     let _ = writeln!(out, "query_roots: [{}]", roots.join(", "));
 }
 
-/// The logical edges into each input of `consumer`: each producer of the
-/// input group with `✓`, or `✗` and why ([`logical_edges_into`]). With
-/// `folded` (Pass 2's pruned candidates), the edges from those and from
-/// producers of another θ are counted on one line, not listed.
+/// The logical edges Pass 2 stored into each input of `consumer`
+/// (`stored_edges`, from `LogicalASAPMemoCandidates::edges` by (consumer,
+/// input): between surviving candidates only), as producer indices by
+/// $\alpha^{\log}$, then how many candidates of the input group have no
+/// edge: `input 0 <- G7: ✓ G7[0..11] ✗ G7[12] · 270 others`.
+fn write_stored_logical_edges(
+    out: &mut String,
+    memo: &Memo,
+    stored_edges: &BTreeMap<(CandidateForMemoGroupId, usize), Vec<&LogicalEdge>>,
+    consumer: CandidateForMemoGroupId,
+) {
+    let groups = memo.candidate(consumer).expression.operator.children();
+    for (input, group) in groups.into_iter().enumerate() {
+        let (mut satisfied, mut failed) = (Vec::new(), Vec::new());
+        for edge in stored_edges.get(&(consumer, input)).into_iter().flatten() {
+            let index = edge.producer_candidate_id.index_in_group;
+            match edge.satisfies_logical_requirement {
+                true => satisfied.push(index),
+                false => failed.push(index),
+            }
+        }
+        let others =
+            memo.groups()[group.0 as usize].candidates.len() - satisfied.len() - failed.len();
+        let mut line = format!("        input {input} <- G{}:", group.0);
+        for (mark, indices) in [("✓", satisfied), ("✗", failed)] {
+            if !indices.is_empty() {
+                let _ = write!(line, " {mark} G{}[{}]", group.0, index_ranges(&indices));
+            }
+        }
+        if others > 0 {
+            let plural = if others == 1 { "" } else { "s" };
+            let _ = write!(line, " · {others} other{plural}");
+        }
+        let _ = writeln!(out, "{line}");
+    }
+}
+
+/// The logical edges into each input of `consumer`, recomputed
+/// (`verbose`): each candidate of the input group with `✓`, or `✗` and why
+/// ([`logical_edges_into`]).
 fn write_logical_edges(
     out: &mut String,
     memo: &Memo,
     accepted: &[Option<Vec<AccuracyMetric>>],
     consumer: CandidateForMemoGroupId,
     evidence: &dyn AccuracyEvidence,
-    folded: Option<&BTreeMap<CandidateForMemoGroupId, &'static str>>,
 ) {
     let groups = memo.candidate(consumer).expression.operator.children();
     for ((input, group), edges) in groups
@@ -515,47 +665,22 @@ fn write_logical_edges(
         .enumerate()
         .zip(logical_edges_into(memo, accepted, consumer, evidence))
     {
-        let (mut pruned_producers, mut other_parameters) = (0, 0);
         let rows: Vec<Vec<String>> = edges
             .into_iter()
             .enumerate()
-            .filter_map(|(index_in_group, rejection)| {
-                let producer = CandidateForMemoGroupId {
+            .map(|(index_in_group, rejection)| {
+                let producer = candidate_id_text(CandidateForMemoGroupId {
                     group: *group,
                     index_in_group,
-                };
-                if let Some(folded) = folded {
-                    if folded.contains_key(&producer) {
-                        pruned_producers += 1;
-                        return None;
-                    }
-                    if rejection.as_deref() == Some(NO_EDGE_OTHER_PARAMETERS) {
-                        other_parameters += 1;
-                        return None;
-                    }
-                }
-                let producer = candidate_id_text(producer);
-                Some(match rejection {
+                });
+                match rejection {
                     None => vec![producer, "✓".into()],
                     Some(reason) => vec![producer, format!("✗ {reason}")],
-                })
+                }
             })
             .collect();
         let _ = writeln!(out, "        input {input} <- G{}:", group.0);
-        let listed = !rows.is_empty();
         write_rows(out, "            ", rows);
-        let counted: Vec<String> = [
-            (pruned_producers, "pruned producers"),
-            (other_parameters, "producers of another θ (no edge)"),
-        ]
-        .into_iter()
-        .filter(|&(count, _)| count > 0)
-        .map(|(count, what)| format!("{count} {what}"))
-        .collect();
-        if !counted.is_empty() {
-            let and = if listed { "and " } else { "" };
-            let _ = writeln!(out, "            {and}{}", counted.join(", "));
-        }
     }
 }
 
@@ -785,15 +910,11 @@ pub fn root_prune_reason_text(reason: &RootPruneReason) -> String {
 
 /// The candidates Pass 2 eliminated, each with its θ and one line per
 /// cause: the failing edge (`at G4[0] input 0`) or none, the eliminated
-/// consumers the cause comes through, and why. Unless `printing_full_candidates`, per group
+/// consumers the cause comes through, and why. Unless `verbose`, per group
 /// the count of its pruned candidates by their first cause.
-fn write_pass2_pruned(
-    out: &mut String,
-    logical: &LogicalASAPMemoCandidates,
-    printing_full_candidates: bool,
-) {
+fn write_pass2_pruned(out: &mut String, logical: &LogicalASAPMemoCandidates, verbose: bool) {
     let _ = writeln!(out, "pruned by Pass 2 ({}):", logical.pruned.len());
-    if !printing_full_candidates {
+    if !verbose {
         let mut causes: BTreeMap<MemoGroupId, Vec<&str>> = BTreeMap::new();
         for pruned in &logical.pruned {
             causes.entry(pruned.candidate.group).or_default().push(
@@ -945,20 +1066,41 @@ fn physical_candidate_text(
 /// candidate and $p^{\mathrm{phys}}_v$; under it, per input $(c, i)$, the
 /// physical edges whose logical edge holds, with $\alpha^{\mathrm{phys}}$
 /// (`✓`, or `✗` and why not) and `selected` for an edge of `plan`; then the
-/// candidates Stage 2 pruned (unless `printing_full_candidates`, their count per reason).
+/// candidates Stage 2 pruned (unless `verbose`, their count per reason).
 fn write_physical(
     out: &mut String,
     physical: &PhysicalASAPMemoCandidates,
     plan: Option<&PhysicalASAPDAG>,
-    printing_full_candidates: bool,
+    verbose: bool,
 ) {
-    let memo = &physical.logical_candidates.memo;
     let selected = selected_edges(plan);
     let _ = writeln!(
         out,
         "physical candidates ({}):",
         physical.physical_candidates.len()
     );
+    if verbose {
+        write_physical_edges(out, physical, &selected);
+    } else {
+        write_physical_by_logical_candidate(out, physical, plan, &selected);
+    }
+    let _ = writeln!(
+        out,
+        "pruned by Stage 2 ({}):",
+        physical.pruned_candidates.len()
+    );
+    write_physical_pruned(out, &physical.pruned_candidates, verbose);
+}
+
+/// Each physical candidate with, per input, every physical edge whose
+/// logical edge holds: `✓`, or `✗` and why, and `selected` for an edge of
+/// the plan (`selected`).
+fn write_physical_edges(
+    out: &mut String,
+    physical: &PhysicalASAPMemoCandidates,
+    selected: &BTreeSet<(PhysicalCandidateId, PhysicalCandidateId, usize)>,
+) {
+    let memo = &physical.logical_candidates.memo;
     let edges_into = edges_per_input(physical);
     for (id, candidate) in physical.physical_candidates.iter().enumerate() {
         let operator = &memo
@@ -1005,19 +1147,22 @@ fn write_physical(
             write_rows(out, "            ", rows);
         }
     }
-    let _ = writeln!(
-        out,
-        "pruned by Stage 2 ({}):",
-        physical.pruned_candidates.len()
-    );
-    if !printing_full_candidates {
-        let reasons: Vec<String> = physical
-            .pruned_candidates
+}
+
+/// Physical candidates Stage 2 or Stage 3 pruned: their count per reason,
+/// or with `verbose` each with its logical candidate, properties and reason.
+fn write_physical_pruned(
+    out: &mut String,
+    pruned: &[PrunedCandidate<PhysicalCandidate>],
+    verbose: bool,
+) {
+    if !verbose {
+        let reasons: Vec<String> = pruned
             .iter()
             .map(|pruned| {
                 let reason = format!("{:?}", pruned.reason);
                 reason
-                    .split(['(', ' '])
+                    .split(['(', ' ', '{'])
                     .next()
                     .unwrap_or_default()
                     .to_owned()
@@ -1032,8 +1177,7 @@ fn write_physical(
         }
         return;
     }
-    let rows = physical
-        .pruned_candidates
+    let rows = pruned
         .iter()
         .map(|pruned| {
             vec![
@@ -1046,11 +1190,111 @@ fn write_physical(
     write_rows(out, "    ", rows);
 }
 
+/// Stage 2's output without `verbose`: each logical candidate once, its
+/// physical candidates under it (`★` when in `plan`), and per input the
+/// producers it can read ($\alpha^{\log} = \alpha^{\mathrm{phys}} = 1$) and
+/// the one the plan reads:
+///
+/// ```text
+/// G1[0]  TimeRange 300s <- G0  exact
+///     C4  (QueryTime, None)  ★
+///         input 0 <- G0: reads C0..C1, C3 · uses C0
+/// ```
+fn write_physical_by_logical_candidate(
+    out: &mut String,
+    physical: &PhysicalASAPMemoCandidates,
+    plan: Option<&PhysicalASAPDAG>,
+    selected: &BTreeSet<(PhysicalCandidateId, PhysicalCandidateId, usize)>,
+) {
+    let memo = &physical.logical_candidates.memo;
+    let in_plan: BTreeSet<PhysicalCandidateId> = plan
+        .into_iter()
+        .flat_map(|plan| &plan.nodes)
+        .filter_map(|node| node.selected_physical_candidate)
+        .collect();
+    // Grouped explicitly: Stage 2 lists a logical candidate's physical
+    // candidates together, but `PhysicalASAPMemoCandidates` does not require it.
+    let mut by_logical: BTreeMap<CandidateForMemoGroupId, Vec<usize>> = BTreeMap::new();
+    for (index, candidate) in physical.physical_candidates.iter().enumerate() {
+        by_logical
+            .entry(candidate.logical_candidate_id)
+            .or_default()
+            .push(index);
+    }
+    for (logical_id, indices) in by_logical {
+        let logical = memo.candidate(logical_id);
+        let _ = writeln!(
+            out,
+            "{}  {}",
+            candidate_id_text(logical_id),
+            candidate_text(logical, true)
+        );
+        for index in indices {
+            let candidate = &physical.physical_candidates[index];
+            let id = PhysicalCandidateId(index);
+            let star = if in_plan.contains(&id) { "  ★" } else { "" };
+            let _ = writeln!(
+                out,
+                "    C{index}  {}{star}",
+                physical_properties_text(&candidate.physical_properties)
+            );
+            for (input, group) in logical
+                .expression
+                .operator
+                .children()
+                .into_iter()
+                .enumerate()
+            {
+                let producers: Vec<usize> = physical
+                    .admissible_edges_into(id, input)
+                    .iter()
+                    .map(|&edge| physical.edge(edge).producer_candidate_id.0)
+                    .collect();
+                let mut line = match producers.is_empty() {
+                    true => format!("        input {input} <- G{}: reads nothing", group.0),
+                    false => format!(
+                        "        input {input} <- G{}: reads {}",
+                        group.0,
+                        physical_ranges(&producers)
+                    ),
+                };
+                if let Some(&(producer, ..)) =
+                    selected.iter().find(|&&(_, consumer, selected_input)| {
+                        consumer == id && selected_input == input
+                    })
+                {
+                    let _ = write!(line, " · uses C{}", producer.0);
+                }
+                let _ = writeln!(out, "{line}");
+            }
+        }
+    }
+}
+
+/// `C0..C1, C3`: sorted physical candidate ids as ranges.
+fn physical_ranges(ids: &[usize]) -> String {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    index_ranges(&ids)
+        .split(", ")
+        .map(|range| match range.split_once("..") {
+            Some((start, end)) => format!("C{start}..C{end}"),
+            None => format!("C{range}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Stage 3's plan, each node with its physical candidate, operator and
 /// input nodes; the plan's cost (`plan_cost`) with each node's charge;
 /// each query's accepted accuracy; the selection MILP's size; and the
 /// candidates Stage 3 pruned. Or why no plan was selected.
-fn write_selection(out: &mut String, stages: &PlanningStagesRun, plan_cost: Option<&PlanCost>) {
+fn write_selection(
+    out: &mut String,
+    stages: &PlanningStagesRun,
+    plan_cost: Option<&PlanCost>,
+    verbose: bool,
+) {
     let run = &stages.run;
     let (plan, selection) = match &run.selection {
         Ok(selected) => selected,
@@ -1135,16 +1379,5 @@ fn write_selection(out: &mut String, stages: &PlanningStagesRun, plan_cost: Opti
         "pruned by Stage 3 ({}):",
         selection.pruned_candidates.len()
     );
-    let rows = selection
-        .pruned_candidates
-        .iter()
-        .map(|pruned| {
-            vec![
-                candidate_id_text(pruned.candidate.logical_candidate_id),
-                physical_properties_text(&pruned.candidate.physical_properties),
-                format!("{:?}", pruned.reason),
-            ]
-        })
-        .collect();
-    write_rows(out, "    ", rows);
+    write_physical_pruned(out, &selection.pruned_candidates, verbose);
 }

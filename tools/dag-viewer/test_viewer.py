@@ -1,4 +1,4 @@
-"""Tests for the ASAPPlanner Stage Viewer: the stage-document functions in
+"""Tests for the ASAPPlanner Plan Viewer: the stage-document functions in
 stages.js and the page itself (app.js) run in V8 through py_mini_racer with
 a stub DOM, plus the page's files and the example list.
 
@@ -262,30 +262,22 @@ class PlanRowTests(unittest.TestCase):
         self.js = stages_js()
         self.doc = example1()
 
-    def test_the_selected_plan_row_shows_its_cost_and_accepted_accuracy(self):
-        """The row shows the plan's cost per second and what Stage 3 accepted per query."""
-        row = self.js.call("selectedPlanRow", self.doc)
-        self.assertEqual(row, {"status": "selected", "total": self.doc["stage3_plan_selection"]["cost"]["cost_per_second"],
-                               "accepted": "q1: accepted exact; q2: accepted exact", "reason": None})
-
-    def test_a_failed_selection_row_shows_the_error(self):
-        """Without a plan the row shows selection's error, as does the header."""
+    def test_a_failed_selection_shows_the_error(self):
+        """Without a plan the outcome line shows selection's error."""
         self.doc["stage3_plan_selection"] = {"plan": None, "error": "no data workload", "materialized_views": []}
-        self.assertEqual(self.js.call("selectedPlanRow", self.doc),
-                         {"status": "no plan", "total": None, "accepted": None, "reason": "no data workload"})
         self.assertEqual(self.js.call("planHeader", self.doc), "selection failed: no data workload")
 
     def test_accuracy_text_reads_the_target_json(self):
         """An accuracy target reads as its ε, δ, metric and scope."""
         text = lambda target: self.js.call("accuracyText", target)
         self.assertEqual(text({"max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result"}), "exact")
-        self.assertEqual(text({"max_error": 0.01, "accuracy_scope": "whole_result"}), "ε=0.01 (metric not set)")
+        self.assertEqual(text({"max_error": 0.01, "accuracy_scope": "whole_result"}), "ε=0.01 (error metric not set)")
         self.assertEqual(text({"accuracy_metric": "rank", "max_error": 0.01, "failure_probability": 0.001, "accuracy_scope": "whole_result"}), "ε=0.01, δ=0.001 (rank)")
-        self.assertEqual(self.js.call("accuracyText", {"max_error": 0.01}, "relative"), "ε=0.01 (metric not set; default relative)")
+        self.assertEqual(self.js.call("accuracyText", {"max_error": 0.01}, "relative"), "ε=0.01 (error metric not set; default relative)")
         self.assertEqual(text(None), "")
         self.assertEqual(text({"accuracy_metric": "relative", "max_error": 0.05, "failure_probability": 0.05, "accuracy_scope": "per_value"}), "ε=0.05, δ=0.05 (relative; per value)")
         self.assertEqual(text({"accuracy_metric": "relative", "max_error": 0.05, "failure_probability": 0.05, "accuracy_scope": {"groups_with_record_share_at_least": 0.05}}), "ε=0.05, δ=0.05 (relative; groups ≥ 5% of records)")
-        self.assertEqual(text({"max_error": 0.05, "accuracy_scope": {"groups_with_record_share_at_least": 0.01}}), "ε=0.05 (metric not set; groups ≥ 1% of records)")
+        self.assertEqual(text({"max_error": 0.05, "accuracy_scope": {"groups_with_record_share_at_least": 0.01}}), "ε=0.05 (error metric not set; groups ≥ 1% of records)")
 
     def test_counts_line_counts_each_stages_candidates(self):
         """The counts line counts the Pass 2 memo's candidates, the physical
@@ -432,15 +424,16 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(len(self.doc["stage3_plan_selection"]["plan"]["roots"]), 2)
 
     def test_guarantees_are_enforced_by_default_and_the_header_says_which(self):
-        """The header says whether the run enforced accuracy guarantees
+        """The settings say whether the run enforced accuracy guarantees
         (the default) or ignored them."""
+        guarantees = lambda doc: dict(self.js.call("settingsRows", doc))["accuracy guarantees"]
         self.assertEqual(self.doc["accuracy_guarantees"], "enforced")
-        self.assertEqual(self.js.call("accuracyGuaranteesText", self.doc), "accuracy guarantees enforced")
+        self.assertEqual(guarantees(self.doc), "enforced")
         ignored = planned(promql_workload(["sum(rate(a[1m]))", "topk(5, rate(b[1m]))"], ["a", "b"]), ignore_accuracy_guarantees=True)
         self.assertEqual(ignored["accuracy_guarantees"], "ignored")
         self.assertEqual(self.js.call("validateStagePipeline", ignored), [])
-        self.assertTrue(self.js.call("accuracyGuaranteesText", ignored).startswith("accuracy guarantees ignored"))
-        self.assertEqual(self.js.call("accuracyGuaranteesText", {}), "")
+        self.assertTrue(guarantees(ignored).startswith("ignored"))
+        self.assertEqual(guarantees({}), "not recorded")
 
     def test_header_names_the_search_and_its_milp(self):
         """The header names the candidate-connection search and its MILP's
@@ -546,8 +539,12 @@ class WorkloadViewTests(unittest.TestCase):
         """The usage and deployment lines read the plan's cost and capabilities."""
         cost = self.doc["stage3_plan_selection"]["cost"]
         self.assertIn("peak cores", self.js.call("usageText", cost["usage"]))
-        self.assertEqual(self.js.call("deploymentText", NO_RAW_DATA), "raw data not retained · query-time results not retained · every summary the planner builds")
-        self.assertTrue(self.js.call("deploymentText", self.doc["deployment_capabilities"]).startswith("raw data retained · "))
+        no_raw = dict(self.js.call("settingsRows", {"deployment_capabilities": NO_RAW_DATA}))
+        self.assertEqual([no_raw["raw data"], no_raw["query-time results"], no_raw["summaries"]], ["not retained", "not retained", "every summary the planner builds"])
+        rows = dict(self.js.call("settingsRows", self.doc))
+        self.assertEqual(rows["raw data"], "retained")
+        self.assertTrue(rows["summaries"].startswith("Cms (Total), "))
+        self.assertEqual(rows["cost model"], cost["source"])
 
     def test_planning_workload_queries_read_the_workload_json(self):
         """A PlanningWorkload is recognised and its queries listed."""
@@ -694,7 +691,7 @@ function __el(id) {
     __on: {}, addEventListener(type, fn) { this.__on[type] = fn; }, setAttribute() {}, click() {}, querySelectorAll() { return []; } };
   return __els[id];
 }
-var document = { getElementById: __el, documentElement: {}, body: { classList: { add() {}, remove() {} } }, addEventListener() {} };
+var document = { getElementById: __el, querySelectorAll() { return []; }, documentElement: {}, body: { classList: { add() {}, remove() {} } }, addEventListener() {} };
 var window = { matchMedia() { return { addEventListener() {} }; } };
 var location = { hash: '', search: '', pathname: '/' };
 var history = { replaceState(a, b, h) { location.hash = h; } };
@@ -753,14 +750,13 @@ class AppTests(unittest.TestCase):
         row with its cost and accepted accuracy, the counts and the header."""
         js = self.page("?doc=examples/e1.json", {"examples/e1.json": json.dumps(example1())})
         self.assertIn("Candidates per stage", js.eval("__els.counts.textContent"))
-        self.assertIn("✓ selected", self.text(js, "rank"))
-        self.assertIn("accepted exact", self.text(js, "rank"))
         lane = self.text(js, "lane1-meta")
         self.assertRegex(lane, r"^\d+ nodes · cost [\d.]+ per second · q1: accepted exact")
         self.assertIn("Stage 3 usage: CPU", lane)
-        rank_meta = js.eval("__els['rank-meta'].textContent")
-        self.assertIn("accuracy guarantees enforced", rank_meta)
-        self.assertIn("candidate-connection search · MILP", rank_meta)
+        outcome = js.eval("__els.outcome.textContent")
+        self.assertTrue(outcome.startswith("plan selected · "))
+        self.assertIn("candidate-connection search · MILP", outcome)
+        self.assertIn("accuracy guaranteesenforced", self.text(js, "deployment"))
         self.assertEqual(len(lane_nodes(self.ev(js, "__rendered.cy1"))), len(example1()["stage3_plan_selection"]["plan"]["nodes"]))
         self.assertGreater(len(self.ev(js, "__rendered.cy0")), 0)
 
@@ -770,9 +766,8 @@ class AppTests(unittest.TestCase):
         doc = example1()
         doc["stage3_plan_selection"] = {"plan": None, "error": "no valid candidate", "materialized_views": []}
         js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
-        self.assertIn("no planno valid candidate", self.text(js, "rank"))
         self.assertEqual(js.eval("__els['lane1-meta'].textContent"), "no plan: no valid candidate")
-        self.assertIn("selection failed: no valid candidate", js.eval("__els['rank-meta'].textContent"))
+        self.assertTrue(js.eval("__els.outcome.textContent").startswith("no plan selected: no valid candidate"))
         self.assertFalse(js.eval("'cy1' in __rendered"))
         self.assertGreater(len(self.ev(js, "__rendered.cy0")), 0)
         self.assertEqual(js.eval("__els['views-meta'].textContent"), "no plan selected")
@@ -781,7 +776,7 @@ class AppTests(unittest.TestCase):
         """A Stage 1 failure still draws Stage 0 and shows the error."""
         doc = planned(json.loads(EXAMPLE3A.read_text()), NO_RAW_DATA)
         js = self.page("?doc=d.json", {"d.json": json.dumps(doc)})
-        self.assertIn("Stage 1 failed: deployment capabilities", js.eval("__els['rank-meta'].textContent"))
+        self.assertIn("Stage 1 failed: deployment capabilities", js.eval("__els.outcome.textContent"))
         self.assertGreater(len(self.ev(js, "__rendered.cy0")), 0)
 
     def test_examples_become_tabs_and_the_hash_picks_one(self):
@@ -808,7 +803,7 @@ class AppTests(unittest.TestCase):
         js = self.page("?doc=s.json", {"s.json": json.dumps(doc)})
         self.assertIn("q1, q2", self.text(js, "dataSources"))
         self.assertIn("ingesting", js.eval("__els.dataArrival.textContent"))
-        self.assertIn("raw data retained", js.eval("__els.deployment.textContent"))
+        self.assertIn("raw dataretained", self.text(js, "deployment"))
         self.assertIn("every 10 s · predictable", self.text(js, "queries"))
         self.assertIn(f"no installable plan: {doc['stage3_plan_selection']['materialized_views_error']}", self.text(js, "views-meta"))
 
@@ -854,9 +849,20 @@ class AppTests(unittest.TestCase):
         js = self.page("?doc=bad.json", {"bad.json": json.dumps({"format": "nope"})})
         self.assertIn("Could not load", js.eval("__els.queries.innerHTML"))
 
-    def memo_page(self, doc=None):
-        """The p90 fixture document (or `doc`) on the page."""
-        return self.page("?doc=m.json", {"m.json": json.dumps(doc or p90_kll())})
+    def memo_page(self, doc=None, show_pruned=True):
+        """The p90 fixture document (or `doc`) on the page, with Pass 2's
+        pruned candidates shown unless `show_pruned` is false."""
+        js = self.page("?doc=m.json", {"m.json": json.dumps(doc or p90_kll())})
+        if show_pruned:
+            js.eval("__els.memoShowPruned.checked = true; __els.memoShowPruned.__on.change()")
+        return js
+
+    def test_the_memo_view_hides_pruned_candidates_until_asked(self):
+        """Pass 2's pruned candidates are hidden until the box is ticked."""
+        js = self.memo_page(show_pruned=False)
+        self.assertEqual(self.memo_ids(js, "g3"), ["g3c4", "g3c5", "g3c6", "g3c7"])
+        js.eval("__els.memoShowPruned.checked = true; __els.memoShowPruned.__on.change()")
+        self.assertEqual(len(self.memo_ids(js, "g3")), 8)
 
     def tap_memo(self, js, element_id):
         js.eval(f"__taps['cyMemo node']({{ target: {{ data() {{ return __rendered.cyMemo.find((e) => e.data.id === {json.dumps(element_id)}).data; }} }} }})")
@@ -871,14 +877,14 @@ class AppTests(unittest.TestCase):
         js = self.page("?doc=e1.json", {"e1.json": json.dumps(doc)})
         self.assertTrue(js.eval("__els.memoView.hidden"))
         self.assertFalse(js.eval("'cyMemo' in __rendered"))
-        self.assertIn("✓ selected", self.text(js, "rank"))
+        self.assertTrue(js.eval("__els.outcome.textContent").startswith("plan selected"))
 
     def test_the_memo_view_has_a_tab_per_step_and_opens_on_the_last(self):
         """The memo view has a tab per step and opens on the last."""
         js = self.memo_page()
         self.assertFalse(js.eval("__els.memoView.hidden"))
         tabs = js.eval("__els.memoTabs.innerHTML")
-        self.assertEqual(re.findall(r">([^<]+)</button>", tabs), ["Stage 0, the frontends' DAG hash-consed", "Stage 1, Pass 1", "Stage 1, Pass 2"])
+        self.assertEqual(re.findall(r">([^<]+)</button>", tabs), ["Stage 0", "Stage 1 · Pass 1", "Stage 1 · Pass 2"])
         self.assertIn('data-step="2" aria-pressed="true"', tabs)
         meta = self.text(js, "memoView-meta")
         self.assertIn("7 groups (+2) · 17 candidates (+5)", meta)
@@ -889,19 +895,28 @@ class AppTests(unittest.TestCase):
         self.assertIn("3 groups · 0 candidates", self.text(js, "memoView-meta"))
         self.assertIn("shown on the last tab", self.text(js, "memoView-meta"))
 
-    def test_tapping_a_count_expands_its_group_and_the_group_collapses_it(self):
-        """Tapping an origin count expands its group; tapping the group collapses it."""
+    def test_tapping_counts_drills_down_to_candidates_and_the_group_goes_back(self):
+        """Tapping a count drills into it until the group shows candidates
+        (at most 12); the details offer the dimensions to split by; tapping
+        the group goes back one level at a time."""
         doc = example1()
         js = self.memo_page(doc)
         pass2 = doc["memo"]["steps"][-1]
         big = next(g for g in pass2["groups"] if g["candidate_count"] > 12)
-        counts = self.memo_ids(js, f"g{big['id']}")
-        self.assertEqual(len(counts), len([n for n in big["candidate_count_by_origin"].values() if n]))
-        self.tap_memo(js, counts[0])
-        self.assertEqual(len(self.memo_ids(js, f"g{big['id']}")), big["candidate_count"])
+        group = f"g{big['id']}"
+        levels = [self.memo_ids(js, group)]
+        self.assertTrue(all("b" in i for i in levels[0]))
+        self.tap_memo(js, group)
+        self.assertIn('data-dim="', js.eval("__els.details.innerHTML"))
+        while "b" in levels[-1][0]:
+            self.tap_memo(js, levels[-1][0])
+            levels.append(self.memo_ids(js, group))
+        self.assertTrue(all("c" in i for i in levels[-1]))
+        self.assertLessEqual(len(levels[-1]), 12)
         self.assertIn(f"Memo group G{big['id']}", self.text(js, "details"))
-        self.tap_memo(js, f"g{big['id']}")
-        self.assertEqual(self.memo_ids(js, f"g{big['id']}"), counts)
+        for level in reversed(levels[:-1]):
+            self.tap_memo(js, group)
+            self.assertEqual(self.memo_ids(js, group), level)
 
     def test_tapping_a_candidate_lists_its_logical_edges_and_physical_candidates(self):
         """Tapping a memo candidate shows its θ and required accuracy, its
