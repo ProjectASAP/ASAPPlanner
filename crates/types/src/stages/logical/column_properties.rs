@@ -155,8 +155,8 @@ fn columns_of(input: &Input<'_>) -> Vec<ColumnProperties> {
         .collect()
 }
 
-/// `right`, the right side's columns of an operator that concatenates two
-/// inputs' columns after `left`'s: a source column of a source `left` also
+/// `right`, the right side's columns of a `Join`, which concatenates them
+/// after `left`'s: a source column of a source `left` also
 /// scans moves to the scans after `left`'s (its scan ordinal shifted by
 /// `left`'s largest for that source, plus one), so a self-join's two sides
 /// name different scans.
@@ -282,23 +282,20 @@ fn non_asap_columns(
             columns.push(ColumnProperties::computed(Unknown));
             columns
         }
-        // The left side's columns, its value computed per the operator,
-        // then the right side's labels the match adds. A label that may
-        // come from either side (`or`, `group_right`) keeps what both sides
-        // agree on; a label `group_left(...)` names comes from the right
-        // ("one") side and one `group_right(...)` names from the left,
-        // overwriting a column of that name. A vector match is a join, so
-        // the right side reads scans after the left's; `or` is a union.
+        // The output side's columns (the left's; the right's, the "many"
+        // side, for `group_right`), its value computed per the operator,
+        // then the right side's labels the match adds. A matched label has
+        // equal values on both sides, so it takes the output side's lineage
+        // and sign; `or`, a union, keeps what both sides agree on. A label
+        // `group_left(...)` names comes from the right ("one") side and one
+        // `group_right(...)` names from the left, overwriting a column of
+        // that name. The output does not concatenate both sides' columns,
+        // so no scan ordinal shifts.
         BinaryOp {
             operator, lhs, rhs, ..
         } => {
-            let is_or = matches!(operator.kind, BinaryOpKind::Set(PromQLVectorSetOpKind::Or));
             let left = columns_of(lhs);
-            let right = if is_or {
-                columns_of(rhs)
-            } else {
-                after_left_scans(&left, columns_of(rhs))
-            };
+            let right = columns_of(rhs);
             let named = |input: &Input<'_>, columns: &[ColumnProperties], name: &str| {
                 input
                     .schema()
@@ -310,17 +307,25 @@ fn non_asap_columns(
                 .vector_match
                 .as_ref()
                 .and_then(|m| m.grouping.as_ref());
-            let right_rows =
-                is_or || grouping.is_some_and(|grouping| grouping.side == GroupSide::Right);
-            let mut columns = left.clone();
-            if right_rows {
-                for (column, field) in lhs.schema().fields.iter().enumerate() {
-                    columns[column] =
-                        columns[column]
-                            .clone()
-                            .agreed_with(&named(rhs, &right, &field.name));
-                }
-            }
+            let output_side_is_right =
+                grouping.is_some_and(|grouping| grouping.side == GroupSide::Right);
+            let is_or = matches!(operator.kind, BinaryOpKind::Set(PromQLVectorSetOpKind::Or));
+            let mut columns: Vec<ColumnProperties> = lhs
+                .schema()
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(column, field)| {
+                    let from_right = || named(rhs, &right, &field.name);
+                    if output_side_is_right {
+                        from_right()
+                    } else if is_or {
+                        left[column].clone().agreed_with(&from_right())
+                    } else {
+                        left[column].clone()
+                    }
+                })
+                .collect();
             if let Ok(value) = resolve_column_ref(&ColumnRef::SampleValue, lhs.schema()) {
                 let left_sign = left[value].sign;
                 let right_sign = resolve_column_ref(&ColumnRef::SampleValue, rhs.schema())

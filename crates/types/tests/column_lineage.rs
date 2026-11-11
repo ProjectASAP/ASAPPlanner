@@ -23,7 +23,7 @@ use asap_types::stages::{
     LogicalRequirements, Memo, MemoGroupId, OriginOfCandidateForMemoGroup, ValueSign,
 };
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
-use asap_types::test_support::memo_fixtures::{filter, range, shift};
+use asap_types::test_support::memo_fixtures::{aggregate, filter, range, shift};
 use asap_types::workload::{DataWorkload, SourceFacts};
 
 fn memo() -> Memo {
@@ -677,4 +677,61 @@ fn a_group_right_label_comes_from_the_left_side() {
         lineage_and_sign_of(&memo, product, "team"),
         (series_column("a", "team"), ValueSign::NonNegative)
     );
+}
+
+/// `rate(x[<width>])`: per series, `[ts, value, job, team]` kept in place.
+fn rate_of_x(memo: &mut Memo, width_ms: i64) -> MemoGroupId {
+    let x = memo
+        .find_or_add_group(series("x", &["job", "team"]))
+        .unwrap();
+    let window = memo.find_or_add_group(range(width_ms, x)).unwrap();
+    memo.find_or_add_group(aggregate(Reduction::PerEntity, AggIntent::Rate, window))
+        .unwrap()
+}
+
+/// `rate(x[5m]) / rate(x[1h])`: both sides read `x`, but a `BinaryOp`
+/// does not concatenate their columns; its labels are the left side's, so
+/// `job` is still `x` scan 0's.
+#[test]
+fn a_same_source_binary_op_keeps_its_labels_scan() {
+    let mut memo = match_grouping_memo();
+    let short = rate_of_x(&mut memo, 300_000);
+    let long = rate_of_x(&mut memo, 3_600_000);
+    let ratio = memo
+        .find_or_add_group(Operator::NonASAP(NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                checked_relative_division: false,
+                checked_finite_division: false,
+                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+                vector_match: None,
+            },
+            return_bool: false,
+            lhs: short,
+            rhs: long,
+        }))
+        .unwrap();
+    assert_eq!(
+        lineage_and_sign_of(&memo, ratio, "job").0,
+        series_column("x", "job")
+    );
+}
+
+/// `rate(x[5m]) * on(job) group_right(team) rate(x[1h])`: the output's rows
+/// are the right ("many") side's, so its labels take that side's lineage,
+/// `x` scan 0's, not a shifted scan or a disagreement; `team` comes from
+/// the left ("one") side, also `x` scan 0's.
+#[test]
+fn a_same_source_group_right_takes_the_right_sides_labels() {
+    let mut memo = match_grouping_memo();
+    let short = rate_of_x(&mut memo, 300_000);
+    let long = rate_of_x(&mut memo, 3_600_000);
+    let product = memo
+        .find_or_add_group(grouped_product(GroupSide::Right, short, long))
+        .unwrap();
+    for label in ["job", "team"] {
+        assert_eq!(
+            lineage_and_sign_of(&memo, product, label).0,
+            series_column("x", label)
+        );
+    }
 }
