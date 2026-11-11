@@ -1013,6 +1013,46 @@ fn no_chain_without_a_merge_an_anchor_or_a_grid() {
     .is_empty());
 }
 
+/// A chain serves a reader only when its width divides the reader's
+/// evaluation grid: `quantile_over_time(0.9, m[30s])` read every 15 s and
+/// every 10 s is one state group evaluated on the 5 s grid, so of its 5,
+/// 10 and 15 s chains only the 5 s one has edges, and the merges over the
+/// others are pruned (a 15 s chain would answer the 10 s reader at times
+/// it does not end on).
+#[test]
+fn a_chain_whose_width_does_not_divide_the_readers_grid_has_no_edge() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let (_, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.9, 30);
+    query(&mut memo, readout, None);
+    query(&mut memo, readout, None);
+    let logical = pass2(memo, &[entry(15_000), entry(10_000)]);
+    let memo = &logical.memo;
+    assert_eq!(
+        chain_widths_serving(memo, state),
+        BTreeSet::from([5_000, 10_000, 15_000])
+    );
+    for edge in &logical.edges {
+        if let Some(width) = chain_width_below(memo, edge.producer_candidate_id.group) {
+            assert_eq!(width, 5_000, "{edge:?}");
+        }
+    }
+    let mut live_widths = BTreeSet::new();
+    for (index_in_group, merge) in candidates_of(memo, state).iter().enumerate() {
+        let Operator::ASAP(ASAPOp::SummaryMerge { children, .. }) = &merge.expression.operator
+        else {
+            continue;
+        };
+        let merge = CandidateForMemoGroupId {
+            group: state,
+            index_in_group,
+        };
+        if pruned_entry(&logical, merge).is_none() {
+            live_widths.extend(chain_width_below(memo, children[0]));
+        }
+    }
+    assert_eq!(live_widths, BTreeSet::from([5_000]));
+}
+
 /// A state under `@ T` adds no width; it reads a chain another query's
 /// width created when that width divides T.
 #[test]

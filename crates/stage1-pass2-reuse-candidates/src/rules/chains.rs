@@ -29,7 +29,10 @@ use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
 /// The widths are the gcd closure of $\gcd(g_q, W, o_1, \ldots)$ over the
 /// queries reaching S that repeat on a known evaluation grid $g_q$
 /// (`QueryRecurrence::evaluation_grid_ms`), with the offsets $o_j$ on S's
-/// path; no query with a grid, no chain. Under `@ T` S adds no width: it
+/// path; no query with a grid, no chain. A chain whose width does not
+/// divide the evaluation grid of the group reading it (the gcd over all its
+/// readers) gets no edge (`candidate_edges`), so the merge over it is
+/// pruned: a 15 s chain never serves a reader every 10 s. Under `@ T` S adds no width: it
 /// reads only chains other states created whose width divides W, the
 /// offsets and T. Under `@ end()` or `@ start()` (a `TimeShift` the front
 /// end puts above the subtree it anchors) no chain is read.
