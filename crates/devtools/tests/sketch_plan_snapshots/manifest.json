@@ -74,6 +74,206 @@
       "covers": "random-mixed seed-862-long workload-01, query 3: DDSketch pane chain",
       "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/random-mixed-seed-862-long-w01-q3.json",
       "deployment": "mvp"
+    },
+    {
+      "id": "quantile-over-time-no-phase-raw-retained",
+      "covers": "two quantile_over_time over [5m] every 1m without an evaluation phase: one shared KLL build, no tumbling-window chains (#1260)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-over-time-no-phase.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "quantile-over-time-phase-0-raw-retained",
+      "covers": "the same two queries at phase 0: one 60 s KLL chain offered, query-time KLL selected",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-over-time-phase-0.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "mixed-quantiles-raw-retained",
+      "covers": "five quantiles over [5m], [10m] and instant vectors by job and by job, host, at mixed intervals",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/mixed-quantiles.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "chains-10m-5m-3m-3m-raw-retained",
+      "covers": "[10m] and [5m] every 5m and [3m] every 3m: chains at 300 s and 180 s, no shared 60 s chain (#1270)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/chains-10m-5m-3m-3m.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "chains-10m-5m-3m-10s-raw-retained",
+      "covers": "as chains-10m-5m-3m-3m with [3m] every 10 s: the [10m] and [5m] states do not read the 10 s chain (#1270)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/chains-10m-5m-3m-10s.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "chains-10m-5m-3m-10s-mvp",
+      "covers": "chains-10m-5m-3m-10s with raw data not retained: ingest-time chains, priced by the memory they keep",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/chains-10m-5m-3m-10s.json",
+      "deployment": "mvp"
+    },
+    {
+      "id": "rollup-quantile-nested-labels-raw-retained",
+      "covers": "quantile by (job) and by (job, host): the PromQL Scans project different labels, so no rollup and two scans (#1281)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/rollup-quantile-nested-labels.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "rollup-quantile-disjoint-labels-raw-retained",
+      "covers": "quantile by (job) and by (host): no finest common group, two scans (#1281)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/rollup-quantile-disjoint-labels.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "rollup-sum-chain-raw-retained",
+      "covers": "exact sum by (job), by (job, host) and sum: three scans, no rollup (#1281)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/rollup-sum-chain.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "stddev-nested-labels-raw-retained",
+      "covers": "exact stddev by (job) and by (job, host): no summary state, no rollup",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/stddev-nested-labels.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "avg-nested-labels-raw-retained",
+      "covers": "exact avg by (job), by (job, host) and avg: Sum and Count states, not rolled up (#1281)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/avg-nested-labels.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "sql-rollup-quantile-same-window-raw-retained",
+      "covers": "SQL quantile GROUP BY job and job, host over 5 min: one Scan, the job state merges the finer KLL",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/sql-rollup-quantile-same-window.json",
+      "deployment": "raw_retained",
+      "tables": "crates/devtools/tests/sketch_plan_snapshots/workloads/sql-table-data.tables.json"
+    },
+    {
+      "id": "sql-rollup-quantile-different-windows-raw-retained",
+      "covers": "SQL quantile by job over 5 min and by job, host over 10 min: no rollup through the finer chain (#1282)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/sql-rollup-quantile-different-windows.json",
+      "deployment": "raw_retained",
+      "tables": "crates/devtools/tests/sketch_plan_snapshots/workloads/sql-table-data.tables.json"
+    },
+    {
+      "id": "sum-avg-over-time-5m-raw-retained",
+      "covers": "exact sum_over_time and avg_over_time over [5m]: avg as Sum / Count, the Sum state shared",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/sum-avg-over-time-5m.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "sum-5m-avg-10m-over-time-raw-retained",
+      "covers": "exact sum_over_time [5m] and avg_over_time [10m]: one 60 s Sum chain offered for both windows",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/sum-5m-avg-10m-over-time.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "topk-5-and-10-raw-retained",
+      "covers": "topk(5) and topk(10) of a selector: Sort and Limit, both Limits over one Sort",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/topk-5-and-10.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "topk-by-job-and-global-raw-retained",
+      "covers": "topk by (job) and global topk: no reuse across partitions, two scans (#1281)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/topk-by-job-and-global.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "topk-5-and-10-accuracy-raw-retained",
+      "covers": "topk-5-and-10 with an accuracy target: no sketch for a Sort and Limit",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/topk-5-and-10-accuracy.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "topk-rate-counter-raw-retained",
+      "covers": "topk(5) and topk(10) of a counter rate: topk(5) reads topk(10)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/topk-rate-counter.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "topk-sum-count-over-time-raw-retained",
+      "covers": "exact topk of sum_over_time and of count_over_time: Aggregate top_k over shared Sum and Count states",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/topk-sum-count-over-time.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "topk-sum-count-over-time-accuracy-raw-retained",
+      "covers": "K5 at max_error 0.01: CMS and Count Sketch heaps below the required accuracy, exact plan",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/topk-sum-count-over-time-accuracy.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "sum-over-time-two-intervals-raw-retained",
+      "covers": "exact sum_over_time [10m] every 5m and [5m] every 1m: Sum chains at 300 s and 60 s, not shared (#1270)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/sum-over-time-two-intervals.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "distinct-over-time-1pct-raw-retained",
+      "covers": "distinct_over_time [10m] and [5m] at 1 %: every distinct sketch pruned, exact plan",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/distinct-over-time-1pct.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "distinct-over-time-5pct-raw-retained",
+      "covers": "distinct_over_time [10m] and [5m] at 5 %: one 300 s KMV chain serves both windows",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/distinct-over-time-5pct.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "entropy-over-time-raw-retained",
+      "covers": "entropy_over_time with a target: UnivMon has no guarantee, exact plan",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/entropy-over-time.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "quantile-phase-0-and-30s-raw-retained",
+      "covers": "quantiles at phase 0 and 30 s every 1m: chains at 30 s and 60 s",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-phase-0-and-30s.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "quantile-7m-every-5m-raw-retained",
+      "covers": "quantile_over_time [7m] every 5m: a 60 s chain, gcd(5 min, 7 min)",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-7m-every-5m.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "quantile-two-targets-raw-retained",
+      "covers": "one quantile at max_error 0.01 and 0.05: one root, sized for the stricter target",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-two-targets.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "distinct-two-forms-raw-retained",
+      "covers": "distinct_over_time and count(count_values): KMV for the first, exact for the second",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/distinct-two-forms.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "entropy-and-distinct-raw-retained",
+      "covers": "entropy_over_time and distinct_over_time: no shared UnivMon; KMV and exact entropy",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/entropy-and-distinct.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "quantile-exact-raw-retained",
+      "covers": "quantile_over_time without a target: every sketch pruned, exact plan",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-exact.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "sign-unknown-raw-retained",
+      "covers": "quantile and topk of sum_over_time at 5 %, value sign unknown: no DDSketch",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/sign-unknown.json",
+      "deployment": "raw_retained"
+    },
+    {
+      "id": "sign-non-negative-raw-retained",
+      "covers": "as sign-unknown with the value declared non-negative: DDSketch offered",
+      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/sign-non-negative.json",
+      "deployment": "raw_retained"
     }
   ]
 }
