@@ -1,0 +1,578 @@
+{
+  "accuracy_guarantees": "enforced",
+  "materialized_views": [],
+  "queries": [
+    "topk(5, data)",
+    "topk(10, data)"
+  ],
+  "selected": {
+    "accepted": [
+      {
+        "accepted_metric": null,
+        "sketches": [],
+        "summary": "accepted exact"
+      },
+      {
+        "accepted_metric": null,
+        "sketches": [],
+        "summary": "accepted exact"
+      }
+    ],
+    "cost": {
+      "cost_per_second": 3.59844698355e-11,
+      "cpu_core_seconds_per_second": 3.20025e-6,
+      "per_node": {
+        "0": {
+          "cost_per_second": 7.87080002576e-12,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 7e-7,
+          "detail": "scan 10000 samples; x 0.0167/s; holds 32 bytes for 0.042 ms; keeps 320000 bytes of raw data on disk",
+          "multiplier": 1,
+          "operator": "Scan",
+          "timing": "query_time"
+        },
+        "1": {
+          "cost_per_second": 1.87400000613e-12,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 1.66666666667e-7,
+          "detail": "time range 15s: keep 10000 of 10000 rows; x 0.0167/s; holds 32 bytes for 0.010 ms",
+          "multiplier": 1,
+          "operator": "TimeRange",
+          "timing": "query_time"
+        },
+        "2": {
+          "cost_per_second": 2.62368588036e-11,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 2.33333333333e-6,
+          "detail": "sort 10000 rows in 1 partitions; x 0.0167/s; holds 320000 bytes for 0.140 ms",
+          "multiplier": 1,
+          "operator": "Sort",
+          "timing": "query_time"
+        },
+        "3": {
+          "cost_per_second": 1.87400000613e-15,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 1.66666666667e-10,
+          "detail": "limit to 10 rows; x 0.0167/s; holds 32 bytes for 0.000 ms",
+          "multiplier": 1,
+          "operator": "Limit",
+          "timing": "query_time"
+        },
+        "4": {
+          "cost_per_second": 9.37000015336e-16,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 8.33333333333e-11,
+          "detail": "limit to 5 rows; x 0.0167/s; holds 160 bytes for 0.000 ms",
+          "multiplier": 1,
+          "operator": "Limit",
+          "timing": "query_time"
+        }
+      },
+      "source": "analytical-cost-v2 (illustrative statistics)",
+      "usage": {
+        "average_memory_bytes": 0.746694418667,
+        "cpu_ops_per_second": 2666.91666667,
+        "disk_bytes": 320000,
+        "peak_cpu_cores": 2,
+        "peak_memory_bytes": 320256,
+        "scanned_bytes_per_second": 5333.33333333
+      }
+    },
+    "dag": {
+      "edges": [
+        {
+          "consumer": 1,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "producer": 0,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 2,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "producer": 1,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 3,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "producer": 2,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 4,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "producer": 2,
+          "role": "Input",
+          "window": "NotApplicable"
+        }
+      ],
+      "nodes": [
+        {
+          "guarantee": null,
+          "id": 0,
+          "lifetime": "None",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": false
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "$promql_series_identity",
+                      "nullable": false
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": [
+                    [
+                      2,
+                      0
+                    ]
+                  ]
+                },
+                "source": {
+                  "TimeSeries": {
+                    "metric": "data"
+                  }
+                }
+              }
+            }
+          },
+          "retention_ms": 15000
+        },
+        {
+          "guarantee": null,
+          "id": 1,
+          "lifetime": "None",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 0,
+                "kind": "instant",
+                "range": {
+                  "nanos": 0,
+                  "secs": 15
+                }
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 2,
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Sort": {
+                "child": 1,
+                "keys": [
+                  {
+                    "ascending": false,
+                    "expr": {
+                      "Column": 1
+                    },
+                    "nulls_first": false
+                  }
+                ],
+                "partition_by": []
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 3,
+          "lifetime": "None",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Limit": {
+                "child": 2,
+                "n": 10,
+                "offset": 0,
+                "partition_by": []
+              }
+            }
+          }
+        },
+        {
+          "guarantee": null,
+          "id": 4,
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Limit": {
+                "child": 2,
+                "n": 5,
+                "offset": 0,
+                "partition_by": []
+              }
+            }
+          }
+        }
+      ],
+      "roots": [
+        4,
+        3
+      ],
+      "scalar_roots": []
+    }
+  }
+}
