@@ -117,3 +117,25 @@ fn a_dead_candidate_makes_no_group_exact_only() {
         );
     }
 }
+
+/// `quantile_over_time(0.9, m[5m])` twice, Q0 exact and Q1 at rank error
+/// 0.01: the KLL readouts survive for Q1, but Q0 reads no sketch, so every
+/// sketch readout group (and every group below one) is exact-only for Q0.
+/// An exact target allows no error metric.
+#[test]
+fn an_exact_query_reads_every_sketch_readout_only_exactly() {
+    let query = "quantile_over_time(0.9, m[5m])";
+    let exact = serde_json::to_value(asap_types::accuracy::AccuracyTarget::exact()).unwrap();
+    let logical = promql_pass2(&[
+        (query, exact),
+        (query, json!({"max_error": 0.01, "accuracy_metric": "rank"})),
+    ]);
+    let exact_only = &logical.exact_only_groups_of_query;
+    let kll = readout_groups(&logical, SketchAlgorithm::Kll);
+    assert!(!kll.is_empty());
+    for group in kll {
+        assert!(live(&logical, group), "G{} survives", group.0);
+        assert!(exact_only[0].contains(&group), "G{} for Q0", group.0);
+        assert!(!exact_only[1].contains(&group), "G{} for Q1", group.0);
+    }
+}
