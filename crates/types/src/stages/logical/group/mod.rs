@@ -258,15 +258,5 @@ pub fn ranked_column_of_group(memo: &Memo, group: MemoGroupId) -> Result<ColumnI
     })
 }
 
-/// [`raw_data_samples_of_metric`](crate::summary_type::raw_data_samples_of_metric)
-/// of memo group `group`: the metric whose raw data samples, or plain sums of
-/// them, are every value the group outputs.
-pub fn raw_data_samples_of_metric_of_group(memo: &Memo, group: MemoGroupId) -> Option<String> {
-    crate::summary_type::raw_data_samples_of_metric(&MemoGroupAsInput {
-        memo,
-        group_id: group,
-    })
-}
-
 #[cfg(test)]
 mod tests;

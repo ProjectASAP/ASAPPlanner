@@ -2,11 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ir::operator::arguments::Source;
-use crate::ir::operator::input::OperatorInput;
 use crate::ir::operator::AggIntent;
 use crate::ir::scalar::ColumnRef;
-use crate::ir::{NonASAPOp, Operator};
 
 /// One summary-state update. `item` identifies a keyed item when the family
 /// is keyed; `weight` is the observation/update expression applied to state.
@@ -14,11 +11,6 @@ use crate::ir::{NonASAPOp, Operator};
 pub struct SummaryUpdate {
     pub item: Option<SummaryInputExpr>,
     pub weight: SummaryInputExpr,
-    /// Planner proof for algorithms whose error/update semantics require a
-    /// non-negative stream. Absence of proof is never interpreted as zero or
-    /// non-negative.
-    #[serde(default)]
-    pub weight_domain: WeightDomain,
 }
 
 impl SummaryUpdate {
@@ -26,75 +18,8 @@ impl SummaryUpdate {
         Self {
             item: None,
             weight: SummaryInputExpr::Column(column),
-            weight_domain: WeightDomain::UnknownOrSigned,
         }
     }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WeightDomain {
-    #[default]
-    UnknownOrSigned,
-    NonNegative {
-        proof: NonNegativeWeightProof,
-    },
-    /// An open requirement, not a proof: the weights are raw data samples of
-    /// `metric`, or plain sums of them (no rate, no other arithmetic), so they
-    /// are non-negative when every raw data sample of `metric` is: `metric` is
-    /// declared a counter, or declared non-negative. Logical optimization
-    /// records it without reading the data workload; plan selection confirms
-    /// it from the declared source facts
-    /// ([`SourceFacts::metric_type`](crate::workload::SourceFacts::metric_type),
-    /// [`SourceFacts::column_signs`](crate::workload::SourceFacts::column_signs)).
-    /// Unconfirmed, it counts as not proven. Serialized as
-    /// `samples_of_metric`.
-    #[serde(rename = "samples_of_metric")]
-    RawDataSamplesOfMetric {
-        metric: String,
-    },
-    /// An open requirement, not a proof: the weights are reset-corrected
-    /// `rate`, `increase` or `irate` values of `metric`'s raw data samples, or plain
-    /// sums of them. Reset correction keeps them non-negative exactly when
-    /// the samples are, that is when `metric` is a counter; over a gauge a
-    /// negative sample can give a negative value. Plan selection confirms
-    /// it from the declared metric types, as
-    /// [`RawDataSamplesOfMetric`](Self::RawDataSamplesOfMetric). Unconfirmed, it
-    /// counts as not proven.
-    CounterDerivativeOfMetric {
-        metric: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NonNegativeWeightProof {
-    UnitCount,
-    /// `rate`, `increase` or `irate` of a counter's samples, or plain sums
-    /// of them: reset correction over non-negative samples gives a
-    /// non-negative increase, and a rate divides it by a positive duration.
-    /// Plan selection gives it on confirming a
-    /// [`WeightDomain::CounterDerivativeOfMetric`] requirement.
-    ResetAwareCounterDerivative,
-    /// Raw data samples of a metric declared a counter
-    /// ([`PrometheusMetricType::Counter`](crate::workload::PrometheusMetricType::Counter)), or
-    /// plain sums of them: a counter sample is never negative. Plan selection
-    /// gives it on confirming a
-    /// [`WeightDomain::RawDataSamplesOfMetric`] requirement. Serialized as
-    /// `counter_samples`.
-    #[serde(rename = "counter_samples")]
-    CounterRawDataSamples,
-    /// Raw data samples of a metric declared non-negative
-    /// ([`SourceFacts::column_signs`](crate::workload::SourceFacts::column_signs)),
-    /// such as a gauge, or plain sums of them. Plan selection gives it on
-    /// confirming a [`WeightDomain::RawDataSamplesOfMetric`] requirement for a
-    /// metric not declared a counter. Serialized as
-    /// `declared_non_negative_samples`.
-    #[serde(rename = "declared_non_negative_samples")]
-    DeclaredNonNegativeRawDataSamples,
-    /// A constant weight greater than 0, such as `Constant(2.0)`: every row
-    /// adds the same positive amount, so no weight is negative.
-    PositiveConstant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,35 +79,6 @@ impl SketchStatistic {
             },
             _ => return None,
         })
-    }
-}
-
-/// The metric whose raw data samples, or plain sums of them, are every value
-/// `input` outputs, or `None`: walking down through a time range, an
-/// `offset`-only time shift (it moves the window, not the samples) and a
-/// plain `sum`, to a time-series scan. Any other operator (rate and
-/// arithmetic included) ends it. The metric's type is not read here: whether
-/// its samples are non-negative is plan selection's question
-/// ([`WeightDomain::RawDataSamplesOfMetric`]).
-pub fn raw_data_samples_of_metric<I: OperatorInput>(input: &I) -> Option<String> {
-    let Operator::NonASAP(operator) = input.operator() else {
-        return None;
-    };
-    match operator {
-        NonASAPOp::Scan {
-            source: Source::TimeSeries { metric },
-            ..
-        } => Some(metric),
-        NonASAPOp::TimeRange { child, .. } => raw_data_samples_of_metric(&child),
-        NonASAPOp::TimeShift { shift, child } if shift.at.is_none() => {
-            raw_data_samples_of_metric(&child)
-        }
-        NonASAPOp::Aggregate {
-            measures, child, ..
-        } if matches!(measures.as_slice(), [AggIntent::Sum { col: None }]) => {
-            raw_data_samples_of_metric(&child)
-        }
-        _ => None,
     }
 }
 

@@ -58,7 +58,6 @@ fn a_heap_estimate_without_the_groups_columns_adds_nothing() {
         reduction: &reduction,
         intent: &intent,
         filter: None,
-        raw_data_samples_of: None,
     };
     assert_unsupported_way_adds_nothing(
         &mut memo,
@@ -100,7 +99,6 @@ fn a_readout_an_open_group_cannot_rename_adds_nothing() {
         reduction: &Reduction::PerEntity,
         intent: &intent,
         filter: None,
-        raw_data_samples_of: None,
     };
     assert_unsupported_way_adds_nothing(
         &mut memo,

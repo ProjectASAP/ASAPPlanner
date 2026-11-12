@@ -141,9 +141,6 @@ fn query_time_count_heap_binds_a_constant_row_weight() {
                     ColumnRef::Named("service".into()),
                 )])),
                 weight: SummaryInputExpr::Constant(1.0),
-                weight_domain: WeightDomain::NonNegative {
-                    proof: NonNegativeWeightProof::UnitCount,
-                },
             },
             reduction: Reduction::Reduce(GroupKeys::by(vec![0])),
             filter: None,

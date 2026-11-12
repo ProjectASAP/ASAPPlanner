@@ -6,14 +6,14 @@ use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::{ASAPOp, Operator, TimeRangeKind};
 use asap_types::stages::Memo;
-use asap_types::summary_type::{parameter_list, SketchAlgorithm, SummaryInputExpr, WeightDomain};
+use asap_types::summary_type::{parameter_list, SketchAlgorithm, SummaryInputExpr};
 use asap_types::test_support::memo_builders::{candidates_of, query};
 use asap_types::workload::DataWorkload;
 
 /// `topk(5, sum by (job) (sum_over_time(m[5m])))`: the top-k gets heaps
 /// over the range's raw data samples, keyed by `job` (the ranked item),
-/// weighted by the sample value with the open requirement that the samples
-/// of `m` are non-negative (`RawDataSamplesOfMetric`). Each heap build
+/// weighted by the sample value (whether those weights are non-negative is
+/// the state group's `column_signs`, which Stage 2 reads). Each heap build
 /// lists the absorbed sums' groups in `fused_groups`, and the top-k's own
 /// heaps over its one-row-per-item input are pruned.
 #[test]
@@ -49,10 +49,6 @@ fn whole_expression_topk_heaps_read_the_raw_samples() {
         assert_eq!(
             update.item,
             Some(SummaryInputExpr::Column(ColumnRef::Named("job".into())))
-        );
-        assert_eq!(
-            update.weight_domain,
-            WeightDomain::RawDataSamplesOfMetric { metric: "m".into() }
         );
         for build in candidates_of(&memo, state) {
             let mut fused = build.fused_groups.clone();
@@ -133,8 +129,7 @@ fn whole_expression_topk_heap_candidates() {
     assert_eq!(memo.groups().len(), 11, "{}", memo_printout(&memo));
 }
 
-/// A top-k over a `count` ranks the counted items with unit weight, proven
-/// non-negative.
+/// A top-k over a `count` ranks the counted items with unit weight.
 #[test]
 fn count_ranked_topk_counts_with_unit_weight() {
     let mut memo = Memo::new(&DataWorkload::default());
@@ -157,10 +152,6 @@ fn count_ranked_topk_counts_with_unit_weight() {
     let memo = pass1_memo(memo, None).unwrap();
     let (_, update) = state_group(&memo, SketchAlgorithm::CmsWithHeap);
     assert_eq!(update.weight, SummaryInputExpr::Constant(1.0));
-    assert!(matches!(
-        update.weight_domain,
-        WeightDomain::NonNegative { .. }
-    ));
 }
 
 /// The ranked item over several group keys is their tuple; the top-k's own
