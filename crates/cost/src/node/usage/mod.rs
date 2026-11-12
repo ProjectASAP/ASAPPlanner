@@ -107,10 +107,15 @@ fn state_family<'a>(
 /// family.
 #[derive(Debug, Clone)]
 pub struct ProducerOutput<'a> {
+    /// Its payload.
     pub payload: &'a Payload,
+    /// Its output schema.
     pub output_schema: &'a Schema,
+    /// Its output rows and bytes.
     pub output: EdgeStatistics,
+    /// The sources it reads.
     pub sources: BTreeSet<&'a str>,
+    /// Its state family (with θ).
     pub family: StateFamily<'a>,
     /// Its output columns that still hold one source row's label (or
     /// column) values unchanged ([`unchanged_source_columns`]).
@@ -128,8 +133,11 @@ pub struct ProducerOutput<'a> {
 /// on disk); its calibration fit and its [`NodeCost`].
 #[derive(Debug, Clone)]
 pub struct NodeResourceUsageAndCost<'a> {
+    /// Its output rows and bytes.
     pub output: EdgeStatistics,
+    /// The sources it reads.
     pub sources: BTreeSet<&'a str>,
+    /// Its state family.
     pub family: StateFamily<'a>,
     /// Its output columns that still hold one source row's label (or
     /// column) values unchanged ([`unchanged_source_columns`]).
@@ -137,17 +145,26 @@ pub struct NodeResourceUsageAndCost<'a> {
     /// The tumbling windows its rows span: those a `TimeRange` selects
     /// from a chain, 1 for any other node.
     pub tumbling_windows: u64,
+    /// Work of one execution, in ms on one core.
     pub work_ms_per_execution: f64,
+    /// CPU operations per second.
     pub cpu_ops_per_second: f64,
+    /// Bytes scanned per second.
     pub scanned_bytes_per_second: f64,
+    /// Average memory, including memory a query-time node holds while it
+    /// computes.
     pub average_memory_bytes: f64,
+    /// Peak memory.
     pub peak_memory_bytes: u64,
+    /// Disk bytes.
     pub disk_bytes: u64,
     /// An in-memory ingestion-time state's bytes per window.
     pub maintained: Option<u64>,
     /// A query-time scan's source and the raw bytes it reads.
     pub raw_scan: Option<(&'a Source, u64)>,
+    /// Its calibration fit.
     pub fit: CalibrationFit,
+    /// Its cost.
     pub cost: NodeCost,
 }
 
