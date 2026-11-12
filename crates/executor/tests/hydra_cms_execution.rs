@@ -92,9 +92,6 @@ fn unit_count() -> SummaryUpdate {
     SummaryUpdate {
         item: Some(SummaryInputExpr::Column(ColumnRef::Named("service".into()))),
         weight: SummaryInputExpr::Constant(1.0),
-        weight_domain: WeightDomain::NonNegative {
-            proof: NonNegativeWeightProof::UnitCount,
-        },
     }
 }
 
@@ -270,17 +267,10 @@ fn hydra_cms_merges_like_one_build() {
     );
 }
 
-fn weighted(weight_domain: WeightDomain) -> SummaryUpdate {
+fn weighted() -> SummaryUpdate {
     SummaryUpdate {
         weight: SummaryInputExpr::Column(ColumnRef::Named("weight".into())),
-        weight_domain,
         ..unit_count()
-    }
-}
-
-fn non_negative() -> WeightDomain {
-    WeightDomain::NonNegative {
-        proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
     }
 }
 
@@ -289,7 +279,7 @@ fn non_negative() -> WeightDomain {
 // stream's total weight; a split-stream merge answers as one build.
 #[test]
 fn weighted_hydra_cms_sums_item_weights_per_group() {
-    let points = run(weighted(non_negative()), None, vec![batch(&ROWS)]);
+    let points = run(weighted(), None, vec![batch(&ROWS)]);
     let total: f64 = ROWS.iter().map(|(_, _, w)| w).sum();
     let slack =
         std::f64::consts::E * total * (1. / f64::from(SHARED_COLUMNS) + 1. / f64::from(WIDTH));
@@ -304,26 +294,19 @@ fn weighted_hydra_cms_sums_item_weights_per_group() {
     }
     let (left, right) = ROWS.split_at(5);
     assert_eq!(
-        run(
-            weighted(non_negative()),
-            None,
-            vec![batch(left), batch(right)]
-        ),
+        run(weighted(), None, vec![batch(left), batch(right)]),
         points
     );
 }
 
-// A positive constant weight, `Constant(2.0)` with its `PositiveConstant`
-// proof, adds 2 per row: each job's point count is twice the unit count's.
+// A positive constant weight, `Constant(2.0)`, adds 2 per row: each job's
+// point count is twice the unit count's.
 // A non-integer constant is refused at binding, since sketchlib's Hydra adds
 // integer weights.
 #[test]
 fn positive_constant_weight_adds_the_constant_per_row() {
     let constant = |weight: f64| SummaryUpdate {
         weight: SummaryInputExpr::Constant(weight),
-        weight_domain: WeightDomain::NonNegative {
-            proof: NonNegativeWeightProof::PositiveConstant,
-        },
         ..unit_count()
     };
     let unit = run(unit_count(), None, vec![batch(&ROWS)]);
@@ -347,12 +330,9 @@ fn positive_constant_weight_adds_the_constant_per_row() {
 fn row_weight_serializes_as_one_field_and_rejects_constants_above_i32() {
     let constant = SummaryUpdate {
         weight: SummaryInputExpr::Constant(2.0),
-        weight_domain: WeightDomain::NonNegative {
-            proof: NonNegativeWeightProof::PositiveConstant,
-        },
         ..unit_count()
     };
-    let column = weighted(non_negative());
+    let column = weighted();
     for (update, expected) in [
         (constant, serde_json::json!({"Constant": 2})),
         (column, serde_json::json!({"Column": 2})),
@@ -394,9 +374,6 @@ fn row_weight_serializes_as_one_field_and_rejects_constants_above_i32() {
 fn constant_weight_above_i32_is_refused_at_validation() {
     let update = SummaryUpdate {
         weight: SummaryInputExpr::Constant(2_147_483_648.0),
-        weight_domain: WeightDomain::NonNegative {
-            proof: NonNegativeWeightProof::PositiveConstant,
-        },
         ..unit_count()
     };
     let error = asap_executor::capability::validate_summary_kernel(&family(), &update)
@@ -414,19 +391,6 @@ fn constant_weight_above_i32_is_refused_at_validation() {
     );
 }
 
-// A weight column of unknown sign is rejected at binding: a Count-Min point
-// count only overestimates when no weight is negative.
-#[test]
-fn unknown_sign_weight_is_rejected() {
-    let error = compile_node(
-        &summary_agg(weighted(WeightDomain::UnknownOrSigned), None),
-        &[input_schema()],
-    )
-    .err()
-    .expect("unknown-sign weight");
-    assert!(error.to_string().contains("non-negative"), "{error}");
-}
-
 // sketchlib's Hydra adds integer weights, so a negative, fractional or
 // non-finite weight value fails the build with a clear error.
 #[test]
@@ -438,7 +402,7 @@ fn invalid_weight_values_fail_the_build() {
         (f64::INFINITY, "integer"),
     ] {
         let rows = [("api", "checkout", 1.0), ("api", "checkout", weight)];
-        let error = try_run(weighted(non_negative()), None, vec![batch(&rows)])
+        let error = try_run(weighted(), None, vec![batch(&rows)])
             .err()
             .unwrap_or_else(|| panic!("{weight} accepted"));
         assert!(error.contains(expected), "{weight}: {error}");

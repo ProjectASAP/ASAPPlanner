@@ -543,16 +543,14 @@ The sections below describe each stage.
 | 0. Frontends | nothing: a query that cannot be lowered fails planning with an error | — | — |
 | 1, Pass 1 | nothing is recorded: a way the measure or the deployment cannot compute is not offered (the exact accumulator of an `avg` over a nullable input, a count sketch over relational rows, a summary the deployment does not support, a quantile summary outside [0, 1], a top-k heap over one row per item), nor a way Pass 1 cannot build | — | — |
 | 1, Pass 2 | nothing: it only adds candidates | — | — |
-| 2 | what cannot be built or materialized: `NoIngestionPipeline`, `RawDataNotRetained` (a query-time scan of raw data the deployment does not keep), `QueryTimeResultsNotRetained`, `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`; the planner does not check executor support | `PhysicalASAPMemoCandidates::pruned_candidates` | the `PhysicalCandidate` it would have been |
+| 2 | what cannot be built or materialized: `NoIngestionPipeline`, `RawDataNotRetained` (a scan of raw data the deployment does not keep, at query time or materialized across evaluations), `QueryTimeResultsNotRetained`, `CountMinWeightsNotProvenNonNegative`, `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`; the planner does not check executor support | `PhysicalASAPMemoCandidates::pruned_candidates` | the `PhysicalCandidate` it would have been |
 | 3 | valid candidates that lose, and the checks only a whole plan can make (accuracy, latency, cluster capacity) | its own `RejectionCause` | — |
 
-Stage 2's key names what a pruned candidate would have been, since kept
-candidates are renumbered after pruning and a pruned one has no
-`PhysicalCandidateId`. Stage 2 emits one candidate per operator node,
-timing and lifetime, and makes no copies of it, so (`operator_node`,
-`properties`) is unique. Operator
-nodes are kept whole, so `operator_node` indexes the output's
-`operator_nodes_of_candidates_for_memo_groups`. Pass 1 records no pruned
+Stage 2 records a pruned candidate as the `PhysicalCandidate` it would
+have been, since kept candidates are renumbered after pruning and a pruned
+one has no `PhysicalCandidateId`. Stage 2 emits one candidate per logical
+candidate, timing and lifetime, and makes no copies of it, so
+(`logical_candidate_id`, `physical_properties`) is unique. Pass 1 records no pruned
 candidate: a way it cannot compute is not offered.
 
 `asap_planner` writes both lists as `pruned_candidates` under
@@ -573,7 +571,7 @@ the memo path's entry points.
 | 0. Frontends | Query text, language → one logical root per query, carrying its accuracy target | Same: a `QueryRoot` per query | `lower_promql_query_workload`, `lower_sql_dialect` (`asap-frontend-*`); `plan_installable` (`asap_planner`) runs the frontends and Stages 1–3 on the user input |
 | 1, Pass 1 | Logical roots; the deployment's supported summaries → the Pass 1 inventory, every computation's candidates (no longer in the code) | Logical roots → Stage 0's `Memo` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment does not support → the same `Memo` with each group's `CandidateForMemoGroup`s (a summary with one build per configuration of its `parameter_list`) | `memo_of_queries`, `pass1_memo` |
 | 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (no longer in the code) | `Memo`; the entries' recurrence and range steps → `LogicalASAPMemoCandidates`: the same memo with the rules' groups and candidates added (rollup, top-k reuse, chain groups), each readout's required accuracy, the logical edges between the surviving candidates, the pruned candidates and, per query, the groups it may read only exactly | `generate_logical_asap_memo_candidates` (`asap_stage1_pass2_reuse_candidates`) |
-| 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per physical properties assignment | `LogicalASAPMemoCandidates`; entries, `DataWorkload`, query-time and raw-data retention → `PhysicalASAPMemoCandidates`: every operator node of every candidate with each allowed timing and lifetime (one physical candidate each, no copies), the producers of each input, reader constraints (each applied to every selected run of its candidate), and the pruned candidates (`PrunedCandidate<PhysicalCandidate>`) | `generate_physical_asap_memo_candidates` (`asap_stage2_physical_optimization`) |
+| 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, query-time retention → its physical candidates, one per physical properties assignment | `LogicalASAPMemoCandidates` (with each group's evaluation grid); `DataWorkload` (arrival), `DeploymentCapabilities` (raw-data and query-time retention) → `PhysicalASAPMemoCandidates`: every logical candidate Pass 2 kept with each offered timing and lifetime (one physical candidate each, no copies), every logical edge expanded into physical edges with $\alpha^{\log}$ and $\alpha^{\mathrm{phys}}$, and the pruned alternatives (`PrunedCandidate<PhysicalCandidate>`) | `generate_physical_asap_memo_candidates` (`asap_stage2_physical_optimization`) |
 | 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `AccuracyCheckInputs`, `CostInputs`, Stage 2's realizer → `Selection`: the selected plan (`selected_dag`, a `DagOfSelectedCandidates`: one node per run of a candidate, so a candidate recomputed by two readers or shared as two instances over different inputs is two nodes, with an edge per input), its cost, the accepted accuracy per query and the search report | `select_plan` (`asap_stage3_plan_selection`); the facade (`run_planning`, output `PlanningRun`) runs it once and builds the selected `PhysicalWorkloadPlan` with `AssignmentRealizer::realize`, one plan node per selected node |
 | 4. Execution | The selected `PhysicalASAPDAG` → query results | Same: an `InstallablePlan` (`{dag, query_texts}`) → query results | The deployment runtime installs the `InstallablePlan` |
 
@@ -1261,14 +1259,17 @@ Output: C3 — CandidatePhysicalASAPDAGs
 here; they determine the cost of each option, which stage 3 uses to pick the
 cheapest plan (the typical outcomes above).
 
-On the memo, Stage 2 prunes per operator node and records each pruned
-candidate in `PhysicalASAPMemoCandidates::pruned_candidates`
+On the memo, Stage 2 prunes per physical alternative (a logical candidate
+with one timing and lifetime) and records each pruned alternative in `PhysicalASAPMemoCandidates::pruned_candidates`
 ([Pruning by stage](#pruning-by-stage)). It does not generate a
 configuration the deployment cannot run: an ingestion-time alternative
-without an ingestion pipeline (`NoIngestionPipeline`), a query-time scan
-of raw data the deployment does not retain (`RawDataNotRetained`), and a
-materialized query-time result the deployment does not retain
-(`QueryTimeResultsNotRetained`). It does not check executor support. It
+without an ingestion pipeline (`NoIngestionPipeline`), a scan of raw data
+the deployment does not retain, at query time or materialized across
+evaluations (`RawDataNotRetained`), a
+query-time result materialized across evaluations the deployment does not
+retain (`QueryTimeResultsNotRetained`), and a Count-Min build whose weights
+are not proven non-negative (`CountMinWeightsNotProvenNonNegative`). It does
+not check executor support. It
 then removes the candidates no buildable input or query output can use
 (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`),
 repeating until nothing more is removed. Stage 2 makes no execution-scope

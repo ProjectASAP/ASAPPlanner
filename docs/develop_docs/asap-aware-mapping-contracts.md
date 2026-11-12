@@ -77,30 +77,27 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 
 ## 4. Stage 2
 
-- Only summary builds (`SummaryAgg`, `SummaryTumblingWindowChain`) get materialization
-  options, each a timing and a lifetime (`PhysicalProperties`): not materialized always;
-  materialized at ingestion time, `AcrossEvaluations(Memory)`, when the build is
-  eligible to run as data arrives; materialized at query time for `OneEvaluation(Memory)`
-  when two or more queries read it (reused within one evaluation); materialized at
-  query time `AcrossEvaluations(Memory)` for a tumbling-window chain that
-  builds one new tumbling window per evaluation, when the deployment declares
-  `query_time_results_retained`.
-- One `PhysicalCandidate` per assignment, the all-not-materialized one first
-  (`P<n>`, then `P<n>-m<k>`). An assignment that puts a build at ingestion
-  time over one that is not is not generated. A logical candidate Stage 2
-  cannot implement becomes a `PrunedCandidate` with its reason.
-- On the memo (`generate_physical_asap_memo_candidates`), every physical
-  candidate Stage 2 prunes is recorded in
+- Each logical candidate Pass 2 kept gets one `PhysicalCandidate` per
+  offered timing and lifetime (`PhysicalProperties`): any candidate, not
+  only a summary build, may get a lifetime. `IngestionTime` is offered to
+  a time-independent group and its inputs (a counter state only over
+  ordered rows); `AcrossEvaluations` to a chain, a group on a known
+  evaluation grid and a time-independent group, unless the group is read
+  under an absolute `@ T`; (IngestionTime, None) not to a summary build. A
+  value not offered is not recorded.
+- Every physical alternative Stage 2 prunes is recorded in
   `PhysicalASAPMemoCandidates::pruned_candidates` as
   `PrunedCandidate<PhysicalCandidate>` with a `PruneReason`: an
   ingestion-time alternative without an ingestion pipeline
-  (`NoIngestionPipeline`), a query-time scan of raw data the deployment does
-  not retain (`RawDataNotRetained`) and a materialized query-time result the
-  deployment does not retain (`QueryTimeResultsNotRetained`) are not
-  generated; a candidate no buildable input or query output can use is
-  removed (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`). The
-  planner does not check executor support. Stage 2 emits one candidate per operator node,
-  timing and lifetime; it makes no execution-scope copies.
+  (`NoIngestionPipeline`); a scan of raw data the deployment does not
+  retain, at query time or materialized across evaluations
+  (`RawDataNotRetained`); a query-time result materialized across
+  evaluations the deployment does not retain
+  (`QueryTimeResultsNotRetained`); a Count-Min build whose weights are not
+  proven non-negative (`CountMinWeightsNotProvenNonNegative`); then an
+  alternative no buildable input or query output can use
+  (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`). The planner does
+  not check executor support. Stage 2 makes no execution-scope copies.
 
 ## 5. Stage 3
 

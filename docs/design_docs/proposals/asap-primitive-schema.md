@@ -1254,13 +1254,13 @@ This part of the code answers two questions about summary state:
 
 **Update input examples** (as the planner builds them in Stage 1, `asap-stage1-pass1-per-computation-candidates`):
 
-| Query | Sketch | `item` | `weight` | `weight_domain` |
-|---|---|---|---|---|
-| p99 of `latency` | KLL | none: KLL has no keys | `Column(latency)`: the value itself | `UnknownOrSigned` |
-| how often each `endpoint` occurs | Count-Min | `Column(endpoint)` | `Constant(1.0)`: each row counts once | `NonNegative(UnitCount)` |
-| `topk(5, rate(http_requests_total[5m]))` | Count-Min with heap | `Tuple(every column except value and the group columns)`: one item per series, including its timestamp | `Column(value)`: the rate | `NonNegative(ResetAwareCounterDerivative)` |
+| Query | Sketch | `item` | `weight` |
+|---|---|---|---|
+| p99 of `latency` | KLL | none: KLL has no keys | `Column(latency)`: the value itself |
+| how often each `endpoint` occurs | Count-Min | `Column(endpoint)` | `Constant(1.0)`: each row counts once |
+| `topk(5, rate(http_requests_total[5m]))` | Count-Min with heap | `Tuple(every column except value and the group columns)`: one item per series, including its timestamp | `Column(value)`: the rate |
 
-`weight_domain` matters because some sketches (e.g. Count-Min) are only accurate when weights are never negative. The planner records why a weight is non-negative; if it cannot prove it, the weight counts as possibly negative.
+Some sketches (e.g. Count-Min) are only accurate when weights are never negative. The sign of the weights is not part of the update: it is the state group's `column_signs` entry for its state column, derived from the input groups and the declared source signs, and Stage 2 prunes a Count-Min build whose weights are not proven non-negative (`CountMinWeightsNotProvenNonNegative`).
 
 **Evaluation examples:** `Quantile { q: 0.99 }` reads p99 from a KLL; `PointCount { key: endpoint, value: Some("checkout") }` reads how often `checkout` occurred from a Count-Min; `TopK { k: 5 }` reads the 5 heaviest items.
 
@@ -1273,24 +1273,10 @@ pub struct SummaryUpdate {
     /// The value added to the state: the observed value for a KLL, or the
     /// count to add for a Count-Min (often `Constant(1.0)`).
     pub weight: SummaryInputExpr,
-    /// Whether `weight` is proven never negative. Some algorithms need that.
-    /// Missing proof is never treated as non-negative.
-    pub weight_domain: WeightDomain,
 }
 impl SummaryUpdate {
-    /// Add the value of column `c` for each row: no item, and the weight is
-    /// not known to be non-negative.
+    /// Add the value of column `c` for each row, with no item.
     pub fn column(c: ColumnRef) -> Self;
-}
-pub enum WeightDomain {
-    /// Nothing is known; the weight may be negative. The default.
-    UnknownOrSigned,
-    /// The weight is never negative. `proof`: why.
-    NonNegative { proof: NonNegativeWeightProof },
-}
-pub enum NonNegativeWeightProof {
-    UnitCount,                     // every row adds 1
-    ResetAwareCounterDerivative,   // PromQL increase/rate over counters with reset correction
 }
 /// An expression that computes an item or a weight from the input row.
 pub enum SummaryInputExpr {

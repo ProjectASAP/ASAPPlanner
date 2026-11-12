@@ -47,7 +47,7 @@ target.
 | Query frontends | `frontend-sql`, `frontend-promql`, `frontend-metricsql` | Stage 0: parse source languages and produce canonical Pre-ASAP queries |
 | Stage 0 hash-consing | `stage0-memo` | The memo groups of the workload's query roots |
 | Logical ASAP-aware optimization | `stage1-pass1-per-computation-candidates`, `stage1-pass2-reuse-candidates` | Stage 1: per-computation candidates (Pass 1), ASAP-aware CSE (Pass 2) |
-| Physical ASAP-aware optimization | `stage2-physical-optimization` | Stage 2: materialization and physical operator implementation |
+| Physical ASAP-aware optimization | `stage2-physical-optimization` | Stage 2: each logical candidate's timing and lifetime, the physical edges and the pruned alternatives |
 | Plan selection | `stage3-plan-selection` | Stage 3: accuracy and latency checks, costing and selection; the planning models and the Stage 1 to Stage 3 driver |
 | Planner facade | `planner` | `e2e_plan`: Stage 0 followed by Stages 1–3 |
 | Executor | `executor` | Stage 4: runs a `PhysicalASAPDAG` over `asap_sketchlib` summaries; no stage crate depends on it |
