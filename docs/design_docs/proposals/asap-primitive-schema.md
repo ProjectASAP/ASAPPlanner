@@ -117,7 +117,7 @@ A node in the physical data will represent the data or summary instance, so a no
 | How is it computed? | by the planner, from the memo group's input groups, in one walk that yields both the definition and the selection | §4.2.2 |
 | How expensive is it? | proportional to the few operators directly under the `SummaryAgg`, not to the whole sub-DAG; derived once per memo group | §4.2.3 |
 | What uses it? | merge (in #646), rollup; slice, reuse (planned); subtract (reserved) | §5.6, §5.7 |
-| Where is it in the code? | `GroupProperties::aggregate_coverage`, derived in `stages/logical/aggregate_coverage.rs` | §6.6 |
+| Where is it in the code? | `GroupProperties::aggregate_coverage`, derived in `stages/logical/group/aggregate_coverage.rs` | §6.6 |
 | What is left out? | the deployment and runtime implementation, e.g. SDS | §4.3 |
 
 **Why coverage is not part of the schema.**
@@ -237,7 +237,7 @@ Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` 
 
 #### 4.2.2 Deriving the definition and the selection
 
-Coverage is a memo-group property, derived like an output schema and never declared; its types and derivation are in `crates/types/src/stages/logical/aggregate_coverage.rs`. The memo derives it once, when `Memo::find_or_add_group` creates an aggregate group (a summary state or an exact `Aggregate`): `aggregate_coverage` walks down from the group's `SummaryAgg` or `Aggregate` through its input groups' `expression`s, and the result, its inputs named by `MemoGroupId`, is stored in the group's `GroupProperties::aggregate_coverage`. Node trees have none. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint (disjoint in time, for counter states).
+Coverage is a memo-group property, derived like an output schema and never declared; its types and derivation are in `crates/types/src/stages/logical/group/aggregate_coverage.rs`. The memo derives it once, when `Memo::find_or_add_group` creates an aggregate group (a summary state or an exact `Aggregate`): `aggregate_coverage` walks down from the group's `SummaryAgg` or `Aggregate` through its input groups' `expression`s, and the result, its inputs named by `MemoGroupId`, is stored in the group's `GroupProperties::aggregate_coverage`. Node trees have none. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint (disjoint in time, for counter states).
 
 ```rust
 /// What a summary state computes, with every lifted selection removed,
@@ -951,7 +951,6 @@ OperatorNode                                         §6.1
 │     └── fields[i].dtype: FieldDataType ◀───────┘   §6.3  (the same type: the output
 │           └── Sketch(SketchAlgorithm)              `state` field has type `summary_type`)
 │                 (θ, `SketchParams`, is on the candidate)  §6.4
-└── guarantee: AccuracyGuarantee                       §6.5  (accuracy of an evaluation)
 
 MemoGroup.group_properties.aggregate_coverage: AggregateCoverage   §6.6
       └── definition: AggregateDefinition { input, unlifted_operators }
@@ -966,7 +965,7 @@ MemoGroup.group_properties.aggregate_coverage: AggregateCoverage   §6.6
 | §6.5 Update input and evaluations | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.2 |
 | §6.6 Aggregate coverage | `AggregateCoverage`, `AggregateDefinition`, `SelectionBox`, `Constraint` | `GroupProperties::aggregate_coverage` of aggregate memo groups |
 
-**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `summary_type = Sketch(Kll)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5); its candidate's θ is `Kll { k: 200 }`. Its `schema` (§6.3) is `(job Utf8, state Sketch(Kll))`: the `state` field has the same type as `summary_type`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5), and its node carries the `guarantee` of the evaluation. The memo derives the `SummaryAgg` group's `AggregateCoverage` (§6.6) and stores it in the group's `GroupProperties::aggregate_coverage`.
+**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `summary_type = Sketch(Kll)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5); its candidate's θ is `Kll { k: 200 }`. Its `schema` (§6.3) is `(job Utf8, state Sketch(Kll))`: the `state` field has the same type as `summary_type`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5). The memo derives the `SummaryAgg` group's `AggregateCoverage` (§6.6) and stores it in the group's `GroupProperties::aggregate_coverage`.
 
 ### 6.1 DAG node (`crates/types/src/ir/operator/node.rs`)
 
@@ -982,9 +981,6 @@ pub struct OperatorNode {
     pub result_kind: OperatorResultKind,
     /// The output columns. Derived from `operator` and its children.
     pub schema: Schema,
-    /// The accuracy statement of the output, once known. `None` does not
-    /// mean exact.
-    pub guarantee: Option<AccuracyGuarantee>,
 }
 ```
 
@@ -1353,9 +1349,9 @@ pub struct CurrentSeriesInput {
 }
 ```
 
-A finalized value's accuracy statement is `AccuracyGuarantee` (`accuracy/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It is attached to evaluation and finalized nodes, and to `MaintainPopulation` nodes (whose population is exact); never to sketch or accumulator state.
+A finalized value's accuracy statement is `AccuracyGuarantee` (`accuracy/guarantee.rs`): a `spec` (`AccuracySpec`) with `accuracy_metric` (which error is measured, e.g. rank error), `error` (the error bound), `failure_probability` (the chance the bound does not hold) and `accuracy_scope` (which output values one statement covers), plus `provenance` (which estimates the bound came from). It describes evaluation and finalized values, and `MaintainPopulation` values (whose population is exact); never sketch or accumulator state. No node type stores it today.
 
-### 6.6 Aggregate coverage (`crates/types/src/stages/logical/aggregate_coverage.rs`; selection algebra in `crates/types/src/ir/properties/selection.rs`; `SourceColumn` in `crates/types/src/ir/operator/arguments.rs`; column lineage (`ColumnLineage`, a memo-group property) in `crates/types/src/stages/logical/column_properties.rs`; the plan's content id in `crates/types/src/stages/logical/view_coverage.rs`)
+### 6.6 Aggregate coverage (`crates/types/src/stages/logical/group/aggregate_coverage.rs`; selection algebra in `crates/types/src/ir/properties/selection.rs`; `SourceColumn` in `crates/types/src/ir/operator/arguments.rs`; column lineage (`ColumnLineage`, a memo-group property) in `crates/types/src/stages/logical/group/column_properties.rs`; the plan's content id in `crates/types/src/plan/view_coverage.rs`)
 
 The code for §4. `AggregateDefinition` is shown in §4.2.2.
 

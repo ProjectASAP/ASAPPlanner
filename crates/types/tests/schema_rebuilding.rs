@@ -1,4 +1,3 @@
-use asap_types::accuracy::AccuracyGuarantee;
 use asap_types::ir::operator::{AggIntent, Reduction, Source};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
@@ -57,15 +56,14 @@ fn rebuilding_rederives_schema_for_both_categories() {
     }
 }
 
-/// Naming overrides survive rewrites without freezing types or assessed properties.
+/// Naming overrides survive rewrites without freezing types.
 #[test]
 fn rebuilding_preserves_only_explicit_naming_overrides() {
     for asap in [false, true] {
         let original = aggregate(scan(DataType::Int64, "key"), asap);
         let mut schema = original.schema.clone();
         schema.fields[0].name = "alias".into();
-        let renamed = OperatorNode::with_schema(original.operator.clone(), schema)
-            .with_guarantee(Some(AccuracyGuarantee::exact("fixture")));
+        let renamed = OperatorNode::with_schema(original.operator.clone(), schema);
         let original = Rc::new(renamed);
         original.validate_structure().unwrap();
         let replacement = scan(DataType::Utf8, "new_key");
@@ -75,7 +73,6 @@ fn rebuilding_preserves_only_explicit_naming_overrides() {
             rebuilt.schema.fields[0].plain_dtype(),
             Some(&DataType::Utf8)
         );
-        assert!(rebuilt.guarantee.is_none());
         rebuilt.validate_structure().unwrap();
     }
 }

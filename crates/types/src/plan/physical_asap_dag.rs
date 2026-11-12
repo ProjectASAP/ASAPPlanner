@@ -23,7 +23,6 @@ use crate::ir::operator::node::OperatorNode;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::scalar::ScalarExpr;
 
-use crate::accuracy::AccuracyGuarantee;
 use crate::ir::properties::execution_data_state::{ExecutionDataState, ExecutionTiming};
 use crate::ir::properties::selection::SelectionBox;
 use crate::ir::schema::Schema;
@@ -82,7 +81,6 @@ pub struct PhysicalASAPDAGNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<SketchParams>,
     pub output_schema: Schema,
-    pub guarantee: Option<AccuracyGuarantee>,
     /// For a materialized view (a node whose lifetime materializes its output
     /// across evaluations), how far back from the newest evaluation
     /// time its output must stay available once refreshed; for a query-time
@@ -303,9 +301,8 @@ impl PhysicalASAPDAG {
             .collect())
     }
 
-    /// Every node of this DAG as IR, by node id, with its exported
-    /// guarantee (an operator node has no physical properties): what
-    /// [`Self::query_roots`] reads. Shared inputs stay shared. Validates the
+    /// Every node of this DAG as IR, by node id (an operator node has no
+    /// physical properties): what [`Self::query_roots`] reads. Shared inputs stay shared. Validates the
     /// DAG first.
     #[cfg(any(test, feature = "test-support"))]
     fn operator_nodes(
@@ -331,8 +328,7 @@ impl PhysicalASAPDAG {
                 let operator = node
                     .payload
                     .map_children(|child| Rc::clone(&rebuilt[child]));
-                let restored = OperatorNode::with_schema(operator, node.output_schema.clone())
-                    .with_guarantee(node.guarantee.clone());
+                let restored = OperatorNode::with_schema(operator, node.output_schema.clone());
                 rebuilt.insert(id, Rc::new(restored));
             }
         }
@@ -652,7 +648,6 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
             lifetime: Lifetime::None,
             parameters: None,
             output_schema: flat_node.schema,
-            guarantee: flat_node.guarantee,
             retention_ms: None,
             selected_physical_candidate: None,
             view_coverage: None,

@@ -532,7 +532,6 @@ fn bind_physical_asap_dag_before_execution() {
         lifetime: Default::default(),
         parameters: None,
         output_schema: (*schema).clone(),
-        guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
         view_coverage: None,
@@ -694,7 +693,6 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         output_state: ExecutionDataState::QUERY_ROWS,
         lifetime: Default::default(),
         parameters: None,
-        guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
         view_coverage: None,
@@ -1116,7 +1114,6 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         lifetime: Default::default(),
         parameters: None,
         output_schema: (*input).clone(),
-        guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
         view_coverage: None,
@@ -1208,7 +1205,6 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             output_state: ExecutionDataState::QUERY_ROWS,
             lifetime: Default::default(),
             parameters: None,
-            guarantee: None,
             retention_ms: None,
             payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::Join {
                 kind: JoinKind::Semi,
@@ -1316,7 +1312,6 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         output_state: ExecutionDataState::INGESTION_ROWS,
         lifetime: Default::default(),
         parameters: None,
-        guarantee: None,
         retention_ms: None,
         payload: PhysicalASAPOperatorPayload::NonASAP(planner_types::ir::NonASAPOp::BinaryOp {
             operator: BinaryOperator {

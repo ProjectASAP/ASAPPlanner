@@ -152,7 +152,6 @@ fn shared_construction_derives_both_operator_categories() {
     );
     assert_eq!(state.result_kind, OperatorResultKind::State);
     assert!(!state.schema.fields.last().unwrap().is_plain());
-    assert!(state.guarantee.is_none());
     state.validate_structure().unwrap();
 
     assert!(

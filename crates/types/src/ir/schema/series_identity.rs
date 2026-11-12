@@ -90,9 +90,7 @@ pub fn with_promql_series_identity(
             ) => {}
             _ => return Err("operator has no dynamic series-identity realization".into()),
         }
-        let mut rebuilt = OperatorNode::new(operator).map_err(|e| e.to_string())?;
-        rebuilt.guarantee = node.guarantee.clone();
-        let rebuilt = Rc::new(rebuilt);
+        let rebuilt = Rc::new(OperatorNode::new(operator).map_err(|e| e.to_string())?);
         cache.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
         Ok(rebuilt)
     }

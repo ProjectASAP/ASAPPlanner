@@ -1,6 +1,6 @@
 //! The unified operator node: one node type before and after ASAP
 //! optimization. A node is an operator plus the common planning properties
-//! every traversal needs (output category and schema, accuracy guarantee).
+//! every traversal needs (output category and schema).
 //! Physical properties (timing, lifetime, schedule) are not on the node:
 //! each physical candidate holds its own
 //! ([`crate::stages::PhysicalCandidate::properties`]).
@@ -14,7 +14,6 @@ use super::arguments::Source;
 use super::asap::ASAPOp;
 use super::input::OperatorInput;
 use super::non_asap::NonASAPOp;
-use crate::accuracy::AccuracyGuarantee;
 use crate::ir::schema::Schema;
 use crate::ir::SchemaDerivationError;
 
@@ -117,14 +116,12 @@ impl<I: OperatorInput> Operator<I> {
 /// node.
 ///
 /// `schema` and `result_kind` are derived from `operator` and its children
-/// at construction and retained. `guarantee` is `None` until accuracy
-/// assessment establishes one (`None` never means exact).
+/// at construction and retained.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperatorNode {
     pub operator: Operator,
     pub result_kind: OperatorResultKind,
     pub schema: Schema,
-    pub guarantee: Option<AccuracyGuarantee>,
 }
 
 impl OperatorNode {
@@ -145,7 +142,6 @@ impl OperatorNode {
             operator,
             result_kind,
             schema,
-            guarantee: None,
         }
     }
 
@@ -154,11 +150,6 @@ impl OperatorNode {
     /// planning supplies a more specific output schema.
     pub fn new_shared(operator: Operator) -> Result<Rc<Self>, SchemaDerivationError> {
         Self::new(operator).map(Rc::new)
-    }
-
-    pub fn with_guarantee(mut self, guarantee: Option<AccuracyGuarantee>) -> Self {
-        self.guarantee = guarantee;
-        self
     }
 
     /// The build whose state this summary-state node carries
@@ -208,7 +199,6 @@ impl OperatorNode {
     /// structural schema metadata. Only names that override the old derived
     /// schema are retained, for either operator category. A change in output
     /// arity with such overrides needs an explicit new naming assignment.
-    /// `guarantee` depends on the inputs and is cleared.
     pub fn with_new_children(
         &self,
         f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>,

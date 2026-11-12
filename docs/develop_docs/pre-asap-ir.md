@@ -32,7 +32,6 @@ pub struct OperatorNode {
     pub operator: Operator,                   // NonASAP(NonASAPOp) | ASAP(ASAPOp)
     pub result_kind: OperatorResultKind,      // Relation | InstantVector | RangeVector | State | Scalar
     pub schema: Schema,                       // output schema, derived at construction
-    pub guarantee: Option<AccuracyGuarantee>, // None until accuracy assessment establishes one
 }
 ```
 
@@ -44,7 +43,6 @@ pub struct OperatorNode {
 - `schema` is derived by `OperatorNode::new(operator)`; it fails when the schema cannot be
   derived (a column reference out of range, a reserved ASAP operator). ASAP planning may
   retain a more specific schema through `OperatorNode::with_schema`.
-- `guarantee` is `None` until accuracy assessment establishes one; `None` never means exact.
 - A node has no physical properties (timing, lifetime): a logical candidate has only its
   logical properties (#1200). Physical stages keep each node's `PhysicalProperties` in a
   `PhysicalPropertiesAssignment` keyed by node; `ir::timing::apply_physical_properties`
@@ -148,7 +146,7 @@ yet — and calls `asap_frontend_common::resolve_root`, which does three things 
 The result is `Rc<OperatorNode>`. `lower_sql` / `lower_sql_dialect` and
 `lower_metricsql` return it; `lower_promql_query_workload` returns a `QueryRoot` per query.
 
-Workload search then runs structural CSE (Stage 0's `memo_of_queries` in `crates/stage0-memo/src/lib.rs`, hash-consing each operator into a `Memo` group through `Memo::find_or_add_group` and `crates/types/src/stages/logical/memo/hash_consing.rs`) once
+Workload search then runs structural CSE (Stage 0's `memo_of_queries` in `crates/stage0-memo/src/lib.rs`, hash-consing each operator into a `Memo` group through `Memo::find_or_add_group` and `crates/types/src/stages/logical/memo/hash_consing/mod.rs`) once
 across every root: bottom-up hash-consing where the structural hash is only a filter and the
 typed `PartialEq` decides sharing, following scalar references like any other input, and
 gated by `NonASAPOp::is_shareable_when_equal` for non-ASAP producers.
