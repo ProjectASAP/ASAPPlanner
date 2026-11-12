@@ -2,7 +2,7 @@
 //! candidate is the candidate it duplicates, on the concepts doc's KLL example
 //! (section 1: G1 the latency scan, G2 its KLL state).
 
-use super::super::tests::{candidate, kll_k};
+use super::super::tests::kll_k;
 use super::super::*;
 use crate::ir::operator::arguments::{GroupKeys, Reduction, Source};
 use crate::ir::operator::AggIntent;
@@ -11,6 +11,7 @@ use crate::ir::scalar::{ProjectItem, SortKey};
 use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
 use crate::ir::{ExprSemantics, NonASAPOp, Predicate, ScalarExpr};
 use crate::summary_type::SketchAlgorithm;
+use crate::test_support::memo_builders::try_candidate;
 use crate::test_support::memo_fixtures::{aggregate_with, scan, state};
 
 /// An unordered `LIMIT 10` over `input`, whose copies may return
@@ -96,27 +97,23 @@ fn kll_builds_with_k_269_and_k_547_share_one_group() {
     let k269_group = memo
         .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
         .unwrap();
-    let k269 = memo
-        .add_candidate(
-            k269_group,
-            candidate(
-                state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
-                kll_k(269),
-            ),
-        )
-        .unwrap();
+    let k269 = try_candidate(
+        &mut memo,
+        k269_group,
+        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+        kll_k(269),
+    )
+    .unwrap();
     let k547_group = memo
         .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
         .unwrap();
-    let k547 = memo
-        .add_candidate(
-            k547_group,
-            candidate(
-                state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
-                kll_k(547),
-            ),
-        )
-        .unwrap();
+    let k547 = try_candidate(
+        &mut memo,
+        k547_group,
+        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+        kll_k(547),
+    )
+    .unwrap();
     assert_eq!(k269_group, k547_group);
     assert_ne!(k269, k547);
     assert_eq!(memo.groups()[k269_group.0 as usize].candidates.len(), 2);
@@ -137,24 +134,20 @@ fn add_candidate_returns_the_existing_candidate_for_a_duplicate() {
     let g2 = memo
         .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
         .unwrap();
-    let first = memo
-        .add_candidate(
-            g2,
-            candidate(
-                state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
-                kll_k(269),
-            ),
-        )
-        .unwrap();
-    let again = memo
-        .add_candidate(
-            g2,
-            candidate(
-                state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
-                kll_k(269),
-            ),
-        )
-        .unwrap();
+    let first = try_candidate(
+        &mut memo,
+        g2,
+        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+        kll_k(269),
+    )
+    .unwrap();
+    let again = try_candidate(
+        &mut memo,
+        g2,
+        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+        kll_k(269),
+    )
+    .unwrap();
     assert_eq!(first, again);
     assert_eq!(
         first,
@@ -163,11 +156,13 @@ fn add_candidate_returns_the_existing_candidate_for_a_duplicate() {
             index_in_group: 0
         }
     );
-    let other_size = candidate(
+    let other_size = try_candidate(
+        &mut memo,
+        g2,
         state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
         kll_k(547),
     );
-    assert_ne!(memo.add_candidate(g2, other_size).unwrap(), first);
+    assert_ne!(other_size.unwrap(), first);
     assert_eq!(memo.groups()[g2.0 as usize].candidates.len(), 2);
 }
 

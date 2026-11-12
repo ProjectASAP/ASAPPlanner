@@ -15,6 +15,7 @@ use asap_types::workload::{
 };
 
 use crate::test_fixtures::*;
+use asap_types::test_support::memo_builders::*;
 
 /// A mergeable state over a range gets one chain group per width with a
 /// build per surviving θ; its readout reads the builds and the merges,
@@ -44,7 +45,7 @@ fn a_mergeable_state_reads_a_chain_with_one_build_per_surviving_parameters() {
 #[test]
 fn no_chain_without_a_merge_an_anchor_or_a_grid() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let input = scan(&mut memo, "m", &["job"]);
+    let input = scan_group(&mut memo, "m", &["job"], vec![]);
     let window = range(&mut memo, input, 300);
     let (irate, irate_root) =
         exact_state(&mut memo, window, ExactKind::IRate, Reduction::PerEntity);
@@ -56,7 +57,7 @@ fn no_chain_without_a_merge_an_anchor_or_a_grid() {
         ExactKind::Sum,
         Reduction::PerEntity,
     );
-    let other = scan(&mut memo, "n", &["job"]);
+    let other = scan_group(&mut memo, "n", &["job"], vec![]);
     let other_window = range(&mut memo, other, 300);
     let (no_grid, no_grid_root) = exact_state(
         &mut memo,
@@ -143,7 +144,7 @@ fn a_chain_whose_width_does_not_divide_the_readers_grid_fails_its_edge() {
 #[test]
 fn an_absolute_anchor_reuses_only_existing_chains() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let input = scan(&mut memo, "m", &["job"]);
+    let input = scan_group(&mut memo, "m", &["job"], vec![]);
     let window = range(&mut memo, input, 300);
     let (state, root) = exact_state(&mut memo, window, ExactKind::Sum, Reduction::PerEntity);
     query(&mut memo, root, None);
@@ -174,7 +175,7 @@ fn an_absolute_anchor_reuses_only_existing_chains() {
 #[test]
 fn chain_groups_run_after_reach_so_a_rolled_up_query_adds_its_grid() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let input = scan(&mut memo, "m", &["job", "instance"]);
+    let input = scan_group(&mut memo, "m", &["job", "instance"], vec![]);
     let window = range(&mut memo, input, 300);
     let (by_job_instance, a) = exact_state(
         &mut memo,
@@ -213,7 +214,7 @@ fn chain_groups_run_after_reach_so_a_rolled_up_query_adds_its_grid() {
 #[test]
 fn an_offset_enters_the_gcd_of_the_widths() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let input = scan(&mut memo, "m", &["job"]);
+    let input = scan_group(&mut memo, "m", &["job"], vec![]);
     let shifted = shift(&mut memo, input, 45, None);
     let window = range(&mut memo, shifted, 300);
     let (state, root) = exact_state(&mut memo, window, ExactKind::Sum, Reduction::PerEntity);
@@ -240,7 +241,7 @@ fn an_offset_enters_the_gcd_of_the_widths() {
 #[test]
 fn one_range_free_chain_group_serves_every_range_and_offset() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let input = scan(&mut memo, "m", &["job"]);
+    let input = scan_group(&mut memo, "m", &["job"], vec![]);
     let five_minutes = range(&mut memo, input, 300);
     let shifted_input = shift(&mut memo, input, 3600, None);
     let five_minutes_an_hour_ago = range(&mut memo, shifted_input, 300);

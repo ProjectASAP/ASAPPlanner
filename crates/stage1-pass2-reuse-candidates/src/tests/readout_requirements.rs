@@ -1,18 +1,14 @@
-//! Step 3: readout requirements.
+//! Step 3: readout requirements: what Pass 2 writes on the readouts and
+//! prunes with the levels (the level math is tested in `asap_accuracy`).
 
 use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
-use asap_types::ir::operator::arguments::Reduction;
-use asap_types::ir::operator::AggIntent;
-use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::QueryRoot;
-use asap_types::stages::{
-    Memo, MemoGroupId, MemoQuery, PruneCause, RequiredAccuracy, RootPruneReason,
-};
-use asap_types::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
+use asap_types::stages::{Memo, MemoQuery, RequiredAccuracy, RootPruneReason};
+use asap_types::summary_type::{SketchAlgorithm, SketchParams};
 use asap_types::workload::DataWorkload;
 
 use crate::test_fixtures::*;
-use asap_types::test_support::memo_fixtures::aggregate;
+use asap_types::test_support::memo_builders::*;
 
 /// A single quantile query with rank error 0.01: its one readout gets that
 /// requirement (λ = 1), and only the KLL builds whose rank error at δ = 1
@@ -56,24 +52,6 @@ fn a_single_readout_requires_the_query_target() {
             .causes
             .iter()
             .all(|cause| matches!(cause.root, RootPruneReason::BelowRequiredAccuracy { .. }))));
-}
-
-/// A whole-result failure probability is split over the values one
-/// evaluation returns: δ = 0.01 over 100 series is 1e-4 per value.
-#[test]
-fn a_whole_result_failure_probability_is_split_per_value() {
-    let mut memo = Memo::new(&with_series("m", 100));
-    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.9, 300);
-    memo.add_query(MemoQuery {
-        root: QueryRoot::Operator(readout),
-        accuracy_target: Some(AccuracyTarget::max_error(0.01).failure_probability(0.01)),
-        number_of_values_per_query_evaluation: Some(100),
-    });
-    let logical = pass2(memo, &[entry(60_000)]);
-    let [Some(required)] = requirements_of(&logical.memo, readout)[..] else {
-        panic!("one requirement");
-    };
-    assert!((required.failure_probability - 1e-4).abs() < 1e-12);
 }
 
 /// A whole-result failure probability with the
@@ -139,132 +117,4 @@ fn a_readout_another_query_gives_a_level_survives_unknown_values_per_evaluation(
     for group in [readout, state] {
         assert!(!exact_only[q1].contains(&group), "G{}", group.0);
     }
-}
-
-/// A ratio reads no rank error: with a relative target, the KLL readout's
-/// edges into the division and from its states fail the metric rule; it
-/// gets no requirement.
-#[test]
-fn a_ratio_reads_no_rank_error() {
-    let mut memo = Memo::new(&DataWorkload::default());
-    let (_, _, p99) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.99, 300);
-    let p50 = estimate(
-        &mut memo,
-        MemoGroupId(2),
-        SketchStatistic::Quantile { q: 0.5 },
-    );
-    let ratio = arithmetic(&mut memo, ArithmeticOpKind::Div, p99, p50);
-    let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
-    query(&mut memo, ratio, Some(target));
-    let logical = pass2(memo, &[entry(60_000)]);
-    assert_eq!(requirements_of(&logical.memo, p99), vec![None]);
-    // Its metric, rank, is accepted neither by the ratio nor at its own
-    // output: every edge into it is cut.
-    let pruned = pruned_entry(&logical, own_candidate(p99)).expect("pruned");
-    assert!(!pruned.causes.is_empty());
-    assert!(pruned.causes.iter().all(|cause| matches!(
-        cause,
-        PruneCause {
-            root: RootPruneReason::MetricRule {
-                producer_metric: AccuracyMetric::Rank,
-                ..
-            },
-            ..
-        }
-    )));
-}
-
-/// The snapshot workload
-/// `ratio-of-quantiles-1h-mvp`: `quantile_over_time(0.9, data[1h]) /
-/// quantile_over_time(0.5, data[1h])` with relative error 0.05 and δ = 0.01
-/// over the whole result of 10 000 series is δ = 1e-6 per value, below the
-/// grid's 1e-5. The δ levels continue in powers of ten below it, so both
-/// readouts find levels whose sum stays within 1e-6 and (K) can hold.
-#[test]
-fn a_ratio_whose_per_value_failure_probability_is_below_the_grid_splits_it_over_its_readouts() {
-    let mut memo = Memo::new(&with_series("m", 10_000));
-    let (_, state, p90) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 3600);
-    let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
-    let ratio = arithmetic(&mut memo, ArithmeticOpKind::Div, p90, p50);
-    memo.add_query(MemoQuery {
-        root: QueryRoot::Operator(ratio),
-        accuracy_target: Some(
-            AccuracyTarget::max_error(0.05)
-                .failure_probability(0.01)
-                .accuracy_metric(AccuracyMetric::Relative),
-        ),
-        number_of_values_per_query_evaluation: Some(10_000),
-    });
-    let logical = pass2(memo, &[entry(60_000)]);
-    let smallest_failure_probability = |readout| {
-        requirements_of(&logical.memo, readout)
-            .into_iter()
-            .map(|required| {
-                required
-                    .expect("every readout has a level")
-                    .failure_probability
-            })
-            .fold(f64::INFINITY, f64::min)
-    };
-    let (p90_delta, p50_delta) = (
-        smallest_failure_probability(p90),
-        smallest_failure_probability(p50),
-    );
-    assert!(
-        p90_delta + p50_delta <= 1e-6,
-        "{p90_delta} + {p50_delta} > 1e-6"
-    );
-}
-
-/// A `max` reads every readout of one evaluation, and fails when any of
-/// them does: `max(quantile_over_time(0.9, m[5m]))` over 1000 series with
-/// δ = 0.01 returns one value, yet each of its 1000 readouts must fail at
-/// most 1e-5 for the union bound to hold.
-#[test]
-fn a_max_over_many_readouts_splits_the_failure_probability_over_them() {
-    let mut memo = Memo::new(&with_series("m", 1000));
-    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
-    let max = group(
-        &mut memo,
-        aggregate(Reduction::by(vec![]), AggIntent::Max { col: None }, readout),
-    );
-    memo.add_query(MemoQuery {
-        root: QueryRoot::Operator(max),
-        accuracy_target: Some(
-            AccuracyTarget::max_error(0.05)
-                .failure_probability(0.01)
-                .accuracy_metric(AccuracyMetric::Relative),
-        ),
-        number_of_values_per_query_evaluation: Some(1),
-    });
-    let logical = pass2(memo, &[entry(60_000)]);
-    let levels = requirements_of(&logical.memo, readout);
-    assert!(!levels.is_empty());
-    for level in levels {
-        let level = level.expect("the readout has a level");
-        assert!(
-            level.failure_probability <= 1e-5 * (1.0 + 1e-9),
-            "{level:?}"
-        );
-    }
-}
-
-/// A count reads no value (β = 0), so the readouts below it get no level
-/// from it: `count(quantile_over_time(0.9, m[5m]))` requires nothing of
-/// its readout, not an infinite error.
-#[test]
-fn a_count_over_readouts_gives_them_no_level() {
-    let mut memo = Memo::new(&with_series("m", 1000));
-    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
-    let count = group(
-        &mut memo,
-        aggregate(Reduction::by(vec![]), AggIntent::Count, readout),
-    );
-    query(
-        &mut memo,
-        count,
-        Some(AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative)),
-    );
-    let logical = pass2(memo, &[entry(60_000)]);
-    assert_eq!(requirements_of(&logical.memo, readout), vec![None]);
 }

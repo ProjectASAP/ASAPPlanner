@@ -12,16 +12,17 @@ use asap_types::workload::{
 };
 
 use crate::test_fixtures::*;
+use asap_types::test_support::memo_builders::*;
 
 /// A group's evaluation grid is the gcd of its reaching queries' grids;
 /// `None` when one has no known grid.
 #[test]
 fn a_groups_evaluation_grid_is_the_gcd_of_its_queries_grids() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let input = scan(&mut memo, "m", &["job"]);
+    let input = scan_group(&mut memo, "m", &["job"], vec![]);
     let window = range(&mut memo, input, 300);
     let (_, a) = exact_state(&mut memo, window, ExactKind::Sum, Reduction::PerEntity);
-    let other = scan(&mut memo, "n", &["job"]);
+    let other = scan_group(&mut memo, "n", &["job"], vec![]);
     query(&mut memo, a, None);
     query(&mut memo, a, None);
     query(&mut memo, other, None);
@@ -44,7 +45,7 @@ fn sum_over_time_in_a_subquery(
     memo: &mut Memo,
     resolution: Option<Duration>,
 ) -> (MemoGroupId, MemoGroupId, MemoGroupId) {
-    let input = scan(memo, "m", &["job"]);
+    let input = scan_group(memo, "m", &["job"], vec![]);
     let window = range(memo, input, 120);
     let (state, sum) = exact_state(memo, window, ExactKind::Sum, Reduction::PerEntity);
     let subquery = group(

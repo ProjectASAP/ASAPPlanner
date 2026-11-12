@@ -11,6 +11,8 @@ use asap_types::summary_type::{SketchAlgorithm, SketchParams};
 use asap_types::workload::DataWorkload;
 
 use crate::test_fixtures::*;
+use asap_types::test_support::memo_builders::*;
+use asap_types::test_support::memo_fixtures::arithmetic;
 
 /// The concepts doc example "ratio of quantiles":
 /// `quantile_over_time(0.99, m[5m]) / quantile_over_time(0.5, m[5m])`,
@@ -23,12 +25,15 @@ use crate::test_fixtures::*;
 #[test]
 fn dead_candidates_are_pruned_and_listed_before_chain_groups() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let input = scan(&mut memo, "m", &["job"]);
+    let input = scan_group(&mut memo, "m", &["job"], vec![]);
     let window = range(&mut memo, input, 300);
     let algorithms = [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch];
     let p99 = quantile_over_time_readouts(&mut memo, window, 0.99, &algorithms);
     let p50 = quantile_over_time_readouts(&mut memo, window, 0.5, &algorithms);
-    let ratio = arithmetic(&mut memo, ArithmeticOpKind::Div, p99.result, p50.result);
+    let ratio = group(
+        &mut memo,
+        arithmetic(ArithmeticOpKind::Div, p99.result, p50.result),
+    );
     let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
     query(&mut memo, ratio, Some(target));
     let logical = pass2(memo, &[entry(60_000)]);

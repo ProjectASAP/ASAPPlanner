@@ -8,8 +8,9 @@ use crate::ir::operator::arguments::Reduction;
 use crate::ir::schema::FieldDataType;
 use crate::ir::NonASAPOp;
 use crate::stages::logical::group::MemoGroupAsInput;
-use crate::stages::{LogicalPropertiesError, OriginOfCandidateForMemoGroup};
+use crate::stages::LogicalPropertiesError;
 use crate::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
+use crate::test_support::memo_builders::{query, try_candidate};
 use crate::test_support::memo_fixtures::{readout, scan, state};
 
 /// `Project(input)` keeping its first column.
@@ -21,28 +22,6 @@ fn project_first_column(input: MemoGroupId) -> Operator<MemoGroupId> {
         }],
         child: input,
     })
-}
-
-/// A candidate computing `operator` with `parameters`.
-pub(super) fn candidate(
-    operator: Operator<MemoGroupId>,
-    parameters: Option<SketchParams>,
-) -> CandidateForMemoGroup {
-    CandidateForMemoGroup::new(
-        operator,
-        parameters,
-        OriginOfCandidateForMemoGroup::Pass1,
-        vec![],
-    )
-}
-
-/// A query rooted at `group`, without an accuracy target or $n_q$.
-fn query(group: MemoGroupId) -> MemoQuery {
-    MemoQuery {
-        root: QueryRoot::Operator(group),
-        accuracy_target: None,
-        number_of_values_per_query_evaluation: None,
-    }
 }
 
 /// KLL `k`.
@@ -81,7 +60,7 @@ fn add_candidate_maintains_parents_and_queries() {
     let g3 = memo
         .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.95 }, g2))
         .unwrap();
-    assert_eq!(memo.add_query(query(g3)), 0);
+    assert_eq!(query(&mut memo, g3, None), 0);
     // A rule adds a state group G5 over another scan G4: no query
     // reaches them yet.
     let g4 = memo
@@ -92,9 +71,11 @@ fn add_candidate_maintains_parents_and_queries() {
         .unwrap();
     assert!(memo.groups()[g5.0 as usize].reached_by_queries().is_empty());
     // G3 gains a candidate reading G5: G5 and G4 now serve query 0.
-    memo.add_candidate(
+    try_candidate(
+        &mut memo,
         g3,
-        candidate(readout(SketchStatistic::Quantile { q: 0.95 }, g5), None),
+        readout(SketchStatistic::Quantile { q: 0.95 }, g5),
+        None,
     )
     .unwrap();
     assert_eq!(memo.groups()[g5.0 as usize].parent_groups(), &[g3]);
@@ -104,7 +85,7 @@ fn add_candidate_maintains_parents_and_queries() {
     // Query 1 is G6 = Project(G3): it reaches G3 and everything below
     // it, through expressions and candidates, in ascending order.
     let g6 = memo.find_or_add_group(project_first_column(g3)).unwrap();
-    assert_eq!(memo.add_query(query(g6)), 1);
+    assert_eq!(query(&mut memo, g6, None), 1);
     for group in [g1, g2, g3, g4, g5] {
         assert_eq!(
             memo.groups()[group.0 as usize].reached_by_queries(),
@@ -128,7 +109,7 @@ fn add_candidate_rejects_a_candidate_whose_output_differs_from_its_group() {
         .unwrap();
     let before = format!("{memo:?}");
     assert!(matches!(
-        memo.add_candidate(g2, candidate(readout(SketchStatistic::Quantile { q: 0.5 }, g2), None)),
+        try_candidate(&mut memo, g2, readout(SketchStatistic::Quantile { q: 0.5 }, g2), None),
         Err(CandidateError::OutputDiffersFromGroup { group }) if group == g2
     ));
     assert_eq!(
@@ -165,9 +146,11 @@ fn add_candidate_rejects_a_candidate_whose_inputs_fail_validation() {
     );
     let before = format!("{memo:?}");
     assert!(matches!(
-        memo.add_candidate(
+        try_candidate(
+            &mut memo,
             g3,
-            candidate(readout(SketchStatistic::Quantile { q: 0.95 }, g1), None)
+            readout(SketchStatistic::Quantile { q: 0.95 }, g1),
+            None
         ),
         Err(CandidateError::NotValidOverInputGroups(_))
     ));
@@ -269,9 +252,9 @@ fn set_candidate_input_requirements_replaces_only_the_named_candidate() {
         .unwrap();
     let p90 = || readout(SketchStatistic::Quantile { q: 0.9 }, g2);
     let g3 = memo.find_or_add_group(p90()).unwrap();
-    let first = memo.add_candidate(g3, candidate(p90(), None)).unwrap();
+    let first = try_candidate(&mut memo, g3, p90(), None).unwrap();
     memo.set_candidate_input_requirements(first, required(0.01));
-    let second = memo.add_candidate(g3, candidate(p90(), None)).unwrap();
+    let second = try_candidate(&mut memo, g3, p90(), None).unwrap();
     assert_ne!(first, second, "an unset copy is a new candidate");
     memo.set_candidate_input_requirements(second, required(0.02));
     let requirements: Vec<_> = memo.groups()[g3.0 as usize]
@@ -294,8 +277,7 @@ fn a_merge_carries_the_parameters_of_the_states_it_reads() {
     let kll_state = || state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1);
     let g2 = memo.find_or_add_group(kll_state()).unwrap();
     for k in [269, 547] {
-        memo.add_candidate(g2, candidate(kll_state(), kll_k(k)))
-            .unwrap();
+        try_candidate(&mut memo, g2, kll_state(), kll_k(k)).unwrap();
     }
     let merge = Operator::ASAP(crate::ir::ASAPOp::SummaryMerge {
         children: vec![g2],
@@ -303,14 +285,12 @@ fn a_merge_carries_the_parameters_of_the_states_it_reads() {
     });
     let g3 = memo.find_or_add_group(merge.clone()).unwrap();
     assert!(matches!(
-        memo.add_candidate(g3, candidate(merge.clone(), None)),
+        try_candidate(&mut memo, g3, merge.clone(), None),
         Err(CandidateError::LogicalProperties(
             LogicalPropertiesError::SketchBuildWithoutParameters
         ))
     ));
-    let merged = memo
-        .add_candidate(g3, candidate(merge, kll_k(547)))
-        .unwrap();
+    let merged = try_candidate(&mut memo, g3, merge, kll_k(547)).unwrap();
     assert_eq!(
         memo.producers(merged, 0),
         vec![CandidateForMemoGroupId {
@@ -330,9 +310,7 @@ fn set_candidate_input_requirements_panics_on_a_length_mismatch() {
         .unwrap();
     let kll_state = || state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1);
     let g2 = memo.find_or_add_group(kll_state()).unwrap();
-    let build = memo
-        .add_candidate(g2, candidate(kll_state(), kll_k(269)))
-        .unwrap();
+    let build = try_candidate(&mut memo, g2, kll_state(), kll_k(269)).unwrap();
     memo.set_candidate_input_requirements(build, Vec::new());
 }
 
@@ -423,7 +401,7 @@ fn add_candidate_checks_parameters_against_the_groups_output() {
     for (operator, by_parameters) in table {
         let group = memo.find_or_add_group(operator.clone()).unwrap();
         for (parameters, expected) in parameters.iter().zip(by_parameters) {
-            let added = memo.add_candidate(group, candidate(operator.clone(), parameters.clone()));
+            let added = try_candidate(&mut memo, group, operator.clone(), parameters.clone());
             let added = match added {
                 Ok(_) => Ok(()),
                 Err(CandidateError::LogicalProperties(error)) => Err(error),

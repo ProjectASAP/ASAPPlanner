@@ -7,15 +7,15 @@ use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use std::time::Duration;
 
-use asap_types::ir::{
-    ASAPOp, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr, TimeRangeKind,
-};
+use asap_types::ir::{ASAPOp, ExprSemantics, NonASAPOp, Operator, Predicate, TimeRangeKind};
 use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 use asap_types::summary_type::parameter_list;
 use asap_types::summary_type::{ExactKind, SketchAlgorithm, SketchStatistic, SummaryUpdate};
 use asap_types::workload::DataWorkload;
 
 use crate::test_fixtures::*;
+use asap_types::test_support::memo_builders::*;
+use asap_types::test_support::memo_fixtures::compare;
 use asap_types::test_support::memo_fixtures::{aggregate, state_grouped_by};
 
 /// Concepts doc Example 1: F = `quantile by (job, host)(latency[5m])`, C =
@@ -27,12 +27,17 @@ use asap_types::test_support::memo_fixtures::{aggregate, state_grouped_by};
 fn a_filtered_coarse_sketch_state_merges_the_finer_states_through_a_compensating_filter() {
     let mut memo = Memo::new(&DataWorkload::default());
     let labels = ["job", "host"];
-    let all = scan(&mut memo, "latency", &labels);
-    let api = scan_where(
+    let all = scan_group(&mut memo, "latency", &labels, vec![]);
+    let api = scan_group(
         &mut memo,
         "latency",
         &labels,
-        vec![Predicate(equals(2, "api"))],
+        vec![compare(
+            2,
+            CompareOpKind::Eq,
+            ScalarValue::Utf8("api".into()),
+            ExprSemantics::Promql,
+        )],
     );
     let fine_window = range(&mut memo, all, 300);
     let coarse_window = range(&mut memo, api, 300);
@@ -58,7 +63,12 @@ fn a_filtered_coarse_sketch_state_merges_the_finer_states_through_a_compensating
     let filter = group_of(
         memo,
         &Operator::NonASAP(NonASAPOp::Filter {
-            pred: Predicate(equals(0, "api")),
+            pred: Predicate(compare(
+                0,
+                CompareOpKind::Eq,
+                ScalarValue::Utf8("api".into()),
+                ExprSemantics::Promql,
+            )),
             child: fine,
         }),
     )
@@ -92,12 +102,17 @@ fn a_filtered_coarse_sketch_state_merges_the_finer_states_through_a_compensating
 fn a_finest_common_group_no_query_asks_for_serves_both() {
     let mut memo = Memo::new(&DataWorkload::default());
     let labels = ["job", "host"];
-    let all = scan(&mut memo, "latency", &labels);
-    let xxx = scan_where(
+    let all = scan_group(&mut memo, "latency", &labels, vec![]);
+    let xxx = scan_group(
         &mut memo,
         "latency",
         &labels,
-        vec![Predicate(equals(3, "xxx"))],
+        vec![compare(
+            3,
+            CompareOpKind::Eq,
+            ScalarValue::Utf8("xxx".into()),
+            ExprSemantics::Promql,
+        )],
     );
     let all_window = range(&mut memo, all, 300);
     let xxx_window = range(&mut memo, xxx, 300);
@@ -157,7 +172,12 @@ fn a_finest_common_group_no_query_asks_for_serves_both() {
     let filter = group_of(
         memo,
         &Operator::NonASAP(NonASAPOp::Filter {
-            pred: Predicate(equals(1, "xxx")),
+            pred: Predicate(compare(
+                1,
+                CompareOpKind::Eq,
+                ScalarValue::Utf8("xxx".into()),
+                ExprSemantics::Promql,
+            )),
             child: finest,
         }),
     )
@@ -182,12 +202,17 @@ fn a_finest_common_group_no_query_asks_for_serves_both() {
 fn a_narrowing_on_a_column_that_is_no_key_gives_no_rollup() {
     let mut memo = Memo::new(&DataWorkload::default());
     let labels = ["job", "host", "status"];
-    let all = scan(&mut memo, "latency", &labels);
-    let errors = scan_where(
+    let all = scan_group(&mut memo, "latency", &labels, vec![]);
+    let errors = scan_group(
         &mut memo,
         "latency",
         &labels,
-        vec![Predicate(equals(4, "500"))],
+        vec![compare(
+            4,
+            CompareOpKind::Eq,
+            ScalarValue::Utf8("500".into()),
+            ExprSemantics::Promql,
+        )],
     );
     let all_window = range(&mut memo, all, 300);
     let errors_window = range(&mut memo, errors, 300);
@@ -221,7 +246,7 @@ fn a_narrowing_on_a_column_that_is_no_key_gives_no_rollup() {
 #[test]
 fn a_coarse_exact_sum_rolls_up_the_finer_sum() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let input = scan(&mut memo, "x", &["job", "instance"]);
+    let input = scan_group(&mut memo, "x", &["job", "instance"], vec![]);
     let window = range(&mut memo, input, 60);
     let rate = group(
         &mut memo,
@@ -290,7 +315,7 @@ fn instant(memo: &mut Memo, scan: MemoGroupId) -> MemoGroupId {
 #[test]
 fn a_coarse_count_rolls_up_the_finer_count_as_a_sum() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let input = scan(&mut memo, "x", &["job", "instance"]);
+    let input = scan_group(&mut memo, "x", &["job", "instance"], vec![]);
     let rows = instant(&mut memo, input);
     let fine = group(
         &mut memo,
@@ -329,19 +354,16 @@ fn a_coarse_count_rolls_up_the_finer_count_as_a_sum() {
 #[test]
 fn a_not_equal_matcher_compensates_with_promql_semantics() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let not_equal = |column: usize| ScalarExpr::Compare {
-        left: Box::new(ScalarExpr::Column(column)),
-        op: CompareOpKind::Ne,
-        right: Box::new(ScalarExpr::Literal(ScalarValue::Utf8("i1".into()))),
-        semantics: ExprSemantics::Promql,
+    let not_equal = |column: usize| {
+        compare(
+            column,
+            CompareOpKind::Ne,
+            ScalarValue::Utf8("i1".into()),
+            ExprSemantics::Promql,
+        )
     };
-    let all = scan(&mut memo, "x", &["job", "instance"]);
-    let not_i1 = scan_where(
-        &mut memo,
-        "x",
-        &["job", "instance"],
-        vec![Predicate(not_equal(3))],
-    );
+    let all = scan_group(&mut memo, "x", &["job", "instance"], vec![]);
+    let not_i1 = scan_group(&mut memo, "x", &["job", "instance"], vec![not_equal(3)]);
     let all_rows = instant(&mut memo, all);
     let not_i1_rows = instant(&mut memo, not_i1);
     let fine = group(
@@ -397,16 +419,6 @@ fn flows(memo: &mut Memo, predicates: Vec<Predicate<MemoGroupId>>) -> MemoGroupI
     )
 }
 
-/// `column = value`, SQL semantics.
-fn sql_equals(column: usize, value: &str) -> ScalarExpr<MemoGroupId> {
-    ScalarExpr::Compare {
-        left: Box::new(ScalarExpr::Column(column)),
-        op: CompareOpKind::Eq,
-        right: Box::new(ScalarExpr::Literal(ScalarValue::Utf8(value.into()))),
-        semantics: ExprSemantics::Sql,
-    }
-}
-
 /// A compensating filter compares with the semantics of the frontend of
 /// the source it reads: `SUM(bytes) WHERE dst = 'x' GROUP BY src` over a
 /// SQL table rolls up the exact sum state by (src, dst) through
@@ -415,7 +427,15 @@ fn sql_equals(column: usize, value: &str) -> ScalarExpr<MemoGroupId> {
 fn a_compensating_filter_over_a_sql_table_has_sql_semantics() {
     let mut memo = Memo::new(&DataWorkload::default());
     let all = flows(&mut memo, vec![]);
-    let x = flows(&mut memo, vec![Predicate(sql_equals(1, "x"))]);
+    let x = flows(
+        &mut memo,
+        vec![Predicate(compare(
+            1,
+            CompareOpKind::Eq,
+            ScalarValue::Utf8("x".into()),
+            ExprSemantics::Sql,
+        ))],
+    );
     let sum_state = |memo: &mut Memo, rows: MemoGroupId, keys: Vec<usize>| {
         group(
             memo,
@@ -448,7 +468,12 @@ fn a_compensating_filter_over_a_sql_table_has_sql_semantics() {
     assert_eq!(
         logical.memo.groups()[filter.0 as usize].expression,
         Operator::NonASAP(NonASAPOp::Filter {
-            pred: Predicate(sql_equals(1, "x")),
+            pred: Predicate(compare(
+                1,
+                CompareOpKind::Eq,
+                ScalarValue::Utf8("x".into()),
+                ExprSemantics::Sql
+            )),
             child: fine,
         })
     );
@@ -462,7 +487,15 @@ fn a_compensating_filter_over_a_sql_table_has_sql_semantics() {
 fn a_rejected_rollup_leaves_no_compensating_filter() {
     let mut memo = Memo::new(&DataWorkload::default());
     let all = flows(&mut memo, vec![]);
-    let a = flows(&mut memo, vec![Predicate(sql_equals(0, "a"))]);
+    let a = flows(
+        &mut memo,
+        vec![Predicate(compare(
+            0,
+            CompareOpKind::Eq,
+            ScalarValue::Utf8("a".into()),
+            ExprSemantics::Sql,
+        ))],
+    );
     let count_by = |memo: &mut Memo, rows: MemoGroupId, keys: Vec<usize>| {
         group(
             memo,

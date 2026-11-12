@@ -8,13 +8,14 @@ use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use asap_types::workload::DataWorkload;
 
 use crate::test_fixtures::*;
+use asap_types::test_support::memo_builders::*;
 
 /// `topk(5, x)` reads `topk(10, x)`'s ranked rows: the 5 highest of the 10
 /// highest are the 5 highest.
 #[test]
 fn a_smaller_topk_reads_the_largest_topk_of_the_same_input() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let input = scan(&mut memo, "x", &["job"]);
+    let input = scan_group(&mut memo, "x", &["job"], vec![]);
     let topk = |memo: &mut Memo, k: usize| {
         group(
             memo,
