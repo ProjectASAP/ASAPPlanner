@@ -109,9 +109,11 @@ keeps the metric: an input's error and the output's are in the same one.
 
 | Operator | Metric | Factor per input | Validity cap |
 | --- | --- | --- | --- |
-| `Project` of columns and literals, `Sort`, `TimeRange`, `TimeShift`, `Concat`, a readout, a finalize, `SummaryMerge` | any | 1 | none |
+| `Sort`, `TimeRange`, `TimeShift`, `Concat`, a readout, a finalize, `SummaryMerge` | any | 1 | none |
 | `Filter` whose predicate reads only columns copied from a source (labels, keys) | any | 1 | none |
-| `Project` computing `abs`, `clamp`, `clamp_min`, `clamp_max` or a negation of a column | absolute | 1 | none |
+| `Project` whose items reading a computed value (not a copied label, the time or the series identity) are copies | any | 1 | none |
+| the same, with items computing `abs`, `clamp`, `clamp_min`, `clamp_max` (or PromQL's `promql_abs`, …) or a negation of a column | absolute | 1 | none |
+| the same, with items multiplying or dividing a column by a nonzero literal | relative | 1 | none |
 | `Aggregate` (or exact accumulator build) by keys copied from a source, without measure filters or `HAVING`: `count` | any | 0 | none |
 | the same: `min`, `max` | absolute, relative | 1 | none |
 | the same: `avg` | absolute | 1 | none |
@@ -132,14 +134,20 @@ The contracts are used in three places:
   carries. An edge from a readout whose metric its consumer does not
   accept fails (`RootPruneReason::MetricRule`), so an approximate value
   never reaches an operator with no contract for its error. Where no query
-  with a target reaches a group, no metric rule applies.
+  with a target reaches a group, no metric rule applies. The rule is a
+  union over the queries reaching a group; per query, Pass 2 lists the
+  groups reached through a consumer without a contract for the query's
+  metric (`exact_only_groups_of_query`, `exact_only_groups.rs` in Pass 2),
+  which Stage 3 must let that query read only exactly.
 - **Readout requirements** (`asap_accuracy::readout_levels`,
   `accuracy/src/readout_caps.rs`): each query's target is passed from its
   root down to the readouts, divided by each consumer's factor and capped
   by its validity cap, keeping per group the largest cap of each query
   and metric. A query that reads one readout gives it one level, its cap
   at the target's failure probability per value (a whole-result δ split
-  over the values one evaluation returns); a query that combines several
+  over the larger of the values one evaluation returns and the readout
+  group's values per evaluation, since a `max` over many readouts fails
+  when any of them does); a count passes no cap down; a query that combines several
   readouts (a ratio of two quantiles) gives every level of the grid
   `MAX_ERROR_LEVELS` × a failure-probability grid that is not looser than
   the cap and the per-value δ. Pass 2 writes each level on a readout
@@ -149,6 +157,8 @@ The contracts are used in three places:
   producer's θ has a guarantee (measured, else `theoretical_guarantee`)
   in the required metric within the required error at the required
   failure probability, and a merged state keeps the guarantee of a build.
+  Under a query with a target, a readout with no guarantee, or one whose
+  failure probability is unknown (HLL's), fails with `NoGuarantee`.
 
 A value that is exact has no error and needs no contract. Nothing composes
 failure probabilities across readouts beyond the per-value split and the

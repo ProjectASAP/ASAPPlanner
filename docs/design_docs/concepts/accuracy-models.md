@@ -73,11 +73,15 @@ over a scope, a per-value failure probability `δ` becomes `V · δ` by the unio
 bound, without assuming independence, so a sketch shared by several groups
 (Hydra, a keyed Count-Min) is covered the same way
 (`AccuracyScope::max_values_covered` gives `V`). A guarantee whose own failure probability is
-unknown (generic HLL) stays unmet under every scope with a δ, and top-k
-membership needs its own evidence under every scope.
+unknown (generic HLL) serves no query with an accuracy target
+(`RootPruneReason::NoGuarantee`), and a top-k readout is admitted on its
+heap size and its value guarantee alone (the contracts table).
 
 Pass 2 gives each sketch readout the error and per-value failure probability
-`δ / V` it must meet, so the union bound gives δ over the covered values;
+`δ / max(V, R)` it must meet, with `R` the readout group's values per
+evaluation (the series its scans read): a `max` over 1000 readouts returns
+one value yet fails when any readout does, so the union bound gives δ over
+every readout read;
 Pass 1's candidate takes the first requirement level and Pass 2 adds a copy
 per further level. A readout several queries reach gets the union of their
 levels, and a build Pass 2 shares among several readers takes the strictest
@@ -219,15 +223,15 @@ within its validity cap `b_i`. The principal contracts are:
 
 | Operator | Contract |
 |---|---|
-| Project of columns and literals, Sort, TimeRange, TimeShift, Concat, a readout, a finalize, a summary merge | `β = 1` in any metric |
+| Sort, TimeRange, TimeShift, Concat, a readout, a finalize, a summary merge | `β = 1` in any metric |
 | Filter on columns copied from a source (labels and keys) | `β = 1` in any metric; a filter comparing a computed value has none |
-| Project computing `abs`, `clamp` or a negation | Absolute error, `β = 1` |
+| Project | Judged on the items reading a computed value (labels, the time and the series identity are copied): `β = 1` in any metric for a copied column; absolute error, `β = 1`, for `abs`, `clamp`, `clamp_min`, `clamp_max` (also PromQL's `promql_` functions) and a negation; relative error, `β = 1`, for a product with or quotient by a nonzero constant |
 | Aggregate or exact-accumulator build of counts, min, max, avg | Counts `β = 0`; min and max absolute or relative with `β = 1`; avg absolute with `β = 1`; none with measure filters or `HAVING` |
 | `+`, `-` | Absolute error, `β = 1` |
 | `/` | Relative error, `β = 1/(1 − b)` on both operands, the denominator capped at `b` |
 | `*` | Relative error, `β = (1 + b, 1)`, the right operand capped at `b` |
 | Sum, comparison, ranking, counter rate or increase, any other function | No contract: an approximate input gives no edge |
-| Top-k over a sketch | The heap holds its `k` whatever the requirement; membership needs its own evidence |
+| Top-k over a sketch | Checked: the heap size is at least `k`, and the readout's value guarantee meets the requirement; membership has no check of its own |
 
 `b` is `RELATIVE_OPERAND_VALIDITY_CAP`, 0.1, the weakest error of every
 algorithm's list, so it never excludes a listed θ. For relative errors `x`
@@ -270,6 +274,21 @@ largest error the readout's output may have for that query.
   failure probability) not looser than the cap. The logical-edge check then
   keeps the levels a producer's θ meets.
 - A readout reached by several queries gets the union of their levels.
+- A count reads no value (`β = 0`): the readouts below it get no level
+  through it.
+- A query whose target sets a failure probability with no per-value one
+  (`n_q` or the readout's values per evaluation unknown) gives no level. A
+  readout no query gives a level is pruned
+  (`RootPruneReason::ValuesPerEvaluationUnknown`); one another query gives a
+  level stays, and the query reads its group only exactly.
+
+The metric rule cuts a readout's edge when no query reaching it accepts its
+metric, a union over the queries. Per query, Pass 2 also lists the groups it
+reaches through a consumer without a contract for its target's metric
+(`LogicalASAPMemoCandidates::exact_only_groups_of_query`): with Q0 =
+`p99 / p50` and Q1 = `p99 / p50 > 1` sharing the ratio, Q0 may read the
+DDSketch readouts while Q1 reads the ratio and every group below it only
+exactly. Stage 3 must enforce the list per query; Pass 2 only computes it.
 
 An exact target gets no approximate level. A model with only a fixed 1%
 failure contract cannot meet a level that needs a smaller failure probability;
