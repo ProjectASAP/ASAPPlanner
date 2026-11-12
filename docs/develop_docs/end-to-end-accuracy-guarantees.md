@@ -77,9 +77,9 @@ pub trait AccuracyEvidence {
 
 Pass 2 gives each sketch readout the accuracy it is required to meet: a
 query's target divided by the propagation factors of the consumers on the path
-from the readout to the query root (`accuracy::error_propagation`, a linear
-bound per operator and metric, with a validity cap on an operand where the
-bound holds only below it, such as the denominator of a ratio). A query that
+from the readout to the query root (`asap_accuracy::ErrorContract`, a linear
+bound per operator and metric, holding on an operand only up to an error
+where it is limited, such as the denominator of a ratio). A query that
 reads one readout gives it one level; a query that composes several readouts
 (a ratio of two quantiles) gives every level of an error and failure-probability
 grid not looser than the cap, and each logical edge is then checked against
@@ -97,8 +97,9 @@ for this boundary.
 
 Only a sketch readout (`SummaryEstimate` over a sketch state) introduces
 error. Every other operator passes its inputs' errors on through its error
-contract, `asap_accuracy::error_propagation(memo, consumer, metric)`
-(`accuracy/src/error_propagation.rs`): a linear bound on the output error
+contract, `ErrorContract` (`accuracy/src/error_contract/mod.rs`, one per
+candidate and metric in `ErrorMetricsOfMemo`): a linear bound on the output
+error
 from the input errors in one metric,
 
 ```text
@@ -128,8 +129,9 @@ on a computed value, a ranking, a `sum`, a comparison, any other function.
 
 The contracts are used in three places:
 
-- **The metric rule** (`asap_accuracy::accepted_metrics`,
-  `accuracy/src/metric_rule.rs`): a query root accepts its target's metric
+- **The metric rule** (`asap_accuracy::ErrorMetricsOfMemo`, built once per
+  memo state before an edge pass, `accuracy/src/metric_rule/mod.rs`): a
+  query root accepts its target's metric
   (every metric when the target names none); an input of a candidate
   accepts the metrics its output accepts that the candidate's contract
   carries. An edge from a readout whose metric its consumer does not
@@ -137,25 +139,28 @@ The contracts are used in three places:
   never reaches an operator with no contract for its error. Where no query
   with a target reaches a group, no metric rule applies. The rule is a
   union over the queries reaching a group; per query, Pass 2 lists the
-  groups reached through a consumer without a contract for the query's
-  metric (`exact_only_groups_of_query`, `exact_only_groups.rs` in Pass 2),
-  which Stage 3 must let that query read only exactly.
+  groups reached through a live consumer without a contract for the query's
+  metric, and the readout groups whose error metric the query's target does
+  not allow (`ErrorMetricsOfMemo::exact_only_groups_of_query`), which Stage 3
+  must let that query read only exactly.
 - **Readout requirements** (`asap_accuracy::readout_levels`,
-  `accuracy/src/readout_caps.rs`): each query's target is passed from its
+  `accuracy/src/readout_caps/mod.rs`, a `ReadoutRequiredAccuracy` per
+  readout): each query's target is passed from its
   root down to the readouts, divided by each consumer's factor and capped
   by its validity cap, keeping per group the largest cap of each query
   and metric. A query that reads one readout gives it one level, its cap
   at the target's failure probability per value (a whole-result δ split
   over the larger of the values one evaluation returns and the readout
-  group's values per evaluation, since a `max` over many readouts fails
+  group's values per evaluation, `Memo::max_values_per_evaluation`, since a
+  `max` over many readouts fails
   when any of them does); a count passes no cap down; a query that combines several
   readouts (a ratio of two quantiles) gives every level of the grid
   `MAX_ERROR_LEVELS` × a failure-probability grid (powers of ten from 1e-2
   down to 1e-5, continued to the first at or below a tenth of the per-value
   δ) that is not looser than the cap and the per-value δ. Pass 2 writes each level on a readout
   candidate of its own.
-- **$\alpha^{\log}$** (`asap_accuracy::producer_satisfies_logical_requirements`,
-  `accuracy/src/logical_edge.rs`): an edge into a readout holds when the
+- **$\alpha^{\log}$** (`ErrorMetricsOfMemo::edge_meets_logical_requirements`,
+  `accuracy/src/logical_edge/mod.rs`): an edge into a readout holds when the
   producer's θ has a guarantee (measured, else `theoretical_guarantee`)
   in the required metric within the required error at the required
   failure probability, and a merged state keeps the guarantee of a build.
@@ -325,9 +330,10 @@ into an existing variant merely to reuse its API.
 
 For a new summary, give its readouts a guarantee per listed θ at a failure
 probability (`guarantee/`) in one metric, tied to the parameters its list
-commits. Record estimator/version premises in provenance. For a new error
-contract, add the operator's row to `error_propagation`: the metric it
-keeps, the factor per input and any validity cap. An operator without a
+commits. Record estimator/version premises in the guarantee module's docs.
+For a new error contract, add the operator's row to `error_contract`: the
+metric it keeps, the error factor per input and any limit up to which the
+linear bound holds. An operator without a
 row has no contract, so an approximate input never reaches it. Missing
 evidence must stay symbolic or produce a structured rejection.
 

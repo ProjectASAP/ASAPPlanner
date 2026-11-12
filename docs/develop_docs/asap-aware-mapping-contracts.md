@@ -64,14 +64,14 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
   (`AccuracyEvidence::measured_guarantee`) when there is one, else its
   algorithm's error formula (`theoretical_guarantee`); Pass 2 compares it
   with each readout's `RequiredAccuracy`
-  (`producer_satisfies_logical_requirements`). It fails closed: no rule
+  (`ErrorMetricsOfMemo::edge_meets_logical_requirements`). It fails closed: no rule
   means no guarantee, and the edge is not admissible.
 - A target with no `accuracy_metric` accepts a guarantee in any metric that
   meets its ε, δ and scope; Stage 3 reports the metric it accepted
   (`AcceptedAccuracy`).
 - A query that composes several readouts gives each readout a level of an
   error and failure-probability grid, within the cap its path's consumers
-  (`accuracy::error_propagation`) leave it.
+  (`asap_accuracy::ErrorContract`) leave it.
 - Facts come only from the declared `DataWorkload`; an undeclared fact is
   unknown, never zero.
 

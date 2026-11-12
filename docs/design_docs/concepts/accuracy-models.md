@@ -104,8 +104,8 @@ every grouping column's distinct values are declared, and over 25 services
 and 25 endpoints requires each group's sketch to meet `δ / 625`. Nothing declared
 leaves `G` unbound; no default stands in for it.
 
-An `AccuracyGuarantee` contains an error metric, an error-bound expression, a
-failure-probability expression and provenance. The metric is essential:
+An `AccuracyGuarantee` contains an error metric, an error bound and a
+failure probability (possibly unknown, as HLL's). The metric is essential:
 
 | Metric | Quantity bounded |
 |---|---|
@@ -208,8 +208,9 @@ committed parameters, and the cost model never grants accuracy authority.
 ## Propagating errors through a DAG
 
 The accuracy crate supplies theoretical guarantees (`theoretical_guarantee`),
-each operator's error contract (`error_propagation`) and the comparison limit
-of a target (`target_limit`); the deployment's measurements
+each operator's error contract (`ErrorContract`, gathered per memo state in
+`ErrorMetricsOfMemo`) and the comparison of a bound with a target
+(`within_limit`); the deployment's measurements
 (`AccuracyEvidence::measured_guarantee`) take precedence over a theoretical
 guarantee. Only a sketch readout introduces error. Every other operator
 passes its inputs' errors on through a contract, and the contracts are
@@ -219,7 +220,8 @@ approximate value is never treated as exact.
 
 A contract is a linear bound: the consumer's output error is at most
 `Σ β_i · ε_i` over its inputs' errors `ε_i`, valid while each input stays
-within its validity cap `b_i`. The principal contracts are:
+within its validity cap `b_i` (`ErrorContract::error_factor_per_input` and
+`linear_bound_holds_up_to_per_input`). The principal contracts are:
 
 | Operator | Contract |
 |---|---|
@@ -267,7 +269,12 @@ largest error the readout's output may have for that query.
 
 - A query whose path reads one readout gives one requirement level: the
   target divided by the path's factor, at the target's failure probability per
-  value.
+  value: a whole-result δ split over the larger of `n_q` and the readout's
+  own values per evaluation (`Memo::max_values_per_evaluation`: at most the
+  series scanned below it, the declared distinct values of its state's keys,
+  one without keys), since a reduction such as `max` fails when any readout
+  it reads does. `SELECT count(DISTINCT dst) FROM flows` at δ = 0.01 reads
+  one distinct count, so its readout keeps 0.01.
 - A composed query (several readouts, such as a ratio) gives every level of
   the error grid (10%, 5%, 2%, 1%, 0.5%, 0.2%, 0.1%) and the failure-probability
   grid (powers of ten from 1e-2 down to 1e-5, continued down to the first
@@ -285,11 +292,31 @@ largest error the readout's output may have for that query.
 
 The metric rule cuts a readout's edge when no query reaching it accepts its
 metric, a union over the queries. Per query, Pass 2 also lists the groups it
-reaches through a consumer without a contract for its target's metric
-(`LogicalASAPMemoCandidates::exact_only_groups_of_query`): with Q0 =
-`p99 / p50` and Q1 = `p99 / p50 > 1` sharing the ratio, Q0 may read the
-DDSketch readouts while Q1 reads the ratio and every group below it only
-exactly. Stage 3 must enforce the list per query; Pass 2 only computes it.
+may read only exactly
+(`LogicalASAPMemoCandidates::exact_only_groups_of_query`, from
+`ErrorMetricsOfMemo::exact_only_groups_of_query`), walking the live
+candidates: the groups it reaches through a consumer without a contract for
+its target's metric, and the readout groups whose error metric its target
+does not allow. With Q0 = `p99 / p50` and Q1 = `p99 / p50 > 1` sharing the
+ratio, Q0 may read the DDSketch readouts while Q1 reads the ratio and every
+group below it only exactly; with `quantile_over_time(0.9, m[5m])` asked once
+at a rank target and once at a relative one, each reads the other's readout
+groups only exactly. Stage 3 must enforce the list per query; Pass 2 only
+computes it. A scalar root's operands are roots: `scalar(v)` and a scalar
+subquery keep the target's metrics, and any other scalar expression reads its
+operands only exactly.
+
+The list is per group, so it is conservative where one group holds
+candidates a query may and may not read: `avg by (job)(count_over_time(m[1m]))`
+at an absolute target reads `avg` with a contract and the exact accumulator's
+sum and count without one, so the group below is exact-only for that query
+even through `avg`. A finer list needs Stage 3 to enforce the metric rule per
+query on each edge.
+
+A PromQL subquery (`<expr>[10m:30s]`) has no error contract, so every sketch
+readout below one serves no query with a target (sound). A contract for it
+must split the failure probability over the subquery's inner steps (series ×
+range / resolution), not over the series alone.
 
 An exact target gets no approximate level. A model with only a fixed 1%
 failure contract cannot meet a level that needs a smaller failure probability;
@@ -388,33 +415,33 @@ The `asap_accuracy` crate separates these responsibilities:
 accuracy/src/
 ├── lib.rs              # Re-exports: the public interfaces
 ├── evidence.rs         # AccuracyEvidence: the deployment's measured accuracy
-├── error_propagation.rs # error_propagation: each operator's error contract per
-│                       # metric; metrics_carried
-├── metric_rule.rs      # accepted_metrics, metrics_accepted_on_inputs (the
-│                       # metric rule)
-├── readout.rs          # readout_metric, sketch_readout_metric,
-│                       # readout_metric_of_candidate: the metric of a
-│                       # readout's error
-├── readout_caps.rs     # readout_levels: caps through the error contracts, each
-│                       # readout's required-accuracy levels; MAX_ERROR_LEVELS
-├── logical_edge.rs     # producer_satisfies_logical_requirements (α^log);
-│                       # target_limit, the requirement comparison
+├── error_contract/     # ErrorContract: each operator's error contract per
+│                       # metric
+├── metric_rule/        # ErrorMetricsOfMemo: the contracts, allowed metrics and
+│                       # readout metrics of one memo state; the metric rule per
+│                       # query (exact_only_groups_of_query)
+├── readout/            # readout_error_metric: the metric of a readout's error
+├── readout_caps/       # readout_levels → ReadoutRequiredAccuracy: caps through
+│                       # the error contracts, each readout's required-accuracy
+│                       # levels; MAX_ERROR_LEVELS
+├── logical_edge/       # ErrorMetricsOfMemo::edge_meets_logical_requirements
+│                       # (α^log); within_limit, the requirement comparison
 └── guarantee/
     ├── mod.rs          # theoretical_guarantee (one lookup at a failure
     │                   # probability per algorithm)
     ├── binomial.rs     # binomial_upper_tail
-    ├── kll.rs
+    ├── kll/
     ├── ddsketch.rs
-    ├── hll.rs          # Generic HLL (unknown failure probability)
-    ├── cms.rs
-    ├── count_sketch.rs
-    ├── cardinality.rs  # KMV model
-    └── univmon.rs
+    ├── hll.rs          # HLL (unknown failure probability)
+    ├── cms/
+    ├── count_sketch/
+    ├── cardinality/    # KMV model
+    └── univmon/
 ```
 
-Each estimator module owns its local accuracy formulas: the guarantee of a
-listed θ at a failure probability. Unit tests sit next to the file they
-test. The unified entry point delegates to these models; it does not
+A directory is a module (`mod.rs`) with its unit tests beside it
+(`tests.rs`). Each estimator module owns its local accuracy formulas: the
+guarantee of a listed θ at a failure probability. The unified entry point delegates to these models; it does not
 contain a second copy of their mathematics. Serializable guarantee and metric
 types live in `asap-types` so planning, explanations and downstream binding
 share the same contract.

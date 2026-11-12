@@ -4,11 +4,11 @@
 > targets and per-family guarantees (`AccuracyTarget`, `AccuracyGuarantee`);
 > per-operator error contracts (`ErrorContract { error_factor_per_input,
 > linear_bound_holds_up_to_per_input }` in
-> [`crates/accuracy/src/error_propagation.rs`](../../../../crates/accuracy/src/error_propagation.rs));
+> [`crates/accuracy/src/error_contract/mod.rs`](../../../../crates/accuracy/src/error_contract/mod.rs));
 > readout requirements
-> ([`crates/accuracy/src/readout_caps.rs`](../../../../crates/accuracy/src/readout_caps.rs));
+> ([`crates/accuracy/src/readout_caps/mod.rs`](../../../../crates/accuracy/src/readout_caps/mod.rs));
 > and the logical edge check
-> ([`crates/accuracy/src/logical_edge.rs`](../../../../crates/accuracy/src/logical_edge.rs)).
+> ([`crates/accuracy/src/logical_edge/mod.rs`](../../../../crates/accuracy/src/logical_edge/mod.rs)).
 > The guarantee composition and propagation pipeline this proposal describes
 > (`CompositionOperator`, `AccuracyModel`, `AccuracyBudgetAllocator`) is not
 > in the code: the per-operator error contracts replaced it. The
@@ -260,6 +260,11 @@ struct AccuracyGuarantee {
 
 Summary state does not itself claim a final-result guarantee. The
 guarantee is attached to a finalized value, such as a `SummaryEstimate`.
+
+> Implemented: `AccuracyGuarantee` holds only an `AccuracySpec` with a
+> constant bound (`BoundExpr::Constant`) and a failure probability
+> (`ProbabilityExpr::{Zero, Constant, Unknown}`); the symbolic combinators
+> and the provenance trail below are not in the code.
 
 #### Error metrics
 
