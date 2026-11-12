@@ -83,7 +83,8 @@ bound holds only below it, such as the denominator of a ratio). A query that
 reads one readout gives it one level; a query that composes several readouts
 (a ratio of two quantiles) gives every level of an error and failure-probability
 grid not looser than the cap, and each logical edge is then checked against
-the levels. A consumer with no contract for a metric gives no edge, so an
+the levels. A consumer with no contract for a metric fails the edge from a
+readout in that metric (`RootPruneReason::MetricRule`), so an
 approximate value is never treated as exact. Every candidate is
 checked against the target before being treated as satisfying it. This is distinct from
 candidate visibility: a Stage 1 candidate whose output has no guarantee is
@@ -149,8 +150,9 @@ The contracts are used in three places:
   group's values per evaluation, since a `max` over many readouts fails
   when any of them does); a count passes no cap down; a query that combines several
   readouts (a ratio of two quantiles) gives every level of the grid
-  `MAX_ERROR_LEVELS` × a failure-probability grid that is not looser than
-  the cap and the per-value δ. Pass 2 writes each level on a readout
+  `MAX_ERROR_LEVELS` × a failure-probability grid (powers of ten from 1e-2
+  down to 1e-5, continued to the first at or below a tenth of the per-value
+  δ) that is not looser than the cap and the per-value δ. Pass 2 writes each level on a readout
   candidate of its own.
 - **$\alpha^{\log}$** (`asap_accuracy::producer_satisfies_logical_requirements`,
   `accuracy/src/logical_edge.rs`): an edge into a readout holds when the
@@ -214,18 +216,11 @@ epsilon_cardinality = 1.04 / sqrt(2^p)
 delta = unknown
 ```
 
-Sizing inverts the magnitude. HLL's current parameter model contains precision
-only; it does not encode a confidence-level budget. Generic HLL may therefore
-satisfy a target with only `error` set, but not one that also sets
-`failure_probability`.
-
-Classic HLL (its linear-counting branch) has an estimator-specific confidence
-bound (`accuracy/guarantee/hll.rs`). Its precision is sized from (ε, δ), and
-its failure probability stays symbolic,
-`classic_hll_failure_probability[p=P,eps=ε](max_distinct[source])`, until
-plan selection binds it with the source's
-`DataWorkload.sources[source].max_distinct_per_evaluation`. A missing bound
-leaves the target unmet.
+HLL's parameter model contains precision only; it does not encode a
+confidence-level budget. With its failure probability unknown, a distinct
+count read from HLL serves no query with an accuracy target (the edge fails
+with `NoGuarantee`); KMV is the distinct-count summary with a certified
+bound.
 
 ### KMV and Theta
 
@@ -280,22 +275,13 @@ declared facts, and is recorded in provenance. The default evidence has no measu
 
 ### TopK membership
 
-The membership certificate needs:
-
-- the lower confidence bound of the kth selected item;
-- the greatest upper confidence bound among excluded items; and
-- the union-bound failure probability of all certificate intervals.
-
-The intervals must already include underlying sketch error. Certify exact
-membership only when:
-
-```text
-selected_kth_lower_bound > excluded_max_upper_bound
-```
-
-The result uses `TopKMembership`, zero membership error, and the supplied
-failure probability. Missing, non-finite, invalid, equal, or overlapping
-evidence rejects the candidate.
+Planner has no membership certificate for a top-k. A top-k readout from a
+heap variant (`CmsWithHeap`, `CountSketchWithHeap`) is admitted when its
+heap holds at least `k` entries (else the edge fails with
+`RootPruneReason::HeapSmallerThanTopK`) and the counts it reports meet the
+requirement: the Count-Min L1 or Count Sketch L2 absolute stream bound of
+the sketch's width and depth. Whether the right `k` keys are selected is not
+checked on its own.
 
 ### Hydra shared grid
 
@@ -310,6 +296,8 @@ When observations are unavailable, preserve
 `hydra_shared_grid_collision_bound` and
 `hydra_shared_grid_failure_probability` as symbolic leaves and reject an
 accuracy-targeted candidate. Never copy the inner guarantee onto Hydra alone.
+The code does not implement this yet: a Hydra state currently has its
+per-subpopulation state's guarantee, without the shared-grid term.
 
 ## Adding or changing an accuracy target
 

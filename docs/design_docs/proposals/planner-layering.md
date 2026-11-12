@@ -311,7 +311,7 @@ rule's origin, and gives each reader a candidate that reads that group.
 | `OriginOfCandidateForMemoGroup` | Added by | Candidates |
 |---|---|---|
 | `Pass1` | `pass1_memo` (`stage1-pass1-per-computation-candidates`: `computation_targets.rs`, `candidates/`) | Every Pass 1 way to compute the group's measures: exact, exact accumulator, each summary algorithm with one build per configuration of its predefined list (`parameter_list`), and fused computations. A fused candidate lists the groups of the operators it replaces in `fused_groups`; those groups keep their own candidates for their other readers. |
-| `TumblingWindows` | Chain groups: `add_chain_groups` (`stage1-pass2-reuse-candidates/src/rules/chains.rs`) | A chain group `SummaryTumblingWindowChain[w](X)` per width the reaching queries' evaluation grids allow, one build per surviving θ, the `TimeShift`/`TimeRange` groups over it, and the `SummaryMerge` over them in the state group. A chain has an edge only into a group whose evaluation grid its width divides, so a 15 s chain never serves a state also read every 10 s. |
+| `TumblingWindows` | Chain groups: `add_chain_groups` (`stage1-pass2-reuse-candidates/src/rules/chains.rs`) | A chain group `SummaryTumblingWindowChain[w](X)` per width the reaching queries' evaluation grids allow, one build per surviving θ, the `TimeShift`/`TimeRange` groups over it, and the `SummaryMerge` over them in the state group. A chain's edge into a group whose evaluation grid its width does not divide fails with `ChainWidthDoesNotDivideEvaluationGrid`, so the merge over it is pruned: a 15 s chain never serves a state also read every 10 s. |
 | `TopKReuse` | Exact top-k reuse: `add_topk_candidates` (`stage1-pass2-reuse-candidates/src/rules/topk.rs`) | For each exact top-k, `Aggregate[TopK k]` over the ranked rows of the top-k group of the same input and partition with the largest `k`, partitioned by that group's leading key columns: the `k` highest of the `k_max` highest rows are the `k` highest. |
 | `Rollup` | Rollup from the finest common group: `add_rollup_candidates` (`stage1-pass2-reuse-candidates/src/rules/rollup.rs`) | A coarse group computed from a finer group's values or states (through a compensating `Filter` on the finer group's keys), and the builds of a cluster's finest common group. |
 
@@ -489,8 +489,10 @@ full tumbling-window-width domain, with no time limit.
 
 #### Memo code interface
 
-The memo rules are in `crates/stage1-pass2-reuse-candidates/src/` (module
-`memo`, crate-private: the crate root re-exports each entry point); the memo types Stage 1 hands Stage 2 are in
+The memo rules are in `crates/stage1-pass2-reuse-candidates/src/` (files
+`rules/`, `readout_requirements.rs`, `dead_candidates.rs`, `edges.rs`,
+`evaluation_grids.rs` and `exact_only_groups.rs`, crate-private: the crate
+root's `generate_logical_asap_memo_candidates` runs them); the memo types Stage 1 hands Stage 2 are in
 `crates/types/src/stages/` (`asap_types::stages`); the facade that runs the
 stages is in `crates/planner/src/run.rs`; the search over Stage 2's
 candidates is in `crates/stage3-plan-selection/src/` (`lib.rs`, `groups/`, `milp/`).
@@ -501,7 +503,6 @@ candidates is in `crates/stage3-plan-selection/src/` (`lib.rs`, `groups/`, `milp
 | Pass 1 | `pass1_memo` → `Memo`, the one entry: inside it, the computation targets (walking the memo groups, less the summaries the deployment does not support; `ComputationTarget` is Pass 1's private working type), then each target's ways to compute added as candidates of the groups, a summary with one build per configuration of its `parameter_list` | `stage1-pass1-per-computation-candidates/src/lib.rs`; `computation_targets.rs`; `candidates/` (`mod.rs`, `pending.rs`, `measure_output.rs`); `summary_realization.rs` builds the summary inputs (the sketch algorithms that serve an intent, each row's update) |
 | Memo types | `Memo`, `MemoGroup`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
 | Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, from Pass 1's output. It calls in this order: 1. rollup from the finest common group; 2. top-k reuse; 3. reach, caps and readout requirements; 4. dead-candidate elimination; 5. chain groups; 6. the logical edges; then each group's evaluation grid and the groups each query may read only exactly | `stage1-pass2-reuse-candidates/src/` (`lib.rs`, `rules/{rollup,topk,chains}.rs`, `readout_requirements.rs`, `dead_candidates.rs`, `edges.rs`, `evaluation_grids.rs`, `exact_only_groups.rs`; the readout levels: `asap_accuracy::readout_levels`; `LogicalASAPMemoCandidates` itself: `asap_types::stages`) |
-| Memo to candidate DAGs | `enumerate`, `build_logical_asap_dags_from_chosen_candidates`, `ChosenCandidatePerMemoGroup`, `AllChosenCandidatesPerMemoGroup`, `ErrorBuildingLogicalASAPDagsFromChosenCandidates` | `pass2/memo/enumeration.rs` (re-exported at the crate root) |
 | Production memo build and search | The facade's `run_planning` builds Stage 0's memo (`memo_of_queries`) and runs Pass 1 (`pass1_memo`) once; then `generate_logical_asap_memo_candidates`, `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`, once each; `select_plan` builds the plan. Behind `select_plan`: the group selection MILP (#1095), `groups/` and `milp/` | `crates/planner/src/run.rs`; `crates/stage3-plan-selection/src/lib.rs` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies

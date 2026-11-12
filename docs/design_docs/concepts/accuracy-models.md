@@ -84,8 +84,10 @@ one value yet fails when any readout does, so the union bound gives δ over
 every readout read;
 Pass 1's candidate takes the first requirement level and Pass 2 adds a copy
 per further level. A readout several queries reach gets the union of their
-levels, and a build Pass 2 shares among several readers takes the strictest
-reader's size. Stage 3 only checks the guarantee; it never resizes. At equal
+levels. Pass 2 sizes nothing: a state has one build per listed θ, and each
+edge checks the guarantee of its producer's θ at the required failure
+probability, so a build several readers share serves the readers whose
+levels its θ meets. Stage 3 only checks the guarantee; it never resizes. At equal
 δ, the scope covering the most values is the strictest: every group (`G`,
 when `G` is above 100), then a 1% share (100), then a 5% share (20), then a
 single value (1). A whole-result target with an unbound `G`
@@ -99,7 +101,7 @@ most the series read. With each of 625 endpoints in one of 25 services and
 most 625 values, not 25 x 625. A key counts only when it is a source column passed through
 unchanged; a relabeled or computed key leaves `G` unbound. So a sketch meets a whole-result target over SQL groups when
 every grouping column's distinct values are declared, and over 25 services
-and 25 endpoints sizes each group's sketch for `δ / 625`. Nothing declared
+and 25 endpoints requires each group's sketch to meet `δ / 625`. Nothing declared
 leaves `G` unbound; no default stands in for it.
 
 An `AccuracyGuarantee` contains an error metric, an error-bound expression, a
@@ -130,7 +132,7 @@ query text or cost estimates.
 
 ```mermaid
 flowchart TD
-    Request[Query semantics and accuracy target] --> Generate[Generate candidates and size parameters]
+    Request[Query semantics and accuracy target] --> Generate[Generate candidates with listed parameters]
     Evidence[Scoped source contracts and evidence] --> Generate
     Generate --> Local[Derive local evaluation guarantees]
     Evidence --> Local
@@ -161,16 +163,17 @@ missing-evidence gate still matters during selection. A successful accuracy
 check also does not prove that a runtime implements the plan, that stored state
 is ready, or that a complete deployment cost is available.
 
-## Local estimator models and parameter sizing
+## Local estimator models and parameter lists
 
 A local model describes a specific evaluation of a specific estimator with
 committed parameters and applicable assumptions. A family name or a parameter
 such as HLL precision is not, by itself, a confidence certificate.
 
-Sizing proposes parameters for a local target. Planner then derives the
-actual guarantee from those parameters and checks it. Parameter rounding,
-implementation limits, or conservative probability bounds can make a proposed
-configuration insufficient; sizing must not bypass that check.
+Planner does not size parameters for a target. Each algorithm has a listed
+set of parameters θ; Planner derives the guarantee of each listed θ at the
+required failure probability and checks it against the requirement.
+Implementation limits or conservative probability bounds can make a listed θ
+insufficient for a requirement; that θ then serves no reader that needs more.
 
 The built-in models currently include:
 
@@ -180,7 +183,6 @@ The built-in models currently include:
 | KLL | Normalized rank error from the empirical 99% calibration `2.296 / k^0.9723`, fitted on Apache DataSketches' C++ KLL (`a9b42755072b`); below a failure probability of 0.01 that error is scaled by the Gaussian quantile ratio `z(1 − δ/2) / z(1 − 0.01/2)`, a model rather than a measurement, and the guarantee names that contract apart |
 | DDSketch | Relative value error from alpha under the supported estimator/domain contract; operators sensitive to sign or range require additional domain evidence |
 | Generic HLL | RSE magnitude with unknown failure probability; not a general confidence theorem |
-| Bounded Classic HLL | Source-conditioned relative-error/failure-probability bound and precision sizing for the linear-counting branch |
 | CMS | L1-normalized frequency bound from width and depth; does not by itself certify TopK membership |
 | CountSketch | L2-normalized frequency bound and median concentration bound, requiring valid odd depth |
 | KMV | Provable distinct-count bound from the `k` smallest hashes |
@@ -193,17 +195,15 @@ another implementation with the same algorithm name. In particular, a named
 empirical calibration is different from an arbitrary benchmark's maximum
 observed error; both its confidence and applicability must remain explicit.
 
-Sizing is each algorithm's predefined parameter list, `parameter_list`
-(`crates/types/src/summary_type/parameter_lists.rs`), which a test keeps equal
-to the estimator modules' closed-form sizing over an error grid; a summary shared by several readers is sized with each
-parameter's largest value among them. Where an error bound grows as the failure
-probability shrinks (a KLL's `k`, a distinct-count UnivMon's heap), each
-reader's parameter is first resized to the readers' smallest failure
-probability at no larger error, so the shared summary meets every reader at
-the one failure probability it states. Accuracy validation is independent of
-sizing: Stage 3 checks the guarantee derived from the committed parameters.
-The design boundary is that sizing never grants accuracy authority to the
-cost model.
+The θ lists are each algorithm's predefined parameter list, `parameter_list`
+(`crates/types/src/summary_type/parameter_lists.rs`), weakest first. Pass 1
+and Pass 2 add one build per listed θ, and the logical-edge check keeps an
+edge only when the guarantee of the producer's θ, at the readout's required
+failure probability, is within the required error. Where an error bound grows
+as the failure probability shrinks (a KLL's `k`), the same θ meets a reader
+at 1e-2 and misses one at 1e-6; no θ is resized for a reader. Accuracy
+validation is independent of cost: the guarantee is derived from the
+committed parameters, and the cost model never grants accuracy authority.
 
 ## Propagating errors through a DAG
 
@@ -213,9 +213,9 @@ of a target (`target_limit`); the deployment's measurements
 (`AccuracyEvidence::measured_guarantee`) take precedence over a theoretical
 guarantee. Only a sketch readout introduces error. Every other operator
 passes its inputs' errors on through a contract, and the contracts are
-conservative: an operator with no contract for a metric gives no edge for an
-input whose error is in that metric, so an approximate value is never treated
-as exact.
+conservative: an operator with no contract for a metric fails the edge of an
+input whose error is in that metric (`RootPruneReason::MetricRule`), so an
+approximate value is never treated as exact.
 
 A contract is a linear bound: the consumer's output error is at most
 `Σ β_i · ε_i` over its inputs' errors `ε_i`, valid while each input stays
@@ -226,11 +226,11 @@ within its validity cap `b_i`. The principal contracts are:
 | Sort, TimeRange, TimeShift, Concat, a readout, a finalize, a summary merge | `β = 1` in any metric |
 | Filter on columns copied from a source (labels and keys) | `β = 1` in any metric; a filter comparing a computed value has none |
 | Project | Judged on the items reading a computed value (labels, the time and the series identity are copied): `β = 1` in any metric for a copied column; absolute error, `β = 1`, for `abs`, `clamp`, `clamp_min`, `clamp_max` (also PromQL's `promql_` functions) and a negation; relative error, `β = 1`, for a product with or quotient by a nonzero constant |
-| Aggregate or exact-accumulator build of counts, min, max, avg | Counts `β = 0`; min and max absolute or relative with `β = 1`; avg absolute with `β = 1`; none with measure filters or `HAVING` |
+| Aggregate or exact-accumulator build of counts, min, max, avg | Counts `β = 0`; min and max absolute or relative with `β = 1`; avg absolute with `β = 1`; only when every group-by key is copied from a source (a `by` key as listed; for `without`, every column but the time, the sample value and the excluded ones); none with measure filters or `HAVING`, or with a key reading an estimate |
 | `+`, `-` | Absolute error, `β = 1` |
 | `/` | Relative error, `β = 1/(1 − b)` on both operands, the denominator capped at `b` |
 | `*` | Relative error, `β = (1 + b, 1)`, the right operand capped at `b` |
-| Sum, comparison, ranking, counter rate or increase, any other function | No contract: an approximate input gives no edge |
+| Sum, comparison, ranking, counter rate or increase, any other function | No contract: the edge of an approximate input fails |
 | Top-k over a sketch | Checked: the heap size is at least `k`, and the readout's value guarantee meets the requirement; membership has no check of its own |
 
 `b` is `RELATIVE_OPERAND_VALIDITY_CAP`, 0.1, the weakest error of every
@@ -270,8 +270,9 @@ largest error the readout's output may have for that query.
   value.
 - A composed query (several readouts, such as a ratio) gives every level of
   the error grid (10%, 5%, 2%, 1%, 0.5%, 0.2%, 0.1%) and the failure-probability
-  grid (powers of ten from 1e-2 down to a tenth of the query's per-value
-  failure probability) not looser than the cap. The logical-edge check then
+  grid (powers of ten from 1e-2 down to 1e-5, continued down to the first
+  one at or below a tenth of the query's per-value failure probability) not
+  looser than the cap. The logical-edge check then
   keeps the levels a producer's θ meets.
 - A readout reached by several queries gets the union of their levels.
 - A count reads no value (`β = 0`): the readouts below it get no level
@@ -314,30 +315,16 @@ certification. If a model uses an empirical accuracy calibration, the contract
 must identify its confidence level and scope rather than silently promoting
 an observation into a guarantee.
 
-### Example: bounded Classic HLL
+### Example: HLL distinct counts
 
-A deployment declares `DataWorkload.sources[source].max_distinct_per_evaluation`
-for the source the distinct count reads. It asserts an enforced maximum
-distinct population per evaluation, including all merged tumbling windows; the classic
-estimator and independent uniform bucket hashing are the model's
-assumptions. Stage 1 sizes the precision from the query or allocated local
-target and leaves the failure probability symbolic, as
-`classic_hll_failure_probability[p=P,eps=ε](max_distinct[source])`. Pass 1
-then raises the precision when the source's declared bound needs it (for its
-share of the failure probability), and Stage 3 binds the failure probability
-from that bound in the normal selection checks. A bound outside the
-contract's range gives a failure probability of 1; a missing bound leaves it
-unknown, so the target is not met.
-
-The current model supports maxima from 1 to 131,072 (2^17) and precisions from 4 to 18,
-and certifies only configurations that remain in the linear-counting branch.
-It bounds collisions across every integer cardinality in the declared domain
-and bounds overestimation deterministically. It is not an RSE-to-normal
-conversion, nor does it cover HIP/MLE or arbitrary unbounded populations.
-
-Missing evidence leaves generic HLL confidence unknown. Invalid or infeasible
-contracts cannot authorize the result. The contract does not certify another
-estimator, another expression or an unsupported shared-grid grouping.
+HLL's guarantee is its relative standard error, `1.04 / √m` for `m` buckets,
+with an unknown failure probability. Its readout's metric is relative error,
+but no failure probability can be evaluated, so a distinct count read from
+HLL serves no query with an accuracy target
+(`RootPruneReason::NoGuarantee`); KMV's distinct count, whose bound does not
+depend on the number of distinct items, serves such a query. Missing evidence
+leaves generic HLL confidence unknown. Invalid or infeasible contracts cannot
+authorize the result.
 
 ## Sharing across consumers
 
@@ -372,12 +359,12 @@ These percentages bound rank displacement, not latency-value error.
 
 ```mermaid
 flowchart LR
-    Input[Same source, filter and window] --> Shared[KLL computation per service sized for A]
+    Input[Same source, filter and window] --> Shared[KLL computation per service meeting A]
     Shared --> A[Consumer A: 1% rank error]
     Shared --> B[Consumer B: 5% rank error]
 ```
 
-B's independently sized candidate remains available. Global selection compares
+B's own candidate, a θ meeting only B, remains available. Global selection compares
 that candidate with the reuse candidate and preserves the dependency on A's
 tighter computation if it chooses reuse. Sharing is therefore an explicit
 planning choice, not an unconditional rewrite or two separately charged builds.
@@ -388,18 +375,10 @@ not just accuracy. Nor does this example justify serving B at a failure target
 of 0.1%; A's 1% failure guarantee would not meet it. A separate supported reuse
 rule or a different estimator configuration would be needed in those cases.
 
-When the consumers' failure targets differ, the summary-capability rule offers
-such a configuration. A shared summary states one accuracy bound at one failure
-probability, so it is sized at the smallest one. Each consumer's parameters are
-resized to it at no larger error, and the largest is kept. Suppose A asks
-for 1% rank error at a 1% failure probability (`k = 269` alone) and B for
-5% at 0.01% (`k = 79` alone). At 0.01% the Gaussian scale is 1.51, so A's
-`k = 269` would give 1.5% rank error there, which misses A's target. A's
-`k` is therefore grown to 412 (rank error 0.997% at 0.01%), and the shared KLL is
-`k = 412` at 0.01%, which meets both. A distinct-count UnivMon's heap is shared
-the same way. Checking each consumer at its own failure probability against
-a smaller shared summary would need a guarantee per consumer, which a shared
-summary's guarantee does not carry.
+When the consumers' failure targets differ, each reads the shared KLL at
+its own required failure probability: a θ whose guarantee meets both
+requirements serves both, and one meeting only the looser does not serve
+the tighter consumer. No θ is resized for sharing.
 
 ## Organization and extension contract
 
@@ -409,18 +388,24 @@ The `asap_accuracy` crate separates these responsibilities:
 accuracy/src/
 ├── lib.rs              # Re-exports: the public interfaces
 ├── evidence.rs         # AccuracyEvidence: the deployment's measured accuracy
-├── error_propagation.rs # error_propagation: each operator's error contract per metric
-├── metric_rule.rs      # accepted_metrics (the metric rule), readout_metric,
-│                       # sketch_readout_metric
+├── error_propagation.rs # error_propagation: each operator's error contract per
+│                       # metric; metrics_carried
+├── metric_rule.rs      # accepted_metrics, metrics_accepted_on_inputs (the
+│                       # metric rule)
+├── readout.rs          # readout_metric, sketch_readout_metric,
+│                       # readout_metric_of_candidate: the metric of a
+│                       # readout's error
 ├── readout_caps.rs     # readout_levels: caps through the error contracts, each
-│                       # readout's required-accuracy levels
-├── logical_edge.rs     # producer_satisfies_logical_requirements (α^log)
+│                       # readout's required-accuracy levels; MAX_ERROR_LEVELS
+├── logical_edge.rs     # producer_satisfies_logical_requirements (α^log);
+│                       # target_limit, the requirement comparison
 └── guarantee/
     ├── mod.rs          # theoretical_guarantee (one lookup at a failure
-    │                   # probability per algorithm), target_limit
+    │                   # probability per algorithm)
+    ├── binomial.rs     # binomial_upper_tail
     ├── kll.rs
     ├── ddsketch.rs
-    ├── hll.rs          # Generic HLL and bounded Classic HLL
+    ├── hll.rs          # Generic HLL (unknown failure probability)
     ├── cms.rs
     ├── count_sketch.rs
     ├── cardinality.rs  # KMV model
@@ -428,7 +413,8 @@ accuracy/src/
 ```
 
 Each estimator module owns its local accuracy formulas: the guarantee of a
-listed θ at a failure probability. The unified entry point delegates to these models; it does not
+listed θ at a failure probability. Unit tests sit next to the file they
+test. The unified entry point delegates to these models; it does not
 contain a second copy of their mathematics. Serializable guarantee and metric
 types live in `asap-types` so planning, explanations and downstream binding
 share the same contract.
@@ -436,10 +422,10 @@ share the same contract.
 Adding an estimator or an operator's error contract requires:
 
 1. A precisely defined error metric, estimator/evaluation semantics and assumptions.
-2. Sizing behavior and a guarantee derived from the committed parameters, including unsupported parameter domains.
+2. A θ list and a guarantee derived from each listed θ at a required failure probability, including unsupported parameter domains.
 3. Explicit evidence requirements, population scope and provenance.
 4. Propagation rules where supported; rejection or retained unknowns elsewhere.
-5. Tests from target and evidence through sizing, error propagation and selection, including missing evidence and infeasible targets.
+5. Tests from target and evidence through the guarantee at the required failure probability, error propagation and selection, including missing evidence and infeasible targets.
 
 Algorithm-specific mathematics belongs behind this common contract. It does
 not require a new selection rule for every sketch. A deployment's measured
