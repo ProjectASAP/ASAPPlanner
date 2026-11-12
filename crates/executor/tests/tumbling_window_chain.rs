@@ -220,7 +220,12 @@ fn a_chain_built_at_ingestion_answers_queries_through_its_time_ranges() {
     dag.materialized_views().unwrap();
     assert_eq!(
         dag.refresh_window(chain),
-        planner_types::plan::materialized_view::RefreshWindow::of_window(0, WIDTH_MS)
+        planner_types::plan::materialized_view::RefreshWindow::of_window(
+            planner_types::plan::TimeWindow {
+                end_offset_ms: 0,
+                width_ms: WIDTH_MS as u64,
+            }
+        )
     );
     let refresh = compile(&dag, &[], &[chain as u64]).unwrap();
     let query = compile(&dag, &views, &[now as u64, shifted as u64]).unwrap();

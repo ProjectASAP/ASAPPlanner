@@ -25,6 +25,7 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload,
 };
+use asap_types::plan::time_window::TimeIndexedRead;
 use asap_types::summary_type::SketchParams;
 use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation};
 
@@ -466,13 +467,11 @@ fn scan_read_ms(
     if !matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. })) {
         return None;
     }
-    let readers = |id: PhysicalASAPNodeId| consumers_of.get(&id).cloned().unwrap_or_default();
     read_back_ms(
-        readers(node.id),
-        |id| &nodes[&id].payload,
-        readers,
+        node.id,
+        |id| consumers_of.get(&id).into_iter().flatten().copied(),
+        |id| TimeIndexedRead::of(&nodes[&id].payload, nodes[&id].output_state.timing),
         |_| 0,
-        |id| nodes[&id].output_state.timing == ExecutionTiming::QueryTime,
         true,
     )
 }

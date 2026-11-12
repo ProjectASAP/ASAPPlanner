@@ -1,83 +1,36 @@
-//! How far back from the evaluation time the consumers of a time-indexed
+//! How far back from the evaluation time the readers of a time-indexed
 //! producer (raw data, a chain, results stored per evaluation time) read its
-//! rows: one walk, shared by Stage 3 (over candidates) and [`plan_cost`]
-//! (over plan nodes) for retention and for a query-time `Scan`'s read
-//! window (concepts doc, section 5, "Cost and retention").
+//! rows, over the shared walk [`asap_types::plan::time_window::windows_read_above`]:
+//! used by Stage 3 (over candidates) and [`plan_cost`] (over plan nodes) for
+//! retention and for a query-time `Scan`'s read per execution
+//! (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
+//! section 5, "Cost and retention").
 //!
 //! [`plan_cost`]: crate::plan_cost
 
-use std::collections::BTreeSet;
+use asap_types::plan::time_window::{windows_read_above, TimeIndexedRead};
 
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
-
-/// Over the paths from `consumers` (each a reader of the producer) up
-/// through `TimeShift`s without `@` (`consumers_of` gives a node's own
-/// readers), the most of the shifts' offsets plus the `TimeRange`'s range
-/// plus `span_ms` of that `TimeRange` (a range query's span, for retention;
-/// 0 for one execution's read). A tumbling-window chain built at ingestion
-/// time reads its newest window back. A chain built at query time
-/// (`query_time_chain`) builds, at each evaluation, the windows its own
-/// readers read: the walk passes up through it as through a shift of 0.
-/// Any other reader reads at the evaluation time (its `span_ms`), except
-/// over raw data (`reads_raw_data`), which it reads whole: `None`,
-/// unbounded, as under a `TimeShift` anchored with `@`.
+/// The most any reader of `producer` reads back from the evaluation time
+/// (`readers_of` gives a node's readers, `read_of` how a reader reads,
+/// [`TimeIndexedRead::of`]): each window's `read_back_ms` plus the
+/// `span_ms` of the reader at its end (a range query's span, for
+/// retention; 0 for one execution's read). `None`, unbounded, when one
+/// reads it whole (an `@` anchor, or a reader at the evaluation time over
+/// raw data, `reads_raw_data`). 0 when nothing reads it.
 ///
 /// Example: `sum_over_time(m[5m] offset 1h)` reads `m` back 1h + 5m,
 /// directly or through a query-time chain of 1-minute windows; through an
 /// ingestion-time chain of 1-minute windows, `m` is read back 1 minute.
-pub fn read_back_ms<'a, N: Copy + Ord, C: 'a>(
-    consumers: impl IntoIterator<Item = N>,
-    operator_of: impl Fn(N) -> &'a Operator<C>,
-    consumers_of: impl Fn(N) -> Vec<N>,
-    span_ms: impl Fn(N) -> i64,
-    query_time_chain: impl Fn(N) -> bool,
+pub fn read_back_ms<N: Copy + Ord, R: IntoIterator<Item = N>>(
+    producer: N,
+    readers_of: impl Fn(N) -> R,
+    read_of: impl Fn(N) -> TimeIndexedRead,
+    span_ms: impl Fn(N) -> u64,
     reads_raw_data: bool,
 ) -> Option<u64> {
-    let mut need_ms: i64 = 0;
-    // (reader, offset of the shifts below it), walked up through shifts.
-    let mut pending: Vec<(N, i64)> = consumers.into_iter().map(|c| (c, 0)).collect();
-    let mut seen = BTreeSet::new();
-    while let Some((consumer, offset_ms)) = pending.pop() {
-        if !seen.insert((consumer, offset_ms)) {
-            continue;
-        }
-        let read_ms = match operator_of(consumer) {
-            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
-                let range_ms = i64::try_from(range.as_millis()).ok()?;
-                offset_ms
-                    .checked_add(range_ms)?
-                    .checked_add(span_ms(consumer))?
-            }
-            Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_none() => {
-                let offset_ms = offset_ms.checked_add(shift.offset_ms)?;
-                pending.extend(
-                    consumers_of(consumer)
-                        .into_iter()
-                        .map(|reader| (reader, offset_ms)),
-                );
-                continue;
-            }
-            Operator::NonASAP(NonASAPOp::TimeShift { .. }) => return None,
-            // A query-time chain reads what its readers read.
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
-                if query_time_chain(consumer) =>
-            {
-                pending.extend(
-                    consumers_of(consumer)
-                        .into_iter()
-                        .map(|reader| (reader, offset_ms)),
-                );
-                continue;
-            }
-            // An ingestion-time chain builds its newest window from it.
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }) => offset_ms.checked_add(i64::try_from(*tumbling_window_width_ms).ok()?)?,
-            _ if reads_raw_data => return None,
-            _ => offset_ms.checked_add(span_ms(consumer))?,
-        };
-        need_ms = need_ms.max(read_ms);
-    }
-    u64::try_from(need_ms).ok()
+    windows_read_above(producer, readers_of, read_of, reads_raw_data)?
+        .into_iter()
+        .try_fold(0_u64, |most, (reader, window)| {
+            Some(most.max(window.read_back_ms().checked_add(span_ms(reader))?))
+        })
 }

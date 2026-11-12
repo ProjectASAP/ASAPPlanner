@@ -20,6 +20,8 @@ use planner_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload,
 };
+use planner_types::plan::time_window::{self, TimeIndexedRead};
+use planner_types::plan::TimeWindow;
 use planner_types::summary_type::{
     SketchParams, SketchStatistic, SummaryInputExpr, SummaryTypeCapability,
 };
@@ -170,9 +172,9 @@ fn compile_internal(
             // A chain's rows are read through the `TimeRange`s above it,
             // which select its windows; any other view's state is read for
             // the window of data it summarizes. Either is exact, so bounded.
-            let read_window_ms = match node.payload {
+            let read_window = match node.payload {
                 Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
-                    window_read_above(id, &compile_roots, &consumers, &nodes, &dependencies)
+                    window_read_above(id, &compile_roots, &consumers, &nodes)
                 }
                 _ => window_below(id, &nodes, &dependencies),
             }
@@ -182,7 +184,7 @@ fn compile_internal(
                 compiled::MaterializedViewSlot {
                     view: (*view).clone(),
                     schema: output,
-                    read_window_ms,
+                    read_window,
                 },
             )?;
         } else if let Payload::NonASAP(NonASAPOp::Scan {
@@ -208,16 +210,16 @@ fn compile_internal(
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| invalid(format!("scan {id}: {error}")))?;
             // The rows its consumers read; a compile root reads them all.
-            let read_window_ms = output.time_index.and_then(|_| {
-                window_read_above(id, &compile_roots, &consumers, &nodes, &dependencies)
-            });
+            let read_window = output
+                .time_index
+                .and_then(|_| window_read_above(id, &compile_roots, &consumers, &nodes));
             physical_dag.add_raw_data(
                 id,
                 compiled::RawDataSlot {
                     source: source.clone(),
                     schema: output,
                     predicates,
-                    read_window_ms,
+                    read_window,
                 },
             )?;
         } else {
@@ -479,14 +481,18 @@ fn compile_internal(
                 };
                 let window = if query_time {
                     // The windows its readers read, whole tumbling windows.
+                    let read = window_read_above(id, &compile_roots, &consumers, &nodes)
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "node {id}: a query-time tumbling-window chain is read \
+                                 outside the time ranges above it"
+                            ))
+                        })?;
+                    let millis = |ms: u64| {
+                        i64::try_from(ms).map_err(|_| invalid("a chain's read overflows Int64"))
+                    };
                     let (end_offset_ms, read_width_ms) =
-                        window_read_above(id, &compile_roots, &consumers, &nodes, &dependencies)
-                            .ok_or_else(|| {
-                                invalid(format!(
-                                    "node {id}: a query-time tumbling-window chain is read \
-                                     outside the time ranges above it"
-                                ))
-                            })?;
+                        (millis(read.end_offset_ms)?, millis(read.width_ms)?);
                     if end_offset_ms % width_ms != 0 || read_width_ms % width_ms != 0 {
                         return Err(invalid(format!(
                             "node {id}: a window ({end_offset_ms} ms back, {read_width_ms} ms \
@@ -867,9 +873,11 @@ fn time_window_operator(
             .collect();
         return Operator::project(input.clone(), columns).map(Some);
     };
-    let Some((end_offset_ms, width_ms)) = time_range_window(id, nodes, dependencies) else {
+    let Some(window) = time_range_window(id, nodes, dependencies) else {
         return Ok(None);
     };
+    let millis = |ms: u64| i64::try_from(ms).map_err(|_| invalid("a time window overflows Int64"));
+    let (end_offset_ms, width_ms) = (millis(window.end_offset_ms)?, millis(window.width_ms)?);
     let time = input
         .time_index
         .ok_or_else(|| invalid("a time range needs its input's time column"))?;
@@ -923,120 +931,81 @@ fn time_window_operator(
     .map(Some)
 }
 
-/// `(s, w)` of the `TimeRange(w)` `id` over `TimeShift`s summing to `s`: it
-/// reads `(T - s - w, T - s]` at evaluation time `T`. `None` when `id` is not
-/// a `TimeRange` or a shift below it has an `@` anchor.
+/// The window the `TimeRange` `id` reads, its range over the `TimeShift`s
+/// right below it ([`time_window::end_offset_below`]): `(T - s - w, T - s]`
+/// at evaluation time `T`. `None` when `id` is not a `TimeRange`, or a
+/// shift below it has an `@` anchor or the offsets are negative.
 fn time_range_window(
     id: NodeId,
     nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
     dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
-) -> Option<(i64, i64)> {
+) -> Option<TimeWindow> {
     let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) = &nodes.get(&id)?.payload else {
         return None;
     };
-    let mut end_offset_ms = 0i64;
-    let mut below = first_input(id, dependencies);
-    while let Some(Payload::NonASAP(NonASAPOp::TimeShift { shift, .. })) = below
-        .and_then(|below| nodes.get(&below))
-        .map(|node| &node.payload)
-    {
-        if shift.at.is_some() {
-            return None;
-        }
-        end_offset_ms = end_offset_ms.saturating_add(shift.offset_ms);
-        below = below.and_then(|below| first_input(below, dependencies));
-    }
-    Some((end_offset_ms, i64::try_from(range.as_millis()).ok()?))
+    Some(TimeWindow {
+        end_offset_ms: time_window::end_offset_below(
+            id,
+            |node| first_input(node, dependencies),
+            |node| &nodes[&node].payload,
+        )?,
+        width_ms: u64::try_from(range.as_millis()).ok()?,
+    })
 }
 
-/// The smallest window `(end_offset_ms, width_ms)` holding both.
-fn window_union(a: (i64, i64), b: (i64, i64)) -> (i64, i64) {
-    let end_offset_ms = a.0.min(b.0);
-    let start_back_ms = a.0.saturating_add(a.1).max(b.0.saturating_add(b.1));
-    (end_offset_ms, start_back_ms.saturating_sub(end_offset_ms))
-}
-
-/// The window `(end_offset_ms, width_ms)` back from the evaluation time that
-/// the compiled consumers of `id` read through the `TimeShift`s (without an
-/// `@` anchor) above it: a `TimeRange(w)`, or a chain of width `w` built at
-/// ingestion time (its window ending at the evaluation time), over shifts
-/// summing to `s` reads `(s, w)`; several read the smallest window holding
-/// all of theirs. A chain built at query time builds the windows its own
-/// readers read, so it reads what they read: the walk passes up through it.
-/// `None` when `id` is a compile root, a root or another consumer reads it
-/// outside a window, or nothing reads it.
+/// The window back from the evaluation time that the compiled consumers of
+/// `id` read ([`time_window::windows_read_above`]): through the
+/// `TimeShift`s (without an `@` anchor) above it, a `TimeRange(w)` or a
+/// chain of width `w` built at ingestion time (its window ending at the
+/// evaluation time) over shifts summing to `s` reads `{s, w}`; several read
+/// the smallest window holding all of theirs. A chain built at query time
+/// builds the windows its own readers read, so the walk passes up through
+/// it. `None` when `id` or a shift above it is a compile root, another
+/// consumer reads it outside a window, or nothing reads it.
 ///
 /// Example: a `Scan` read by a query-time chain of 1-minute windows, which
 /// `TimeRange(5m)` and `TimeShift(1m) -> TimeRange(5m)` read, is read for
-/// `(0, 6m)`.
+/// `{0, 6m}`.
 fn window_read_above(
     id: NodeId,
     roots: &BTreeSet<NodeId>,
     consumers: &BTreeMap<NodeId, Vec<NodeId>>,
     nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
-    dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
-) -> Option<(i64, i64)> {
-    let mut window: Option<(i64, i64)> = None;
-    let mut pending = vec![(id, 0i64)];
-    while let Some((node, end_offset_ms)) = pending.pop() {
-        if roots.contains(&node) {
-            return None;
-        }
-        for &consumer in consumers.get(&node).into_iter().flatten() {
-            let read = match &nodes[&consumer].payload {
-                Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_none() => {
-                    pending.push((consumer, end_offset_ms.saturating_add(shift.offset_ms)));
-                    continue;
-                }
-                Payload::NonASAP(NonASAPOp::TimeRange { .. }) => {
-                    time_range_window(consumer, nodes, dependencies)?
-                }
-                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
-                    if nodes[&consumer].output_state.timing
-                        == planner_types::ir::properties::ExecutionTiming::QueryTime =>
-                {
-                    pending.push((consumer, end_offset_ms));
-                    continue;
-                }
-                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                    tumbling_window_width_ms,
-                    ..
-                }) => (
-                    end_offset_ms,
-                    i64::try_from(*tumbling_window_width_ms).ok()?,
-                ),
-                _ => return None,
-            };
-            window = Some(window.map_or(read, |window| window_union(window, read)));
-        }
+) -> Option<TimeWindow> {
+    if roots.contains(&id) {
+        return None;
     }
-    window
+    time_window::windows_read_above(
+        id,
+        |node| consumers.get(&node).into_iter().flatten().copied(),
+        |node| match TimeIndexedRead::of(&nodes[&node].payload, nodes[&node].output_state.timing) {
+            TimeIndexedRead::Through { .. } if roots.contains(&node) => TimeIndexedRead::Whole,
+            read => read,
+        },
+        true,
+    )?
+    .into_iter()
+    .map(|(_, window)| window)
+    .reduce(TimeWindow::union)
 }
 
-/// The window `(end_offset_ms, width_ms)` back from the evaluation time of
-/// the data `id`'s state summarizes: the smallest window holding every
-/// `TimeRange` below it. `None` when none is below it, or one is read
-/// through an `@` anchor.
+/// The window back from the evaluation time of the data `id`'s state
+/// summarizes: the smallest window holding every window below it
+/// ([`time_window::windows_below`]). `None` when none is below it, or one
+/// is read through an `@` anchor or a negative offset.
 fn window_below(
     id: NodeId,
     nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
     dependencies: &BTreeMap<NodeId, Vec<NodeId>>,
-) -> Option<(i64, i64)> {
-    let mut seen = BTreeSet::new();
-    let mut pending = vec![id];
-    let mut window: Option<(i64, i64)> = None;
-    while let Some(node) = pending.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        if let Payload::NonASAP(NonASAPOp::TimeRange { .. }) = &nodes[&node].payload {
-            let read = time_range_window(node, nodes, dependencies)?;
-            window = Some(window.map_or(read, |window| window_union(window, read)));
-        } else {
-            pending.extend(dependencies.get(&node).into_iter().flatten().copied());
-        }
-    }
-    window
+) -> Option<TimeWindow> {
+    time_window::windows_below(
+        id,
+        |node| dependencies.get(&node).into_iter().flatten().copied(),
+        |node| first_input(node, dependencies),
+        |node| &nodes[&node].payload,
+    )?
+    .into_iter()
+    .reduce(TimeWindow::union)
 }
 
 fn first_input(id: NodeId, dependencies: &BTreeMap<NodeId, Vec<NodeId>>) -> Option<NodeId> {

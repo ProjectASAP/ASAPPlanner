@@ -63,9 +63,10 @@ pub use asap_types::ir::properties::selection::{
 pub use asap_types::ir::properties::ExecutionTiming;
 pub use asap_types::plan::materialized_view::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, MaterializedViewInputs,
-    MaterializedViewRefresh, RawDataRetention, RawDataWindow, RefreshWindow,
+    MaterializedViewRefresh, RawDataRetention, RefreshWindow,
 };
 pub use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId, ViewCoverage};
+pub use asap_types::plan::TimeWindow;
 pub use asap_types::summary_type::{SketchAlgorithm, SketchParams, StatisticKind};
 pub use asap_types::workload::PlanningWorkload;
 

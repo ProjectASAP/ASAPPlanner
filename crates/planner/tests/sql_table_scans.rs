@@ -268,11 +268,16 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
                     })
                     .collect()
             }
-            None => vec![view
-                .inputs
-                .raw_data_windows()
-                .iter()
-                .map(|window| window.bounds_ms(EVALUATION_MS))
+            None => vec![dag
+                .refresh_window(view.node_id)
+                .map(|refresh| {
+                    asap_planner::TimeWindow {
+                        end_offset_ms: refresh.phase_ms,
+                        width_ms: refresh.width_ms,
+                    }
+                    .bounds_ms(EVALUATION_MS)
+                })
+                .into_iter()
                 .chain(
                     view.inputs
                         .materialized_views
@@ -350,7 +355,7 @@ async fn ingestion_time_tumbling_windows_built_from_table_rows_answer_exactly() 
         views
             .iter()
             .any(|v| v.refresh() == MaterializedViewRefresh::AtIngestion
-                && !v.inputs.raw_data_windows().is_empty()),
+                && v.inputs.materialized_views.is_empty()),
         "tumbling windows built at ingestion time from table rows: {:?}",
         views
     );
@@ -402,7 +407,7 @@ async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_ro
         views
             .iter()
             .any(|v| v.refresh() == MaterializedViewRefresh::AtIngestion
-                && !v.inputs.raw_data_windows().is_empty()),
+                && v.inputs.materialized_views.is_empty()),
         "built at ingestion time from table rows: {:?}",
         views
     );

@@ -21,7 +21,7 @@
 //! evaluation of the queries reaching its group (once per request when it
 //! is materialized across evaluations). A materialized candidate and a
 //! query-time `Scan` retain the most their selectable consumers read back
-//! ([`read_back_ms`]). Execution contexts make both per context.
+//! ([`retention_need_ms`]). Execution contexts make both per context.
 
 use std::collections::HashMap;
 
@@ -37,6 +37,7 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload,
 };
+use asap_types::plan::time_window::TimeIndexedRead;
 use asap_types::plan::view_coverage;
 use asap_types::stages::{
     Lifetime, Memo, MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId,
@@ -133,19 +134,48 @@ pub(crate) fn retains_rows(physical: &PhysicalASAPMemoCandidates, v: PhysicalCan
     ) || (scan && candidate.physical_properties.timing() == ExecutionTiming::QueryTime)
 }
 
-/// How far back from the evaluation time `producer`'s rows are read
-/// through `edges` (its edges to consumers; `consumers_of` gives each
-/// candidate's edges to its own consumers): [`asap_cost::read_back_ms`]
-/// with the longest range-evaluation span of the queries reaching each
-/// `TimeRange` when `with_span` (retention), without it (one execution's
-/// read of a query-time `Scan`).
-pub(crate) fn read_back_ms(
+/// How far back from the evaluation time `producer`'s rows must be kept
+/// for its readers (`readers_of`, the candidates that may read it):
+/// [`asap_cost::read_back_ms`] with, at each reader, the longest
+/// range-evaluation span of the queries reaching it.
+pub(crate) fn retention_need_ms<R: IntoIterator<Item = PhysicalCandidateId>>(
     physical: &PhysicalASAPMemoCandidates,
     entries: &[QueryWorkloadEntry],
     producer: PhysicalCandidateId,
-    edges: &[PhysicalEdgeId],
-    consumers_of: &dyn Fn(PhysicalCandidateId) -> Vec<PhysicalEdgeId>,
-    with_span: bool,
+    readers_of: impl Fn(PhysicalCandidateId) -> R,
+) -> Option<u64> {
+    let memo = &physical.logical_candidates.memo;
+    let span_ms = |v: PhysicalCandidateId| {
+        let group = physical.physical_candidates[v.0].logical_candidate_id.group;
+        memo.groups()[group.0 as usize]
+            .reached_by_queries()
+            .iter()
+            .filter_map(|&query| entries.get(query)?.range_evaluation)
+            .map(|range| range.span_ms)
+            .max()
+            .unwrap_or(0)
+    };
+    read_back(physical, producer, readers_of, span_ms)
+}
+
+/// How far back from the evaluation time one execution of the query-time
+/// `Scan` `producer` reads, for its readers (`readers_of`):
+/// [`asap_cost::read_back_ms`] without a range-evaluation span.
+pub(crate) fn scan_read_ms<R: IntoIterator<Item = PhysicalCandidateId>>(
+    physical: &PhysicalASAPMemoCandidates,
+    producer: PhysicalCandidateId,
+    readers_of: impl Fn(PhysicalCandidateId) -> R,
+) -> Option<u64> {
+    read_back(physical, producer, readers_of, |_| 0)
+}
+
+/// [`asap_cost::read_back_ms`] over candidates, each read as its operator
+/// at its timing reads ([`TimeIndexedRead::of`]).
+fn read_back<R: IntoIterator<Item = PhysicalCandidateId>>(
+    physical: &PhysicalASAPMemoCandidates,
+    producer: PhysicalCandidateId,
+    readers_of: impl Fn(PhysicalCandidateId) -> R,
+    span_ms: impl Fn(PhysicalCandidateId) -> u64,
 ) -> Option<u64> {
     let memo = &physical.logical_candidates.memo;
     let operator_of = |v: PhysicalCandidateId| {
@@ -154,36 +184,18 @@ pub(crate) fn read_back_ms(
             .expression
             .operator
     };
-    let span_ms = |v: PhysicalCandidateId| {
-        if !with_span {
-            return 0;
-        }
-        let group = physical.physical_candidates[v.0].logical_candidate_id.group;
-        memo.groups()[group.0 as usize]
-            .reached_by_queries()
-            .iter()
-            .filter_map(|&query| entries.get(query)?.range_evaluation)
-            .map(|range| i64::try_from(range.span_ms).unwrap_or(i64::MAX))
-            .max()
-            .unwrap_or(0)
-    };
-    let readers = |edges: Vec<PhysicalEdgeId>| -> Vec<PhysicalCandidateId> {
-        edges
-            .into_iter()
-            .map(|edge| physical.edge(edge).consumer_candidate_id)
-            .collect()
-    };
     asap_cost::read_back_ms(
-        readers(edges.to_vec()),
-        operator_of,
-        |v| readers(consumers_of(v)),
-        span_ms,
+        producer,
+        readers_of,
         |v| {
-            physical.physical_candidates[v.0]
-                .physical_properties
-                .timing()
-                == ExecutionTiming::QueryTime
+            TimeIndexedRead::of(
+                operator_of(v),
+                physical.physical_candidates[v.0]
+                    .physical_properties
+                    .timing(),
+            )
         },
+        span_ms,
         matches!(
             operator_of(producer),
             Operator::NonASAP(NonASAPOp::Scan { .. })
@@ -209,6 +221,12 @@ pub(crate) fn selection_costs(
     for &edge in selectable {
         out_edges[physical.edge(edge).producer_candidate_id.0].push(edge);
     }
+    // The candidates that may read each candidate.
+    let readers_of = |v: PhysicalCandidateId| {
+        out_edges[v.0]
+            .iter()
+            .map(|&edge| physical.edge(edge).consumer_candidate_id)
+    };
     // Each candidate's node, its inputs numbered 0.. (the ids do not
     // matter to `node_resource_usage_and_cost`), with the retention it would need.
     let nodes: Vec<PhysicalASAPDAGNode> = (0..count)
@@ -217,14 +235,7 @@ pub(crate) fn selection_costs(
             let inputs: Vec<PhysicalASAPNodeId> = (0..input_count(physical, v)).collect();
             let mut node = candidate_node(physical, v, v.0, &inputs);
             if retains_rows(physical, v) {
-                node.retention_ms = read_back_ms(
-                    physical,
-                    entries,
-                    v,
-                    &out_edges[v.0],
-                    &|consumer| out_edges[consumer.0].clone(),
-                    true,
-                );
+                node.retention_ms = retention_need_ms(physical, entries, v, readers_of);
             }
             node
         })
@@ -242,16 +253,7 @@ pub(crate) fn selection_costs(
                 Operator::NonASAP(NonASAPOp::Scan { .. })
             );
             (scan && candidate.physical_properties.timing() == ExecutionTiming::QueryTime)
-                .then(|| {
-                    read_back_ms(
-                        physical,
-                        entries,
-                        v,
-                        &out_edges[v.0],
-                        &|consumer| out_edges[consumer.0].clone(),
-                        false,
-                    )
-                })
+                .then(|| scan_read_ms(physical, v, readers_of))
                 .flatten()
         })
         .collect();

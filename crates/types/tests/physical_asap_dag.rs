@@ -261,14 +261,11 @@ fn physical_node_ids_serialize_in_deterministic_binding_order() {
 /// A window 600,000 ms wide ending 300,000 ms before T = 3,600,000 covers
 /// `(2,700,000, 3,300,000]`.
 #[test]
-fn a_raw_data_window_ends_its_offset_before_the_evaluation() {
-    let window = asap_types::plan::materialized_view::RawDataWindow::new(
-        Source::TimeSeries {
-            metric: "latency".into(),
-        },
-        300_000,
-        600_000,
-    );
+fn a_time_window_ends_its_offset_before_the_evaluation() {
+    let window = asap_types::plan::TimeWindow {
+        end_offset_ms: 300_000,
+        width_ms: 600_000,
+    };
     assert_eq!(window.bounds_ms(3_600_000), (2_700_000, 3_300_000));
 }
 

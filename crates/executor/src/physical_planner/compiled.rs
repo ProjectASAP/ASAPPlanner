@@ -24,10 +24,10 @@ pub(super) struct MaterializedViewSlot {
     pub(super) view: MaterializedView,
     /// The view node's schema.
     pub(super) schema: SchemaRef,
-    /// The rows a read selects, `(end_offset_ms, width_ms)` back from the
-    /// evaluation time: for a chain, the windows the `TimeRange`s above it
-    /// select; for any other view, the data its state summarizes.
-    pub(super) read_window_ms: (i64, i64),
+    /// The rows a read selects, back from the evaluation time: for a
+    /// chain, the windows the `TimeRange`s above it select; for any other
+    /// view, the data its state summarizes.
+    pub(super) read_window: TimeWindow,
 }
 
 /// A `Scan` leaf, computed once at compile time: what [`CompiledPhysicalDAG::instantiate`]
@@ -39,9 +39,9 @@ pub(super) struct RawDataSlot {
     pub(super) schema: SchemaRef,
     /// The `Scan`'s predicates, compiled over `schema`.
     pub(super) predicates: Vec<crate::expressions::CompiledExpression>,
-    /// The rows its consumers read, `(end_offset_ms, width_ms)` back from
-    /// the evaluation time; `None` when one reads every row.
-    pub(super) read_window_ms: Option<(i64, i64)>,
+    /// The rows its consumers read, back from the evaluation time; `None`
+    /// when one reads every row.
+    pub(super) read_window: Option<TimeWindow>,
 }
 
 /// Selected native operators and input slots. Rebinding never repeats lowering.
@@ -186,7 +186,7 @@ impl CompiledPhysicalDAG {
                         store.clone(),
                         slot.view.clone(),
                         slot.schema.clone(),
-                        slot.read_window_ms,
+                        slot.read_window,
                     );
                     dag.add(id, vec![], scan)?;
                 }
@@ -196,7 +196,7 @@ impl CompiledPhysicalDAG {
                         slot.source.clone(),
                         slot.schema.clone(),
                         slot.predicates.clone(),
-                        slot.read_window_ms,
+                        slot.read_window,
                     );
                     dag.add(id, vec![], scan)?;
                 }

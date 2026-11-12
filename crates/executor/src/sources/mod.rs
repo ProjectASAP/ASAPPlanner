@@ -14,6 +14,7 @@ use planner_types::ir::operator::Source;
 use planner_types::ir::schema::DataType;
 use planner_types::ir::ScalarExpr;
 use planner_types::plan::materialized_view::MaterializedView;
+use planner_types::plan::TimeWindow;
 use std::sync::Arc;
 
 mod data_store;
@@ -43,18 +44,16 @@ enum ScanInput {
         predicates: Vec<CompiledExpression>,
         /// `predicates` as the store receives them.
         predicate_hints: Vec<ScalarExpr<()>>,
-        /// The rows its consumers read, `(end_offset_ms, width_ms)` back
-        /// from the time the run evaluates it at
-        /// ([`window_bounds_ms`]); `None` when one reads every row.
-        read_window_ms: Option<(i64, i64)>,
+        /// The rows its consumers read, back from the time the run
+        /// evaluates it at; `None` when one reads every row.
+        read_window: Option<TimeWindow>,
     },
     /// A materialized view slot: exact, never re-filtered; its states are
     /// the store's.
     MaterializedView {
         view: MaterializedView,
-        /// The rows a read selects, `(end_offset_ms, width_ms)` back from
-        /// the evaluation time ([`window_bounds_ms`]).
-        read_window_ms: (i64, i64),
+        /// The rows a read selects, back from the evaluation time.
+        read_window: TimeWindow,
     },
 }
 
@@ -72,7 +71,7 @@ impl Scan {
         source: Source,
         output: SchemaRef,
         predicates: Vec<CompiledExpression>,
-        read_window_ms: Option<(i64, i64)>,
+        read_window: Option<TimeWindow>,
     ) -> Self {
         let predicate_hints = predicates
             .iter()
@@ -85,25 +84,22 @@ impl Scan {
                 source,
                 predicates,
                 predicate_hints,
-                read_window_ms,
+                read_window,
             },
         }
     }
     /// A materialized view slot reading the rows of `view` that
-    /// `read_window_ms` selects.
+    /// `read_window` selects.
     pub(crate) fn materialized_view(
         store: Arc<dyn DataStore>,
         view: MaterializedView,
         output: SchemaRef,
-        read_window_ms: (i64, i64),
+        read_window: TimeWindow,
     ) -> Self {
         Self {
             store,
             output,
-            input: ScanInput::MaterializedView {
-                view,
-                read_window_ms,
-            },
+            input: ScanInput::MaterializedView { view, read_window },
         }
     }
     /// `batch` in the slot's schema; bad input when its columns differ.
@@ -165,18 +161,11 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 source,
                 predicates,
                 predicate_hints,
-                read_window_ms,
-            } => self.start_raw_data(
-                source,
-                predicates,
-                predicate_hints,
-                *read_window_ms,
-                context,
-            ),
-            ScanInput::MaterializedView {
-                view,
-                read_window_ms,
-            } => self.start_materialized_view(view, *read_window_ms, context),
+                read_window,
+            } => self.start_raw_data(source, predicates, predicate_hints, *read_window, context),
+            ScanInput::MaterializedView { view, read_window } => {
+                self.start_materialized_view(view, *read_window, context)
+            }
         }
     }
 }
@@ -184,18 +173,18 @@ impl Scan {
     fn start_materialized_view<'a>(
         &'a self,
         view: &'a MaterializedView,
-        read_window_ms: (i64, i64),
+        read_window: TimeWindow,
         context: RunContext,
     ) -> Result<OutputStream<'a, Batch>, Error> {
         // A query run reads the window back from its evaluation time; an
         // ingestion run reads the window ending at its end, whatever the
         // offset.
-        let (end_offset_ms, _) = read_window_ms;
         let at_ms = match context.scope {
             Scope::Query { evaluation_time_ms } => evaluation_time_ms,
-            Scope::Ingestion { window_end_ms, .. } => window_end_ms.saturating_add(end_offset_ms),
+            Scope::Ingestion { window_end_ms, .. } => window_end_ms
+                .saturating_add(i64::try_from(read_window.end_offset_ms).unwrap_or(i64::MAX)),
         };
-        let time_range_ms = window_bounds_ms(read_window_ms, at_ms);
+        let time_range_ms = read_window.bounds_ms(at_ms);
         let opening = context.clone();
         let stream = stream::once(async move {
             if opening.is_cancelled() {
@@ -226,7 +215,7 @@ impl Scan {
         source: &'a Source,
         predicates: &'a [CompiledExpression],
         predicate_hints: &'a [ScalarExpr<()>],
-        read_window_ms: Option<(i64, i64)>,
+        read_window: Option<TimeWindow>,
         context: RunContext,
     ) -> Result<OutputStream<'a, Batch>, Error> {
         // `now()` in the predicates is this run's evaluation time.
@@ -239,14 +228,14 @@ impl Scan {
             .collect();
         let time_range_ms = match context.scope {
             Scope::Query { evaluation_time_ms } => {
-                read_window_ms.map(|window| window_bounds_ms(window, evaluation_time_ms))
+                read_window.map(|window| window.bounds_ms(evaluation_time_ms))
             }
             // A slot read through windows reads the rows of the window the
             // run builds.
             Scope::Ingestion {
                 window_start_ms,
                 window_end_ms,
-            } => read_window_ms.map(|_| (window_start_ms, window_end_ms)),
+            } => read_window.map(|_| (window_start_ms, window_end_ms)),
         };
         let time_filter = match time_range_ms {
             Some(range) => Some((
@@ -324,13 +313,6 @@ impl Scan {
             })
             .boxed_local())
     }
-}
-
-/// `(start, end]` of the window `(end_offset_ms, width_ms)` back from
-/// `at_ms`: `(at_ms - end_offset_ms - width_ms, at_ms - end_offset_ms]`.
-pub(crate) fn window_bounds_ms((end_offset_ms, width_ms): (i64, i64), at_ms: i64) -> (i64, i64) {
-    let end = at_ms.saturating_sub(end_offset_ms);
-    (end.saturating_sub(width_ms), end)
 }
 
 /// The rows of `batch` that `keep` keeps; `batch` itself, uncopied, when it

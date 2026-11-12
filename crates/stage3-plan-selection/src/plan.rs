@@ -14,14 +14,14 @@ use asap_types::stages::{
 };
 use asap_types::workload::QueryWorkloadEntry;
 
-use crate::cost::{candidate_node, input_count, read_back_ms, retains_rows};
+use crate::cost::{candidate_node, input_count, retains_rows, retention_need_ms};
 use crate::milp::model::{QueryId, SolvedSelection};
 
 /// The plan of `solved`, whose output `j` answers `outputs[j]` (a query and
 /// the group its root, or one operator its scalar root, reads). Nodes are
 /// numbered producers first. A node that retains rows (materialized, or a
 /// query-time `Scan`) has `retention_ms` the most its selected consumers
-/// read back ([`read_back_ms`] with the range-evaluation span), and at least the range-evaluation
+/// read back ([`retention_need_ms`]), and at least the range-evaluation
 /// span of a query it answers directly.
 pub(crate) fn plan_of(
     physical: &PhysicalASAPMemoCandidates,
@@ -43,7 +43,9 @@ pub(crate) fn plan_of(
             .or_default()
             .push(id);
     }
-    let consumers = |v: PhysicalCandidateId| consumers_of.get(&v).cloned().unwrap_or_default();
+    let consumers = |v: PhysicalCandidateId| consumers_of.get(&v).into_iter().flatten().copied();
+    let readers_of =
+        |v: PhysicalCandidateId| consumers(v).map(|edge| physical.edge(edge).consumer_candidate_id);
     let inputs = |v: PhysicalCandidateId| -> Vec<PhysicalCandidateId> {
         (0..input_count(physical, v))
             .map(|i| producer_of[&(v, i)])
@@ -98,9 +100,8 @@ pub(crate) fn plan_of(
                 inputs(v).iter().map(|producer| node_of[producer]).collect();
             let mut node = candidate_node(physical, v, id, &input_ids);
             if retains_rows(physical, v) {
-                node.retention_ms =
-                    read_back_ms(physical, entries, v, &consumers(v), &consumers, true)
-                        .map(|need_ms| need_ms.max(output_span_ms.get(&v).copied().unwrap_or(0)));
+                node.retention_ms = retention_need_ms(physical, entries, v, readers_of)
+                    .map(|need_ms| need_ms.max(output_span_ms.get(&v).copied().unwrap_or(0)));
             }
             node
         })

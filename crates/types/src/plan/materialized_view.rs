@@ -80,6 +80,7 @@ use super::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
     ViewCoverage,
 };
+use super::time_window::{self, TimeIndexedRead, TimeWindow};
 use crate::ir::operator::arguments::Source;
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::Operator;
@@ -127,79 +128,15 @@ impl MaterializedView {
     }
 }
 
-/// What a view's refresh reads, each bound as a source of the refresh.
+/// What a view's refresh reads, each bound as a source of the refresh;
+/// the raw data it scans is read by `Source` through the windows below it
+/// ([`PhysicalASAPDAG::refresh_window`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaterializedViewInputs {
-    /// The windows of raw data it scans directly, one per `TimeRange` it
-    /// reaches, in node order.
-    pub(crate) raw_data_windows: Vec<RawDataWindow>,
     /// The views it reads, by node id, in node order; each is listed before
     /// it in [`PhysicalASAPDAG::materialized_views`].
     pub materialized_views: Vec<PhysicalASAPNodeId>,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl MaterializedViewInputs {
-    /// The windows of raw data it scans directly.
-    pub fn raw_data_windows(&self) -> &[RawDataWindow] {
-        &self.raw_data_windows
-    }
-}
-
-/// A window of a raw-data source a view's refresh scans: at evaluation time
-/// `T`, the rows of `source` in `(T - end_offset_ms - width_ms, T -
-/// end_offset_ms]`. Read as `TimeRange(width) <- TimeShift(offset)* <-
-/// Scan`, with no `TimeShift`, `TimeRange` or subquery above the
-/// `TimeRange`, so the window depends on `T` alone. For an instant selector
-/// `width_ms` is its lookback.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RawDataWindow {
-    /// The source the `Scan` reads.
-    pub(crate) source: Source,
-    /// How long before the evaluation time the window ends: the sum of the
-    /// offset `TimeShift`s between the `TimeRange` and the `Scan`.
-    pub(crate) end_offset_ms: i64,
-    /// Width of the window, from the `TimeRange`.
-    pub(crate) width_ms: i64,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl RawDataWindow {
-    /// The source the `Scan` reads.
-    pub fn source(&self) -> &Source {
-        &self.source
-    }
-
-    /// How long before the evaluation time the window ends.
-    pub fn end_offset_ms(&self) -> i64 {
-        self.end_offset_ms
-    }
-
-    /// Width of the window.
-    pub fn width_ms(&self) -> i64 {
-        self.width_ms
-    }
-
-    /// The window of `source` ending `end_offset_ms` before the evaluation
-    /// time, `width_ms` wide.
-    pub fn new(source: Source, end_offset_ms: i64, width_ms: i64) -> Self {
-        Self {
-            source,
-            end_offset_ms,
-            width_ms,
-        }
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl RawDataWindow {
-    /// `(start, end]` of the window at evaluation time `evaluation_time_ms`.
-    pub fn bounds_ms(&self, evaluation_time_ms: i64) -> (i64, i64) {
-        let end = evaluation_time_ms - self.end_offset_ms;
-        (end - self.width_ms, end)
-    }
 }
 
 /// Which run refreshes a materialized view.
@@ -233,16 +170,13 @@ pub struct RefreshWindow {
 }
 
 impl RefreshWindow {
-    /// The refresh window of the window `(T - end_offset_ms - width_ms, T -
-    /// end_offset_ms]`: `(width_ms, end_offset_ms mod width_ms)`; `None` for
-    /// an empty window (`width_ms <= 0`).
-    pub fn of_window(end_offset_ms: i64, width_ms: i64) -> Option<Self> {
-        let phase_ms = end_offset_ms
-            .checked_rem_euclid(width_ms)
-            .filter(|_| width_ms > 0)?;
+    /// The refresh window of `window`: `(width_ms, end_offset_ms mod
+    /// width_ms)`; `None` for an empty window.
+    pub fn of_window(window: TimeWindow) -> Option<Self> {
+        let phase_ms = window.end_offset_ms.checked_rem(window.width_ms)?;
         Some(RefreshWindow {
-            width_ms: u64::try_from(width_ms).ok()?,
-            phase_ms: u64::try_from(phase_ms).ok()?,
+            width_ms: window.width_ms,
+            phase_ms,
         })
     }
 }
@@ -339,7 +273,7 @@ pub enum InstallableDagError {
     )]
     IngestionBuildReadsWindowsOfDifferentOffsets {
         node_id: PhysicalASAPNodeId,
-        end_offsets_ms: Vec<i64>,
+        end_offsets_ms: Vec<u64>,
     },
     /// Bad input (a plan file): view `node_id` has no `retention_ms`.
     #[error("materialized view {node_id} has no retention_ms")]
@@ -378,7 +312,12 @@ impl PhysicalASAPDAG {
         let index = ViewIndex::new(self);
         let views = index.views()?;
         for view in &views {
-            if view.retention_ms < index.read_back_ms(view.node_id).0 {
+            // A view read at a time not relative to the evaluation (`@`) is
+            // read unbounded, which no retention covers; it is not checked.
+            if index
+                .read_back_ms(view.node_id)
+                .is_some_and(|read_back_ms| view.retention_ms < read_back_ms)
+            {
                 return Err(InstallableDagError::ViewRetentionTooShort {
                     node_id: view.node_id,
                 });
@@ -491,20 +430,10 @@ impl PhysicalASAPDAG {
         nodes
             .into_iter()
             .map(|node| {
-                let window = index.windows_below(node).and_then(|windows| {
-                    windows
-                        .into_iter()
-                        .reduce(|(a_end, a_width), (b_end, b_width)| {
-                            let end = a_end.min(b_end);
-                            let start_back = a_end
-                                .saturating_add(a_width)
-                                .max(b_end.saturating_add(b_width));
-                            (end, start_back.saturating_sub(end))
-                        })
-                });
-                let refresh_window = window.and_then(|(end_offset_ms, width_ms)| {
-                    RefreshWindow::of_window(end_offset_ms, width_ms)
-                });
+                let refresh_window = index
+                    .windows_below(node)
+                    .and_then(|windows| windows.into_iter().reduce(TimeWindow::union))
+                    .and_then(RefreshWindow::of_window);
                 (node, refresh_window)
             })
             .collect()
@@ -526,14 +455,13 @@ impl PhysicalASAPDAG {
             let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload else {
                 continue;
             };
-            let (read_back_ms, read_outside_windows) = index.read_back_ms(node.id);
-            let lookback_ms = match (read_outside_windows, node.retention_ms) {
-                (true, _) => None,
-                (false, Some(kept_ms)) if kept_ms >= read_back_ms => Some(kept_ms),
-                (false, Some(_)) => {
+            let lookback_ms = match (index.read_back_ms(node.id), node.retention_ms) {
+                (None, _) => None,
+                (Some(read_back_ms), Some(kept_ms)) if kept_ms >= read_back_ms => Some(kept_ms),
+                (Some(_), Some(_)) => {
                     return Err(InstallableDagError::ScanRetentionTooShort { node_id: node.id })
                 }
-                (false, None) => {
+                (Some(_), None) => {
                     return Err(InstallableDagError::ScanWithoutRetention { node_id: node.id })
                 }
             };
@@ -705,11 +633,11 @@ impl<'a> ViewIndex<'a> {
             if refreshed_at_ingestion {
                 // An ingestion run builds the windows ending at its end, so
                 // every window the view reads must end at one offset.
-                let mut end_offsets_ms: Vec<i64> = self
+                let mut end_offsets_ms: Vec<u64> = self
                     .windows_below(id)
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|(end_offset_ms, _)| end_offset_ms)
+                    .map(|window| window.end_offset_ms)
                     .collect();
                 end_offsets_ms.sort_unstable();
                 end_offsets_ms.dedup();
@@ -743,103 +671,51 @@ impl<'a> ViewIndex<'a> {
         Ok(derived)
     }
 
-    /// The windows `(end_offset_ms, width_ms)` back from the evaluation
-    /// time that `node` reads: a chain of width `w` over `TimeShift`s
-    /// summing to `s` its own `(s, w)`; any other node each `TimeRange(w)`
-    /// below it over shifts summing to `s`, `(s, w)`, and each chain below
-    /// it reached without passing a `TimeRange`. `None` when one is read
-    /// through an `@` anchor below its `TimeRange` or chain.
-    fn windows_below(&self, node: PhysicalASAPNodeId) -> Option<Vec<(i64, i64)>> {
-        let mut windows = Vec::new();
-        let mut seen = HashSet::new();
-        let mut pending = vec![node];
-        while let Some(id) = pending.pop() {
-            if !seen.insert(id) {
-                continue;
-            }
-            let width_ms = match &self.nodes.get(&id)?.payload {
-                Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
-                    i64::try_from(range.as_millis()).ok()?
-                }
-                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                    tumbling_window_width_ms,
-                    ..
-                }) => i64::try_from(*tumbling_window_width_ms).ok()?,
-                _ => {
-                    pending.extend(self.inputs.get(&id).into_iter().flatten().copied());
-                    continue;
-                }
-            };
-            windows.push((self.offset_below(id)?, width_ms));
-        }
-        Some(windows)
+    /// The windows back from the evaluation time that `node` reads
+    /// ([`time_window::windows_below`]): a chain its own tumbling window;
+    /// any other node each `TimeRange` below it and each chain below it
+    /// reached without passing a `TimeRange`. `None` when one is read
+    /// through an `@` anchor or a negative offset.
+    fn windows_below(&self, node: PhysicalASAPNodeId) -> Option<Vec<TimeWindow>> {
+        time_window::windows_below(
+            node,
+            |id| self.inputs.get(&id).into_iter().flatten().copied(),
+            |id| self.only_input(id),
+            |id| &self.nodes[&id].payload,
+        )
     }
 
-    /// The sum of the offsets of the `TimeShift`s right below `node`;
-    /// `None` when one has an `@` anchor.
-    fn offset_below(&self, node: PhysicalASAPNodeId) -> Option<i64> {
-        let mut end_offset_ms = 0i64;
-        let mut current = node;
-        while let Some(input) = self.only_input(current) {
-            let Some(NonASAPOp::TimeShift { shift, .. }) = self.relational(input) else {
-                break;
-            };
-            if shift.at.is_some() {
-                return None;
-            }
-            end_offset_ms = end_offset_ms.saturating_add(shift.offset_ms);
-            current = input;
+    /// How far back from the evaluation time the readers of `node` read it
+    /// ([`time_window::windows_read_above`]): the most any reads back.
+    /// `None`, unbounded, when a root or a reader at a time not relative
+    /// to the evaluation (`@`) reads it, or, for a raw-data `Scan`, a reader
+    /// other than a window (a `TimeRange` or an ingestion-time chain).
+    ///
+    /// Example: a `Scan` read by `TimeShift(1m) -> TimeRange(5m)`: 360,000.
+    fn read_back_ms(&self, node: PhysicalASAPNodeId) -> Option<u64> {
+        let root = |id: PhysicalASAPNodeId| self.dag.roots.contains(&id);
+        if root(node) {
+            return None;
         }
-        Some(end_offset_ms)
-    }
-
-    /// How far back from the evaluation time the consumers of `node` read
-    /// it: through `TimeShift`s (without an `@` anchor) summing to `o`, a
-    /// `TimeRange(r)` reads `o + r` back, a chain of width `w` built at
-    /// ingestion time `o + w`, and any other consumer `o`; the most of
-    /// these, and whether a consumer other than a `TimeRange` or chain (or
-    /// a root) reads it, outside a window. A chain built at query time
-    /// builds the windows its own readers read, so it reads `node` as far
-    /// back as they read it: the walk passes up through it like a shift of
-    /// 0.
-    fn read_back_ms(&self, node: PhysicalASAPNodeId) -> (u64, bool) {
-        let mut read_back_ms = 0u64;
-        let mut read_outside_windows = false;
-        let mut pending = vec![(node, 0i64)];
-        while let Some((id, offset_ms)) = pending.pop() {
-            if self.dag.roots.contains(&id) {
-                read_outside_windows = true;
-            }
-            for &consumer in self.consumers.get(&id).into_iter().flatten() {
-                let width_ms = match &self.nodes[&consumer].payload {
-                    Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_none() => {
-                        pending.push((consumer, offset_ms.saturating_add(shift.offset_ms)));
-                        continue;
-                    }
-                    Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
-                        u64::try_from(range.as_millis()).unwrap_or(u64::MAX)
-                    }
-                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
-                        if self.nodes[&consumer].output_state.timing
-                            == ExecutionTiming::QueryTime =>
-                    {
-                        pending.push((consumer, offset_ms));
-                        continue;
-                    }
-                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                        tumbling_window_width_ms,
-                        ..
-                    }) => *tumbling_window_width_ms,
-                    _ => {
-                        read_outside_windows = true;
-                        0
-                    }
-                };
-                let offset_ms = u64::try_from(offset_ms).unwrap_or(0);
-                read_back_ms = read_back_ms.max(offset_ms.saturating_add(width_ms));
-            }
-        }
-        (read_back_ms, read_outside_windows)
+        let windows = time_window::windows_read_above(
+            node,
+            |id| self.consumers.get(&id).into_iter().flatten().copied(),
+            |id| match TimeIndexedRead::of(
+                &self.nodes[&id].payload,
+                self.nodes[&id].output_state.timing,
+            ) {
+                TimeIndexedRead::Through { .. } if root(id) => TimeIndexedRead::Whole,
+                read => read,
+            },
+            is_raw_data_scan(self.nodes[&node]),
+        )?;
+        Some(
+            windows
+                .iter()
+                .map(|(_, window)| window.read_back_ms())
+                .max()
+                .unwrap_or(0),
+        )
     }
 
     /// See [`PhysicalASAPDAG::check_raw_data_windows`].
@@ -850,13 +726,10 @@ impl<'a> ViewIndex<'a> {
             }
             match &node.payload {
                 Operator::NonASAP(NonASAPOp::TimeRange { .. }) => {
-                    self.window_at(node.id)?;
+                    self.check_raw_window_at(node.id)?;
                 }
-                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                    tumbling_window_width_ms,
-                    ..
-                }) => {
-                    self.raw_window_below(node.id, u128::from(*tumbling_window_width_ms))?;
+                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
+                    self.check_raw_window_below(node.id)?;
                 }
                 _ => {}
             }
@@ -864,31 +737,32 @@ impl<'a> ViewIndex<'a> {
         Ok(())
     }
 
-    /// The raw-data window read through the `TimeRange` `time_range`, or why its shape is unsupported.
-    fn window_at(
+    /// Checks the shape of the raw-data window read through the `TimeRange`
+    /// `time_range` ([`Self::check_raw_window_below`]).
+    fn check_raw_window_at(
         &self,
         time_range: PhysicalASAPNodeId,
-    ) -> Result<RawDataWindow, InstallableDagError> {
-        let Some(NonASAPOp::TimeRange { range, .. }) = self.relational(time_range) else {
+    ) -> Result<(), InstallableDagError> {
+        let Some(NonASAPOp::TimeRange { .. }) = self.relational(time_range) else {
             return Err(InstallableDagError::UnsupportedRawDataWindow {
                 time_range_node_id: time_range,
                 reason: "not a TimeRange",
             });
         };
-        self.raw_window_below(time_range, range.as_millis())
+        self.check_raw_window_below(time_range)
     }
 
-    /// The window of width `width_ms` that `time_range` (a `TimeRange`, or
-    /// a `SummaryTumblingWindowChain`'s tumbling window) reads from the
-    /// `Scan` below it, or why its shape is unsupported. A
-    /// `TimeRange` run at ingestion time may have no `TimeShift` or subquery
-    /// above it; a query run evaluates one, and a chain's windows are
-    /// selected by the `TimeRange`s above it.
-    fn raw_window_below(
+    /// Checks that `time_range` (a `TimeRange`, or a
+    /// `SummaryTumblingWindowChain`'s tumbling window) reads the `Scan`
+    /// below it through `TimeShift`s without `@` summing to a non-negative
+    /// offset, or says why its shape is unsupported. A `TimeRange` run at
+    /// ingestion time may have no `TimeShift` or subquery above it; a query
+    /// run evaluates one, and a chain's windows are selected by the
+    /// `TimeRange`s above it.
+    fn check_raw_window_below(
         &self,
         time_range: PhysicalASAPNodeId,
-        width_ms: u128,
-    ) -> Result<RawDataWindow, InstallableDagError> {
+    ) -> Result<(), InstallableDagError> {
         let unsupported = |reason| InstallableDagError::UnsupportedRawDataWindow {
             time_range_node_id: time_range,
             reason,
@@ -900,8 +774,6 @@ impl<'a> ViewIndex<'a> {
         {
             return Err(unsupported("a subquery or a TimeShift above the range"));
         }
-        let width_ms =
-            i64::try_from(width_ms).map_err(|_| unsupported("window width overflows"))?;
         let mut end_offset_ms = 0i64;
         let mut current = time_range;
         loop {
@@ -920,14 +792,7 @@ impl<'a> ViewIndex<'a> {
                 Some(NonASAPOp::Scan { .. }) if end_offset_ms < 0 => {
                     return Err(unsupported("a negative offset below the range"))
                 }
-                Some(NonASAPOp::Scan { source, .. }) => {
-                    let window = RawDataWindow {
-                        source: source.clone(),
-                        end_offset_ms,
-                        width_ms,
-                    };
-                    return Ok(window);
-                }
+                Some(NonASAPOp::Scan { .. }) => return Ok(()),
                 _ => {
                     return Err(unsupported(
                         "an operator other than TimeShift below the range",
@@ -937,24 +802,23 @@ impl<'a> ViewIndex<'a> {
         }
     }
 
-    /// What view `node`'s refresh reads: a chain reading raw data, the
-    /// window of its tumbling window; any other view, below it, each view
-    /// (`views`) and each raw-data `TimeRange` it reaches without passing
-    /// another of them, in node order.
+    /// What view `node`'s refresh reads: below it, each view (`views`) it
+    /// reaches without passing another, in node order; a chain reading raw
+    /// data none. Checks the shape of each raw-data window it reads (its
+    /// tumbling window over raw data, or each raw-data `TimeRange` it
+    /// reaches without passing a view), and that it reads no `Scan` outside
+    /// one.
     fn inputs_of_view(
         &self,
         node: PhysicalASAPNodeId,
         views: &HashSet<PhysicalASAPNodeId>,
     ) -> Result<MaterializedViewInputs, InstallableDagError> {
-        if let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-            tumbling_window_width_ms,
-            ..
-        }) = &self.nodes[&node].payload
+        if let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) =
+            &self.nodes[&node].payload
         {
             if self.reading_raw_data.contains(&node) {
-                let window = self.raw_window_below(node, u128::from(*tumbling_window_width_ms))?;
+                self.check_raw_window_below(node)?;
                 return Ok(MaterializedViewInputs {
-                    raw_data_windows: vec![window],
                     materialized_views: Vec::new(),
                 });
             }
@@ -990,12 +854,10 @@ impl<'a> ViewIndex<'a> {
         }
         raw_ranges.sort_unstable();
         view_inputs.sort_unstable();
-        let raw_data_windows = raw_ranges
-            .into_iter()
-            .map(|range| self.window_at(range))
-            .collect::<Result<Vec<_>, _>>()?;
+        for range in raw_ranges {
+            self.check_raw_window_at(range)?;
+        }
         Ok(MaterializedViewInputs {
-            raw_data_windows,
             materialized_views: view_inputs,
         })
     }

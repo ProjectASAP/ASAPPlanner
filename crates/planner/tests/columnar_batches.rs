@@ -61,18 +61,22 @@ async fn a_tumbling_window_is_built_from_arrow_columns_with_one_label_entry_per_
     .await
     .unwrap()
     .0;
-    // The newest tumbling window: its node, and the raw-data window it reads.
+    // The newest tumbling window: its node, and the raw-data window it reads
+    // (its refresh window's, ending at or before the evaluation).
     let views = plan.materialized_views().unwrap();
+    let newest_window = |node_id| {
+        let refresh = plan.dag.refresh_window(node_id).expect("a bounded window");
+        asap_planner::TimeWindow {
+            end_offset_ms: refresh.phase_ms,
+            width_ms: refresh.width_ms,
+        }
+    };
     let output = views
         .iter()
-        .max_by_key(|output| {
-            output.inputs.raw_data_windows()[0]
-                .bounds_ms(EVALUATION_MS)
-                .1
-        })
+        .max_by_key(|output| newest_window(output.node_id).bounds_ms(EVALUATION_MS).1)
         .unwrap();
     // The time range the tumbling window covers at this evaluation, `(start_ms, end_ms]`.
-    let (start_ms, end_ms) = output.inputs.raw_data_windows()[0].bounds_ms(EVALUATION_MS);
+    let (start_ms, end_ms) = newest_window(output.node_id).bounds_ms(EVALUATION_MS);
     // Feed both series within the selected tumbling window, whose width is an optimizer
     // decision. Keep distinct millisecond timestamps even for very fine tumbling windows.
     let width_ms = end_ms - start_ms;

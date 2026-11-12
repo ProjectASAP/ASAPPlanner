@@ -5,6 +5,7 @@ use std::time::Duration;
 use asap_types::ir::properties::ExecutionDataState;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode;
+use asap_types::plan::time_window::TimeIndexedRead;
 use asap_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
 
 use super::*;
@@ -196,11 +197,13 @@ fn a_query_time_scan_reads_what_its_consumers_read_and_keeps_its_retention() {
         child: 0,
     }));
     let read_ms = read_back_ms(
-        [1],
-        |_| &instant.payload,
-        |_| vec![],
+        0,
+        |id| match id {
+            0 => vec![1],
+            _ => vec![],
+        },
+        |_| TimeIndexedRead::of(&instant.payload, ExecutionTiming::QueryTime),
         |_| 0,
-        |_| false,
         true,
     );
     assert_eq!(read_ms, Some(1_000));
