@@ -103,7 +103,7 @@ pub struct GroupProperties {
 impl GroupProperties {
     /// The sketch algorithm of the state the group outputs; `None` for
     /// rows, values and exact states.
-    pub(super) fn sketch_algorithm_of_state(&self) -> Option<SketchAlgorithm> {
+    pub fn sketch_algorithm_of_state(&self) -> Option<SketchAlgorithm> {
         if self.result_kind != OperatorResultKind::State {
             return None;
         }

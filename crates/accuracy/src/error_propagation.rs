@@ -15,8 +15,8 @@ use asap_types::summary_type::ExactKind;
 /// output's: $\beta_{c,i}$ and $b_{c,i}$ per input, read from the
 /// operator, its arguments and, for a `Filter`, its input group's column
 /// lineage in `memo`. `None` when the consumer has no error contract for
-/// `metric`: an input whose error is in `metric` then gives no edge (the
-/// metric rule). No factor is guessed; every contract keeps the metric
+/// `metric`: an edge from an input whose error is in `metric` then fails
+/// (the metric rule). No factor is guessed; every contract keeps the metric
 /// (concepts doc, section 4, "Local propagation"):
 /// - value-preserving (`Sort`, `TimeRange`, `TimeShift`, `Concat`, a
 ///   readout, a finalize, a `SummaryMerge`): $\beta = 1$ in any metric;
@@ -146,6 +146,21 @@ pub fn error_propagation(
             _ => None,
         },
     }
+}
+
+/// The metrics among `metrics` that `consumer`'s error contract
+/// ([`error_propagation`]) carries to its inputs: those an input of it may
+/// be off in when its output accepts `metrics`.
+pub fn metrics_carried(
+    memo: &Memo,
+    consumer: &Operator<MemoGroupId>,
+    metrics: &[AccuracyMetric],
+) -> Vec<AccuracyMetric> {
+    metrics
+        .iter()
+        .copied()
+        .filter(|&metric| error_propagation(memo, consumer, metric).is_some())
+        .collect()
 }
 
 /// Whether each of `columns` of `group`'s output is copied from a source
@@ -301,18 +316,8 @@ mod tests {
     use asap_types::ir::schema::{DataType, PROMQL_SERIES_IDENTITY};
     use asap_types::ir::{ExprSemantics, Predicate, ProjectItem};
     use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
-    use asap_types::test_support::memo_fixtures::{aggregate, readout, scan};
+    use asap_types::test_support::memo_fixtures::{aggregate, arithmetic, compare, readout, scan};
     use asap_types::workload::DataWorkload;
-
-    /// `column <op> literal`, PromQL semantics.
-    fn compare(column: usize, op: CompareOpKind, literal: ScalarValue) -> ScalarExpr<MemoGroupId> {
-        ScalarExpr::Compare {
-            left: Box::new(ScalarExpr::Column(column)),
-            op,
-            right: Box::new(ScalarExpr::Literal(literal)),
-            semantics: ExprSemantics::Promql,
-        }
-    }
 
     /// Constant error contracts. A `Filter` whose
     /// predicate reads only columns copied from a source keeps or drops
@@ -362,11 +367,13 @@ mod tests {
             job,
             CompareOpKind::Eq,
             ScalarValue::Utf8("api".into()),
+            ExprSemantics::Promql,
         ));
         let by_value = filter(compare(
             estimate,
             CompareOpKind::Gt,
             ScalarValue::Float64(0.5),
+            ExprSemantics::Promql,
         ));
         for metric in AccuracyMetric::ALL {
             assert_eq!(
@@ -562,17 +569,7 @@ mod tests {
         let g1 = memo
             .find_or_add_group(scan("latency", &[("job", DataType::Utf8)], vec![]))
             .unwrap();
-        let divide = Operator::NonASAP(NonASAPOp::BinaryOp {
-            operator: BinaryOperator {
-                checked_relative_division: false,
-                checked_finite_division: false,
-                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
-                vector_match: None,
-            },
-            return_bool: false,
-            lhs: g1,
-            rhs: g1,
-        });
+        let divide = arithmetic(ArithmeticOpKind::Div, g1, g1);
         assert_eq!(
             error_propagation(&memo, &divide, AccuracyMetric::Relative),
             Some(ErrorPropagation {

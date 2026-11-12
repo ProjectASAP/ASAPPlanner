@@ -103,6 +103,15 @@ mod tests {
             guarantee.spec.accuracy_metric,
             AccuracyMetric::ABSOLUTE_STREAM_L2
         );
-        assert!(meets(&guarantee, 0.01, Some(0.01)));
+        assert!(guarantee
+            .spec
+            .error
+            .evaluate()
+            .is_some_and(|error| error <= target_limit(0.01)));
+        assert!(guarantee
+            .spec
+            .failure_probability
+            .evaluate()
+            .is_some_and(|failure_probability| failure_probability <= target_limit(0.01)));
     }
 }

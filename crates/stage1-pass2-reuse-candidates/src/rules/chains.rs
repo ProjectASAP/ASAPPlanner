@@ -33,10 +33,12 @@ use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
 /// queries reaching S whose evaluation grid at S, $g_q$, is known
 /// ([`evaluation_grid_per_query`]: below a subquery, its resolution), with
 /// the offsets $o_j$ on S's
-/// path; no query with a grid, no chain. A chain whose width does not
-/// divide the evaluation grid of the group reading it (the gcd over all its
-/// readers) gets no edge (`candidate_edges`), so the merge over it is
-/// pruned: a 15 s chain never serves a reader every 10 s. Under `@ T` S adds no width: it
+/// path; no query with a grid, no chain. The edges from a chain whose
+/// width does not divide the evaluation grid of the group reading it (the
+/// gcd over all its readers) fail with
+/// `ChainWidthDoesNotDivideEvaluationGrid` (`candidate_edges`), so the
+/// merge over it is pruned: a 15 s chain never serves a reader every 10 s.
+/// Under `@ T` S adds no width: it
 /// reads only chains other states created whose width divides W, the
 /// offsets and T. Under `@ end()` or `@ start()` (a `TimeShift` the front
 /// end puts above the subtree it anchors) no chain is read.

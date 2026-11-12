@@ -29,7 +29,7 @@ mod tests;
 
 use std::collections::BTreeSet;
 
-use asap_accuracy::AccuracyEvidence;
+use asap_accuracy::{accepted_metrics, AccuracyEvidence};
 use asap_types::stages::{
     CandidateError, CandidateForMemoGroupId, LogicalASAPMemoCandidates, LogicalEdge, Memo,
     MemoGroupError, PrunedLogicalCandidate,
@@ -79,18 +79,38 @@ pub fn generate_logical_asap_memo_candidates(
     let mut memo = pass1;
     rollup::add_rollup_candidates(&mut memo)?;
     topk::add_topk_candidates(&mut memo)?;
-    let (unknown_values, read_only_exactly) = set_readout_requirements(&mut memo)?;
-    let dead = |pruned: &[PrunedLogicalCandidate]| -> BTreeSet<CandidateForMemoGroupId> {
+    let topological_order = |memo: &Memo| {
+        memo.topological_order()
+            .ok_or(Pass2RuleError::CyclicDependencies)
+    };
+    let order = topological_order(&memo)?;
+    let (readouts_without_per_value_failure_probability, read_only_exactly) =
+        set_readout_requirements(&mut memo, &order)?;
+    let candidates_of = |pruned: &[PrunedLogicalCandidate]| -> BTreeSet<CandidateForMemoGroupId> {
         pruned.iter().map(|pruned| pruned.candidate).collect()
     };
     let before_chains = eliminate_dead_candidates(
         &memo,
-        &candidate_edges(&memo, entries, &unknown_values, evidence),
+        &candidate_edges(
+            &memo,
+            &accepted_metrics(&memo, &order),
+            &evaluation_grids(&memo, entries),
+            &readouts_without_per_value_failure_probability,
+            evidence,
+        ),
     );
-    chains::add_chain_groups(&mut memo, entries, &dead(&before_chains))?;
-    let candidate_edges = candidate_edges(&memo, entries, &unknown_values, evidence);
+    chains::add_chain_groups(&mut memo, entries, &candidates_of(&before_chains))?;
+    let order = topological_order(&memo)?;
+    let evaluation_grid_of_group = evaluation_grids(&memo, entries);
+    let candidate_edges = candidate_edges(
+        &memo,
+        &accepted_metrics(&memo, &order),
+        &evaluation_grid_of_group,
+        &readouts_without_per_value_failure_probability,
+        evidence,
+    );
     let pruned = eliminate_dead_candidates(&memo, &candidate_edges);
-    let dead = dead(&pruned);
+    let dead = candidates_of(&pruned);
     let edges = candidate_edges
         .into_iter()
         .filter(|edge| !dead.contains(&edge.producer) && !dead.contains(&edge.consumer))
@@ -101,10 +121,6 @@ pub fn generate_logical_asap_memo_candidates(
             satisfies_logical_requirement: edge.satisfies.is_ok(),
         })
         .collect();
-    let evaluation_grid_of_group = evaluation_grids(&memo, entries);
-    let order = memo
-        .topological_order()
-        .ok_or(Pass2RuleError::CyclicDependencies)?;
     let exact_only_groups_of_query = exact_only_groups_of_query(&memo, &order, &read_only_exactly);
     Ok(LogicalASAPMemoCandidates {
         memo,

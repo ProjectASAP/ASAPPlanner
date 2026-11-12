@@ -13,8 +13,8 @@ use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 /// `TopK(k)` over that group's ranked rows, partitioned by its leading key
 /// columns: the `k` highest of the `k_max` highest rows are the `k`
 /// highest. Only exact ranked rows give the reuse its answer: a ranking has
-/// no error contract (`asap_accuracy::error_propagation`), so the
-/// metric rule gives an approximate producer (a heap's readout) no edge
+/// no error contract (`asap_accuracy::error_propagation`), so the edge
+/// from an approximate producer (a heap's readout) fails the metric rule
 /// when a query with an accuracy target reaches it.
 pub(crate) fn add_topk_candidates(memo: &mut Memo) -> Result<(), Pass2RuleError> {
     let topks: Vec<(MemoGroupId, MemoGroupId, Reduction, usize)> = (0..memo.groups().len())

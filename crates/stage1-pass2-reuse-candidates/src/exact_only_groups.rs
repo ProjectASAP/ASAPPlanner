@@ -5,7 +5,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
-use asap_accuracy::error_propagation;
+use asap_accuracy::metrics_carried;
 use asap_types::accuracy::AccuracyMetric;
 use asap_types::ir::QueryRoot;
 use asap_types::stages::{Memo, MemoGroupId};
@@ -13,8 +13,8 @@ use asap_types::stages::{Memo, MemoGroupId};
 /// Per query: the groups below its root where an error in no metric of its
 /// target reaches the root bounded, with every group below them. Walking
 /// down from each root with a target, which accepts the target's metric
-/// (every metric when it names none), a candidate passes to its inputs the
-/// metrics its error contract carries (`error_propagation`); a group
+/// (`AccuracyTarget::metrics`), a candidate passes to its inputs the
+/// metrics its error contract carries (`metrics_carried`); a group
 /// keeps, per query, the metrics every path to it carries, so one path
 /// through a consumer without a contract (a comparison, a sum) makes it
 /// exact-only for that query. `read_only_exactly` adds, per query, groups
@@ -34,11 +34,7 @@ pub(crate) fn exact_only_groups_of_query(
         else {
             continue;
         };
-        let metrics = AccuracyMetric::ALL
-            .into_iter()
-            .filter(|&metric| target.accuracy_metric.is_none_or(|named| named == metric))
-            .collect();
-        accepted[root.0 as usize].insert(query, metrics);
+        accepted[root.0 as usize].insert(query, target.metrics());
     }
     let mut exact_only = vec![BTreeSet::new(); memo.queries().len()];
     for (&query, groups) in read_only_exactly {
@@ -53,10 +49,7 @@ pub(crate) fn exact_only_groups_of_query(
         }
         for candidate in &memo.groups()[group.0 as usize].candidates {
             let operator = &candidate.expression.operator;
-            let carried: Vec<AccuracyMetric> = AccuracyMetric::ALL
-                .into_iter()
-                .filter(|&metric| error_propagation(memo, operator, metric).is_some())
-                .collect();
+            let carried = metrics_carried(memo, operator, &AccuracyMetric::ALL);
             for &child in operator.children() {
                 for (&query, metrics) in &accepted_here {
                     let passed: Vec<AccuracyMetric> = metrics

@@ -57,33 +57,17 @@ pub(super) fn guarantee(
             missed = eps;
         }
     }
-    Some(kmv_guarantee(
-        algorithm,
-        params,
-        query,
-        met,
-        failure_probability,
-    ))
-}
-
-fn kmv_guarantee(
-    algorithm: &SketchAlgorithm,
-    params: &SketchParams,
-    query: &SketchStatistic,
-    eps: f64,
-    failure_probability: f64,
-) -> AccuracyGuarantee {
-    super::bounded_guarantee(
+    Some(super::bounded_guarantee(
         algorithm,
         params,
         query,
         AccuracyMetric::Relative,
-        eps,
+        met,
         ProbabilityExpr::Constant {
             value: failure_probability,
         },
         "kmv_exact_below_k_chernoff_v1",
-    )
+    ))
 }
 
 /// The probability that `asap_sketchlib`'s KMV with `k` misses relative

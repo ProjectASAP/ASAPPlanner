@@ -1,14 +1,14 @@
 //! `asap-accuracy` — the accuracy rules the planning stages share: the
 //! theoretical guarantee of reading a statistic from a summary with given
 //! parameters ([`theoretical_guarantee`], from the per-algorithm
-//! guarantees in `guarantee`) and a target's comparison limit
-//! ([`target_limit`]), the deployment's measured accuracy
+//! guarantees in `guarantee`), the deployment's measured accuracy
 //! ([`AccuracyEvidence`], in `evidence`), each operator's error contract
-//! ([`error_propagation`], in `error_propagation`), the metric rule
+//! ([`error_propagation`], in `error_propagation`), the metric of a
+//! readout's error ([`readout_metric`], in `readout`), the metric rule
 //! ([`accepted_metrics`], in `metric_rule`), each readout's required
 //! accuracy ([`readout_levels`], in `readout_caps`), and $\alpha^{\log}$ of
 //! a logical edge ([`producer_satisfies_logical_requirements`], in
-//! `logical_edge`).
+//! `logical_edge`, with a requirement's comparison limit [`target_limit`]).
 //! See `docs/design_docs/concepts/accuracy-models.md` for the design.
 //!
 //! It depends only on `asap-types`, never on a stage crate, so every stage
@@ -16,14 +16,16 @@
 
 mod error_propagation;
 mod evidence;
-pub mod guarantee;
+mod guarantee;
 mod logical_edge;
 mod metric_rule;
+mod readout;
 mod readout_caps;
 
-pub use error_propagation::{error_propagation, ErrorPropagation};
+pub use error_propagation::{error_propagation, metrics_carried, ErrorPropagation};
 pub use evidence::{AccuracyEvidence, NoMeasuredGuarantees};
-pub use guarantee::{target_limit, theoretical_guarantee};
-pub use logical_edge::producer_satisfies_logical_requirements;
-pub use metric_rule::{accepted_metrics, readout_metric, sketch_readout_metric};
+pub use guarantee::theoretical_guarantee;
+pub use logical_edge::{producer_satisfies_logical_requirements, target_limit};
+pub use metric_rule::{accepted_metrics, metrics_accepted_on_inputs};
+pub use readout::{readout_metric, readout_metric_of_candidate};
 pub use readout_caps::readout_levels;

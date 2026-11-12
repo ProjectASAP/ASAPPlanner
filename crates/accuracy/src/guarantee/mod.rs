@@ -7,13 +7,18 @@ use asap_types::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
 
 use asap_types::summary_type::SummaryTypeCapability;
 
+use crate::target_limit;
+
+mod binomial;
 pub(crate) mod cardinality;
 pub(crate) mod cms;
 pub(crate) mod count_sketch;
 pub(crate) mod ddsketch;
-pub mod hll;
+pub(crate) mod hll;
 pub(crate) mod kll;
-pub mod univmon;
+pub(crate) mod univmon;
+
+use binomial::binomial_upper_tail;
 
 /// The guarantee of θ for `query`: where one parameter sets both the error
 /// and the failure probability (KLL's and KMV's `k`), the one that holds at
@@ -125,65 +130,10 @@ pub fn theoretical_guarantee(
     })
 }
 
-/// Small relative tolerance for comparing an evaluated bound against a
-/// target, so a parameter sized by `⌈·⌉` to *exactly* meet ε is not rejected
-/// by floating-point noise.
-const SATISFACTION_TOLERANCE: f64 = 1e-9;
-
-/// The largest evaluated error (or failure probability) that meets a
-/// required `limit`: `limit` widened by [`SATISFACTION_TOLERANCE`], so a
-/// bound equal to it up to floating-point noise meets it.
-pub fn target_limit(limit: f64) -> f64 {
-    limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON
-}
-
-/// `P(Binomial(n, p) ≥ k)`, summed term by term in log space and rounded
-/// up by a relative 1e-12 so rounding never certifies a smaller tail.
-pub(crate) fn binomial_upper_tail(n: u32, p: f64, k: u32) -> f64 {
-    if k == 0 || p >= 1.0 {
-        return 1.0;
-    }
-    if k > n || p <= 0.0 {
-        return 0.0;
-    }
-    let (ln_p, ln_q) = (p.ln(), (-p).ln_1p());
-    let mut ln_choose = 0.0;
-    let mut tail = 0.0;
-    for i in 0..=n {
-        if i > 0 {
-            ln_choose += f64::from(n - i + 1).ln() - f64::from(i).ln();
-        }
-        if i >= k {
-            tail += (ln_choose + f64::from(i) * ln_p + f64::from(n - i) * ln_q).exp();
-        }
-    }
-    (tail * (1.0 + 1e-12)).min(1.0)
-}
-
-/// Whether `guarantee`'s evaluated error is within `max_error` and, when
-/// `failure_probability` is set, its evaluated failure probability within
-/// it ([`target_limit`]); unknown values do not meet.
-#[cfg(test)]
-fn meets(guarantee: &AccuracyGuarantee, max_error: f64, failure_probability: Option<f64>) -> bool {
-    let within = |value: Option<f64>, limit: f64| value.is_some_and(|v| v <= target_limit(limit));
-    within(guarantee.spec.error.evaluate(), max_error)
-        && failure_probability
-            .is_none_or(|delta| within(guarantee.spec.failure_probability.evaluate(), delta))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use asap_types::ir::scalar::expr_ir::ColumnRef;
-
-    /// A bound equal to the limit up to floating-point noise meets it; a
-    /// bound one part in a million above it does not.
-    #[test]
-    fn target_limit_admits_only_floating_point_noise() {
-        assert!(0.01 * (1.0 + 1e-12) <= target_limit(0.01));
-        assert!(0.01 * (1.0 + 1e-6) > target_limit(0.01));
-        assert!(0.0 <= target_limit(0.0));
-    }
 
     /// Every listed θ has a theoretical guarantee for the statistic its
     /// algorithm is listed for, at failure probability 0.01, in the

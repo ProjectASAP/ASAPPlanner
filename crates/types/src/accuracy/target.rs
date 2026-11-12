@@ -287,6 +287,15 @@ impl AccuracyTarget {
     pub fn is_exact(&self) -> bool {
         self.max_error == 0.0 && self.failure_probability == Some(0.0)
     }
+
+    /// The metrics this target accepts an error in: its metric, every
+    /// metric when it names none.
+    pub fn metrics(&self) -> Vec<AccuracyMetric> {
+        AccuracyMetric::ALL
+            .into_iter()
+            .filter(|&metric| self.accuracy_metric.is_none_or(|named| named == metric))
+            .collect()
+    }
 }
 
 /// The metric a query's result is most naturally stated in, from the
