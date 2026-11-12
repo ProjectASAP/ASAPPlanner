@@ -36,8 +36,8 @@ pub struct LogicalASAPMemoCandidates {
     /// unknown) also lists each readout group another query gave a level,
     /// with the groups below it. A group is listed for a query, not
     /// pruned: other queries may still read its approximate candidates, so
-    /// Stage 3 must enforce it per query, in each query's selection
-    /// context; Pass 2 only lists it. Empty for a query without an accuracy
+    /// Stage 3 enforces it per query, in each query's selection context
+    /// (its MILP's constraint (X)); Pass 2 only lists it. Empty for a query without an accuracy
     /// target.
     pub exact_only_groups_of_query: Vec<BTreeSet<MemoGroupId>>,
 }

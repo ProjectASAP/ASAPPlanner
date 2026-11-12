@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::stages::Lifetime;
 
+use super::exact_only::not_read_by_some_query;
 use super::model::{selection_cost_per_second, QueryId, SelectionInputs};
 use crate::selectable::Execution;
 
@@ -80,8 +81,9 @@ pub(crate) fn dearer_than_a_feasible_plan(inputs: &SelectionInputs<'_>) -> Vec<b
 /// \sum_i \min_u (\rho_\kappa c_{\kappa,u,v,i} + \text{tree}_u)$). Trees
 /// share the executions they have in common; when that gives a query-time
 /// result that is not materialized two consumers, or a cycle, the plan is
-/// rebuilt without that execution. `None` when no feasible plan is found
-/// that way.
+/// rebuilt without that execution. An execution some query must not read
+/// (constraint (X)) is left out from the start, so the plan meets (X).
+/// `None` when no feasible plan is found that way.
 fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
     let physical = inputs.physical;
     let contexts = inputs.contexts;
@@ -113,7 +115,7 @@ fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
         let properties = physical.physical_candidates[v.0].physical_properties;
         properties.lifetime() == Lifetime::None && properties.timing() == ExecutionTiming::QueryTime
     };
-    let mut excluded = vec![false; count];
+    let mut excluded = not_read_by_some_query(inputs);
     for _ in 0..REPAIRS {
         let (tree_cost, chosen) = cheapest_trees(inputs, &into, &inputs_of, &excluded);
         // Each query output's cheapest execution, then the trees below.
