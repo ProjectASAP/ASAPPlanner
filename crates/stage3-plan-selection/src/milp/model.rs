@@ -3,7 +3,7 @@
 //!
 //! | Family | Variables | Constraints |
 //! |---|---|---|
-//! | baseline (section 3) | $x_v$, $y_{u,c,i}$, $z_{q,v}$, $t_v$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) [`utilization_constraints`], one consumer of a query-time result that is not materialized [`unshared_result_constraints`], each source's raw data on disk once [`raw_data_disk_constraints`]; (G), (H): $y$ exists only on admissible edges |
+//! | baseline (section 3) | $x_v$, $y_{u,c,i}$, $z_{q,v}$, $t_v$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) and one consumer of a query-time result that is not materialized [`use_constraints`], each source's raw data on disk once [`raw_data_disk_constraints`]; (G), (H): $y$ exists only on admissible edges |
 //! | execution contexts (section 5) | $x^{\mathrm{mat}}_v$, $x_{\kappa,v}$, $y_{\kappa,u,c,i}$, $h_v$ ([`ExecutionContextVariables`]) | (R) [`retention_constraints`] |
 //! | accuracy (section 4) | $E_{c,m}$, $F_{c,i,m}$, $D_c$, $H_{c,i}$ ([`AccuracyVariables`]) | (K) [`accuracy_constraints`] |
 //!
@@ -50,10 +50,10 @@ pub(crate) struct SelectionInputs<'a> {
 pub(crate) struct SelectionVariables {
     /// $x_v$, by [`PhysicalCandidateId`].
     x: Vec<Variable>,
-    /// $y_{u,c,i}$, on admissible edges only.
-    y: HashMap<PhysicalEdgeId, Variable>,
-    /// $z_{q,v}$, for $v \in G_q$.
-    z: HashMap<(QueryId, PhysicalCandidateId), Variable>,
+    /// $y_{u,c,i}$, on admissible edges only, in edge order.
+    y: BTreeMap<PhysicalEdgeId, Variable>,
+    /// $z_{q,v}$, for $v \in G_q$, in key order.
+    z: BTreeMap<(QueryId, PhysicalCandidateId), Variable>,
     /// $t_v$, by [`PhysicalCandidateId`]: only for candidates on a cycle of
     /// admissible edges (a strongly connected component); `None` elsewhere.
     t: Vec<Option<Variable>>,
@@ -69,6 +69,7 @@ pub(crate) struct SelectionVariables {
 fn selection_variables(
     inputs: &SelectionInputs<'_>,
     left_out: &[bool],
+    components: &Components,
     problem: &mut ProblemVariables,
 ) -> SelectionVariables {
     let count = inputs.physical.physical_candidates.len();
@@ -95,7 +96,7 @@ fn selection_variables(
         .into_iter()
         .map(|edge| (edge, problem.add(variable().binary())))
         .collect();
-    let mut z = HashMap::new();
+    let mut z = BTreeMap::new();
     for (query, candidates) in inputs.query_outputs {
         for &v in candidates {
             z.entry((*query, v))
@@ -104,9 +105,10 @@ fn selection_variables(
     }
     // t_v only inside a strongly connected component of the selectable
     // edges, bounded by its size.
-    let t = component_sizes(inputs)
-        .into_iter()
-        .map(|size| (size > 1).then(|| problem.add(variable().min(0).max((size - 1) as f64))))
+    let t = components
+        .size
+        .iter()
+        .map(|&size| (size > 1).then(|| problem.add(variable().min(0).max((size - 1) as f64))))
         .collect();
     let mut raw_data_on_disk = BTreeMap::new();
     for (source, _) in inputs.costs.raw_data_on_disk.iter().flatten() {
@@ -148,8 +150,10 @@ fn producer_selection_constraints(
     inputs: &SelectionInputs<'_>,
     variables: &SelectionVariables,
 ) -> Vec<Constraint> {
-    sorted(&variables.y)
-        .map(|(edge, y)| {
+    variables
+        .y
+        .iter()
+        .map(|(&edge, &y)| {
             let producer = inputs.physical.edge(edge).producer_candidate_id;
             constraint!(y <= variables.x[producer.0])
         })
@@ -166,7 +170,7 @@ fn query_coverage_constraints(
         let covered: Expression = candidates.iter().map(|&v| variables.z[&(*query, v)]).sum();
         constraints.push(constraint!(covered == 1));
     }
-    for (&(_, v), &z) in sorted_by_key(&variables.z) {
+    for (&(_, v), &z) in &variables.z {
         constraints.push(constraint!(z <= variables.x[v.0]));
     }
     constraints
@@ -177,54 +181,49 @@ fn query_coverage_constraints(
 fn acyclicity_constraints(
     inputs: &SelectionInputs<'_>,
     variables: &SelectionVariables,
+    components: &Components,
 ) -> Vec<Constraint> {
-    let components = selectable_components(inputs);
-    let sizes = component_sizes(inputs);
-    sorted(&variables.y)
-        .filter_map(|(edge, y)| {
+    variables
+        .y
+        .iter()
+        .filter_map(|(&edge, &y)| {
             let edge = inputs.physical.edge(edge);
             let (u, c) = (edge.producer_candidate_id.0, edge.consumer_candidate_id.0);
-            if components[u] != components[c] {
+            if components.of[u] != components.of[c] {
                 return None;
             }
             let (t_u, t_c) = (variables.t[u]?, variables.t[c]?);
-            let n = sizes[u] as f64;
+            let n = components.size[u] as f64;
             Some(constraint!(t_u + 1 <= t_c + n * (1 - y)))
         })
         .collect()
 }
 
-/// (F) $x_v \le \sum_{(v,c,i)} y_{v,c,i} + \sum_q z_{q,v}$.
-fn utilization_constraints(
+/// (F) $x_v \le \sum_{(v,c,i)} y_{v,c,i} + \sum_q z_{q,v}$ for every
+/// candidate; with it, a query-time result that is not materialized
+/// ($\ell$ = None) has at most one consumer, $\sum_{(v,c,i)} y_{v,c,i} +
+/// \sum_q z_{q,v} \le x_v$, so for such a candidate the two are one row,
+/// $\sum_{(v,c,i)} y_{v,c,i} + \sum_q z_{q,v} = x_v$. Consumers that share a
+/// result read a `OneEvaluation` or a materialized producer (section 5, per
+/// execution context). An ingestion-time producer is exempt from the
+/// one-consumer rule: there is no `OneEvaluation` at ingestion time, and the
+/// consumers of one ingestion run share its rows.
+fn use_constraints(
     inputs: &SelectionInputs<'_>,
     variables: &SelectionVariables,
 ) -> Vec<Constraint> {
-    let uses = uses_of(inputs, variables);
-    uses.into_iter()
+    uses_of(inputs, variables)
+        .into_iter()
         .enumerate()
-        .map(|(v, used)| constraint!(variables.x[v] <= used))
-        .collect()
-}
-
-/// A query-time result that is not materialized ($\ell$ = None) has at most
-/// one consumer: $\sum_{(v,c,i)} y_{v,c,i} + \sum_q z_{q,v} \le x_v$.
-/// Consumers that share a result read a `OneEvaluation` or a materialized
-/// producer (section 5, per execution context). An ingestion-time
-/// producer is exempt: there is no `OneEvaluation` at ingestion time, and
-/// the consumers of one ingestion run share its rows.
-fn unshared_result_constraints(
-    inputs: &SelectionInputs<'_>,
-    variables: &SelectionVariables,
-) -> Vec<Constraint> {
-    let uses = uses_of(inputs, variables);
-    uses.into_iter()
-        .enumerate()
-        .filter(|(v, _)| {
-            let properties = inputs.physical.physical_candidates[*v].physical_properties;
-            properties.lifetime() == Lifetime::None
+        .map(|(v, used)| {
+            let properties = inputs.physical.physical_candidates[v].physical_properties;
+            match properties.lifetime() == Lifetime::None
                 && properties.timing() == ExecutionTiming::QueryTime
+            {
+                true => constraint!(used == variables.x[v]),
+                false => constraint!(variables.x[v] <= used),
+            }
         })
-        .map(|(v, used)| constraint!(used <= variables.x[v]))
         .collect()
 }
 
@@ -262,50 +261,38 @@ fn uses_of(inputs: &SelectionInputs<'_>, variables: &SelectionVariables) -> Vec<
                 .sum()
         })
         .collect();
-    for (&(_, v), &z) in sorted_by_key(&variables.z) {
+    for (&(_, v), &z) in &variables.z {
         uses[v.0] += z;
     }
     uses
 }
 
-/// `y` in edge order, so the model is the same in every run.
-fn sorted(
-    y: &HashMap<PhysicalEdgeId, Variable>,
-) -> impl Iterator<Item = (PhysicalEdgeId, Variable)> {
-    let mut y: Vec<(PhysicalEdgeId, Variable)> = y.iter().map(|(&e, &v)| (e, v)).collect();
-    y.sort_unstable_by_key(|(edge, _)| *edge);
-    y.into_iter()
+/// Each candidate's strongly connected component of the selectable edges
+/// (those [`SelectionCosts::edge`] costs), computed once per model.
+pub(crate) struct Components {
+    /// Each candidate's component number.
+    of: Vec<usize>,
+    /// The size of each candidate's component: 1 for a candidate on no
+    /// cycle.
+    size: Vec<usize>,
 }
 
-/// `z` in key order.
-fn sorted_by_key(
-    z: &HashMap<(QueryId, PhysicalCandidateId), Variable>,
-) -> Vec<(&(QueryId, PhysicalCandidateId), &Variable)> {
-    let mut z: Vec<_> = z.iter().collect();
-    z.sort_unstable_by_key(|(key, _)| **key);
-    z
-}
-
-/// Each candidate's strongly connected component of the selectable edges.
-fn selectable_components(inputs: &SelectionInputs<'_>) -> Vec<usize> {
-    strongly_connected_components(
-        inputs.physical.physical_candidates.len(),
-        inputs.costs.edge.keys().map(|&edge| {
-            let edge = inputs.physical.edge(edge);
-            (edge.producer_candidate_id.0, edge.consumer_candidate_id.0)
-        }),
-    )
-}
-
-/// The size of each candidate's [`selectable_components`] component: 1
-/// for a candidate on no cycle.
-fn component_sizes(inputs: &SelectionInputs<'_>) -> Vec<usize> {
-    let components = selectable_components(inputs);
-    let mut size: HashMap<usize, usize> = HashMap::new();
-    for &component in &components {
-        *size.entry(component).or_default() += 1;
+impl Components {
+    fn of(inputs: &SelectionInputs<'_>) -> Self {
+        let of = strongly_connected_components(
+            inputs.physical.physical_candidates.len(),
+            inputs.costs.edge.keys().map(|&edge| {
+                let edge = inputs.physical.edge(edge);
+                (edge.producer_candidate_id.0, edge.consumer_candidate_id.0)
+            }),
+        );
+        let mut count: HashMap<usize, usize> = HashMap::new();
+        for &component in &of {
+            *count.entry(component).or_default() += 1;
+        }
+        let size = of.iter().map(|component| count[component]).collect();
+        Self { of, size }
     }
-    components.iter().map(|component| size[component]).collect()
 }
 
 /// Each node's strongly connected component of the graph with `arcs`
@@ -388,7 +375,7 @@ pub(crate) enum SelectionMilpError {
 
 /// Builds and solves the baseline MILP: minimize
 /// $\sum_v w_v x_v + \sum_{(u,c,i)} c_{u,c,i} y_{u,c,i} + \sum_s r_s$ under
-/// (A)–(F), [`unshared_result_constraints`] and
+/// (A)–(F), the one-consumer rule ([`use_constraints`]) and
 /// [`raw_data_disk_constraints`], with HiGHS at gap 0 on one thread. The
 /// candidates dearer than a feasible plan are left out first
 /// ([`dearer_than_a_feasible_plan`]), then the coefficients are scaled so
@@ -398,15 +385,15 @@ pub(crate) fn solve_selection(
 ) -> Result<SolvedSelection, SelectionMilpError> {
     let started = Instant::now();
     let left_out = dearer_than_a_feasible_plan(inputs);
+    let components = Components::of(inputs);
     let mut problem = ProblemVariables::new();
-    let variables = selection_variables(inputs, &left_out, &mut problem);
+    let variables = selection_variables(inputs, &left_out, &components, &mut problem);
     let constraints: Vec<Constraint> = [
         input_satisfaction_constraints(inputs, &variables),
         producer_selection_constraints(inputs, &variables),
         query_coverage_constraints(inputs, &variables),
-        acyclicity_constraints(inputs, &variables),
-        utilization_constraints(inputs, &variables),
-        unshared_result_constraints(inputs, &variables),
+        acyclicity_constraints(inputs, &variables, &components),
+        use_constraints(inputs, &variables),
         raw_data_disk_constraints(inputs, &variables),
     ]
     .into_iter()
@@ -417,7 +404,7 @@ pub(crate) fn solve_selection(
     let largest = (0..left_out.len())
         .filter(kept)
         .filter_map(|v| inputs.costs.candidate[v].as_ref().ok())
-        .chain(sorted(&variables.y).map(|(edge, _)| &inputs.costs.edge[&edge]))
+        .chain(variables.y.keys().map(|edge| &inputs.costs.edge[edge]))
         .chain(
             (0..left_out.len())
                 .filter(kept)
@@ -433,7 +420,10 @@ pub(crate) fn solve_selection(
         let cost = inputs.costs.candidate[v].as_ref().ok()?;
         Some(cost * scale * variables.x[v])
     });
-    let edge_terms = sorted(&variables.y).map(|(edge, y)| inputs.costs.edge[&edge] * scale * y);
+    let edge_terms = variables
+        .y
+        .iter()
+        .map(|(edge, &y)| inputs.costs.edge[edge] * scale * y);
     let raw_data_terms = variables
         .raw_data_on_disk
         .values()
@@ -497,9 +487,11 @@ pub(crate) fn solve_selection(
         .filter(|&v| chosen(variables.x[v]))
         .filter_map(|v| inputs.costs.candidate[v].as_ref().ok())
         .sum::<f64>()
-        + sorted(&variables.y)
-            .filter(|&(_, y)| chosen(y))
-            .map(|(edge, _)| inputs.costs.edge[&edge])
+        + variables
+            .y
+            .iter()
+            .filter(|&(_, &y)| chosen(y))
+            .map(|(edge, _)| inputs.costs.edge[edge])
             .sum::<f64>()
         + raw_data_on_disk.values().sum::<f64>()
         + inputs.costs.request_overhead_cost_per_second;
@@ -509,9 +501,11 @@ pub(crate) fn solve_selection(
             .filter(|&v| chosen(variables.x[v]))
             .map(PhysicalCandidateId)
             .collect(),
-        edges: sorted(&variables.y)
-            .filter(|&(_, y)| chosen(y))
-            .map(|(edge, _)| edge)
+        edges: variables
+            .y
+            .iter()
+            .filter(|&(_, &y)| chosen(y))
+            .map(|(&edge, _)| edge)
             .collect(),
         outputs: inputs
             .query_outputs
