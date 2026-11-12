@@ -178,6 +178,12 @@ pub(crate) fn read_back_ms(
         operator_of,
         |v| readers(consumers_of(v)),
         span_ms,
+        |v| {
+            physical.physical_candidates[v.0]
+                .physical_properties
+                .timing()
+                == ExecutionTiming::QueryTime
+        },
         matches!(
             operator_of(producer),
             Operator::NonASAP(NonASAPOp::Scan { .. })

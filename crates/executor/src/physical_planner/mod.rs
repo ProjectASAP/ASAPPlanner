@@ -439,6 +439,11 @@ fn compile_internal(
             // A chain builds, in an ingestion run, the window of its input
             // ending at the run's end: one row per key, stamped with that
             // `window_end`. Older windows are earlier runs', in the store.
+            // Built at query time, it builds at each evaluation `T` every
+            // window `(T - (k+1)c, T - kc]` its readers read, in one pass:
+            // each row is grouped with its key by the end of its window,
+            // and each state is stamped with that end, as the stored
+            // windows are, for the `TimeRange`s above it to select.
             if let Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 summary_type,
                 input: update,
@@ -448,15 +453,12 @@ fn compile_internal(
                 ..
             }) = &node.payload
             {
-                if node.output_state.timing
-                    != planner_types::ir::properties::ExecutionTiming::IngestionTime
-                {
-                    return Err(invalid(format!(
-                        "node {id}: a tumbling-window chain is built in ingestion runs"
-                    )));
+                let query_time = node.output_state.timing
+                    == planner_types::ir::properties::ExecutionTiming::QueryTime;
+                if !query_time {
+                    crate::capability::validate_ingestion_time_summary(filter.as_ref())
+                        .map_err(Error::Invalid)?;
                 }
-                crate::capability::validate_ingestion_time_summary(filter.as_ref())
-                    .map_err(Error::Invalid)?;
                 let [input] = schemas.as_slice() else {
                     return Err(invalid("a tumbling-window chain reads one input"));
                 };
@@ -475,8 +477,37 @@ fn compile_internal(
                     })) => Some(named_column(input, &ColumnRef::SampleValue)?),
                     _ => None,
                 };
-                let window =
-                    Operator::time_range(input.clone(), time, 0, width_ms, sample_value, None)?;
+                let window = if query_time {
+                    // The windows its readers read, whole tumbling windows.
+                    let (end_offset_ms, read_width_ms) =
+                        window_read_above(id, &compile_roots, &consumers, &nodes, &dependencies)
+                            .ok_or_else(|| {
+                                invalid(format!(
+                                    "node {id}: a query-time tumbling-window chain is read \
+                                     outside the time ranges above it"
+                                ))
+                            })?;
+                    if end_offset_ms % width_ms != 0 || read_width_ms % width_ms != 0 {
+                        return Err(invalid(format!(
+                            "node {id}: a window ({end_offset_ms} ms back, {read_width_ms} ms \
+                             wide) is not whole tumbling windows of {width_ms} ms"
+                        )));
+                    }
+                    Operator::time_range(
+                        input.clone(),
+                        time,
+                        end_offset_ms,
+                        read_width_ms,
+                        sample_value,
+                        None,
+                    )?
+                    .with_tumbling_window_ends(width_ms)?
+                } else {
+                    Operator::time_range(input.clone(), time, 0, width_ms, sample_value, None)?
+                };
+                // At query time each key's rows group by their window end
+                // too.
+                let window_end = query_time.then_some(time);
                 let build = match reduction {
                     PlannerReduction::PerEntity => {
                         let SummaryInputExpr::Column(value) = &update.weight else {
@@ -486,7 +517,9 @@ fn compile_internal(
                         };
                         let value = named_column(input, value)?;
                         let groups = (0..input.fields.len())
-                            .filter(|&column| column != value && column != time)
+                            .filter(|&column| {
+                                column != value && (column != time || window_end.is_some())
+                            })
                             .collect();
                         Operator::per_group_summary_build(
                             input.clone(),
@@ -503,6 +536,7 @@ fn compile_internal(
                         node.parameters.as_ref(),
                         update,
                         reduction,
+                        window_end,
                     )?,
                 };
                 let build = match filter {
@@ -510,12 +544,22 @@ fn compile_internal(
                     None => build,
                 };
                 let compact = build.schema();
+                // The window end's column among the build's output columns.
+                let window_end = window_end
+                    .map(|time| {
+                        compact
+                            .fields
+                            .iter()
+                            .position(|field| field.name == input.fields[time].name)
+                            .ok_or_else(|| invalid("a chain's build drops its window end"))
+                    })
+                    .transpose()?;
                 physical_dag.add(auxiliary, inputs, window)?;
                 physical_dag.add(helper_id(id, 1)?, vec![auxiliary], build)?;
                 physical_dag.add(
                     id,
                     vec![helper_id(id, 1)?],
-                    Operator::scope_timestamp(compact, output)?,
+                    Operator::window_end_timestamp(compact, output, window_end)?,
                 )?;
                 continue;
             }
@@ -914,11 +958,17 @@ fn window_union(a: (i64, i64), b: (i64, i64)) -> (i64, i64) {
 
 /// The window `(end_offset_ms, width_ms)` back from the evaluation time that
 /// the compiled consumers of `id` read through the `TimeShift`s (without an
-/// `@` anchor) above it: a `TimeRange(w)`, or a chain of width `w` (its
-/// window ending at the evaluation time), over shifts summing to `s` reads
-/// `(s, w)`; several read the smallest window holding all of theirs.
+/// `@` anchor) above it: a `TimeRange(w)`, or a chain of width `w` built at
+/// ingestion time (its window ending at the evaluation time), over shifts
+/// summing to `s` reads `(s, w)`; several read the smallest window holding
+/// all of theirs. A chain built at query time builds the windows its own
+/// readers read, so it reads what they read: the walk passes up through it.
 /// `None` when `id` is a compile root, a root or another consumer reads it
 /// outside a window, or nothing reads it.
+///
+/// Example: a `Scan` read by a query-time chain of 1-minute windows, which
+/// `TimeRange(5m)` and `TimeShift(1m) -> TimeRange(5m)` read, is read for
+/// `(0, 6m)`.
 fn window_read_above(
     id: NodeId,
     roots: &BTreeSet<NodeId>,
@@ -940,6 +990,13 @@ fn window_read_above(
                 }
                 Payload::NonASAP(NonASAPOp::TimeRange { .. }) => {
                     time_range_window(consumer, nodes, dependencies)?
+                }
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+                    if nodes[&consumer].output_state.timing
+                        == planner_types::ir::properties::ExecutionTiming::QueryTime =>
+                {
+                    pending.push((consumer, end_offset_ms));
+                    continue;
                 }
                 Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
                     tumbling_window_width_ms,
@@ -1442,8 +1499,14 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 crate::capability::validate_ingestion_time_summary(filter.as_ref())
                     .map_err(Error::Invalid)?;
             }
-            let build =
-                summary_agg_build(input, family, node.parameters.as_ref(), update, reduction)?;
+            let build = summary_agg_build(
+                input,
+                family,
+                node.parameters.as_ref(),
+                update,
+                reduction,
+                None,
+            )?;
             match filter {
                 Some(filter) => build.with_row_filter(expression(&filter.0, input)?),
                 None => Ok(build),
@@ -1506,14 +1569,21 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
 }
 /// The build for a `SummaryAgg` before its row filter: all groups sharing
 /// one state (Hydra), a keyed state per group, or a state per group over
-/// one value column.
+/// one value column. With `window_end`, a column grouped by after the
+/// reduction's keys: a query-time chain's window ends.
 fn summary_agg_build(
     input: &SchemaRef,
     family: &FieldDataType,
     parameters: Option<&SketchParams>,
     update: &planner_types::summary_type::SummaryUpdate,
     reduction: &PlannerReduction,
+    window_end: Option<usize>,
 ) -> Result<Operator, Error> {
+    let groups = |input: &SchemaRef, keys: &GroupKeys| -> Result<Vec<usize>, Error> {
+        let mut columns = groups(input, keys)?;
+        columns.extend(window_end);
+        Ok(columns)
+    };
     if matches!(
         family,
         FieldDataType::Sketch(planner_types::summary_type::SketchAlgorithm::HydraCms)

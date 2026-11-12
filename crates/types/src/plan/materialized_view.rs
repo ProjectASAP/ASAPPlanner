@@ -795,10 +795,13 @@ impl<'a> ViewIndex<'a> {
 
     /// How far back from the evaluation time the consumers of `node` read
     /// it: through `TimeShift`s (without an `@` anchor) summing to `o`, a
-    /// `TimeRange(r)` reads `o + r` back, a chain of width `w` `o + w`, and
-    /// any other consumer `o`; the most of these, and whether a consumer
-    /// other than a `TimeRange` or chain (or a root) reads it, outside a
-    /// window.
+    /// `TimeRange(r)` reads `o + r` back, a chain of width `w` built at
+    /// ingestion time `o + w`, and any other consumer `o`; the most of
+    /// these, and whether a consumer other than a `TimeRange` or chain (or
+    /// a root) reads it, outside a window. A chain built at query time
+    /// builds the windows its own readers read, so it reads `node` as far
+    /// back as they read it: the walk passes up through it like a shift of
+    /// 0.
     fn read_back_ms(&self, node: PhysicalASAPNodeId) -> (u64, bool) {
         let mut read_back_ms = 0u64;
         let mut read_outside_windows = false;
@@ -815,6 +818,13 @@ impl<'a> ViewIndex<'a> {
                     }
                     Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
                         u64::try_from(range.as_millis()).unwrap_or(u64::MAX)
+                    }
+                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+                        if self.nodes[&consumer].output_state.timing
+                            == ExecutionTiming::QueryTime =>
+                    {
+                        pending.push((consumer, offset_ms));
+                        continue;
                     }
                     Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                         tumbling_window_width_ms,

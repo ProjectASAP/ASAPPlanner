@@ -195,7 +195,14 @@ fn a_query_time_scan_reads_what_its_consumers_read_and_keeps_its_retention() {
         kind: TimeRangeKind::Range,
         child: 0,
     }));
-    let read_ms = read_back_ms([1], |_| &instant.payload, |_| vec![], |_| 0, true);
+    let read_ms = read_back_ms(
+        [1],
+        |_| &instant.payload,
+        |_| vec![],
+        |_| 0,
+        |_| false,
+        true,
+    );
     assert_eq!(read_ms, Some(1_000));
     let usage =
         node_resource_usage_and_cost(&scan, &[], (1, 1.0), read_ms, &data, &settings, 1.0).unwrap();

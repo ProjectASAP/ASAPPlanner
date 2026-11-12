@@ -489,7 +489,9 @@ installation checks it:
 Each covers what the `TimeRange` and `TimeShift` nodes above the node read
 back: through shifts summing to `o`, a `TimeRange(r)` reads `o + r` back
 (Stage 3 adds the longest range-evaluation span of the queries reading it).
-`raw_data_retention()` is the per-source maximum over the query-time scans.
+A chain built at ingestion time reads its newest window back; a chain built
+at query time reads what its own readers read, so the walk passes up through
+it. `raw_data_retention()` is the per-source maximum over the query-time scans.
 Example: for `max_over_time(m[5m])` evaluated over the last hour, raw `m` is
 kept 65 minutes.
 
@@ -502,7 +504,11 @@ dropped. A chain runs natively: each ingestion run builds its window ending
 at the run's end (one row per key, `(window_end, keys, state)`), the runtime
 appends it, and a query reads the windows `TimeRange(W)` over shifts summing
 to `o` selects, `(T - o - W, T - o]` on `window_end`, which a `SummaryMerge`
-merges per key. A `TimeShift { at }` evaluates its input once per request, at
+merges per key. A chain built at query time builds, in the query run at
+`T`, every window `(T - (k+1)c, T - kc]` its readers select, in one pass over
+its input: each row is grouped with its key by its window's end, and each
+state is stamped with that end, so the same `TimeRange` selects them. A
+`TimeShift { at }` evaluates its input once per request, at
 the request's end (`@ end()`), start (`@ start()`) or the given time.
 
 ### Input slots and compilation

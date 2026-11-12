@@ -201,7 +201,8 @@ fn installation_checks_the_retention_stage3_set() {
 
 /// A query-time `Scan` read through a window carries its retention;
 /// one without is refused, and one with it is the raw data kept for its
-/// source.
+/// source. Read through the chain built at query time, it is read as far
+/// back as the chain's `TimeRange(1h)` reads, not one 10-minute window.
 #[test]
 fn a_query_time_scan_carries_its_retention() {
     let (mut dag, chain) = chain_plan(Some(3_600_000));
@@ -225,9 +226,18 @@ fn a_query_time_scan_carries_its_retention() {
         .find(|n| n.id == scan)
         .unwrap()
         .retention_ms = Some(600_000);
+    assert!(matches!(
+        dag.raw_data_retention(),
+        Err(InstallableDagError::ScanRetentionTooShort { .. })
+    ));
+    dag.nodes
+        .iter_mut()
+        .find(|n| n.id == scan)
+        .unwrap()
+        .retention_ms = Some(3_600_000);
     let retention = dag.raw_data_retention().unwrap();
     assert_eq!(retention.len(), 1);
-    assert_eq!(retention[0].lookback_ms(), Some(600_000));
+    assert_eq!(retention[0].lookback_ms(), Some(3_600_000));
 }
 
 /// Unrestricted summaries become the executor's families; a caller's

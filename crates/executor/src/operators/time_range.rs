@@ -46,10 +46,34 @@ impl Operator {
                 width_ms,
                 sample_value,
                 latest_per_series,
+                tumbling_window_width_ms: None,
             },
             inputs: vec![input.clone()],
             output: input,
         })
+    }
+
+    /// This range window (not an instant window), each kept row's time
+    /// replaced by the end of the tumbling window of `width_ms` it lies in,
+    /// the windows counted back from the range's end `E`: `(E - (k+1) ·
+    /// width_ms, E - k · width_ms]` ends at `E - k · width_ms`. A
+    /// tumbling-window chain built at query time groups its rows by that
+    /// end. Example: with `E` = 600,000 and windows of 60,000 ms, rows at
+    /// 540,001 and 600,000 end at 600,000, a row at 540,000 at 540,000.
+    pub fn with_tumbling_window_ends(mut self, width_ms: i64) -> Result<Self, Error> {
+        let Kind::TimeRange {
+            latest_per_series: None,
+            tumbling_window_width_ms: slot,
+            ..
+        } = &mut self.kind
+        else {
+            return Err(invalid("tumbling-window ends need a range window"));
+        };
+        if width_ms <= 0 {
+            return Err(invalid("a tumbling window has a positive width"));
+        }
+        *slot = Some(width_ms);
+        Ok(self)
     }
 }
 
@@ -148,6 +172,7 @@ pub(super) fn execute<'a>(
         width_ms,
         sample_value,
         ref latest_per_series,
+        tumbling_window_width_ms,
     } = operator.kind
     else {
         unreachable!()
@@ -196,10 +221,15 @@ pub(super) fn execute<'a>(
                 }
                 let batch = batch?;
                 let keep = kept(&batch, true)?;
-                if keep.true_count() == batch.num_rows() {
-                    return Ok((*batch).clone());
+                let batch = if keep.true_count() == batch.num_rows() {
+                    (*batch).clone()
+                } else {
+                    batch.filter(&keep)?
+                };
+                match tumbling_window_width_ms {
+                    Some(width_ms) => window_ends(batch, time, end, width_ms),
+                    None => Ok(batch),
                 }
-                batch.filter(&keep)
             })
             .boxed_local());
     };
@@ -241,4 +271,34 @@ pub(super) fn execute<'a>(
         latest.filter(&keep)
     })
     .boxed_local())
+}
+
+/// `batch` (its rows in `(.., end]`) with each row's `time` replaced by the
+/// end of its tumbling window of `width_ms` counted back from `end`
+/// ([`Operator::with_tumbling_window_ends`]).
+fn window_ends(batch: Batch, time: usize, end: i64, width_ms: i64) -> Result<Batch, Error> {
+    let times = batch
+        .column(time)
+        .as_any()
+        .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+        .ok_or_else(|| invalid("time range column is not a timestamp"))?;
+    // `end - t` is in `[k · width_ms, (k+1) · width_ms)` for the window
+    // ending at `end - k · width_ms`.
+    let ends: arrow::array::TimestampMillisecondArray = times
+        .iter()
+        .map(|t| t.map(|t| end - (end - t) / width_ms * width_ms))
+        .collect();
+    let rows = batch.num_rows();
+    let mut arrays = Vec::with_capacity(batch.schema().fields.len());
+    let mut states = Vec::with_capacity(arrays.capacity());
+    for column in 0..batch.schema().fields.len() {
+        if column == time {
+            arrays.push(std::sync::Arc::new(ends.clone()) as arrow::array::ArrayRef);
+            states.push(None);
+        } else {
+            arrays.push(batch.column(column).clone());
+            states.push(batch.state_column(column).cloned());
+        }
+    }
+    Batch::from_parts(batch.schema().clone(), arrays, states, rows)
 }

@@ -472,6 +472,7 @@ fn scan_read_ms(
         |id| &nodes[&id].payload,
         readers,
         |_| 0,
+        |id| nodes[&id].output_state.timing == ExecutionTiming::QueryTime,
         true,
     )
 }

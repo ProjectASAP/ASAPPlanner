@@ -126,6 +126,9 @@ enum Kind {
         sample_value: Option<usize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         latest_per_series: Option<Vec<usize>>,
+        /// Set by [`Operator::with_tumbling_window_ends`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tumbling_window_width_ms: Option<i64>,
     },
     Limit {
         n: u64,

@@ -1,7 +1,8 @@
 //! A tumbling-window chain runs natively: each ingestion run builds the
 //! chain's window ending at the run's end, the runtime appends it to its
 //! time-indexed store, and a query run merges the windows the `TimeRange`
-//! (and `TimeShift`) above the chain select. And a `TimeShift` with an `@`
+//! (and `TimeShift`) above the chain select; a chain built at query time
+//! builds those windows in the query run. And a `TimeShift` with an `@`
 //! anchor evaluates its input at the anchor's time.
 use asap_executor::physical_planner::{compile, test_support::views_at};
 use asap_executor::runtime::{Limits, RunContext, Scope};
@@ -304,19 +305,124 @@ fn a_chain_built_at_ingestion_answers_queries_through_its_time_ranges() {
     assert!(error.is_some_and(|error| error.to_string().contains("no rows tiling")));
 }
 
-// A query run never builds a chain: it is built one window per ingestion
-// run.
+// A chain built at query time, of 1-minute windows over the raw samples,
+// read by `sum_over_time(latency[5m])` and `sum_over_time(latency[5m]
+// offset 1m)`: at T = 4h the run builds, from the `Scan`'s rows in `(T -
+// 6m, T]`, one state per job and window `(T - (k+1)m, T - km]` stamped with
+// its end, and the `TimeRange`s merge the windows of `(T - 5m, T]` and
+// `(T - 6m, T - 1m]`, equal to the sums computed directly over the raw
+// samples (one sample per minute, on the windows' ends).
 #[test]
-fn a_chain_is_built_only_at_ingestion() {
-    let (mut dag, chain, _) = chain_plan();
-    // At query time the chain is not materialized, so it has no retention.
-    dag.nodes
-        .iter_mut()
-        .find(|node| node.id == chain)
+fn a_chain_built_at_query_time_answers_queries_through_its_time_ranges() {
+    let chain = node(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+        child: scan(),
+        summary_type: sum(),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::by(vec![0]),
+        filter: None,
+        tumbling_window_width_ms: MINUTE_MS as u64,
+    }));
+    let merge = |windows| {
+        node(Operator::ASAP(ASAPOp::SummaryMerge {
+            children: vec![windows],
+            group_by: None,
+        }))
+    };
+    let now = finalized_sum(merge(range(5 * MINUTE_MS, chain.clone())));
+    let shifted = finalized_sum(merge(range(
+        5 * MINUTE_MS,
+        shift(MINUTE_MS, None, chain.clone()),
+    )));
+    let (dag, nodes) =
+        planner_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&[
+            QueryRoot::Operator(now.clone()),
+            QueryRoot::Operator(shifted.clone()),
+        ])
+        .unwrap();
+    let chain_node = dag
+        .nodes
+        .iter()
+        .find(|node| node.id == id_of(&nodes, &chain))
+        .unwrap();
+    assert_eq!(
+        chain_node.output_state.timing,
+        planner_types::ir::properties::ExecutionTiming::QueryTime
+    );
+    let roots = [id_of(&nodes, &now) as u64, id_of(&nodes, &shifted) as u64];
+    let query = compile(&dag, &[], &roots).unwrap();
+    let evaluation_time_ms = 4 * HOUR_MS;
+    let context = RunContext::new(Scope::Query { evaluation_time_ms }, Limits::default()).unwrap();
+    let answers = {
+        let query = query.instantiate(Arc::new(store_with_samples())).unwrap();
+        run(&query, &roots, context)
+    };
+    assert_eq!(
+        sums_of(answers[0].clone()),
+        direct_sums(evaluation_time_ms - 5 * MINUTE_MS, evaluation_time_ms)
+    );
+    assert_eq!(
+        sums_of(answers[1].clone()),
+        direct_sums(
+            evaluation_time_ms - 6 * MINUTE_MS,
+            evaluation_time_ms - MINUTE_MS
+        )
+    );
+}
+
+// A range window with tumbling-window ends: at T = 10m, `(T - 3m, T]` in
+// windows of 1 minute keeps the rows at 7m (out), 7m + 1 ms, 8m, 9m 30 s and
+// 10m, their times replaced by their windows' ends 8m, 8m, 10m and 10m.
+#[test]
+fn a_range_window_stamps_each_row_with_its_tumbling_windows_end() {
+    use asap_executor::operators::Operator as ExecutorOperator;
+    use asap_executor::plan::PhysicalDAG;
+    let schema = Arc::new(samples_schema());
+    let times = [
+        7 * MINUTE_MS,
+        7 * MINUTE_MS + 1,
+        8 * MINUTE_MS,
+        570_000,
+        10 * MINUTE_MS,
+    ];
+    let rows = times
+        .iter()
+        .map(|&t| {
+            vec![
+                Value::Utf8("a".into()),
+                Value::Timestamp(t),
+                Value::Float64(1.0),
+            ]
+        })
+        .collect();
+    let batch = Batch::try_new(schema.clone(), rows).unwrap();
+    let mut dag = PhysicalDAG::default();
+    dag.add(
+        0,
+        vec![],
+        ExecutorOperator::source(schema.clone(), vec![batch]).unwrap(),
+    )
+    .unwrap();
+    let window = ExecutorOperator::time_range(schema, 1, 0, 3 * MINUTE_MS, None, None)
         .unwrap()
-        .retention_ms = None;
-    assert!(compile(&dag, &[], &[chain as u64])
-        .is_err_and(|error| error.to_string().contains("built in ingestion runs")));
+        .with_tumbling_window_ends(MINUTE_MS)
+        .unwrap();
+    dag.add(1, vec![0], window).unwrap();
+    let context = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: 10 * MINUTE_MS,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let ends: Vec<i64> = run(&dag, &[1], context)
+        .remove(0)
+        .into_iter()
+        .map(|row| match row[1] {
+            Value::Timestamp(t) => t,
+            ref other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(ends, [8, 8, 10, 10].map(|minutes| minutes * MINUTE_MS));
 }
 
 // `sum_over_time(latency[5m] @ end())` in a range request over (1h, 3h]:
