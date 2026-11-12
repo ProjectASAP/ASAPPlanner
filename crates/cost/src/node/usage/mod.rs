@@ -934,7 +934,8 @@ pub fn node_resource_usage_and_cost<'a>(
             raw_scan = Some((source, retained));
         }
     }
-    // Query-time memory is held only while the node computes (concepts doc,
+    // Query-time memory is held only while the node computes
+    // (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
     // section 5, "Memory held while computing"): its bytes for its work per
     // execution, at its executions per second. Query latency does not
     // enter it.

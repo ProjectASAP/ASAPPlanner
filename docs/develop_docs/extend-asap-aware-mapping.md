@@ -85,7 +85,7 @@ contains the candidate and that Stage 3 prices it.
    (`LIFETIMES`, `offered_physical_properties`; a per-group offer in
    `group.rs`), and gate it on the
    deployment input that allows it with a `PruneReason`.
-3. Price it in `crates/cost/src/node/usage/mod.rs` (`asap_cost::node_resource_usage_and_cost`): what it keeps in memory or on
+3. Cost it in `crates/cost/src/node/usage/mod.rs` (`asap_cost::node_resource_usage_and_cost`): what it keeps in memory or on
    disk, and what each evaluation rebuilds.
 
 Tests: Stage 2 unit tests for when the option is offered;

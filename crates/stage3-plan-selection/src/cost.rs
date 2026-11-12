@@ -1,4 +1,6 @@
-//! The baseline objective's coefficients (concepts doc, section 3, "Stage
+//! The baseline objective's coefficients
+//! (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
+//! section 3, "Stage
 //! 3: baseline selection and plan output"): $w_v$ of every physical
 //! candidate and $c_{u,c,i}$ of every edge a plan may select, from
 //! `asap-cost` under cost model 1.

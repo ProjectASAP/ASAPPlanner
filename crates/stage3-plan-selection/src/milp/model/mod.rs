@@ -1,4 +1,5 @@
-//! Stage 3's selection MILP, named after the formulation (concepts doc,
+//! Stage 3's selection MILP, named after the formulation
+//! (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
 //! sections 3–5).
 //!
 //! | Family | Variables | Constraints |

@@ -3,11 +3,10 @@ name = "asap-stage3-plan-selection"
 version = "0.1.0"
 edition = "2021"
 
-# #509 Stage 3, plan selection: the only stage that prices plans, with the
-# planning models (accuracy from `asap-accuracy`; cost from `asap-cost`)
+# Stage 3, plan selection: the only stage that costs plans, with the
+# planning models (accuracy from `asap-accuracy`; cost from `asap-cost`).
 # Reads only Stage 2's output (`asap_types::stages`) and builds the plan
-# itself: no dependency on Stages 1 or 2, nor on the executor (#1054 X1,
-# #1047 P7).
+# itself: no dependency on Stages 1 or 2, nor on the executor.
 [dependencies]
 asap-types = { path = "../types" }
 asap-accuracy = { path = "../accuracy" }
