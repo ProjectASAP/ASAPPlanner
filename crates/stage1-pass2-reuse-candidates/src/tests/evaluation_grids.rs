@@ -8,7 +8,7 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::stages::{Memo, MemoGroupId};
 use asap_types::summary_type::ExactKind;
 use asap_types::workload::{
-    DataWorkload, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand, RepetitionInterval,
+    DataWorkload, DemandEstimate, QueryRecurrence, QueryWorkloadEntry, Rate, RepeatedDemand,
 };
 
 use crate::test_fixtures::*;
@@ -27,13 +27,15 @@ fn a_groups_evaluation_grid_is_the_gcd_of_its_queries_grids() {
     query(&mut memo, a, None);
     query(&mut memo, a, None);
     query(&mut memo, other, None);
-    let without_phase = QueryWorkloadEntry {
-        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
-            60_000,
-        ))),
+    let without_grid = QueryWorkloadEntry {
+        recurrence: QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(DemandEstimate {
+            expected_rate: Rate(1.0 / 60.0),
+            observed_at: None,
+            valid_for: None,
+        })),
         ..entry(60_000)
     };
-    let logical = pass2(memo, &[entry(60_000), entry(120_000), without_phase]);
+    let logical = pass2(memo, &[entry(60_000), entry(120_000), without_grid]);
     let grid = |group: MemoGroupId| logical.evaluation_grid_of_group[group.0 as usize];
     assert_eq!(grid(window).map(|g| g.period_ms), Some(60_000));
     assert_eq!(grid(other), None);

@@ -157,7 +157,7 @@ fn adhoc(queries: &[&str], accuracy: Value, metrics: &[&str]) -> Value {
 fn every_10s_within_1_percent(query: &str) -> Value {
     json!({
         "query": query,
-        "demand": {"fixed_interval": 10000},
+        "demand": {"fixed_interval_at": {"interval": 10000, "evaluation_phase": 0}},
         "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.001}},
         "predictability": {"predictable": {"known_at": null}},
     })
@@ -1000,7 +1000,7 @@ fn milp_lower_bound_is_consistent_with_the_selected_cost() {
             "query_batch": null,
             "repeating_queries": [{
                 "query": "topk(32, sum by (label_0) (sum_over_time(data[1h])))",
-                "demand": {"fixed_interval": 60000},
+                "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
                 "requirements": {
                     "accuracy": {
                         "max_error": 0.05,
@@ -1415,7 +1415,7 @@ fn rate_and_max_over(metric_type: &str) -> Value {
     let entry = |query: &str| {
         json!({
             "query": query,
-            "demand": {"fixed_interval": 60000},
+            "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
             "requirements": {},
             "predictability": {"predictable": {"known_at": null}},
         })
@@ -1487,7 +1487,7 @@ fn mixed_language_workload_files(sql_arrival: Value, sql_facts: Value) -> (TempF
     let entry = |query: &str| {
         json!({
             "query": query,
-            "demand": {"fixed_interval": 60000},
+            "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
             "requirements": {},
             "predictability": {"predictable": {"known_at": null}},
         })

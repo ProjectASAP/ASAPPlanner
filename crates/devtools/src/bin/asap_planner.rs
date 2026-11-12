@@ -112,8 +112,7 @@ use asap_types::stages::PhysicalASAPMemoCandidates;
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
 use asap_types::stages::{MemoGroup, MemoGroupId};
 use asap_types::workload::{
-    DataArrival, DataWorkload, PlanningWorkload, QueryLanguage, QueryRecurrence,
-    QueryWorkloadEntry, RepeatedDemand,
+    DataArrival, DataWorkload, PlanningWorkload, QueryLanguage, QueryWorkloadEntry,
 };
 use serde_json::{json, Value};
 
@@ -679,10 +678,8 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
             if let Some(ms) = entry.requirements.max_latency_ms {
                 requirements["max_latency_ms"] = json!(ms);
             }
-            if let QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) =
-                &entry.recurrence
-            {
-                requirements["repeat_interval_ms"] = json!(interval.0);
+            if let Some(interval_ms) = entry.recurrence.fixed_interval_ms() {
+                requirements["repeat_interval_ms"] = json!(interval_ms);
             }
             if let Some(range) = entry.range_evaluation {
                 requirements["range_evaluation"] = json!(range);

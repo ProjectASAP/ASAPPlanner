@@ -38,7 +38,7 @@ fn workload(queries: &[&str]) -> PlanningWorkload {
         .iter()
         .map(|query| {
             format!(
-                r#"{{"query": {query:?}, "demand": {{"fixed_interval": 600000}},
+                r#"{{"query": {query:?}, "demand": {{"fixed_interval_at": {{"interval": 600000, "evaluation_phase": 0}}}},
                   "requirements": {{"accuracy": {{"accuracy_metric": "rank", "max_error": 0.01,
                       "failure_probability": 0.01, "accuracy_scope": "whole_result"}},
                       "max_latency_ms": 200.0}},
@@ -326,7 +326,7 @@ fn p99_avg_workload(values_non_negative: bool) -> PlanningWorkload {
     serde_json::from_str(&format!(
         r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
               "query": "avg by (region, service, job) (quantile_over_time(0.99, data[100s]))",
-              "demand": {{"fixed_interval": 1000}},
+              "demand": {{"fixed_interval_at": {{"interval": 1000, "evaluation_phase": 0}}}},
               "requirements": {{"accuracy": {{"max_error": 0.05, "failure_probability": 0.3,
                   "accuracy_scope": "whole_result"}}}},
               "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
@@ -378,7 +378,7 @@ fn counter_topk_workload(function: &str) -> PlanningWorkload {
     serde_json::from_str(&format!(
         r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
               "query": {query:?},
-              "demand": {{"fixed_interval": 60000}},
+              "demand": {{"fixed_interval_at": {{"interval": 60000, "evaluation_phase": 0}}}},
               "requirements": {{"accuracy": {{"max_error": 0.05, "failure_probability": 0.3}}}},
               "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
             "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 100000.0}}}},

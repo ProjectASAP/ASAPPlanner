@@ -74,7 +74,7 @@ FLOWS_TABLE = {"name": "flows", "time_index": 0, "columns": [
 SQL_WORKLOAD = {
     "query_workload": {"language": {"sql": "datafusion_sql"}, "query_batch": None, "repeating_queries": [{
         "query": "SELECT dst_port, COUNT(*) AS value FROM flows WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY dst_port",
-        "demand": {"fixed_interval": 60000},
+        "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
         "requirements": {"accuracy": {"max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result"}, "max_latency_ms": None},
         "predictability": {"predictable": {"known_at": None}}}]},
     "data_workload": {"arrival": {"ingesting": {"rows_per_second": 1000.0}},
@@ -312,7 +312,7 @@ class PlanEndpointTests(unittest.TestCase):
         with its deployment capabilities, keeping materialized views."""
         workload = {
             "query_workload": {"language": "promql", "query_batch": None, "repeating_queries": [{
-                "query": "sum by (job) (sum_over_time(m[1m]))", "demand": {"fixed_interval": 10000},
+                "query": "sum by (job) (sum_over_time(m[1m]))", "demand": {"fixed_interval_at": {"interval": 10000, "evaluation_phase": 0}},
                 "requirements": {"accuracy": {"max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result"}, "max_latency_ms": None},
                 "predictability": {"predictable": {"known_at": None}}}]},
             "data_workload": {"arrival": {"ingesting": {"rows_per_second": 1000.0}},

@@ -11,7 +11,7 @@ use asap_types::stages::{
 use asap_types::summary_type::parameter_list;
 use asap_types::summary_type::{ExactKind, SketchAlgorithm};
 use asap_types::workload::{
-    DataWorkload, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand, RepetitionInterval,
+    DataWorkload, DemandEstimate, QueryRecurrence, QueryWorkloadEntry, Rate, RepeatedDemand,
 };
 
 use crate::test_fixtures::*;
@@ -69,13 +69,15 @@ fn no_chain_without_a_merge_an_anchor_or_a_grid() {
     for root in [irate_root, pinned_root, no_grid_root] {
         query(&mut memo, root, None);
     }
-    let without_phase = QueryWorkloadEntry {
-        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
-            60_000,
-        ))),
+    let without_grid = QueryWorkloadEntry {
+        recurrence: QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(DemandEstimate {
+            expected_rate: Rate(1.0 / 60.0),
+            observed_at: None,
+            valid_for: None,
+        })),
         ..entry(60_000)
     };
-    let logical = pass2(memo, &[entry(60_000), entry(60_000), without_phase]);
+    let logical = pass2(memo, &[entry(60_000), entry(60_000), without_grid]);
     for state in [irate, pinned, no_grid] {
         assert!(
             chain_widths_serving(&logical.memo, state).is_empty(),

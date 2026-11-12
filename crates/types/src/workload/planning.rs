@@ -161,7 +161,10 @@ mod tests {
                 query_batch: None,
                 repeating_queries: Some(vec![RepeatingEntry {
                     query: Query("rate(requests_total[5m])".into()),
-                    demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
+                    demand: RepeatedDemand::FixedIntervalAt {
+                        interval: RepetitionInterval(10_000),
+                        evaluation_phase: TimestampMs(0),
+                    },
                     requirements: QueryRequirements {
                         accuracy: AccuracyTarget::max_error(0.01).failure_probability(0.001),
                         max_latency_ms: Some(100.0),
