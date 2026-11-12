@@ -6,6 +6,7 @@
 //! |---|---|---|
 //! | baseline (section 3) over execution contexts (section 5) | $x_{\kappa,v}$ (with $x^{\mathrm{mat}}_v = x_{\mathrm{Materialized}(v),v}$), $y_{\kappa,u,c,i}$, $z_{q,v}$, $t$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) and one consumer per context of a query-time result that is not materialized [`use_constraints`], each source's raw data on disk once [`raw_data_disk_constraints`]; (G), (H): $y$ exists only on admissible edges where the producer delivers on the consumer's context |
 //! | retention (section 5) | $h_v$ | (R) [`super::execution_contexts::retention_constraints`] |
+//! | exact-only reads per query | $a_{q,e}$ | (X) [`super::exact_only::exact_only_constraints`] |
 //! | accuracy (section 4) | $E_{c,m}$, $F_{c,i,m}$, $D_c$, $H_{c,i}$ (`AccuracyVariables`) | (K) `accuracy_constraints` |
 //!
 //! [`solve_selection`] solves it without (K), whose variables and
@@ -29,6 +30,7 @@ use asap_types::stages::{
 };
 use asap_types::workload::QueryWorkloadEntry;
 
+use super::exact_only::{exact_only_constraints, exact_only_variables};
 use super::execution_contexts::{least_retention_ms, retention_constraints, retention_variables};
 use super::graph::Components;
 use super::upper_bound::dearer_than_a_feasible_plan;
@@ -75,6 +77,9 @@ pub(crate) struct SelectionVariables {
     /// cost per second of keeping it, at least each selected scan's
     /// ([`raw_data_disk_constraints`]).
     raw_data_on_disk: BTreeMap<Source, Variable>,
+    /// $a_{q,e}$: query $q$'s selected path reads execution $e$, where
+    /// (X) needs it ([`exact_only_variables`]).
+    read_by_query: BTreeMap<(QueryId, Execution), Variable>,
 }
 
 /// $x$, $y$, $z$, $t$, $h$ and $r$ over `inputs`, added to `problem`: $x$
@@ -130,6 +135,7 @@ fn selection_variables(
             .entry(source.clone())
             .or_insert_with(|| problem.add(variable().min(0)));
     }
+    let read_by_query = exact_only_variables(inputs, &y, problem);
     SelectionVariables {
         x,
         y,
@@ -137,6 +143,7 @@ fn selection_variables(
         t,
         h,
         raw_data_on_disk,
+        read_by_query,
     }
 }
 
@@ -343,7 +350,7 @@ pub(crate) enum SelectionMilpError {
 /// \rho_\kappa c_{\kappa,v} x_{\kappa,v} + \sum \rho_\kappa c_{\kappa,u,c,i}
 /// y_{\kappa,u,c,i} + \sum_v \pi_v h_v + \sum_s r_s$ ($\pi_v h_v$ of a
 /// query-time scan is in $r_s$) under (A)–(F), [`use_constraints`],
-/// [`raw_data_disk_constraints`] and (R), with HiGHS at gap 0 on one
+/// [`raw_data_disk_constraints`], (R) and (X), with HiGHS at gap 0 on one
 /// thread. The executions dearer than a feasible plan are left out first
 /// ([`dearer_than_a_feasible_plan`]), then the coefficients are scaled so
 /// the largest left is 1,000 (HiGHS's tolerances are absolute).
@@ -363,6 +370,7 @@ pub(crate) fn solve_selection(
         use_constraints(inputs, &variables),
         raw_data_disk_constraints(inputs, &variables),
         retention_constraints(inputs, &variables.h, &variables.y, &variables.z),
+        exact_only_constraints(inputs, &variables.read_by_query, &variables.y, &variables.z),
     ]
     .into_iter()
     .flatten()

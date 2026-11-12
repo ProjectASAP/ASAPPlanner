@@ -6,6 +6,7 @@ mod time_series;
 
 mod columnar_batches;
 mod e2e_plan;
+mod exact_only_reads;
 mod runtime_install;
 mod sql_table_scans;
 mod summary_sharing;
