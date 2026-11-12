@@ -17,7 +17,6 @@ use asap_types::stages::{CandidateForMemoGroup, LogicalRequirements, Memo, MemoG
 use asap_types::summary_type::{parameter_list, SummaryTypeCapability};
 use asap_types::summary_type::{
     ExactKind, SketchAlgorithm, SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate,
-    WeightDomain,
 };
 
 use crate::candidates::{add_measure_way, key_only_having, Pending, SingleMeasure};
@@ -794,12 +793,12 @@ fn own_value_having_filters_each_readout() {
     assert_eq!(kinds, ["Aggregate", "Filter", "Filter"]);
 }
 
-// ── Fused heaps, whole-expression top-k, ranked items, raw-data signs ──────
+// ── Fused heaps, whole-expression top-k, ranked items ─────────────────────
 
 /// `topk(5, sum by (job) (sum_over_time(m[5m])))`: the top-k gets heaps
 /// over the range's raw data samples, keyed by `job` (the ranked item),
-/// weighted by the sample value with the open requirement that the samples
-/// of `m` are non-negative (`RawDataSamplesOfMetric`). Each heap build
+/// weighted by the sample value (whether those weights are non-negative is
+/// the state group's `column_signs`, which Stage 2 reads). Each heap build
 /// lists the absorbed sums' groups in `fused_groups`, and the top-k's own
 /// heaps over its one-row-per-item input are pruned.
 #[test]
@@ -835,10 +834,6 @@ fn whole_expression_topk_heaps_read_the_raw_samples() {
         assert_eq!(
             update.item,
             Some(SummaryInputExpr::Column(ColumnRef::Named("job".into())))
-        );
-        assert_eq!(
-            update.weight_domain,
-            WeightDomain::RawDataSamplesOfMetric { metric: "m".into() }
         );
         for build in candidates(&memo, state) {
             let mut fused = build.fused_groups.clone();
@@ -919,8 +914,7 @@ fn whole_expression_topk_heap_candidates() {
     assert_eq!(memo.groups().len(), 11, "{}", memo_printout(&memo));
 }
 
-/// A top-k over a `count` ranks the counted items with unit weight, proven
-/// non-negative.
+/// A top-k over a `count` ranks the counted items with unit weight.
 #[test]
 fn count_ranked_topk_counts_with_unit_weight() {
     let mut memo = Memo::new(&DataWorkload::default());
@@ -943,10 +937,6 @@ fn count_ranked_topk_counts_with_unit_weight() {
     let memo = pass1_memo(memo, None).unwrap();
     let (_, update) = state_group(&memo, SketchAlgorithm::CmsWithHeap);
     assert_eq!(update.weight, SummaryInputExpr::Constant(1.0));
-    assert!(matches!(
-        update.weight_domain,
-        WeightDomain::NonNegative { .. }
-    ));
 }
 
 /// The ranked item over several group keys is their tuple; the top-k's own
@@ -1339,7 +1329,6 @@ fn a_heap_estimate_without_the_groups_columns_adds_nothing() {
         reduction: &reduction,
         intent: &intent,
         filter: None,
-        raw_data_samples_of: None,
     };
     assert_unsupported_way_adds_nothing(
         &mut memo,
@@ -1381,7 +1370,6 @@ fn a_readout_an_open_group_cannot_rename_adds_nothing() {
         reduction: &Reduction::PerEntity,
         intent: &intent,
         filter: None,
-        raw_data_samples_of: None,
     };
     assert_unsupported_way_adds_nothing(
         &mut memo,

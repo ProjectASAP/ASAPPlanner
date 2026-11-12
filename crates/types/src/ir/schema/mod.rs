@@ -126,7 +126,7 @@ impl From<Field<DataType>> for Field<FieldDataType> {
 ///
 /// "Sample" means two things in the planner, and the names keep them apart:
 /// a *raw data sample* is one timestamped value of a time series as it
-/// arrives (`RawDataSamplesOfMetric`), and a *summary sample* is the subset of
+/// arrives (a time-series `Scan`'s rows), and a *summary sample* is the subset of
 /// input rows a sampling summary family keeps as its state
 /// ([`FieldDataType::SummarySample`], [`SamplingKind`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

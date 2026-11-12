@@ -18,3 +18,11 @@ pub struct PhysicalEdge {
     /// $\alpha^{\mathrm{phys}}_{u,c,i}$.
     pub satisfies_physical_requirement: bool,
 }
+
+impl PhysicalEdge {
+    /// Whether a plan may use the edge: $\alpha^{\log}_{u,c,i} =
+    /// \alpha^{\mathrm{phys}}_{u,c,i} = 1$.
+    pub fn is_logically_and_physically_admissible(&self) -> bool {
+        self.satisfies_logical_requirement && self.satisfies_physical_requirement
+    }
+}

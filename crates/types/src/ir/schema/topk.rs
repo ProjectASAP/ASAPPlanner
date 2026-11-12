@@ -239,7 +239,7 @@ mod tests {
     use crate::ir::{
         ASAPOp, NonASAPOp, Operator, OperatorNode, ProjectItem, ScalarExpr, TimeRangeKind,
     };
-    use crate::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate, WeightDomain};
+    use crate::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
 
     fn node(operator: Operator) -> Rc<OperatorNode> {
         OperatorNode::new_shared(operator).unwrap()
@@ -292,7 +292,6 @@ mod tests {
             input: SummaryUpdate {
                 item: Some(super::series_identity_item(&window.schema, &[2])),
                 weight: crate::summary_type::SummaryInputExpr::Column(ColumnRef::SampleValue),
-                weight_domain: WeightDomain::UnknownOrSigned,
             },
             reduction: Reduction::by(vec![2]),
             filter: None,

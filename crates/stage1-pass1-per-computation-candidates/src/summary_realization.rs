@@ -11,12 +11,10 @@ use asap_types::ir::scalar::column_resolution::{resolve_column_ref, ResolveError
 use asap_types::ir::scalar::expr_ir::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{NonASAPOp, Operator, OperatorResultKind, Predicate, ScalarExpr};
-use asap_types::stages::{
-    ranked_column_of_group, raw_data_samples_of_metric_of_group, Memo, MemoGroupId,
-};
+use asap_types::stages::{ranked_column_of_group, Memo, MemoGroupId};
 use asap_types::summary_type::{
-    EntityIdentity, NonNegativeWeightProof, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
-    SummaryTypeCapability, SummaryUpdate, WeightDomain,
+    EntityIdentity, SketchAlgorithm, SketchStatistic, SummaryInputExpr, SummaryTypeCapability,
+    SummaryUpdate,
 };
 
 use crate::computation_targets::nested_aggregates;
@@ -109,9 +107,10 @@ pub(crate) fn summarised_input(
 /// (`TopK(Count GROUP BY key)`, `TopK(Sum GROUP BY key)`): the group the heap
 /// reads and its update, one keyed heap over the raw rows rather than over
 /// an independently materialized per-item result. The update serves both
-/// heap algorithms; whether Count-Min is admissible over its weights is plan
-/// selection's question. `None` when the rule does not apply or the shape is
-/// unsupported (each reason is noted where it returns).
+/// heap algorithms; whether Count-Min is admissible over its weights is
+/// Stage 2's question (the state group's `column_signs`). `None` when the
+/// rule does not apply or the shape is unsupported (each reason is noted
+/// where it returns).
 pub(crate) fn realize_keyed_additive_summary_input(
     memo: &Memo,
     output_reduction: &Reduction,
@@ -134,26 +133,17 @@ pub(crate) fn realize_keyed_additive_summary_input(
     if any_measure_filtered(filters) {
         return None;
     }
-    // A grouped sum of per-series `rate`/`increase`/`irate` values: the
-    // metric they derive from, whose declared type decides their sign.
-    let derivative_of = match (measures.as_slice(), expression(memo, raw_child)) {
+    // A grouped sum of per-series `rate`/`increase`/`irate` values.
+    let counter_input = matches!(
+        (measures.as_slice(), expression(memo, raw_child)),
         (
             [AggIntent::Sum { .. }],
-            Operator::NonASAP(NonASAPOp::Aggregate {
-                measures: derivative,
-                child: samples,
-                ..
-            }),
+            Operator::NonASAP(NonASAPOp::Aggregate { measures: derivative, .. }),
         ) if matches!(
             derivative.as_slice(),
             [AggIntent::Rate | AggIntent::Increase | AggIntent::IRate]
-        ) =>
-        {
-            Some(raw_data_samples_of_metric_of_group(memo, *samples))
-        }
-        _ => None,
-    };
-    let counter_input = derivative_of.is_some();
+        )
+    );
     // `sum by (G) (sum_over_time(m[W]))` or `... count_over_time ...`: the
     // grouped sum of per-series sums (counts) of raw data samples is their sum
     // (count) by `G`, so the heap reads those samples.
@@ -183,13 +173,6 @@ pub(crate) fn realize_keyed_additive_summary_input(
             },
         }),
         _ => return None,
-    };
-    let weight_domain = match derivative_of {
-        _ if counted => WeightDomain::NonNegative {
-            proof: NonNegativeWeightProof::UnitCount,
-        },
-        Some(Some(metric)) => WeightDomain::CounterDerivativeOfMetric { metric },
-        _ => WeightDomain::UnknownOrSigned,
     };
     let subpopulation_columns = match output_reduction {
         Reduction::PerEntity => vec![],
@@ -249,7 +232,6 @@ pub(crate) fn realize_keyed_additive_summary_input(
         SummaryUpdate {
             item: Some(item),
             weight,
-            weight_domain,
         },
     ))
 }
@@ -279,23 +261,6 @@ fn summed_per_series_samples(
         return None;
     }
     Some((nested.rows, nested.inner_measure.clone()))
-}
-
-/// `update` with the open requirement that its weights are samples of
-/// `metric` ([`WeightDomain::RawDataSamplesOfMetric`]), when it is a keyed heap
-/// update whose weights are not otherwise proven.
-pub(crate) fn with_raw_data_samples_requirement(
-    mut update: SummaryUpdate,
-    metric: Option<&str>,
-) -> SummaryUpdate {
-    if let Some(metric) = metric {
-        if update.item.is_some() && update.weight_domain == WeightDomain::UnknownOrSigned {
-            update.weight_domain = WeightDomain::RawDataSamplesOfMetric {
-                metric: metric.to_string(),
-            };
-        }
-    }
-    update
 }
 
 /// What a measure's state reads from each row of `input`, resolvable there.
@@ -449,23 +414,14 @@ pub(crate) fn summary_update(
                 item: Some(item),
                 // The ranked value ([`measure_input`]).
                 weight,
-                // Not proven non-negative; selection decides whether CMS is admissible.
-                weight_domain: WeightDomain::UnknownOrSigned,
             }
         }
         (_, Some(SketchAlgorithm::UnivMon)) | (AggIntent::Count, Some(SketchAlgorithm::Cms)) => {
             SummaryUpdate {
                 item: Some(weight),
                 weight: SummaryInputExpr::Constant(1.0),
-                weight_domain: WeightDomain::NonNegative {
-                    proof: NonNegativeWeightProof::UnitCount,
-                },
             }
         }
-        _ => SummaryUpdate {
-            item: None,
-            weight,
-            weight_domain: WeightDomain::UnknownOrSigned,
-        },
+        _ => SummaryUpdate { item: None, weight },
     })
 }

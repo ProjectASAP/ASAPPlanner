@@ -52,13 +52,13 @@ use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorResultKind, Predicate, ScalarExpr};
-use asap_types::stages::{raw_data_samples_of_metric_of_group, Memo, MemoGroupId};
+use asap_types::stages::{Memo, MemoGroupId};
 
 use crate::computation_targets::{
     having_filter_groups, nested_distributive_input, whole_expression_input, ComputationTarget,
     HowToComputeAggregateMeasure,
 };
-use crate::summary_realization::{measure_input, with_raw_data_samples_requirement};
+use crate::summary_realization::measure_input;
 use crate::{expression, PerComputationCandidateError};
 use measure_output::{
     accumulator_build, add_output_candidate, join_measures, measure_output, summary_readout,
@@ -222,10 +222,6 @@ pub(crate) struct SingleMeasure<'a> {
     pub(crate) reduction: &'a Reduction,
     pub(crate) intent: &'a AggIntent,
     pub(crate) filter: Option<&'a Predicate<MemoGroupId>>,
-    /// The metric whose raw data samples, or plain sums of them, are every
-    /// value the aggregate reads: a heap-sketch weight read from them
-    /// carries the open requirement `WeightDomain::RawDataSamplesOfMetric`.
-    pub(crate) raw_data_samples_of: Option<&'a str>,
 }
 
 /// Adds `ways.result_group`'s candidates that compute it from
@@ -266,14 +262,12 @@ fn add_aggregate_candidates(
         }
         Ok((pending, input))
     };
-    let raw_data_samples = raw_data_samples_of_metric_of_group(memo, child);
     let measure = |index: usize, input: MemoGroupId| SingleMeasure {
         input,
         unfiltered_input: child,
         reduction: &reduction,
         intent: &measures[index],
         filter: filters.get(index).and_then(Option::as_ref),
-        raw_data_samples_of: raw_data_samples.as_deref(),
     };
     let target_of = |index: usize| {
         ways.targets
@@ -443,7 +437,7 @@ fn add_fused_candidate(
             )?;
             let build = Operator::ASAP(ASAPOp::SummaryAgg {
                 child: rows,
-                input: with_raw_data_samples_requirement(update, measure.raw_data_samples_of),
+                input: update,
                 summary_type: FieldDataType::Sketch(*algorithm),
                 reduction: partitions,
                 filter: None,
@@ -485,7 +479,6 @@ fn add_fused_candidate(
                 reduction: &partitions,
                 intent: &inner,
                 filter: None,
-                raw_data_samples_of: None,
             };
             let merged = accumulator_build(
                 memo,
