@@ -117,8 +117,17 @@ timing and a `Lifetime` (#1200). The lifetime is `None` (discarded after its
 reader), `OneEvaluation(medium)` (materialized until every reader of one evaluation
 finishes) or `AcrossEvaluations(medium)` (materialized for later evaluations), with
 `StorageMedium::Memory` or `StorageMedium::Disk`; an ingestion-time output cannot be materialized
-for `OneEvaluation`. A
-[`PhysicalPropertiesAssignment`](../../../crates/types/src/ir/properties/timing.rs) records,
+for `OneEvaluation`.
+
+> **Note.** The code no longer has `PhysicalPropertiesAssignment`,
+> `apply_physical_properties` or the test helpers named below: each Stage 2
+> [`PhysicalCandidate`](../../../crates/types/src/stages/physical/candidate.rs)
+> carries its own `PhysicalProperties`, and
+> `producer_satisfies_physical_requirements` (same file) checks timing and
+> lifetime on each physical edge. The rest of this section describes the
+> earlier assignment design.
+
+A `PhysicalPropertiesAssignment` records,
 per sub-DAG, the properties of its materialized output, named by the node whose output
 would be materialized. Any node may be named: a summary state, a population, or, as in
 #509 Example 4, the tumbling windows a query reads. `set(node, properties)`

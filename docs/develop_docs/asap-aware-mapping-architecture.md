@@ -17,7 +17,7 @@ in `asap-integration-tests` (`crate_graph`) checks these edges with
 
 | Crate | Role |
 | --- | --- |
-| `asap-types` (`crates/types`) | Shared vocabulary, by scope: the operator IR by IR section, `ir::operator` (`OperatorNode`, `NonASAPOp`, `ASAPOp`, operator arguments, `AggIntent`), `ir::scalar` (`ScalarExpr`, `ColumnRef`), `ir::schema` (`Schema`, `FieldDataType`), `ir::properties` (execution timing, the selection algebra of aggregate coverage) and `ir::flat`; summary types (`summary_type`: `SketchAlgorithm`, `SketchParams`, `SummaryTypeCapability`); accuracy targets and guarantees (`accuracy`: `AccuracyTarget`, `AccuracyMetric`, `AccuracyGuarantee`); the planner inputs (`workload`); the stage-boundary types (`stages`, with the memo groups' aggregate coverage and Stage 2's `PhysicalProperties` (timing and `Lifetime`)); and Stage 3's plan (`plan`: `plan::physical_asap_dag`, `plan::materialized_view`) |
+| `asap-types` (`crates/types`) | Shared vocabulary, by scope: the operator IR by IR section, `ir::operator` (`OperatorNode`, `NonASAPOp`, `ASAPOp`, operator arguments, `AggIntent`), `ir::scalar` (`ScalarExpr`, `ColumnRef`), `ir::schema` (`Schema`, `FieldDataType`), `ir::properties` (`execution_data_state`: execution timing and what an edge carries; `selection`: the selection algebra aggregate coverage is stated in) and `ir::flat`; summary types (`summary_type`: `SketchAlgorithm`, `SketchParams`, `SummaryTypeCapability`); accuracy targets and guarantees (`accuracy`: `AccuracyTarget`, `AccuracyMetric`, `AccuracyGuarantee`); the planner inputs (`workload`); the stage-boundary types (`stages::logical`: the memo, its groups with their aggregate coverage, candidates and logical edges; `stages::physical`: Stage 2's physical candidates with their `PhysicalProperties` (timing and `Lifetime`) and edges; `stages::pruning`); and Stage 3's plan (`plan`: `plan::physical_asap_dag`, `plan::materialized_view`) |
 | `asap-frontend-sql`, `asap-frontend-promql`, `asap-frontend-metricsql` (with `asap-frontend-common`) | Stage 0, the query-language frontends: lower each query into the logical DAG (`QueryRoot`s of `NonASAPOp` nodes, no summaries, no timing) |
 | `asap-stage0-memo` (`crates/stage0-memo`) | Stage 0 hash-consing: the memo groups of the workload's query roots (`memo_of_queries`) |
 | `asap-stage1-pass1-per-computation-candidates` (`crates/stage1-pass1-per-computation-candidates`) | Stage 1, Pass 1: the initial candidates of each memo group |
@@ -32,8 +32,8 @@ in `asap-integration-tests` (`crate_graph`) checks these edges with
 
 ```text
 asap-types ◄── frontends (Stage 0)
-asap-types ◄── asap-cost (shared cost model) ◄── asap-stage2-physical-optimization, asap-stage3-plan-selection
-asap-types ◄── asap-accuracy (shared accuracy model) ◄── asap-stage1-pass1-per-computation-candidates, asap-stage2-physical-optimization, asap-stage3-plan-selection
+asap-types ◄── asap-cost (shared cost model) ◄── asap-stage3-plan-selection
+asap-types ◄── asap-accuracy (shared accuracy model) ◄── asap-stage1-pass2-reuse-candidates, asap-stage3-plan-selection
 asap-types ◄── asap-stage0-memo (Stage 0 hash-consing) ◄── asap-planner
 asap-types ◄── asap-stage1-pass1-per-computation-candidates (Stage 1, Pass 1) ◄── asap-planner
 asap-types ◄── asap-stage1-pass2-reuse-candidates (Stage 1, Pass 2) ◄── asap-planner
@@ -51,7 +51,8 @@ QueryRoots (Stage 0)
   ▼                                                                     Stage 1, Pass 1
 Memo (each group's initial candidates)
   │  asap_stage1_pass2_reuse_candidates::generate_logical_asap_memo_candidates
-  │    the memo rules (memo/rules/) over the candidate memo       Stage 1, Pass 2
+  │    the reuse rules (crates/stage1-pass2-reuse-candidates/src/rules/)
+  │    over the candidate memo                                    Stage 1, Pass 2
   ▼
 LogicalASAPMemoCandidates
   │  asap_stage2_physical_optimization::generate_physical_asap_memo_candidates  Stage 2
@@ -72,13 +73,13 @@ same pipeline behind the `OptimizationPass` trait.
 | --- | --- |
 | Pass 1: which computations a query has (`ComputationTarget`), how each can be computed (`HowToComputeAggregateMeasure`: `Exact`, `ExactAccumulator`, `Summary`), fused computations (`FusedComputation`); the candidates that compute them | `asap-stage1-pass1-per-computation-candidates`, `computation_targets.rs`, `candidates/` |
 | Which summary families serve an intent (`summary_candidates`) | `asap-stage1-pass1-per-computation-candidates`, `summary_realization.rs` |
-| Pass 2 steps: rollup from the finest common group (shared producers across group keys), top-k reuse, readout requirements, dead-candidate elimination, chain groups (tumbling windows) and the logical edges | `asap-stage1-pass2-reuse-candidates`, `lib.rs` (the steps in order) and `rules/` (`rollup.rs`, `topk.rs`, `chains.rs`) |
-| Enumeration of the plans a memo stands for (reference pricer, DAG viewer) | none today (deleted in #1207 PR 0) |
+| Pass 2 steps: rollup from the finest common group (shared producers across group keys), top-k reuse, readout requirements, dead-candidate elimination, chain groups (tumbling windows) and the logical edges | `asap-stage1-pass2-reuse-candidates` (`crates/stage1-pass2-reuse-candidates/src/`): `lib.rs` (the steps in order), `rules/` (`rollup.rs`, `topk.rs`, `chains.rs`), `readout_requirements.rs`, `dead_candidates.rs`, `edges.rs`, `evaluation_grids.rs` and `exact_only_groups.rs` |
+| Enumeration of the plans a memo stands for (reference pricer, DAG viewer) | none today (the standalone enumeration was deleted) |
 | What each summary type can merge and answer (`SummaryTypeCapability::of`: `merge_inputs`, `readouts`) | `asap-types`, `summary_type/capability.rs` |
 | Stage 2: physical properties options per summary build (not materialized; materialized at ingestion time `AcrossEvaluations`; materialized at query time `OneEvaluation` or `AcrossEvaluations`), ingestion-time eligibility, physical operator implementation | `asap-stage2-physical-optimization` |
-| Timing and data-state edge rules applied from a `PhysicalPropertiesAssignment` | `asap-types`, `ir/properties/timing.rs` and `ir/properties/execution_data_state.rs`; `PhysicalProperties` and `Lifetime` in `physical/properties.rs` |
-| Stage 3: accuracy check, latency check, resource usage (`ResourceUsage`), cost models 1–3 (`CostModel`), measured operation costs | `asap-stage3-plan-selection`, `lib.rs`; `asap-cost`, `lib.rs` and `measured.rs` |
-| The analytical per-operator resource model Stage 3 measures with | `asap-cost`, `analytical.rs` and `operator_statistics.rs` |
+| Execution timing and data-state edge rules; each physical candidate's `PhysicalProperties` and `Lifetime`, and the physical edge check (`producer_satisfies_physical_requirements`) | `asap-types`, `ir/properties/execution_data_state.rs`; `stages/physical/properties/mod.rs` (`PhysicalProperties`, `Lifetime`) and `stages/physical/candidate.rs` (`PhysicalCandidate`, the edge check) |
+| Stage 3: accuracy check, latency check, resource usage (`ResourceUsage`), cost models 1–3 (`CostModel`), measured operation costs | `asap-stage3-plan-selection`, `lib.rs`; `asap-cost`, `model.rs` (`CostModel`, `CostInputs`), `resources/mod.rs` (`ResourceUsage`) and `measured.rs` |
+| The analytical per-operator resource model Stage 3 measures with | `asap-cost`, `node/analytical.rs` and `node/operator_statistics.rs` |
 | The accuracy rules: per-family guarantees, each operator's error propagation, the metric rule, each readout's required accuracy, α^log of a logical edge | `asap-accuracy` (`AccuracyEvidence`, `theoretical_guarantee`, `guarantee/`, `evidence.rs`, `error_propagation.rs`, `metric_rule.rs`, `readout_caps.rs`, `logical_edge.rs`) |
 | The statistic a summary is read for an aggregation intent (`SketchStatistic::for_intent`) | `asap-types`, `summary_type/statistic.rs` |
 | What the executor supports (`DeploymentCapabilities`) | `asap-types`, `deployment_capabilities.rs`; Pass 1 receives only `supported_summaries` and Stage 2 only `query_time_results_retained` and `raw_data_retained` (`bool` arguments, so Stage 2 does not depend on the Stage 1 crate); Stage 3 reads none of it |
