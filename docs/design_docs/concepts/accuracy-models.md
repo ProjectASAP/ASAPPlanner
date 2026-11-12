@@ -301,10 +301,14 @@ does not allow. With Q0 = `p99 / p50` and Q1 = `p99 / p50 > 1` sharing the
 ratio, Q0 may read the DDSketch readouts while Q1 reads the ratio and every
 group below it only exactly; with `quantile_over_time(0.9, m[5m])` asked once
 at a rank target and once at a relative one, each reads the other's readout
-groups only exactly. Stage 3 must enforce the list per query; Pass 2 only
-computes it. A scalar root's operands are roots: `scalar(v)` and a scalar
-subquery keep the target's metrics, and any other scalar expression reads its
-operands only exactly.
+groups only exactly. Pass 2 only computes the list; Stage 3 enforces it per
+query, in the query's own selection context (the selection MILP's
+constraint (X)): no execution on the query's selected path, from its output
+down, in a group on its list is a candidate with sketch parameters, while
+another query may still read that candidate through its own path. A scalar
+root's operands are roots: `scalar(v)` and a scalar subquery keep the
+target's metrics, and any other scalar expression reads its operands only
+exactly.
 
 The list is per group, so it is conservative where one group holds
 candidates a query may and may not read: `avg by (job)(count_over_time(m[1m]))`

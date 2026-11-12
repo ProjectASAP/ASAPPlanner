@@ -2,7 +2,7 @@
 //! costs: which executions and edges its optimum selects, its retention,
 //! and the plan built from it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::properties::ExecutionTiming;
@@ -15,9 +15,9 @@ use asap_types::stages::{
     PhysicalEdgeId,
 };
 use asap_types::stages::{Lifetime, PhysicalProperties, StorageMedium};
-use asap_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
+use asap_types::summary_type::{ExactKind, ExactParams, SketchAlgorithm, SummaryUpdate};
 use asap_types::test_support::memo_builders::{
-    group, own_candidate, query, scan_group, try_candidate,
+    group, own_candidate, quantile_over_time_readouts, query, scan_group, try_candidate,
 };
 use asap_types::test_support::memo_fixtures;
 use asap_types::workload::DataWorkload;
@@ -491,4 +491,77 @@ fn a_candidate_dearer_than_a_feasible_plan_does_not_hide_a_cheaper_plan() {
     ];
     let (solved, _) = solve(&physical, &every_10s(1), &w, &[], &[]);
     assert_eq!(candidates(&solved.unwrap()), vec![3, 4, 5, 6, 7, 8]);
+}
+
+/// `quantile_over_time(0.9, m[5m])` read by Q0 every 10 s and Q1 every
+/// 30 s, two contexts: its KLL readout (cost 1 per execution, through the
+/// state group) is cheaper than the exact quantile (cost 100). Q1 may read
+/// its exact-only groups only exactly (a relative target, which the KLL
+/// readout's rank error does not meet). With Pass 2's list (the quantile
+/// and every group below it) Q1's output is the exact quantile, constraint
+/// (X) at the output; with only the state group listed it is too, as the
+/// readout would read the state for Q1 (X along the edge); with no list Q1
+/// reads the readout. Q0, with no list, reads the readout throughout.
+#[test]
+fn a_query_reads_its_exact_only_groups_through_exact_candidates_only() {
+    let mut memo = empty_memo();
+    let m = scan(&mut memo);
+    let window = range(&mut memo, 300, m);
+    let quantile = quantile_over_time_readouts(&mut memo, window, 0.9, &[SketchAlgorithm::Kll]);
+    let state = quantile.by_algorithm[0].state;
+    query(&mut memo, quantile.result, None);
+    query(&mut memo, quantile.result, None);
+    // Every candidate, one θ of the state's.
+    let logical_candidates: Vec<(CandidateForMemoGroupId, Lifetime)> = (0..memo.groups().len())
+        .map(|group| MemoGroupId(group as u32))
+        .flat_map(|group| {
+            let count = match group == state {
+                true => 1,
+                false => memo.groups()[group.0 as usize].candidates.len(),
+            };
+            (0..count).map(move |index_in_group| {
+                (
+                    CandidateForMemoGroupId {
+                        group,
+                        index_in_group,
+                    },
+                    ONE_EVALUATION,
+                )
+            })
+        })
+        .collect();
+    let exact_quantile = logical_candidates
+        .iter()
+        .position(|&(candidate, _)| candidate == own_candidate(quantile.result))
+        .unwrap();
+    let costs: Vec<f64> = (0..logical_candidates.len())
+        .map(|v| if v == exact_quantile { 100.0 } else { 1.0 })
+        .collect();
+    let mut physical = physical(memo, &logical_candidates);
+    // Every group: the quantile and every group below it.
+    let below_quantile: BTreeSet<MemoGroupId> =
+        (0..physical.logical_candidates.memo.groups().len())
+            .map(|group| MemoGroupId(group as u32))
+            .collect();
+    for (q1_exact_only, q1_reads_exactly) in [
+        (below_quantile, true),
+        (BTreeSet::from([state]), true),
+        (BTreeSet::new(), false),
+    ] {
+        physical.logical_candidates.exact_only_groups_of_query =
+            vec![BTreeSet::new(), q1_exact_only];
+        let (solved, _) = solve(&physical, &[every(10_000), every(30_000)], &costs, &[], &[]);
+        let outputs: Vec<usize> = solved
+            .unwrap()
+            .outputs
+            .iter()
+            .map(|execution| execution.candidate.0)
+            .collect();
+        assert_ne!(outputs[0], exact_quantile);
+        assert_eq!(
+            outputs[1] == exact_quantile,
+            q1_reads_exactly,
+            "{outputs:?}"
+        );
+    }
 }

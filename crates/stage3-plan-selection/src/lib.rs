@@ -11,8 +11,10 @@
 //! $x_{\kappa,v}$ per execution (an `AcrossEvaluations` candidate runs
 //! once, $x^{\mathrm{mat}}_v$), $y_{\kappa,u,c,i}$, $z_{q,v}$, $t$, $r_s$ and
 //! the retention $h_v$, under constraints (A)–(F) per context, the
-//! one-consumer rule and (R) ((G) and (H) hold because $y$ exists only on
-//! admissible edges whose producer delivers on the consumer's context). It
+//! one-consumer rule, (R) ((G) and (H) hold because $y$ exists only on
+//! admissible edges whose producer delivers on the consumer's context) and
+//! (X): a query reads the groups Pass 2 lists as exact-only for it through
+//! exact candidates only, $a_{q,e}$ marking what its selected path reads. It
 //! builds the plan (`PhysicalASAPDAG`) from the selected executions and
 //! edges as its last step ([`plan`], each node retaining its candidate's
 //! $h_v$, the needs from [`retention`]). Accuracy at each query root,
