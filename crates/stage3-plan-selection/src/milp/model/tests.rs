@@ -283,3 +283,54 @@ fn acyclicity_forbids_two_groups_reading_each_other() {
     let outputs = vec![(QueryId(0), a), (QueryId(1), b)];
     plan_of(&physical, &[], &solved, &outputs).unwrap();
 }
+
+/// x08's shape: `max by (job)(count_over_time(m[1m]))`. Path A (scan and
+/// range `OneEvaluation`, the root reading the range: 0.0058 + 0.0010 +
+/// 0.0020) costs 0.0088/s; path B (each `None`, through three more groups)
+/// 0.0078/s. An unused candidate costing 2.55e6/s scaled every coefficient
+/// so the 0.001 difference fell under HiGHS's tolerances and the optimum
+/// took path A, 12.6% dearer. A candidate dearer than a feasible plan is
+/// left out before scaling, so the optimum is path B.
+#[test]
+fn a_candidate_dearer_than_a_feasible_plan_does_not_hide_a_cheaper_plan() {
+    let mut memo = empty_memo();
+    let m = scan(&mut memo);
+    let r = range(&mut memo, 60, m);
+    let a = group(&mut memo, shift(1_000, r));
+    let b = group(&mut memo, shift(2_000, a));
+    let c = group(&mut memo, shift(3_000, b));
+    let root = group(&mut memo, shift(4_000, c));
+    let root_from_r = try_candidate(&mut memo, root, shift(10_000, r), None).unwrap();
+    query(&mut memo, root, None);
+    let first = own_candidate;
+    let physical = physical(
+        memo,
+        &[
+            (first(m), ONE_EVALUATION), // v0: path A's scan
+            (first(r), ONE_EVALUATION), // v1: path A's range
+            (root_from_r, NONE),        // v2: path A's root, reading the range
+            (first(m), NONE),           // v3: path B's scan
+            (first(r), NONE),           // v4: path B's range
+            (first(a), NONE),           // v5
+            (first(b), NONE),           // v6
+            (first(c), NONE),           // v7
+            (first(root), NONE),        // v8: path B's root
+            (first(c), ONE_EVALUATION), // v9: unused, 2.55e6/s
+        ],
+    );
+    let w = [
+        0.005_802_088,
+        0.001_000_36,
+        0.002_033_333_5,
+        0.005_800_000_034_8,
+        0.001_000_000_006,
+        0.001_000_007,
+        1.666_666_666_666_666_7e-5,
+        1.666_678_333_333_333_4e-5,
+        1.666_666_666_666_666_7e-5,
+        2_553_517.822_748_626_6,
+    ];
+    let costs = costs(&physical, &w, &[]);
+    let solved = solve(&physical, &costs).unwrap();
+    assert_eq!(solved.candidates, ids(&[3, 4, 5, 6, 7, 8]));
+}

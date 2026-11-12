@@ -26,6 +26,7 @@ use asap_types::stages::{
     ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId,
 };
 
+use super::upper_bound::dearer_than_a_feasible_plan;
 use crate::cost::{input_count, SelectionCosts};
 
 /// A query, by index in the workload.
@@ -62,19 +63,33 @@ pub(crate) struct SelectionVariables {
     raw_data_on_disk: BTreeMap<Source, Variable>,
 }
 
-/// $x$, $y$, $z$ and $t$ over `inputs`, added to `problem`.
+/// $x$, $y$, $z$, $t$ and $r$ over `inputs`, added to `problem`: $x_v$
+/// fixed at 0 for a candidate that could not be costed or is `left_out`,
+/// and no $y$ on an edge of one.
 fn selection_variables(
     inputs: &SelectionInputs<'_>,
+    left_out: &[bool],
     problem: &mut ProblemVariables,
 ) -> SelectionVariables {
     let count = inputs.physical.physical_candidates.len();
     let x = (0..count)
-        .map(|v| match inputs.costs.candidate[v].is_ok() {
-            true => problem.add(variable().binary()),
-            false => problem.add(variable().min(0).max(0)),
+        .map(
+            |v| match inputs.costs.candidate[v].is_ok() && !left_out[v] {
+                true => problem.add(variable().binary()),
+                false => problem.add(variable().min(0).max(0)),
+            },
+        )
+        .collect();
+    let mut edges: Vec<PhysicalEdgeId> = inputs
+        .costs
+        .edge
+        .keys()
+        .copied()
+        .filter(|&edge| {
+            let edge = inputs.physical.edge(edge);
+            !left_out[edge.producer_candidate_id.0] && !left_out[edge.consumer_candidate_id.0]
         })
         .collect();
-    let mut edges: Vec<PhysicalEdgeId> = inputs.costs.edge.keys().copied().collect();
     edges.sort_unstable();
     let y = edges
         .into_iter()
@@ -374,15 +389,17 @@ pub(crate) enum SelectionMilpError {
 /// Builds and solves the baseline MILP: minimize
 /// $\sum_v w_v x_v + \sum_{(u,c,i)} c_{u,c,i} y_{u,c,i} + \sum_s r_s$ under
 /// (A)–(F), [`unshared_result_constraints`] and
-/// [`raw_data_disk_constraints`], with HiGHS at gap 0 on one thread, the
-/// coefficients scaled so the largest is 1,000 (HiGHS's tolerances are
-/// absolute).
+/// [`raw_data_disk_constraints`], with HiGHS at gap 0 on one thread. The
+/// candidates dearer than a feasible plan are left out first
+/// ([`dearer_than_a_feasible_plan`]), then the coefficients are scaled so
+/// the largest left is 1,000 (HiGHS's tolerances are absolute).
 pub(crate) fn solve_selection(
     inputs: &SelectionInputs<'_>,
 ) -> Result<SolvedSelection, SelectionMilpError> {
     let started = Instant::now();
+    let left_out = dearer_than_a_feasible_plan(inputs);
     let mut problem = ProblemVariables::new();
-    let variables = selection_variables(inputs, &mut problem);
+    let variables = selection_variables(inputs, &left_out, &mut problem);
     let constraints: Vec<Constraint> = [
         input_satisfaction_constraints(inputs, &variables),
         producer_selection_constraints(inputs, &variables),
@@ -395,18 +412,16 @@ pub(crate) fn solve_selection(
     .into_iter()
     .flatten()
     .collect();
-    let largest = inputs
-        .costs
-        .candidate
-        .iter()
-        .flatten()
-        .chain(inputs.costs.edge.values())
+    // Scaled by the largest coefficient of a candidate the bound keeps.
+    let kept = |v: &usize| !left_out[*v];
+    let largest = (0..left_out.len())
+        .filter(kept)
+        .filter_map(|v| inputs.costs.candidate[v].as_ref().ok())
+        .chain(sorted(&variables.y).map(|(edge, _)| &inputs.costs.edge[&edge]))
         .chain(
-            inputs
-                .costs
-                .raw_data_on_disk
-                .iter()
-                .flatten()
+            (0..left_out.len())
+                .filter(kept)
+                .filter_map(|v| inputs.costs.raw_data_on_disk[v].as_ref())
                 .map(|(_, cost)| cost),
         )
         .fold(0.0_f64, |largest, &cost| largest.max(cost.abs()));
@@ -414,12 +429,10 @@ pub(crate) fn solve_selection(
         true => 1_000.0 / largest,
         false => 1.0,
     };
-    let candidate_terms = inputs
-        .costs
-        .candidate
-        .iter()
-        .zip(&variables.x)
-        .filter_map(|(cost, &x)| cost.as_ref().ok().map(|cost| cost * scale * x));
+    let candidate_terms = (0..left_out.len()).filter(kept).filter_map(|v| {
+        let cost = inputs.costs.candidate[v].as_ref().ok()?;
+        Some(cost * scale * variables.x[v])
+    });
     let edge_terms = sorted(&variables.y).map(|(edge, y)| inputs.costs.edge[&edge] * scale * y);
     let raw_data_terms = variables
         .raw_data_on_disk
