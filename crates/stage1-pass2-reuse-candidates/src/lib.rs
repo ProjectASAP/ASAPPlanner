@@ -14,6 +14,10 @@
 mod dead_candidates;
 /// Step 6: the possible edges and their $\alpha^{\log}$.
 mod edges;
+/// The evaluation grid of each group, per query reaching it.
+mod evaluation_grids;
+/// The groups each query may read only exactly.
+mod exact_only_groups;
 /// Step 3: readout requirements.
 mod readout_requirements;
 /// Steps 1, 2 and 5: the rules that add groups and candidates.
@@ -27,12 +31,14 @@ use std::collections::BTreeSet;
 
 use asap_accuracy::AccuracyEvidence;
 use asap_types::stages::{
-    CandidateError, CandidateForMemoGroupId, EvaluationGrid, LogicalASAPMemoCandidates,
-    LogicalEdge, Memo, MemoGroupError, PrunedLogicalCandidate,
+    CandidateError, CandidateForMemoGroupId, LogicalASAPMemoCandidates, LogicalEdge, Memo,
+    MemoGroupError, PrunedLogicalCandidate,
 };
-use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
+use asap_types::workload::QueryWorkloadEntry;
 use dead_candidates::eliminate_dead_candidates;
 use edges::candidate_edges;
+use evaluation_grids::evaluation_grids;
+use exact_only_groups::exact_only_groups_of_query;
 use readout_requirements::set_readout_requirements;
 use rules::{chains, rollup, topk};
 
@@ -55,7 +61,8 @@ pub enum Pass2RuleError {
 /// Stage 1, Pass 2 (concepts doc, section 3, "Stage 1, Pass 2"), in order:
 /// 1. rollup from the finest common group;
 /// 2. top-k reuse;
-/// 3. reach, caps and readout requirements;
+/// 3. reach, caps and readout requirements, and the groups each query may
+///    read only exactly;
 /// 4. dead-candidate elimination;
 /// 5. chain groups for the surviving state groups, then dead-candidate
 ///    elimination again over the memo with them (a merge whose θ serves no
@@ -72,7 +79,7 @@ pub fn generate_logical_asap_memo_candidates(
     let mut memo = pass1;
     rollup::add_rollup_candidates(&mut memo)?;
     topk::add_topk_candidates(&mut memo)?;
-    let unknown_values = set_readout_requirements(&mut memo)?;
+    let (unknown_values, read_only_exactly) = set_readout_requirements(&mut memo)?;
     let dead = |pruned: &[PrunedLogicalCandidate]| -> BTreeSet<CandidateForMemoGroupId> {
         pruned.iter().map(|pruned| pruned.candidate).collect()
     };
@@ -95,39 +102,15 @@ pub fn generate_logical_asap_memo_candidates(
         })
         .collect();
     let evaluation_grid_of_group = evaluation_grids(&memo, entries);
+    let order = memo
+        .topological_order()
+        .ok_or(Pass2RuleError::CyclicDependencies)?;
+    let exact_only_groups_of_query = exact_only_groups_of_query(&memo, &order, &read_only_exactly);
     Ok(LogicalASAPMemoCandidates {
         memo,
         edges,
         pruned,
         evaluation_grid_of_group,
+        exact_only_groups_of_query,
     })
-}
-
-/// Per group: the grid its result is evaluated on, the gcd of the
-/// evaluation grids of the queries reaching it
-/// ([`query_evaluation_grid_ms`]) at phase 0; `None` when no query reaches
-/// it or one has no known grid.
-fn evaluation_grids(memo: &Memo, entries: &[QueryWorkloadEntry]) -> Vec<Option<EvaluationGrid>> {
-    memo.groups()
-        .iter()
-        .map(|group| {
-            let mut period_ms = 0;
-            for &query in group.reached_by_queries() {
-                period_ms =
-                    greatest_common_divisor(period_ms, query_evaluation_grid_ms(entries, query)?);
-            }
-            (period_ms > 0).then_some(EvaluationGrid {
-                period_ms,
-                phase_ms: 0,
-            })
-        })
-        .collect()
-}
-
-/// The evaluation grid of query `query` (`entries[query]`'s
-/// `QueryRecurrence::evaluation_grid_ms`); `None` when it has no known
-/// grid.
-fn query_evaluation_grid_ms(entries: &[QueryWorkloadEntry], query: usize) -> Option<u64> {
-    let entry = entries.get(query)?;
-    entry.recurrence.evaluation_grid_ms(entry.range_evaluation)
 }

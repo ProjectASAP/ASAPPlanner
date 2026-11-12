@@ -237,6 +237,7 @@ mod tests {
                 edges: vec![],
                 pruned: vec![],
                 evaluation_grid_of_group,
+                exact_only_groups_of_query: vec![],
             },
             physical_candidates: vec![],
             pruned_candidates: vec![],

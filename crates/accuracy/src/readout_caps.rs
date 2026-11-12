@@ -34,11 +34,12 @@ type Caps = Vec<HashMap<AccuracyMetric, BTreeMap<usize, f64>>>;
 
 /// The required-accuracy levels of the sketch readouts
 /// ([`sketch_readout_metric`]) without a requirement yet, per readout
-/// group and the readout's metric. `order` is the memo's topological order
-/// (`Memo::topological_order`).
+/// group and the readout's metric, with the queries reaching it whose
+/// failure probability has no per-value one there. `order` is the memo's
+/// topological order (`Memo::topological_order`).
 /// - A query whose path reads one readout group gives one level: its target
 ///   divided by the path's factor, the readout group's cap, at the target's
-///   failure probability per value.
+///   failure probability per readout value ([`query_levels`]).
 /// - A composed query (several readout groups, such as a ratio) gives every
 ///   level of the grid [`MAX_ERROR_LEVELS`] × [`failure_probability_levels`]
 ///   not looser than the cap and the per-value failure probability (the cap
@@ -48,15 +49,16 @@ type Caps = Vec<HashMap<AccuracyMetric, BTreeMap<usize, f64>>>;
 ///   levels, in query order; one no query with a target reaches in the
 ///   readout's metric gets none.
 ///
-/// `Err(query)` when no query gives a level while `query`, which reaches
-/// the readout, has a whole-result failure probability without a per-value
-/// one ($n_q$ unknown): Pass 2 prunes such a readout
-/// (`RootPruneReason::ValuesPerEvaluationUnknown`). A readout another
-/// query gives a level gets its levels.
+/// A query whose target sets a failure probability that has no per-value
+/// one at the readout (the values it covers or the readout group's values
+/// per evaluation unknown) gives no level and is listed instead: Pass 2
+/// prunes a readout no query gives a level
+/// (`RootPruneReason::ValuesPerEvaluationUnknown`), and lets a listed query
+/// read the group only exactly when another query gives it a level.
 pub fn readout_levels(
     memo: &Memo,
     order: &[MemoGroupId],
-) -> HashMap<(MemoGroupId, AccuracyMetric), Result<Vec<RequiredAccuracy>, usize>> {
+) -> HashMap<(MemoGroupId, AccuracyMetric), (Vec<RequiredAccuracy>, Vec<usize>)> {
     let caps = caps(memo, order);
     let mut readout_metrics: BTreeMap<MemoGroupId, Vec<AccuracyMetric>> = BTreeMap::new();
     for (index, group) in memo.groups().iter().enumerate() {
@@ -81,9 +83,10 @@ pub fn readout_levels(
     let composed = composed_queries(memo, order, &readout_groups);
     let mut levels_of_readouts = HashMap::new();
     for (group, metrics) in readout_metrics {
+        let readout_values = memo.series_count_scanned_below(group);
         for metric in metrics {
             let mut levels: Vec<RequiredAccuracy> = Vec::new();
-            let mut unknown_values_of = None;
+            let mut without_per_value_failure_probability = Vec::new();
             let group_caps = caps[group.0 as usize].get(&metric).into_iter().flatten();
             for (&query, &cap) in group_caps {
                 let Some(target) = &memo.queries()[query].accuracy_target else {
@@ -92,11 +95,12 @@ pub fn readout_levels(
                 let Some(query_levels) = query_levels(
                     target,
                     memo.queries()[query].number_of_values_per_query_evaluation,
+                    readout_values,
                     metric,
                     cap,
                     composed.contains(&query),
                 ) else {
-                    unknown_values_of.get_or_insert(query);
+                    without_per_value_failure_probability.push(query);
                     continue;
                 };
                 for level in query_levels {
@@ -105,13 +109,10 @@ pub fn readout_levels(
                     }
                 }
             }
-            // Only a readout no query gives a level is pruned: one with a
-            // level serves the queries that gave it.
-            let levels = match unknown_values_of {
-                Some(query) if levels.is_empty() => Err(query),
-                _ => Ok(levels),
-            };
-            levels_of_readouts.insert((group, metric), levels);
+            levels_of_readouts.insert(
+                (group, metric),
+                (levels, without_per_value_failure_probability),
+            );
         }
     }
     levels_of_readouts
@@ -119,24 +120,28 @@ pub fn readout_levels(
 
 /// The requirement levels one query gives a readout in `metric` whose cap
 /// for it is `cap`; `None` when its target's failure probability has no
-/// per-value one (a whole-result δ with $n_q$ unknown).
+/// per-value one. A whole-result δ splits over the values one evaluation
+/// returns, $n_q$; a reduction (`max`, `min`, `avg`) fails when any
+/// readout it reads does, so δ also splits over the readout group's values
+/// per evaluation, `readout_values`: the per-value failure probability is
+/// $\delta / \max(n_q, \text{readout values})$ (`max(quantile_over_time(0.9,
+/// m[5m]))` over 1000 series at δ = 0.01: 1e-5), and needs both known when
+/// the target sets a δ.
 fn query_levels(
     target: &AccuracyTarget,
     number_of_values_per_query_evaluation: Option<u64>,
+    readout_values: Option<u64>,
     metric: AccuracyMetric,
     cap: f64,
     composed: bool,
 ) -> Option<Vec<RequiredAccuracy>> {
-    // The target's failure probability per value: a whole-result δ split
-    // over the values one evaluation returns; 1 without a δ.
     let per_value = match target.failure_probability {
         None => 1.0,
         Some(delta) => {
-            delta
-                / target
-                    .accuracy_scope
-                    .max_values_covered(number_of_values_per_query_evaluation)?
-                    .max(1) as f64
+            let values_covered = target
+                .accuracy_scope
+                .max_values_covered(number_of_values_per_query_evaluation)?;
+            delta / values_covered.max(readout_values?).max(1) as f64
         }
     };
     let level = |max_error, failure_probability| RequiredAccuracy {
@@ -177,7 +182,8 @@ fn query_levels(
 /// target's metric (every metric when it names none), then, consumers
 /// before producers, every candidate's caps passed to its inputs through
 /// its error contract, $\min(b_{c,i},\ \text{cap}/\beta_{c,i})$, keeping
-/// the largest per query and metric (the bottleneck over paths). A scalar
+/// the largest per query and metric (the bottleneck over paths); an input
+/// with $\beta_{c,i} = 0$ gets none through that candidate. A scalar
 /// root's operands get none.
 fn caps(memo: &Memo, order: &[MemoGroupId]) -> Caps {
     let mut caps: Caps = vec![HashMap::new(); memo.groups().len()];
@@ -209,12 +215,16 @@ fn caps(memo: &Memo, order: &[MemoGroupId]) -> Caps {
                         let factor = propagation.factor_per_input[input];
                         let validity =
                             propagation.validity_cap_per_input[input].unwrap_or(f64::INFINITY);
-                        let passed = if factor > 0.0 {
-                            validity.min(cap / factor)
-                        } else {
-                            validity
-                        };
-                        raise(&mut caps[child.0 as usize], metric, query, passed);
+                        // An input the output does not depend on (a count's,
+                        // β = 0) gets no cap from it.
+                        if factor > 0.0 {
+                            raise(
+                                &mut caps[child.0 as usize],
+                                metric,
+                                query,
+                                validity.min(cap / factor),
+                            );
+                        }
                     }
                 }
             }

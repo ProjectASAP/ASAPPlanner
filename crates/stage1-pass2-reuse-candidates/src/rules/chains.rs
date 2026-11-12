@@ -5,11 +5,12 @@
 
 use std::collections::BTreeSet;
 
+use crate::evaluation_grids::evaluation_grid_per_query;
 use crate::rules::{
     add_candidate_if_output_matches, add_candidates_per_input_parameters,
     add_group_computing_itself, distinct_parameters,
 };
-use crate::{query_evaluation_grid_ms, Pass2RuleError};
+use crate::Pass2RuleError;
 use asap_types::ir::operator::arguments::{AtModifier, TimeShift};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::stages::{
@@ -29,8 +30,9 @@ use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
 /// state groups has the builds of all of them).
 ///
 /// The widths are the gcd closure of $\gcd(g_q, W, o_1, \ldots)$ over the
-/// queries reaching S that repeat on a known evaluation grid $g_q$
-/// ([`query_evaluation_grid_ms`]), with the offsets $o_j$ on S's
+/// queries reaching S whose evaluation grid at S, $g_q$, is known
+/// ([`evaluation_grid_per_query`]: below a subquery, its resolution), with
+/// the offsets $o_j$ on S's
 /// path; no query with a grid, no chain. A chain whose width does not
 /// divide the evaluation grid of the group reading it (the gcd over all its
 /// readers) gets no edge (`candidate_edges`), so the merge over it is
@@ -47,7 +49,8 @@ pub(crate) fn add_chain_groups(
     // First every chain group with its builds, then the groups reading
     // them, so a chain shared by state groups offers each every θ it has.
     let mut chains_of_states: Vec<(MemoGroupId, ChainPath, Vec<MemoGroupId>)> = Vec::new();
-    for index in 0..memo.groups().len() {
+    let grids = evaluation_grid_per_query(memo, entries);
+    for (index, grids_of_state) in grids.iter().enumerate() {
         let state = MemoGroupId(index as u32);
         let Some(path) = chain_path(memo, state) else {
             continue;
@@ -78,12 +81,11 @@ pub(crate) fn add_chain_groups(
                 .into_iter()
                 .filter(|&width| divisor % width == 0 && at_ms.unsigned_abs() % width == 0)
                 .collect(),
-            None => gcd_closure(memo.groups()[index].reached_by_queries().iter().filter_map(
-                |&query| {
-                    let grid = query_evaluation_grid_ms(entries, query)?;
-                    Some(greatest_common_divisor(grid, divisor))
-                },
-            )),
+            None => gcd_closure(
+                grids_of_state
+                    .values()
+                    .filter_map(|&grid| Some(greatest_common_divisor(grid?, divisor))),
+            ),
         };
         let mut chain_groups = Vec::new();
         for width in widths {

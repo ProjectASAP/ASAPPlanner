@@ -1,5 +1,4 @@
-//! Step 6: the logical edges, $\alpha^{\log}$ and the metric rule, and
-//! the evaluation grids.
+//! Step 6: the logical edges, $\alpha^{\log}$ and the metric rule.
 
 use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::operator::arguments::Reduction;
@@ -10,10 +9,8 @@ use asap_types::stages::{
     CandidateForMemoGroupId, Memo, MemoGroupId, PruneCause, RequiredAccuracy, RootPruneReason,
 };
 use asap_types::summary_type::parameter_list;
-use asap_types::summary_type::{ExactKind, SketchAlgorithm, SketchParams, SketchStatistic};
-use asap_types::workload::{
-    DataWorkload, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand, RepetitionInterval,
-};
+use asap_types::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
+use asap_types::workload::DataWorkload;
 
 use crate::test_fixtures::*;
 
@@ -114,30 +111,6 @@ fn every_candidate_of_an_input_group_is_an_edge_of_matching_parameters() {
             merge.logical_properties.parameters()
         );
     }
-}
-
-/// A group's evaluation grid is the gcd of its reaching queries' grids;
-/// `None` when one has no known grid.
-#[test]
-fn a_groups_evaluation_grid_is_the_gcd_of_its_queries_grids() {
-    let mut memo = Memo::new(&DataWorkload::default());
-    let input = scan(&mut memo, "m", &["job"]);
-    let window = range(&mut memo, input, 300);
-    let (_, a) = exact_state(&mut memo, window, ExactKind::Sum, Reduction::PerEntity);
-    let other = scan(&mut memo, "n", &["job"]);
-    query(&mut memo, a, None);
-    query(&mut memo, a, None);
-    query(&mut memo, other, None);
-    let without_phase = QueryWorkloadEntry {
-        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
-            60_000,
-        ))),
-        ..entry(60_000)
-    };
-    let logical = pass2(memo, &[entry(60_000), entry(120_000), without_phase]);
-    let grid = |group: MemoGroupId| logical.evaluation_grid_of_group[group.0 as usize];
-    assert_eq!(grid(window).map(|g| g.period_ms), Some(60_000));
-    assert_eq!(grid(other), None);
 }
 
 /// A `Filter` whose predicate reads only label

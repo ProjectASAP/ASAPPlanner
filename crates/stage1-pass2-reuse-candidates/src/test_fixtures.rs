@@ -25,13 +25,29 @@ use asap_types::stages::{
 use asap_types::summary_type::parameter_list;
 use asap_types::summary_type::{ExactKind, SketchAlgorithm, SketchParams, SketchStatistic};
 use asap_types::workload::{
-    Predictability, Query, QueryRecurrence, QueryRequirements, QueryWorkloadEntry, RepeatedDemand,
-    RepetitionInterval, TimestampMs,
+    DataWorkload, Predictability, Query, QueryRecurrence, QueryRequirements, QueryWorkloadEntry,
+    RepeatedDemand, RepetitionInterval, SourceFacts, TimestampMs,
 };
 
 use asap_types::test_support::memo_fixtures;
 
 use crate::generate_logical_asap_memo_candidates;
+
+/// A data workload declaring only that `metric` holds `series_count`
+/// series.
+pub fn with_series(metric: &str, series_count: u64) -> DataWorkload {
+    DataWorkload {
+        sources: [(
+            metric.to_string(),
+            SourceFacts {
+                series_count: Some(series_count),
+                ..SourceFacts::default()
+            },
+        )]
+        .into(),
+        ..DataWorkload::default()
+    }
+}
 
 /// Adds `operator` with `parameters` to `group`, as Pass 1 does.
 pub fn try_candidate(

@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::evaluation_grids;
+use crate::evaluation_grids::evaluation_grids;
 use asap_accuracy::{accepted_metrics, producer_satisfies_logical_requirements, AccuracyEvidence};
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::stages::{CandidateForMemoGroupId, Memo, MemoGroupId, RootPruneReason};

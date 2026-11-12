@@ -14,13 +14,14 @@ use super::group::{
 use crate::accuracy::AccuracyTarget;
 use crate::ir::operator::input::InputOrTemporaryBuild;
 use crate::ir::schema::Schema;
-use crate::ir::Operator;
 use crate::ir::QueryRoot;
+use crate::ir::{NonASAPOp, Operator};
 use crate::stages::{
     CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, LogicalRequirements, MemoGroup,
     MemoGroupId,
 };
-use crate::workload::{DataWorkload, SourceFacts};
+use crate::workload::bounds::source_name;
+use crate::workload::{series_facts, DataWorkload, SourceFacts};
 use hash_consing::{
     expression_hash, same_candidate, same_serialized_expression, serialized_expression,
 };
@@ -75,6 +76,32 @@ impl Memo {
     /// The groups, by id.
     pub fn groups(&self) -> &[MemoGroup] {
         &self.groups
+    }
+
+    /// The most series (PromQL) or groups of rows (SQL) the `Scan` groups
+    /// below `group` read: the sum of their sources' declared
+    /// `SourceFacts::series_count`; `None` when one declares none. Every
+    /// value of a per-series or grouped result over those scans comes from
+    /// at least one of them, so it bounds the values one evaluation of
+    /// `group` returns. Example: a readout of `quantile_over_time(0.9,
+    /// m[5m])` over `m` with 1000 series returns at most 1000 values, which
+    /// `max(...)` over it reads at once.
+    pub fn series_count_scanned_below(&self, group: MemoGroupId) -> Option<u64> {
+        let mut seen = HashSet::new();
+        let mut pending = vec![group];
+        let mut total: u64 = 0;
+        while let Some(group) = pending.pop() {
+            if !seen.insert(group) {
+                continue;
+            }
+            let expression = &self.groups[group.0 as usize].expression;
+            if let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = expression {
+                let (facts, _) = series_facts(&self.source_facts, source_name(source))?;
+                total = total.checked_add(facts.series_count?)?;
+            }
+            pending.extend(expression.children().into_iter().copied());
+        }
+        Some(total)
     }
 
     /// The queries, by index in the workload.

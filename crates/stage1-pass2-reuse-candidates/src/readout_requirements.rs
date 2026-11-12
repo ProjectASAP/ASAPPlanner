@@ -3,7 +3,7 @@
 //! accuracy, from the levels `asap_accuracy::readout_levels` gives it, on
 //! the readout and its copies.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Pass2RuleError;
 use asap_accuracy::{readout_levels, sketch_readout_metric};
@@ -19,18 +19,29 @@ use asap_types::stages::{
 /// `Memo::set_candidate_input_requirements`. A readout without a level
 /// keeps no requirement.
 ///
-/// Returns the readouts that no query gives a level while one reaching
-/// them has a whole-result failure probability without a per-value one
-/// ($n_q$ unknown), each with that query: Pass 2 prunes them
-/// (`RootPruneReason::ValuesPerEvaluationUnknown`).
+/// Returns, first, the readouts that no query gives a level while one
+/// reaching them has a failure probability without a per-value one, each
+/// with that query: Pass 2 prunes them
+/// (`RootPruneReason::ValuesPerEvaluationUnknown`); second, per such query,
+/// the readout groups it reaches without a per-value failure probability,
+/// which it may read only exactly (another query's level says nothing of
+/// its own δ).
+#[allow(clippy::type_complexity)]
 pub(crate) fn set_readout_requirements(
     memo: &mut Memo,
-) -> Result<BTreeMap<CandidateForMemoGroupId, usize>, Pass2RuleError> {
+) -> Result<
+    (
+        BTreeMap<CandidateForMemoGroupId, usize>,
+        BTreeMap<usize, BTreeSet<MemoGroupId>>,
+    ),
+    Pass2RuleError,
+> {
     let order = memo
         .topological_order()
         .ok_or(Pass2RuleError::CyclicDependencies)?;
     let levels_of_readouts = readout_levels(memo, &order);
-    let mut without_per_value_failure_probability = BTreeMap::new();
+    let mut without_levels = BTreeMap::new();
+    let mut read_only_exactly: BTreeMap<usize, BTreeSet<MemoGroupId>> = BTreeMap::new();
     for index in 0..memo.groups().len() {
         let group = MemoGroupId(index as u32);
         for (index_in_group, metric) in sketch_readouts(memo, group) {
@@ -38,15 +49,20 @@ pub(crate) fn set_readout_requirements(
                 group,
                 index_in_group,
             };
-            match &levels_of_readouts[&(group, metric)] {
-                Ok(levels) => write_levels(memo, readout, levels)?,
-                Err(query) => {
-                    without_per_value_failure_probability.insert(readout, *query);
+            let (levels, without_per_value_failure_probability) =
+                &levels_of_readouts[&(group, metric)];
+            for &query in without_per_value_failure_probability {
+                read_only_exactly.entry(query).or_default().insert(group);
+            }
+            match without_per_value_failure_probability.first() {
+                Some(&query) if levels.is_empty() => {
+                    without_levels.insert(readout, query);
                 }
+                _ => write_levels(memo, readout, levels)?,
             }
         }
     }
-    Ok(without_per_value_failure_probability)
+    Ok((without_levels, read_only_exactly))
 }
 
 /// Writes `levels` on `readout`: the first on it, each further one on a
