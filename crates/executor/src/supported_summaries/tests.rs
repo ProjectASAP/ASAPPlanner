@@ -1,0 +1,187 @@
+use super::*;
+use crate::capability::validate_sketch_evaluation;
+use crate::factory::create_planner_accumulator;
+
+use planner_types::ir::operator::arguments::{Reduction, Source};
+use planner_types::ir::scalar::ColumnRef;
+use planner_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use planner_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
+use planner_types::summary_type::{
+    SketchAlgorithm, SketchStatistic, StatisticKind, SummaryInputExpr, SummaryTypeCapability,
+    SummaryUpdate,
+};
+
+const ALGORITHMS: [SketchAlgorithm; 9] = [
+    SketchAlgorithm::UnivMon,
+    SketchAlgorithm::Kll,
+    SketchAlgorithm::Cms,
+    SketchAlgorithm::Hll,
+    SketchAlgorithm::DDSketch,
+    SketchAlgorithm::CmsWithHeap,
+    SketchAlgorithm::Kmv,
+    SketchAlgorithm::CountSketch,
+    SketchAlgorithm::CountSketchWithHeap,
+];
+
+const READOUTS: [StatisticKind; 7] = [
+    StatisticKind::Total,
+    StatisticKind::ItemFrequency,
+    StatisticKind::Quantile,
+    StatisticKind::Distinct,
+    StatisticKind::FrequencyL2,
+    StatisticKind::FrequencyEntropy,
+    StatisticKind::TopK,
+];
+
+fn per_instance(algorithm: &SketchAlgorithm) -> FieldDataType {
+    FieldDataType::Sketch(*algorithm)
+}
+
+/// A statistic of kind `readout`.
+fn statistic(readout: StatisticKind) -> SketchStatistic {
+    let key = ColumnRef::Named("item".into());
+    match readout {
+        // Pass 1 reads a total keyed by the sample value.
+        StatisticKind::Total => SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        },
+        StatisticKind::ItemFrequency => SketchStatistic::PointCount {
+            key,
+            value: Some("a".into()),
+        },
+        StatisticKind::Quantile => SketchStatistic::Quantile { q: 0.99 },
+        StatisticKind::Distinct => SketchStatistic::Cardinality,
+        StatisticKind::FrequencyL2 => SketchStatistic::FrequencyL2,
+        StatisticKind::FrequencyEntropy => SketchStatistic::FrequencyEntropy,
+        StatisticKind::TopK => SketchStatistic::TopK { k: 5 },
+        other => unreachable!("{other:?} is not probed"),
+    }
+}
+
+/// Whether the factory builds the per-instance `family` from rows, with
+/// a value column or keyed items.
+fn factory_builds(family: &FieldDataType) -> bool {
+    let FieldDataType::Sketch(algorithm) = family else {
+        return false;
+    };
+    let theta = planner_types::summary_type::parameter_list(*algorithm).first();
+    let value = SummaryUpdate::column(ColumnRef::SampleValue);
+    let keyed = SummaryUpdate {
+        item: Some(SummaryInputExpr::Column(ColumnRef::Named("item".into()))),
+        ..value.clone()
+    };
+    create_planner_accumulator(family, theta, &value).is_ok()
+        || create_planner_accumulator(family, theta, &keyed).is_ok()
+}
+
+/// Whether the executor answers `readout` from `family`'s state: top-k
+/// through the keyed heap evaluation, every other readout through the
+/// sketch evaluation, whose kernel must then read it from a built state.
+fn evaluation_answers(family: &FieldDataType, readout: StatisticKind) -> bool {
+    match (readout, family) {
+        (StatisticKind::TopK, FieldDataType::Sketch(kind)) => matches!(
+            kind,
+            planner_types::summary_type::SketchAlgorithm::CmsWithHeap
+                | planner_types::summary_type::SketchAlgorithm::CountSketchWithHeap
+        ),
+        _ => {
+            let accepted = validate_sketch_evaluation(family, &statistic(readout)).is_ok();
+            if accepted {
+                assert!(kernel_answers(family, readout), "{family:?} {readout:?}");
+            }
+            accepted
+        }
+    }
+}
+
+/// Whether the kernel of a per-instance `family` state built from one
+/// update reads `readout`.
+fn kernel_answers(family: &FieldDataType, readout: StatisticKind) -> bool {
+    let FieldDataType::Sketch(algorithm) = family else {
+        return false;
+    };
+    let theta = planner_types::summary_type::parameter_list(*algorithm).first();
+    let value = SummaryUpdate::column(ColumnRef::SampleValue);
+    let keyed = SummaryUpdate {
+        item: Some(SummaryInputExpr::Column(ColumnRef::Named("item".into()))),
+        ..value.clone()
+    };
+    let Ok(mut updater) = create_planner_accumulator(family, theta, &value)
+        .or_else(|_| create_planner_accumulator(family, theta, &keyed))
+    else {
+        return false;
+    };
+    let updated = if updater.is_keyed() {
+        updater.update_keyed(&["a".to_string()], 1.0, 0)
+    } else {
+        updater.update_single(1.0, 0)
+    };
+    updated.is_ok()
+        && updater
+            .snapshot_accumulator()
+            .estimate(&statistic(readout))
+            .is_ok()
+}
+
+/// Whether the IR builds a structurally valid `SummaryEstimate` of
+/// `readout` over a `family` state.
+fn ir_builds_estimate(family: &FieldDataType, readout: StatisticKind) -> bool {
+    let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::Table {
+            table_ref: "t".into(),
+        },
+        predicates: vec![],
+        schema: Schema::new(vec![
+            Field::plain("item", DataType::Utf8, false),
+            Field::plain("value", DataType::Float64, false),
+        ]),
+    }))
+    .unwrap();
+    let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+        child: scan,
+        summary_type: family.clone(),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::by(vec![]),
+        filter: None,
+    }))
+    .unwrap();
+    OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryEstimate {
+        summary_input: state,
+        query: statistic(readout),
+    }))
+    .is_ok_and(|estimate| estimate.validate_structure().is_ok())
+}
+
+/// The list holds exactly the (family, readout) pairs the factory builds
+/// per instance and an evaluation answers from that state, and the
+/// IR's `SummaryEstimate` validation accepts exactly what the
+/// family-capability table answers. Every declared readout is in the
+/// family's table row.
+#[test]
+fn supported_summary_families_match_the_factory_and_evaluations() {
+    let listed = supported_summary_families();
+    for algorithm in &ALGORITHMS {
+        // Per instance: Stage 1 builds every family per instance; the
+        // Hydra grid is not produced outside tests yet.
+        let family = per_instance(algorithm);
+        for readout in READOUTS {
+            let executed = factory_builds(&family) && evaluation_answers(&family, readout);
+            let declared = listed
+                .iter()
+                .any(|s| &s.summary_type == algorithm && s.readouts.contains(&readout));
+            assert_eq!(declared, executed, "{algorithm:?} {readout:?}");
+            let answered = SummaryTypeCapability::of(&family).answers(&statistic(readout));
+            assert_eq!(
+                ir_builds_estimate(&family, readout),
+                answered,
+                "IR: {algorithm:?} {readout:?}"
+            );
+            assert!(
+                !declared || answered,
+                "declared but not in the table: {algorithm:?} {readout:?}"
+            );
+        }
+    }
+    assert!(listed.iter().all(|s| !s.readouts.is_empty()));
+}
