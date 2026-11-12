@@ -72,3 +72,6 @@ pub(super) fn same_candidate(left: &CandidateForMemoGroup, right: &CandidateForM
         )
         && left.input_requirements == right.input_requirements
 }
+
+#[cfg(test)]
+mod tests;

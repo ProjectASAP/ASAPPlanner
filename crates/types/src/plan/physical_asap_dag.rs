@@ -119,7 +119,7 @@ pub struct ViewCoverage {
     /// coverage's `AggregateDefinition` with every input group expanded
     /// recursively to its expression, down to the `Scan`s, holding no
     /// memo group or plan node ids, canonically serialized and hashed
-    /// (`stages::view_coverage`).
+    /// (`plan::view_coverage`).
     /// Equal across plans and processes that compute the same thing,
     /// whatever the selection, and different when they do not (a rollup to
     /// a coarser grouping computes something else and has its own). Inside

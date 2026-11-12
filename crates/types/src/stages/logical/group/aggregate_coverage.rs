@@ -26,7 +26,7 @@ use std::ops::Bound;
 use thiserror::Error;
 
 use super::column_properties::{project_lineage, ColumnLineage};
-use super::group::MemoGroupAsInput;
+use super::MemoGroupAsInput;
 use crate::ir::operator::arguments::{AtModifier, Reduction, SourceColumn};
 use crate::ir::operator::asap::{selected_from, summary_agg_layout, ASAPOp};
 use crate::ir::operator::input::{InputOrTemporaryBuild, OperatorInput};

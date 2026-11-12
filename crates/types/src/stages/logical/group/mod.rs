@@ -3,8 +3,15 @@
 
 use std::collections::BTreeSet;
 
-use super::aggregate_coverage::{aggregate_coverage, AggregateCoverage, CoverageError};
-use super::column_properties::{column_lineage_and_signs, ColumnLineage, ValueSign};
+mod aggregate_coverage;
+mod column_properties;
+
+pub use aggregate_coverage::{AggregateCoverage, AggregateDefinition, CoverageError};
+pub use column_properties::{ColumnLineage, ValueSign};
+
+use aggregate_coverage::aggregate_coverage;
+use column_properties::column_lineage_and_signs;
+
 use crate::ir::operator::arguments::{AtModifier, Source, TimeShift};
 use crate::ir::operator::input::OperatorInput;
 use crate::ir::scalar::column_resolution::ResolveError;

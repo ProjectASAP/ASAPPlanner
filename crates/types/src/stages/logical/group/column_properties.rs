@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use super::group::{MemoGroupAsInput, MemoGroupId};
+use super::{MemoGroupAsInput, MemoGroupId};
 use crate::ir::operator::arguments::{
     BinaryOpKind, GroupSide, JoinKind, PromQLVectorSetOpKind, Reduction, Source, SourceColumn,
 };

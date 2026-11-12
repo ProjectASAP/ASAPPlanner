@@ -1,6 +1,6 @@
 //! A memo group's view coverage ([`view_coverage`]): the plan's content id
 //! for the group's aggregate coverage, which names no group. The memo
-//! derives aggregate coverage ([`super::aggregate_coverage`]) over memo
+//! derives aggregate coverage ([`AggregateCoverage`](crate::stages::AggregateCoverage)) over memo
 //! groups and stores it per group (`GroupProperties::aggregate_coverage`);
 //! this file expands the stored coverage's input groups and hashes the
 //! result.
@@ -43,7 +43,7 @@ pub fn view_coverage(memo: &Memo, group: MemoGroupId) -> Option<ViewCoverage> {
 }
 
 /// An aggregate definition
-/// ([`AggregateDefinition`](super::AggregateDefinition)) with its input
+/// ([`AggregateDefinition`](crate::stages::AggregateDefinition)) with its input
 /// groups expanded ([`expanded`]): the fields in the same order, so it
 /// serializes as the definition would with each group replaced.
 #[derive(Serialize)]

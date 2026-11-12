@@ -13,7 +13,7 @@ mod pruning;
 
 pub use logical::{
     listed_build_parameters, ranked_column_of_group, raw_data_samples_of_metric_of_group,
-    view_coverage, AggregateCoverage, AggregateDefinition, CandidateError, CandidateExpression,
+    AggregateCoverage, AggregateDefinition, CandidateError, CandidateExpression,
     CandidateForMemoGroup, CandidateForMemoGroupId, ColumnLineage, CoverageError, GroupProperties,
     LogicalASAPMemoCandidates, LogicalEdge, LogicalProperties, LogicalPropertiesError,
     LogicalRequirements, Memo, MemoGroup, MemoGroupError, MemoGroupId, MemoQuery,

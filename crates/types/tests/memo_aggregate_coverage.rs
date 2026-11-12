@@ -18,9 +18,10 @@ use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarVal
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr};
+use asap_types::plan::view_coverage;
 use asap_types::stages::{
-    view_coverage, AggregateCoverage, CandidateForMemoGroup, ColumnLineage, CoverageError, Memo,
-    MemoGroupError, MemoGroupId, OriginOfCandidateForMemoGroup,
+    AggregateCoverage, CandidateForMemoGroup, ColumnLineage, CoverageError, Memo, MemoGroupError,
+    MemoGroupId, OriginOfCandidateForMemoGroup,
 };
 use asap_types::summary_type::{
     ExactKind, MergeInputRule, SketchAlgorithm, SketchParams, SummaryUpdate,

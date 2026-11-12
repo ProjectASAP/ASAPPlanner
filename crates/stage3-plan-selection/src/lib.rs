@@ -30,7 +30,7 @@ pub use report::{
 /// `PhysicalASAPDAG` node per selected execution, its inputs from the
 /// selected edges, each node's `selected_physical_candidate` set and each
 /// materialized view node's `view_coverage` from its memo group
-/// (`asap_types::stages::view_coverage`).
+/// (`asap_types::plan::view_coverage`).
 /// `entries[q]` is query `q`'s workload entry; `data` the data workload
 /// with its bounds.
 ///
@@ -46,5 +46,5 @@ pub fn select_plan(
         .validate()
         .map_err(ErrorSelectingPlan::InvalidSettings)?;
     let _ = (physical, entries, data);
-    todo!("#1207 PR 6: the baseline MILP over x, y, z, t, and the PhysicalASAPDAG of its solution, each materialized view node's view_coverage = asap_types::stages::view_coverage(memo, its group)")
+    todo!("#1207 PR 6: the baseline MILP over x, y, z, t, and the PhysicalASAPDAG of its solution, each materialized view node's view_coverage = asap_types::plan::view_coverage(memo, its group)")
 }

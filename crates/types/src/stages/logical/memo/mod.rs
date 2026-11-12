@@ -418,16 +418,7 @@ impl Memo {
         }
         (order.len() == count).then_some(order)
     }
-}
 
-/// Lists `parent` among `group`'s parents, once.
-fn add_parent(group: &mut MemoGroup, parent: MemoGroupId) {
-    if !group.parents.contains(&parent) {
-        group.parents.push(parent);
-    }
-}
-
-impl Memo {
     /// The groups some query's root reads, ascending: the groups of the
     /// queries' roots that are a query's result or a scalar query's operand.
     pub fn root_groups(&self) -> BTreeSet<MemoGroupId> {
@@ -443,6 +434,13 @@ impl Memo {
         (0..self.queries.len())
             .filter(|&query| self.queries[query].root.operator_refs().contains(&&group))
             .collect()
+    }
+}
+
+/// Lists `parent` among `group`'s parents, once.
+fn add_parent(group: &mut MemoGroup, parent: MemoGroupId) {
+    if !group.parents.contains(&parent) {
+        group.parents.push(parent);
     }
 }
 
