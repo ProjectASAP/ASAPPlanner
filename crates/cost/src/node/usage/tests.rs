@@ -29,15 +29,7 @@ fn produced<'a>(
     node: &'a PhysicalASAPDAGNode,
     usage: &NodeResourceUsageAndCost<'a>,
 ) -> ProducerOutput<'a> {
-    ProducerOutput {
-        payload: &node.payload,
-        output_schema: &node.output_schema,
-        output: usage.output,
-        sources: usage.sources.clone(),
-        family: usage.family,
-        unchanged_columns: usage.unchanged_columns.clone(),
-        tumbling_windows: usage.tumbling_windows,
-    }
+    usage.producer_output(&node.payload, &node.output_schema)
 }
 
 /// A merge of the five 60 s windows a 5m `TimeRange` selects from a
@@ -72,16 +64,9 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         kind: TimeRangeKind::Range,
         child: 0,
     }));
-    let windows_usage = node_resource_usage_and_cost(
-        &windows,
-        &[chain_output],
-        (1, 1.0),
-        None,
-        &data,
-        &settings,
-        1.0,
-    )
-    .unwrap();
+    let windows_usage =
+        node_resource_usage_and_cost(&windows, &[chain_output], (1, 1.0), None, &data, &settings)
+            .unwrap();
     assert_eq!(windows_usage.output.rows, 5_000);
     assert_eq!(windows_usage.tumbling_windows, 5);
     let merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
@@ -95,7 +80,6 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         None,
         &data,
         &settings,
-        1.0,
     )
     .unwrap();
     assert_eq!(merge_usage.output.rows, 1_000);
@@ -145,8 +129,7 @@ fn query_time_memory_is_held_only_while_the_node_computes() {
         }))
     };
     let usage =
-        node_resource_usage_and_cost(&merge, &[states], (1, 0.1), None, &data, &settings, 1.0)
-            .unwrap();
+        node_resource_usage_and_cost(&merge, &[states], (1, 0.1), None, &data, &settings).unwrap();
     let held: u64 = usage
         .cost
         .detail
@@ -208,7 +191,7 @@ fn a_query_time_scan_reads_what_its_consumers_read_and_keeps_its_retention() {
     );
     assert_eq!(read_ms, Some(1_000));
     let usage =
-        node_resource_usage_and_cost(&scan, &[], (1, 1.0), read_ms, &data, &settings, 1.0).unwrap();
+        node_resource_usage_and_cost(&scan, &[], (1, 1.0), read_ms, &data, &settings).unwrap();
     assert_eq!(usage.output.rows, 1_000);
     let (_, kept_bytes) = usage.raw_scan.expect("a query-time scan keeps raw data");
     assert_eq!(kept_bytes, usage.output.bytes * 3_601);

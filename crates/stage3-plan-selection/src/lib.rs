@@ -74,7 +74,6 @@ pub fn select_plan(
             entries: entries.len(),
         });
     }
-    let formula_scale = cost_inputs.frozen_calibration_factor.unwrap_or(1.0);
     let selectable: Vec<PhysicalEdgeId> = physical
         .edges()
         .filter(|(_, edge)| {
@@ -95,7 +94,6 @@ pub fn select_plan(
         entries,
         data,
         cost_inputs,
-        formula_scale,
         request_overhead_cost_per_second,
     );
     let roots: Vec<QueryRoot<MemoGroupId>> =

@@ -1,7 +1,7 @@
 //! One node of a physical plan DAG: its resource usage and cost
 //! ([`node_resource_usage_and_cost`], [`NodeCost`]).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::node::analytical::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
@@ -20,9 +20,9 @@ use crate::{
 use asap_types::ir::operator::{GroupKeys, Reduction, Source};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, Schema};
-use asap_types::ir::{ASAPOp, NonASAPOp, TimeRangeKind};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::plan::physical_asap_dag::{
-    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
+    PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
 use asap_types::stages::{Lifetime, StorageMedium};
 use asap_types::summary_type::{SketchParams, SketchStatistic};
@@ -151,17 +151,77 @@ pub struct NodeResourceUsageAndCost<'a> {
     pub cost: NodeCost,
 }
 
+impl<'a> NodeResourceUsageAndCost<'a> {
+    /// What a consumer reads of the node with `payload` and
+    /// `output_schema` that uses this.
+    pub fn producer_output(
+        &self,
+        payload: &'a Payload,
+        output_schema: &'a Schema,
+    ) -> ProducerOutput<'a> {
+        ProducerOutput {
+            payload,
+            output_schema,
+            output: self.output,
+            sources: self.sources.clone(),
+            family: self.family,
+            unchanged_columns: self.unchanged_columns.clone(),
+            tumbling_windows: self.tumbling_windows,
+        }
+    }
+}
+
+/// The window an ingestion-time grouping `node` maintains, in ms: a
+/// tumbling-window chain's tumbling window, a `TimeRange`'s range, or the
+/// first `TimeRange` below it through filters, projections and time shifts
+/// (`input_of` gives a node's first input, `operator_of` its operator).
+/// `None` when there is none. Over plan nodes ([`plan_cost`]) or memo
+/// groups (Stage 3, before any plan exists).
+///
+/// Example: `Aggregate(Sum) <- Filter <- TimeRange(1m) <- Scan`: 60,000.
+///
+/// [`plan_cost`]: crate::plan_cost
+pub fn maintained_window_ms<'o, N: Copy + Ord, C: 'o>(
+    node: N,
+    operator_of: impl Fn(N) -> &'o Operator<C>,
+    input_of: impl Fn(N) -> Option<N>,
+) -> Option<u64> {
+    let range_ms = |range: &std::time::Duration| u64::try_from(range.as_millis()).ok();
+    match operator_of(node) {
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms,
+            ..
+        }) => return Some(*tumbling_window_width_ms),
+        Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => return range_ms(range),
+        _ => {}
+    }
+    let mut seen = BTreeSet::new();
+    let mut below = input_of(node)?;
+    while seen.insert(below) {
+        match operator_of(below) {
+            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => return range_ms(range),
+            Operator::NonASAP(
+                NonASAPOp::Filter { .. } | NonASAPOp::Project { .. } | NonASAPOp::TimeShift { .. },
+            ) => below = input_of(below)?,
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// Measure and price one node of a physical DAG (one step of
-/// [`plan_cost`]): `producers` are its producers in edge order,
-/// `rate` its `(multiplier, per_second)` ([`computations`]), and
-/// `window_ms` the time window one execution covers: the window an
-/// ingestion-time node maintains, or a query-time `Scan`'s read, the most
-/// offset + range its consumers read ([`read_back_ms`] without a span;
-/// `None`: it reads what it retains)
-/// (`maintained_window_ms`). A materialized node keeps what its
+/// [`plan_cost`]; Stage 3 calls it per candidate): `producers` are its
+/// producers in edge order, `rate` its `(multiplier, per_second)`
+/// ([`computations`], [`executions_per_second`]), and `window_ms` the time
+/// window one execution covers: the window an ingestion-time node
+/// maintains ([`maintained_window_ms`]), or a query-time `Scan`'s read, the
+/// most offset + range its consumers read ([`read_back_ms`] without a span;
+/// `None`: it reads what it retains). A materialized node keeps what its
 /// `retention_ms` ($h_v$) covers: a tumbling-window chain its windows in
-/// it, a query-time `Scan` its raw rows in it.
-#[allow(clippy::too_many_arguments)]
+/// it, a query-time `Scan` its raw rows in it. The formulas' CPU is scaled
+/// by `settings.frozen_calibration_factor` (1 when unset).
+///
+/// [`executions_per_second`]: crate::plan::execution_demand::executions_per_second
 pub fn node_resource_usage_and_cost<'a>(
     node: &'a asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode,
     producers: &[ProducerOutput<'a>],
@@ -169,8 +229,9 @@ pub fn node_resource_usage_and_cost<'a>(
     window_ms: Option<u64>,
     data: &DataWorkload,
     settings: &'a CostInputs,
-    formula_scale: f64,
 ) -> Result<NodeResourceUsageAndCost<'a>, AnalyticalCostError> {
+    // The formulas' CPU scaled by the deployment's calibration, 1 unset.
+    let formula_scale = settings.frozen_calibration_factor.unwrap_or(1.0);
     let table = &settings.measured_operation_costs;
     let speed = settings.resource_speed;
     let usage_prices = match &settings.cost_model {
@@ -202,6 +263,16 @@ pub fn node_resource_usage_and_cost<'a>(
         _ => 1,
     };
     let inputs: Vec<EdgeStatistics> = producers.iter().map(|p| p.output).collect();
+    // The tumbling windows its rows span: those a `TimeRange` selects from
+    // a chain, 1 otherwise.
+    let tumbling_windows = match &node.payload {
+        Payload::NonASAP(NonASAPOp::TimeRange { range, .. })
+            if chain_width_ms(producers).is_some() =>
+        {
+            selected_tumbling_windows(range, producers)?
+        }
+        _ => 1,
+    };
     let sources: BTreeSet<&str> = match &node.payload {
         Payload::NonASAP(NonASAPOp::Scan { source, .. }) => [source_name(source)].into(),
         _ => producers
@@ -332,35 +403,25 @@ pub fn node_resource_usage_and_cost<'a>(
                 // without a window).
                 let source = source_name(source);
                 let rows_held = data.sources.get(source).and_then(|facts| facts.rows_held);
-                let (window_width_ms, retained_lookback_ms): (Option<u64>, Option<u64>) =
-                    match ingestion {
-                        true => (None, None),
-                        // One execution reads the most its consumers read
-                        // (`window_ms`), else what the scan retains (its
-                        // `retention_ms`, $h_v$); `None` reads every row
-                        // held. It keeps `retention_ms`.
-                        false => (window_ms.or(node.retention_ms), node.retention_ms),
-                    };
+                // At ingestion, one second of rows; at query time, one
+                // execution reads the most its consumers read (`window_ms`),
+                // else what the scan retains (its `retention_ms`, $h_v$);
+                // `None` reads every row held.
                 let lookback = match ingestion {
                     true => Some(1_000),
-                    false => window_width_ms,
+                    false => window_ms.or(node.retention_ms),
                 };
                 let by_rate = |lookback: Option<u64>| {
                     rows_per_ms.zip(lookback).map(|(rows_per_ms, lookback)| {
                         (rows_per_ms * lookback as f64).round() as u64
                     })
                 };
-                // The raw rows retained for a query-time scan: back to the
-                // oldest row it reads, `end_offset + width` (an offset
+                // The raw rows a query-time scan, or an ingestion-time scan
+                // materialized across evaluations, keeps: back to the
+                // oldest row read, its `retention_ms` ($h_v$; an offset
                 // window keeps more than it reads), at most those held.
-                // So are those an ingestion-time scan materialized across
-                // evaluations keeps: back `retention_ms` ($h_v$).
-                let retained_lookback_ms = match ingestion {
-                    true => node.retention_ms,
-                    false => retained_lookback_ms,
-                };
                 if !ingestion || matches!(node.lifetime, Lifetime::AcrossEvaluations(_)) {
-                    let retained_rows = match (by_rate(retained_lookback_ms), rows_held) {
+                    let retained_rows = match (by_rate(node.retention_ms), rows_held) {
                         (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
                         (by_rate, rows_held) => by_rate.or(rows_held),
                     };
@@ -511,7 +572,7 @@ pub fn node_resource_usage_and_cost<'a>(
             NonASAPOp::TimeRange { range, .. } if chain_width_ms(producers).is_some() => {
                 // Over a chain, the windows inside the range: one
                 // window's states per window.
-                let windows = selected_tumbling_windows(range, producers)?;
+                let windows = tumbling_windows;
                 let out = EdgeStatistics {
                     rows: input
                         .rows
@@ -893,14 +954,6 @@ pub fn node_resource_usage_and_cost<'a>(
     if cost.is_some_and(|cost| !cost.is_finite()) {
         return Err(AnalyticalCostError::Overflow);
     }
-    let tumbling_windows = match &node.payload {
-        Payload::NonASAP(NonASAPOp::TimeRange { range, .. })
-            if chain_width_ms(producers).is_some() =>
-        {
-            selected_tumbling_windows(range, producers)?
-        }
-        _ => 1,
-    };
     Ok(NodeResourceUsageAndCost {
         output: out,
         sources,
@@ -973,15 +1026,6 @@ fn merged_states(producers: &[ProducerOutput<'_>]) -> Result<u64, AnalyticalCost
             .ok_or(AnalyticalCostError::Overflow)
     })
 }
-
-/// The nodes of `dag` by id.
-pub(crate) fn node_map(dag: &PhysicalASAPDAG) -> NodeMap<'_> {
-    dag.nodes.iter().map(|n| (n.id, n)).collect()
-}
-
-/// The nodes of a physical DAG by id.
-pub(crate) type NodeMap<'a> =
-    HashMap<PhysicalASAPNodeId, &'a asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode>;
 
 /// A summary type's name in reports: a sketch by its algorithm, e.g.
 /// `HydraCms`; an exact accumulator by its kind.

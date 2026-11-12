@@ -502,6 +502,18 @@ pub(crate) fn is_raw_data_scan(node: &PhysicalASAPDAGNode) -> bool {
             || matches!(node.lifetime, Lifetime::AcrossEvaluations(_)))
 }
 
+impl PhysicalASAPDAGNode {
+    /// Whether it keeps time-indexed rows for its readers to read back, so
+    /// carries `retention_ms`: materialized across evaluations (a view, or
+    /// raw data kept at ingestion), or a raw-data `Scan` at query time.
+    ///
+    /// Example: a query-time `Scan` of `m` read by `TimeRange(5m)` keeps 5
+    /// minutes of `m`; a `OneEvaluation` merge keeps nothing.
+    pub fn retains_rows(&self) -> bool {
+        matches!(self.lifetime, Lifetime::AcrossEvaluations(_)) || is_raw_data_scan(self)
+    }
+}
+
 /// The nodes of a DAG by id, each node's inputs and consumers in edge
 /// order, and two facts every raw-data window check reads, computed in one
 /// pass each over the DAG (O(nodes + edges)); it walks down from each

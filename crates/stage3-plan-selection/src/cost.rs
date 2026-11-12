@@ -23,11 +23,11 @@
 //! query-time `Scan` retain the most their selectable consumers read back
 //! ([`retention_need_ms`]). Execution contexts make both per context.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use asap_cost::plan::execution_demand::evaluation_rate;
+use asap_cost::plan::execution_demand::executions_per_second;
 use asap_cost::{
-    node_resource_usage_and_cost, raw_data_disk_cost_per_second, CostInputs,
+    maintained_window_ms, node_resource_usage_and_cost, raw_data_disk_cost_per_second, CostInputs,
     NodeResourceUsageAndCost, ProducerOutput,
 };
 use asap_types::ir::operator::Source;
@@ -114,26 +114,6 @@ pub(crate) fn input_count(physical: &PhysicalASAPMemoCandidates, v: PhysicalCand
         .len()
 }
 
-/// Whether candidate `v` keeps time-indexed rows for its consumers to read
-/// back: materialized across evaluations, or a `Scan` at query time (raw
-/// data). Its node carries `retention_ms`.
-pub(crate) fn retains_rows(physical: &PhysicalASAPMemoCandidates, v: PhysicalCandidateId) -> bool {
-    let candidate = &physical.physical_candidates[v.0];
-    let scan = matches!(
-        physical
-            .logical_candidates
-            .memo
-            .candidate(candidate.logical_candidate_id)
-            .expression
-            .operator,
-        Operator::NonASAP(NonASAPOp::Scan { .. })
-    );
-    matches!(
-        candidate.physical_properties.lifetime(),
-        Lifetime::AcrossEvaluations(_)
-    ) || (scan && candidate.physical_properties.timing() == ExecutionTiming::QueryTime)
-}
-
 /// How far back from the evaluation time `producer`'s rows must be kept
 /// for its readers (`readers_of`, the candidates that may read it):
 /// [`asap_cost::read_back_ms`] with, at each reader, the longest
@@ -212,7 +192,6 @@ pub(crate) fn selection_costs(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     cost_inputs: &CostInputs,
-    formula_scale: f64,
     request_overhead_cost_per_second: f64,
 ) -> SelectionCosts {
     let memo = &physical.logical_candidates.memo;
@@ -234,7 +213,7 @@ pub(crate) fn selection_costs(
         .map(|v| {
             let inputs: Vec<PhysicalASAPNodeId> = (0..input_count(physical, v)).collect();
             let mut node = candidate_node(physical, v, v.0, &inputs);
-            if retains_rows(physical, v) {
+            if node.retains_rows() {
                 node.retention_ms = retention_need_ms(physical, entries, v, readers_of);
             }
             node
@@ -242,18 +221,14 @@ pub(crate) fn selection_costs(
         .collect();
     // Each query-time `Scan`'s read per execution: the most any selectable
     // consumer reads (no range-evaluation span), charged once.
-    let scan_read: Vec<Option<u64>> = (0..count)
-        .map(PhysicalCandidateId)
-        .map(|v| {
-            let candidate = &physical.physical_candidates[v.0];
-            let scan = matches!(
-                memo.candidate(candidate.logical_candidate_id)
-                    .expression
-                    .operator,
-                Operator::NonASAP(NonASAPOp::Scan { .. })
-            );
-            (scan && candidate.physical_properties.timing() == ExecutionTiming::QueryTime)
-                .then(|| scan_read_ms(physical, v, readers_of))
+    let scan_read_ms_of: Vec<Option<u64>> = nodes
+        .iter()
+        .enumerate()
+        .map(|(v, node)| {
+            let query_time_scan = node.output_state.timing == ExecutionTiming::QueryTime
+                && matches!(node.payload, Operator::NonASAP(NonASAPOp::Scan { .. }));
+            query_time_scan
+                .then(|| scan_read_ms(physical, PhysicalCandidateId(v), readers_of))
                 .flatten()
         })
         .collect();
@@ -274,23 +249,25 @@ pub(crate) fn selection_costs(
         .unwrap_or_else(|| (0..memo.groups().len() as u32).map(MemoGroupId).collect());
     let mut usage: Vec<Option<Result<NodeResourceUsageAndCost<'_>, String>>> =
         (0..count).map(|_| None).collect();
+    // Each candidate's logical inputs, as costed for $w_v$; each edge into
+    // it replaces one.
+    let mut inputs_of: Vec<Option<Vec<ProducerOutput<'_>>>> = (0..count).map(|_| None).collect();
     for group in order {
         for &v in &candidates_of_group[group.0 as usize] {
             let inputs = logical_inputs(physical, &group_payloads, &candidates_of_group, &usage, v);
-            usage[v.0] = Some(match inputs {
+            usage[v.0] = Some(match &inputs {
                 Some(inputs) => cost_node(
                     physical,
-                    v,
                     &nodes[v.0],
-                    &inputs,
+                    inputs,
                     entries,
                     data,
                     cost_inputs,
-                    formula_scale,
-                    scan_read[v.0],
+                    scan_read_ms_of[v.0],
                 ),
                 None => Err("an input group has no costable candidate".to_string()),
             });
+            inputs_of[v.0] = inputs;
         }
     }
     let candidate: Vec<Result<f64, String>> = usage
@@ -316,22 +293,19 @@ pub(crate) fn selection_costs(
         let (Some(Ok(produced)), Ok(own)) = (&usage[u.0], &candidate[c.0]) else {
             continue;
         };
-        let Some(mut inputs) =
-            logical_inputs(physical, &group_payloads, &candidates_of_group, &usage, c)
-        else {
+        let Some(mut inputs) = inputs_of[c.0].clone() else {
             continue;
         };
-        inputs[e.input_index_of_consumer] = producer_output(&nodes[u.0], produced);
+        inputs[e.input_index_of_consumer] =
+            produced.producer_output(&nodes[u.0].payload, &nodes[u.0].output_schema);
         let with_u = cost_node(
             physical,
-            c,
             &nodes[c.0],
             &inputs,
             entries,
             data,
             cost_inputs,
-            formula_scale,
-            scan_read[c.0],
+            scan_read_ms_of[c.0],
         )
         .and_then(|usage| cost_per_second(&usage));
         if let Ok(with_u) = with_u {
@@ -362,7 +336,7 @@ fn logical_inputs<'a>(
         .into_iter()
         .enumerate()
         .map(|(input, group)| {
-            let readable = memo.producers(consumer, input);
+            let readable: HashSet<_> = memo.producers(consumer, input).into_iter().collect();
             logical_output(
                 &group_payloads[group.0 as usize],
                 &memo.groups()[group.0 as usize].group_properties.schema,
@@ -392,22 +366,6 @@ fn input_groups(
         .collect()
 }
 
-/// What a consumer reads of candidate `node` with `usage`.
-fn producer_output<'a>(
-    node: &'a PhysicalASAPDAGNode,
-    usage: &NodeResourceUsageAndCost<'a>,
-) -> ProducerOutput<'a> {
-    ProducerOutput {
-        payload: &node.payload,
-        output_schema: &node.output_schema,
-        output: usage.output,
-        sources: usage.sources.clone(),
-        family: usage.family,
-        unchanged_columns: usage.unchanged_columns.clone(),
-        tumbling_windows: usage.tumbling_windows,
-    }
-}
-
 /// An input's logical output over its readable costed candidates' `usages`: the most
 /// rows and bytes any outputs, the state family of the one with the most
 /// bytes, the sources any reads and the columns every one leaves unchanged;
@@ -421,15 +379,7 @@ fn logical_output<'a: 'b, 'b>(
     let mut output: Option<ProducerOutput<'a>> = None;
     for usage in usages {
         let Some(known) = output.as_mut() else {
-            output = Some(ProducerOutput {
-                payload,
-                output_schema: schema,
-                output: usage.output,
-                sources: usage.sources.clone(),
-                family: usage.family,
-                unchanged_columns: usage.unchanged_columns.clone(),
-                tumbling_windows: usage.tumbling_windows,
-            });
+            output = Some(usage.producer_output(payload, schema));
             continue;
         };
         if usage.output.bytes > known.output.bytes {
@@ -445,68 +395,61 @@ fn logical_output<'a: 'b, 'b>(
     output
 }
 
-/// Candidate `v`'s usage as `node` over `inputs`, at its rate (module doc);
-/// a query-time `Scan` reads `scan_read_ms` per execution.
-#[allow(clippy::too_many_arguments)]
+/// The usage of the candidate `node` over `inputs` (module doc): run
+/// [`executions_per_second`] for the queries reaching its group, over the
+/// window an ingestion-time grouping maintains
+/// ([`asap_cost::maintained_window_ms`], over the memo's groups) or, for a
+/// query-time `Scan`, `scan_read_ms` per execution.
 fn cost_node<'a>(
     physical: &PhysicalASAPMemoCandidates,
-    v: PhysicalCandidateId,
     node: &'a PhysicalASAPDAGNode,
     inputs: &[ProducerOutput<'a>],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     cost_inputs: &'a CostInputs,
-    formula_scale: f64,
     scan_read_ms: Option<u64>,
 ) -> Result<NodeResourceUsageAndCost<'a>, String> {
     let memo = &physical.logical_candidates.memo;
-    let candidate = &physical.physical_candidates[v.0];
-    let group = candidate.logical_candidate_id.group;
-    let ingestion = candidate.physical_properties.timing() == ExecutionTiming::IngestionTime;
-    let per_second = match ingestion {
-        true => 1.0,
-        false => {
-            let per_request = matches!(
-                candidate.physical_properties.lifetime(),
-                Lifetime::AcrossEvaluations(_)
-            );
-            evaluation_rate(
-                memo.groups()[group.0 as usize]
-                    .reached_by_queries()
-                    .iter()
-                    .filter_map(|&query| entries.get(query))
-                    .map(|entry| {
-                        (
-                            &entry.recurrence,
-                            (!per_request).then_some(entry.range_evaluation).flatten(),
-                        )
-                    }),
-                cost_inputs.non_repeating_query_horizon_seconds,
-            )
-            .map_err(|error| error.to_string())?
-        }
-    };
-    let window_ms = match (&node.payload, ingestion) {
-        (_, false) => scan_read_ms,
-        (
+    let candidate = node
+        .selected_physical_candidate
+        .expect("a candidate's node names it");
+    let group = physical.physical_candidates[candidate.0]
+        .logical_candidate_id
+        .group;
+    let per_second = executions_per_second(
+        node.output_state.timing,
+        node.lifetime,
+        memo.groups()[group.0 as usize]
+            .reached_by_queries()
+            .iter()
+            .filter_map(|&query| entries.get(query)),
+        cost_inputs.non_repeating_query_horizon_seconds,
+    )
+    .map_err(|error| error.to_string())?;
+    let window_ms = match node.output_state.timing {
+        ExecutionTiming::QueryTime => scan_read_ms,
+        // A chain maintains its own window; any other grouping the first
+        // range below its group.
+        ExecutionTiming::IngestionTime => match &node.payload {
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms,
                 ..
-            }),
-            true,
-        ) => Some(*tumbling_window_width_ms),
-        (_, true) => window_ms_below(memo, group),
+            }) => Some(*tumbling_window_width_ms),
+            _ => maintained_window_ms(
+                group,
+                |group: MemoGroupId| &memo.groups()[group.0 as usize].expression,
+                |group| {
+                    memo.groups()[group.0 as usize]
+                        .expression
+                        .children()
+                        .first()
+                        .map(|g| **g)
+                },
+            ),
+        },
     };
-    node_resource_usage_and_cost(
-        node,
-        inputs,
-        (1, per_second),
-        window_ms,
-        data,
-        cost_inputs,
-        formula_scale,
-    )
-    .map_err(|error| error.to_string())
+    node_resource_usage_and_cost(node, inputs, (1, per_second), window_ms, data, cost_inputs)
+        .map_err(|error| error.to_string())
 }
 
 /// $w_v$ from a candidate's usage: its cost per second under cost model 1
@@ -523,28 +466,4 @@ fn cost_per_second(usage: &NodeResourceUsageAndCost<'_>) -> Result<f64, String> 
             "its cost per second {cost} is not a finite non-negative number"
         )),
     }
-}
-
-/// The window, in ms, of the first range below `group`'s operator,
-/// through filters, projections and time shifts: what an ingestion-time
-/// grouping maintains (what asap-cost reads below a plan node, over the memo's
-/// groups, since a candidate is costed before any plan exists).
-fn window_ms_below(memo: &Memo, group: MemoGroupId) -> Option<u64> {
-    let range_ms = |range: &std::time::Duration| u64::try_from(range.as_millis()).ok();
-    let expression = &memo.groups()[group.0 as usize].expression;
-    if let Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) = expression {
-        return range_ms(range);
-    }
-    let mut below = **expression.children().first()?;
-    for _ in 0..memo.groups().len() {
-        let expression = &memo.groups()[below.0 as usize].expression;
-        match expression {
-            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => return range_ms(range),
-            Operator::NonASAP(
-                NonASAPOp::Filter { .. } | NonASAPOp::Project { .. } | NonASAPOp::TimeShift { .. },
-            ) => below = **expression.children().first()?,
-            _ => return None,
-        }
-    }
-    None
 }

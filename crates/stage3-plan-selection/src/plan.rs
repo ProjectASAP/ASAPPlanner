@@ -14,7 +14,7 @@ use asap_types::stages::{
 };
 use asap_types::workload::QueryWorkloadEntry;
 
-use crate::cost::{candidate_node, input_count, retains_rows, retention_need_ms};
+use crate::cost::{candidate_node, input_count, retention_need_ms};
 use crate::milp::model::{QueryId, SolvedSelection};
 
 /// The plan of `solved`, whose output `j` answers `outputs[j]` (a query and
@@ -99,7 +99,7 @@ pub(crate) fn plan_of(
             let input_ids: Vec<PhysicalASAPNodeId> =
                 inputs(v).iter().map(|producer| node_of[producer]).collect();
             let mut node = candidate_node(physical, v, id, &input_ids);
-            if retains_rows(physical, v) {
+            if node.retains_rows() {
                 node.retention_ms = retention_need_ms(physical, entries, v, readers_of)
                     .map(|need_ms| need_ms.max(output_span_ms.get(&v).copied().unwrap_or(0)));
             }
