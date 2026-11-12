@@ -11,7 +11,7 @@ use crate::stages::logical::group::MemoGroupAsInput;
 use crate::stages::LogicalPropertiesError;
 use crate::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
 use crate::test_support::memo_builders::{query, try_candidate};
-use crate::test_support::memo_fixtures::{readout, scan, state};
+use crate::test_support::memo_fixtures::{readout, scan, state, state_grouped_by};
 
 /// `Project(input)` keeping its first column.
 fn project_first_column(input: MemoGroupId) -> Operator<MemoGroupId> {
@@ -409,5 +409,57 @@ fn add_candidate_checks_parameters_against_the_groups_output() {
             };
             assert_eq!(added, expected, "{:?} {parameters:?}", operator.kind_name());
         }
+    }
+}
+
+/// A readout returns at most the series scanned below it, the declared
+/// distinct values of its state's keys, and one value without keys: over
+/// `latency` with 1000 series and 20 declared jobs, a per-series KLL
+/// readout returns at most 1000 values, one by `job` 20, one with no key 1.
+#[test]
+fn max_values_per_evaluation_bounds_a_readout_by_its_states_keys() {
+    let data = crate::workload::DataWorkload {
+        sources: [(
+            "latency".to_string(),
+            crate::workload::SourceFacts {
+                series_count: Some(1000),
+                distinct_values_per_label: [("job".to_string(), 20)].into(),
+                ..Default::default()
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let mut memo = Memo::new(&data);
+    let input = memo
+        .find_or_add_group(scan(
+            "latency",
+            &[("job", crate::ir::schema::DataType::Utf8)],
+            vec![],
+        ))
+        .unwrap();
+    let job = memo.groups()[input.0 as usize]
+        .group_properties
+        .schema
+        .fields
+        .iter()
+        .position(|field| field.name == "job")
+        .expect("the scan lists job");
+    for (reduction, values) in [
+        (Reduction::PerEntity, 1000),
+        (Reduction::by(vec![job]), 20),
+        (Reduction::by(vec![]), 1),
+    ] {
+        let state = memo
+            .find_or_add_group(state_grouped_by(
+                FieldDataType::Sketch(SketchAlgorithm::Kll),
+                reduction,
+                input,
+            ))
+            .unwrap();
+        let quantile = memo
+            .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.9 }, state))
+            .unwrap();
+        assert_eq!(memo.max_values_per_evaluation(quantile), Some(values));
     }
 }

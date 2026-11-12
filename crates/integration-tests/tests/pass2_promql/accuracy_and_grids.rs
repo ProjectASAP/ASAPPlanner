@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 /// Pass 2's output for `query` at `accuracy`.
 fn pass2(query: &str, accuracy: Value) -> LogicalASAPMemoCandidates {
-    promql_pass2(&[query], accuracy)
+    promql_pass2(&[(query, accuracy)])
 }
 
 /// The sketch readouts (`SummaryEstimate` over a sketch state) that

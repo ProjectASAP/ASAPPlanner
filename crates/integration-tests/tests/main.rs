@@ -21,6 +21,7 @@ mod operator_design_examples;
 mod operator_sharing;
 mod pass1_candidates;
 mod pass2_promql;
+mod pass2_sql;
 mod per_series_exact_execution;
 mod plan_sharing;
 mod production_rollup_workloads;

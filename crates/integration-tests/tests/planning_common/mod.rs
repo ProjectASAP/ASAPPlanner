@@ -1,10 +1,10 @@
 //! Helpers shared by the planning tests that load a workload fixture, plan it
-//! through the production stages, and compare costs, or that run PromQL
-//! workloads through Pass 2.
+//! through the production stages, and compare costs, or that run PromQL or
+//! SQL workloads through Pass 2.
 use asap_cost::CostInputs;
 use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Planner};
 use asap_devtools::planning_stages::{
-    lower_promql_roots, run_search_over, run_stages_until, RunUntil,
+    lower_promql_roots, lower_sql_roots, run_search_over, run_stages_until, sql_catalog, RunUntil,
 };
 use asap_planner::{PlanSearchSettings, PlanningModels};
 use asap_types::stages::LogicalASAPMemoCandidates;
@@ -71,13 +71,51 @@ pub fn cost(w: &FuzzWorkload) -> f64 {
     value
 }
 
-/// Pass 2's output for PromQL `queries`, each repeating every minute at
-/// `accuracy`, over the gauge `m` and the counter `c`, 1000 series each.
-pub fn promql_pass2(queries: &[&str], accuracy: Value) -> LogicalASAPMemoCandidates {
+/// Pass 2's output for PromQL `queries`, each with its accuracy target,
+/// repeating every minute over the gauge `m` and the counter `c`, 1000
+/// series each.
+pub fn promql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
+    pass2_of(
+        json!("promql"),
+        queries,
+        json!({
+            "m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000},
+            "c": {"series_count": 1000, "metric_type": "counter", "sample_interval": 1000},
+        }),
+        None,
+    )
+}
+
+/// Pass 2's output for SQL `queries` over the table
+/// `flows(ts, src, dst, bytes)` of 1000 groups of rows, each with its
+/// accuracy target, repeating every minute.
+pub fn sql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
+    let flows = json!({"name": "flows", "time_index": 0, "columns": [
+        {"name": "ts", "type": "timestamp"},
+        {"name": "src", "type": "utf8"},
+        {"name": "dst", "type": "utf8"},
+        {"name": "bytes", "type": "float64"},
+    ]});
+    pass2_of(
+        json!({"sql": "datafusion_sql"}),
+        queries,
+        json!({"flows": {"series_count": 1000}}),
+        Some(&[flows.to_string()]),
+    )
+}
+
+/// Pass 2's output for `queries` in `language` over `sources`, through
+/// production lowering (SQL over the `tables` catalog).
+fn pass2_of(
+    language: Value,
+    queries: &[(&str, Value)],
+    sources: Value,
+    tables: Option<&[String]>,
+) -> LogicalASAPMemoCandidates {
     let workload: PlanningWorkload = serde_json::from_value(json!({
         "query_workload": {
-            "language": "promql",
-            "repeating_queries": queries.iter().map(|query| json!({
+            "language": language,
+            "repeating_queries": queries.iter().map(|(query, accuracy)| json!({
                 "query": query,
                 "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
                 "requirements": {"accuracy": accuracy},
@@ -86,15 +124,15 @@ pub fn promql_pass2(queries: &[&str], accuracy: Value) -> LogicalASAPMemoCandida
         },
         "data_workload": {
             "arrival": {"ingesting": {"rows_per_second": 1000.0}},
-            "sources": {
-                "m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000},
-                "c": {"series_count": 1000, "metric_type": "counter", "sample_interval": 1000},
-            },
+            "sources": sources,
         },
     }))
     .unwrap();
     workload.validate().unwrap();
-    let roots = lower_promql_roots(&workload).unwrap();
+    let roots = match tables {
+        Some(tables) => lower_sql_roots(&workload, &sql_catalog(tables).unwrap().0).unwrap(),
+        None => lower_promql_roots(&workload).unwrap(),
+    };
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap_or_default();
     let run = run_stages_until(

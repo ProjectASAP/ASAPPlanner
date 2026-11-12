@@ -10,7 +10,11 @@ use serde_json::json;
 
 /// Pass 2's memo of `queries`, each at a 1% error target.
 fn pass2_memo(queries: &[&str]) -> Memo {
-    promql_pass2(queries, json!({"max_error": 0.01})).memo
+    let queries: Vec<_> = queries
+        .iter()
+        .map(|&query| (query, json!({"max_error": 0.01})))
+        .collect();
+    promql_pass2(&queries).memo
 }
 
 /// The root group of query `query`.

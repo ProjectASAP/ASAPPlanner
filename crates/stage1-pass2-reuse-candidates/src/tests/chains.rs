@@ -168,6 +168,31 @@ fn an_absolute_anchor_reuses_only_existing_chains() {
     assert!(widths(pinned[1]).is_empty());
 }
 
+/// A state under `@ T` reads the chains the other states create whatever
+/// the memo order: listed before the query whose 60 s grid creates the
+/// chain, the state pinned at T = …040 s still reads it.
+#[test]
+fn an_absolute_anchor_reuses_a_chain_a_later_group_creates() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let input = scan_group(&mut memo, "m", &["job"], vec![]);
+    let at = group(
+        &mut memo,
+        shift(0, Some(AtModifier::Timestamp(1_700_000_040_000)), input),
+    );
+    let at_window = group(&mut memo, range(300_000, at));
+    let (pinned, pinned_root) =
+        exact_state(&mut memo, at_window, ExactKind::Sum, Reduction::PerEntity);
+    query(&mut memo, pinned_root, None);
+    let window = group(&mut memo, range(300_000, input));
+    let (state, root) = exact_state(&mut memo, window, ExactKind::Sum, Reduction::PerEntity);
+    query(&mut memo, root, None);
+    assert!(pinned.0 < state.0, "the pinned state comes first");
+    let logical = pass2(memo, &vec![entry(60_000); 2]);
+    let widths = |state| chain_widths_serving(&logical.memo, state);
+    assert_eq!(widths(state), BTreeSet::from([60_000]));
+    assert_eq!(widths(pinned), BTreeSet::from([60_000]));
+}
+
 /// Chain groups come after the rollup
 /// rule and the reach along candidate edges, so a state's widths come from
 /// every query that reaches it through a candidate.
