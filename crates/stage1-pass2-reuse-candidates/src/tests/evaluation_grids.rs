@@ -1,4 +1,4 @@
-//! The evaluation grid of each group, per query reaching it.
+//! Steps 4 to 6: the evaluation grid of each group, per query reaching it.
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -13,6 +13,7 @@ use asap_types::workload::{
 
 use crate::test_fixtures::*;
 use asap_types::test_support::memo_builders::*;
+use asap_types::test_support::memo_fixtures::range;
 
 /// A group's evaluation grid is the gcd of its reaching queries' grids;
 /// `None` when one has no known grid.
@@ -20,7 +21,7 @@ use asap_types::test_support::memo_builders::*;
 fn a_groups_evaluation_grid_is_the_gcd_of_its_queries_grids() {
     let mut memo = Memo::new(&DataWorkload::default());
     let input = scan_group(&mut memo, "m", &["job"], vec![]);
-    let window = range(&mut memo, input, 300);
+    let window = group(&mut memo, range(300_000, input));
     let (_, a) = exact_state(&mut memo, window, ExactKind::Sum, Reduction::PerEntity);
     let other = scan_group(&mut memo, "n", &["job"], vec![]);
     query(&mut memo, a, None);
@@ -46,7 +47,7 @@ fn sum_over_time_in_a_subquery(
     resolution: Option<Duration>,
 ) -> (MemoGroupId, MemoGroupId, MemoGroupId) {
     let input = scan_group(memo, "m", &["job"], vec![]);
-    let window = range(memo, input, 120);
+    let window = group(memo, range(120_000, input));
     let (state, sum) = exact_state(memo, window, ExactKind::Sum, Reduction::PerEntity);
     let subquery = group(
         memo,

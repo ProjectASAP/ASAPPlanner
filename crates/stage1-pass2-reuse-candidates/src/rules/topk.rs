@@ -1,7 +1,7 @@
 //! Step 2, top-k reuse: an exact top-k reads a larger top-k of the same
 //! input and partition, whose ranked rows hold its own.
 
-use crate::rules::add_candidate_if_output_matches;
+use crate::rules::candidates::add_candidate_if_output_matches;
 use crate::Pass2RuleError;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::{NonASAPOp, Operator};
@@ -13,7 +13,7 @@ use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 /// `TopK(k)` over that group's ranked rows, partitioned by its leading key
 /// columns: the `k` highest of the `k_max` highest rows are the `k`
 /// highest. Only exact ranked rows give the reuse its answer: a ranking has
-/// no error contract (`asap_accuracy::error_propagation`), so the edge
+/// no error contract (`asap_accuracy::ErrorContract`), so the edge
 /// from an approximate producer (a heap's readout) fails the metric rule
 /// when a query with an accuracy target reaches it.
 pub(crate) fn add_topk_candidates(memo: &mut Memo) -> Result<(), Pass2RuleError> {

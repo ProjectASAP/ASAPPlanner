@@ -37,9 +37,7 @@ const KMV_MIN_K: u32 = 2;
 /// `failure_probability` ([`kmv_failure_probability`], by bisection);
 /// `None` when no error up to 1 does.
 pub(super) fn guarantee(
-    algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchStatistic,
     failure_probability: f64,
 ) -> Option<AccuracyGuarantee> {
     let SketchParams::Kmv { k } = params else {
@@ -58,22 +56,18 @@ pub(super) fn guarantee(
         }
     }
     Some(super::bounded_guarantee(
-        algorithm,
-        params,
-        query,
         AccuracyMetric::Relative,
         met,
         ProbabilityExpr::Constant {
             value: failure_probability,
         },
-        "kmv_exact_below_k_chernoff_v1",
     ))
 }
 
 /// The probability that `asap_sketchlib`'s KMV with `k` misses relative
 /// error `eps` on any number of distinct items (the module's bound): `1`
 /// when it certifies nothing.
-pub(crate) fn kmv_failure_probability(k: u32, eps: f64) -> f64 {
+fn kmv_failure_probability(k: u32, eps: f64) -> f64 {
     if k < KMV_MIN_K || !(eps.is_finite() && eps > 0.0) {
         return 1.0;
     }

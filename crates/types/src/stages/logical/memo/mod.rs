@@ -12,14 +12,16 @@ use super::group::{
     MemoGroupError,
 };
 use crate::accuracy::AccuracyTarget;
+use crate::ir::operator::arguments::Reduction;
 use crate::ir::operator::input::InputOrTemporaryBuild;
 use crate::ir::schema::Schema;
 use crate::ir::QueryRoot;
-use crate::ir::{NonASAPOp, Operator};
+use crate::ir::{ASAPOp, Operator};
 use crate::stages::{
-    CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, LogicalRequirements, MemoGroup,
-    MemoGroupId,
+    CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, ColumnLineage,
+    LogicalRequirements, MemoGroup, MemoGroupId,
 };
+use crate::summary_type::SketchStatistic;
 use crate::workload::bounds::source_name;
 use crate::workload::{series_facts, DataWorkload, SourceFacts};
 use hash_consing::{
@@ -78,30 +80,84 @@ impl Memo {
         &self.groups
     }
 
-    /// The most series (PromQL) or groups of rows (SQL) the `Scan` groups
-    /// below `group` read: the sum of their sources' declared
-    /// `SourceFacts::series_count`; `None` when one declares none. Every
-    /// value of a per-series or grouped result over those scans comes from
-    /// at least one of them, so it bounds the values one evaluation of
-    /// `group` returns. Example: a readout of `quantile_over_time(0.9,
-    /// m[5m])` over `m` with 1000 series returns at most 1000 values, which
-    /// `max(...)` over it reads at once.
-    pub fn series_count_scanned_below(&self, group: MemoGroupId) -> Option<u64> {
-        let mut seen = HashSet::new();
-        let mut pending = vec![group];
-        let mut total: u64 = 0;
-        while let Some(group) = pending.pop() {
-            if !seen.insert(group) {
-                continue;
-            }
-            let expression = &self.groups[group.0 as usize].expression;
-            if let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = expression {
+    /// The most values one evaluation of `group` returns, from the facts
+    /// the data workload declares; `None` when they bound it in no way.
+    /// The smaller of:
+    /// - the series (PromQL) or groups of rows (SQL) of the sources scanned
+    ///   below it (`GroupProperties::scanned_sources`, each source's
+    ///   `SourceFacts::series_count`, when every one declares it): every
+    ///   value of a per-series or grouped result over them comes from at
+    ///   least one of them;
+    /// - for a readout (`SummaryEstimate`, not a top-k) of a state, or a
+    ///   state, grouped `by` keys, the groups those keys form: 1 for no
+    ///   key, else the distinct combinations the source declares for keys
+    ///   copied from one source (`SourceFacts::distinct_values_per_label`
+    ///   and `distinct_values_per_label_set`).
+    ///
+    /// Examples: a readout of `quantile_over_time(0.9, m[5m])` over `m`
+    /// with 1000 series returns at most 1000 values, which `max(...)` over
+    /// it reads at once; `SELECT count(DISTINCT dst) FROM flows` reads one
+    /// distinct count per evaluation.
+    pub fn max_values_per_evaluation(&self, group: MemoGroupId) -> Option<u64> {
+        let series_scanned = self.groups[group.0 as usize]
+            .group_properties
+            .scanned_sources
+            .iter()
+            .try_fold(0u64, |total, source| {
                 let (facts, _) = series_facts(&self.source_facts, source_name(source))?;
-                total = total.checked_add(facts.series_count?)?;
-            }
-            pending.extend(expression.children().into_iter().copied());
+                total.checked_add(facts.series_count?)
+            });
+        match (series_scanned, self.declared_groups_of_state(group)) {
+            (Some(series), Some(groups)) => Some(series.min(groups)),
+            (series, groups) => series.or(groups),
         }
-        Some(total)
+    }
+
+    /// The groups the `by` keys of the state `group` is, or reads, form
+    /// ([`Self::max_values_per_evaluation`]).
+    fn declared_groups_of_state(&self, group: MemoGroupId) -> Option<u64> {
+        match &self.groups[group.0 as usize].expression {
+            Operator::ASAP(ASAPOp::SummaryEstimate {
+                summary_input,
+                query,
+            }) if !matches!(query, SketchStatistic::TopK { .. }) => {
+                self.declared_groups_of_state(*summary_input)
+            }
+            Operator::ASAP(
+                ASAPOp::SummaryAgg {
+                    reduction: Reduction::Reduce(by),
+                    child,
+                    ..
+                }
+                | ASAPOp::SummaryTumblingWindowChain {
+                    reduction: Reduction::Reduce(by),
+                    child,
+                    ..
+                },
+            ) if !by.is_without() => {
+                let lineage = &self.groups[child.0 as usize]
+                    .group_properties
+                    .column_lineage;
+                let mut source = None;
+                let mut labels = Vec::new();
+                for key in by.keys() {
+                    let Some(ColumnLineage::SourceColumn(column)) = lineage.get(*key) else {
+                        return None;
+                    };
+                    if source.is_some_and(|source| source != &column.source) {
+                        return None;
+                    }
+                    source = Some(&column.source);
+                    labels.push(column.column.as_str());
+                }
+                let Some(source) = source else {
+                    return Some(1);
+                };
+                let (facts, _) = series_facts(&self.source_facts, source_name(source))?;
+                facts.declared_distinct_combinations(&labels)
+            }
+            _ => None,
+        }
     }
 
     /// The queries, by index in the workload.

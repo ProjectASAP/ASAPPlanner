@@ -2,26 +2,18 @@
 //! median fails only when a majority of rows fail, an exact binomial tail.
 use super::*;
 
-pub(super) fn guarantee(
-    algorithm: &SketchAlgorithm,
-    params: &SketchParams,
-    query: &SketchStatistic,
-) -> Option<AccuracyGuarantee> {
+pub(super) fn guarantee(params: &SketchParams) -> Option<AccuracyGuarantee> {
     let (SketchParams::CountSketch { width, depth }
     | SketchParams::CountSketchWithHeap { width, depth, .. }) = params
     else {
         return None;
     };
     Some(super::bounded_guarantee(
-        algorithm,
-        params,
-        query,
         AccuracyMetric::ABSOLUTE_STREAM_L2,
         (3.0 / f64::from(*width)).sqrt(),
         ProbabilityExpr::Constant {
             value: count_sketch_failure_probability(*width, *depth)?,
         },
-        "count_sketch_l2_median_binomial_v1",
     ))
 }
 /// One row misses a point query by more than `ε ‖f‖₂ = √(3/w) ‖f‖₂` with
@@ -90,7 +82,6 @@ mod tests {
             depth: 47,
         };
         let guarantee = guarantee_of_parameters(
-            &SketchAlgorithm::CountSketch,
             &count_sketch,
             &SketchStatistic::PointCount {
                 key: asap_types::ir::scalar::expr_ir::ColumnRef::SampleValue,
@@ -107,11 +98,11 @@ mod tests {
             .spec
             .error
             .evaluate()
-            .is_some_and(|error| error <= target_limit(0.01)));
+            .is_some_and(|error| within_limit(error, 0.01)));
         assert!(guarantee
             .spec
             .failure_probability
             .evaluate()
-            .is_some_and(|failure_probability| failure_probability <= target_limit(0.01)));
+            .is_some_and(|failure_probability| within_limit(failure_probability, 0.01)));
     }
 }

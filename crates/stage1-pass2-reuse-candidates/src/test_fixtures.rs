@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 
 use asap_accuracy::NoMeasuredGuarantees;
-use asap_types::ir::operator::arguments::{AtModifier, Reduction};
+use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::stages::{
@@ -14,7 +14,7 @@ use asap_types::stages::{
     PrunedLogicalCandidate, RequiredAccuracy,
 };
 use asap_types::summary_type::ExactKind;
-use asap_types::test_support::memo_builders::{group, own_candidate};
+use asap_types::test_support::memo_builders::group;
 use asap_types::test_support::memo_fixtures;
 use asap_types::workload::{
     Predictability, Query, QueryRecurrence, QueryRequirements, QueryWorkloadEntry, RepeatedDemand,
@@ -22,21 +22,6 @@ use asap_types::workload::{
 };
 
 use crate::generate_logical_asap_memo_candidates;
-
-/// `child[seconds]`.
-pub fn range(memo: &mut Memo, child: MemoGroupId, seconds: u64) -> MemoGroupId {
-    group(memo, memo_fixtures::range(seconds as i64 * 1000, child))
-}
-
-/// `child offset <seconds>`, or `child @ at`.
-pub fn shift(
-    memo: &mut Memo,
-    child: MemoGroupId,
-    seconds: i64,
-    at: Option<AtModifier>,
-) -> MemoGroupId {
-    group(memo, memo_fixtures::shift(seconds * 1000, at, child))
-}
 
 /// An exact accumulator state of `kind` over `window` grouped by
 /// `reduction`, read by a `FinalizeExactAccumulator` group (the query
@@ -178,12 +163,4 @@ pub fn group_of(memo: &Memo, operator: &Operator<MemoGroupId>) -> Option<MemoGro
     groups_where(memo, |expression| expression == operator)
         .first()
         .copied()
-}
-
-/// The readout of `state` a candidate `id` of a quantile group is or reads.
-pub fn readout_of(memo: &Memo, id: CandidateForMemoGroupId) -> CandidateForMemoGroupId {
-    match &memo.candidate(id).expression.operator {
-        Operator::NonASAP(NonASAPOp::Project { child, .. }) => own_candidate(*child),
-        _ => id,
-    }
 }

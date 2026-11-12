@@ -153,8 +153,20 @@ pub fn quantile_over_time(
 pub struct QuantileReadouts {
     /// The `Aggregate` group `quantile_over_time(q, window)` per series.
     pub result: MemoGroupId,
-    /// Per algorithm: its state group and the readout candidate of `result`.
-    pub by_algorithm: Vec<(SketchAlgorithm, MemoGroupId, CandidateForMemoGroupId)>,
+    /// One per algorithm.
+    pub by_algorithm: Vec<QuantileReadout>,
+}
+
+/// One summary type's readout of a quantile group ([`QuantileReadouts`]).
+pub struct QuantileReadout {
+    pub algorithm: SketchAlgorithm,
+    /// The state group, one build per listed θ.
+    pub state: MemoGroupId,
+    /// The candidate of the quantile group reading the state: the readout
+    /// itself, or a renaming `Project` over the readout group.
+    pub candidate_of_result: CandidateForMemoGroupId,
+    /// The readout (`SummaryEstimate`) candidate.
+    pub readout: CandidateForMemoGroupId,
 }
 
 /// `quantile_over_time(q, window)` per series as Pass 1 leaves it: the
@@ -183,8 +195,8 @@ pub fn quantile_over_time_readouts(
     for &algorithm in algorithms {
         let state = sketch_state(memo, window, algorithm, Reduction::PerEntity);
         let direct = readout(SketchStatistic::Quantile { q }, state);
-        let id = match try_candidate(memo, result, direct, None) {
-            Ok(id) => id,
+        let (candidate_of_result, readout) = match try_candidate(memo, result, direct, None) {
+            Ok(id) => (id, id),
             Err(CandidateError::OutputDiffersFromGroup { .. }) => {
                 let readout = estimate(memo, state, SketchStatistic::Quantile { q });
                 let to = &memo.groups()[result.0 as usize].group_properties.schema;
@@ -200,11 +212,19 @@ pub fn quantile_over_time_readouts(
                         .collect(),
                     child: readout,
                 });
-                candidate(memo, result, renamed, None)
+                (
+                    candidate(memo, result, renamed, None),
+                    own_candidate(readout),
+                )
             }
             Err(error) => panic!("{error}"),
         };
-        by_algorithm.push((algorithm, state, id));
+        by_algorithm.push(QuantileReadout {
+            algorithm,
+            state,
+            candidate_of_result,
+            readout,
+        });
     }
     QuantileReadouts {
         result,

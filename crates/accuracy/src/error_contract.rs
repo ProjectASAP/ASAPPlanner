@@ -1,5 +1,5 @@
-//! Each operator's local error propagation: the linear bound $g_c$ on a
-//! consumer's output error from its inputs' errors (concepts doc, section 4).
+//! Each operator's error contract: the linear bound $g_c$ on a consumer's
+//! output error from its inputs' errors (concepts doc, section 4).
 
 use asap_types::accuracy::AccuracyMetric;
 use asap_types::ir::operator::arguments::BinaryOpKind;
@@ -41,15 +41,15 @@ use asap_types::summary_type::ExactKind;
 ///
 /// Every other operator (a filter comparing a computed value, a ranking,
 /// a `sum`, a comparison, another function) has none.
-pub fn error_propagation(
+pub(crate) fn error_contract(
     memo: &Memo,
     consumer: &Operator<MemoGroupId>,
     metric: AccuracyMetric,
-) -> Option<ErrorPropagation> {
+) -> Option<ErrorContract> {
     let inputs = consumer.children().len();
-    let uniform = |factor: f64| ErrorPropagation {
-        factor_per_input: vec![factor; inputs],
-        validity_cap_per_input: vec![None; inputs],
+    let uniform = |factor: f64| ErrorContract {
+        error_factor_per_input: vec![factor; inputs],
+        linear_bound_holds_up_to_per_input: vec![None; inputs],
     };
     let absolute = matches!(metric, AccuracyMetric::Absolute { .. });
     let extremum_metric = absolute || metric == AccuracyMetric::Relative;
@@ -107,13 +107,13 @@ pub fn error_propagation(
                     (ArithmeticOpKind::Add | ArithmeticOpKind::Sub, _) if absolute => {
                         Some(uniform(1.0))
                     }
-                    (ArithmeticOpKind::Div, AccuracyMetric::Relative) => Some(ErrorPropagation {
-                        factor_per_input: vec![1.0 / (1.0 - b); 2],
-                        validity_cap_per_input: vec![None, Some(b)],
+                    (ArithmeticOpKind::Div, AccuracyMetric::Relative) => Some(ErrorContract {
+                        error_factor_per_input: vec![1.0 / (1.0 - b); 2],
+                        linear_bound_holds_up_to_per_input: vec![None, Some(b)],
                     }),
-                    (ArithmeticOpKind::Mul, AccuracyMetric::Relative) => Some(ErrorPropagation {
-                        factor_per_input: vec![1.0 + b, 1.0],
-                        validity_cap_per_input: vec![None, Some(b)],
+                    (ArithmeticOpKind::Mul, AccuracyMetric::Relative) => Some(ErrorContract {
+                        error_factor_per_input: vec![1.0 + b, 1.0],
+                        linear_bound_holds_up_to_per_input: vec![None, Some(b)],
                     }),
                     _ => None,
                 }
@@ -146,21 +146,6 @@ pub fn error_propagation(
             _ => None,
         },
     }
-}
-
-/// The metrics among `metrics` that `consumer`'s error contract
-/// ([`error_propagation`]) carries to its inputs: those an input of it may
-/// be off in when its output accepts `metrics`.
-pub fn metrics_carried(
-    memo: &Memo,
-    consumer: &Operator<MemoGroupId>,
-    metrics: &[AccuracyMetric],
-) -> Vec<AccuracyMetric> {
-    metrics
-        .iter()
-        .copied()
-        .filter(|&metric| error_propagation(memo, consumer, metric).is_some())
-        .collect()
 }
 
 /// Whether each of `columns` of `group`'s output is copied from a source
@@ -288,24 +273,25 @@ fn scaled_by_a_constant<C>(expr: &ScalarExpr<C>) -> bool {
 }
 
 /// $b$ of a ratio's denominator and a product's right operand: the
-/// relative error under which [`error_propagation`]'s linear bound holds,
+/// relative error under which [`error_contract`]'s linear bound holds,
 /// $\varepsilon_{X/Y} \le (\varepsilon_X + \varepsilon_Y) / (1 - b)$
 /// (concepts doc, section 4). 0.1 is the weakest error of every
 /// algorithm's list, so it never excludes a listed θ.
 const RELATIVE_OPERAND_VALIDITY_CAP: f64 = 0.1;
 
-/// The local error propagation of one consumer: its output error is at
-/// most $\sum_i \beta_{c,i}\varepsilon_{c,i}$ while each input's error stays
-/// within its validity cap (concepts doc, section 4; approved 2026-11-05).
-#[derive(Debug)]
+/// The error contract of one consumer in one metric: its output error is
+/// at most $\sum_i \beta_{c,i}\varepsilon_{c,i}$ while each input's error
+/// stays within $b_{c,i}$ (concepts doc, section 4).
+#[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
-pub struct ErrorPropagation {
-    /// $\beta_{c,i}$ per input, for that input's metric.
-    pub factor_per_input: Vec<f64>,
-    /// $b_{c,i}$ per input: the cap under which the linear bound holds;
-    /// `None` when the bound holds everywhere (e.g. a ratio caps only its
-    /// denominator).
-    pub validity_cap_per_input: Vec<Option<f64>>,
+pub struct ErrorContract {
+    /// $\beta_{c,i}$ per input: how much of that input's error, in the
+    /// contract's metric, reaches the output.
+    pub error_factor_per_input: Vec<f64>,
+    /// $b_{c,i}$ per input: the largest error of that input up to which
+    /// the linear bound holds; `None` when it holds for any error (a ratio
+    /// bounds only its denominator's).
+    pub linear_bound_holds_up_to_per_input: Vec<Option<f64>>,
 }
 
 #[cfg(test)]
@@ -377,13 +363,13 @@ mod tests {
         ));
         for metric in AccuracyMetric::ALL {
             assert_eq!(
-                error_propagation(&memo, &by_job, metric)
-                    .map(|propagation| propagation.factor_per_input),
+                error_contract(&memo, &by_job, metric)
+                    .map(|contract| contract.error_factor_per_input),
                 Some(vec![1.0]),
                 "key-only filter, {metric:?}"
             );
             assert_eq!(
-                error_propagation(&memo, &by_value, metric),
+                error_contract(&memo, &by_value, metric),
                 None,
                 "a filter comparing the estimate, {metric:?}"
             );
@@ -420,8 +406,7 @@ mod tests {
             })
         };
         let factor = |project: &Operator<MemoGroupId>, metric| {
-            error_propagation(&memo, project, metric)
-                .map(|propagation| propagation.factor_per_input)
+            error_contract(&memo, project, metric).map(|contract| contract.error_factor_per_input)
         };
         let one_lipschitz = [
             ScalarExpr::FunctionCall {
@@ -532,7 +517,7 @@ mod tests {
                 AggIntent::Avg { col: None },
             ] {
                 assert_eq!(
-                    error_propagation(
+                    error_contract(
                         &memo,
                         &aggregate(Reduction::by(vec![estimate]), measure.clone(), readout),
                         metric
@@ -542,7 +527,7 @@ mod tests {
                 );
             }
             assert_eq!(
-                error_propagation(&memo, &exact_count_by(estimate), metric),
+                error_contract(&memo, &exact_count_by(estimate), metric),
                 None,
                 "an exact count by the estimate, {metric:?}"
             );
@@ -551,8 +536,8 @@ mod tests {
                 exact_count_by(job),
             ] {
                 assert_eq!(
-                    error_propagation(&memo, &count_by_job, metric)
-                        .map(|propagation| propagation.factor_per_input),
+                    error_contract(&memo, &count_by_job, metric)
+                        .map(|contract| contract.error_factor_per_input),
                     Some(vec![0.0]),
                     "a count by job, {metric:?}"
                 );
@@ -571,27 +556,27 @@ mod tests {
             .unwrap();
         let divide = arithmetic(ArithmeticOpKind::Div, g1, g1);
         assert_eq!(
-            error_propagation(&memo, &divide, AccuracyMetric::Relative),
-            Some(ErrorPropagation {
-                factor_per_input: vec![1.0 / 0.9; 2],
-                validity_cap_per_input: vec![None, Some(0.1)],
+            error_contract(&memo, &divide, AccuracyMetric::Relative),
+            Some(ErrorContract {
+                error_factor_per_input: vec![1.0 / 0.9; 2],
+                linear_bound_holds_up_to_per_input: vec![None, Some(0.1)],
             })
         );
         for metric in [AccuracyMetric::ABSOLUTE, AccuracyMetric::Rank] {
-            assert_eq!(error_propagation(&memo, &divide, metric), None);
+            assert_eq!(error_contract(&memo, &divide, metric), None);
         }
         let by_job = || Reduction::by(vec![2]);
         assert_eq!(
-            error_propagation(
+            error_contract(
                 &memo,
                 &aggregate(by_job(), AggIntent::Count, g1),
                 AccuracyMetric::Rank
             )
-            .map(|propagation| propagation.factor_per_input),
+            .map(|contract| contract.error_factor_per_input),
             Some(vec![0.0])
         );
         assert_eq!(
-            error_propagation(
+            error_contract(
                 &memo,
                 &aggregate(by_job(), AggIntent::Sum { col: Some(1) }, g1),
                 AccuracyMetric::ABSOLUTE

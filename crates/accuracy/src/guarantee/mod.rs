@@ -1,22 +1,20 @@
 //! Dispatch committed estimator parameters to their accuracy models.
-use asap_types::accuracy::{
-    AccuracyGuarantee, AccuracyMetric, BoundExpr, GuaranteeSource, ProbabilityExpr,
-};
+use asap_types::accuracy::{AccuracyGuarantee, AccuracyMetric, BoundExpr, ProbabilityExpr};
 use asap_types::ir::schema::FieldDataType;
-use asap_types::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
+use asap_types::summary_type::{SketchParams, SketchStatistic};
 
 use asap_types::summary_type::SummaryTypeCapability;
 
-use crate::target_limit;
+use crate::within_limit;
 
 mod binomial;
-pub(crate) mod cardinality;
-pub(crate) mod cms;
-pub(crate) mod count_sketch;
-pub(crate) mod ddsketch;
-pub(crate) mod hll;
-pub(crate) mod kll;
-pub(crate) mod univmon;
+mod cardinality;
+mod cms;
+mod count_sketch;
+mod ddsketch;
+mod hll;
+mod kll;
+mod univmon;
 
 use binomial::binomial_upper_tail;
 
@@ -28,31 +26,23 @@ use binomial::binomial_upper_tail;
 /// (HLL's). A Hydra state reads each subpopulation's state, so it has
 /// that state's guarantee.
 fn guarantee_of_parameters(
-    algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
     failure_probability: f64,
 ) -> Option<AccuracyGuarantee> {
     match params {
-        SketchParams::Kll { .. } => kll::guarantee(algorithm, params, query, failure_probability),
-        SketchParams::Kmv { .. } => {
-            cardinality::guarantee(algorithm, params, query, failure_probability)
+        SketchParams::Kll { .. } => kll::guarantee(params, failure_probability),
+        SketchParams::Kmv { .. } => cardinality::guarantee(params, failure_probability),
+        SketchParams::Hydra(hydra) => {
+            guarantee_of_parameters(&hydra.per_subpopulation(), query, failure_probability)
         }
-        SketchParams::Hydra(hydra) => guarantee_of_parameters(
-            algorithm,
-            &hydra.per_subpopulation(),
-            query,
-            failure_probability,
-        ),
-        SketchParams::DDSketch { .. } => ddsketch::guarantee(algorithm, params, query),
-        SketchParams::Hll { .. } => hll::generic_guarantee(algorithm, params, query),
-        SketchParams::Cms { .. } | SketchParams::CmsWithHeap { .. } => {
-            cms::guarantee(algorithm, params, query)
-        }
+        SketchParams::DDSketch { .. } => ddsketch::guarantee(params),
+        SketchParams::Hll { .. } => hll::guarantee(params),
+        SketchParams::Cms { .. } | SketchParams::CmsWithHeap { .. } => cms::guarantee(params),
         SketchParams::CountSketch { .. } | SketchParams::CountSketchWithHeap { .. } => {
-            count_sketch::guarantee(algorithm, params, query)
+            count_sketch::guarantee(params)
         }
-        SketchParams::UnivMon { .. } => univmon::guarantee(algorithm, params, query),
+        SketchParams::UnivMon { .. } => univmon::guarantee(params, query),
     }
 }
 
@@ -66,34 +56,25 @@ pub(crate) fn guarantee_before_failure_probability_check(
     statistic: &SketchStatistic,
     failure_probability: f64,
 ) -> Option<AccuracyGuarantee> {
-    let FieldDataType::Sketch(algorithm) = summary_type else {
-        return None;
-    };
-    if !SummaryTypeCapability::of(summary_type).answers(statistic) {
+    if !matches!(summary_type, FieldDataType::Sketch(_))
+        || !SummaryTypeCapability::of(summary_type).answers(statistic)
+    {
         return None;
     }
-    guarantee_of_parameters(algorithm, parameters, statistic, failure_probability)
+    guarantee_of_parameters(parameters, statistic, failure_probability)
 }
 
+/// The guarantee of an error at most `bound` in `metric`, failing with
+/// probability at most `failure_probability`.
 fn bounded_guarantee(
-    algorithm: &SketchAlgorithm,
-    params: &SketchParams,
-    query: &SketchStatistic,
     metric: AccuracyMetric,
     bound: f64,
-    delta: ProbabilityExpr,
-    contract: &str,
+    failure_probability: ProbabilityExpr,
 ) -> AccuracyGuarantee {
     AccuracyGuarantee::new(
         metric,
         BoundExpr::Constant { value: bound },
-        delta,
-        vec![GuaranteeSource::SketchEvaluation {
-            algorithm: format!("{algorithm:?}"),
-            contract: contract.into(),
-            params: serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
-            query: format!("{query:?}"),
-        }],
+        failure_probability,
     )
 }
 
@@ -121,19 +102,27 @@ pub fn theoretical_guarantee(
         statistic,
         failure_probability,
     )
-    .filter(|guarantee| {
-        guarantee
-            .spec
-            .failure_probability
-            .evaluate()
-            .is_some_and(|own| own <= target_limit(failure_probability))
-    })
+    .filter(|guarantee| holds_at_failure_probability(guarantee, failure_probability))
+}
+
+/// Whether `guarantee` fails at most `failure_probability` rarely: its own
+/// failure probability is known and within it ([`within_limit`]).
+pub(crate) fn holds_at_failure_probability(
+    guarantee: &AccuracyGuarantee,
+    failure_probability: f64,
+) -> bool {
+    guarantee
+        .spec
+        .failure_probability
+        .evaluate()
+        .is_some_and(|own| within_limit(own, failure_probability))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use asap_types::ir::scalar::expr_ir::ColumnRef;
+    use asap_types::summary_type::SketchAlgorithm;
 
     /// Every listed θ has a theoretical guarantee for the statistic its
     /// algorithm is listed for, at failure probability 0.01, in the

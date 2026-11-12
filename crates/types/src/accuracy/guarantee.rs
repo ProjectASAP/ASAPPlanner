@@ -1,18 +1,17 @@
 //! Machine-readable accuracy guarantees: the vocabulary for what error a
 //! finalized, caller-visible value has — the typed metric
-//! ([`AccuracyGuarantee`]), the symbolic bound and failure-probability
-//! expressions ([`BoundExpr`], [`ProbabilityExpr`]) and the provenance trail
-//! ([`GuaranteeSource`]). The theoretical guarantee of a summary
-//! (`theoretical_guarantee`), each operator's error contract and the
-//! deployment's measured accuracy (`AccuracyEvidence`) live one layer up in
-//! `asap_accuracy`: this crate defines the shapes, the planning crates
-//! decide.
+//! ([`AccuracyGuarantee`]) and the bound and failure-probability
+//! expressions ([`BoundExpr`], [`ProbabilityExpr`]). The theoretical
+//! guarantee of a summary (`theoretical_guarantee`), each operator's error
+//! contract and the deployment's measured accuracy (`AccuracyEvidence`)
+//! live one layer up in `asap_accuracy`: this crate defines the shapes, the
+//! planning crates decide.
 //!
 //! ## What a guarantee says
 //!
 //! [`AccuracyGuarantee`] describes a finalized, caller-visible value — a
-//! `SummaryEstimate` evaluation, an exact accumulator, or a kept pre-ASAP
-//! sub-DAG — never raw summary state. Its statement is:
+//! `SummaryEstimate` evaluation or an exact accumulator — never raw summary
+//! state. Its statement is:
 //!
 //! ```text
 //! Pr[ err_metric(estimate, truth) > error ] <= failure_probability
@@ -26,128 +25,33 @@
 //! epsilons". [`AccuracyGuarantee`] shares its outer shape, [`AccuracySpec`],
 //! with the requirement it is checked against, [`AccuracyTarget`](super::AccuracyTarget).
 //!
-//! ## Why expressions, not numbers
-//!
-//! [`BoundExpr`]/[`ProbabilityExpr`] are tiny serializable expression DAGs
-//! rather than bare `f64`s so a planning-time guarantee can reference a
-//! statistic it does not have (a group count, a stream's L1 norm) and stay
-//! honestly *unknown* until something instantiates it — a deployment's own
-//! cardinality estimate, or a runtime posterior observation.
-//! [`BoundExpr::evaluate`] returns `None`, never `0`, for such a bound;
+//! A failure probability may be *unknown* ([`ProbabilityExpr::Unknown`],
+//! HLL's): [`ProbabilityExpr::evaluate`] returns `None`, never `0`, for it;
 //! "unknown" and "zero" are different answers and a fail-closed planner
 //! treats them differently.
-//!
-//! ## What is deliberately *not* here
-//!
-//! No `CorrectnessPolicy`-style enum: [`AccuracyTarget`](super::AccuracyTarget) remains the one
-//! authoritative requirement type. No independence assumptions: the only
-//! probability combinator is the union bound.
 
 use serde::{Deserialize, Serialize};
 
 use super::target::{AccuracyMetric, AccuracyScope, AccuracySpec};
 
-/// A symbolic, serializable error-bound expression. Non-negative real
-/// arithmetic only — there is no subtraction, so a bound can never be
-/// tightened by construction, only by evaluating a known statistic.
+/// A serializable error bound, in the metric's own normalization.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum BoundExpr {
-    /// Exactly zero error (deterministic exact computation).
-    Zero,
-    /// A resolved numeric bound in the metric's own normalization.
+    /// A resolved numeric bound.
     Constant { value: f64 },
-    /// `Σ terms` — the additive composition rule.
-    Sum { terms: Vec<BoundExpr> },
-    /// `Π factors` — e.g. the relative-error cross term, or a normalized
-    /// bound times the (possibly unknown) statistic it is normalized by.
-    Product { factors: Vec<BoundExpr> },
-    /// `factor · inner` — an explicitly registered Lipschitz constant.
-    Scaled { factor: f64, inner: Box<BoundExpr> },
-    /// `max(terms)` — exact max/min over bounded inputs.
-    Max { terms: Vec<BoundExpr> },
-    /// A statistic this bound needs but nothing has supplied yet. Evaluates
-    /// to `None`, never `0`: an unknown quantity is not a small one.
-    Unknown { statistic: String },
 }
 
 impl BoundExpr {
-    /// See [`AccuracyGuarantee::bind`].
-    pub(crate) fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
-        let all = |terms: &[BoundExpr]| terms.iter().map(|t| t.bind(value)).collect();
-        match self {
-            BoundExpr::Zero | BoundExpr::Constant { .. } => self.clone(),
-            BoundExpr::Sum { terms } => BoundExpr::Sum { terms: all(terms) },
-            BoundExpr::Product { factors } => BoundExpr::Product {
-                factors: all(factors),
-            },
-            BoundExpr::Max { terms } => BoundExpr::Max { terms: all(terms) },
-            BoundExpr::Scaled { factor, inner } => BoundExpr::Scaled {
-                factor: *factor,
-                inner: Box::new(inner.bind(value)),
-            },
-            BoundExpr::Unknown { statistic } => {
-                value(statistic).map_or_else(|| self.clone(), |value| BoundExpr::Constant { value })
-            }
-        }
-    }
-
-    /// Whether evaluation depends on a statistic not yet supplied.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn has_unknown(&self) -> bool {
-        match self {
-            BoundExpr::Zero | BoundExpr::Constant { .. } => false,
-            BoundExpr::Sum { terms }
-            | BoundExpr::Product { factors: terms }
-            | BoundExpr::Max { terms } => terms.iter().any(BoundExpr::has_unknown),
-            BoundExpr::Scaled { inner, .. } => inner.has_unknown(),
-            BoundExpr::Unknown { .. } => true,
-        }
-    }
-
-    /// Numeric value of this bound, or `None` if any [`BoundExpr::Unknown`]
-    /// leaf is reachable.
+    /// Numeric value of this bound; `None` when it is negative or not
+    /// finite.
     pub fn evaluate(&self) -> Option<f64> {
-        let value = match self {
-            BoundExpr::Zero => Some(0.0),
-            BoundExpr::Constant { value } => value.is_finite().then_some(*value),
-            BoundExpr::Sum { terms } => terms.iter().map(BoundExpr::evaluate).sum(),
-            BoundExpr::Product { factors } => factors.iter().map(BoundExpr::evaluate).product(),
-            BoundExpr::Scaled { factor, inner } => factor
-                .is_finite()
-                .then_some(*factor)
-                .zip(inner.evaluate())
-                .map(|(factor, bound)| factor * bound),
-            BoundExpr::Max { terms } => terms
-                .iter()
-                .map(BoundExpr::evaluate)
-                .try_fold(0.0_f64, |acc, t| t.map(|t| acc.max(t))),
-            BoundExpr::Unknown { .. } => None,
-        }?;
-        (value.is_finite() && value >= 0.0).then_some(value)
-    }
-
-    /// `true` iff this bound is structurally zero (every leaf is
-    /// [`BoundExpr::Zero`], or a `Product`/`Scaled` contains a zero factor).
-    /// Distinct from `evaluate() == Some(0.0)` only in that it never
-    /// depends on floating-point evaluation.
-    pub fn is_zero(&self) -> bool {
-        match self {
-            BoundExpr::Zero => true,
-            BoundExpr::Constant { value } => *value == 0.0,
-            BoundExpr::Sum { terms } | BoundExpr::Max { terms } => {
-                terms.iter().all(BoundExpr::is_zero)
-            }
-            BoundExpr::Product { factors } => factors.iter().any(BoundExpr::is_zero),
-            BoundExpr::Scaled { factor, inner } => *factor == 0.0 || inner.is_zero(),
-            BoundExpr::Unknown { .. } => false,
-        }
+        let BoundExpr::Constant { value } = self;
+        (value.is_finite() && *value >= 0.0).then_some(*value)
     }
 }
 
-/// A symbolic, serializable failure-probability expression. The only
-/// combinator over several events is the union bound — the default model
-/// never assumes independence between sketch errors.
+/// A serializable failure-probability expression.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ProbabilityExpr {
@@ -155,115 +59,30 @@ pub enum ProbabilityExpr {
     Zero,
     /// A resolved probability in `[0, 1]`.
     Constant { value: f64 },
-    /// `min(1, Σ terms)` — Boole's inequality over the listed events.
-    UnionBound { terms: Vec<ProbabilityExpr> },
-    /// `min(1, count · inner)` — the union bound over `count` events that
-    /// each fail with probability at most `inner` (e.g. one per input row of
-    /// an exact aggregation). `count` is a [`BoundExpr`] so it may be an
-    /// [`BoundExpr::Unknown`] statistic.
-    Scaled {
-        count: BoundExpr,
-        inner: Box<ProbabilityExpr>,
-    },
-    /// A probability nothing has supplied yet — same stance as
-    /// [`BoundExpr::Unknown`].
+    /// A probability nothing has supplied (HLL's). Evaluates to `None`,
+    /// never `0`: an unknown probability is not a small one.
     Unknown { statistic: String },
 }
 
 impl ProbabilityExpr {
-    /// Whether evaluation depends on a statistic not yet supplied.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn has_unknown(&self) -> bool {
-        match self {
-            ProbabilityExpr::Zero | ProbabilityExpr::Constant { .. } => false,
-            ProbabilityExpr::UnionBound { terms } => terms.iter().any(ProbabilityExpr::has_unknown),
-            ProbabilityExpr::Scaled { count, inner } => count.has_unknown() || inner.has_unknown(),
-            ProbabilityExpr::Unknown { .. } => true,
-        }
-    }
-
-    /// Numeric value clamped to `[0, 1]`, or `None` if any unknown leaf is
-    /// reachable.
+    /// Numeric value in `[0, 1]`; `None` when it is unknown or out of
+    /// range.
     pub fn evaluate(&self) -> Option<f64> {
-        let raw = match self {
-            ProbabilityExpr::Zero => 0.0,
-            ProbabilityExpr::Constant { value } if (0.0..=1.0).contains(value) => *value,
-            ProbabilityExpr::Constant { .. } => return None,
-            ProbabilityExpr::UnionBound { terms } => terms
-                .iter()
-                .map(ProbabilityExpr::evaluate)
-                .sum::<Option<f64>>()?,
-            ProbabilityExpr::Scaled { count, inner } => count.evaluate()? * inner.evaluate()?,
-            ProbabilityExpr::Unknown { .. } => return None,
-        };
-        raw.is_finite().then(|| raw.clamp(0.0, 1.0))
-    }
-
-    /// See [`AccuracyGuarantee::bind`].
-    pub(crate) fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
         match self {
-            ProbabilityExpr::Zero | ProbabilityExpr::Constant { .. } => self.clone(),
-            ProbabilityExpr::UnionBound { terms } => ProbabilityExpr::UnionBound {
-                terms: terms.iter().map(|t| t.bind(value)).collect(),
-            },
-            ProbabilityExpr::Scaled { count, inner } => ProbabilityExpr::Scaled {
-                count: count.bind(value),
-                inner: Box::new(inner.bind(value)),
-            },
-            ProbabilityExpr::Unknown { statistic } => value(statistic)
-                .map_or_else(|| self.clone(), |value| ProbabilityExpr::Constant { value }),
-        }
-    }
-
-    /// `true` iff this probability is structurally zero.
-    pub fn is_zero(&self) -> bool {
-        match self {
-            ProbabilityExpr::Zero => true,
-            ProbabilityExpr::Constant { value } => *value == 0.0,
-            ProbabilityExpr::UnionBound { terms } => terms.iter().all(ProbabilityExpr::is_zero),
-            ProbabilityExpr::Scaled { count, inner } => count.is_zero() || inner.is_zero(),
-            ProbabilityExpr::Unknown { .. } => false,
+            ProbabilityExpr::Zero => Some(0.0),
+            ProbabilityExpr::Constant { value } if (0.0..=1.0).contains(value) => Some(*value),
+            ProbabilityExpr::Constant { .. } | ProbabilityExpr::Unknown { .. } => None,
         }
     }
 }
 
-/// One entry in a [`AccuracyGuarantee`]'s provenance trail — enough for a
-/// reader to reconstruct *why* the bound is what it is without re-running
-/// the planner. `#[non_exhaustive]` so runtime evidence and
-/// deployment-specific sources can be appended later.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum GuaranteeSource {
-    /// Deterministic exact computation — zero error by construction.
-    Exact {
-        /// What made it exact (e.g. `"ExactAggregate(Sum)"`,
-        /// `"RetainedExact"`).
-        reason: String,
-    },
-    /// The concrete sketch a evaluation's local guarantee was derived from.
-    SketchEvaluation {
-        algorithm: String,
-        /// Stable estimator/analysis contract used to derive this guarantee.
-        #[serde(default)]
-        contract: String,
-        params: serde_json::Value,
-        query: String,
-    },
-}
-
-/// The machine-readable accuracy statement attached to a finalized
-/// post-ASAP value — see the module docs for its semantics. Its
-/// [`AccuracySpec`] is symbolic, for plan selection to bind; a guarantee a
-/// sketch or a composition produces covers each output value separately
-/// ([`AccuracyScope::PerValue`]).
+/// The machine-readable accuracy statement of a finalized post-ASAP value
+/// — see the module docs for its semantics. A guarantee a sketch produces
+/// covers each output value separately ([`AccuracyScope::PerValue`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccuracyGuarantee {
     pub spec: AccuracySpec<BoundExpr, ProbabilityExpr>,
-    /// The explanation trail: why the bound is what it is. No planning
-    /// decision reads it.
-    pub provenance: Vec<GuaranteeSource>,
 }
 
 impl AccuracyGuarantee {
@@ -273,7 +92,6 @@ impl AccuracyGuarantee {
         metric: AccuracyMetric,
         error: BoundExpr,
         failure_probability: ProbabilityExpr,
-        provenance: Vec<GuaranteeSource>,
     ) -> Self {
         Self {
             spec: AccuracySpec {
@@ -282,45 +100,19 @@ impl AccuracyGuarantee {
                 failure_probability,
                 accuracy_scope: AccuracyScope::PerValue,
             },
-            provenance,
         }
-    }
-
-    /// This guarantee with every [`BoundExpr::Unknown`] (and
-    /// [`ProbabilityExpr::Unknown`]) leaf whose statistic `value` supplies
-    /// replaced by that value. Plan selection binds statistics this way;
-    /// a statistic `value` does not supply stays unknown.
-    pub fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
-        let mut bound = self.clone();
-        bound.spec.error = self.spec.error.bind(value);
-        bound.spec.failure_probability = self.spec.failure_probability.bind(value);
-        bound
-    }
-
-    /// An unresolved bound or failure probability is not a certificate.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn has_unknown(&self) -> bool {
-        self.spec.error.has_unknown() || self.spec.failure_probability.has_unknown()
     }
 
     /// The zero-error, zero-failure guarantee of a deterministic exact
     /// computation. `metric` is [`AccuracyMetric::ABSOLUTE`]: an exact value
     /// is exact under every metric, and absolute error is the one every
     /// same-metric rule accepts as a zero input.
-    pub fn exact(reason: impl Into<String>) -> Self {
+    pub fn exact() -> Self {
         Self::new(
             AccuracyMetric::ABSOLUTE,
-            BoundExpr::Zero,
+            BoundExpr::Constant { value: 0.0 },
             ProbabilityExpr::Zero,
-            vec![GuaranteeSource::Exact {
-                reason: reason.into(),
-            }],
         )
-    }
-
-    /// `true` iff this guarantee promises zero error with certainty.
-    pub fn is_exact(&self) -> bool {
-        self.spec.error.is_zero() && self.spec.failure_probability.is_zero()
     }
 }
 
@@ -328,184 +120,36 @@ impl AccuracyGuarantee {
 mod tests {
     use super::*;
 
-    impl BoundExpr {
-        fn optimistic_floor(&self) -> Self {
-            match self {
-                Self::Unknown { .. } => Self::Zero,
-                Self::Sum { terms } => Self::Sum {
-                    terms: terms.iter().map(Self::optimistic_floor).collect(),
-                },
-                Self::Product { factors } => Self::Product {
-                    factors: factors.iter().map(Self::optimistic_floor).collect(),
-                },
-                Self::Scaled { factor, inner } => Self::Scaled {
-                    factor: *factor,
-                    inner: Box::new(inner.optimistic_floor()),
-                },
-                Self::Max { terms } => Self::Max {
-                    terms: terms.iter().map(Self::optimistic_floor).collect(),
-                },
-                other => other.clone(),
-            }
-        }
-    }
-
-    impl ProbabilityExpr {
-        fn optimistic_floor(&self) -> Self {
-            match self {
-                Self::Unknown { .. } => Self::Zero,
-                Self::UnionBound { terms } => Self::UnionBound {
-                    terms: terms.iter().map(Self::optimistic_floor).collect(),
-                },
-                Self::Scaled { count, inner } => Self::Scaled {
-                    count: count.optimistic_floor(),
-                    inner: Box::new(inner.optimistic_floor()),
-                },
-                other => other.clone(),
-            }
-        }
-    }
-
-    impl AccuracyGuarantee {
-        /// Optimistic lower bound (tests only): unknown non-negative
-        /// contributions count as zero, so it cannot certify a candidate; the
-        /// original guarantee remains unresolved.
-        fn optimistic_floor(&self) -> Self {
-            let mut floor = self.clone();
-            floor.spec.error = self.spec.error.optimistic_floor();
-            floor.spec.failure_probability = self.spec.failure_probability.optimistic_floor();
-            floor
-        }
-    }
-
+    /// An unknown failure probability never evaluates to zero.
     #[test]
-    fn unknown_statistic_never_evaluates_to_zero() {
-        let b = BoundExpr::Product {
-            factors: vec![
-                BoundExpr::Constant { value: 0.01 },
-                BoundExpr::Unknown {
-                    statistic: "input_row_count".into(),
-                },
-            ],
+    fn an_unknown_failure_probability_never_evaluates_to_zero() {
+        let unknown = ProbabilityExpr::Unknown {
+            statistic: "hll_failure_probability".into(),
         };
-        assert_eq!(b.evaluate(), None);
-        assert!(!b.is_zero());
-        let p = ProbabilityExpr::Scaled {
-            count: BoundExpr::Unknown {
-                statistic: "input_row_count".into(),
-            },
-            inner: Box::new(ProbabilityExpr::Constant { value: 0.01 }),
-        };
-        assert_eq!(p.evaluate(), None);
-    }
-
-    #[test]
-    fn optimistic_floor_preserves_known_contributions_without_certifying() {
-        let guarantee = AccuracyGuarantee::new(
-            AccuracyMetric::ABSOLUTE_STREAM_L1,
-            BoundExpr::Sum {
-                terms: vec![
-                    BoundExpr::Constant { value: 0.1 },
-                    BoundExpr::Unknown {
-                        statistic: "collision".into(),
-                    },
-                ],
-            },
-            ProbabilityExpr::UnionBound {
-                terms: vec![
-                    ProbabilityExpr::Constant { value: 0.02 },
-                    ProbabilityExpr::Unknown {
-                        statistic: "failure".into(),
-                    },
-                ],
-            },
-            vec![],
-        );
-        assert!(guarantee.has_unknown());
-        assert_eq!(guarantee.spec.error.evaluate(), None);
-        let floor = guarantee.optimistic_floor();
-        assert_eq!(floor.spec.error.evaluate(), Some(0.1));
-        assert_eq!(floor.spec.failure_probability.evaluate(), Some(0.02));
-        assert!(!floor.has_unknown());
-        assert!(guarantee.has_unknown());
+        assert_eq!(unknown.evaluate(), None);
+        assert_eq!(ProbabilityExpr::Zero.evaluate(), Some(0.0));
     }
 
     #[test]
     fn invalid_numeric_leaves_fail_closed() {
         assert_eq!(BoundExpr::Constant { value: -0.1 }.evaluate(), None);
-        assert_eq!(
-            BoundExpr::Scaled {
-                factor: -1.0,
-                inner: Box::new(BoundExpr::Constant { value: 0.1 }),
-            }
-            .evaluate(),
-            None
-        );
+        assert_eq!(BoundExpr::Constant { value: f64::NAN }.evaluate(), None);
         assert_eq!(ProbabilityExpr::Constant { value: -0.1 }.evaluate(), None);
         assert_eq!(ProbabilityExpr::Constant { value: 1.1 }.evaluate(), None);
-    }
-
-    #[test]
-    fn union_bound_sums_and_clamps() {
-        let p = ProbabilityExpr::UnionBound {
-            terms: vec![
-                ProbabilityExpr::Constant { value: 0.7 },
-                ProbabilityExpr::Constant { value: 0.6 },
-            ],
-        };
-        assert_eq!(p.evaluate(), Some(1.0));
     }
 
     #[test]
     fn guarantee_round_trips_through_json() {
         let g = AccuracyGuarantee::new(
             AccuracyMetric::ABSOLUTE_STREAM_L1,
-            BoundExpr::Sum {
-                terms: vec![
-                    BoundExpr::Constant { value: 0.01 },
-                    BoundExpr::Scaled {
-                        factor: 2.0,
-                        inner: Box::new(BoundExpr::Constant { value: 0.005 }),
-                    },
-                ],
-            },
-            ProbabilityExpr::UnionBound {
-                terms: vec![ProbabilityExpr::Constant { value: 0.01 }],
-            },
-            vec![GuaranteeSource::Exact {
-                reason: "test".into(),
-            }],
+            BoundExpr::Constant { value: 0.01 },
+            ProbabilityExpr::Constant { value: 0.01 },
         );
         let json = serde_json::to_value(&g).unwrap();
         assert_eq!(json["spec"]["accuracy_metric"], "absolute_stream_l1");
         assert_eq!(json["spec"]["accuracy_scope"], "per_value");
-        assert_eq!(json["spec"]["error"]["op"], "sum");
+        assert_eq!(json["spec"]["error"]["op"], "constant");
         let back: AccuracyGuarantee = serde_json::from_value(json).unwrap();
         assert_eq!(back, g);
-    }
-
-    /// A supplied statistic replaces its `Unknown` leaves, in the bound and
-    /// in the failure probability; any other statistic stays unknown.
-    #[test]
-    fn binding_a_statistic_replaces_only_its_unknown_leaves() {
-        let rows = || BoundExpr::Unknown {
-            statistic: "input_row_count".into(),
-        };
-        let g = AccuracyGuarantee::new(
-            AccuracyMetric::ABSOLUTE,
-            BoundExpr::Product {
-                factors: vec![BoundExpr::Constant { value: 0.01 }, rows()],
-            },
-            ProbabilityExpr::Scaled {
-                count: rows(),
-                inner: Box::new(ProbabilityExpr::Constant { value: 1e-4 }),
-            },
-            vec![],
-        );
-        let bound = g.bind(&|statistic| (statistic == "input_row_count").then_some(10.0));
-        assert_eq!(bound.spec.error.evaluate(), Some(0.1));
-        assert!((bound.spec.failure_probability.evaluate().unwrap() - 1e-3).abs() < 1e-12);
-        let unbound = g.bind(&|_| None);
-        assert_eq!(unbound, g);
     }
 }

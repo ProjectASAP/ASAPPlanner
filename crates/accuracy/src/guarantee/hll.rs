@@ -2,24 +2,16 @@
 
 use super::*;
 
-pub(super) fn generic_guarantee(
-    algorithm: &SketchAlgorithm,
-    params: &SketchParams,
-    query: &SketchStatistic,
-) -> Option<AccuracyGuarantee> {
+pub(super) fn guarantee(params: &SketchParams) -> Option<AccuracyGuarantee> {
     let SketchParams::Hll { precision, .. } = params else {
         return None;
     };
     Some(super::bounded_guarantee(
-        algorithm,
-        params,
-        query,
         AccuracyMetric::Relative,
         relative_standard_error(*precision),
         ProbabilityExpr::Unknown {
             statistic: "hll_estimator_failure_probability".into(),
         },
-        "generic_hll_rse_only_no_confidence_v1",
     ))
 }
 /// HLL's relative standard error, `1.04 / √m` for `m = 2^precision` buckets.

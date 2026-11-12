@@ -8,9 +8,7 @@ use asap_types::summary_type::KLL_MAX_K;
 /// calibration at 0.01 and above, scaled by [`delta_scale`] below. `None`
 /// for a `k` above the library's cap or a probability outside (0, 1].
 pub(super) fn guarantee(
-    algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchStatistic,
     failure_probability: f64,
 ) -> Option<AccuracyGuarantee> {
     let SketchParams::Kll { k } = params else {
@@ -21,34 +19,22 @@ pub(super) fn guarantee(
     }
     let delta = failure_probability.min(KLL_CALIBRATED_FAILURE_PROBABILITY);
     let scale = delta_scale(delta)?;
-    let contract = if delta < KLL_CALIBRATED_FAILURE_PROBABILITY {
-        KLL_DELTA_SCALED_CONTRACT
-    } else {
-        KLL_EMPIRICAL_99_CONTRACT
-    };
     Some(super::bounded_guarantee(
-        algorithm,
-        params,
-        query,
         AccuracyMetric::Rank,
         kll_rank_error_99(*k) * scale,
         ProbabilityExpr::Constant { value: delta },
-        contract,
     ))
 }
-/// The empirical 99% calibration of the pinned Apache DataSketches KLL.
-const KLL_EMPIRICAL_99_CONTRACT: &str = "apache_datasketches_kll_empirical_99_a9b42755072b";
-/// That calibration scaled to a failure probability below 0.01 by the
-/// Gaussian quantile ratio ([`delta_scale`]): a model, not a measurement, so
-/// it is named apart from the calibration.
-const KLL_DELTA_SCALED_CONTRACT: &str =
-    "apache_datasketches_kll_empirical_99_delta_scaled_a9b42755072b";
-pub(crate) const KLL_RANK_ERROR_COEFFICIENT_99: f64 = 2.296;
-pub(crate) const KLL_RANK_ERROR_EXPONENT_99: f64 = 0.9723;
+/// The empirical 99% calibration of the pinned Apache DataSketches KLL:
+/// rank error `2.296 / k^0.9723` at failure probability 0.01. Below 0.01 it
+/// is scaled by the Gaussian quantile ratio ([`delta_scale`]), a model, not
+/// a measurement.
+const KLL_RANK_ERROR_COEFFICIENT_99: f64 = 2.296;
+const KLL_RANK_ERROR_EXPONENT_99: f64 = 0.9723;
 /// The failure probability of the empirical 99% calibration.
-pub(crate) const KLL_CALIBRATED_FAILURE_PROBABILITY: f64 = 0.01;
+const KLL_CALIBRATED_FAILURE_PROBABILITY: f64 = 0.01;
 
-pub(crate) fn kll_rank_error_99(k: u32) -> f64 {
+fn kll_rank_error_99(k: u32) -> f64 {
     KLL_RANK_ERROR_COEFFICIENT_99 / f64::from(k).powf(KLL_RANK_ERROR_EXPONENT_99)
 }
 
@@ -129,14 +115,7 @@ mod tests {
     /// A hand-built `k` above the library's cap gives no guarantee.
     #[test]
     fn a_k_above_the_library_cap_gives_no_guarantee() {
-        let g = |k| {
-            guarantee(
-                &SketchAlgorithm::Kll,
-                &SketchParams::Kll { k },
-                &SketchStatistic::Quantile { q: 0.99 },
-                KLL_CALIBRATED_FAILURE_PROBABILITY,
-            )
-        };
+        let g = |k| guarantee(&SketchParams::Kll { k }, KLL_CALIBRATED_FAILURE_PROBABILITY);
         assert!(g(KLL_MAX_K).is_some());
         assert!(g(KLL_MAX_K + 1).is_none());
     }

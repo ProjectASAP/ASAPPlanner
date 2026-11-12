@@ -34,7 +34,7 @@ pub struct CandidateForMemoGroup {
     /// "Fused groups").
     pub fused_groups: Vec<MemoGroupId>,
     /// Which rule added it. Not in the formulation: kept for
-    /// `stage_pipeline --text` and the viewer (approved 2026-11-05).
+    /// `stage_pipeline --text` and the viewer.
     pub origin: OriginOfCandidateForMemoGroup,
 }
 
@@ -52,7 +52,7 @@ impl CandidateForMemoGroup {
         let input_requirements = vec![LogicalRequirements::default(); operator.children().len()];
         Self {
             expression: CandidateExpression { operator },
-            logical_properties: LogicalProperties::new(parameters),
+            logical_properties: LogicalProperties { parameters },
             input_requirements,
             fused_groups,
             origin,
@@ -129,10 +129,6 @@ pub struct LogicalProperties {
 }
 
 impl LogicalProperties {
-    pub fn new(parameters: Option<SketchParams>) -> Self {
-        Self { parameters }
-    }
-
     /// $\boldsymbol\theta_v$.
     pub fn parameters(&self) -> Option<&SketchParams> {
         self.parameters.as_ref()

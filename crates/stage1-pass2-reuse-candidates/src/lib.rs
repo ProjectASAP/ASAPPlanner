@@ -10,14 +10,13 @@
 //! `asap-accuracy` for the readout levels and $\alpha^{\log}$. It depends on
 //! no other stage crate, and the planner facade calls it after Pass 1.
 
-/// Step 4: dead-candidate elimination and its root causes.
+/// Steps 4 and 5: dead-candidate elimination and its root causes.
 mod dead_candidates;
-/// Step 6: the possible edges and their $\alpha^{\log}$.
+/// Steps 4 to 6: the possible edges and their $\alpha^{\log}$.
 mod edges;
-/// The evaluation grid of each group, per query reaching it.
+/// Steps 4 to 6: the evaluation grid of each group, which a chain's width
+/// must divide.
 mod evaluation_grids;
-/// The groups each query may read only exactly.
-mod exact_only_groups;
 /// Step 3: readout requirements.
 mod readout_requirements;
 /// Steps 1, 2 and 5: the rules that add groups and candidates.
@@ -29,7 +28,7 @@ mod tests;
 
 use std::collections::BTreeSet;
 
-use asap_accuracy::{accepted_metrics, AccuracyEvidence};
+use asap_accuracy::{AccuracyEvidence, ErrorMetricsOfMemo};
 use asap_types::stages::{
     CandidateError, CandidateForMemoGroupId, LogicalASAPMemoCandidates, LogicalEdge, Memo,
     MemoGroupError, PrunedLogicalCandidate,
@@ -37,8 +36,7 @@ use asap_types::stages::{
 use asap_types::workload::QueryWorkloadEntry;
 use dead_candidates::eliminate_dead_candidates;
 use edges::candidate_edges;
-use evaluation_grids::evaluation_grids;
-use exact_only_groups::exact_only_groups_of_query;
+use evaluation_grids::{evaluation_grids, evaluation_period_ms_per_query};
 use readout_requirements::set_readout_requirements;
 use rules::{chains, rollup, topk};
 
@@ -61,14 +59,15 @@ pub enum Pass2RuleError {
 /// Stage 1, Pass 2 (concepts doc, section 3, "Stage 1, Pass 2"), in order:
 /// 1. rollup from the finest common group;
 /// 2. top-k reuse;
-/// 3. reach, caps and readout requirements, and the groups each query may
-///    read only exactly;
-/// 4. dead-candidate elimination;
-/// 5. chain groups for the surviving state groups, then dead-candidate
-///    elimination again over the memo with them (a merge whose θ serves no
-///    consumer);
+/// 3. reach, caps and readout requirements;
+/// 4. dead-candidate elimination over the logical edges;
+/// 5. chain groups for the surviving state groups, then the edges and
+///    dead-candidate elimination again over the memo with them (a merge
+///    whose θ serves no consumer);
 /// 6. the logical edges between the surviving candidates, with
-///    $\alpha^{\log}$ from `evidence` or the theoretical guarantee.
+///    $\alpha^{\log}$ from `evidence` or the theoretical guarantee, and the
+///    groups each query may read only exactly
+///    (`ErrorMetricsOfMemo::exact_only_groups_of_query`).
 ///
 /// `entries[i]` is query `i`'s workload entry (its evaluation grid).
 pub fn generate_logical_asap_memo_candidates(
@@ -83,30 +82,38 @@ pub fn generate_logical_asap_memo_candidates(
         memo.topological_order()
             .ok_or(Pass2RuleError::CyclicDependencies)
     };
+    // Readout copies add candidates, not groups: one order serves steps 3
+    // and 4.
     let order = topological_order(&memo)?;
-    let (readouts_without_per_value_failure_probability, read_only_exactly) =
-        set_readout_requirements(&mut memo, &order)?;
+    let readout_requirements = set_readout_requirements(&mut memo, &order)?;
     let candidates_of = |pruned: &[PrunedLogicalCandidate]| -> BTreeSet<CandidateForMemoGroupId> {
         pruned.iter().map(|pruned| pruned.candidate).collect()
     };
+    let evaluation_period_ms = evaluation_period_ms_per_query(&memo, entries);
     let before_chains = eliminate_dead_candidates(
         &memo,
         &candidate_edges(
             &memo,
-            &accepted_metrics(&memo, &order),
-            &evaluation_grids(&memo, entries),
-            &readouts_without_per_value_failure_probability,
+            &ErrorMetricsOfMemo::of(&memo, &order),
+            &evaluation_grids(&evaluation_period_ms),
+            &readout_requirements.readouts_without_per_value_failure_probability,
             evidence,
         ),
     );
-    chains::add_chain_groups(&mut memo, entries, &candidates_of(&before_chains))?;
+    chains::add_chain_groups(
+        &mut memo,
+        &evaluation_period_ms,
+        &candidates_of(&before_chains),
+    )?;
     let order = topological_order(&memo)?;
-    let evaluation_grid_of_group = evaluation_grids(&memo, entries);
+    let evaluation_grid_of_group =
+        evaluation_grids(&evaluation_period_ms_per_query(&memo, entries));
+    let error_metrics = ErrorMetricsOfMemo::of(&memo, &order);
     let candidate_edges = candidate_edges(
         &memo,
-        &accepted_metrics(&memo, &order),
+        &error_metrics,
         &evaluation_grid_of_group,
-        &readouts_without_per_value_failure_probability,
+        &readout_requirements.readouts_without_per_value_failure_probability,
         evidence,
     );
     let pruned = eliminate_dead_candidates(&memo, &candidate_edges);
@@ -121,7 +128,12 @@ pub fn generate_logical_asap_memo_candidates(
             satisfies_logical_requirement: edge.satisfies.is_ok(),
         })
         .collect();
-    let exact_only_groups_of_query = exact_only_groups_of_query(&memo, &order, &read_only_exactly);
+    let exact_only_groups_of_query = error_metrics.exact_only_groups_of_query(
+        &memo,
+        &order,
+        &dead,
+        &readout_requirements.exact_only_readout_groups_of_query,
+    );
     Ok(LogicalASAPMemoCandidates {
         memo,
         edges,

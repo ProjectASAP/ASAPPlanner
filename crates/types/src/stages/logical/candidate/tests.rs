@@ -3,17 +3,7 @@ use crate::ir::operator::arguments::Reduction;
 use crate::ir::scalar::expr_ir::ColumnRef;
 use crate::ir::ASAPOp;
 use crate::summary_type::{ExactKind, SummaryUpdate};
-
-/// `SummaryAgg` over group 0 building a state of `summary_type`.
-fn summary_agg(summary_type: FieldDataType) -> Operator<MemoGroupId> {
-    Operator::ASAP(ASAPOp::SummaryAgg {
-        child: MemoGroupId(0),
-        summary_type,
-        input: SummaryUpdate::column(ColumnRef::SampleValue),
-        reduction: Reduction::PerEntity,
-        filter: None,
-    })
-}
+use crate::test_support::memo_fixtures::state;
 
 /// `summary_type_of_operator` reads the summary type of a `SummaryAgg`
 /// and of a chain, and of no other operator.
@@ -33,7 +23,7 @@ fn summary_type_of_operator_reads_the_builds_summary_type() {
         group_by: None,
     });
     assert_eq!(
-        summary_type_of_operator(&summary_agg(kll.clone())),
+        summary_type_of_operator(&state(kll.clone(), MemoGroupId(0))),
         Some(&kll)
     );
     assert_eq!(summary_type_of_operator(&chain), Some(&kll));
@@ -46,7 +36,7 @@ fn summary_type_of_operator_reads_the_builds_summary_type() {
 fn listed_build_parameters_lists_a_sketch_builds_parameters() {
     let kll = SketchAlgorithm::Kll;
     assert_eq!(
-        listed_build_parameters(&summary_agg(FieldDataType::Sketch(kll))),
+        listed_build_parameters(&state(FieldDataType::Sketch(kll), MemoGroupId(0))),
         parameter_list(kll)
             .iter()
             .cloned()
@@ -54,7 +44,7 @@ fn listed_build_parameters_lists_a_sketch_builds_parameters() {
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        listed_build_parameters(&summary_agg(FieldDataType::exact(ExactKind::Sum))),
+        listed_build_parameters(&state(FieldDataType::exact(ExactKind::Sum), MemoGroupId(0))),
         vec![None]
     );
 }

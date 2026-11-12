@@ -1,4 +1,4 @@
-//! Step 6: the logical edges Pass 2 assembles and keeps ($\alpha^{\log}$
+//! Steps 4 to 6: the logical edges Pass 2 assembles and keeps ($\alpha^{\log}$
 //! and the metric rule themselves are tested in `asap_accuracy`).
 
 use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};

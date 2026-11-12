@@ -15,7 +15,7 @@ use crate::guarantee::guarantee_before_failure_probability_check;
 /// error although its failure probability is unknown). `None` for an exact
 /// state and for a summary type with no listed θ or no guarantee for the
 /// statistic (UnivMon's distinct count).
-pub fn readout_metric(
+pub(crate) fn readout_error_metric(
     summary_type: &FieldDataType,
     statistic: &SketchStatistic,
 ) -> Option<AccuracyMetric> {
@@ -31,29 +31,14 @@ pub fn readout_metric(
 }
 
 /// The metric of `candidate`'s error when it is a readout
-/// (`SummaryEstimate`) of a sketch state ([`readout_metric`]); `None` for
-/// any other candidate.
-pub(crate) fn sketch_readout_metric(
+/// (`SummaryEstimate`) of a sketch state ([`readout_error_metric`]); `None`
+/// for any other candidate.
+pub(crate) fn sketch_readout_error_metric(
     memo: &Memo,
     candidate: &CandidateForMemoGroup,
 ) -> Option<AccuracyMetric> {
     let (summary_type, statistic) = sketch_readout(memo, candidate)?;
-    readout_metric(&summary_type, statistic)
-}
-
-/// Per group, by group id, per candidate, by index in the group: its
-/// [`sketch_readout_metric`].
-pub fn readout_metric_of_candidate(memo: &Memo) -> Vec<Vec<Option<AccuracyMetric>>> {
-    memo.groups()
-        .iter()
-        .map(|group| {
-            group
-                .candidates
-                .iter()
-                .map(|candidate| sketch_readout_metric(memo, candidate))
-                .collect()
-        })
-        .collect()
+    readout_error_metric(&summary_type, statistic)
 }
 
 /// The summary type of the sketch state `candidate` reads and the statistic
@@ -90,19 +75,19 @@ mod tests {
         let quantile = SketchStatistic::Quantile { q: 0.9 };
         let sketch = |algorithm| FieldDataType::Sketch(algorithm);
         assert_eq!(
-            readout_metric(&sketch(SketchAlgorithm::Kll), &quantile),
+            readout_error_metric(&sketch(SketchAlgorithm::Kll), &quantile),
             Some(AccuracyMetric::Rank)
         );
         assert_eq!(
-            readout_metric(&sketch(SketchAlgorithm::DDSketch), &quantile),
+            readout_error_metric(&sketch(SketchAlgorithm::DDSketch), &quantile),
             Some(AccuracyMetric::Relative)
         );
         assert_eq!(
-            readout_metric(&sketch(SketchAlgorithm::Hll), &SketchStatistic::Cardinality),
+            readout_error_metric(&sketch(SketchAlgorithm::Hll), &SketchStatistic::Cardinality),
             Some(AccuracyMetric::Relative)
         );
         assert_eq!(
-            readout_metric(&FieldDataType::exact(ExactKind::Sum), &quantile),
+            readout_error_metric(&FieldDataType::exact(ExactKind::Sum), &quantile),
             None
         );
     }

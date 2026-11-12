@@ -1,4 +1,4 @@
-//! Step 4: dead-candidate elimination and Pass 2's pruned list.
+//! Steps 4 and 5: dead-candidate elimination and Pass 2's pruned list.
 use std::collections::BTreeSet;
 
 use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
@@ -12,7 +12,7 @@ use asap_types::workload::DataWorkload;
 
 use crate::test_fixtures::*;
 use asap_types::test_support::memo_builders::*;
-use asap_types::test_support::memo_fixtures::arithmetic;
+use asap_types::test_support::memo_fixtures::{arithmetic, range};
 
 /// The concepts doc example "ratio of quantiles":
 /// `quantile_over_time(0.99, m[5m]) / quantile_over_time(0.5, m[5m])`,
@@ -26,7 +26,7 @@ use asap_types::test_support::memo_fixtures::arithmetic;
 fn dead_candidates_are_pruned_and_listed_before_chain_groups() {
     let mut memo = Memo::new(&DataWorkload::default());
     let input = scan_group(&mut memo, "m", &["job"], vec![]);
-    let window = range(&mut memo, input, 300);
+    let window = group(&mut memo, range(300_000, input));
     let algorithms = [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch];
     let p99 = quantile_over_time_readouts(&mut memo, window, 0.99, &algorithms);
     let p50 = quantile_over_time_readouts(&mut memo, window, 0.5, &algorithms);
@@ -38,10 +38,10 @@ fn dead_candidates_are_pruned_and_listed_before_chain_groups() {
     query(&mut memo, ratio, Some(target));
     let logical = pass2(memo, &[entry(60_000)]);
     let memo = &logical.memo;
-    let (kll_state, ddsketch_state) = (p99.by_algorithm[0].1, p99.by_algorithm[1].1);
+    let (kll_state, ddsketch_state) = (p99.by_algorithm[0].state, p99.by_algorithm[1].state);
     // Each KLL readout: the metric rule at the ratio, directly.
     for quantile in [&p99, &p50] {
-        let kll_readout = quantile.by_algorithm[0].2;
+        let kll_readout = quantile.by_algorithm[0].candidate_of_result;
         let pruned = pruned_entry(&logical, kll_readout).expect("the KLL readout is pruned");
         assert!(pruned.causes.iter().all(|cause| matches!(
             &cause.root,
@@ -87,7 +87,7 @@ fn dead_candidates_are_pruned_and_listed_before_chain_groups() {
         })
         .collect();
     assert_eq!(pruned_alphas, vec![0.1, 0.05]);
-    let readout_group = readout_of(memo, p99.by_algorithm[1].2).group;
+    let readout_group = p99.by_algorithm[1].readout.group;
     let mut levels: Vec<f64> = requirements_of(memo, readout_group)
         .into_iter()
         .map(|required| required.expect("a DDSketch readout's level").max_error)

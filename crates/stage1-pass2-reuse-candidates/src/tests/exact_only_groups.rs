@@ -1,4 +1,4 @@
-//! Step 3: the groups each query may read only exactly.
+//! Step 6: the groups each query may read only exactly.
 use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
@@ -9,7 +9,7 @@ use asap_types::workload::DataWorkload;
 
 use crate::test_fixtures::*;
 use asap_types::test_support::memo_builders::*;
-use asap_types::test_support::memo_fixtures::arithmetic;
+use asap_types::test_support::memo_fixtures::{arithmetic, range};
 
 /// The metric rule is per query, not per group: Q0 =
 /// `quantile_over_time(0.99, latency[5m]) / quantile_over_time(0.5,
@@ -22,7 +22,7 @@ use asap_types::test_support::memo_fixtures::arithmetic;
 fn a_query_comparing_a_shared_ratio_reads_it_only_exactly() {
     let mut memo = Memo::new(&DataWorkload::default());
     let input = scan_group(&mut memo, "latency", &["job"], vec![]);
-    let window = range(&mut memo, input, 300);
+    let window = group(&mut memo, range(300_000, input));
     let p99 = quantile_over_time_readouts(&mut memo, window, 0.99, &[SketchAlgorithm::DDSketch]);
     let p50 = quantile_over_time_readouts(&mut memo, window, 0.5, &[SketchAlgorithm::DDSketch]);
     let ratio = group(
@@ -52,14 +52,20 @@ fn a_query_comparing_a_shared_ratio_reads_it_only_exactly() {
     let q1 = query(&mut memo, above_one, Some(target()));
     let logical = pass2(memo, &[entry(60_000), entry(60_000)]);
     let exact_only = &logical.exact_only_groups_of_query;
-    for group in [ratio, p99.result, p50.result, p99.by_algorithm[0].1] {
+    for group in [ratio, p99.result, p50.result, p99.by_algorithm[0].state] {
         assert!(!exact_only[q0].contains(&group), "G{}", group.0);
     }
-    for group in [ratio, p99.result, p50.result, p99.by_algorithm[0].1, window] {
+    for group in [
+        ratio,
+        p99.result,
+        p50.result,
+        p99.by_algorithm[0].state,
+        window,
+    ] {
         assert!(exact_only[q1].contains(&group), "G{}", group.0);
     }
     assert!(!exact_only[q1].contains(&above_one));
-    let ddsketch_p99 = readout_of(&logical.memo, p99.by_algorithm[0].2);
+    let ddsketch_p99 = p99.by_algorithm[0].readout;
     assert!(
         pruned_entry(&logical, ddsketch_p99).is_none(),
         "Q0 still reads the DDSketch readout"

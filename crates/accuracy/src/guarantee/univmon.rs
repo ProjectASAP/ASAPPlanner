@@ -21,10 +21,7 @@ use super::*;
 /// lets a shape state one `(ε, δ)`: the columns give `ε`, the rows `δ`.
 const L2_ROW_FAILURE: f64 = 0.1;
 
-const L2_CONTRACT: &str = "univmon_layer0_f2_median_chebyshev_binomial_v1";
-
 pub(super) fn guarantee(
-    algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
 ) -> Option<AccuracyGuarantee> {
@@ -38,20 +35,14 @@ pub(super) fn guarantee(
         return None;
     };
     match query {
-        SketchStatistic::PointCount { value: None, .. } => {
-            Some(AccuracyGuarantee::exact("univmon_unit_update_total"))
-        }
+        SketchStatistic::PointCount { value: None, .. } => Some(AccuracyGuarantee::exact()),
         SketchStatistic::FrequencyL2 if hash_independent(*sketch_rows, *sketch_cols, *layers) => {
             Some(super::bounded_guarantee(
-                algorithm,
-                params,
-                query,
                 AccuracyMetric::Relative,
                 l2_relative_error(*sketch_cols)?,
                 ProbabilityExpr::Constant {
                     value: l2_failure_probability(*sketch_rows),
                 },
-                L2_CONTRACT,
             ))
         }
         // The distinct count needs the source's distinct bound; entropy has
@@ -65,7 +56,7 @@ pub(super) fn guarantee(
 /// UnivMon state encodes, and `rows · (⌈log2 cols⌉ + 1) ≤ 128`
 /// ([`asap_sketchlib::UnivMon::check_shape`]; the heap size is not part of
 /// the hash rules).
-pub(crate) fn hash_independent(rows: u32, cols: u32, layers: u8) -> bool {
+fn hash_independent(rows: u32, cols: u32, layers: u8) -> bool {
     rows as usize <= asap_sketchlib::MATRIX_MAX_ROWS
         && asap_sketchlib::UnivMon::check_shape(
             1,
@@ -135,11 +126,7 @@ mod tests {
     }
 
     fn l2(params: &SketchParams) -> Option<AccuracyGuarantee> {
-        guarantee(
-            &SketchAlgorithm::UnivMon,
-            params,
-            &SketchStatistic::FrequencyL2,
-        )
+        guarantee(params, &SketchStatistic::FrequencyL2)
     }
 
     /// The general collision bound `9/(8w)` applies off powers of two: a
@@ -179,7 +166,6 @@ mod tests {
     fn total_is_exact_and_entropy_uncertified() {
         let params = univmon(54_000, 1, 1, MAX_LAYERS);
         let total = guarantee(
-            &SketchAlgorithm::UnivMon,
             &params,
             &SketchStatistic::PointCount {
                 key: asap_types::ir::scalar::expr_ir::ColumnRef::SampleValue,
@@ -187,12 +173,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(total.is_exact());
-        assert!(guarantee(
-            &SketchAlgorithm::UnivMon,
-            &BASELINE,
-            &SketchStatistic::FrequencyEntropy
-        )
-        .is_none());
+        assert_eq!(total.spec.error.evaluate(), Some(0.0));
+        assert_eq!(total.spec.failure_probability.evaluate(), Some(0.0));
+        assert!(guarantee(&BASELINE, &SketchStatistic::FrequencyEntropy).is_none());
     }
 }

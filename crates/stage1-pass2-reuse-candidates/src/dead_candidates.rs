@@ -1,4 +1,4 @@
-//! Step 4, dead-candidate elimination (concepts doc, section 3): a
+//! Steps 4 and 5, dead-candidate elimination (concepts doc, section 3): a
 //! candidate that is not a query output is dead when it never had a
 //! consumer, or when every edge to a consumer fails or reaches a dead
 //! consumer; any candidate is dead when every edge on one of its inputs
