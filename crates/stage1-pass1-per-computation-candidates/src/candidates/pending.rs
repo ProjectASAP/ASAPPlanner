@@ -4,14 +4,13 @@
 //! check that can find the way unsupported has passed, so an unsupported
 //! way adds nothing.
 
-use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::schema::Schema;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::stages::{
-    CandidateExpression, CandidateForMemoGroup, LogicalProperties, LogicalRequirements, Memo,
-    MemoGroupId, OriginOfCandidateForMemoGroup,
+    listed_build_parameters, CandidateForMemoGroup, Memo, MemoGroupId,
+    OriginOfCandidateForMemoGroup,
 };
-use asap_types::summary_type::{parameter_list, SketchParams};
+use asap_types::summary_type::SketchParams;
 
 use crate::{schema, PerComputationCandidateError};
 
@@ -135,18 +134,7 @@ pub(crate) fn add_state_group(
     fused_groups: &[MemoGroupId],
 ) -> Result<MemoGroupId, PerComputationCandidateError> {
     let group = memo.find_or_add_group(build.clone())?;
-    let configurations: Vec<Option<SketchParams>> = match &build {
-        Operator::ASAP(ASAPOp::SummaryAgg {
-            summary_type: FieldDataType::Sketch(algorithm),
-            ..
-        }) => parameter_list(*algorithm)
-            .iter()
-            .cloned()
-            .map(Some)
-            .collect(),
-        _ => vec![None],
-    };
-    for parameters in configurations {
+    for parameters in listed_build_parameters(&build) {
         add_candidate(
             memo,
             group,
@@ -168,19 +156,14 @@ pub(crate) fn add_candidate(
     parameters: Option<SketchParams>,
     fused_groups: Vec<MemoGroupId>,
 ) -> Result<(), PerComputationCandidateError> {
-    let expression = CandidateExpression { operator };
-    let logical_properties = LogicalProperties::new(&expression, parameters)?;
-    let input_requirements =
-        vec![LogicalRequirements::default(); expression.operator.children().len()];
     memo.add_candidate(
         group,
-        CandidateForMemoGroup {
-            expression,
-            logical_properties,
-            input_requirements,
+        CandidateForMemoGroup::new(
+            operator,
+            parameters,
+            OriginOfCandidateForMemoGroup::Pass1,
             fused_groups,
-            origin: OriginOfCandidateForMemoGroup::Pass1,
-        },
+        ),
     )?;
     Ok(())
 }

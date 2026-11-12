@@ -165,7 +165,7 @@ mod tests {
 
     // From k distinct items on, the estimate is `(k - 1) / U`, with `U` the
     // k-th smallest hash mapped into (0, 1]: the estimator the planner's
-    // KMV bound is proved for (`accuracy::estimators::cardinality`, #694).
+    // KMV bound is proved for (the cardinality guarantee in `asap_accuracy`).
     #[test]
     fn estimates_k_minus_one_over_the_kth_smallest_hash() {
         let k = 256;

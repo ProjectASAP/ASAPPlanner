@@ -4,6 +4,7 @@
 
 mod physical_common;
 mod planner_layering_common;
+mod planning_common;
 
 mod aggregate;
 mod binary_op;
@@ -11,7 +12,6 @@ mod crate_graph;
 mod filtered_aggregates;
 mod finer_aggregate_reuse;
 mod frontend_timestamps;
-mod identical_exact_queries;
 mod independent_plan_seed;
 mod joint_search_equivalence;
 mod kll_tumbling_window_execution;
@@ -20,14 +20,15 @@ mod nested;
 mod operator_design_examples;
 mod operator_sharing;
 mod pass1_candidates;
-mod pass1_candidates_sql;
+mod pass2_promql;
+mod pass2_sql;
 mod per_series_exact_execution;
+mod plan_sharing;
 mod production_rollup_workloads;
 mod promql_to_post_asap;
 mod rollup_controlled;
 mod scan;
 mod schema;
-mod sharing_issue_regressions;
 mod sql_cardinality;
 mod sql_frequency;
 mod sql_to_post_asap;

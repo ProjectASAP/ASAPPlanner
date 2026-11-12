@@ -3,24 +3,256 @@
 //! over the `TimeRange` (and `TimeShift`s) over it as a candidate of the
 //! summary state group.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::rules::Pass2RuleError;
-use asap_types::stages::{CandidateForMemoGroupId, Memo};
-use asap_types::workload::QueryWorkloadEntry;
+use crate::rules::candidates::{
+    add_candidate_if_output_matches, add_candidates_per_input_parameters,
+    add_group_computing_itself, distinct_parameters,
+};
+use crate::Pass2RuleError;
+use asap_types::ir::operator::arguments::{AtModifier, Reduction, TimeShift};
+use asap_types::ir::schema::FieldDataType;
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, Predicate, TimeRangeKind};
+use asap_types::stages::{
+    CandidateForMemoGroupId, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
+};
+use asap_types::summary_type::{SketchParams, SummaryTypeCapability, SummaryUpdate};
+use asap_types::workload::greatest_common_divisor;
 
-/// For each summary state group with a build that survived dead-candidate
-/// elimination (not in `pruned`), a chain group and a merge candidate per
-/// tumbling width $w$ from the gcd closure of the evaluation grids, ranges
-/// and offsets of the queries that reach it and repeat on a known grid.
-/// `entries[q]` is query `q`'s workload entry.
-// Step 5 runs after dead-candidate elimination, which #1207 PR 4 adds.
-#[allow(dead_code)]
+/// For each summary state group S = `SummaryAgg(TimeRange(W,
+/// TimeShift*(X)))` of a summary type that merges, with a build that
+/// survived dead-candidate elimination (`pruned`), and each width $w$: the
+/// chain group $G_w$ = `SummaryTumblingWindowChain[w](X)` (the shifts
+/// stripped, so ranges and offsets over X share it) with one build per θ of
+/// S's surviving builds, the shifts and the `TimeRange` re-wrapped around
+/// it, and the candidates `SummaryMerge` over the outermost of them in S,
+/// each of these one per θ of the group it reads (a chain shared by several
+/// state groups has the builds of all of them).
+///
+/// The widths are the gcd closure of $\gcd(g_q, W, o_1, \ldots)$ over the
+/// queries reaching S whose evaluation period at S, $g_q$, is known
+/// (`evaluation_period_ms_per_query`: below a subquery, its resolution),
+/// with the offsets $o_j$ on S's path; no query with a period, no chain.
+/// The edges from a chain whose width does not divide the evaluation grid
+/// of the group reading it (the gcd over all its readers) fail with
+/// `ChainWidthDoesNotDivideEvaluationGrid` (`candidate_edges`), so the
+/// merge over it is pruned: a 15 s chain never serves a reader every 10 s.
+/// Under `@ T` S adds no width: once every unanchored state has added its
+/// chains, it reads those whose width divides W, the offsets and T, in any
+/// memo order. Under `@ end()` or `@ start()` (a `TimeShift` the front end
+/// puts above the subtree it anchors) no chain is read.
 pub(crate) fn add_chain_groups(
     memo: &mut Memo,
-    entries: &[QueryWorkloadEntry],
+    evaluation_period_ms_per_query: &[BTreeMap<usize, Option<u64>>],
     pruned: &BTreeSet<CandidateForMemoGroupId>,
 ) -> Result<(), Pass2RuleError> {
-    let _ = (memo, entries, pruned);
-    todo!("#1207 PR 4: step 5, chain groups and the merges over them")
+    // The chainable states with the θ of their surviving builds, the
+    // unanchored ones first: an anchored state reads only the chains they
+    // create.
+    let mut states: Vec<(MemoGroupId, ChainPath, Vec<Option<SketchParams>>)> = Vec::new();
+    for (index, memo_group) in memo.groups().iter().enumerate() {
+        let state = MemoGroupId(index as u32);
+        let Some(path) = chain_path(memo, state) else {
+            continue;
+        };
+        let parameters = distinct_parameters(
+            memo_group
+                .candidates
+                .iter()
+                .enumerate()
+                .filter(|&(index_in_group, candidate)| {
+                    let survived = !pruned.contains(&CandidateForMemoGroupId {
+                        group: state,
+                        index_in_group,
+                    });
+                    survived && candidate.expression.operator == memo_group.expression
+                })
+                .map(|(_, candidate)| candidate),
+        );
+        if !parameters.is_empty() {
+            states.push((state, path, parameters));
+        }
+    }
+    states.sort_by_key(|(_, path, _)| path.anchored_at_ms.is_some());
+    // First every chain group with its builds, then the groups reading
+    // them, so a chain shared by state groups offers each every θ it has.
+    let mut chains_of_states: Vec<(MemoGroupId, ChainPath, Vec<MemoGroupId>)> = Vec::new();
+    for (state, path, parameters) in states {
+        let divisor = path.shifts.iter().fold(path.window_ms, |gcd, shift| {
+            greatest_common_divisor(gcd, shift.offset_ms.unsigned_abs())
+        });
+        let widths: BTreeSet<u64> = match path.anchored_at_ms {
+            Some(at_ms) => existing_chain_widths(memo, &path)
+                .into_iter()
+                .filter(|&width| divisor % width == 0 && at_ms.unsigned_abs() % width == 0)
+                .collect(),
+            None => gcd_closure(
+                evaluation_period_ms_per_query[state.0 as usize]
+                    .values()
+                    .filter_map(|&period_ms| Some(greatest_common_divisor(period_ms?, divisor))),
+            ),
+        };
+        let mut chain_groups = Vec::new();
+        for width in widths {
+            let chain = path.chain(width);
+            let chain_group = memo.find_or_add_group(chain.clone())?;
+            for theta in &parameters {
+                add_candidate_if_output_matches(
+                    memo,
+                    chain_group,
+                    chain.clone(),
+                    theta.clone(),
+                    OriginOfCandidateForMemoGroup::TumblingWindows,
+                )?;
+            }
+            chain_groups.push(chain_group);
+        }
+        chains_of_states.push((state, path, chain_groups));
+    }
+    for (state, path, chain_groups) in chains_of_states {
+        for chain_group in chain_groups {
+            let mut top = chain_group;
+            for shift in path.shifts.iter().rev() {
+                top = add_group_computing_itself(
+                    memo,
+                    Operator::NonASAP(NonASAPOp::TimeShift {
+                        shift: *shift,
+                        child: top,
+                    }),
+                    OriginOfCandidateForMemoGroup::TumblingWindows,
+                )?;
+            }
+            let windows = add_group_computing_itself(
+                memo,
+                Operator::NonASAP(NonASAPOp::TimeRange {
+                    range: std::time::Duration::from_millis(path.window_ms),
+                    kind: TimeRangeKind::Range,
+                    child: top,
+                }),
+                OriginOfCandidateForMemoGroup::TumblingWindows,
+            )?;
+            add_candidates_per_input_parameters(
+                memo,
+                state,
+                Operator::ASAP(ASAPOp::SummaryMerge {
+                    children: vec![windows],
+                    group_by: None,
+                }),
+                OriginOfCandidateForMemoGroup::TumblingWindows,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// A state group's walk down to the rows its chain reads:
+/// `SummaryAgg` → `TimeRange(W)` → `TimeShift`s → X, with the build's
+/// arguments the chain keeps.
+struct ChainPath {
+    summary_type: FieldDataType,
+    input: SummaryUpdate,
+    reduction: Reduction,
+    filter: Option<Predicate<MemoGroupId>>,
+    window_ms: u64,
+    /// Top down.
+    shifts: Vec<TimeShift>,
+    /// T of an `@ T` among the shifts.
+    anchored_at_ms: Option<i64>,
+    rows: MemoGroupId,
+}
+
+impl ChainPath {
+    /// `SummaryTumblingWindowChain[width](X)` with the build's arguments.
+    fn chain(&self, width: u64) -> Operator<MemoGroupId> {
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: self.rows,
+            summary_type: self.summary_type.clone(),
+            input: self.input.clone(),
+            reduction: self.reduction.clone(),
+            filter: self.filter.clone(),
+            tumbling_window_width_ms: width,
+        })
+    }
+}
+
+/// S's [`ChainPath`]: a `SummaryAgg` of a summary type whose states merge
+/// (its capability row), over a range `TimeRange(W)` with `W > 0`, over
+/// `TimeShift`s with at most one `@ T` and no `@ end()` or `@ start()`.
+fn chain_path(memo: &Memo, state: MemoGroupId) -> Option<ChainPath> {
+    let expression = &memo.groups()[state.0 as usize].expression;
+    let Operator::ASAP(ASAPOp::SummaryAgg {
+        child,
+        summary_type,
+        input,
+        reduction,
+        filter,
+    }) = expression
+    else {
+        return None;
+    };
+    SummaryTypeCapability::of(summary_type).merge_inputs?;
+    let Operator::NonASAP(NonASAPOp::TimeRange {
+        range,
+        kind: TimeRangeKind::Range,
+        child: below,
+    }) = &memo.groups()[child.0 as usize].expression
+    else {
+        return None;
+    };
+    let window_ms = u64::try_from(range.as_millis()).ok().filter(|&ms| ms > 0)?;
+    let (mut shifts, mut anchored_at_ms, mut rows) = (Vec::new(), None, *below);
+    while let Operator::NonASAP(NonASAPOp::TimeShift { shift, child }) =
+        &memo.groups()[rows.0 as usize].expression
+    {
+        match shift.at {
+            None => {}
+            Some(AtModifier::Timestamp(at_ms)) if anchored_at_ms.is_none() => {
+                anchored_at_ms = Some(at_ms)
+            }
+            Some(_) => return None,
+        }
+        shifts.push(*shift);
+        rows = *child;
+    }
+    Some(ChainPath {
+        summary_type: summary_type.clone(),
+        input: input.clone(),
+        reduction: reduction.clone(),
+        filter: filter.clone(),
+        window_ms,
+        shifts,
+        anchored_at_ms,
+        rows,
+    })
+}
+
+/// The widths of the chain groups over `path`'s rows with its build's
+/// arguments that the memo has already.
+fn existing_chain_widths(memo: &Memo, path: &ChainPath) -> Vec<u64> {
+    memo.groups()
+        .iter()
+        .filter_map(|group| match &group.expression {
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }) if group.expression == path.chain(*tumbling_window_width_ms) => {
+                Some(*tumbling_window_width_ms)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The gcd closure of `widths`: each, and the gcd of every two in it.
+fn gcd_closure(widths: impl IntoIterator<Item = u64>) -> BTreeSet<u64> {
+    let mut closure: BTreeSet<u64> = BTreeSet::new();
+    for width in widths.into_iter().filter(|&width| width > 0) {
+        let gcds: Vec<u64> = closure
+            .iter()
+            .map(|&known| greatest_common_divisor(known, width))
+            .collect();
+        closure.insert(width);
+        closure.extend(gcds);
+    }
+    closure
 }

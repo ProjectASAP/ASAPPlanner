@@ -1,4 +1,4 @@
-//! Acceptance tests for operator sharing (issue #468): one operator IR
+//! Acceptance tests for operator sharing: one operator IR
 //! before and after ASAP optimization, so non-ASAP operators sit both above
 //! and below summary operators, can share inputs with them, and can carry
 //! summaries below set operators.
@@ -68,7 +68,7 @@ fn is_scan(node: &OperatorNode) -> bool {
     matches!(node.non_asap(), Some(NonASAPOp::Scan { .. }))
 }
 
-// #468 problem 2: the exact aggregate and the sketch read one shared Scan
+// Problem 2: the exact aggregate and the sketch read one shared Scan
 // (`Rc::ptr_eq`), not two copies.
 #[ignore = "waits for the binding rule splitting multi-measure aggregates"]
 #[tokio::test]
@@ -101,7 +101,7 @@ async fn exact_aggregate_and_sketch_share_one_scan() {
     );
 }
 
-// #468 problem 3: a summary can sit below a set operator — each side of the
+// Problem 3: a summary can sit below a set operator — each side of the
 // UNION ALL holds its own SummaryEstimate.
 #[tokio::test]
 #[ignore = "plan selection picks the exact plan: a query-time summary on each side never costs less than the exact aggregate until Pass 2 shares it (#580)"]

@@ -57,7 +57,7 @@ fn rows() -> Vec<Vec<Value>> {
 
 /// Run the logical DAG `root` over [`rows`]; rows come back shown and sorted.
 fn execute(root: &Rc<OperatorNode>) -> Vec<String> {
-    let dag = asap_types::test_support::physical_asap_dag_at_query_time(root).unwrap();
+    let dag = asap_types::test_support::forwarders::physical_asap_dag_at_query_time(root).unwrap();
     let scan = dag
         .nodes
         .iter()

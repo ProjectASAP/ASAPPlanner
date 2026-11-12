@@ -1,13 +1,21 @@
-//! Memo expressions over group ids that the memo's unit tests and this
+//! Memo expressions over group ids that the memo's unit tests, this
 //! crate's memo integration tests (`memo_group_properties`,
-//! `memo_aggregate_coverage`) build their examples from.
+//! `memo_aggregate_coverage`) and the stage crates' tests build their
+//! examples from. The builders that add them to a memo are in
+//! [`memo_builders`](super::memo_builders).
 use std::time::Duration;
 
-use crate::ir::operator::arguments::{AtModifier, Reduction, Source, SourceColumn, TimeShift};
+use crate::ir::operator::arguments::{
+    AtModifier, BinaryOpKind, Reduction, Source, SourceColumn, TimeShift,
+};
 use crate::ir::operator::AggIntent;
-use crate::ir::scalar::ColumnRef;
+use crate::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind};
+use crate::ir::scalar::{ColumnRef, ScalarValue};
 use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
-use crate::ir::{ASAPOp, NonASAPOp, Operator, Predicate, ScalarExpr, TimeRangeKind};
+use crate::ir::{
+    ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr,
+    TimeRangeKind,
+};
 use crate::stages::MemoGroupId;
 use crate::summary_type::{SketchStatistic, SummaryUpdate};
 
@@ -85,11 +93,20 @@ pub fn shift(offset_ms: i64, at: Option<AtModifier>, child: MemoGroupId) -> Oper
 
 /// `SummaryAgg[summary_type]` of the sample value per series.
 pub fn state(summary_type: FieldDataType, child: MemoGroupId) -> Operator<MemoGroupId> {
+    state_grouped_by(summary_type, Reduction::PerEntity, child)
+}
+
+/// `SummaryAgg[summary_type]` of the sample value, grouped by `reduction`.
+pub fn state_grouped_by(
+    summary_type: FieldDataType,
+    reduction: Reduction,
+    child: MemoGroupId,
+) -> Operator<MemoGroupId> {
     Operator::ASAP(ASAPOp::SummaryAgg {
         child,
         summary_type,
         input: SummaryUpdate::column(ColumnRef::SampleValue),
-        reduction: Reduction::PerEntity,
+        reduction,
         filter: None,
     })
 }
@@ -131,5 +148,40 @@ pub fn readout(query: SketchStatistic, state: MemoGroupId) -> Operator<MemoGroup
     Operator::ASAP(ASAPOp::SummaryEstimate {
         summary_input: state,
         query,
+    })
+}
+
+/// `column <op> literal`, with `semantics` (the frontend's comparison
+/// rules).
+pub fn compare(
+    column: usize,
+    op: CompareOpKind,
+    literal: ScalarValue,
+    semantics: ExprSemantics,
+) -> ScalarExpr<MemoGroupId> {
+    ScalarExpr::Compare {
+        left: Box::new(ScalarExpr::Column(column)),
+        op,
+        right: Box::new(ScalarExpr::Literal(literal)),
+        semantics,
+    }
+}
+
+/// `lhs <kind> rhs`, value by value, without vector matching.
+pub fn arithmetic(
+    kind: ArithmeticOpKind,
+    lhs: MemoGroupId,
+    rhs: MemoGroupId,
+) -> Operator<MemoGroupId> {
+    Operator::NonASAP(NonASAPOp::BinaryOp {
+        operator: BinaryOperator {
+            checked_relative_division: false,
+            checked_finite_division: false,
+            kind: BinaryOpKind::Arithmetic(kind),
+            vector_match: None,
+        },
+        return_bool: false,
+        lhs,
+        rhs,
     })
 }

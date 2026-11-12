@@ -387,7 +387,6 @@ fn global_extrema_bind_with_planner_derived_schema() {
             lifetime: Default::default(),
             parameters: None,
             output_schema: (*output).clone(),
-            guarantee: None,
             retention_ms: None,
             selected_physical_candidate: None,
             view_coverage: None,
@@ -931,7 +930,6 @@ fn planner_node(
                 })
                 .collect(),
         ),
-        guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
         view_coverage: None,
@@ -1165,7 +1163,6 @@ fn exact_aggregate_node(
         lifetime: Default::default(),
         parameters: None,
         output_schema: (*schema(&[(name, dtype, false)])).clone(),
-        guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
         view_coverage: None,

@@ -7,8 +7,7 @@
 //! group; Pass 2 extends that memo.
 //!
 //! It depends only on `asap-types` (its input and output memo are in
-//! `asap_types::stages`) and the shared accuracy model (`asap-accuracy`,
-//! for the statistic each intent reads). It depends on no other stage
+//! `asap_types::stages`). It depends on no other stage
 //! crate, and the planner facade calls it after Stage 0. It depends on no
 //! query-language frontend either; its tests build their input memo through
 //! `Memo::find_or_add_group` and `Memo::add_query`.
@@ -37,9 +36,7 @@ mod tests;
 use asap_types::deployment_capabilities::SupportedSummary;
 use asap_types::ir::schema::Schema;
 use asap_types::ir::{Operator, SchemaDerivationError};
-use asap_types::stages::{
-    CandidateError, LogicalPropertiesError, Memo, MemoGroupError, MemoGroupId,
-};
+use asap_types::stages::{CandidateError, Memo, MemoGroupError, MemoGroupId};
 use thiserror::Error;
 
 use candidates::add_pass1_candidates;
@@ -62,10 +59,6 @@ pub enum PerComputationCandidateError {
     /// its group's result: a bug in the rule that built it.
     #[error(transparent)]
     Candidate(#[from] CandidateError),
-    /// A candidate Pass 1 built has logical properties that cannot go
-    /// together: a bug in the rule that built it.
-    #[error(transparent)]
-    LogicalProperties(#[from] LogicalPropertiesError),
     #[error("unsupported substitution in logical ASAP-aware optimization: {0}")]
     Unsupported(&'static str),
 }

@@ -58,7 +58,6 @@ fn node(id: usize, payload: Payload, output: Schema) -> PhysicalASAPDAGNode {
         lifetime: Lifetime::None,
         parameters: None,
         output_schema: output,
-        guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
         view_coverage: None,

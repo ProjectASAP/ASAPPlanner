@@ -52,7 +52,6 @@ fn sorted_scan(schema: &Schema, identity: &Source) -> PhysicalASAPDAG {
         lifetime: Default::default(),
         parameters: None,
         output_schema: schema.clone(),
-        guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
         view_coverage: None,

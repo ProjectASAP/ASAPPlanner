@@ -55,7 +55,7 @@ pub fn execute_raw_rows_at(
     use asap_executor::physical_planner::compile;
     use asap_types::ir::NonASAPOp;
     use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
-    let wire = asap_types::test_support::physical_asap_dag_at_query_time(root).unwrap();
+    let wire = asap_types::test_support::forwarders::physical_asap_dag_at_query_time(root).unwrap();
     let (source, schema) = wire
         .nodes
         .iter()

@@ -1,4 +1,4 @@
-//! Cross-frontend evaluation-time semantics (issues #46 and #184).
+//! Cross-frontend evaluation-time semantics.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql_root;

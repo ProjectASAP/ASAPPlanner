@@ -142,10 +142,12 @@ pub struct SourceFacts {
     /// it must hold for the longest evaluation window any of them uses; a
     /// filter or a shorter window only lowers it. Each group's own items
     /// count separately: the bound is per output row. The deployment must
-    /// enforce it; an observed distinct count is not a bound. Plan
-    /// selection binds it to give classic HLL (and a distinct-count UnivMon)
-    /// its failure probability per output row; without it that probability
-    /// is unknown. KMV's guarantee needs no bound.
+    /// enforce it; an observed distinct count is not a bound. It is for a
+    /// distinct-count guarantee whose failure probability per output row
+    /// depends on the number of distinct items (classic HLL, a
+    /// distinct-count UnivMon); no guarantee in `asap_accuracy` reads it
+    /// yet, so those readouts serve no query with an accuracy target. KMV's
+    /// guarantee needs no bound.
     #[serde(default)]
     pub max_distinct_per_evaluation: Option<u64>,
     /// How many distinct values each label (PromQL) or column (SQL) of the

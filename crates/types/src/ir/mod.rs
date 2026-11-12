@@ -1,4 +1,4 @@
-//! The operator IR from #511: one operator DAG for every planning stage,
+//! The operator IR: one operator DAG for every planning stage,
 //! arranged by IR section.
 pub mod operator;
 pub mod properties;

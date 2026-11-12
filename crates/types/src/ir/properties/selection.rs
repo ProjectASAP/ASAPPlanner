@@ -167,7 +167,7 @@ mod limit_bound {
 
 /// `column = v`, `!=`, `<`, `<=`, `>`, `>=`, `[NOT] IN (...)` and `OR` of
 /// equalities on one column, with non-null literals.
-pub(crate) fn constraint_of<C>(expr: &ScalarExpr<C>) -> Option<(ColumnId, Constraint)> {
+pub fn constraint_of<C>(expr: &ScalarExpr<C>) -> Option<(ColumnId, Constraint)> {
     let literal = |e: &ScalarExpr<C>| match e {
         ScalarExpr::Literal(v) if *v != ScalarValue::Null => Some(v.clone()),
         _ => None,
@@ -443,8 +443,8 @@ impl Constraint {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
 impl SelectionBox {
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(columns: BTreeMap<SourceColumn, Constraint>) -> Self {
         Self { columns }
     }
@@ -453,9 +453,7 @@ impl SelectionBox {
     pub fn columns(&self) -> &BTreeMap<SourceColumn, Constraint> {
         &self.columns
     }
-}
 
-impl SelectionBox {
     /// Whether no row lies in both boxes: some column is restricted by both
     /// and the restrictions are disjoint.
     pub(crate) fn disjoint(&self, other: &Self) -> bool {

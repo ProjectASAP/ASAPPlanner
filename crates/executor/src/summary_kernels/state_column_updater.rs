@@ -48,7 +48,7 @@ enum GroupStates {
     Sketches(Vec<Box<dyn AccumulatorUpdater>>),
     /// A keyed frequency sketch (Count-Min or Count Sketch with a heap) per
     /// group.
-    #[allow(dead_code)] // Used again in #1207 PR 6, with θ from the exported node.
+    #[allow(dead_code)] // Used again once θ comes from the exported node.
     Keyed {
         /// An empty state of the family's shape, cloned for each new group
         /// (boxed: much larger than the other kinds' fields).

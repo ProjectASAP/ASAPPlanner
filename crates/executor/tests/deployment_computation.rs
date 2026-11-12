@@ -60,9 +60,10 @@ fn population_dag(
     grouping: &[&str],
 ) -> PhysicalASAPDAG {
     let root = promql_rows::with_series_identity(&lower(query)).unwrap();
-    let selected =
-        planner_types::test_support::population_over_selector(&root, statistic, grouping);
-    planner_types::test_support::physical_asap_dag_at_query_time(&selected).unwrap()
+    let selected = planner_types::test_support::forwarders::population_over_selector(
+        &root, statistic, grouping,
+    );
+    planner_types::test_support::forwarders::physical_asap_dag_at_query_time(&selected).unwrap()
 }
 
 /// The time-series scans: each metric's raw data slot and its schema.

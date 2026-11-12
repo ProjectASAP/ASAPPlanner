@@ -43,6 +43,7 @@
 //! every check that can find it unsupported has passed, so an unsupported
 //! way adds nothing to the memo.
 
+pub(crate) mod having;
 mod measure_output;
 mod pending;
 
@@ -55,11 +56,12 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorResultKind, Predicate,
 use asap_types::stages::{raw_data_samples_of_metric_of_group, Memo, MemoGroupId};
 
 use crate::computation_targets::{
-    having_filter_groups, nested_distributive_input, whole_expression_input, ComputationTarget,
+    nested_distributive_input, whole_expression_input, ComputationTarget,
     HowToComputeAggregateMeasure,
 };
-use crate::summary_realization::{measure_input, with_raw_data_samples_requirement};
+use crate::summary_realization::{measure_input, with_raw_data_samples_of};
 use crate::{expression, PerComputationCandidateError};
+use having::having_filter_groups;
 use measure_output::{
     accumulator_build, add_output_candidate, join_measures, measure_output, summary_readout,
 };
@@ -443,7 +445,7 @@ fn add_fused_candidate(
             )?;
             let build = Operator::ASAP(ASAPOp::SummaryAgg {
                 child: rows,
-                input: with_raw_data_samples_requirement(update, measure.raw_data_samples_of),
+                input: with_raw_data_samples_of(update, measure.raw_data_samples_of),
                 summary_type: FieldDataType::Sketch(*algorithm),
                 reduction: partitions,
                 filter: None,

@@ -318,7 +318,6 @@ fn merge_over_a_stored_tumbling_window(
         output_state,
         lifetime: Default::default(),
         parameters: None,
-        guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
         view_coverage: None,

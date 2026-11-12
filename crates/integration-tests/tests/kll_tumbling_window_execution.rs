@@ -107,7 +107,8 @@ fn fixture() -> Fixture {
         QueryRoot::Operator(estimate(0.99)),
     ];
     let (dag, operator_node_of_id) =
-        asap_types::test_support::physical_asap_dag_at_query_time_with_node_ids(&roots).unwrap();
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&roots)
+            .unwrap();
     let mut tumbling_window_ids = vec![0; 5];
     let (mut merge, mut p50, mut p99) = (0, 0, 0);
     for node in &dag.nodes {

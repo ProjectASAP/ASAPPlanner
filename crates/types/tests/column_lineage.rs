@@ -19,8 +19,8 @@ use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, Predicate, ProjectItem, ScalarExpr,
 };
 use asap_types::stages::{
-    CandidateExpression, CandidateForMemoGroup, ColumnLineage, LogicalProperties,
-    LogicalRequirements, Memo, MemoGroupId, OriginOfCandidateForMemoGroup, ValueSign,
+    CandidateForMemoGroup, ColumnLineage, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
+    ValueSign,
 };
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
 use asap_types::test_support::memo_fixtures::{
@@ -150,14 +150,8 @@ fn an_hll_readout_renamed_to_the_aggregate_column_is_its_candidate() {
         ],
         child: g5,
     });
-    let expression = CandidateExpression { operator };
-    let candidate = CandidateForMemoGroup {
-        logical_properties: LogicalProperties::new(&expression, None).unwrap(),
-        expression,
-        input_requirements: vec![LogicalRequirements::default()],
-        fused_groups: vec![],
-        origin: OriginOfCandidateForMemoGroup::Pass1,
-    };
+    let candidate =
+        CandidateForMemoGroup::new(operator, None, OriginOfCandidateForMemoGroup::Pass1, vec![]);
     let id = memo.add_candidate(g3, candidate).unwrap();
     assert_eq!(id.group, g3);
 }

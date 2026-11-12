@@ -5,7 +5,7 @@
 mod column_lineage;
 mod memo_aggregate_coverage;
 mod memo_group_properties;
-mod physical_export;
+mod physical_asap_dag;
 mod planner_vocabulary;
 mod schema_rebuilding;
 mod structure_contract;

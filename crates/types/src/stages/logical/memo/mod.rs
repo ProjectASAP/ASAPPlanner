@@ -1,28 +1,31 @@
 //! Memo scope: the memo, Stage 0's and Stage 1's one type, and each query
 //! over its groups; the operations over the whole memo
-//! (concepts doc `memo-groups-properties-requirements.md`, section 3; #1203).
+//! (concepts doc `memo-groups-properties-requirements.md`, section 3).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod hash_consing;
 
+use super::candidate::parameters_fit;
 use super::group::{
     derive_group_properties, validate_expression_over_input_groups, MemoGroupAsInput,
     MemoGroupError,
 };
 use crate::accuracy::AccuracyTarget;
+use crate::ir::operator::arguments::Reduction;
 use crate::ir::operator::input::InputOrTemporaryBuild;
 use crate::ir::schema::Schema;
-use crate::ir::Operator;
 use crate::ir::QueryRoot;
+use crate::ir::{ASAPOp, Operator};
 use crate::stages::{
-    CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, LogicalRequirements, MemoGroup,
-    MemoGroupId,
+    CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, ColumnLineage,
+    LogicalRequirements, MemoGroup, MemoGroupId,
 };
-use crate::workload::{DataWorkload, SourceFacts};
+use crate::summary_type::SketchStatistic;
+use crate::workload::bounds::source_name;
+use crate::workload::{series_facts, DataWorkload, SourceFacts};
 use hash_consing::{
-    expression_hash, same_expression_and_logical_properties, same_serialized_expression,
-    serialized_expression,
+    expression_hash, same_candidate, same_serialized_expression, serialized_expression,
 };
 
 /// The memo, Stage 0's and Stage 1's one type: the memo groups, each with
@@ -75,6 +78,86 @@ impl Memo {
     /// The groups, by id.
     pub fn groups(&self) -> &[MemoGroup] {
         &self.groups
+    }
+
+    /// The most values one evaluation of `group` returns, from the facts
+    /// the data workload declares; `None` when they bound it in no way.
+    /// The smaller of:
+    /// - the series (PromQL) or groups of rows (SQL) of the sources scanned
+    ///   below it (`GroupProperties::scanned_sources`, each source's
+    ///   `SourceFacts::series_count`, when every one declares it): every
+    ///   value of a per-series or grouped result over them comes from at
+    ///   least one of them;
+    /// - for a readout (`SummaryEstimate`, not a top-k) of a state, or a
+    ///   state, grouped `by` keys, the groups those keys form: 1 for no
+    ///   key, else the distinct combinations the source declares for keys
+    ///   copied from one source (`SourceFacts::distinct_values_per_label`
+    ///   and `distinct_values_per_label_set`).
+    ///
+    /// Examples: a readout of `quantile_over_time(0.9, m[5m])` over `m`
+    /// with 1000 series returns at most 1000 values, which `max(...)` over
+    /// it reads at once; `SELECT count(DISTINCT dst) FROM flows` reads one
+    /// distinct count per evaluation.
+    pub fn max_values_per_evaluation(&self, group: MemoGroupId) -> Option<u64> {
+        let series_scanned = self.groups[group.0 as usize]
+            .group_properties
+            .scanned_sources
+            .iter()
+            .try_fold(0u64, |total, source| {
+                let (facts, _) = series_facts(&self.source_facts, source_name(source))?;
+                total.checked_add(facts.series_count?)
+            });
+        match (series_scanned, self.declared_groups_of_state(group)) {
+            (Some(series), Some(groups)) => Some(series.min(groups)),
+            (series, groups) => series.or(groups),
+        }
+    }
+
+    /// The groups the `by` keys of the state `group` is, or reads, form
+    /// ([`Self::max_values_per_evaluation`]).
+    fn declared_groups_of_state(&self, group: MemoGroupId) -> Option<u64> {
+        match &self.groups[group.0 as usize].expression {
+            Operator::ASAP(ASAPOp::SummaryEstimate {
+                summary_input,
+                query,
+            }) if !matches!(query, SketchStatistic::TopK { .. }) => {
+                self.declared_groups_of_state(*summary_input)
+            }
+            Operator::ASAP(
+                ASAPOp::SummaryAgg {
+                    reduction: Reduction::Reduce(by),
+                    child,
+                    ..
+                }
+                | ASAPOp::SummaryTumblingWindowChain {
+                    reduction: Reduction::Reduce(by),
+                    child,
+                    ..
+                },
+            ) if !by.is_without() => {
+                let lineage = &self.groups[child.0 as usize]
+                    .group_properties
+                    .column_lineage;
+                let mut source = None;
+                let mut labels = Vec::new();
+                for key in by.keys() {
+                    let Some(ColumnLineage::SourceColumn(column)) = lineage.get(*key) else {
+                        return None;
+                    };
+                    if source.is_some_and(|source| source != &column.source) {
+                        return None;
+                    }
+                    source = Some(&column.source);
+                    labels.push(column.column.as_str());
+                }
+                let Some(source) = source else {
+                    return Some(1);
+                };
+                let (facts, _) = series_facts(&self.source_facts, source_name(source))?;
+                facts.declared_distinct_combinations(&labels)
+            }
+            _ => None,
+        }
     }
 
     /// The queries, by index in the workload.
@@ -198,16 +281,19 @@ impl Memo {
 
     /// Adds `candidate` to `group`'s candidates and returns its id, unless
     /// the group already has a candidate with the same expression
-    /// (`same_expression`) and logical properties: then that candidate's
-    /// id, and `candidate` is dropped. A new candidate makes `group` a parent
-    /// of each of its input groups, and `group`'s queries reach each input
-    /// group and every group below it.
+    /// (`same_expression`), logical properties and input requirements: then
+    /// that candidate's id, and `candidate` is dropped. A new candidate makes
+    /// `group` a parent of each of its input groups, and `group`'s queries
+    /// reach each input group and every group below it.
     ///
     /// Fails, leaving the memo unchanged, when the candidate's expression
     /// is not valid over its input groups
     /// (`validate_expression_over_input_groups`),
-    /// or when its output schema or kind differs from the group's: then it
-    /// does not compute the group's result.
+    /// when its output schema or kind differs from the group's (then it
+    /// does not compute the group's result), or when its θ does not fit the
+    /// group's output: a candidate of a sketch state group (a build, or a
+    /// merge, `Filter`, `TimeRange` or `TimeShift` passing states on) has a
+    /// θ from that algorithm's list, any other candidate none.
     pub fn add_candidate(
         &mut self,
         group: MemoGroupId,
@@ -216,7 +302,7 @@ impl Memo {
         if let Some(index_in_group) = self.groups[group.0 as usize]
             .candidates
             .iter()
-            .position(|known| same_expression_and_logical_properties(known, &candidate))
+            .position(|known| same_candidate(known, &candidate))
         {
             return Ok(CandidateForMemoGroupId {
                 group,
@@ -237,6 +323,11 @@ impl Memo {
         if schema != group_properties.schema || result_kind != group_properties.result_kind {
             return Err(CandidateError::OutputDiffersFromGroup { group });
         }
+        parameters_fit(
+            group_properties.sketch_algorithm_of_state(),
+            candidate.logical_properties.parameters(),
+        )
+        .map_err(CandidateError::LogicalProperties)?;
         let candidates = &mut self.groups[group.0 as usize].candidates;
         let input_groups: Vec<MemoGroupId> = candidate
             .expression
@@ -314,6 +405,34 @@ impl Memo {
         candidate.input_requirements = input_requirements;
     }
 
+    /// The candidates `consumer` may read on input `input`: those of the
+    /// input group, except that a consumer with a θ (a build, or a candidate
+    /// passing states on) reads only producers with the same θ or none.
+    pub fn producers(
+        &self,
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+    ) -> Vec<CandidateForMemoGroupId> {
+        let candidate = self.candidate(consumer);
+        let group = *candidate.expression.operator.children()[input];
+        let theta = candidate.logical_properties.parameters();
+        self.groups[group.0 as usize]
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(
+                |(_, producer)| match (theta, producer.logical_properties.parameters()) {
+                    (Some(theta), Some(produced)) => theta == produced,
+                    _ => true,
+                },
+            )
+            .map(|(index_in_group, _)| CandidateForMemoGroupId {
+                group,
+                index_in_group,
+            })
+            .collect()
+    }
+
     /// The groups, each after every group it or one of its candidates
     /// reads, the lower index first among those ready: a dependency order for
     /// candidate traversal, whatever order rules appended groups in. `None`
@@ -355,16 +474,7 @@ impl Memo {
         }
         (order.len() == count).then_some(order)
     }
-}
 
-/// Lists `parent` among `group`'s parents, once.
-fn add_parent(group: &mut MemoGroup, parent: MemoGroupId) {
-    if !group.parents.contains(&parent) {
-        group.parents.push(parent);
-    }
-}
-
-impl Memo {
     /// The groups some query's root reads, ascending: the groups of the
     /// queries' roots that are a query's result or a scalar query's operand.
     pub fn root_groups(&self) -> BTreeSet<MemoGroupId> {
@@ -380,6 +490,13 @@ impl Memo {
         (0..self.queries.len())
             .filter(|&query| self.queries[query].root.operator_refs().contains(&&group))
             .collect()
+    }
+}
+
+/// Lists `parent` among `group`'s parents, once.
+fn add_parent(group: &mut MemoGroup, parent: MemoGroupId) {
+    if !group.parents.contains(&parent) {
+        group.parents.push(parent);
     }
 }
 

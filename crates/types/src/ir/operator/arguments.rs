@@ -239,7 +239,7 @@ pub enum JoinKind {
     Full,
     Cross,
     /// Left semi-join — each left row that has **at least one** match, once.
-    /// `WHERE c IN (SELECT …)` / `WHERE EXISTS (…)` (issue #111).
+    /// `WHERE c IN (SELECT …)` / `WHERE EXISTS (…)`.
     ///
     /// Output schema is the **left's alone**; the right side is a filter, not a
     /// source of columns. The join predicate still resolves against the
@@ -285,10 +285,10 @@ pub enum WindowFuncKind {
     /// these respect the window frame bounds (NULL/default past the frame edge)
     /// rather than reaching arbitrarily far back/forward. Kept as distinct
     /// variants so the frame clause is never silently discarded by conflating
-    /// them with `Lag`/`Lead` (#267). `WindowFuncKind` still has no frame
+    /// them with `Lag`/`Lead`. `WindowFuncKind` still has no frame
     /// representation, so today these lower and behave exactly like
     /// `Lag`/`Lead` — the tag is correct, the frame-respecting behavior isn't
-    /// implemented yet. See #231 for modeling window frames properly.
+    /// implemented yet; window frames need proper modeling.
     LagInFrame,
     LeadInFrame,
     FirstValue,
@@ -304,7 +304,7 @@ pub enum WindowFuncKind {
 
 /// A window's frame-spec (`ROWS`/`RANGE BETWEEN … AND …`) — which rows around
 /// the current one an analytic window function reads. `GROUPS` is rejected at
-/// lowering time (issue #268): every SQL corpus in this repo uses only `ROWS`,
+/// lowering time: every SQL corpus in this repo uses only `ROWS`,
 /// and nothing downstream interprets frame semantics yet, so it isn't worth
 /// modelling untested.
 ///
@@ -450,7 +450,7 @@ pub enum GroupSide {
 /// `Reduce`). Explicit, decided once by whichever pass constructs the node
 /// (structural, at front-end lowering time), rather than inferred downstream from
 /// whether a grouping-key list happens to be empty or from a neighboring
-/// node's shape. See design proposal #165.
+/// node's shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Reduction<C = ColumnId> {
     /// Collapses input rows via `by` — `by`/`without` semantics are exactly

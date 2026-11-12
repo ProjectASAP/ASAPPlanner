@@ -6,7 +6,7 @@
 //! directly as its last step, one node per selected execution, each with the
 //! timing and lifetime of the physical candidate it was built from.
 //! The deployment executes the plan as given
-//! (#509 Assumption 8): it does not change lifetime or timing.
+//! (the physical plan is final): it does not change lifetime or timing.
 
 use std::collections::{HashMap, HashSet};
 #[cfg(any(test, feature = "test-support"))]
@@ -23,7 +23,6 @@ use crate::ir::operator::node::OperatorNode;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::scalar::ScalarExpr;
 
-use crate::accuracy::AccuracyGuarantee;
 use crate::ir::properties::execution_data_state::{ExecutionDataState, ExecutionTiming};
 use crate::ir::properties::selection::SelectionBox;
 use crate::ir::schema::Schema;
@@ -72,7 +71,7 @@ pub struct PhysicalASAPDAGNode {
     pub output_state: ExecutionDataState,
     /// How long and where the deployment materializes this node's output: the
     /// lifetime the physical properties assignment chose for the sub-DAG this
-    /// node produces. Any node may be materialized (#509 §Materialization); a node
+    /// node produces. Any node may be materialized; a node
     /// with no assignment has lifetime `None`. With `output_state.timing` it
     /// is the node's `PhysicalProperties`.
     pub lifetime: Lifetime,
@@ -82,7 +81,6 @@ pub struct PhysicalASAPDAGNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<SketchParams>,
     pub output_schema: Schema,
-    pub guarantee: Option<AccuracyGuarantee>,
     /// For a materialized view (a node whose lifetime materializes its output
     /// across evaluations), how far back from the newest evaluation
     /// time its output must stay available once refreshed; for a query-time
@@ -119,7 +117,7 @@ pub struct ViewCoverage {
     /// coverage's `AggregateDefinition` with every input group expanded
     /// recursively to its expression, down to the `Scan`s, holding no
     /// memo group or plan node ids, canonically serialized and hashed
-    /// (`stages::view_coverage`).
+    /// (`plan::view_coverage`).
     /// Equal across plans and processes that compute the same thing,
     /// whatever the selection, and different when they do not (a rollup to
     /// a coarser grouping computes something else and has its own). Inside
@@ -217,8 +215,7 @@ pub struct PhysicalASAPDAG {
     pub roots: Vec<PhysicalASAPNodeId>,
     /// One expression per standalone scalar query, keyed by the query's
     /// position in the batch, in increasing order. Its operator references
-    /// name nodes of this DAG. A standalone scalar query is not a node (#511
-    /// §2.3), so query `i` of the batch is the scalar root keyed `i` when
+    /// name nodes of this DAG. A standalone scalar query is not a node, so query `i` of the batch is the scalar root keyed `i` when
     /// there is one, and otherwise the next entry of `roots`.
     pub scalar_roots: Vec<(usize, ScalarExpr<PhysicalASAPNodeId>)>,
 }
@@ -303,9 +300,8 @@ impl PhysicalASAPDAG {
             .collect())
     }
 
-    /// Every node of this DAG as IR, by node id, with its exported
-    /// guarantee (an operator node has no physical properties): what
-    /// [`Self::query_roots`] reads. Shared inputs stay shared. Validates the
+    /// Every node of this DAG as IR, by node id (an operator node has no
+    /// physical properties): what [`Self::query_roots`] reads. Shared inputs stay shared. Validates the
     /// DAG first.
     #[cfg(any(test, feature = "test-support"))]
     fn operator_nodes(
@@ -331,8 +327,7 @@ impl PhysicalASAPDAG {
                 let operator = node
                     .payload
                     .map_children(|child| Rc::clone(&rebuilt[child]));
-                let restored = OperatorNode::with_schema(operator, node.output_schema.clone())
-                    .with_guarantee(node.guarantee.clone());
+                let restored = OperatorNode::with_schema(operator, node.output_schema.clone());
                 rebuilt.insert(id, Rc::new(restored));
             }
         }
@@ -652,7 +647,6 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
             lifetime: Lifetime::None,
             parameters: None,
             output_schema: flat_node.schema,
-            guarantee: flat_node.guarantee,
             retention_ms: None,
             selected_physical_candidate: None,
             view_coverage: None,

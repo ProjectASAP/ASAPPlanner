@@ -181,7 +181,6 @@ fn planner_unit_frequency_update_binds_as_a_value_frequency_build() -> Result<()
         lifetime: Default::default(),
         parameters: None,
         output_schema: (*state).clone(),
-        guarantee: None,
         retention_ms: None,
         selected_physical_candidate: None,
         view_coverage: None,

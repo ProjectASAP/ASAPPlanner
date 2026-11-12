@@ -4,7 +4,7 @@ use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{
     ExprSemantics, NonASAPOp, OperatorNode, OperatorResultKind, Predicate, ScalarExpr,
 };
-use asap_types::test_support::validate_asap_inputs;
+use asap_types::test_support::forwarders::validate_asap_inputs;
 use std::rc::Rc;
 fn scan() -> Rc<OperatorNode> {
     OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
@@ -28,7 +28,7 @@ fn invalid_predicates_are_rejected() {
             child: scan(),
             pred: Predicate(expr),
         };
-        assert!(asap_types::test_support::validate_non_asap_inputs(&op).is_err());
+        assert!(asap_types::test_support::forwarders::validate_non_asap_inputs(&op).is_err());
     }
 }
 /// Common metadata must agree with the actual operation, including result kind.
@@ -50,7 +50,7 @@ fn values_contract_is_checked() {
             rows: vec![row],
             schema: scan().schema.clone(),
         };
-        assert!(asap_types::test_support::validate_non_asap_inputs(&op).is_err());
+        assert!(asap_types::test_support::forwarders::validate_non_asap_inputs(&op).is_err());
     }
 }
 /// Scalar typing validates every branch and never assigns placeholder types.
@@ -152,7 +152,6 @@ fn shared_construction_derives_both_operator_categories() {
     );
     assert_eq!(state.result_kind, OperatorResultKind::State);
     assert!(!state.schema.fields.last().unwrap().is_plain());
-    assert!(state.guarantee.is_none());
     state.validate_structure().unwrap();
 
     assert!(

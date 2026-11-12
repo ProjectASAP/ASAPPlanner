@@ -431,7 +431,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     // is an aggregation operator with no `by(...)`: a genuine full
     // reduction, one output row — not to be confused with the inner rate's
     // per-entity grouping below, even though both once collapsed to the
-    // same empty `by: []` (issue #163).
+    // same empty `by: []`.
     let Some(ASAPOp::SummaryAgg {
         child,
         summary_type: family,

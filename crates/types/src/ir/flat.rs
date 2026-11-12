@@ -13,7 +13,6 @@ use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::accuracy::AccuracyGuarantee;
 use crate::ir::operator::node::{Operator, OperatorNode, OperatorResultKind};
 use crate::ir::operator::query::QueryRoot;
 use crate::ir::schema::Schema;
@@ -27,7 +26,6 @@ pub struct FlatNode {
     pub operator: Operator<NodeId>,
     pub(crate) result_kind: OperatorResultKind,
     pub(crate) schema: Schema,
-    pub(crate) guarantee: Option<AccuracyGuarantee>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,7 +71,6 @@ fn visit(
         operator,
         result_kind: node.result_kind,
         schema: node.schema.clone(),
-        guarantee: node.guarantee.clone(),
     });
     originals.push(Rc::clone(node));
     ids.insert(Rc::as_ptr(node), id);

@@ -18,12 +18,14 @@ use asap_types::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarVal
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr};
+use asap_types::plan::view_coverage;
 use asap_types::stages::{
-    view_coverage, AggregateCoverage, CandidateExpression, CandidateForMemoGroup, ColumnLineage,
-    CoverageError, LogicalProperties, LogicalRequirements, Memo, MemoGroupError, MemoGroupId,
-    OriginOfCandidateForMemoGroup,
+    AggregateCoverage, CandidateForMemoGroup, ColumnLineage, CoverageError, Memo, MemoGroupError,
+    MemoGroupId, OriginOfCandidateForMemoGroup,
 };
-use asap_types::summary_type::{ExactKind, MergeInputRule, SketchAlgorithm, SummaryUpdate};
+use asap_types::summary_type::{
+    ExactKind, MergeInputRule, SketchAlgorithm, SketchParams, SummaryUpdate,
+};
 use asap_types::test_support::memo_fixtures::{filter, range, scan, series_column, shift, state};
 use asap_types::workload::DataWorkload;
 
@@ -350,7 +352,7 @@ fn scan_predicates_lift_and_their_states_merge() {
 /// G1 Scan latency
 /// G2 TimeShift(1h)(G1);  G3 TimeRange[5m](G2);  G4 SummaryAgg[KLL](G3)   (the query)
 /// G5 Chain[KLL, 1m](G1);  G6 TimeShift(1h)(G5);  G7 TimeRange[5m](G6)
-/// G4 candidate: SummaryMerge(G7)
+/// G4 candidate: SummaryMerge[k=269](G7)
 /// ```
 #[test]
 fn a_merge_over_a_chains_windows_covers_the_direct_build() {
@@ -370,16 +372,12 @@ fn a_merge_over_a_chains_windows_covers_the_direct_build() {
     assert_eq!(time_of(&memo, g7), five_minutes_an_hour_ago);
     assert_eq!(coverage(&memo, g7), coverage(&memo, g4));
 
-    let expression = CandidateExpression {
-        operator: merge(vec![g7]),
-    };
-    let merge_of_windows = CandidateForMemoGroup {
-        logical_properties: LogicalProperties::new(&expression, None).unwrap(),
-        expression,
-        input_requirements: vec![LogicalRequirements::default()],
-        fused_groups: vec![],
-        origin: OriginOfCandidateForMemoGroup::Pass1,
-    };
+    let merge_of_windows = CandidateForMemoGroup::new(
+        merge(vec![g7]),
+        Some(SketchParams::Kll { k: 269 }),
+        OriginOfCandidateForMemoGroup::Pass1,
+        vec![],
+    );
     memo.add_candidate(g4, merge_of_windows).unwrap();
     let merged = memo.find_or_add_group(merge(vec![g7])).unwrap();
     assert_eq!(coverage(&memo, merged), coverage(&memo, g4));

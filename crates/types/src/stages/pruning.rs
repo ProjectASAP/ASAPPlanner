@@ -1,13 +1,14 @@
-//! What a stage removed, and why: one shape for every stage (#1047 P6).
-//! Each stage removes only what its own knowledge rules out (option C):
-//! Stage 2 what cannot be built, run or read by a query output. Stage 0 fails with an
-//! error, Pass 1 records nothing it leaves out (#1205 will show it), and
-//! Pass 2 records its eliminated candidates with their own causes
-//! (`PrunedLogicalCandidate`). Stage 3 prunes before
-//! its selection MILP (dominated and uncostable candidates); its
-//! rejections of whole plans keep their own cause (`RejectionCause` in plan
-//! selection). The planner does not check whether an executor implements an
-//! operator or summary type, so no reason names it.
+//! What a stage removed, and why: one shape for every stage. Each stage
+//! removes only what its own knowledge rules out. Pass 2 records its
+//! eliminated logical candidates with their causes ([`PrunedLogicalCandidate`],
+//! [`PruneCause`], [`RootPruneReason`]); Stage 2 records the physical
+//! candidates that cannot be built, run or read by a query output
+//! ([`PrunedCandidate`], [`PruneReason`]); Stage 3 prunes dominated and
+//! uncostable candidates before its selection, and its rejections of whole
+//! plans keep their own cause (`RejectionCause` in plan selection). Stage 0
+//! fails with an error and Pass 1 records nothing it leaves out. The planner
+//! does not check whether an executor implements an operator or summary
+//! type, so no reason names it.
 
 use crate::accuracy::AccuracyMetric;
 use crate::stages::{CandidateForMemoGroupId, PhysicalCandidateId, RequiredAccuracy};
@@ -22,12 +23,13 @@ pub struct PrunedLogicalCandidate {
     pub causes: Vec<PruneCause>,
 }
 
-/// One path from the candidate, through consumers that are themselves
+/// One path from the candidate, through candidates that are themselves
 /// eliminated, to the edge that fails. One shortest path per failing edge.
 #[derive(Debug, Clone)]
 pub struct PruneCause {
-    /// The eliminated consumers on the path, nearest first.
-    pub through_pruned_consumers: Vec<CandidateForMemoGroupId>,
+    /// The eliminated candidates on the path, nearest first: consumers
+    /// above, or, for a candidate cut off from an input, producers below.
+    pub through_pruned_candidates: Vec<CandidateForMemoGroupId>,
     pub root: RootPruneReason,
 }
 
@@ -42,12 +44,52 @@ pub enum RootPruneReason {
         input: usize,
         required: RequiredAccuracy,
     },
-    /// The consumer's error contract carries none of the producer's metrics.
+    /// The metric rule: the producer is a readout whose metric the
+    /// consumer does not accept on that input; or, on a readout's own input,
+    /// the readout's metric is not one its output accepts.
     MetricRule {
         consumer: CandidateForMemoGroupId,
         input: usize,
         producer_metric: AccuracyMetric,
-        consumer_carries: Vec<AccuracyMetric>,
+        /// The metrics accepted on that input (on a readout's own input: at
+        /// its output).
+        accepted_metrics: Vec<AccuracyMetric>,
+    },
+    /// The consumer is a top-k readout whose `k` exceeds the producer's
+    /// heap size: the heap cannot hold the k ranked keys, whatever accuracy
+    /// is required.
+    HeapSmallerThanTopK {
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+        k: usize,
+    },
+    /// The producer is a readout with an accuracy metric but no guarantee
+    /// evaluable at the required failure probability (an HLL distinct
+    /// count, whose failure probability is unknown), or with no guarantee
+    /// at all (UnivMon's distinct count), read by a query with an accuracy
+    /// target: its error has no bound.
+    NoGuarantee {
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+    },
+    /// The readout `consumer` is reached by query `query`, whose target sets
+    /// a failure probability over the whole result while the number of
+    /// values one evaluation returns ($n_q$) is unknown: no per-value
+    /// failure probability follows, so no state meets it; and no other
+    /// query reaching it gives it a level.
+    ValuesPerEvaluationUnknown {
+        consumer: CandidateForMemoGroupId,
+        query: usize,
+    },
+    /// The producer is a candidate over a tumbling-window chain whose width
+    /// does not divide the consumer group's evaluation period (or the group
+    /// has no known evaluation grid): the chain's windows do not end at the
+    /// consumer's evaluation times.
+    ChainWidthDoesNotDivideEvaluationGrid {
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+        tumbling_window_width_ms: u64,
+        evaluation_period_ms: Option<u64>,
     },
     /// The candidate never had a consumer and is not a query output. A
     /// candidate whose consumers were eliminated is traced to their causes.

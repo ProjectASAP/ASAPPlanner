@@ -1,4 +1,4 @@
-//! Shared helpers for the #509 Examples 1–4 acceptance tests
+//! Shared helpers for the Examples 1–4 acceptance tests
 //! (`planner_layering_example{1,2,3,4}.rs`). Specs:
 //! `docs/design_docs/proposals/planner-layering-example{1,2,3,4}-acceptance.md`.
 //!
@@ -307,13 +307,13 @@ pub fn cross_query_nodes(dag: &impl ExportedDag, query_roots: &[NodeId]) -> BTre
         .collect()
 }
 
-/// How many times each node is computed per evaluation of its consumers (#509; the
+/// How many times each node is computed per evaluation of its consumers (the
 /// rule of plan selection's private `computations`): 1 for a materialized
 /// node; for a not-materialized one, the number of consumers that reach
 /// it. A consumer is a query (operator or scalar root) or a materialized
 /// node, whose walk starts at its inputs; a walk stops at materialized
 /// nodes and counts each node once. The consumers materialized at ingestion time of one
-/// refresh window share one ingestion run and count once (#1151).
+/// refresh window share one ingestion run and count once.
 pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
     let materialized_nodes: BTreeSet<_> = dag
         .nodes
@@ -393,7 +393,7 @@ pub enum Materializing {
 }
 
 /// Whether physical ASAP-aware optimization materializes `node`'s output, and at
-/// which timing (#667).
+/// which timing.
 pub fn materializing(p: &Physical, node: NodeId) -> Materializing {
     let n = p.dag().nodes.iter().find(|n| n.id == node).expect("node");
     match (n.output_state.timing, n.lifetime) {
@@ -410,7 +410,7 @@ pub fn runs_at_ingestion(p: &Physical, node: NodeId) -> bool {
 
 // ── Pending adapters ─────────────────────────────────────────────────────
 
-/// The window summary a summary build node maintains (#509 Pass 2,
+/// The window summary a summary build node maintains (Pass 2's
 /// window-composition rule).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WindowForm {
@@ -426,8 +426,7 @@ pub enum WindowForm {
 
 /// The window summary of a build: a `SummaryTumblingWindowChain` keeps back-to-back tumbling windows of
 /// its tumbling-window width (tumbling); a `SummaryAgg` is rebuilt from its query
-/// window. Sliding windows and Exponential Histograms are not planned yet
-/// (#628).
+/// window. Sliding windows and Exponential Histograms are not planned yet.
 pub fn window_form(dag: &impl ExportedDag, build: NodeId) -> WindowForm {
     match dag.payload(build) {
         Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {

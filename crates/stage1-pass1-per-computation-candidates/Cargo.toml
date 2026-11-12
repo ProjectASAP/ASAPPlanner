@@ -3,14 +3,12 @@ name = "asap-stage1-pass1-per-computation-candidates"
 version = "0.1.0"
 edition = "2021"
 
-# #509 Stage 1, Pass 1: the initial candidates of each memo group (exact,
-# exact accumulator, summaries, fused builds), with the shared analytical
-# accuracy model (`asap-accuracy`). Reads Stage 0's memo through
+# Stage 1, Pass 1: the initial candidates of each memo group (exact,
+# exact accumulator, summaries, fused builds). Reads Stage 0's memo through
 # `asap_types::stages`; depends on no other stage crate and on no
 # query-language frontend.
 [dependencies]
 asap-types = { path = "../types" }
-asap-accuracy = { path = "../accuracy" }
 thiserror = "2"
 
 [dev-dependencies]

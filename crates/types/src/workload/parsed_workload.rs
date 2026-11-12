@@ -2,7 +2,7 @@
 //! to the operator IR.
 //!
 //! This is the boundary between the query-language frontends and Stage 1,
-//! logical ASAP-aware optimization (issues #429, #430). Everything downstream of lowering consumes this type
+//! logical ASAP-aware optimization. Everything downstream of lowering consumes this type
 //! and never sees query text, a catalog, or a query language; everything the
 //! optimizer still needs about *demand* — recurrence, predictability,
 //! execution time, accuracy requirement — is read off the retained

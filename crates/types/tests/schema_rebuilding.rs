@@ -1,4 +1,3 @@
-use asap_types::accuracy::AccuracyGuarantee;
 use asap_types::ir::operator::{AggIntent, Reduction, Source};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
@@ -51,21 +50,20 @@ fn rebuilding_rederives_schema_for_both_categories() {
         let rebuilt = Rc::new(original.with_new_children(|_| replacement.clone()).unwrap());
         assert_eq!(
             rebuilt.schema,
-            asap_types::test_support::output_schema(&rebuilt.operator).unwrap()
+            asap_types::test_support::forwarders::output_schema(&rebuilt.operator).unwrap()
         );
         rebuilt.validate_structure().unwrap();
     }
 }
 
-/// Naming overrides survive rewrites without freezing types or assessed properties.
+/// Naming overrides survive rewrites without freezing types.
 #[test]
 fn rebuilding_preserves_only_explicit_naming_overrides() {
     for asap in [false, true] {
         let original = aggregate(scan(DataType::Int64, "key"), asap);
         let mut schema = original.schema.clone();
         schema.fields[0].name = "alias".into();
-        let renamed = OperatorNode::with_schema(original.operator.clone(), schema)
-            .with_guarantee(Some(AccuracyGuarantee::exact("fixture")));
+        let renamed = OperatorNode::with_schema(original.operator.clone(), schema);
         let original = Rc::new(renamed);
         original.validate_structure().unwrap();
         let replacement = scan(DataType::Utf8, "new_key");
@@ -75,7 +73,6 @@ fn rebuilding_preserves_only_explicit_naming_overrides() {
             rebuilt.schema.fields[0].plain_dtype(),
             Some(&DataType::Utf8)
         );
-        assert!(rebuilt.guarantee.is_none());
         rebuilt.validate_structure().unwrap();
     }
 }
@@ -275,10 +272,14 @@ fn a_current_series_population_matches_only_its_selectors_lookback() {
         lookback_ms: 1_000,
     };
     let selector = series_selector();
-    assert!(asap_types::test_support::matches_node(&spec, &selector));
+    assert!(asap_types::test_support::forwarders::matches_node(
+        &spec, &selector
+    ));
     let wrong = CurrentSeriesInput {
         lookback_ms: 300_000,
         ..spec
     };
-    assert!(!asap_types::test_support::matches_node(&wrong, &selector));
+    assert!(!asap_types::test_support::forwarders::matches_node(
+        &wrong, &selector
+    ));
 }

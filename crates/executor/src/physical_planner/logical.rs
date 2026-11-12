@@ -34,8 +34,7 @@ pub(super) fn restore(dag: &PhysicalASAPDAG) -> Result<BTreeMap<NodeId, Rc<Opera
             let operator = node
                 .payload
                 .map_children(|child| Rc::clone(&done[&(*child as u64)]));
-            let mut rebuilt = OperatorNode::with_schema(operator, node.output_schema.clone());
-            rebuilt.guarantee = node.guarantee.clone();
+            let rebuilt = OperatorNode::with_schema(operator, node.output_schema.clone());
             done.insert(node.id as u64, Rc::new(rebuilt));
         }
         if next.len() == before {

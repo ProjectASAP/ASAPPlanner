@@ -1,0 +1,65 @@
+//! The metric of a readout's error: what a `SummaryEstimate` of a sketch
+//! state may be off in.
+
+use asap_types::accuracy::AccuracyMetric;
+use asap_types::ir::schema::FieldDataType;
+use asap_types::ir::{ASAPOp, Operator};
+use asap_types::stages::{CandidateForMemoGroup, Memo};
+use asap_types::summary_type::{parameter_list, SketchStatistic};
+
+use crate::guarantee::guarantee_before_failure_probability_check;
+
+/// The metric of the error reading `statistic` from a state of
+/// `summary_type` has: its first listed θ's guarantee's, whatever that
+/// guarantee's failure probability (HLL's distinct count reads a relative
+/// error although its failure probability is unknown). `None` for an exact
+/// state and for a summary type with no listed θ or no guarantee for the
+/// statistic (UnivMon's distinct count).
+pub(crate) fn readout_error_metric(
+    summary_type: &FieldDataType,
+    statistic: &SketchStatistic,
+) -> Option<AccuracyMetric> {
+    let FieldDataType::Sketch(algorithm) = summary_type else {
+        return None;
+    };
+    let parameters = parameter_list(*algorithm).first()?;
+    Some(
+        guarantee_before_failure_probability_check(summary_type, parameters, statistic, 1.0)?
+            .spec
+            .accuracy_metric,
+    )
+}
+
+/// The metric of `candidate`'s error when it is a readout
+/// (`SummaryEstimate`) of a sketch state ([`readout_error_metric`]); `None`
+/// for any other candidate.
+pub(crate) fn sketch_readout_error_metric(
+    memo: &Memo,
+    candidate: &CandidateForMemoGroup,
+) -> Option<AccuracyMetric> {
+    let (summary_type, statistic) = sketch_readout(memo, candidate)?;
+    readout_error_metric(&summary_type, statistic)
+}
+
+/// The summary type of the sketch state `candidate` reads and the statistic
+/// it reads from it, when it is a readout (`SummaryEstimate`) of a sketch
+/// state (`GroupProperties::sketch_algorithm_of_state`).
+pub(crate) fn sketch_readout<'a>(
+    memo: &Memo,
+    candidate: &'a CandidateForMemoGroup,
+) -> Option<(FieldDataType, &'a SketchStatistic)> {
+    let Operator::ASAP(ASAPOp::SummaryEstimate {
+        summary_input,
+        query,
+    }) = &candidate.expression.operator
+    else {
+        return None;
+    };
+    let algorithm = memo.groups()[summary_input.0 as usize]
+        .group_properties
+        .sketch_algorithm_of_state()?;
+    Some((FieldDataType::Sketch(algorithm), query))
+}
+
+#[cfg(test)]
+mod tests;

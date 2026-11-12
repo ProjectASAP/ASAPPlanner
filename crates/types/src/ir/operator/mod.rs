@@ -1,4 +1,4 @@
-//! #511 §1: the operators of the unified DAG and the parameter types their
+//! The operators of the unified DAG and the parameter types their
 //! payloads are built from.
 //!
 //! - [`node`] — [`OperatorNode`](node::OperatorNode): an operator plus the

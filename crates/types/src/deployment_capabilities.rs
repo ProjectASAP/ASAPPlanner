@@ -1,4 +1,4 @@
-//! What the deployment's executor can run and keep (#509's third
+//! What the deployment's executor can run and keep (the third
 //! deployment input, beside the cost and accuracy models).
 //!
 //! [`DeploymentCapabilities`] says three things:

@@ -13,7 +13,7 @@ Preserve supported accuracy semantics, physical eligibility, cost objectives, sc
 | Scope | Current implementation | Responsibility |
 | --- | --- | --- |
 | Logical identity | `stage0-memo/src/lib.rs`; `types/src/stages/` | `Memo`, `MemoGroup` (`asap_types::stages`; built by `memo_of_queries`, hash-consed by `Memo::find_or_add_group`), stable initial query/group references. |
-| Computation and sharing rules | `stage1-pass2-reuse-candidates/src/{lib.rs,rules.rs,rules/}` | Populate groups, retain local candidates, expose shared states and compatible rewrites. |
+| Computation and sharing rules | `stage1-pass2-reuse-candidates/src/{lib.rs,rules/}` | Populate groups, retain local candidates, expose shared states and compatible rewrites. |
 | Physical legality | `stage2-physical-optimization` | Executable operators, timing and materialization eligibility. |
 | Candidate dependency inventory | `stage2-physical-optimization/src/lib.rs`; `types/src/stages/physical` | Local `PhysicalCandidate`, `ProducerRequirement` (`asap_types::stages`), compatible producers, structural pruning; Stage 3 builds the selected plan (`PhysicalASAPDAG`) directly. Stage 2 makes no execution-scope copies; today's Stage 3 engine makes its own (`stage3-plan-selection/src/search/candidates/scopes.rs`). |
 | Solver | `stage3-plan-selection/src/search/milp` | Activation, producer/root assignment, reachability, acyclicity, resource constraints, and solver warm starts. |

@@ -62,7 +62,7 @@ under the stage that failed.
 | --- | --- |
 | `stage0` | The frontends' query DAGs and their memo groups. |
 | `stage1_pass1` | Stage 1 Pass 1: each computation's candidates, and the candidates pruned with their reason. |
-| `stage1_pass2` | Stage 1 Pass 2: the memo after local window composition (a candidate for every legal tumbling-window width), then the memo after the sharing rules, which Stage 2 implements. |
+| `stage1_pass2` | Stage 1 Pass 2: the memo after the reuse rules and chain groups (a chain group for every legal tumbling-window width), with the logical edges and the pruned candidates, which Stage 2 implements. |
 | `stage2` | Stage 2: the physical candidates and the ones pruned. |
 | `stage3` | Stage 3: the selected plan, its cost per node, each query's accepted accuracy and the search status. |
 

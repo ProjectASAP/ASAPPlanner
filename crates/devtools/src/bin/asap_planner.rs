@@ -778,11 +778,9 @@ fn group_node(table: &mut MemoNodes, group: &MemoGroup) -> usize {
 fn origin_name(origin: &OriginOfCandidateForMemoGroup) -> String {
     match origin {
         OriginOfCandidateForMemoGroup::Pass1 => "pass1",
-        OriginOfCandidateForMemoGroup::SummaryInput => "summary_input",
         OriginOfCandidateForMemoGroup::TumblingWindows => "tumbling_windows",
         OriginOfCandidateForMemoGroup::Rollup => "rollup",
         OriginOfCandidateForMemoGroup::TopKReuse => "top_k_reuse",
-        OriginOfCandidateForMemoGroup::WidenedScans => "widened_scans",
     }
     .into()
 }

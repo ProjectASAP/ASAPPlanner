@@ -15,11 +15,9 @@ use asap_types::stages::{
     ranked_column_of_group, raw_data_samples_of_metric_of_group, Memo, MemoGroupId,
 };
 use asap_types::summary_type::{
-    EntityIdentity, NonNegativeWeightProof, SketchAlgorithm, SummaryInputExpr,
+    EntityIdentity, NonNegativeWeightProof, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
     SummaryTypeCapability, SummaryUpdate, WeightDomain,
 };
-
-use asap_accuracy::sizing::sketch_statistic;
 
 use crate::computation_targets::nested_aggregates;
 use crate::{expression, schema, PerComputationCandidateError};
@@ -45,7 +43,7 @@ const ALGORITHM_PREFERENCE: &[SketchAlgorithm] = &[
 /// count. Empty for an intent no sketch
 /// statistic serves.
 pub(crate) fn summary_candidates(intent: &AggIntent) -> Vec<SketchAlgorithm> {
-    let Some(statistic) = sketch_statistic(intent) else {
+    let Some(statistic) = SketchStatistic::for_intent(intent) else {
         return Vec::new();
     };
     // A distinct-tuple count hashes the whole tuple as one item
@@ -286,7 +284,7 @@ fn summed_per_series_samples(
 /// `update` with the open requirement that its weights are samples of
 /// `metric` ([`WeightDomain::RawDataSamplesOfMetric`]), when it is a keyed heap
 /// update whose weights are not otherwise proven.
-pub(crate) fn with_raw_data_samples_requirement(
+pub(crate) fn with_raw_data_samples_of(
     mut update: SummaryUpdate,
     metric: Option<&str>,
 ) -> SummaryUpdate {

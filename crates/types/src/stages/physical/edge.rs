@@ -1,5 +1,5 @@
 //! Edge scope: the physical edges $\mathcal E$ with $\alpha^{\log}$ and
-//! $\alpha^{\mathrm{phys}}$ (#1201).
+//! $\alpha^{\mathrm{phys}}$.
 
 use crate::stages::PhysicalCandidateId;
 

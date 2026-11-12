@@ -1,5 +1,4 @@
-//! Exact per-series range reductions over raw data samples execute natively
-//! (issue #770): exact `quantile/sum/avg/min/max/count_over_time` reduces
+//! Exact per-series range reductions over raw data samples execute natively: exact `quantile/sum/avg/min/max/count_over_time` reduces
 //! each series' samples in the window with a per-entity `Aggregate`, which
 //! the executor compiles and runs. The samples are bound at the plan's
 //! `Scan`, as a runtime binds them, and its `TimeRange` keeps the window.
@@ -94,7 +93,7 @@ fn series_labels(schema: &Schema, row: &[Value]) -> BTreeMap<String, String> {
 /// at its `Scan` of `x`: each answered series' `instance` and value.
 fn execute(query: &str, samples: &[RawDataSample]) -> Vec<(String, f64)> {
     let plan = per_entity_plan(query);
-    let dag = asap_types::test_support::physical_asap_dag_at_query_time(&plan).unwrap();
+    let dag = asap_types::test_support::forwarders::physical_asap_dag_at_query_time(&plan).unwrap();
     let node = |matches: fn(&PhysicalASAPOperatorPayload) -> bool| {
         let found: Vec<_> = dag
             .nodes

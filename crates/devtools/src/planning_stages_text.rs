@@ -1,7 +1,6 @@
 //! The planner stages' output as plain text: `asap_planner --format text`.
 //! It prints, up to the run's last stage, the frontends' roots and their
-//! memo groups (Stage 0), Pass 1's `Memo`,
-//! the memo after Pass 2's local window composition and Pass 2's
+//! memo groups (Stage 0), Pass 1's `Memo`, Pass 2's
 //! `LogicalASAPMemoCandidates` (Stage 2's input), Stage 2's
 //! `PhysicalASAPMemoCandidates` (Stage 3's input), and Stage 3's
 //! `Selection` with the selected memo choice, each node's cost and each

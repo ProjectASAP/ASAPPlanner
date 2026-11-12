@@ -72,7 +72,7 @@ fn a_chain_reads_an_instant_vector() {
     assert!(empty.validate_structure().is_err());
 }
 
-/// JSON written before #1163 names the chain `PaneChain` and its width
+/// JSON written before the tumbling-window rename names the chain `PaneChain` and its width
 /// `pane_width_ms`; it reads as today's operator.
 #[test]
 fn names_before_the_tumbling_window_rename_still_read() {

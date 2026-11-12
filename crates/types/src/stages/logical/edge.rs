@@ -1,4 +1,4 @@
-//! Edge scope: the logical edges $(u, c, i)$ with $\alpha^{\log}$ (#1201).
+//! Edge scope: the logical edges $(u, c, i)$ with $\alpha^{\log}$.
 
 use crate::stages::CandidateForMemoGroupId;
 

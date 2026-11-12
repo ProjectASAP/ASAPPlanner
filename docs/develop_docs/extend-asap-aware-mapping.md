@@ -55,13 +55,13 @@ estimator; an execution test in `crates/integration-tests/tests/` such as
 A new way for computations of one Pass 1 candidate to share, split or reuse
 work.
 
-1. Add a memo rule under `crates/stage1-pass2-reuse-candidates/src/memo/rules/`
-   (for example `rollup.rs` or `topk.rs`): it adds candidates (and, when it
+1. Add a memo rule under `crates/stage1-pass2-reuse-candidates/src/rules/`
+   (for example `rollup/` or `topk.rs`): it adds candidates (and, when it
    needs them, groups) to the memo groups it implements, keeping every
    existing candidate. Read summary families only through
-   `SummaryTypeCapability`. Shared rewrite helpers live in
-   `pass2/asap_aware_cse.rs`.
-2. Declare it in `rules.rs` and call it from `generate_logical_asap_memo_candidates`
+   `SummaryTypeCapability`. The helpers rules add candidates with live in
+   `rules/candidates.rs`.
+2. Declare it in `rules/mod.rs` and call it from `generate_logical_asap_memo_candidates`
    (`stage1-pass2-reuse-candidates/src/lib.rs`), after the
    existing rules.
 3. Add its row to the Pass 2 rule table of the
@@ -78,7 +78,7 @@ contains the candidate and that Stage 3 prices it.
 ## 3. Add a Stage 2 physical properties option
 
 1. Add the `Lifetime` variant or the valid (timing, lifetime) pair
-   (`crates/types/src/stages/physical/properties.rs`, `PhysicalProperties::new` and
+   (`crates/types/src/stages/physical/properties/mod.rs`, `PhysicalProperties::new` and
    `readable_at`) and its placement in
    `crates/types/src/ir/properties/timing.rs`, with its data-state edge rules.
 2. Offer it in `crates/stage2-physical-optimization/src/lib.rs` (the

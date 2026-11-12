@@ -1,5 +1,5 @@
 //! What a runtime derives from an installable plan's DAG alone: its
-//! materialized views and its raw-data retention (issue #970).
+//! materialized views and its raw-data retention.
 
 use std::collections::HashSet;
 
@@ -14,7 +14,7 @@ use asap_types::ir::{NonASAPOp, Operator};
 use serde_json::Value;
 
 /// A plan file of wire version 10 (assembled from the parts of a plan
-/// written before #970: the versioned DAG envelope, `queries`,
+/// written before views were derived from the DAG: the versioned DAG envelope, `queries`,
 /// `stored_outputs`, `query_time_raw_windows`, `selection`; its DAG nodes
 /// carry today's node fields, e.g. `lifetime`) is refused for its version,
 /// not for a missing field; its DAG with today's version reads back.
@@ -45,7 +45,7 @@ fn a_plan_file_of_an_older_wire_version_is_refused_by_version() {
     assert_eq!(read, current);
 }
 
-/// For installable plans captured from `main` before #970 (each the plan
+/// For installable plans captured before views were derived from the DAG (each the plan
 /// file's DAG and its `stored_outputs` field), `materialized_views()` of
 /// that DAG, with each view's `retention_ms` on its node, equals
 /// `stored_outputs` field for field after the renames: `built_at` →
@@ -57,7 +57,7 @@ fn a_plan_file_of_an_older_wire_version_is_refused_by_version() {
 #[test]
 fn materialized_views_equal_the_stored_outputs_main_listed() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/materialized_view_fixtures/stored_outputs_on_main.json");
+        .join("tests/materialized_view_fixtures/stored_outputs_before_view_coverage.json");
     let cases: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     assert!(!cases.is_empty());
     let mut refreshes = HashSet::new();

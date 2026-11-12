@@ -1,4 +1,4 @@
-//! #511 §2.2–2.3: the planning properties a node carries besides its
+//! The planning properties a node carries besides its
 //! operator and schema (when its value is produced), and the selection
 //! algebra aggregate coverage is stated in. Aggregate coverage itself is a
 //! memo-group property, derived and stored by the memo (`crate::stages`).

@@ -20,15 +20,15 @@ use asap_types::ir::operator::non_asap::any_measure_filtered;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef};
 use asap_types::ir::schema::{ColumnId, Schema};
-use asap_types::ir::{NonASAPOp, Operator, OperatorResultKind, Predicate, ScalarExpr};
+use asap_types::ir::{NonASAPOp, Operator, OperatorResultKind, ScalarExpr};
 use asap_types::stages::{Memo, MemoGroupId};
 use asap_types::summary_type::{
-    ExactKind, SketchAlgorithm, StatisticKind, SummaryInputExpr, SummaryUpdate,
+    ExactKind, SketchAlgorithm, SketchStatistic, StatisticKind, SummaryInputExpr, SummaryUpdate,
 };
 
-use asap_accuracy::sizing::sketch_statistic;
 use asap_types::deployment_capabilities::{summary_supported, SupportedSummary};
 
+use crate::candidates::having::has_having;
 use crate::summary_realization::{realize_keyed_additive_summary_input, summary_candidates};
 use crate::{expression, schema, PerComputationCandidateError};
 
@@ -97,9 +97,7 @@ pub(crate) struct FusedComputation {
 /// one; plain exact execution is not listed (it is the group's own
 /// expression). A quantile outside [0, 1] gets no summary: its answer is
 /// -Inf or +Inf.
-pub(crate) fn computation_candidates_for_intent(
-    intent: &AggIntent,
-) -> Vec<HowToComputeAggregateMeasure> {
+pub(crate) fn ways_to_compute_intent(intent: &AggIntent) -> Vec<HowToComputeAggregateMeasure> {
     let states = match intent {
         AggIntent::Count => vec![ExactKind::Count],
         AggIntent::Sum { .. } => vec![ExactKind::Sum],
@@ -117,7 +115,7 @@ pub(crate) fn computation_candidates_for_intent(
     }
     let quantile_outside_unit_interval =
         matches!(intent, AggIntent::Quantile { q, .. } if !(0.0..=1.0).contains(q));
-    if sketch_statistic(intent).is_some() && !quantile_outside_unit_interval {
+    if SketchStatistic::for_intent(intent).is_some() && !quantile_outside_unit_interval {
         choices.extend(
             summary_candidates(intent)
                 .into_iter()
@@ -137,37 +135,6 @@ fn nullable_avg_input(input: &Schema, intent: &AggIntent) -> bool {
     column
         .and_then(|column| input.fields.get(column))
         .is_none_or(|field| field.nullable)
-}
-
-/// The consumer `Filter` groups directly above `aggregate_group` (its
-/// `HAVING` as the SQL frontend lowers it), with their predicates. A
-/// `Filter` that reads the aggregate from a scalar expression stays a plain
-/// consumer.
-pub(crate) fn having_filter_groups(
-    memo: &Memo,
-    aggregate_group: MemoGroupId,
-) -> impl Iterator<Item = (MemoGroupId, &Predicate<MemoGroupId>)> {
-    memo.groups()[aggregate_group.0 as usize]
-        .parent_groups()
-        .iter()
-        .filter_map(move |&parent| match expression(memo, parent) {
-            Operator::NonASAP(NonASAPOp::Filter { child, pred }) if *child == aggregate_group => {
-                Some((parent, pred))
-            }
-            _ => None,
-        })
-}
-
-/// Whether `aggregate_group` has a `HAVING`: its own `having` or a consumer
-/// `Filter` group directly above it ([`having_filter_groups`]).
-fn has_having(memo: &Memo, aggregate_group: MemoGroupId) -> bool {
-    matches!(
-        expression(memo, aggregate_group),
-        Operator::NonASAP(NonASAPOp::Aggregate {
-            having: Some(_),
-            ..
-        })
-    ) || having_filter_groups(memo, aggregate_group).next().is_some()
 }
 
 /// Discover one target per measure of each eligible aggregate group of
@@ -202,7 +169,7 @@ pub(crate) fn computation_targets(
         };
         let aggregate_group = MemoGroupId(index as u32);
         for (measure, intent) in measures.iter().enumerate() {
-            let mut choices = computation_candidates_for_intent(intent);
+            let mut choices = ways_to_compute_intent(intent);
             if choices.is_empty() {
                 continue;
             }
@@ -251,7 +218,8 @@ fn without_unsupported_summaries(
         else {
             continue;
         };
-        let Some(readout) = sketch_statistic(&measures[target.measure_index]).map(|s| s.kind())
+        let Some(readout) =
+            SketchStatistic::for_intent(&measures[target.measure_index]).map(|s| s.kind())
         else {
             continue;
         };

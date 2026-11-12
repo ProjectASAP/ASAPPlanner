@@ -1,7 +1,19 @@
 # Design: End-to-End Accuracy Guarantees
 
-> Status: partially implemented design. Typed guarantees, supported composition
-> rules and accuracy gating are implemented. Empirical-input and combined
+> Status: partially implemented design. Implemented today: typed accuracy
+> targets and per-family guarantees (`AccuracyTarget`, `AccuracyGuarantee`);
+> per-operator error contracts (`ErrorContract { error_factor_per_input,
+> linear_bound_holds_up_to_per_input }` in
+> [`crates/accuracy/src/error_contract/mod.rs`](../../../../crates/accuracy/src/error_contract/mod.rs));
+> readout requirements
+> ([`crates/accuracy/src/readout_caps/mod.rs`](../../../../crates/accuracy/src/readout_caps/mod.rs));
+> and the logical edge check
+> ([`crates/accuracy/src/logical_edge/mod.rs`](../../../../crates/accuracy/src/logical_edge/mod.rs)).
+> The guarantee composition and propagation pipeline this proposal describes
+> (`CompositionOperator`, `AccuracyModel`, `AccuracyBudgetAllocator`) is not
+> in the code: the per-operator error contracts replaced it. The
+> [accuracy models concept](../../concepts/accuracy-models.md) describes the
+> current model. Empirical-input and combined
 > parameter configuration remain extensions as described below. The
 > [implementation companion](../../../develop_docs/end-to-end-accuracy-guarantees.md)
 > describes current contracts and validation.
@@ -209,6 +221,11 @@ AccuracyModel::satisfies
     accepts or rejects the candidate before CostModel ranking
 ```
 
+> **Replaced.** This pipeline and the components table below are not in the
+> code: per-operator error contracts (`ErrorContract`), readout requirements
+> and the logical edge check replaced guarantee composition; see the
+> [accuracy models concept](../../concepts/accuracy-models.md).
+
 Four components have distinct responsibilities:
 
 | Component | Responsibility | Does not do |
@@ -243,6 +260,11 @@ struct AccuracyGuarantee {
 
 Summary state does not itself claim a final-result guarantee. The
 guarantee is attached to a finalized value, such as a `SummaryEstimate`.
+
+> Implemented: `AccuracyGuarantee` holds only an `AccuracySpec` with a
+> constant bound (`BoundExpr::Constant`) and a failure probability
+> (`ProbabilityExpr::{Zero, Constant, Unknown}`); the symbolic combinators
+> and the provenance trail below are not in the code.
 
 #### Error metrics
 
@@ -295,6 +317,10 @@ The accuracy model derives local guarantees, propagates compatible guarantees,
 and checks the final query result against its target. The budget allocator
 only proposes allocations; it does not prove them. `CostModel` may rank only
 candidates that survive the complete accuracy check.
+
+> **Replaced.** The composition rules below are now per-operator error
+> contracts (`ErrorContract`); an operator without a contract for a metric
+> fails the edge (the metric rule).
 
 Composition rules are explicit and metric-aware. The built-in model supports
 only registered exact, additive, Lipschitz, relative, and exact-aggregation
@@ -409,6 +435,10 @@ for additive nested layers:
 epsilon_i = epsilon_total / approximate_layer_count
 delta_i = delta_total / approximate_layer_count
 ```
+
+> **Replaced.** No budget allocator exists in the code: readout requirements
+> (`readout_caps.rs`) pass each query's target down through the consumers'
+> error contracts to the required accuracy of each readout.
 
 Every allocated candidate is reconfigured, propagated, and checked. Allocation
 is only a proposal, and recording a requested delta in metadata is not evidence

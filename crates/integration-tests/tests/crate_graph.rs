@@ -1,4 +1,4 @@
-//! The workspace crate graph follows #1054's target graph (its rule 4).
+//! The workspace crate graph follows the target crate graph (its rule 4).
 //!
 //! The test reads `cargo metadata --format-version 1 --no-deps` and checks every
 //! `[dependencies]` edge between two workspace crates, and every
@@ -16,7 +16,7 @@
 //! - the **facade** (asap-planner) may depend on every stage crate and every
 //!   shared crate;
 //! - the **executor** is a runtime, not a stage; it depends only on asap-types
-//!   (#1016 decides where it belongs);
+//!   (where it belongs is not decided);
 //! - **devtools** and **integration-tests** may depend on anything, and no
 //!   other crate may depend on them.
 //!
@@ -100,8 +100,8 @@ type Exception = (&'static str, &'static str);
 /// The forbidden `[dependencies]` edges the workspace keeps today.
 const EXCEPTIONS: &[Exception] = &[
     // `plan_installable` offers only the summaries the Planner's own executor
-    // implements. #1016 decides where that kernel list and the executor
-    // belong; this exception goes away with it.
+    // implements. Where that kernel list and the executor belong is
+    // not decided; this exception goes away with it.
     ("asap-planner", "asap-executor"),
 ];
 
@@ -159,9 +159,7 @@ fn crate_graph_violations(metadata: &Value) -> Vec<String> {
                 continue;
             };
             if !exceptions.contains(&(from, to)) {
-                violations.push(format!(
-                    "forbidden {section} edge {from} -> {to}: {rule} (#1054)"
-                ));
+                violations.push(format!("forbidden {section} edge {from} -> {to}: {rule}"));
             }
         }
     }
@@ -222,7 +220,7 @@ fn checker_rejects_an_edge_between_stage_crates() {
         crate_graph_violations(&metadata),
         vec![
             "forbidden [dependencies] edge asap-stage3-plan-selection -> \
-             asap-stage2-physical-optimization: stage crates never depend on each other (#1054)"
+             asap-stage2-physical-optimization: stage crates never depend on each other"
                 .to_string()
         ]
     );
@@ -255,7 +253,7 @@ fn checker_rejects_a_dev_dependency_between_stage_crates() {
         vec![
             "forbidden [dev-dependencies] edge asap-stage1-pass1-per-computation-candidates -> \
              asap-stage0-memo: a stage crate's tests never call another stage crate, \
-             directly or through the facade (#1054)"
+             directly or through the facade"
                 .to_string()
         ]
     );
@@ -274,7 +272,7 @@ fn checker_rejects_a_frontend_dev_dependency_on_the_facade() {
         vec![
             "forbidden [dev-dependencies] edge asap-frontend-promql -> asap-planner: \
              a stage crate's tests never call another stage crate, directly or through \
-             the facade (#1054)"
+             the facade"
                 .to_string()
         ]
     );
@@ -292,7 +290,7 @@ fn checker_rejects_an_unclassified_crate_and_shared_model_edges() {
         crate_graph_violations(&metadata),
         vec![
             "forbidden [dependencies] edge asap-accuracy -> asap-stage1-pass1-per-computation-candidates: \
-             asap-accuracy and asap-cost depend only on asap-types (#1054)"
+             asap-accuracy and asap-cost depend only on asap-types"
                 .to_string(),
             "workspace crate `asap-new-crate` has no role: add it to `role_of` in \
              crates/integration-tests/tests/crate_graph.rs"

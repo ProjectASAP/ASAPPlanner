@@ -1,4 +1,4 @@
-//! #511 examples: source text → unified dag → summary rewrite → flat export.
+//! Operator IR examples: source text → unified dag → summary rewrite → flat export.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::operator::AggIntent;
@@ -41,7 +41,8 @@ async fn sql_filter_projection_example() {
     assert!(
         matches!(root.expect_non_asap(),NonASAPOp::Project { cols,.. } if matches!(cols[0].expr,ScalarExpr::Arithmetic { .. }))
     );
-    let wire = asap_types::test_support::physical_asap_dag_at_query_time(&root).unwrap();
+    let wire =
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time(&root).unwrap();
     wire.validate().unwrap();
     assert_eq!(wire.nodes.len(), OperatorNode::reachable(&root).len());
 }
@@ -83,15 +84,10 @@ async fn sql_sum_projection_before_and_after_summary_rewrite() {
                 }))
                 .unwrap(),
             );
-            let finalize = std::rc::Rc::new(
-                OperatorNode::with_schema(
-                    asap_types::ir::Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
-                        child: state,
-                    }),
-                    node.schema.clone(),
-                )
-                .with_guarantee(None),
-            );
+            let finalize = std::rc::Rc::new(OperatorNode::with_schema(
+                asap_types::ir::Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: state }),
+                node.schema.clone(),
+            ));
             return finalize;
         }
         Rc::new(node.with_new_children(rewrite).unwrap())
@@ -106,7 +102,8 @@ async fn sql_sum_projection_before_and_after_summary_rewrite() {
     assert!(dag
         .iter()
         .any(|n| matches!(n.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))));
-    let wire = asap_types::test_support::physical_asap_dag_at_query_time(&rewritten).unwrap();
+    let wire =
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time(&rewritten).unwrap();
     wire.validate().unwrap();
     assert_eq!(wire.nodes.len(), dag.len());
 }
@@ -121,7 +118,8 @@ async fn sql_scalar_subquery_retains_its_cardinality_contract() {
         let root = lower_sql(query, &catalog()).await.unwrap();
         root.validate_structure().unwrap();
         assert!(root.children().len() > 1);
-        let wire = asap_types::test_support::physical_asap_dag_at_query_time(&root).unwrap();
+        let wire =
+            asap_types::test_support::forwarders::physical_asap_dag_at_query_time(&root).unwrap();
         assert!(wire
             .edges
             .iter()
@@ -153,7 +151,8 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
     let NonASAPOp::Scan { source, .. } = logical_scan.expect_non_asap() else {
         panic!()
     };
-    let wire = asap_types::test_support::physical_asap_dag_at_query_time(&root).unwrap();
+    let wire =
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time(&root).unwrap();
     let scan = wire
         .nodes
         .iter()

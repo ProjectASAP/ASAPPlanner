@@ -84,7 +84,7 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     /// It has no range and no window count: a `TimeRange` (and
     /// `TimeShift`) over it selects the windows a query reads, and how many
     /// windows it retains is $h_v$, a Stage 3 choice.
-    // Written as `PaneChain` before #1163; the aliases read those documents.
+    // Written as `PaneChain` before the rename; the alias reads those documents.
     #[serde(alias = "PaneChain")]
     SummaryTumblingWindowChain {
         child: C,
