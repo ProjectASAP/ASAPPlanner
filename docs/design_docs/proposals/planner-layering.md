@@ -1259,8 +1259,8 @@ Output: C3 — CandidatePhysicalASAPDAGs
 here; they determine the cost of each option, which stage 3 uses to pick the
 cheapest plan (the typical outcomes above).
 
-On the memo, Stage 2 prunes per operator node and records each pruned
-candidate in `PhysicalASAPMemoCandidates::pruned_candidates`
+On the memo, Stage 2 prunes per physical alternative (a logical candidate
+with one timing and lifetime) and records each pruned alternative in `PhysicalASAPMemoCandidates::pruned_candidates`
 ([Pruning by stage](#pruning-by-stage)). It does not generate a
 configuration the deployment cannot run: an ingestion-time alternative
 without an ingestion pipeline (`NoIngestionPipeline`), a scan of raw data
