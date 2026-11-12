@@ -21,6 +21,7 @@ use asap_types::workload::SqlDialect;
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query, QueryLanguage,
     QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry, RepetitionInterval,
+    TimestampMs,
 };
 
 /// `epsilon` as a query's requested accuracy; a quantile query's target
@@ -45,7 +46,10 @@ fn requirements(query: &str, epsilon: f64) -> QueryRequirements {
 fn repeating(query: &str, epsilon: f64) -> RepeatingEntry {
     RepeatingEntry {
         query: Query(query.into()),
-        demand: RepeatedDemand::FixedInterval(RepetitionInterval(600_000)),
+        demand: RepeatedDemand::FixedIntervalAt {
+            interval: RepetitionInterval(600_000),
+            evaluation_phase: TimestampMs(0),
+        },
         requirements: requirements(query, epsilon),
         predictability: Predictability::Unknown,
         range_evaluation: None,

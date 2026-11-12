@@ -16,7 +16,7 @@ fn workload(query: &str, interval_ms: u64, max_error: f64, metric: &str) -> Valu
     json!({
         "query_workload": {"language": "promql", "query_batch": null, "repeating_queries": [{
             "query": query,
-            "demand": {"fixed_interval": interval_ms},
+            "demand": {"fixed_interval_at": {"interval": interval_ms, "evaluation_phase": 0}},
             "requirements": {"accuracy": {"max_error": max_error, "failure_probability": failure_probability}},
             "predictability": {"predictable": {"known_at": null}},
         }]},

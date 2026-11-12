@@ -8,7 +8,10 @@
       {
         "query": "SELECT percentile_cont(0.9) WITHIN GROUP (ORDER BY value) FROM metrics WHERE ts > now() - INTERVAL '5' MINUTE",
         "demand": {
-          "fixed_interval": 10000
+          "fixed_interval_at": {
+            "interval": 10000,
+            "evaluation_phase": 0
+          }
         },
         "requirements": {
           "accuracy": {
@@ -25,7 +28,10 @@
       {
         "query": "SELECT percentile_cont(0.9) WITHIN GROUP (ORDER BY value) FROM metrics WHERE ts > now() - INTERVAL '5' MINUTE AND city = 'NYC'",
         "demand": {
-          "fixed_interval": 10000
+          "fixed_interval_at": {
+            "interval": 10000,
+            "evaluation_phase": 0
+          }
         },
         "requirements": {
           "accuracy": {
@@ -42,7 +48,10 @@
       {
         "query": "SELECT city, percentile_cont(0.9) WITHIN GROUP (ORDER BY value) FROM metrics WHERE ts > now() - INTERVAL '5' MINUTE GROUP BY city",
         "demand": {
-          "fixed_interval": 10000
+          "fixed_interval_at": {
+            "interval": 10000,
+            "evaluation_phase": 0
+          }
         },
         "requirements": {
           "accuracy": {

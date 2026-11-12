@@ -79,7 +79,10 @@ fn sql_sum_shares_nested_windows_and_slower_readers() {
     w.queries.truncate(1);
     w.queries[0].entry.query.0 =
         "SELECT SUM(value) FROM metrics WHERE ts > now() - INTERVAL '5' MINUTE".into();
-    w.queries[0].entry.demand = serde_json::from_value(json!({"fixed_interval":60000})).unwrap();
+    w.queries[0].entry.demand = serde_json::from_value(
+        json!({"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}}),
+    )
+    .unwrap();
     let single = cost(&w);
     let mut nested = w.clone();
     let mut shorter = w.queries[0].clone();
@@ -88,7 +91,10 @@ fn sql_sum_shares_nested_windows_and_slower_readers() {
     let nested_cost = cost(&nested);
     assert!(nested_cost <= single * 1.001, "{nested_cost} vs {single}");
     let mut slower = w.queries[0].clone();
-    slower.entry.demand = serde_json::from_value(json!({"fixed_interval":120000})).unwrap();
+    slower.entry.demand = serde_json::from_value(
+        json!({"fixed_interval_at": {"interval": 120000, "evaluation_phase": 0}}),
+    )
+    .unwrap();
     w.queries.push(slower);
     let repeated_cost = cost(&w);
     assert!(

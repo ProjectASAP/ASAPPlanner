@@ -1198,10 +1198,12 @@ agree, and the interval and a declared phase are multiples of the window:
 `m[5m]` every 5 minutes is one tumbling 5-minute window maintained at
 ingestion time and read at each evaluation, as a one-tumbling-window chain would be, while `m[20s]` every 20 s at phase
 5 s, or every 30 s, is not kept whole (Pass 2 offers 5 s or 10 s tumbling windows). A
-reader whose phase is not declared has no known evaluation grid
-(`QueryRecurrence::evaluation_grid_ms` is `None`: Prometheus staggers rule groups
-by a hash, so a fixed interval does not mean phase 0), and Pass 2 adds no
-tumbling-window chain for a state it reads. Below a PromQL subquery the
+reader whose evaluation times are not known (an estimated rate, a one-off
+query without a time, or an unknown recurrence) has no known evaluation grid
+(`QueryRecurrence::evaluation_grid_ms` is `None`), and Pass 2 adds no
+tumbling-window chain for a state it reads. A fixed interval always declares
+its phase: Prometheus staggers rule groups by a hash, so no phase can be
+assumed. Below a PromQL subquery the
 grid is the subquery's: `<expr>[10m:30s]` evaluates `<expr>` at the
 multiples of 30 s whatever the outer grid, and `<expr>[10m:]` at the
 server's default interval, which the planner does not know, so a state

@@ -13,7 +13,7 @@ use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
     QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry,
-    RepetitionInterval, SourceFacts, SqlDialect,
+    RepetitionInterval, SourceFacts, SqlDialect, TimestampMs,
 };
 
 fn approximate() -> QueryRequirements {
@@ -169,7 +169,10 @@ async fn lowers_repeating_sql_entries_too() {
             query: Query(
                 "SELECT approx_percentile_cont(l_extendedprice, 0.99) FROM lineitem".into(),
             ),
-            demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
+            demand: RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(60_000),
+                evaluation_phase: TimestampMs(0),
+            },
             requirements: approximate_for("approx_percentile_cont"),
             predictability: Predictability::Unknown,
             range_evaluation: None,
@@ -300,7 +303,10 @@ async fn each_plan_carries_its_selected_root() {
             query_batch: None,
             repeating_queries: Some(vec![RepeatingEntry {
                 query: Query("count_over_time(up[5m])".into()),
-                demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
+                demand: RepeatedDemand::FixedIntervalAt {
+                    interval: RepetitionInterval(60_000),
+                    evaluation_phase: TimestampMs(0),
+                },
                 requirements: approximate(),
                 predictability: Predictability::Unknown,
                 range_evaluation: None,

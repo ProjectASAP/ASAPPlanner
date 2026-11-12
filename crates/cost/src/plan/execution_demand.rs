@@ -1,8 +1,8 @@
 //! Execution demand shared by DAG evaluation and candidate-connection selection.
 //!
 //! This preserves the configured accounting policy, not an exact timestamp
-//! union: different fixed intervals add, unknown phases join a known phase,
-//! estimated rates add, and one-off/scheduled demand uses a batch maximum.
+//! union: different fixed intervals add, estimated rates add, and
+//! one-off/scheduled demand uses a batch maximum.
 //! Call `schedule_groups` or `evaluation_rate` on the chosen query subset
 //! only; neither enumerates subsets. For retained query-time state pass `None` for each range evaluation
 //! to price once per request, as `computations` does.
@@ -52,42 +52,35 @@ type FixedSchedule = (BTreeMap<u64, u64>, Vec<usize>);
 /// one. Repeating queries with equal intervals and equal phases form one
 /// group, every request ending at the same instant: a node they share is
 /// computed once per distinct instant their steps fall on,
-/// `end − k · step_ms` for `k · step_ms ≤ span_ms`. A query of unknown
-/// phase joins the group of the first known phase on its interval, if any.
-/// A query evaluated once per request (no range, or one step) evaluates
-/// only at the end. Different intervals or phases are different groups (an
-/// over-estimate for intervals whose instants coincide, e.g. every 20 s and
-/// every 30 s meet every 60 s); each estimated rate is its own group.
+/// `end − k · step_ms` for `k · step_ms ≤ span_ms`. A query evaluated once
+/// per request (no range, or one step) evaluates only at the end. Different
+/// intervals or phases are different groups (an over-estimate for intervals
+/// whose instants coincide, e.g. every 20 s and every 30 s meet every 60 s);
+/// each estimated rate is its own group.
 /// One-off, scheduled and unknown queries form one batch group: the most
 /// evaluations among them, spread over `non_repeating_query_horizon_seconds`.
 pub fn schedule_groups<'r>(
     queries: impl IntoIterator<Item = (&'r QueryRecurrence, Option<RangeEvaluation>)>,
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<Vec<ScheduleGroup>, AnalyticalCostError> {
-    // Per interval in ms and phase in ms on it (`None`: unknown), each step
-    // in ms its queries use and the longest span in ms at that step, with
-    // the queries; once per request is the interval with span 0.
-    let mut by_schedule: BTreeMap<(u32, Option<u64>), FixedSchedule> = BTreeMap::new();
+    // Per interval in ms and phase in ms on it, each step in ms its queries
+    // use and the longest span in ms at that step, with the queries; once
+    // per request is the interval with span 0.
+    let mut by_schedule: BTreeMap<(u32, u64), FixedSchedule> = BTreeMap::new();
     let mut estimated = Vec::new();
     let mut invocations = 0u64;
     let mut non_repeating = Vec::new();
     for (query, (recurrence, range_evaluation)) in queries.into_iter().enumerate() {
         let steps = range_evaluation.map_or(1, |range| range.evaluations_per_request());
         match recurrence {
-            QueryRecurrence::Repeated(
-                RepeatedDemand::FixedInterval(interval)
-                | RepeatedDemand::FixedIntervalAt { interval, .. },
-            ) => {
+            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval,
+                evaluation_phase,
+            }) => {
                 if interval.0 == 0 {
                     return Err(AnalyticalCostError::InvalidRecurrence);
                 }
-                let phase_ms = match recurrence {
-                    QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
-                        evaluation_phase,
-                        ..
-                    }) => Some(evaluation_phase.0 % u64::from(interval.0)),
-                    _ => None,
-                };
+                let phase_ms = evaluation_phase.0 % u64::from(interval.0);
                 let (step_ms, span_ms) = range_evaluation
                     .filter(|_| steps > 1)
                     .map_or((u64::from(interval.0), 0), |range| {
@@ -124,30 +117,6 @@ pub fn schedule_groups<'r>(
                 invocations = invocations.max(steps);
                 non_repeating.push(query);
             }
-        }
-    }
-    // Queries of unknown phase run with the first known phase on their
-    // interval.
-    let unknown_phase_intervals_ms: Vec<u32> = by_schedule
-        .keys()
-        .filter(|(_, phase_ms)| phase_ms.is_none())
-        .map(|&(interval_ms, _)| interval_ms)
-        .collect();
-    for interval_ms in unknown_phase_intervals_ms {
-        let known = by_schedule
-            .range((interval_ms, Some(0))..=(interval_ms, Some(u64::MAX)))
-            .next()
-            .map(|(&schedule, _)| schedule);
-        if let Some(known) = known {
-            let (unknown, unknown_readers) =
-                by_schedule.remove(&(interval_ms, None)).unwrap_or_default();
-            let (with, members) = by_schedule.get_mut(&known).expect("found above");
-            for (step_ms, span_ms) in unknown {
-                let longest_span_ms = with.entry(step_ms).or_default();
-                *longest_span_ms = (*longest_span_ms).max(span_ms);
-            }
-            members.extend(unknown_readers);
-            members.sort_unstable();
         }
     }
     let mut groups: Vec<ScheduleGroup> = by_schedule
@@ -459,13 +428,10 @@ mod tests {
     use super::*;
     use asap_types::workload::{DemandEstimate, Rate, RepetitionInterval, TimestampMs};
 
-    fn fixed(interval: u32, phase: Option<u64>) -> QueryRecurrence {
-        QueryRecurrence::Repeated(match phase {
-            Some(phase) => RepeatedDemand::FixedIntervalAt {
-                interval: RepetitionInterval(interval),
-                evaluation_phase: TimestampMs(phase),
-            },
-            None => RepeatedDemand::FixedInterval(RepetitionInterval(interval)),
+    fn fixed(interval: u32, phase: u64) -> QueryRecurrence {
+        QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+            interval: RepetitionInterval(interval),
+            evaluation_phase: TimestampMs(phase),
         })
     }
 
@@ -473,13 +439,13 @@ mod tests {
         assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
     }
 
-    // Unknown phases join the first known phase; separate known phases add.
+    // Equal phases share evaluations; separate phases add.
     #[test]
     fn chosen_readers_preserve_phase_accounting() {
         let queries = [
-            fixed(20_000, None),
-            fixed(20_000, Some(5_000)),
-            fixed(20_000, Some(0)),
+            fixed(20_000, 5_000),
+            fixed(20_000, 25_000),
+            fixed(20_000, 0),
         ];
         close(
             evaluation_rate(queries[..2].iter().map(|r| (r, None)), 3600.0).unwrap(),
@@ -496,7 +462,7 @@ mod tests {
     // Range offsets union within one cadence; retained state instead uses requests.
     #[test]
     fn range_offsets_and_request_rates_stay_distinct() {
-        let recurrence = fixed(60_000, Some(0));
+        let recurrence = fixed(60_000, 0);
         let ranges = [
             Some(RangeEvaluation {
                 step_ms: 60_000,
@@ -521,7 +487,7 @@ mod tests {
     // Different fixed intervals remain additive even if timestamps can coincide.
     #[test]
     fn different_intervals_preserve_existing_conservative_rate() {
-        let queries = [fixed(20_000, Some(0)), fixed(30_000, Some(0))];
+        let queries = [fixed(20_000, 0), fixed(30_000, 0)];
         close(
             evaluation_rate(queries.iter().map(|r| (r, None)), 3600.0).unwrap(),
             1.0 / 20.0 + 1.0 / 30.0,
@@ -567,7 +533,7 @@ mod tests {
 
     #[test]
     fn billion_offset_mixed_ranges_are_counted_arithmetically() {
-        let recurrence = fixed(1000, None);
+        let recurrence = fixed(1000, 0);
         let rate = evaluation_rate(
             [
                 (
@@ -628,7 +594,7 @@ mod tests {
     #[test]
     fn invalid_recurrence_is_rejected() {
         assert!(matches!(
-            evaluation_rate([(&fixed(0, None), None)], 3600.0),
+            evaluation_rate([(&fixed(0, 0), None)], 3600.0),
             Err(AnalyticalCostError::InvalidRecurrence)
         ));
         let invalid = QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(DemandEstimate {

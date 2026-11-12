@@ -1136,8 +1136,11 @@ function queryScheduleText(query) {
   const [kind, body] = typeof recurrence === 'string' ? [recurrence, null]
     : recurrence && typeof recurrence === 'object' ? Object.entries(recurrence)[0] || [null, null] : [null, null];
   if (kind === 'repeated') {
-    const interval = body && typeof body === 'object' ? body.fixed_interval : undefined;
-    parts.push(typeof interval === 'number' ? `every ${durationText(interval)}` : `repeated: ${compactWire(body)}`);
+    // `fixed_interval_at` (`interval` and `evaluation_phase`, ms).
+    const at = body && typeof body === 'object' ? body.fixed_interval_at : undefined;
+    const interval = at ? at.interval : undefined;
+    const phase = at && at.evaluation_phase ? ` at phase ${durationText(at.evaluation_phase)}` : '';
+    parts.push(typeof interval === 'number' ? `every ${durationText(interval)}${phase}` : `repeated: ${compactWire(body)}`);
   } else if (kind === 'one_time') {
     parts.push(body && body.invocations > 1 ? `${body.invocations} invocations` : 'once');
     if (body && typeof body.execute_at === 'number') parts.push(`at ${body.execute_at} ms`);
@@ -1186,8 +1189,11 @@ function planningWorkloadQueries(workload) {
   }));
   const repeating = (qw.repeating_queries || []).map((entry) => {
     const demand = entry.demand || {};
-    const interval = typeof demand === 'object' ? demand.fixed_interval : undefined;
-    return { text: entry.query, runs: typeof interval === 'number' ? `every ${durationText(interval)}` : compactWire(demand), accuracy: accuracy(entry.requirements) };
+    // `fixed_interval_at` (`interval` and `evaluation_phase`, ms).
+    const at = typeof demand === 'object' ? demand.fixed_interval_at : undefined;
+    const interval = at ? at.interval : undefined;
+    const phase = at && at.evaluation_phase ? ` at phase ${durationText(at.evaluation_phase)}` : '';
+    return { text: entry.query, runs: typeof interval === 'number' ? `every ${durationText(interval)}${phase}` : compactWire(demand), accuracy: accuracy(entry.requirements) };
   });
   return batch.concat(repeating);
 }

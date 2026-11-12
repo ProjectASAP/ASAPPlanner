@@ -158,7 +158,7 @@ struct RepeatingEntry {
 | Field | Required | Purpose | Why it matters / example |
 |---|---:|---|---|
 | `query` | Yes | Raw query text in `QueryWorkload.language`. | `rate(up[5m])` determines the expression to lower and plan. |
-| `demand` | Yes | A nonzero fixed interval, fixed interval with evaluation phase, nonempty explicit schedule, or evidence-backed estimated rate. | A query every minute produces more expected reads over a horizon than one every hour. |
+| `demand` | Yes | A nonzero fixed interval with its evaluation phase (`fixed_interval_at`; there is no fixed interval without a phase), nonempty explicit schedule, or evidence-backed estimated rate. | A query every minute produces more expected reads over a horizon than one every hour; its phase fixes the evaluation times that tumbling-window chains must end on. |
 | `requirements` | Yes | Accuracy and response-latency requirements. | An exact dashboard query cannot use an approximate summary solely because it is cheaper. |
 | `predictability` | Yes as a field; `Unknown` is allowed | Records whether future executions are known in advance; independent of recurrence. | Current planner code does not use this field for repeating entries; set `Unknown` if no predictability claim is available. |
 

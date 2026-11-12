@@ -82,7 +82,7 @@ impl FuzzQuery {
     ) -> Self {
         let entry = serde_json::from_value(json!({
             "query": spec.render(),
-            "demand": {"fixed_interval": repeat_interval_ms},
+            "demand": {"fixed_interval_at": {"interval": repeat_interval_ms, "evaluation_phase": 0}},
             "requirements": {"accuracy": accuracy, "max_latency_ms": max_latency_ms},
             "predictability": {"predictable": {"known_at": null}},
         }))

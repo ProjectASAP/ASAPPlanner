@@ -16,7 +16,7 @@ use asap_types::ir::QueryRoot;
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, PrometheusMetricType,
     Query, QueryLanguage, QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand,
-    RepeatingEntry, RepetitionInterval, SourceFacts,
+    RepeatingEntry, RepetitionInterval, SourceFacts, TimestampMs,
 };
 
 fn workload_of(queries: &[(&str, u32)], accuracy: AccuracyTarget) -> PlanningWorkload {
@@ -29,7 +29,10 @@ fn workload_of(queries: &[(&str, u32)], accuracy: AccuracyTarget) -> PlanningWor
                     .iter()
                     .map(|&(query, interval)| RepeatingEntry {
                         query: Query(query.into()),
-                        demand: RepeatedDemand::FixedInterval(RepetitionInterval(interval)),
+                        demand: RepeatedDemand::FixedIntervalAt {
+                            interval: RepetitionInterval(interval),
+                            evaluation_phase: TimestampMs(0),
+                        },
                         requirements: QueryRequirements {
                             accuracy: accuracy.clone(),
                             max_latency_ms: None,
