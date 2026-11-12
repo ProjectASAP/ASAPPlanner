@@ -5,7 +5,7 @@ use asap_types::accuracy::AccuracyMetric;
 use asap_types::ir::operator::arguments::BinaryOpKind;
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
-use asap_types::ir::scalar::{resolve_column_ref, ColumnRef};
+use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, ScalarValue};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, BinaryOperator, NonASAPOp, Operator, ScalarExpr};
 use asap_types::stages::{ColumnLineage, Memo, MemoGroupId};
@@ -18,13 +18,16 @@ use asap_types::summary_type::ExactKind;
 /// `metric`: an input whose error is in `metric` then gives no edge (the
 /// metric rule). No factor is guessed; every contract keeps the metric
 /// (concepts doc, section 4, "Local propagation"):
-/// - value-preserving (a `Project` of columns and literals, `Sort`,
-///   `TimeRange`, `TimeShift`, `Concat`, a readout, a finalize, a
-///   `SummaryMerge`): $\beta = 1$ in any metric;
+/// - value-preserving (`Sort`, `TimeRange`, `TimeShift`, `Concat`, a
+///   readout, a finalize, a `SummaryMerge`): $\beta = 1$ in any metric;
+/// - a `Project` whose items reading an estimate ([`reads_an_estimate`])
+///   each keep its error ([`keeps_error`]): $\beta = 1$, in any metric for
+///   a copied column, in absolute error for `abs`, `clamp`, `clamp_min`,
+///   `clamp_max` (also as the PromQL frontend's `promql_` functions) and a
+///   negation, in relative error for a product with or quotient by a
+///   nonzero literal (`q * 2`, `q / 1000`);
 /// - a `Filter` whose predicate reads only columns copied from a source
 ///   (lineage `SourceColumn`, labels and keys): $\beta = 1$ in any metric;
-/// - a `Project` whose computed items are `abs`, `clamp`, `clamp_min`,
-///   `clamp_max` or a negation of a column: absolute, $\beta = 1$;
 /// - an `Aggregate` (or exact accumulator build) of counts ($\beta = 0$),
 ///   min and max (absolute or relative, $\beta = 1$) and avg (absolute,
 ///   $\beta = 1$), without measure filters or `HAVING`, whose group-by
@@ -58,16 +61,11 @@ pub fn error_propagation(
             | NonASAPOp::TimeRange { .. }
             | NonASAPOp::TimeShift { .. }
             | NonASAPOp::Concat { .. } => Some(uniform(1.0)),
-            NonASAPOp::Project { cols, .. } => {
-                let preserves = |expr: &ScalarExpr<MemoGroupId>| {
-                    matches!(expr, ScalarExpr::Column(_) | ScalarExpr::Literal(_))
-                };
-                // A computed item that changes a value by at most its
-                // error keeps an absolute bound only.
-                cols.iter()
-                    .all(|item| preserves(&item.expr) || (absolute && one_lipschitz(&item.expr)))
-                    .then(|| uniform(1.0))
-            }
+            NonASAPOp::Project { cols, child } => cols
+                .iter()
+                .filter(|item| reads_an_estimate(memo, *child, &item.expr))
+                .all(|item| keeps_error(&item.expr, metric))
+                .then(|| uniform(1.0)),
             NonASAPOp::Filter { pred, child } => (pred.0.operator_refs().is_empty()
                 && copied_from_a_source(memo, *child, pred.0.columns_referenced()))
             .then(|| uniform(1.0)),
@@ -190,21 +188,86 @@ fn keys_copied_from_a_source(memo: &Memo, child: MemoGroupId, reduction: &Reduct
     )
 }
 
+/// Whether `expr`, an item of a `Project` over `child`, reads a value that
+/// may carry an estimate's error: a column of `child` that is neither
+/// copied from a source (lineage `SourceColumn`: a label, a key, the series
+/// identity) nor its time, or another operator's result. A PromQL function
+/// of the value replaces only the value; the time and labels it copies
+/// (and `promql_drop_metric_name` of the series identity) read no estimate.
+fn reads_an_estimate(memo: &Memo, child: MemoGroupId, expr: &ScalarExpr<MemoGroupId>) -> bool {
+    let properties = &memo.groups()[child.0 as usize].group_properties;
+    !expr.operator_refs().is_empty()
+        || expr.columns_referenced().into_iter().any(|column| {
+            properties.schema.time_index != Some(column)
+                && !matches!(
+                    properties.column_lineage.get(column),
+                    Some(ColumnLineage::SourceColumn(_))
+                )
+        })
+}
+
+/// Whether a `Project` item `expr` keeps the error in `metric` of the
+/// column it reads, with $\beta = 1$: a copy of a column or a literal, or
+/// the series identity without its metric name (`promql_drop_metric_name`,
+/// which changes a label, not a value), in any metric; a 1-Lipschitz
+/// function of a column ([`one_lipschitz`]) in absolute error; a column
+/// times or divided by a nonzero literal in relative error.
+fn keeps_error<C>(expr: &ScalarExpr<C>, metric: AccuracyMetric) -> bool {
+    match expr {
+        ScalarExpr::Column(_) | ScalarExpr::Literal(_) => true,
+        ScalarExpr::FunctionCall { name, args } if name == "promql_drop_metric_name" => {
+            matches!(args[..], [ScalarExpr::Column(_)])
+        }
+        _ if matches!(metric, AccuracyMetric::Absolute { .. }) => one_lipschitz(expr),
+        _ if metric == AccuracyMetric::Relative => scaled_by_a_constant(expr),
+        _ => false,
+    }
+}
+
 /// Whether `expr` changes a column's value by at most its error: `abs`,
-/// `clamp`, `clamp_min` or `clamp_max` of a column with literal bounds, or
-/// a column's negation (1-Lipschitz).
+/// `clamp`, `clamp_min` or `clamp_max` (or the PromQL frontend's
+/// `promql_abs`, …) of a column with literal bounds, or a column's
+/// negation (1-Lipschitz).
 fn one_lipschitz<C>(expr: &ScalarExpr<C>) -> bool {
     match expr {
         ScalarExpr::Negative { expr, .. } => matches!(**expr, ScalarExpr::Column(_)),
         ScalarExpr::FunctionCall { name, args } => {
+            let name = name.to_ascii_lowercase();
             matches!(
-                name.to_ascii_lowercase().as_str(),
+                name.strip_prefix("promql_").unwrap_or(&name),
                 "abs" | "clamp" | "clamp_min" | "clamp_max"
             ) && matches!(args.first(), Some(ScalarExpr::Column(_)))
                 && args[1..]
                     .iter()
                     .all(|arg| matches!(arg, ScalarExpr::Literal(_)))
         }
+        _ => false,
+    }
+}
+
+/// Whether `expr` is a column times a nonzero literal (either side) or
+/// divided by one: $c\hat{x}$ is off from $cx$ by the same share as
+/// $\hat{x}$ from $x$ (a unit conversion, `q * 1000`).
+fn scaled_by_a_constant<C>(expr: &ScalarExpr<C>) -> bool {
+    let nonzero = |expr: &ScalarExpr<C>| match expr {
+        ScalarExpr::Literal(ScalarValue::Float64(x)) => x.is_finite() && *x != 0.0,
+        ScalarExpr::Literal(ScalarValue::Int64(x)) => *x != 0,
+        _ => false,
+    };
+    let column = |expr: &ScalarExpr<C>| matches!(expr, ScalarExpr::Column(_));
+    match expr {
+        ScalarExpr::Arithmetic {
+            op: ArithmeticOpKind::Mul,
+            left,
+            right,
+            ..
+        } => (column(left) && nonzero(right)) || (nonzero(left) && column(right)),
+        ScalarExpr::Arithmetic {
+            op: ArithmeticOpKind::Div,
+            left,
+            right,
+            ..
+        } => column(left) && nonzero(right),
         _ => false,
     }
 }
@@ -234,8 +297,8 @@ pub struct ErrorPropagation {
 mod tests {
     use super::*;
     use asap_types::ir::operator::arguments::Reduction;
-    use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
-    use asap_types::ir::schema::DataType;
+    use asap_types::ir::scalar::CompareOpKind;
+    use asap_types::ir::schema::{DataType, PROMQL_SERIES_IDENTITY};
     use asap_types::ir::{ExprSemantics, Predicate, ProjectItem};
     use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
     use asap_types::test_support::memo_fixtures::{aggregate, readout, scan};
@@ -257,7 +320,10 @@ mod tests {
     /// `latency` by `job`, `job = "api"` reads such a column; `value > 0.5`
     /// compares the computed estimate and has no contract. A `Project` of
     /// `abs`, `clamp` or a negation of the value changes it by at most its
-    /// error: β = 1 for absolute errors only.
+    /// error: β = 1 for absolute errors only; one scaling it by a nonzero
+    /// constant keeps its relative error: β = 1 for relative errors. Only
+    /// the items reading the estimate are judged, so the series identity
+    /// `promql_drop_metric_name` computes does not count.
     #[test]
     fn key_filters_and_value_preserving_projects_have_unit_contracts() {
         let mut memo = Memo::new(&DataWorkload::default());
@@ -315,51 +381,96 @@ mod tests {
                 "a filter comparing the estimate, {metric:?}"
             );
         }
-        let value = || Box::new(ScalarExpr::Column(1));
+        // A `Project` over the readout, as the PromQL frontend lowers a
+        // function of the value: the time and every label copied, the series
+        // identity through `promql_drop_metric_name`, the estimate replaced.
+        let value = || Box::new(ScalarExpr::Column(estimate));
         let literal = |x: f64| ScalarExpr::Literal(ScalarValue::Float64(x));
-        let computed = [
+        let project_value = |expr: ScalarExpr<MemoGroupId>| {
+            let fields = &memo.groups()[readout.0 as usize]
+                .group_properties
+                .schema
+                .fields;
+            Operator::NonASAP(NonASAPOp::Project {
+                cols: fields
+                    .iter()
+                    .enumerate()
+                    .map(|(column, field)| ProjectItem {
+                        alias: Some(field.name.clone()),
+                        expr: if column == estimate {
+                            expr.clone()
+                        } else if field.name == PROMQL_SERIES_IDENTITY {
+                            ScalarExpr::FunctionCall {
+                                name: "promql_drop_metric_name".into(),
+                                args: vec![ScalarExpr::Column(column)],
+                            }
+                        } else {
+                            ScalarExpr::Column(column)
+                        },
+                    })
+                    .collect(),
+                child: readout,
+            })
+        };
+        let factor = |project: &Operator<MemoGroupId>, metric| {
+            error_propagation(&memo, project, metric)
+                .map(|propagation| propagation.factor_per_input)
+        };
+        let one_lipschitz = [
             ScalarExpr::FunctionCall {
-                name: "abs".into(),
+                name: "promql_abs".into(),
                 args: vec![*value()],
             },
             ScalarExpr::FunctionCall {
-                name: "clamp".into(),
+                name: "promql_clamp".into(),
                 args: vec![*value(), literal(0.0), literal(100.0)],
+            },
+            ScalarExpr::FunctionCall {
+                name: "promql_clamp_max".into(),
+                args: vec![*value(), literal(5.0)],
             },
             ScalarExpr::Negative {
                 expr: value(),
                 semantics: ExprSemantics::Promql,
             },
         ];
-        for expr in computed {
-            let project = Operator::NonASAP(NonASAPOp::Project {
-                cols: vec![
-                    ProjectItem {
-                        alias: None,
-                        expr: ScalarExpr::Column(0),
-                    },
-                    ProjectItem {
-                        alias: Some("value".into()),
-                        expr: expr.clone(),
-                    },
-                    ProjectItem {
-                        alias: None,
-                        expr: ScalarExpr::Column(2),
-                    },
-                ],
-                child: g1,
-            });
+        for expr in one_lipschitz {
+            let project = project_value(expr.clone());
             assert_eq!(
-                error_propagation(&memo, &project, AccuracyMetric::ABSOLUTE)
-                    .map(|propagation| propagation.factor_per_input),
+                factor(&project, AccuracyMetric::ABSOLUTE),
                 Some(vec![1.0]),
                 "{expr:?}"
             );
+            assert_eq!(factor(&project, AccuracyMetric::Relative), None, "{expr:?}");
+        }
+        // Scaling by a nonzero constant keeps a relative error: `q / 2`,
+        // `q * 2`, `2 * q`; scaling by 0 has no contract.
+        let scaled = |op, left, right| ScalarExpr::Arithmetic {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
+            semantics: ExprSemantics::Promql,
+        };
+        for expr in [
+            scaled(ArithmeticOpKind::Div, *value(), literal(2.0)),
+            scaled(ArithmeticOpKind::Mul, *value(), literal(2.0)),
+            scaled(ArithmeticOpKind::Mul, literal(2.0), *value()),
+        ] {
+            let project = project_value(expr.clone());
             assert_eq!(
-                error_propagation(&memo, &project, AccuracyMetric::Relative),
-                None,
+                factor(&project, AccuracyMetric::Relative),
+                Some(vec![1.0]),
                 "{expr:?}"
             );
+            assert_eq!(factor(&project, AccuracyMetric::Rank), None, "{expr:?}");
+        }
+        let times_zero = project_value(scaled(ArithmeticOpKind::Mul, *value(), literal(0.0)));
+        assert_eq!(factor(&times_zero, AccuracyMetric::Relative), None);
+        // Copying the value (and dropping the metric name from the series
+        // identity) keeps it in every metric.
+        let copied = project_value(*value());
+        for metric in AccuracyMetric::ALL {
+            assert_eq!(factor(&copied, metric), Some(vec![1.0]), "{metric:?}");
         }
     }
 

@@ -62,6 +62,15 @@ pub enum RootPruneReason {
         input: usize,
         k: usize,
     },
+    /// The producer is a readout with an accuracy metric but no guarantee
+    /// evaluable at the required failure probability (an HLL distinct
+    /// count, whose failure probability is unknown), or with no guarantee
+    /// at all (UnivMon's distinct count), read by a query with an accuracy
+    /// target: its error has no bound.
+    NoGuarantee {
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+    },
     /// The readout `consumer` is reached by query `query`, whose target sets
     /// a failure probability over the whole result while the number of
     /// values one evaluation returns ($n_q$) is unknown: no per-value

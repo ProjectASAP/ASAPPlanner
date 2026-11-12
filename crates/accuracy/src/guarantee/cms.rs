@@ -35,7 +35,7 @@ mod tests {
             depth: 5,
             heap_size: 10,
         };
-        let topk_frequency = sketch_guarantee(
+        let topk_frequency = guarantee_of_parameters(
             &SketchAlgorithm::CmsWithHeap,
             &cms_heap,
             &SketchStatistic::TopK { k: 10 },

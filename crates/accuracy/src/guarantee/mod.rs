@@ -15,32 +15,30 @@ pub mod hll;
 pub(crate) mod kll;
 pub mod univmon;
 
-/// The guarantee of reading `query` from a state of `algorithm` with
-/// parameters `params` at failure probability `failure_probability`
-/// ([`theoretical_guarantee`], without its capability check). A Hydra
-/// state reads each subpopulation's state, so it has that state's
-/// guarantee.
-fn sketch_guarantee(
+/// The guarantee of θ for `query`: where one parameter sets both the error
+/// and the failure probability (KLL's and KMV's `k`), the one that holds at
+/// `failure_probability`; where structural parameters set them apart (a
+/// Count-Min's width and depth, HLL's precision), the one θ fixes, whose
+/// failure probability may exceed `failure_probability` or be unknown
+/// (HLL's). A Hydra state reads each subpopulation's state, so it has
+/// that state's guarantee.
+fn guarantee_of_parameters(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
     query: &SketchStatistic,
     failure_probability: f64,
 ) -> Option<AccuracyGuarantee> {
-    let fixed = match params {
-        SketchParams::Kll { .. } => {
-            return kll::guarantee(algorithm, params, query, failure_probability)
-        }
+    match params {
+        SketchParams::Kll { .. } => kll::guarantee(algorithm, params, query, failure_probability),
         SketchParams::Kmv { .. } => {
-            return cardinality::guarantee(algorithm, params, query, failure_probability)
+            cardinality::guarantee(algorithm, params, query, failure_probability)
         }
-        SketchParams::Hydra(hydra) => {
-            return sketch_guarantee(
-                algorithm,
-                &hydra.per_subpopulation(),
-                query,
-                failure_probability,
-            )
-        }
+        SketchParams::Hydra(hydra) => guarantee_of_parameters(
+            algorithm,
+            &hydra.per_subpopulation(),
+            query,
+            failure_probability,
+        ),
         SketchParams::DDSketch { .. } => ddsketch::guarantee(algorithm, params, query),
         SketchParams::Hll { .. } => hll::generic_guarantee(algorithm, params, query),
         SketchParams::Cms { .. } | SketchParams::CmsWithHeap { .. } => {
@@ -50,16 +48,26 @@ fn sketch_guarantee(
             count_sketch::guarantee(algorithm, params, query)
         }
         SketchParams::UnivMon { .. } => univmon::guarantee(algorithm, params, query),
+    }
+}
+
+/// The guarantee [`theoretical_guarantee`] gives, before it checks that θ
+/// fails at most `failure_probability` rarely: its metric, and whether its
+/// failure probability is known at all. `None` when the summary type does
+/// not answer `statistic` or has no error model for it.
+pub(crate) fn guarantee_before_failure_probability_check(
+    summary_type: &FieldDataType,
+    parameters: &SketchParams,
+    statistic: &SketchStatistic,
+    failure_probability: f64,
+) -> Option<AccuracyGuarantee> {
+    let FieldDataType::Sketch(algorithm) = summary_type else {
+        return None;
     };
-    // Structural parameters set the failure probability: the bound holds
-    // only when θ fails at most that rarely.
-    fixed.filter(|guarantee| {
-        guarantee
-            .spec
-            .failure_probability
-            .evaluate()
-            .is_some_and(|own| own <= target_limit(failure_probability))
-    })
+    if !SummaryTypeCapability::of(summary_type).answers(statistic) {
+        return None;
+    }
+    guarantee_of_parameters(algorithm, parameters, statistic, failure_probability)
 }
 
 fn bounded_guarantee(
@@ -102,13 +110,19 @@ pub fn theoretical_guarantee(
     statistic: &SketchStatistic,
     failure_probability: f64,
 ) -> Option<AccuracyGuarantee> {
-    let FieldDataType::Sketch(algorithm) = summary_type else {
-        return None;
-    };
-    if !SummaryTypeCapability::of(summary_type).answers(statistic) {
-        return None;
-    }
-    sketch_guarantee(algorithm, parameters, statistic, failure_probability)
+    guarantee_before_failure_probability_check(
+        summary_type,
+        parameters,
+        statistic,
+        failure_probability,
+    )
+    .filter(|guarantee| {
+        guarantee
+            .spec
+            .failure_probability
+            .evaluate()
+            .is_some_and(|own| own <= target_limit(failure_probability))
+    })
 }
 
 /// Small relative tolerance for comparing an evaluated bound against a

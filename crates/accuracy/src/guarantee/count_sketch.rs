@@ -89,7 +89,7 @@ mod tests {
             width: 30_000,
             depth: 47,
         };
-        let guarantee = sketch_guarantee(
+        let guarantee = guarantee_of_parameters(
             &SketchAlgorithm::CountSketch,
             &count_sketch,
             &SketchStatistic::PointCount {

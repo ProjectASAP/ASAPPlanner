@@ -8,7 +8,8 @@ use asap_types::ir::{ASAPOp, Operator, QueryRoot};
 use asap_types::stages::{CandidateForMemoGroup, Memo, MemoGroupId};
 use asap_types::summary_type::{parameter_list, SketchStatistic};
 
-use crate::{error_propagation, theoretical_guarantee};
+use crate::error_propagation;
+use crate::guarantee::guarantee_before_failure_probability_check;
 
 /// Per group, by group id, the metrics its output may be off in for the
 /// queries with an accuracy target that reach it: a query root accepts its
@@ -78,9 +79,11 @@ fn add_metrics(known: &mut Option<Vec<AccuracyMetric>>, metrics: &[AccuracyMetri
 }
 
 /// The metric of the error reading `statistic` from a state of
-/// `summary_type` has: its first listed θ's guarantee's. `None` for an
-/// exact state and for a summary type with no listed θ or no guarantee
-/// for the statistic.
+/// `summary_type` has: its first listed θ's guarantee's, whatever that
+/// guarantee's failure probability (HLL's distinct count reads a relative
+/// error although its failure probability is unknown). `None` for an exact
+/// state and for a summary type with no listed θ or no guarantee for the
+/// statistic (UnivMon's distinct count).
 pub fn readout_metric(
     summary_type: &FieldDataType,
     statistic: &SketchStatistic,
@@ -90,7 +93,7 @@ pub fn readout_metric(
     };
     let parameters = parameter_list(*algorithm).first()?;
     Some(
-        theoretical_guarantee(summary_type, parameters, statistic, 1.0)?
+        guarantee_before_failure_probability_check(summary_type, parameters, statistic, 1.0)?
             .spec
             .accuracy_metric,
     )
