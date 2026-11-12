@@ -293,4 +293,4 @@ pub(crate) fn plain(schema: &SchemaRef, column: usize) -> Result<(&DataType, boo
 }
 
 #[cfg(test)]
-mod weighted_state_tests;
+mod tests;
