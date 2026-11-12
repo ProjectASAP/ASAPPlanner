@@ -145,7 +145,6 @@ fn summary_capability_levels_are_distinct() {
             ColumnRef::Named("host".into()),
         )),
         weight: planner_types::summary_type::SummaryInputExpr::Constant(1.0),
-        weight_domain: Default::default(),
     };
     assert!(validate_summary_kernel(&cms, &update).is_ok());
     // Stored Count-Min state reads only its bare count natively.

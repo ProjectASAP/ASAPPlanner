@@ -17,8 +17,7 @@ use planner_types::ir::schema::{Field, FieldDataType};
 use planner_types::ir::ASAPOp;
 use planner_types::plan::physical_asap_dag::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
 use planner_types::summary_type::{
-    NonNegativeWeightProof, SketchAlgorithm, SketchStatistic, SummaryInputExpr, SummaryUpdate,
-    WeightDomain,
+    SketchAlgorithm, SketchStatistic, SummaryInputExpr, SummaryUpdate,
 };
 use std::sync::Arc;
 
@@ -170,9 +169,6 @@ fn planner_unit_frequency_update_binds_as_a_value_frequency_build() -> Result<()
             input: SummaryUpdate {
                 item: Some(SummaryInputExpr::Column(ColumnRef::Named("src_ip".into()))),
                 weight: SummaryInputExpr::Constant(1.0),
-                weight_domain: WeightDomain::NonNegative {
-                    proof: NonNegativeWeightProof::UnitCount,
-                },
             },
             reduction: Reduction::Reduce(GroupKeys::by(vec![])),
             filter: None,

@@ -22,9 +22,8 @@ pub use candidate::{
 };
 pub use edge::LogicalEdge;
 pub use group::{
-    ranked_column_of_group, raw_data_samples_of_metric_of_group, AggregateCoverage,
-    AggregateDefinition, ColumnLineage, CoverageError, GroupProperties, MemoGroup, MemoGroupError,
-    MemoGroupId, ValueSign,
+    ranked_column_of_group, AggregateCoverage, AggregateDefinition, ColumnLineage, CoverageError,
+    GroupProperties, MemoGroup, MemoGroupError, MemoGroupId, ValueSign,
 };
 pub use memo::{Memo, MemoQuery};
 pub use memo_candidates::LogicalASAPMemoCandidates;
