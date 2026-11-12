@@ -122,20 +122,18 @@ fn candidates(
     memo: Memo,
     evaluation_grid_of_group: Vec<Option<EvaluationGrid>>,
 ) -> PhysicalASAPMemoCandidates {
-    PhysicalASAPMemoCandidates {
-        logical_candidates: LogicalASAPMemoCandidates {
+    PhysicalASAPMemoCandidates::new(
+        LogicalASAPMemoCandidates {
             memo,
             edges: vec![],
             pruned: vec![],
             evaluation_grid_of_group,
             exact_only_groups_of_query: vec![],
         },
-        physical_candidates: vec![],
-        pruned_candidates: vec![],
-        edges: vec![],
-        admissible_edges_into_input: HashMap::new(),
-        admissible_edges_out_of_candidate: vec![],
-    }
+        vec![],
+        vec![],
+        vec![],
+    )
 }
 
 fn candidate(
@@ -300,5 +298,92 @@ fn producer_satisfies_physical_requirements_over_every_valid_timing_and_lifetime
                 }
             }
         }
+    }
+}
+
+/// The edge from candidate `producer` into input 0 of `consumer`.
+fn physical_edge(
+    producer: usize,
+    consumer: usize,
+    satisfies_logical_requirement: bool,
+    satisfies_physical_requirement: bool,
+) -> PhysicalEdge {
+    PhysicalEdge {
+        producer_candidate_id: PhysicalCandidateId(producer),
+        consumer_candidate_id: PhysicalCandidateId(consumer),
+        input_index_of_consumer: 0,
+        satisfies_logical_requirement,
+        satisfies_physical_requirement,
+    }
+}
+
+/// An edge is admissible only when it satisfies both the logical and the
+/// physical requirement.
+#[test]
+fn an_edge_is_admissible_when_both_requirements_hold() {
+    for (logical, physical) in [(false, false), (false, true), (true, false), (true, true)] {
+        assert_eq!(
+            physical_edge(0, 1, logical, physical).is_logically_and_physically_admissible(),
+            logical && physical,
+            "alpha_log {logical}, alpha_phys {physical}"
+        );
+    }
+}
+
+/// `new` indexes only the admissible edges, into each (consumer, input)
+/// and out of each producer; every edge stays in `edges()`. The last
+/// 5 minutes read by a query-time KLL build (admissible), by an
+/// ingestion-time chain (not physically admissible) and by a query-time
+/// chain that misses the logical requirement.
+#[test]
+fn new_indexes_only_admissible_edges() {
+    let physical_candidates = vec![
+        candidate(LAST_5M, QueryTime, Lifetime::None),
+        candidate(BUILD, QueryTime, Lifetime::None),
+        candidate(
+            WINDOWS_5S,
+            IngestionTime,
+            Lifetime::AcrossEvaluations(MEMORY),
+        ),
+        candidate(WINDOWS_10S, QueryTime, Lifetime::AcrossEvaluations(MEMORY)),
+    ];
+    let edges = vec![
+        physical_edge(0, 1, true, true),
+        physical_edge(0, 2, true, false),
+        physical_edge(0, 3, false, true),
+    ];
+    let candidates = PhysicalASAPMemoCandidates::new(
+        LogicalASAPMemoCandidates {
+            memo: memo(),
+            edges: vec![],
+            pruned: vec![],
+            evaluation_grid_of_group: vec![None; 5],
+            exact_only_groups_of_query: vec![],
+        },
+        physical_candidates,
+        edges.clone(),
+        vec![],
+    );
+    assert_eq!(
+        candidates.edges().map(|(_, edge)| edge).collect::<Vec<_>>(),
+        edges
+    );
+    assert_eq!(
+        candidates.admissible_edges_into(PhysicalCandidateId(1), 0),
+        [PhysicalEdgeId(0)]
+    );
+    for consumer in [2, 3] {
+        assert!(candidates
+            .admissible_edges_into(PhysicalCandidateId(consumer), 0)
+            .is_empty());
+    }
+    assert_eq!(
+        candidates.admissible_edges_out_of(PhysicalCandidateId(0)),
+        [PhysicalEdgeId(0)]
+    );
+    for producer in 1..4 {
+        assert!(candidates
+            .admissible_edges_out_of(PhysicalCandidateId(producer))
+            .is_empty());
     }
 }
