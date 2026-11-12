@@ -90,7 +90,7 @@ fn per_series_reduction_schema(
 /// `per_series_reduction_schema` (`rate`/`increase`/`*_over_time`) instead
 /// of the cross-series `by ++ measures` shape. Which one applies is read directly
 /// off `reduction` — decided once, at construction, by whoever built the
-/// `Aggregate` node (issue #165) — not re-derived here from `by`/child shape.
+/// `Aggregate` node — not re-derived here from `by`/child shape.
 pub fn aggregate_output_schema(
     in_schema: &Schema,
     reduction: &Reduction,

@@ -6,7 +6,7 @@
 //! directly as its last step, one node per selected execution, each with the
 //! timing and lifetime of the physical candidate it was built from.
 //! The deployment executes the plan as given
-//! (#509 Assumption 8): it does not change lifetime or timing.
+//! (the physical plan is final): it does not change lifetime or timing.
 
 use std::collections::{HashMap, HashSet};
 #[cfg(any(test, feature = "test-support"))]
@@ -71,7 +71,7 @@ pub struct PhysicalASAPDAGNode {
     pub output_state: ExecutionDataState,
     /// How long and where the deployment materializes this node's output: the
     /// lifetime the physical properties assignment chose for the sub-DAG this
-    /// node produces. Any node may be materialized (#509 §Materialization); a node
+    /// node produces. Any node may be materialized; a node
     /// with no assignment has lifetime `None`. With `output_state.timing` it
     /// is the node's `PhysicalProperties`.
     pub lifetime: Lifetime,
@@ -215,8 +215,7 @@ pub struct PhysicalASAPDAG {
     pub roots: Vec<PhysicalASAPNodeId>,
     /// One expression per standalone scalar query, keyed by the query's
     /// position in the batch, in increasing order. Its operator references
-    /// name nodes of this DAG. A standalone scalar query is not a node (#511
-    /// §2.3), so query `i` of the batch is the scalar root keyed `i` when
+    /// name nodes of this DAG. A standalone scalar query is not a node, so query `i` of the batch is the scalar root keyed `i` when
     /// there is one, and otherwise the next entry of `roots`.
     pub scalar_roots: Vec<(usize, ScalarExpr<PhysicalASAPNodeId>)>,
 }

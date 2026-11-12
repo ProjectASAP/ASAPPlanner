@@ -1,5 +1,4 @@
-//! Exact per-series range reductions over raw data samples execute natively
-//! (issue #770): exact `quantile/sum/avg/min/max/count_over_time` reduces
+//! Exact per-series range reductions over raw data samples execute natively: exact `quantile/sum/avg/min/max/count_over_time` reduces
 //! each series' samples in the window with a per-entity `Aggregate`, which
 //! the executor compiles and runs. The samples are bound at the plan's
 //! `Scan`, as a runtime binds them, and its `TimeRange` keeps the window.

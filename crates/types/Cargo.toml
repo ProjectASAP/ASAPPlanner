@@ -6,11 +6,10 @@ edition = "2021"
 
 # Shared vocabulary for the whole workspace: the L3 intent algebra (former
 # asap-ir) plus the L4 sketch-bound IR types (former asap-sketch, minus its
-# execution logic — removed, no real implementor existed; see issue #190).
+# execution logic — removed, no real implementor existed).
 # No internal deps.
 [dependencies]
-# "rc" — OperatorNode child fields are Rc<OperatorNode> (issue #212, #222:
-# shared sub-expressions), and Rc<T>'s Serialize/Deserialize impls live behind
+# "rc" — OperatorNode child fields are Rc<OperatorNode> (shared sub-expressions), and Rc<T>'s Serialize/Deserialize impls live behind
 # this feature flag. A shared Rc still (de)serializes as an ordinary inline
 # value, once per reference, exactly like the old Box.
 serde = { version = "1", features = ["derive", "rc"] }

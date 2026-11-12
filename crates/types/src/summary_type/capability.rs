@@ -208,7 +208,7 @@ impl SummaryTypeCapability {
                 },
                 // A sketch algorithm's row is sketchlib's. HydraKll merges as
                 // that row says: `Hydra::merge` requires the same k and m and
-                // otherwise returns an error (asap_sketchlib #251).
+                // otherwise returns an error (asap_sketchlib).
                 FieldDataType::Sketch(algorithm) => {
                     let row = algorithm.capability();
                     return Self {

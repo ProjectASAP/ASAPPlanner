@@ -130,7 +130,7 @@ pub fn validate_ingestion_time_summary<C>(
     }
 }
 
-#[allow(dead_code)] // Used again in #1207 PR 6, with θ from the exported node.
+#[allow(dead_code)] // Used again once θ comes from the exported node.
 fn valid_matrix(width: u32, depth: u32) -> bool {
     // Construction uses the kernel's native row hashing, so no encoded-size
     // limit applies here.

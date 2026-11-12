@@ -1,4 +1,4 @@
-//! End-to-end SQL query-string → post-ASAP IR pin (issue #191).
+//! End-to-end SQL query-string → post-ASAP IR pin.
 //!
 //! The SQL counterpart of `promql_to_post_asap.rs`: drives SQL text —
 //! `lower_sql` (text → non-ASAP `OperatorNode` tree) → the planner stages'

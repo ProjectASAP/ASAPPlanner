@@ -1,4 +1,4 @@
-//! #511 examples: source text → unified dag → summary rewrite → flat export.
+//! Operator IR examples: source text → unified dag → summary rewrite → flat export.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::ir::operator::AggIntent;

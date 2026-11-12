@@ -33,7 +33,7 @@ use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType};
 /// `None` is the PromQL convention "the time-series sample value"; SQL
 /// `SUM(bytes), AVG(latency)` sets distinct `Some(_)`s so a multi-aggregate
 /// node binds each reducer to the right column, and `plan::bind` knows which
-/// column to summarise over (issue #115). `Cardinality` and `PearsonCorr` read
+/// column to summarise over. `Cardinality` and `PearsonCorr` read
 /// more than one column, so they carry their own lists; [`input_cols`] is the
 /// arity-agnostic accessor every consumer goes through.
 ///
@@ -261,9 +261,9 @@ pub enum AggIntent<C = ColumnId> {
     TsOfLastOverTime,
 
     /// A deployment-model-specific intent this core vocabulary doesn't
-    /// (and shouldn't) know the shape of. First step toward issue #131
-    /// ("add an explicit registration API for extending query / sketch /
-    /// primitive / data types") applied to this IR: rather than growing
+    /// (and shouldn't) know the shape of. A first step toward an explicit
+    /// registration API for extending query / sketch /
+    /// primitive / data types, applied to this IR: rather than growing
     /// `AggIntent` for every capability a single deployment model needs
     /// (which would turn this shared vocabulary into a dumping ground —
     /// core only grows for intents ≥2 deployment models actually use),
@@ -367,7 +367,7 @@ pub enum MathFunc {
 // only its presence via a `{ .. }` pattern — so, unlike schema derivation
 // (which needs bound positions), nothing stops these from being generic
 // over every `C`. And a front end constructing `AggIntent<ColumnRef>`
-// directly (issue #179) does need `is_per_series` pre-binding — it decides
+// directly does need `is_per_series` pre-binding — it decides
 // the `PerEntity`/`Reduce` reduction shape right at construction time (see
 // `asap_frontend_promql::promql::reduction_for`) — so they stay generic
 // alongside `input_col`, in one `impl<C>` block.
