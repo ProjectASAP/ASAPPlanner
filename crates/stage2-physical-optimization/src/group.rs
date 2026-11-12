@@ -5,10 +5,10 @@
 
 use std::collections::HashSet;
 
-use asap_types::ir::operator::arguments::AtModifier;
+use asap_types::ir::operator::arguments::{AtModifier, TimeShift};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::stages::{
-    CandidateForMemoGroup, CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, MemoGroupId,
+    CandidateForMemoGroup, CandidateForMemoGroupId, LogicalASAPMemoCandidates, MemoGroupId,
 };
 
 /// The candidates of group `group` that Pass 2 kept.
@@ -61,49 +61,82 @@ pub(super) fn ingestion_time_offered_per_group(
 }
 
 /// Per group, by `MemoGroupId`: whether level 4 offers its candidates
-/// `AcrossEvaluations`. It does for a chain and for a group evaluated on a
-/// known grid (`evaluation_grid_of_group`), unless the group is read under
-/// an absolute `@ T` ([`read_at_absolute_time`]).
+/// `AcrossEvaluations`. It does for a chain, for a group evaluated on a
+/// known grid (`evaluation_grid_of_group`) and for a time-independent
+/// group (its one result is stored as is and readable at any time), unless
+/// the group is read under an absolute `@ T`
+/// ([`read_at_absolute_time_per_group`]).
 pub(super) fn across_evaluations_offered_per_group(
     logical: &LogicalASAPMemoCandidates,
-    _eliminated: &HashSet<CandidateForMemoGroupId>,
+    eliminated: &HashSet<CandidateForMemoGroupId>,
 ) -> Vec<bool> {
-    let memo = &logical.memo;
-    memo.groups()
+    let read_at_absolute_time = read_at_absolute_time_per_group(logical, eliminated);
+    logical
+        .memo
+        .groups()
         .iter()
         .zip(&logical.evaluation_grid_of_group)
-        .enumerate()
-        .map(|(group_index, (group, evaluation_grid))| {
+        .zip(read_at_absolute_time)
+        .map(|((group, evaluation_grid), read_at_absolute_time)| {
             let chain = matches!(
                 group.expression,
                 Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
             );
-            (chain || evaluation_grid.is_some())
-                && !read_at_absolute_time(memo, MemoGroupId(group_index as u32))
+            (chain
+                || evaluation_grid.is_some()
+                || !group.group_properties.depends_on_evaluation_time)
+                && !read_at_absolute_time
         })
         .collect()
 }
 
-/// Whether `group` is read under an absolute `@ T`: a `TimeShift` anchored
-/// at a timestamp reads it, directly or through `TimeShift`s without `@`.
-/// With no known end of the horizon, how far back that reader reaches (the
-/// horizon end − T + range) is unbounded, so `group` is not materialized
-/// across evaluations (concepts doc, section 5); `x @ 1700000000 [5m]`
-/// reads `x` at query time.
-fn read_at_absolute_time(memo: &Memo, group: MemoGroupId) -> bool {
-    memo.groups()[group.0 as usize]
-        .parent_groups()
-        .iter()
-        .any(
-            |&parent| match &memo.groups()[parent.0 as usize].expression {
-                Operator::NonASAP(NonASAPOp::TimeShift { shift, child }) if *child == group => {
-                    match shift.at {
-                        Some(AtModifier::Timestamp(_)) => true,
-                        None => read_at_absolute_time(memo, parent),
-                        Some(_) => false,
-                    }
+/// Per group, by `MemoGroupId`: whether it is read under an absolute
+/// `@ T`, that is below a `TimeShift` anchored at a timestamp, through any
+/// operators except another `@` (which sets its own evaluation time). With
+/// no known end of the horizon, how far back such a reader reaches (the
+/// horizon end − T + range) is unbounded, so the group is not materialized
+/// across evaluations (concepts doc, section 2): in
+/// `max_over_time(rate(c[1m])[5m:1m] @ 90)` neither the subquery nor the
+/// `rate`, its range or the scan is. A group also read on a relative path
+/// counts as read under the anchor.
+fn read_at_absolute_time_per_group(
+    logical: &LogicalASAPMemoCandidates,
+    eliminated: &HashSet<CandidateForMemoGroupId>,
+) -> Vec<bool> {
+    let anchor = |operator: &Operator<MemoGroupId>| match operator {
+        Operator::NonASAP(NonASAPOp::TimeShift {
+            shift: TimeShift { at: Some(at), .. },
+            ..
+        }) => Some(matches!(at, AtModifier::Timestamp(_))),
+        _ => None,
+    };
+    let group_count = logical.memo.groups().len();
+    let mut read = vec![false; group_count];
+    let mut pending = Vec::new();
+    fn mark(input: &MemoGroupId, read: &mut [bool], pending: &mut Vec<usize>) {
+        let input = input.0 as usize;
+        if !read[input] {
+            read[input] = true;
+            pending.push(input);
+        }
+    }
+    for group in 0..group_count {
+        for candidate in kept_candidates(logical, eliminated, group) {
+            if anchor(&candidate.expression.operator) == Some(true) {
+                for input in candidate.expression.operator.children() {
+                    mark(input, &mut read, &mut pending);
                 }
-                _ => false,
-            },
-        )
+            }
+        }
+    }
+    while let Some(group) = pending.pop() {
+        for candidate in kept_candidates(logical, eliminated, group) {
+            if anchor(&candidate.expression.operator).is_none() {
+                for input in candidate.expression.operator.children() {
+                    mark(input, &mut read, &mut pending);
+                }
+            }
+        }
+    }
+    read
 }

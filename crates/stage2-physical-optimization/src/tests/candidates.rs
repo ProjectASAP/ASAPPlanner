@@ -13,7 +13,7 @@ use asap_types::summary_type::{
     EntityIdentity, ExactKind, SketchAlgorithm, SummaryInputExpr, SummaryUpdate,
 };
 use asap_types::test_support::memo_builders::{group, query, scan_group};
-use asap_types::test_support::memo_fixtures::{range, shift};
+use asap_types::test_support::memo_fixtures::{range, shift, state};
 use asap_types::workload::{DataArrival, DataWorkload, SourceFacts};
 
 use super::{
@@ -29,11 +29,11 @@ use crate::test_fixtures::{
 /// candidates (the last minute, the build over it, the merge, the windows,
 /// the readout) run only at query time; on the 60 s grid they may be
 /// materialized across evaluations. The scan and the chain are
-/// time-independent, so ingestion time is offered too; the scan has no
-/// known grid, so it is not offered `AcrossEvaluations`. A summary build is
-/// not offered (IT, None): fed at ingestion time it keeps its state,
-/// so the chain is offered (IT, AcrossEvaluations) only; the scan's
-/// (IT, None) feeds the chain built at ingestion time.
+/// time-independent, so ingestion time is offered too, and so is
+/// `AcrossEvaluations` without a grid: their one result is readable at any
+/// time. A summary build is not offered (IT, None): fed at ingestion time
+/// it keeps its state, so the chain is offered (IT, AcrossEvaluations)
+/// only; the scan's (IT, None) feeds the chain built at ingestion time.
 #[test]
 fn offers_each_candidate_its_timings_and_lifetimes() {
     let example = example();
@@ -51,7 +51,7 @@ fn offers_each_candidate_its_timings_and_lifetimes() {
     }
     assert_eq!(
         offered(&physical, example.scan),
-        physical_properties_list(&[QT_NONE, QT_ONE, IT_NONE])
+        physical_properties_list(&[QT_NONE, QT_ONE, QT_ACROSS, IT_NONE, IT_ACROSS])
     );
     assert_eq!(
         offered(&physical, example.chain),
@@ -114,7 +114,7 @@ fn without_an_ingestion_pipeline_nothing_runs_at_ingestion_time() {
         let physical = generate(&example.logical, &data, &retaining_everything());
         assert_eq!(
             pruned(&physical, example.scan),
-            pruned_with(&[IT_NONE], PruneReason::NoIngestionPipeline)
+            pruned_with(&[IT_NONE, IT_ACROSS], PruneReason::NoIngestionPipeline)
         );
         assert_eq!(
             pruned(&physical, example.chain),
@@ -128,12 +128,12 @@ fn without_an_ingestion_pipeline_nothing_runs_at_ingestion_time() {
 }
 
 /// Without raw data retained, the scan cannot run at query time, nor keep
-/// its raw rows across evaluations at ingestion time; what reads it at
+/// its raw rows across evaluations; what reads it at
 /// query time then has no buildable producer, so only the ingestion-time
 /// chain serves the query.
 #[test]
 fn without_raw_data_only_ingestion_time_builds_read_the_scan() {
-    let mut example = example();
+    let example = example();
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..retaining_everything()
@@ -141,7 +141,10 @@ fn without_raw_data_only_ingestion_time_builds_read_the_scan() {
     let physical = generate(&example.logical, &ingesting(None), &capabilities);
     assert_eq!(
         pruned(&physical, example.scan),
-        pruned_with(&[QT_NONE, QT_ONE], PruneReason::RawDataNotRetained)
+        pruned_with(
+            &[QT_NONE, QT_ONE, QT_ACROSS, IT_ACROSS],
+            PruneReason::RawDataNotRetained
+        )
     );
     assert_eq!(
         offered(&physical, example.scan),
@@ -163,23 +166,6 @@ fn without_raw_data_only_ingestion_time_builds_read_the_scan() {
             &[QT_NONE, QT_ONE, QT_ACROSS],
             PruneReason::InputHasNoBuildableProducer
         )
-    );
-
-    // A scan on an evaluation grid is offered `AcrossEvaluations`; at
-    // ingestion time that retains the raw rows it scans, so it is pruned
-    // too.
-    example.logical.evaluation_grid_of_group[example.scan.group.0 as usize] = GRID_60S;
-    let physical = generate(&example.logical, &ingesting(None), &capabilities);
-    assert_eq!(
-        pruned(&physical, example.scan),
-        pruned_with(
-            &[QT_NONE, QT_ONE, QT_ACROSS, IT_ACROSS],
-            PruneReason::RawDataNotRetained
-        )
-    );
-    assert_eq!(
-        offered(&physical, example.scan),
-        physical_properties_list(&[IT_NONE])
     );
 }
 
@@ -207,10 +193,13 @@ fn query_time_results_across_evaluations_need_the_deployment_to_retain_them() {
     }
 }
 
-/// `sum_over_time(m[1m] @ 1000)`: the `@ T` result is time-independent, so
-/// it and its time-dependent input, the range under it, are offered
-/// ingestion time; neither has a known grid, so neither is offered
-/// `AcrossEvaluations`.
+/// `m[1m] @ 1000`: the `@ T` result is time-independent, so it and its
+/// time-dependent input, the range under it, are offered ingestion time.
+/// The pinned result is also offered `AcrossEvaluations` without a grid,
+/// and built at ingestion time it reads the range's (IT, None); the
+/// range, read under the anchor, is not materialized across evaluations.
+/// A query reads its output at query time, so the pinned (IT, None) is
+/// pruned.
 #[test]
 fn an_at_t_subtree_is_offered_ingestion_time() {
     let mut memo = memo();
@@ -233,18 +222,19 @@ fn an_at_t_subtree_is_offered_ingestion_time() {
         evaluation_grid_of_group,
     );
     let physical = generate(&logical, &ingesting(None), &retaining_everything());
-    for candidate in [last_minute, pinned] {
-        assert_eq!(
-            offered(&physical, candidate),
-            physical_properties_list(&[QT_NONE, QT_ONE]),
-            "{candidate:?}"
-        );
-        assert_eq!(
-            pruned(&physical, candidate),
-            pruned_with(&[IT_NONE], PruneReason::ReachesNoQueryOutput),
-            "{candidate:?}"
-        );
-    }
+    assert_eq!(
+        offered(&physical, last_minute),
+        physical_properties_list(&[QT_NONE, QT_ONE, IT_NONE])
+    );
+    assert_eq!(pruned(&physical, last_minute), vec![]);
+    assert_eq!(
+        offered(&physical, pinned),
+        physical_properties_list(&[QT_NONE, QT_ONE, QT_ACROSS, IT_ACROSS])
+    );
+    assert_eq!(
+        pruned(&physical, pinned),
+        pruned_with(&[IT_NONE], PruneReason::ReachesNoQueryOutput)
+    );
 }
 
 /// `x @ 1700000000 [5m]` with no known horizon
@@ -401,7 +391,7 @@ fn a_count_min_build_needs_weights_proven_non_negative() {
     assert_eq!(
         unproven,
         pruned_with(
-            &[QT_NONE, QT_ONE],
+            &[QT_NONE, QT_ONE, QT_ACROSS, IT_ACROSS],
             PruneReason::CountMinWeightsNotProvenNonNegative
         )
     );
@@ -409,6 +399,93 @@ fn a_count_min_build_needs_weights_proven_non_negative() {
         "value".to_string(),
         ValueSign::NonNegative,
     )]));
-    assert_eq!(kept, physical_properties_list(&[QT_NONE, QT_ONE]));
+    assert_eq!(
+        kept,
+        physical_properties_list(&[QT_NONE, QT_ONE, QT_ACROSS, IT_ACROSS])
+    );
     assert_eq!(unproven, vec![]);
+}
+
+/// `(x[1m]) @ T` lowers as `TimeShift@T(TimeRange 1m (Scan))`: the scan is
+/// read back without bound through the range just as the range is, so
+/// neither is materialized across evaluations, offered or pruned.
+#[test]
+fn every_group_below_an_absolute_anchor_is_not_materialized_across_evaluations() {
+    let mut memo = memo();
+    let scan = scan_group(&mut memo, "x", &[], vec![]);
+    let last_minute = group(&mut memo, range(60_000, scan));
+    let pinned = group(
+        &mut memo,
+        shift(
+            0,
+            Some(AtModifier::Timestamp(1_700_000_000_000)),
+            last_minute,
+        ),
+    );
+    query(&mut memo, pinned, None);
+    let [scan, last_minute, pinned] =
+        [scan, last_minute, pinned].map(|group| candidate_id(group, 0));
+    let evaluation_grid_of_group = vec![GRID_60S; memo.groups().len()];
+    let logical = logical(
+        memo,
+        vec![
+            edge(scan, last_minute, 0, true),
+            edge(last_minute, pinned, 0, true),
+        ],
+        evaluation_grid_of_group,
+    );
+    let physical = generate(&logical, &ingesting(None), &retaining_everything());
+    for candidate in [scan, last_minute] {
+        let alternatives = offered(&physical, candidate);
+        let pruned_alternatives = pruned(&physical, candidate);
+        assert!(
+            !any_across_evaluations(
+                alternatives
+                    .iter()
+                    .chain(pruned_alternatives.iter().map(|(properties, _)| properties))
+            ),
+            "{candidate:?}: {alternatives:?}"
+        );
+    }
+    assert!(offered(&physical, scan).contains(&properties(QT_NONE)));
+}
+
+/// `max_over_time(m[1m] @ 90)` on a fixed interval without a phase (no
+/// known grid): the `Max` state over the pinned minute does not depend on
+/// the evaluation time, so its one result is materialized across
+/// evaluations and read at any time; built at ingestion time, it reads
+/// the pinned minute's ingestion-time alternative, which is then kept.
+#[test]
+fn a_time_independent_group_without_a_grid_is_materialized_across_evaluations() {
+    let mut memo = memo();
+    let scan = scan_group(&mut memo, "m", &[], vec![]);
+    let last_minute = group(&mut memo, range(60_000, scan));
+    let pinned = group(
+        &mut memo,
+        shift(0, Some(AtModifier::Timestamp(90_000)), last_minute),
+    );
+    let max = group(
+        &mut memo,
+        state(FieldDataType::exact(ExactKind::Max), pinned),
+    );
+    query(&mut memo, max, None);
+    let [scan, last_minute, pinned, max] =
+        [scan, last_minute, pinned, max].map(|group| candidate_id(group, 0));
+    let evaluation_grid_of_group = vec![None; memo.groups().len()];
+    let logical = logical(
+        memo,
+        vec![
+            edge(scan, last_minute, 0, true),
+            edge(last_minute, pinned, 0, true),
+            edge(pinned, max, 0, true),
+        ],
+        evaluation_grid_of_group,
+    );
+    let physical = generate(&logical, &ingesting(None), &retaining_everything());
+    assert_eq!(
+        offered(&physical, max),
+        physical_properties_list(&[QT_NONE, QT_ONE, QT_ACROSS, IT_ACROSS])
+    );
+    assert!(offered(&physical, pinned).contains(&properties(IT_NONE)));
+    assert_eq!(pruned(&physical, pinned), vec![]);
 }
