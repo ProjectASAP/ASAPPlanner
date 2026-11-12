@@ -32,7 +32,7 @@ use asap_types::workload::bounds::{
 };
 use asap_types::workload::DataWorkload;
 
-/// One node's price per second of wall time, with how it was measured. A
+/// One node's cost per second of wall time, with how it was measured. A
 /// node is one operator node of the candidate's physical plan DAG
 /// (`PhysicalASAPDAG`), keyed by its [`PhysicalASAPNodeId`] in
 /// [`PlanCost::per_node`](crate::PlanCost::per_node); not a machine.
@@ -42,8 +42,8 @@ pub struct NodeCost {
     pub operator: OperatorKind,
     /// When it runs: ingestion or query time.
     pub timing: ExecutionTiming,
-    /// Its price per second under cost model 1; `None` under cost models 2
-    /// and 3, which price (or limit) the whole candidate's peaks.
+    /// Its cost per second under cost model 1; `None` under cost models 2
+    /// and 3, which cost (or limit) the whole candidate's peaks.
     pub cost_per_second: Option<f64>,
     /// Core-seconds of CPU it takes per second of wall time: its CPU
     /// operations and scanned bytes timed by [`ResourceSpeed`](crate::ResourceSpeed), what a
@@ -102,7 +102,7 @@ fn state_family<'a>(
     })
 }
 
-/// One producer of a node being priced ([`node_resource_usage_and_cost`]): its payload and
+/// One producer of a node being costed ([`node_resource_usage_and_cost`]): its payload and
 /// schema, its output statistics, the sources it reads and its state
 /// family.
 #[derive(Debug, Clone)]
@@ -209,7 +209,7 @@ pub fn maintained_window_ms<'o, N: Copy + Ord, C: 'o>(
     None
 }
 
-/// Measure and price one node of a physical DAG (one step of
+/// Measure and cost one node of a physical DAG (one step of
 /// [`plan_cost`]; Stage 3 calls it per candidate): `producers` are its
 /// producers in edge order, `rate` its `(multiplier, per_second)`
 /// ([`computations`], [`executions_per_second`]), and `window_ms` the time
@@ -234,8 +234,8 @@ pub fn node_resource_usage_and_cost<'a>(
     let formula_scale = settings.frozen_calibration_factor.unwrap_or(1.0);
     let table = &settings.measured_operation_costs;
     let speed = settings.resource_speed;
-    let usage_prices = match &settings.cost_model {
-        CostModel::UsageOverTime(prices) => Some(prices),
+    let unit_costs = match &settings.cost_model {
+        CostModel::UsageOverTime(unit_cost) => Some(unit_cost),
         _ => None,
     };
     let sketch_size =
@@ -300,7 +300,7 @@ pub fn node_resource_usage_and_cost<'a>(
             .collect::<Vec<_>>(),
     );
     let operator = OperatorKind::of(&node.payload);
-    let unit_price = match &node.payload {
+    let measured_unit_cost = match &node.payload {
         Payload::NonASAP(NonASAPOp::Aggregate { measures, .. }) => {
             aggregate_lookup(table, node.output_state.timing, measures)
         }
@@ -313,7 +313,7 @@ pub fn node_resource_usage_and_cost<'a>(
         ),
     };
     // The kernel's measured bytes per state, when the table has them.
-    let measured_state_bytes = unit_price
+    let measured_state_bytes = measured_unit_cost
         .and_then(|p| p.memory_bytes_per_state)
         .map(|bytes| bytes.round() as u64);
     let mut cost_source = NodeCostSource::Analytical;
@@ -788,7 +788,7 @@ pub fn node_resource_usage_and_cost<'a>(
     let (multiplier, per_second) = rate;
     let formula_ms = estimate.cpu_ops() * speed.ms_per_cpu_op
         + estimate.scan_bytes() as f64 * speed.ms_per_scanned_byte;
-    // What one computation processes, the unit its entry is priced per
+    // What one computation processes, the unit its entry is costed per
     // ([`OperatorKind`]): the samples a scan reads, the states a merge
     // reads, otherwise the rows of its (first) input.
     let units = match &node.payload {
@@ -801,7 +801,7 @@ pub fn node_resource_usage_and_cost<'a>(
     // any other node its formulas' CPU operations times the calibration
     // factor, its scanned bytes unscaled (scaling only the CPU keeps it
     // non-negative whatever the factor).
-    let estimate = match unit_price {
+    let estimate = match measured_unit_cost {
         Some(unit) => {
             cost_source = NodeCostSource::Measured;
             let measured_ms = (units as f64 * unit.ns_per_unit + unit.ns_per_invocation) * 1e-6;
@@ -942,14 +942,14 @@ pub fn node_resource_usage_and_cost<'a>(
         average_memory_bytes += bytes as f64 * node_ms / 1_000.0 * per_second;
         detail += &format!("; holds {bytes} bytes for {node_ms:.3} ms");
     }
-    // One computation's CPU and scan price times its rate, then the
+    // One computation's CPU and scan cost times its rate, then the
     // materialized state's.
-    let cost = usage_prices.map(|prices| {
-        (estimate.cpu_ops() * prices.cost_per_cpu_op
-            + estimate.scan_bytes() as f64 * prices.cost_per_scanned_byte)
+    let cost = unit_costs.map(|unit_cost| {
+        (estimate.cpu_ops() * unit_cost.cost_per_cpu_op
+            + estimate.scan_bytes() as f64 * unit_cost.cost_per_scanned_byte)
             * per_second
-            + prices.cost_per_memory_byte_second * average_memory_bytes
-            + prices.cost_per_disk_byte_second * disk_bytes as f64
+            + unit_cost.cost_per_memory_byte_second * average_memory_bytes
+            + unit_cost.cost_per_disk_byte_second * disk_bytes as f64
     });
     if cost.is_some_and(|cost| !cost.is_finite()) {
         return Err(AnalyticalCostError::Overflow);
@@ -981,7 +981,7 @@ pub fn node_resource_usage_and_cost<'a>(
     })
 }
 
-/// [`PlanCost::source`] for nodes priced as `per_node` says.
+/// [`PlanCost::source`] for nodes costed as `per_node` says.
 pub(crate) fn cost_source(per_node: &BTreeMap<PhysicalASAPNodeId, NodeCost>) -> &'static str {
     let measured = |node: &NodeCost| node.cost_source == NodeCostSource::Measured;
     if !per_node.values().any(measured) {

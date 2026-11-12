@@ -532,7 +532,6 @@ fn the_nine_query_workload_lowers_and_installs() {
         .unwrap();
     plan.validate().unwrap();
     assert_eq!(plan.query_texts.len(), queries);
-    let report = report.unwrap();
     assert!(report
         .cost_per_second
         .is_some_and(|cost| cost.is_finite() && cost > 0.0));

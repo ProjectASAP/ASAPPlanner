@@ -31,22 +31,22 @@ use asap_types::plan::time_window::TimeIndexedRead;
 use asap_types::summary_type::SketchParams;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-/// One candidate's usage and price over the whole workload: `usage` is
-/// the whole candidate's, `per_node` one price per operator node of its
+/// One candidate's usage and cost over the whole workload: `usage` is
+/// the whole candidate's, `per_node` one cost per operator node of its
 /// physical plan DAG.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanCost {
     pub usage: ResourceUsage,
-    /// Its price per second under cost model 1 or 2 (under cost model 1, the
+    /// Its cost per second under cost model 1 or 2 (under cost model 1, the
     /// sum of its nodes' charges plus request overhead for queries without
     /// operator nodes); `None` under cost model 3.
     pub cost_per_second: Option<f64>,
-    /// Where its prices came from, from its nodes' [`NodeCost::cost_source`]:
+    /// Where its costs came from, from its nodes' [`NodeCost::cost_source`]:
     /// [`COST_SOURCE`](crate::COST_SOURCE) (all formulas), [`MEASURED_COST_SOURCE`] (all
     /// measured) or [`MIXED_COST_SOURCE`].
     pub source: &'static str,
     /// Each operator node of the candidate's physical plan DAG, by its id
-    /// in that DAG, with its price.
+    /// in that DAG, with its cost.
     pub per_node: BTreeMap<PhysicalASAPNodeId, NodeCost>,
 }
 
@@ -73,7 +73,7 @@ impl QueryLatency {
 }
 
 /// Measure every node of `dag` per second of wall time (module doc, "Cost
-/// model") and price it under `settings.cost_model`. Nodes are exported
+/// model") and cost it under `settings.cost_model`. Nodes are exported
 /// children first, so each node's input statistics are known when it is
 /// reached. A query-time node is measured per computation over the rows its
 /// time ranges keep, times how often it is computed per second
@@ -95,13 +95,13 @@ pub fn plan_cost(
     let table = &settings.measured_operation_costs;
     let mut fit = CalibrationFit::default();
     let speed = settings.resource_speed;
-    // Cost model 1 prices each node as it is measured.
-    let usage_prices = match &settings.cost_model {
-        CostModel::UsageOverTime(prices) => Some(prices),
+    // Cost model 1 costs each node as it is measured.
+    let unit_costs = match &settings.cost_model {
+        CostModel::UsageOverTime(unit_cost) => Some(unit_cost),
         _ => None,
     };
     let EachNodeResourceUsageAndCost {
-        priced,
+        costed,
         multipliers,
     } = each_node_resource_usage_and_cost(dag, nodes, entries, data, settings)?;
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
@@ -126,30 +126,30 @@ pub fn plan_cost(
     let sketch_size =
         |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
     for node in &dag.nodes {
-        let node_priced = &priced[&node.id];
-        usage.cpu_ops_per_second += node_priced.cpu_ops_per_second;
-        usage.scanned_bytes_per_second += node_priced.scanned_bytes_per_second;
-        usage.average_memory_bytes += node_priced.average_memory_bytes;
+        let node_costed = &costed[&node.id];
+        usage.cpu_ops_per_second += node_costed.cpu_ops_per_second;
+        usage.scanned_bytes_per_second += node_costed.scanned_bytes_per_second;
+        usage.average_memory_bytes += node_costed.average_memory_bytes;
         usage.peak_memory_bytes = usage
             .peak_memory_bytes
-            .saturating_add(node_priced.peak_memory_bytes);
-        usage.disk_bytes = usage.disk_bytes.saturating_add(node_priced.disk_bytes);
-        fit.add(node_priced.fit);
-        work_ms.insert(node.id, node_priced.work_ms_per_execution);
-        output.insert(node.id, node_priced.output);
-        if node_priced.family != StateFamily::None {
-            family_of.insert(node.id, node_priced.family);
+            .saturating_add(node_costed.peak_memory_bytes);
+        usage.disk_bytes = usage.disk_bytes.saturating_add(node_costed.disk_bytes);
+        fit.add(node_costed.fit);
+        work_ms.insert(node.id, node_costed.work_ms_per_execution);
+        output.insert(node.id, node_costed.output);
+        if node_costed.family != StateFamily::None {
+            family_of.insert(node.id, node_costed.family);
         }
-        if let Some(window) = node_priced.maintained {
+        if let Some(window) = node_costed.maintained {
             maintained.push((node.id, window));
         }
-        if let Some((source, bytes)) = node_priced.raw_scan {
+        if let Some((source, bytes)) = node_costed.raw_scan {
             let largest = raw_data.entry(source).or_insert((bytes, node.id));
             if bytes > largest.0 {
                 *largest = (bytes, node.id);
             }
         }
-        per_node.insert(node.id, node_priced.cost.clone());
+        per_node.insert(node.id, node_costed.cost.clone());
     }
     // The runtime's fixed cost per query request, charged to the node the
     // query reads first and added to its latency below.
@@ -176,8 +176,8 @@ pub fn plan_cost(
         evaluation_ms_per_query[query] = evaluation_ms;
         let Some(&first_read) = start.first() else {
             has_unattached_request_overhead = true;
-            if let Some(prices) = usage_prices {
-                unattached_request_cost += prices.cost_per_cpu_op * ops_per_second;
+            if let Some(unit_cost) = unit_costs {
+                unattached_request_cost += unit_cost.cost_per_cpu_op * ops_per_second;
                 if !unattached_request_cost.is_finite() {
                     return Err((diagnostic_node, AnalyticalCostError::Overflow));
                 }
@@ -196,8 +196,8 @@ pub fn plan_cost(
             query + 1,
             table.ns_per_evaluation
         );
-        if let (Some(cost), Some(prices)) = (&mut node.cost_per_second, usage_prices) {
-            *cost += prices.cost_per_cpu_op * ops_per_second;
+        if let (Some(cost), Some(unit_cost)) = (&mut node.cost_per_second, unit_costs) {
+            *cost += unit_cost.cost_per_cpu_op * ops_per_second;
             if !cost.is_finite() {
                 return Err((first_read, AnalyticalCostError::Overflow));
             }
@@ -272,11 +272,11 @@ pub fn plan_cost(
             }
             total
         }
-        CostModel::ProvisionedCapacity(prices) => {
-            let cost = prices.cost_per_provisioned_memory_byte_second
+        CostModel::ProvisionedCapacity(unit_cost) => {
+            let cost = unit_cost.cost_per_provisioned_memory_byte_second
                 * usage.peak_memory_bytes as f64
-                + prices.cost_per_provisioned_cpu_core_second * f64::from(usage.peak_cpu_cores)
-                + prices.cost_per_disk_byte_second * usage.disk_bytes as f64;
+                + unit_cost.cost_per_provisioned_cpu_core_second * f64::from(usage.peak_cpu_cores)
+                + unit_cost.cost_per_disk_byte_second * usage.disk_bytes as f64;
             if !cost.is_finite() {
                 return Err((first, AnalyticalCostError::Overflow));
             }
@@ -362,10 +362,10 @@ pub fn raw_data_disk_cost_per_second(bytes: u64, settings: &CostInputs) -> Optio
     }
 }
 
-/// Every node of a physical DAG priced ([`each_node_resource_usage_and_cost`]), with each
+/// Every node of a physical DAG costed ([`each_node_resource_usage_and_cost`]), with each
 /// node's `(multiplier, per_second)` ([`computations`]).
 struct EachNodeResourceUsageAndCost<'a> {
-    priced: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'a>>,
+    costed: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'a>>,
     multipliers: HashMap<PhysicalASAPNodeId, (u64, f64)>,
 }
 
@@ -387,13 +387,13 @@ fn each_node_resource_usage_and_cost<'a>(
         producers_of.entry(e.consumer).or_default().push(e.producer);
         consumers_of.entry(e.producer).or_default().push(e.consumer);
     }
-    let mut priced: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'a>> = HashMap::new();
+    let mut costed: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'a>> = HashMap::new();
     for node in &dag.nodes {
         let views: Vec<ProducerOutput<'a>> = producers_of
             .get(&node.id)
             .map_or(&[][..], Vec::as_slice)
             .iter()
-            .map(|p| priced[p].producer_output(&nodes[p].payload, &nodes[p].output_schema))
+            .map(|p| costed[p].producer_output(&nodes[p].payload, &nodes[p].output_schema))
             .collect();
         let window_ms = match node.output_state.timing {
             ExecutionTiming::IngestionTime => maintained_window_ms(
@@ -403,7 +403,7 @@ fn each_node_resource_usage_and_cost<'a>(
             ),
             ExecutionTiming::QueryTime => scan_read_ms(node, nodes, &consumers_of),
         };
-        let node_priced = node_resource_usage_and_cost(
+        let node_costed = node_resource_usage_and_cost(
             node,
             &views,
             multipliers[&node.id],
@@ -412,10 +412,10 @@ fn each_node_resource_usage_and_cost<'a>(
             settings,
         )
         .map_err(|error| (node.id, error))?;
-        priced.insert(node.id, node_priced);
+        costed.insert(node.id, node_costed);
     }
     Ok(EachNodeResourceUsageAndCost {
-        priced,
+        costed,
         multipliers,
     })
 }

@@ -1,6 +1,6 @@
 //! `asap-cost` — the cost model the planning stages share: how much of each
 //! resource a plan uses and what that usage costs. It depends only on
-//! `asap-types`, so any stage can price with it.
+//! `asap-types`, so any stage can cost with it.
 //!
 //! - Resource-usage estimation of one node ([`node`]):
 //!   [`node::analytical`] and `node::operator_statistics` (the analytical

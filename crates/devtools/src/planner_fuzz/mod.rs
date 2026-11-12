@@ -12,7 +12,7 @@
 //!
 //! ```text
 //! cost(W ∪ {q'}) − cost(W) ≤ derive_cost + tolerance,
-//! derive_cost = cost(witness) − cost(W's plan priced the same way)
+//! derive_cost = cost(witness) − cost(W's plan costed the same way)
 //! ```
 //!
 //! must hold. `derive_cost` is what Stage 3 charges for the derived
@@ -352,10 +352,10 @@ pub struct Planned {
     pub logical_roots: Option<Vec<QueryRoot>>,
 }
 
-/// A plan priced by Stage 2 and Stage 3 outside the search: the cheapest
+/// A plan costed by Stage 2 and Stage 3 outside the search: the cheapest
 /// physical properties assignment of given logical roots.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Priced {
+pub struct Costed {
     pub selected: String,
     pub cost_per_second: f64,
     /// The nodes only the last root reads: in a witness, the operators
@@ -377,7 +377,7 @@ pub struct PrivateNodes {
 pub struct Planner {
     pub settings: FuzzSettings,
     cache: HashMap<String, Result<Rc<Planned>, String>>,
-    reference_prices: HashMap<String, Result<Priced, String>>,
+    reference_costs: HashMap<String, Result<Costed, String>>,
 }
 
 impl Planner {
@@ -385,7 +385,7 @@ impl Planner {
         Self {
             settings,
             cache: HashMap::new(),
-            reference_prices: HashMap::new(),
+            reference_costs: HashMap::new(),
         }
     }
 
@@ -449,7 +449,7 @@ impl Planner {
     /// queries (one root per query, in order), with the same models as
     /// [`plan`](Self::plan): the selected plan's cost (`plan_cost`) and the
     /// cost of the nodes only its last root reads.
-    pub fn price(&self, workload: &FuzzWorkload, roots: &[QueryRoot]) -> Result<Priced, String> {
+    pub fn cost(&self, workload: &FuzzWorkload, roots: &[QueryRoot]) -> Result<Costed, String> {
         let planning = workload.planning_workload();
         let entries: Vec<_> = planning.query_workload.entries().collect();
         let cost_inputs = self.cost_inputs();
@@ -497,7 +497,7 @@ impl Planner {
             .filter(|node| others.iter().all(|set| !set.contains(node)))
             .filter_map(|node| cost.per_node.get(node))
             .collect();
-        Ok(Priced {
+        Ok(Costed {
             selected: "selected".into(),
             cost_per_second,
             derived_root: PrivateNodes {
@@ -510,20 +510,20 @@ impl Planner {
         })
     }
 
-    /// [`price`](Self::price) of `workload`'s selected logical plan
+    /// [`cost`](Self::cost) of `workload`'s selected logical plan
     /// `roots`, cached per workload: every marginal check of a case prices
     /// the same `W`.
-    pub fn reference_price(
+    pub fn reference_cost(
         &mut self,
         workload: &FuzzWorkload,
         roots: &[QueryRoot],
-    ) -> Result<Priced, String> {
+    ) -> Result<Costed, String> {
         let key = serde_json::to_string(workload).expect("a workload serializes");
-        if let Some(priced) = self.reference_prices.get(&key) {
-            return priced.clone();
+        if let Some(costed) = self.reference_costs.get(&key) {
+            return costed.clone();
         }
-        let priced = self.price(workload, roots);
-        self.reference_prices.insert(key, priced.clone());
-        priced
+        let costed = self.cost(workload, roots);
+        self.reference_costs.insert(key, costed.clone());
+        costed
     }
 }

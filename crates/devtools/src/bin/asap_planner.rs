@@ -569,7 +569,7 @@ fn materialized_views_json(
     plan: &asap_types::plan::physical_asap_dag::PhysicalASAPDAG,
     entries: &[QueryWorkloadEntry],
 ) -> Result<Vec<Value>, String> {
-    let (plan, _) = installable_plan_of(plan, None, entries).map_err(|e| e.to_string())?;
+    let plan = installable_plan_of(plan.clone(), entries).map_err(|e| e.to_string())?;
     let views = plan.materialized_views().map_err(|e| e.to_string())?;
     views
         .iter()

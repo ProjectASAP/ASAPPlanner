@@ -93,7 +93,7 @@ pub struct PredictedUsage {
     pub disk_bytes: u64,
     /// CPU cores to provision for the peak.
     pub peak_cpu_cores: u32,
-    /// One per operator node of the plan Stage 3 priced, in node order.
+    /// One per operator node of the plan Stage 3 costed, in node order.
     pub per_node: Vec<PredictedNodeUsage>,
     /// One per workload query, in workload order.
     pub per_query: Vec<PredictedQueryUsage>,
@@ -111,7 +111,7 @@ pub struct PredictedNodeUsage {
     pub timing: ExecutionTiming,
     /// Core-seconds of CPU per second.
     pub cpu_core_seconds_per_second: f64,
-    /// Its price per second under cost model 1; `None` under cost models
+    /// Its cost per second under cost model 1; `None` under cost models
     /// 2 and 3.
     pub cost_per_second: Option<f64>,
     /// Whether its CPU came from the measured cost table or the formulas.
@@ -201,7 +201,7 @@ impl From<InstallableDagError> for InstallablePlanError {
 /// [`InstallablePlanError::QueryRunNotExecutable`].
 pub async fn plan_installable(
     input: UserInput<'_>,
-) -> Result<(InstallablePlan, Option<SelectedPlanReport>), PlanError> {
+) -> Result<(InstallablePlan, SelectedPlanReport), PlanError> {
     let capabilities = executor_summaries_when_unrestricted(input.models.deployment_capabilities);
     let entries: Vec<_> = input.workload.query_workload.entries().collect();
     let models = input.models.with_deployment_capabilities(&capabilities);
@@ -222,23 +222,21 @@ pub async fn plan_installable(
             })
         },
     )?;
-    installable_plan_of(&output.plan, Some(&cost), &entries).map_err(PlanError::Installable)
+    let installable = installable_plan_of(output.plan, &entries).map_err(PlanError::Installable)?;
+    Ok((installable, report_of(&cost)))
 }
 
 /// The installable plan of `plan`, the plan Stage 3 built for a workload
-/// whose entries are `entries` (in `QueryWorkload::entries()` order), with
-/// the report of its `cost` (`asap_cost::plan_cost` of `plan`) when there is
-/// one: what [`plan_installable`] returns after planning. A caller that runs
-/// the planning stages itself (e.g. a developer tool) uses it to see what a
-/// runtime would install.
+/// whose entries are `entries` (in `QueryWorkload::entries()` order): what
+/// [`plan_installable`] returns after planning, without its cost report. A
+/// caller that runs the planning stages itself (e.g. a developer tool) uses
+/// it to see what a runtime would install.
 pub fn installable_plan_of(
-    plan: &PhysicalASAPDAG,
-    cost: Option<&PlanCost>,
+    plan: PhysicalASAPDAG,
     entries: &[QueryWorkloadEntry],
-) -> Result<(InstallablePlan, Option<SelectedPlanReport>), InstallablePlanError> {
+) -> Result<InstallablePlan, InstallablePlanError> {
     let query_texts: Vec<String> = entries.iter().map(|entry| entry.query.0.clone()).collect();
-    let installable = InstallablePlan::of_dag(plan.clone(), query_texts)?;
-    Ok((installable, cost.map(report_of)))
+    InstallablePlan::of_dag(plan, query_texts)
 }
 
 impl InstallablePlan {

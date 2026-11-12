@@ -154,7 +154,7 @@ fn answers(batches: &[Batch]) -> Vec<Answer> {
 /// The plan for `queries` on a deployment that keeps no raw samples, and
 /// Stage 3's report of the selection it made (which the plan file does not
 /// carry).
-async fn planned_with_report(queries: &[&str]) -> (InstallablePlan, Option<SelectedPlanReport>) {
+async fn planned_with_report(queries: &[&str]) -> (InstallablePlan, SelectedPlanReport) {
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
@@ -167,7 +167,7 @@ async fn planned_with_report(queries: &[&str]) -> (InstallablePlan, Option<Selec
 async fn plan_with_report_for(
     workload: PlanningWorkload,
     capabilities: &DeploymentCapabilities,
-) -> (InstallablePlan, Option<SelectedPlanReport>) {
+) -> (InstallablePlan, SelectedPlanReport) {
     // The deployment's Stage 3 prices, from its JSON file: cost model 1.
     let settings: CostInputs = serde_json::from_str(
         r#"{"cost_model": {"usage_over_time": {
@@ -208,7 +208,6 @@ async fn the_plan_carries_stage3s_predicted_usage() {
         plan.raw_data_retention().unwrap().is_empty(),
         "a tumbling-window-only plan"
     );
-    let selection = selection.as_ref().expect("Stage 3's report");
     let usage = &selection.predicted_usage;
     let node_costs: f64 = usage
         .per_node
@@ -323,7 +322,7 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
         ..DeploymentCapabilities::default()
     };
     let settings = CostInputs::default();
-    let (plan, report) = plan_installable(UserInput::new(
+    let (plan, _report) = plan_installable(UserInput::new(
         &p99_avg_workload(false),
         FrontendInput::Promql,
         PlanningModels::builtin()
@@ -333,7 +332,6 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
     ))
     .await
     .expect("a plan is selected");
-    report.as_ref().expect("the plan's cost report");
     assert!(
         plan.raw_data_retention().unwrap().is_empty(),
         "no raw samples read"

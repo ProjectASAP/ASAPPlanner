@@ -160,9 +160,8 @@ fn producer_of(dag: &PhysicalASAPDAG, consumer: PhysicalASAPNodeId) -> PhysicalA
 #[test]
 fn a_chain_is_installed_as_one_view() {
     let (dag, chain) = chain_plan(Some(3_600_000));
-    let (plan, report) = installable_plan_of(&dag, None, &[entry()]).unwrap();
+    let plan = installable_plan_of(dag.clone(), &[entry()]).unwrap();
     assert_eq!(plan.dag, dag);
-    assert!(report.is_none());
     let views = plan.materialized_views().unwrap();
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].node_id, chain);
@@ -186,13 +185,13 @@ fn a_chain_is_installed_as_one_view() {
 fn installation_checks_the_retention_stage3_set() {
     let entries = [entry()];
     assert!(matches!(
-        installable_plan_of(&chain_plan(None).0, None, &entries),
+        installable_plan_of(chain_plan(None).0, &entries),
         Err(InstallablePlanError::Uninstallable(
             InstallableDagError::ViewWithoutRetention { .. }
         ))
     ));
     assert!(matches!(
-        installable_plan_of(&chain_plan(Some(3_000_000)).0, None, &entries),
+        installable_plan_of(chain_plan(Some(3_000_000)).0, &entries),
         Err(InstallablePlanError::Uninstallable(
             InstallableDagError::ViewRetentionTooShort { .. }
         ))
