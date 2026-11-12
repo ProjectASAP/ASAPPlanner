@@ -112,7 +112,7 @@ Operator nodes carry no physical properties: the logical DAG has no timing
 or lifetime.
 Materialization ([#509 §Materialization](../proposals/planner-layering.md#materialization))
 decides, for each sub-DAG, whether its output is materialized, and if so with which
-[`PhysicalProperties`](../../../crates/types/src/stages/physical/properties.rs): a
+[`PhysicalProperties`](../../../crates/types/src/stages/physical/properties/mod.rs): a
 timing and a `Lifetime` (#1200). The lifetime is `None` (discarded after its
 reader), `OneEvaluation(medium)` (materialized until every reader of one evaluation
 finishes) or `AcrossEvaluations(medium)` (materialized for later evaluations), with

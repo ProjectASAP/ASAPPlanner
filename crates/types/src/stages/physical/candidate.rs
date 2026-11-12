@@ -1,5 +1,5 @@
 //! Candidate scope: each logical candidate's physical alternatives, one per
-//! valid $p^{\mathrm{phys}} = (\tau, \ell)$ (#1200).
+//! valid $p^{\mathrm{phys}} = (\tau, \ell)$.
 
 use crate::ir::properties::ExecutionTiming;
 use crate::ir::{ASAPOp, Operator};

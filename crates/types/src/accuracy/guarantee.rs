@@ -1,24 +1,18 @@
-//! Machine-readable accuracy guarantees for finalized post-ASAP values
-//! (issue #172).
-//!
-//! A selected post-ASAP plan used to carry no statement about the error of
-//! the value it produces: every approximate layer was sized from its own
-//! [`AccuracyTarget`](super::AccuracyTarget) as if its input were exact, so an approximate parent
-//! could silently consume an approximate child. This module is the
-//! *vocabulary* that fixes that — the typed metric, the symbolic bound and
-//! failure-probability expressions and the provenance trail. The
-//! theoretical guarantee of a summary (`theoretical_guarantee`), each
-//! operator's error contract and the deployment's measured accuracy
-//! (`AccuracyEvidence`) live one layer up in `asap_accuracy`: this crate
-//! defines the shapes, the planning crates decide.
+//! Machine-readable accuracy guarantees: the vocabulary for what error a
+//! finalized, caller-visible value has — the typed metric
+//! ([`AccuracyGuarantee`]), the symbolic bound and failure-probability
+//! expressions ([`BoundExpr`], [`ProbabilityExpr`]) and the provenance trail
+//! ([`GuaranteeSource`]). The theoretical guarantee of a summary
+//! (`theoretical_guarantee`), each operator's error contract and the
+//! deployment's measured accuracy (`AccuracyEvidence`) live one layer up in
+//! `asap_accuracy`: this crate defines the shapes, the planning crates
+//! decide.
 //!
 //! ## What a guarantee says
 //!
-//! [`AccuracyGuarantee`] is attached to a finalized, caller-visible value —
-//! [`crate::ir::OperatorNode::guarantee`] on a `SummaryEstimate` evaluation, an
-//! exact accumulator, or a kept pre-ASAP sub-DAG — never to raw summary
-//! state (a `SummaryAgg` sketch node carries `None`; its evaluation carries the
-//! guarantee). Its statement is:
+//! [`AccuracyGuarantee`] describes a finalized, caller-visible value — a
+//! `SummaryEstimate` evaluation, an exact accumulator, or a kept pre-ASAP
+//! sub-DAG — never raw summary state. Its statement is:
 //!
 //! ```text
 //! Pr[ err_metric(estimate, truth) > error ] <= failure_probability
@@ -38,7 +32,7 @@
 //! rather than bare `f64`s so a planning-time guarantee can reference a
 //! statistic it does not have (a group count, a stream's L1 norm) and stay
 //! honestly *unknown* until something instantiates it — a deployment's own
-//! cardinality estimate, or a runtime posterior observation (issue #239).
+//! cardinality estimate, or a runtime posterior observation.
 //! [`BoundExpr::evaluate`] returns `None`, never `0`, for such a bound;
 //! "unknown" and "zero" are different answers and a fail-closed planner
 //! treats them differently.
@@ -78,27 +72,6 @@ pub enum BoundExpr {
 }
 
 impl BoundExpr {
-    #[cfg(test)]
-    fn optimistic_floor(&self) -> Self {
-        match self {
-            Self::Unknown { .. } => Self::Zero,
-            Self::Sum { terms } => Self::Sum {
-                terms: terms.iter().map(Self::optimistic_floor).collect(),
-            },
-            Self::Product { factors } => Self::Product {
-                factors: factors.iter().map(Self::optimistic_floor).collect(),
-            },
-            Self::Scaled { factor, inner } => Self::Scaled {
-                factor: *factor,
-                inner: Box::new(inner.optimistic_floor()),
-            },
-            Self::Max { terms } => Self::Max {
-                terms: terms.iter().map(Self::optimistic_floor).collect(),
-            },
-            other => other.clone(),
-        }
-    }
-
     /// See [`AccuracyGuarantee::bind`].
     pub(crate) fn bind(&self, value: &dyn Fn(&str) -> Option<f64>) -> Self {
         let all = |terms: &[BoundExpr]| terms.iter().map(|t| t.bind(value)).collect();
@@ -198,21 +171,6 @@ pub enum ProbabilityExpr {
 }
 
 impl ProbabilityExpr {
-    #[cfg(test)]
-    fn optimistic_floor(&self) -> Self {
-        match self {
-            Self::Unknown { .. } => Self::Zero,
-            Self::UnionBound { terms } => Self::UnionBound {
-                terms: terms.iter().map(Self::optimistic_floor).collect(),
-            },
-            Self::Scaled { count, inner } => Self::Scaled {
-                count: count.optimistic_floor(),
-                inner: Box::new(inner.optimistic_floor()),
-            },
-            other => other.clone(),
-        }
-    }
-
     /// Whether evaluation depends on a statistic not yet supplied.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn has_unknown(&self) -> bool {
@@ -271,7 +229,7 @@ impl ProbabilityExpr {
 
 /// One entry in a [`AccuracyGuarantee`]'s provenance trail — enough for a
 /// reader to reconstruct *why* the bound is what it is without re-running
-/// the planner. `#[non_exhaustive]` so runtime evidence (issue #239) and
+/// the planner. `#[non_exhaustive]` so runtime evidence and
 /// deployment-specific sources can be appended later.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -339,17 +297,6 @@ impl AccuracyGuarantee {
         bound
     }
 
-    /// Optimistic lower bound (tests only): unknown non-negative
-    /// contributions count as zero, so it cannot certify a candidate; the
-    /// original guarantee remains unresolved.
-    #[cfg(test)]
-    fn optimistic_floor(&self) -> Self {
-        let mut floor = self.clone();
-        floor.spec.error = self.spec.error.optimistic_floor();
-        floor.spec.failure_probability = self.spec.failure_probability.optimistic_floor();
-        floor
-    }
-
     /// An unresolved bound or failure probability is not a certificate.
     #[cfg(any(test, feature = "test-support"))]
     pub fn has_unknown(&self) -> bool {
@@ -380,6 +327,56 @@ impl AccuracyGuarantee {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl BoundExpr {
+        fn optimistic_floor(&self) -> Self {
+            match self {
+                Self::Unknown { .. } => Self::Zero,
+                Self::Sum { terms } => Self::Sum {
+                    terms: terms.iter().map(Self::optimistic_floor).collect(),
+                },
+                Self::Product { factors } => Self::Product {
+                    factors: factors.iter().map(Self::optimistic_floor).collect(),
+                },
+                Self::Scaled { factor, inner } => Self::Scaled {
+                    factor: *factor,
+                    inner: Box::new(inner.optimistic_floor()),
+                },
+                Self::Max { terms } => Self::Max {
+                    terms: terms.iter().map(Self::optimistic_floor).collect(),
+                },
+                other => other.clone(),
+            }
+        }
+    }
+
+    impl ProbabilityExpr {
+        fn optimistic_floor(&self) -> Self {
+            match self {
+                Self::Unknown { .. } => Self::Zero,
+                Self::UnionBound { terms } => Self::UnionBound {
+                    terms: terms.iter().map(Self::optimistic_floor).collect(),
+                },
+                Self::Scaled { count, inner } => Self::Scaled {
+                    count: count.optimistic_floor(),
+                    inner: Box::new(inner.optimistic_floor()),
+                },
+                other => other.clone(),
+            }
+        }
+    }
+
+    impl AccuracyGuarantee {
+        /// Optimistic lower bound (tests only): unknown non-negative
+        /// contributions count as zero, so it cannot certify a candidate; the
+        /// original guarantee remains unresolved.
+        fn optimistic_floor(&self) -> Self {
+            let mut floor = self.clone();
+            floor.spec.error = self.spec.error.optimistic_floor();
+            floor.spec.failure_probability = self.spec.failure_probability.optimistic_floor();
+            floor
+        }
+    }
 
     #[test]
     fn unknown_statistic_never_evaluates_to_zero() {

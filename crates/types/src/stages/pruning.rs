@@ -1,13 +1,14 @@
-//! What a stage removed, and why: one shape for every stage (#1047 P6).
-//! Each stage removes only what its own knowledge rules out (option C):
-//! Stage 2 what cannot be built, run or read by a query output. Stage 0 fails with an
-//! error, Pass 1 records nothing it leaves out (#1205 will show it), and
-//! Pass 2 records its eliminated candidates with their own causes
-//! (`PrunedLogicalCandidate`). Stage 3 prunes before
-//! its selection MILP (dominated and uncostable candidates); its
-//! rejections of whole plans keep their own cause (`RejectionCause` in plan
-//! selection). The planner does not check whether an executor implements an
-//! operator or summary type, so no reason names it.
+//! What a stage removed, and why: one shape for every stage. Each stage
+//! removes only what its own knowledge rules out. Pass 2 records its
+//! eliminated logical candidates with their causes ([`PrunedLogicalCandidate`],
+//! [`PruneCause`], [`RootPruneReason`]); Stage 2 records the physical
+//! candidates that cannot be built, run or read by a query output
+//! ([`PrunedCandidate`], [`PruneReason`]); Stage 3 prunes dominated and
+//! uncostable candidates before its selection, and its rejections of whole
+//! plans keep their own cause (`RejectionCause` in plan selection). Stage 0
+//! fails with an error and Pass 1 records nothing it leaves out. The planner
+//! does not check whether an executor implements an operator or summary
+//! type, so no reason names it.
 
 use crate::accuracy::AccuracyMetric;
 use crate::stages::{CandidateForMemoGroupId, PhysicalCandidateId, RequiredAccuracy};

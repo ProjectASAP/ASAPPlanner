@@ -283,7 +283,7 @@ one. It makes no implementation choice, so this section counts it as Stage 0
 lists `memo_of_queries` with Pass 1. `memo_of_queries`
 (`crates/stage0-memo/src/lib.rs`) visits the frontends' roots children first
 and finds or adds each node's group with `Memo::find_or_add_group`, whose
-expression equality is in `crates/types/src/stages/logical/memo/hash_consing.rs`. Two structurally equal nodes
+expression equality is in `crates/types/src/stages/logical/memo/hash_consing/mod.rs`. Two structurally equal nodes
 become one group only when sharing them is legal, that is, when every reader
 of the shared node reads the rows it would read alone. Equal nodes are
 interned children first, so they always read one input, and a node is legal
@@ -497,7 +497,7 @@ candidates is in `crates/stage3-plan-selection/src/` (`lib.rs`, `groups/`, `milp
 
 | Step | Entry point | Path |
 |---|---|---|
-| Stage 0 | `memo_of_queries` → `Memo` (without candidates), `MemoGroup`, `MemoGroupId` | `stage0-memo/src/lib.rs` (the types: `asap_types::stages`); hash-consing is `Memo::find_or_add_group` in `types/src/stages/logical/memo/mod.rs`, its expression equality in `memo/hash_consing.rs` |
+| Stage 0 | `memo_of_queries` → `Memo` (without candidates), `MemoGroup`, `MemoGroupId` | `stage0-memo/src/lib.rs` (the types: `asap_types::stages`); hash-consing is `Memo::find_or_add_group` in `types/src/stages/logical/memo/mod.rs`, its expression equality in `memo/hash_consing/mod.rs` |
 | Pass 1 | `pass1_memo` → `Memo`, the one entry: inside it, the computation targets (walking the memo groups, less the summaries the deployment does not support; `ComputationTarget` is Pass 1's private working type), then each target's ways to compute added as candidates of the groups, a summary with one build per configuration of its `parameter_list` | `stage1-pass1-per-computation-candidates/src/lib.rs`; `computation_targets.rs`; `candidates/` (`mod.rs`, `pending.rs`, `measure_output.rs`); `summary_realization.rs` builds the summary inputs (the sketch algorithms that serve an intent, each row's update) |
 | Memo types | `Memo`, `MemoGroup`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
 | Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, from Pass 1's output. It calls in this order: 1. rollup from the finest common group; 2. top-k reuse; 3. reach, caps and readout requirements; 4. dead-candidate elimination; 5. chain groups; 6. the logical edges; then each group's evaluation grid and the groups each query may read only exactly | `stage1-pass2-reuse-candidates/src/` (`lib.rs`, `rules/{rollup,topk,chains}.rs`, `readout_requirements.rs`, `dead_candidates.rs`, `edges.rs`, `evaluation_grids.rs`, `exact_only_groups.rs`; the readout levels: `asap_accuracy::readout_levels`; `LogicalASAPMemoCandidates` itself: `asap_types::stages`) |

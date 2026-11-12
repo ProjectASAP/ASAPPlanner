@@ -1,5 +1,12 @@
-//! The logical side: Stage 0's and Stage 1's memo, by scope (memo → group
-//! → candidate → candidate input → edge → Stage 1's output).
+//! The logical side: Stage 0's and Stage 1's memo, by scope.
+//!
+//! - `memo` — the memo and its queries.
+//! - `group` — a memo group and the properties its candidates share
+//!   (column lineage and sign, aggregate coverage).
+//! - `candidate` — a group's candidates.
+//! - `requirements` — what a candidate requires of each input.
+//! - `edge` — the logical edges between candidates.
+//! - `memo_candidates` — Stage 1's output.
 
 mod candidate;
 mod edge;

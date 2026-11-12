@@ -1,4 +1,4 @@
-//! #511 §2.2: accuracy targets and the error metrics they are stated in
+//! Accuracy targets and the error metrics they are stated in
 //! ([`AccuracyTarget`], [`AccuracyMetric`]), and machine-readable accuracy
 //! guarantees ([`AccuracyGuarantee`]).
 //!

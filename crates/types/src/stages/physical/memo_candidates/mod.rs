@@ -1,7 +1,7 @@
 //! Stage 2's output: each logical candidate's physical alternatives
 //! $\mathcal C$, one per valid $p^{\mathrm{phys}} = (\tau, \ell)$, and
 //! the physical edges $\mathcal E$ with $\alpha^{\log}$ and
-//! $\alpha^{\mathrm{phys}}$ (#1200, #1201). Stage 3 selects among them;
+//! $\alpha^{\mathrm{phys}}$. Stage 3 selects among them;
 //! Stage 2 prices nothing.
 
 use std::collections::HashMap;

@@ -78,7 +78,7 @@ contains the candidate and that Stage 3 prices it.
 ## 3. Add a Stage 2 physical properties option
 
 1. Add the `Lifetime` variant or the valid (timing, lifetime) pair
-   (`crates/types/src/stages/physical/properties.rs`, `PhysicalProperties::new` and
+   (`crates/types/src/stages/physical/properties/mod.rs`, `PhysicalProperties::new` and
    `readable_at`) and its placement in
    `crates/types/src/ir/properties/timing.rs`, with its data-state edge rules.
 2. Offer it in `crates/stage2-physical-optimization/src/lib.rs` (the

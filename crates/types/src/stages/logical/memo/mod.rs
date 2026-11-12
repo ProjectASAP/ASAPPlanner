@@ -1,6 +1,6 @@
 //! Memo scope: the memo, Stage 0's and Stage 1's one type, and each query
 //! over its groups; the operations over the whole memo
-//! (concepts doc `memo-groups-properties-requirements.md`, section 3; #1203).
+//! (concepts doc `memo-groups-properties-requirements.md`, section 3).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 

@@ -49,7 +49,7 @@ or `Operator::ASAP(ASAPOp)`. Old public names are not kept as aliases.
 | `SummaryFamilyType` | `FieldDataType` (its non-`Plain` variants) |
 | Timing stored on post-ASAP nodes | `OperatorNode::timing`, `None` until `ir::timing::apply_physical_properties` writes it from a `PhysicalPropertiesAssignment` (default: all query time) |
 | `UnresolvedQueryExpr` + `asap_types::pre_asap::resolve_root` | `UnresolvedOp` / `UnresolvedScalar` + `asap_frontend_common::resolve_root` |
-| `pre_asap::canonicalize`, `pre_asap::cse::share_common_sub_dags` | `asap_frontend_common` `canonicalize` (crate-private), `memo_of_queries` (`asap_stage0_memo`, `crates/stage0-memo/src/lib.rs`), hash-consing through `Memo::find_or_add_group` (`crates/types/src/stages/logical/memo/hash_consing.rs`) |
+| `pre_asap::canonicalize`, `pre_asap::cse::share_common_sub_dags` | `asap_frontend_common` `canonicalize` (crate-private), `memo_of_queries` (`asap_stage0_memo`, `crates/stage0-memo/src/lib.rs`), hash-consing through `Memo::find_or_add_group` (`crates/types/src/stages/logical/memo/hash_consing/mod.rs`) |
 | `asap_types::post_asap::compile_post_asap_dag` (wire version 5, `Fallback`/`Binary`/`Value` payloads) | `asap_types::plan::physical_asap_dag::compile_physical_asap_dag` (`PhysicalASAPDAG`, carried in the plan file versioned by `asap_planner::INSTALLABLE_PLAN_WIRE_VERSION`: one node per operator, `Operator<NodeId>` payloads, `ScalarRef` edges); input must be timed |
 | Exported schema JSON `columns` | `fields` |
 

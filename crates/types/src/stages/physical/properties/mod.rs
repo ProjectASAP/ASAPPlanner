@@ -1,5 +1,5 @@
 //! A physical candidate's physical properties $p^{\mathrm{phys}}_v = (\tau, \ell)$
-//! (#1200; concepts doc `memo-groups-properties-requirements.md`, sections 1
+//! (concepts doc `memo-groups-properties-requirements.md`, sections 1
 //! and 3): when it runs ([`ExecutionTiming`]) and how long its output lives
 //! ([`Lifetime`]). There is no schedule property: a `None` or `OneEvaluation`
 //! output runs on the schedule of the context κ that runs it, and a tumbling

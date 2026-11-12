@@ -1,4 +1,4 @@
-//! Accuracy requirements and the error metrics they are stated in (#690).
+//! Accuracy requirements and the error metrics they are stated in.
 //!
 //! A requirement and a guarantee share one outer shape, [`AccuracySpec`]:
 //! an error metric, an error ε, a failure probability δ and a scope. A
@@ -297,7 +297,7 @@ impl AccuracyTarget {
 /// root, whose error is as naturally a rank as a relative one.
 ///
 /// Used only to size and to display: a target whose metric is not set
-/// accepts a guarantee in any metric (#690).
+/// accepts a guarantee in any metric.
 pub fn default_metric_for_root(root: &QueryRoot) -> Option<AccuracyMetric> {
     match root {
         QueryRoot::Operator(node) => node_metric(node),

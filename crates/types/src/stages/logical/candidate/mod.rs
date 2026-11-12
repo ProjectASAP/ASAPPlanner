@@ -1,6 +1,5 @@
 //! Candidate scope: each group's candidates $v = (e_v, p^{\log}_v)$
-//! (concepts doc `memo-groups-properties-requirements.md`, section 3;
-//! #1203).
+//! (concepts doc `memo-groups-properties-requirements.md`, section 3).
 
 use crate::ir::operator::asap::summary_type_of_operator;
 use crate::ir::schema::FieldDataType;
