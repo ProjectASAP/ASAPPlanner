@@ -50,9 +50,10 @@ fn batch_shares_the_summary_and_keeps_one_root_per_query() {
         .into_iter()
         .map(QueryRoot::Operator)
         .collect();
-    let dag = asap_types::test_support::physical_asap_dag_at_query_time_with_node_ids(&roots)
-        .map(|(dag, _)| dag)
-        .unwrap();
+    let dag =
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&roots)
+            .map(|(dag, _)| dag)
+            .unwrap();
     dag.validate().unwrap();
     assert_eq!(dag.roots.len(), 2);
     assert_eq!(dag.nodes.len(), 4, "scan and summary are exported once");
@@ -71,12 +72,13 @@ fn scalar_roots_export_in_batch_order_and_reference_nodes() {
         right: Box::new(ScalarExpr::literal_f64(1.0)),
         semantics: ExprSemantics::Promql,
     };
-    let dag = asap_types::test_support::physical_asap_dag_at_query_time_with_node_ids(&[
-        QueryRoot::Scalar(scalar),
-        QueryRoot::Operator(Rc::clone(&read)),
-    ])
-    .map(|(dag, _)| dag)
-    .unwrap();
+    let dag =
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&[
+            QueryRoot::Scalar(scalar),
+            QueryRoot::Operator(Rc::clone(&read)),
+        ])
+        .map(|(dag, _)| dag)
+        .unwrap();
     assert_eq!(dag.nodes.len(), 3, "the read plan is exported once");
     assert_eq!(dag.roots.len(), 1);
     assert_eq!(dag.scalar_roots.len(), 1);
@@ -178,7 +180,8 @@ fn a_reference_read_twice_is_one_scalar_ref_edge() {
         child: series("a"),
     }))
     .unwrap();
-    let dag = asap_types::test_support::physical_asap_dag_at_query_time(&project).unwrap();
+    let dag =
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time(&project).unwrap();
     dag.validate().unwrap();
     let roles: Vec<_> = dag
         .edges
@@ -214,7 +217,8 @@ fn swapped_edge_roles_are_rejected() {
         right: scan("b"),
     }))
     .unwrap();
-    let mut dag = asap_types::test_support::physical_asap_dag_at_query_time(&join).unwrap();
+    let mut dag =
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time(&join).unwrap();
     dag.validate().unwrap();
     for edge in &mut dag.edges {
         edge.role = match edge.role {
@@ -235,7 +239,7 @@ fn swapped_edge_roles_are_rejected() {
 #[test]
 fn an_empty_batch_is_an_error() {
     assert!(matches!(
-        asap_types::test_support::physical_asap_dag_at_query_time_with_node_ids(&[])
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&[])
             .map(|(dag, _)| dag),
         Err(PhysicalASAPDAGValidationError::NoRoots)
     ));
@@ -266,7 +270,10 @@ fn a_raw_data_window_ends_its_offset_before_the_evaluation() {
         600_000,
     );
     assert_eq!(window.bounds_ms(3_600_000), (2_700_000, 3_300_000));
-    assert_eq!(asap_types::test_support::lookback_ms(&window), 900_000);
+    assert_eq!(
+        asap_types::test_support::forwarders::lookback_ms(&window),
+        900_000
+    );
 }
 
 /// High-fan-in merge/concat validation is independent of wire edge order and

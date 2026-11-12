@@ -7,8 +7,7 @@
 //! group; Pass 2 extends that memo.
 //!
 //! It depends only on `asap-types` (its input and output memo are in
-//! `asap_types::stages`) and the shared accuracy model (`asap-accuracy`,
-//! for the statistic each intent reads). It depends on no other stage
+//! `asap_types::stages`). It depends on no other stage
 //! crate, and the planner facade calls it after Stage 0. It depends on no
 //! query-language frontend either; its tests build their input memo through
 //! `Memo::find_or_add_group` and `Memo::add_query`.

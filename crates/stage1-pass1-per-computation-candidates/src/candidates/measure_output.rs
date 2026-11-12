@@ -18,9 +18,7 @@ use asap_types::summary_type::{ExactKind, SketchStatistic, SummaryInputExpr};
 use super::pending::{add_candidate, commit_pending, Pending};
 use super::SingleMeasure;
 use crate::computation_targets::HowToComputeAggregateMeasure;
-use crate::summary_realization::{
-    measure_input, summary_update, with_raw_data_samples_requirement,
-};
+use crate::summary_realization::{measure_input, summary_update, with_raw_data_samples_of};
 use crate::{schema, PerComputationCandidateError};
 
 /// The operator that computes `measure` by `way` for
@@ -55,7 +53,7 @@ pub(super) fn measure_output(
                 measure.unfiltered_input,
                 measure.filter,
             )?;
-            let update = with_raw_data_samples_requirement(
+            let update = with_raw_data_samples_of(
                 summary_update(
                     measure.intent,
                     &summary_type,

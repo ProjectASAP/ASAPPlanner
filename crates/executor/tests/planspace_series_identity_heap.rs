@@ -44,7 +44,7 @@ fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<OperatorNode> {
 }
 
 fn carries_identity(root: &Rc<OperatorNode>) -> bool {
-    planner_types::test_support::physical_asap_dag_at_query_time(root)
+    planner_types::test_support::forwarders::physical_asap_dag_at_query_time(root)
         .unwrap()
         .nodes
         .iter()

@@ -50,7 +50,7 @@ fn rebuilding_rederives_schema_for_both_categories() {
         let rebuilt = Rc::new(original.with_new_children(|_| replacement.clone()).unwrap());
         assert_eq!(
             rebuilt.schema,
-            asap_types::test_support::output_schema(&rebuilt.operator).unwrap()
+            asap_types::test_support::forwarders::output_schema(&rebuilt.operator).unwrap()
         );
         rebuilt.validate_structure().unwrap();
     }
@@ -272,10 +272,14 @@ fn a_current_series_population_matches_only_its_selectors_lookback() {
         lookback_ms: 1_000,
     };
     let selector = series_selector();
-    assert!(asap_types::test_support::matches_node(&spec, &selector));
+    assert!(asap_types::test_support::forwarders::matches_node(
+        &spec, &selector
+    ));
     let wrong = CurrentSeriesInput {
         lookback_ms: 300_000,
         ..spec
     };
-    assert!(!asap_types::test_support::matches_node(&wrong, &selector));
+    assert!(!asap_types::test_support::forwarders::matches_node(
+        &wrong, &selector
+    ));
 }

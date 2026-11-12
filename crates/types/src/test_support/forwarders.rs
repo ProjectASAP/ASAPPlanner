@@ -4,9 +4,6 @@
 //! to the crate-private function of the same name, except the fixture
 //! [`population_over_selector`], which the executor's tests build.
 
-pub mod memo_builders;
-pub mod memo_fixtures;
-
 use crate::ir::operator::maintained_population::CurrentSeriesInput;
 use crate::ir::operator::node::Operator;
 use crate::plan::materialized_view::RawDataWindow;

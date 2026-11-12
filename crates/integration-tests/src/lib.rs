@@ -103,7 +103,7 @@ pub mod physical_export {
 
     /// Export the physical DAG of `root`.
     pub fn physical_asap_dag(root: &Rc<OperatorNode>) -> PhysicalASAPDAG {
-        asap_types::test_support::physical_asap_dag_at_query_time(root)
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time(root)
             .expect("physical ASAP DAG export failed")
     }
 }

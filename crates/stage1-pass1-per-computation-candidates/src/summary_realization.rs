@@ -284,7 +284,7 @@ fn summed_per_series_samples(
 /// `update` with the open requirement that its weights are samples of
 /// `metric` ([`WeightDomain::RawDataSamplesOfMetric`]), when it is a keyed heap
 /// update whose weights are not otherwise proven.
-pub(crate) fn with_raw_data_samples_requirement(
+pub(crate) fn with_raw_data_samples_of(
     mut update: SummaryUpdate,
     metric: Option<&str>,
 ) -> SummaryUpdate {

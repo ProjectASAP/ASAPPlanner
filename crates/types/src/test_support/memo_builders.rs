@@ -231,3 +231,21 @@ pub fn quantile_over_time_readouts(
         by_algorithm,
     }
 }
+
+/// The candidates of `group`.
+pub fn candidates_of(memo: &Memo, group: MemoGroupId) -> &[CandidateForMemoGroup] {
+    &memo.groups()[group.0 as usize].candidates
+}
+
+/// The groups whose expression matches `pattern`.
+pub fn groups_where(
+    memo: &Memo,
+    pattern: impl Fn(&Operator<MemoGroupId>) -> bool,
+) -> Vec<MemoGroupId> {
+    memo.groups()
+        .iter()
+        .enumerate()
+        .filter(|(_, group)| pattern(&group.expression))
+        .map(|(index, _)| MemoGroupId(index as u32))
+        .collect()
+}

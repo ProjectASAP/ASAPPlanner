@@ -10,11 +10,11 @@ use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::stages::{
-    CandidateForMemoGroup, CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, MemoGroupId,
-    PrunedLogicalCandidate, RequiredAccuracy,
+    CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, MemoGroupId, PrunedLogicalCandidate,
+    RequiredAccuracy,
 };
 use asap_types::summary_type::ExactKind;
-use asap_types::test_support::memo_builders::group;
+use asap_types::test_support::memo_builders::{candidates_of, group, groups_where};
 use asap_types::test_support::memo_fixtures;
 use asap_types::workload::{
     Predictability, Query, QueryRecurrence, QueryRequirements, QueryWorkloadEntry, RepeatedDemand,
@@ -60,10 +60,6 @@ pub fn entry(interval_ms: u32) -> QueryWorkloadEntry {
 
 pub fn pass2(memo: Memo, entries: &[QueryWorkloadEntry]) -> LogicalASAPMemoCandidates {
     generate_logical_asap_memo_candidates(memo, entries, &NoMeasuredGuarantees).unwrap()
-}
-
-pub fn candidates_of(memo: &Memo, group: MemoGroupId) -> &[CandidateForMemoGroup] {
-    &memo.groups()[group.0 as usize].candidates
 }
 
 /// The edges into input `input` of `consumer`: each producer and α^log.
@@ -143,19 +139,6 @@ pub fn chain_width_below(memo: &Memo, mut group: MemoGroupId) -> Option<u64> {
             _ => return None,
         }
     }
-}
-
-/// The groups whose expression matches `pattern`.
-pub fn groups_where(
-    memo: &Memo,
-    pattern: impl Fn(&Operator<MemoGroupId>) -> bool,
-) -> Vec<MemoGroupId> {
-    memo.groups()
-        .iter()
-        .enumerate()
-        .filter(|(_, group)| pattern(&group.expression))
-        .map(|(index, _)| MemoGroupId(index as u32))
-        .collect()
 }
 
 /// The group whose expression is `operator`, if the memo has one.

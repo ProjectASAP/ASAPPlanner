@@ -83,7 +83,7 @@ fn window_over_rows(
         child,
     }))
     .unwrap();
-    planner_types::test_support::physical_asap_dag_at_query_time(&range).unwrap()
+    planner_types::test_support::forwarders::physical_asap_dag_at_query_time(&range).unwrap()
 }
 
 /// `(instance, ts, value)` samples of `latency_ms` as a store's raw data.

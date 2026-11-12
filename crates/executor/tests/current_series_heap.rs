@@ -335,8 +335,11 @@ fn population_fixture_compiles_with_dynamic_identity() {
     let topk =
         planner_types::ir::operator::maintained_population::PopulationStatistic::TopK { k: 1 };
     let root = Rc::new(with_series_identity(&original).unwrap());
-    let selected = planner_types::test_support::population_over_selector(&root, topk, &["job"]);
-    let logical = planner_types::test_support::physical_asap_dag_at_query_time(&selected).unwrap();
+    let selected =
+        planner_types::test_support::forwarders::population_over_selector(&root, topk, &["job"]);
+    let logical =
+        planner_types::test_support::forwarders::physical_asap_dag_at_query_time(&selected)
+            .unwrap();
     let (source, raw_schema) = logical
         .nodes
         .iter()
