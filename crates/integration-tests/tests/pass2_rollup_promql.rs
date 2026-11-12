@@ -87,6 +87,14 @@ fn an_instant_sum_rolls_up_from_the_finer_sum_over_a_scan_listing_more_labels() 
     assert!(rolled_up_from(&memo, root(&memo, 1)).is_empty());
 }
 
+/// A count rolls up as a sum of the finer counts, under the coarse
+/// count's own column name (`count`, where the sum's would be `sum`).
+#[test]
+fn an_instant_count_rolls_up_from_the_finer_count() {
+    let memo = pass2_memo(&["count by (job) (m)", "count by (job, instance) (m)"]);
+    assert_eq!(rolled_up_from(&memo, root(&memo, 0)), vec![root(&memo, 1)]);
+}
+
 #[test]
 fn a_sum_of_rates_rolls_up_from_the_finer_sum_of_the_same_rates() {
     let memo = pass2_memo(&[

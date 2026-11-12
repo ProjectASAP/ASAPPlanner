@@ -5,14 +5,18 @@ use asap_types::ir::operator::arguments::{Reduction, Source};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
-use asap_types::ir::{ASAPOp, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr};
+use std::time::Duration;
+
+use asap_types::ir::{
+    ASAPOp, ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr, TimeRangeKind,
+};
 use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 use asap_types::summary_type::parameter_list;
 use asap_types::summary_type::{ExactKind, SketchAlgorithm, SketchStatistic, SummaryUpdate};
 use asap_types::workload::DataWorkload;
 
 use crate::test_fixtures::*;
-use asap_types::test_support::memo_fixtures::state_grouped_by;
+use asap_types::test_support::memo_fixtures::{aggregate, state_grouped_by};
 
 /// Concepts doc Example 1: F = `quantile by (job, host)(latency[5m])`, C =
 /// `quantile by (host)(latency{job="api"}[5m])`. Equal definitions, the
@@ -264,6 +268,114 @@ fn a_coarse_exact_sum_rolls_up_the_finer_sum() {
             filters: vec![None],
             having: None,
         })]
+    );
+}
+
+/// The instant vector `x` over `scan`: its latest sample per series.
+fn instant(memo: &mut Memo, scan: MemoGroupId) -> MemoGroupId {
+    group(
+        memo,
+        Operator::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(1),
+            kind: TimeRangeKind::Instant,
+            child: scan,
+        }),
+    )
+}
+
+/// A count rolls up as a sum of counts, under the count's own column name:
+/// `count by (job)` of PromQL (its measure unnamed, `count`) rolls up the
+/// finer `count by (job, instance)` with `sum` over its count column, named
+/// `count` as the coarse group's.
+#[test]
+fn a_coarse_count_rolls_up_the_finer_count_as_a_sum() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let input = scan(&mut memo, "x", &["job", "instance"]);
+    let rows = instant(&mut memo, input);
+    let fine = group(
+        &mut memo,
+        aggregate(Reduction::by(vec![2, 3]), AggIntent::Count, rows),
+    );
+    let coarse = group(
+        &mut memo,
+        aggregate(Reduction::by(vec![2]), AggIntent::Count, rows),
+    );
+    query(&mut memo, fine, Some(AccuracyTarget::exact()));
+    query(&mut memo, coarse, Some(AccuracyTarget::exact()));
+    let logical = pass2(memo, &[entry(60_000), entry(60_000)]);
+    let rollups: Vec<_> = candidates_of(&logical.memo, coarse)
+        .iter()
+        .filter(|c| c.origin == OriginOfCandidateForMemoGroup::Rollup)
+        .map(|c| c.expression.operator.clone())
+        .collect();
+    assert_eq!(
+        rollups,
+        vec![Operator::NonASAP(NonASAPOp::Aggregate {
+            child: fine,
+            reduction: Reduction::by(vec![0]),
+            measures: vec![AggIntent::Sum { col: Some(2) }],
+            output_names: vec!["count".into()],
+            filters: vec![],
+            having: None,
+        })]
+    );
+}
+
+/// A PromQL `!=` matcher compensates with PromQL's comparison:
+/// `sum by (job)` over `x{instance!="i1"}` rolls up `sum by (job,
+/// instance)` over `x` through `Filter(instance != "i1")` with PromQL
+/// semantics (a series without the label matches), not a negated SQL
+/// `IN` list.
+#[test]
+fn a_not_equal_matcher_compensates_with_promql_semantics() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let not_equal = |column: usize| ScalarExpr::Compare {
+        left: Box::new(ScalarExpr::Column(column)),
+        op: CompareOpKind::Ne,
+        right: Box::new(ScalarExpr::Literal(ScalarValue::Utf8("i1".into()))),
+        semantics: ExprSemantics::Promql,
+    };
+    let all = scan(&mut memo, "x", &["job", "instance"]);
+    let not_i1 = scan_where(
+        &mut memo,
+        "x",
+        &["job", "instance"],
+        vec![Predicate(not_equal(3))],
+    );
+    let all_rows = instant(&mut memo, all);
+    let not_i1_rows = instant(&mut memo, not_i1);
+    let fine = group(
+        &mut memo,
+        aggregate(
+            Reduction::by(vec![2, 3]),
+            AggIntent::Sum { col: None },
+            all_rows,
+        ),
+    );
+    let coarse = group(
+        &mut memo,
+        aggregate(
+            Reduction::by(vec![2]),
+            AggIntent::Sum { col: None },
+            not_i1_rows,
+        ),
+    );
+    query(&mut memo, fine, Some(AccuracyTarget::exact()));
+    query(&mut memo, coarse, Some(AccuracyTarget::exact()));
+    let logical = pass2(memo, &[entry(60_000), entry(60_000)]);
+    let filters = groups_where(
+        &logical.memo,
+        |e| matches!(e, Operator::NonASAP(NonASAPOp::Filter { child, .. }) if *child == fine),
+    );
+    let [filter] = filters[..] else {
+        panic!("one compensating filter: {filters:?}");
+    };
+    assert_eq!(
+        logical.memo.groups()[filter.0 as usize].expression,
+        Operator::NonASAP(NonASAPOp::Filter {
+            pred: Predicate(not_equal(1)),
+            child: fine,
+        })
     );
 }
 

@@ -367,7 +367,10 @@ fn finest_common_group(
 /// `Rollup(by coarse's keys)(Filter(compensation, fine))`, without the
 /// `Filter` when the selections are equal. States roll up with a
 /// regrouping `SummaryMerge`; sums and counts with a sum, minima and maxima
-/// with themselves.
+/// with themselves, each under the coarse column's name. The memo checks
+/// the result is the coarse group's: a SQL global count (0 over no row)
+/// does not roll up from a grouped one (its sum is NULL over no group),
+/// while a grouped count does (every group it returns counts a row).
 fn rollup_from(memo: &mut Memo, coarse: &Member, fine: &Member) -> Result<(), Pass2RuleError> {
     if !coarse.keys.iter().all(|key| fine.keys.contains(key)) {
         return Ok(());
@@ -454,10 +457,7 @@ fn rollup_from(memo: &mut Memo, coarse: &Member, fine: &Member) -> Result<(), Pa
             group_by: Some(group_by),
         }),
         Operator::NonASAP(NonASAPOp::Aggregate {
-            measures,
-            output_names,
-            filters,
-            ..
+            measures, filters, ..
         }) => {
             let Some(measures) = measures
                 .iter()
@@ -467,10 +467,20 @@ fn rollup_from(memo: &mut Memo, coarse: &Member, fine: &Member) -> Result<(), Pa
             else {
                 return Ok(());
             };
+            // Each rolled-up measure keeps the coarse column's name: a sum
+            // of counts is named `count`, as the count it computes.
+            let output_names = memo.groups()[coarse.group.0 as usize]
+                .group_properties
+                .schema
+                .fields
+                .iter()
+                .skip(coarse.keys.len())
+                .map(|field| field.name.clone())
+                .collect();
             Operator::NonASAP(NonASAPOp::Aggregate {
                 reduction: Reduction::by(group_by),
                 measures,
-                output_names: output_names.clone(),
+                output_names,
                 filters: vec![None; filters.len()],
                 having: None,
                 child: input,
@@ -574,27 +584,36 @@ fn column_of(lineage: &[ColumnLineage], column: &SourceColumn) -> Option<usize> 
     at.next().is_none().then_some(first)
 }
 
-/// The predicate selecting the rows whose column `at` meets `constraint`:
-/// `at = v` or `at IN (…)`, `at NOT IN (…)`; `None` for an interval (never
-/// a compensation: the time window is equal across a cluster).
+/// The predicate selecting the rows whose column `at` meets `constraint`,
+/// with the comparison `semantics` of the frontend reading the column's
+/// source: `at = v`, `at != v`, or their disjunction (`IN`) or conjunction
+/// (`NOT IN`) over several values. A PromQL `!=` keeps a series without the
+/// label (its value is the empty string), which only the frontend's
+/// comparison says. `None` for an interval (never a compensation: the time
+/// window is equal across a cluster).
 fn selecting(
     at: usize,
     constraint: &Constraint,
     semantics: ExprSemantics,
 ) -> Option<ScalarExpr<MemoGroupId>> {
-    let literal = |value: &ScalarValue| ScalarExpr::Literal(value.clone());
-    Some(match constraint {
-        Constraint::In(values) if values.len() == 1 => ScalarExpr::Compare {
-            left: Box::new(ScalarExpr::Column(at)),
-            op: CompareOpKind::Eq,
-            right: Box::new(literal(&values[0])),
-            semantics,
-        },
-        Constraint::In(values) | Constraint::NotIn(values) => ScalarExpr::InList {
-            expr: Box::new(ScalarExpr::Column(at)),
-            list: values.iter().map(literal).collect(),
-            negated: matches!(constraint, Constraint::NotIn(_)),
-        },
+    let compare = |op: CompareOpKind, value: &ScalarValue| ScalarExpr::Compare {
+        left: Box::new(ScalarExpr::Column(at)),
+        op,
+        right: Box::new(ScalarExpr::Literal(value.clone())),
+        semantics,
+    };
+    let (op, values, combine): (_, _, fn(Vec<_>) -> _) = match constraint {
+        Constraint::In(values) => (CompareOpKind::Eq, values, ScalarExpr::BoolOr),
+        Constraint::NotIn(values) => (CompareOpKind::Ne, values, ScalarExpr::BoolAnd),
         Constraint::Interval { .. } => return None,
+    };
+    Some(match &values[..] {
+        [value] => compare(op, value),
+        values => combine(
+            values
+                .iter()
+                .map(|value| compare(op.clone(), value))
+                .collect(),
+        ),
     })
 }
