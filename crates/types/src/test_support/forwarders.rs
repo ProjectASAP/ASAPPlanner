@@ -74,7 +74,7 @@ pub fn physical_asap_dag_at_query_time(
 /// over a current-series population of the single selector under it,
 /// grouped by `grouping`, with no matchers. The caller states the statistic
 /// and grouping; nothing is recognized. No planner pass offers this sub-DAG
-/// yet (#681).
+/// yet.
 pub fn population_over_selector(
     root: &Rc<OperatorNode>,
     statistic: crate::ir::operator::maintained_population::PopulationStatistic,
