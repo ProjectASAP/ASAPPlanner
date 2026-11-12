@@ -1,0 +1,67 @@
+{
+  "query_workload": {
+    "language": {
+      "sql": "datafusion_sql"
+    },
+    "repeating_queries": [
+      {
+        "query": "SELECT job, approx_percentile_cont(value, 0.9) AS value FROM data WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY job",
+        "demand": {
+          "fixed_interval_at": {
+            "interval": 60000,
+            "evaluation_phase": 0
+          }
+        },
+        "requirements": {
+          "accuracy": {
+            "max_error": 0.01,
+            "failure_probability": 0.001
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        }
+      },
+      {
+        "query": "SELECT job, host, approx_percentile_cont(value, 0.9) AS value FROM data WHERE ts >= now() - INTERVAL '10 minutes' GROUP BY job, host",
+        "demand": {
+          "fixed_interval_at": {
+            "interval": 60000,
+            "evaluation_phase": 0
+          }
+        },
+        "requirements": {
+          "accuracy": {
+            "max_error": 0.01,
+            "failure_probability": 0.001
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        }
+      }
+    ]
+  },
+  "data_workload": {
+    "arrival": {
+      "ingesting": {
+        "rows_per_second": 666.6666666666666
+      }
+    },
+    "sources": {
+      "data": {
+        "series_count": 10000,
+        "metric_type": "gauge",
+        "sample_interval": 15000,
+        "distinct_values_per_label": {
+          "job": 10,
+          "host": 1000
+        }
+      }
+    }
+  }
+}

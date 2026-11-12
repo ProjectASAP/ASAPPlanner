@@ -1,0 +1,24 @@
+[
+  {
+    "name": "data",
+    "columns": [
+      {
+        "name": "ts",
+        "type": "timestamp"
+      },
+      {
+        "name": "job",
+        "type": "utf8"
+      },
+      {
+        "name": "host",
+        "type": "utf8"
+      },
+      {
+        "name": "value",
+        "type": "float64"
+      }
+    ],
+    "time_index": 0
+  }
+]

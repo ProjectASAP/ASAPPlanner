@@ -1,0 +1,65 @@
+{
+  "query_workload": {
+    "language": "promql",
+    "repeating_queries": [
+      {
+        "query": "topk(5, data)",
+        "demand": {
+          "fixed_interval_at": {
+            "interval": 60000,
+            "evaluation_phase": 0
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "requirements": {
+          "accuracy": {
+            "max_error": 0.01,
+            "failure_probability": 0.001
+          }
+        }
+      },
+      {
+        "query": "topk(10, data)",
+        "demand": {
+          "fixed_interval_at": {
+            "interval": 60000,
+            "evaluation_phase": 0
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "requirements": {
+          "accuracy": {
+            "max_error": 0.01,
+            "failure_probability": 0.001
+          }
+        }
+      }
+    ]
+  },
+  "data_workload": {
+    "arrival": {
+      "ingesting": {
+        "rows_per_second": 666.6666666666666
+      }
+    },
+    "sources": {
+      "data": {
+        "series_count": 10000,
+        "metric_type": "gauge",
+        "sample_interval": 15000,
+        "distinct_values_per_label": {
+          "job": 10,
+          "host": 1000
+        }
+      }
+    }
+  }
+}
