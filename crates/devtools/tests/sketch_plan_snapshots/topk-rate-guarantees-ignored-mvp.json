@@ -1750,9 +1750,6 @@
                   "item": null,
                   "weight": {
                     "Column": "SampleValue"
-                  },
-                  "weight_domain": {
-                    "kind": "unknown_or_signed"
                   }
                 },
                 "reduction": "PerEntity",
@@ -1968,10 +1965,6 @@
                   },
                   "weight": {
                     "Column": "SampleValue"
-                  },
-                  "weight_domain": {
-                    "kind": "counter_derivative_of_metric",
-                    "metric": "data_total"
                   }
                 },
                 "reduction": {

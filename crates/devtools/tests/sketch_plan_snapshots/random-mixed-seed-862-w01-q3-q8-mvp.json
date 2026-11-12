@@ -6683,9 +6683,6 @@
                   "item": null,
                   "weight": {
                     "Column": "SampleValue"
-                  },
-                  "weight_domain": {
-                    "kind": "unknown_or_signed"
                   }
                 },
                 "reduction": "PerEntity",
@@ -7041,9 +7038,6 @@
                   "item": null,
                   "weight": {
                     "Column": "SampleValue"
-                  },
-                  "weight_domain": {
-                    "kind": "unknown_or_signed"
                   }
                 },
                 "reduction": {
@@ -7259,9 +7253,6 @@
                   "item": null,
                   "weight": {
                     "Column": "SampleValue"
-                  },
-                  "weight_domain": {
-                    "kind": "unknown_or_signed"
                   }
                 },
                 "reduction": {
@@ -7938,9 +7929,6 @@
                   "item": null,
                   "weight": {
                     "Column": "SampleValue"
-                  },
-                  "weight_domain": {
-                    "kind": "unknown_or_signed"
                   }
                 },
                 "reduction": "PerEntity",
