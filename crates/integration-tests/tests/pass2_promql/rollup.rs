@@ -3,45 +3,14 @@
 //! per-series computation, although the two queries' scans list different
 //! labels and an instant or range `TimeRange` (and a per-series function)
 //! sits between each scan and its aggregate.
-use asap_devtools::planning_stages::{lower_promql_roots, run_stages_until, RunUntil};
-use asap_planner::PlanningModels;
+use crate::planning_common::promql_pass2;
 use asap_types::ir::{NonASAPOp, Operator, QueryRoot};
 use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
-use asap_types::workload::PlanningWorkload;
 use serde_json::json;
 
-/// Pass 2's memo of `queries`, each repeating every minute at a 1% error
-/// target, over the gauge `m`.
+/// Pass 2's memo of `queries`, each at a 1% error target.
 fn pass2_memo(queries: &[&str]) -> Memo {
-    let workload: PlanningWorkload = serde_json::from_value(json!({
-        "query_workload": {
-            "language": "promql",
-            "repeating_queries": queries.iter().map(|query| json!({
-                "query": query,
-                "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
-                "requirements": {"accuracy": {"max_error": 0.01}},
-                "predictability": {"predictable": {"known_at": null}},
-            })).collect::<Vec<_>>(),
-        },
-        "data_workload": {
-            "arrival": {"ingesting": {"rows_per_second": 1000.0}},
-            "sources": {"m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000}},
-        },
-    }))
-    .unwrap();
-    workload.validate().unwrap();
-    let roots = lower_promql_roots(&workload).unwrap();
-    let entries: Vec<_> = workload.query_workload.entries().collect();
-    let data = workload.data_workload.clone().unwrap_or_default();
-    let run = run_stages_until(
-        roots,
-        &entries,
-        &data,
-        PlanningModels::builtin(),
-        RunUntil::Pass2,
-    )
-    .unwrap();
-    run.run.logical_asap_candidates.unwrap().memo
+    promql_pass2(queries, json!({"max_error": 0.01})).memo
 }
 
 /// The root group of query `query`.
