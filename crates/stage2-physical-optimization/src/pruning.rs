@@ -8,7 +8,7 @@ use asap_types::stages::{
 };
 
 /// Why each of `alternatives` cannot be used, `None` for a usable one.
-/// `admissible_producers_per_input[c][i]` lists the alternatives (by
+/// `admissible_producer_alternatives_per_input[c][i]` lists the alternatives (by
 /// index) on admissible edges into input `i` of alternative `c`.
 ///
 /// - [`PruneReason::InputHasNoBuildableProducer`]: not buildable, where
@@ -22,13 +22,16 @@ use asap_types::stages::{
 ///   lets a query-time consumer read.
 pub(super) fn prune_reasons(
     alternatives: &[PhysicalCandidate],
-    admissible_producers_per_input: &[Vec<Vec<usize>>],
+    admissible_producer_alternatives_per_input: &[Vec<Vec<usize>>],
     memo: &Memo,
 ) -> Vec<Option<PruneReason>> {
     let mut buildable = vec![false; alternatives.len()];
     loop {
         let mut changed = false;
-        for (candidate, inputs) in admissible_producers_per_input.iter().enumerate() {
+        for (candidate, inputs) in admissible_producer_alternatives_per_input
+            .iter()
+            .enumerate()
+        {
             if !buildable[candidate]
                 && inputs
                     .iter()
@@ -58,7 +61,7 @@ pub(super) fn prune_reasons(
         if !reached[candidate] {
             reached[candidate] = true;
             pending.extend(
-                admissible_producers_per_input[candidate]
+                admissible_producer_alternatives_per_input[candidate]
                     .iter()
                     .flatten()
                     .copied()
