@@ -3,14 +3,14 @@
 //!
 //! | Family | Variables | Constraints |
 //! |---|---|---|
-//! | baseline (section 3) | $x_v$, $y_{u,c,i}$, $z_{q,v}$, $t_v$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) [`utilization_constraints`], one consumer of a query-time result that is not materialized [`unshared_result_constraints`]; (G), (H): $y$ exists only on admissible edges |
+//! | baseline (section 3) | $x_v$, $y_{u,c,i}$, $z_{q,v}$, $t_v$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) [`utilization_constraints`], one consumer of a query-time result that is not materialized [`unshared_result_constraints`], each source's raw data on disk once [`raw_data_disk_constraints`]; (G), (H): $y$ exists only on admissible edges |
 //! | execution contexts (section 5) | $x^{\mathrm{mat}}_v$, $x_{\kappa,v}$, $y_{\kappa,u,c,i}$, $h_v$ ([`ExecutionContextVariables`]) | (R) [`retention_constraints`] |
 //! | accuracy (section 4) | $E_{c,m}$, $F_{c,i,m}$, $D_c$, $H_{c,i}$ ([`AccuracyVariables`]) | (K) [`accuracy_constraints`] |
 //!
 //! The baseline is solved by [`solve_selection`]; the extensions' bodies
 //! are `todo!()` until execution contexts and constraint (K) are added.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use good_lp::solvers::highs::highs;
@@ -19,6 +19,7 @@ use good_lp::{
 };
 
 use asap_types::accuracy::AccuracyMetric;
+use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::stages::Lifetime;
 use asap_types::stages::{
@@ -55,6 +56,10 @@ pub(crate) struct SelectionVariables {
     /// $t_v$, by [`PhysicalCandidateId`]: only for candidates on a cycle of
     /// admissible edges (a strongly connected component); `None` elsewhere.
     t: Vec<Option<Variable>>,
+    /// Per raw-data source a query-time scan keeps on disk at a cost: the
+    /// cost per second of keeping it, at least each selected scan's
+    /// ([`raw_data_disk_constraints`]).
+    raw_data_on_disk: BTreeMap<Source, Variable>,
 }
 
 /// $x$, $y$, $z$ and $t$ over `inputs`, added to `problem`.
@@ -88,7 +93,19 @@ fn selection_variables(
         .into_iter()
         .map(|size| (size > 1).then(|| problem.add(variable().min(0).max((size - 1) as f64))))
         .collect();
-    SelectionVariables { x, y, z, t }
+    let mut raw_data_on_disk = BTreeMap::new();
+    for (source, _) in inputs.costs.raw_data_on_disk.iter().flatten() {
+        raw_data_on_disk
+            .entry(source.clone())
+            .or_insert_with(|| problem.add(variable().min(0)));
+    }
+    SelectionVariables {
+        x,
+        y,
+        z,
+        t,
+        raw_data_on_disk,
+    }
 }
 
 /// (A) $\sum_{u \in P_{c,i}} y_{u,c,i} = x_c$.
@@ -193,6 +210,27 @@ fn unshared_result_constraints(
                 && properties.timing() == ExecutionTiming::QueryTime
         })
         .map(|(v, used)| constraint!(used <= variables.x[v]))
+        .collect()
+}
+
+/// The raw data of each source is kept on disk once, for the selected scan
+/// that keeps the most: $r_s \ge d_v x_v$ for each query-time `Scan` $v$ of
+/// source $s$, $d_v$ its cost per second of the raw data it keeps.
+fn raw_data_disk_constraints(
+    inputs: &SelectionInputs<'_>,
+    variables: &SelectionVariables,
+) -> Vec<Constraint> {
+    inputs
+        .costs
+        .raw_data_on_disk
+        .iter()
+        .enumerate()
+        .filter_map(|(v, on_disk)| {
+            let (source, cost) = on_disk.as_ref()?;
+            Some(constraint!(
+                variables.raw_data_on_disk[source] >= *cost * variables.x[v]
+            ))
+        })
         .collect()
 }
 
@@ -316,6 +354,8 @@ pub(crate) struct SolvedSelection {
     /// The candidate answering each of `SelectionInputs::query_outputs`, in
     /// its order.
     pub(crate) outputs: Vec<PhysicalCandidateId>,
+    /// The optimum, unscaled: the selected plan's cost per second.
+    pub(crate) objective_cost_per_second: f64,
     pub(crate) variables: usize,
     pub(crate) constraints: usize,
     pub(crate) construction_ms: u64,
@@ -332,8 +372,9 @@ pub(crate) enum SelectionMilpError {
 }
 
 /// Builds and solves the baseline MILP: minimize
-/// $\sum_v w_v x_v + \sum_{(u,c,i)} c_{u,c,i} y_{u,c,i}$ under (A)–(F) and
-/// [`unshared_result_constraints`], with HiGHS at gap 0 on one thread, the
+/// $\sum_v w_v x_v + \sum_{(u,c,i)} c_{u,c,i} y_{u,c,i} + \sum_s r_s$ under
+/// (A)–(F), [`unshared_result_constraints`] and
+/// [`raw_data_disk_constraints`], with HiGHS at gap 0 on one thread, the
 /// coefficients scaled so the largest is 1,000 (HiGHS's tolerances are
 /// absolute).
 pub(crate) fn solve_selection(
@@ -349,6 +390,7 @@ pub(crate) fn solve_selection(
         acyclicity_constraints(inputs, &variables),
         utilization_constraints(inputs, &variables),
         unshared_result_constraints(inputs, &variables),
+        raw_data_disk_constraints(inputs, &variables),
     ]
     .into_iter()
     .flatten()
@@ -359,6 +401,14 @@ pub(crate) fn solve_selection(
         .iter()
         .flatten()
         .chain(inputs.costs.edge.values())
+        .chain(
+            inputs
+                .costs
+                .raw_data_on_disk
+                .iter()
+                .flatten()
+                .map(|(_, cost)| cost),
+        )
         .fold(0.0_f64, |largest, &cost| largest.max(cost.abs()));
     let scale = match largest > 0.0 && largest.is_finite() {
         true => 1_000.0 / largest,
@@ -371,7 +421,14 @@ pub(crate) fn solve_selection(
         .zip(&variables.x)
         .filter_map(|(cost, &x)| cost.as_ref().ok().map(|cost| cost * scale * x));
     let edge_terms = sorted(&variables.y).map(|(edge, y)| inputs.costs.edge[&edge] * scale * y);
-    let objective: Expression = candidate_terms.chain(edge_terms).sum();
+    let raw_data_terms = variables
+        .raw_data_on_disk
+        .values()
+        .map(|&on_disk| scale * on_disk);
+    let objective: Expression = candidate_terms
+        .chain(edge_terms)
+        .chain(raw_data_terms)
+        .sum();
     let variable_count = problem.len();
     // HiGHS's columns are the variables in the order they were added.
     let column_of: HashMap<Variable, usize> = problem
@@ -412,7 +469,29 @@ pub(crate) fn solve_selection(
         other => return Err(SelectionMilpError::Solver(format!("{other:?}"))),
     };
     let chosen = |variable: Variable| columns[column_of[&variable]] > 0.5;
+    // The optimum, unscaled: the selected candidates' and edges' costs,
+    // each source's raw data on disk at its largest selected scan, and the
+    // request overhead every plan pays.
+    let mut raw_data_on_disk: BTreeMap<&Source, f64> = BTreeMap::new();
+    for (source, cost) in (0..variables.x.len())
+        .filter(|&v| chosen(variables.x[v]))
+        .filter_map(|v| inputs.costs.raw_data_on_disk[v].as_ref())
+    {
+        let kept = raw_data_on_disk.entry(source).or_default();
+        *kept = kept.max(*cost);
+    }
+    let objective_cost_per_second = (0..variables.x.len())
+        .filter(|&v| chosen(variables.x[v]))
+        .filter_map(|v| inputs.costs.candidate[v].as_ref().ok())
+        .sum::<f64>()
+        + sorted(&variables.y)
+            .filter(|&(_, y)| chosen(y))
+            .map(|(edge, _)| inputs.costs.edge[&edge])
+            .sum::<f64>()
+        + raw_data_on_disk.values().sum::<f64>()
+        + inputs.costs.request_overhead_cost_per_second;
     Ok(SolvedSelection {
+        objective_cost_per_second,
         candidates: (0..variables.x.len())
             .filter(|&v| chosen(variables.x[v]))
             .map(PhysicalCandidateId)

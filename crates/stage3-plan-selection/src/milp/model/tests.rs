@@ -119,6 +119,8 @@ fn costs(
     SelectionCosts {
         candidate: w.iter().map(|&w| Ok(w)).collect(),
         edge: edge_cost,
+        raw_data_on_disk: vec![None; w.len()],
+        request_overhead_cost_per_second: 0.0,
     }
 }
 

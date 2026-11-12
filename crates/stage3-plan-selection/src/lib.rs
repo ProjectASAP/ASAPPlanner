@@ -20,7 +20,7 @@ mod report;
 
 use std::collections::BTreeSet;
 
-use asap_cost::{summary_type_name, CostInputs, CostModel};
+use asap_cost::{request_overhead_cost_per_second, summary_type_name, CostInputs, CostModel};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator, QueryRoot};
@@ -83,6 +83,12 @@ pub fn select_plan(
         })
         .map(|(id, _)| id)
         .collect();
+    let request_overhead_cost_per_second = request_overhead_cost_per_second(entries, cost_inputs)
+        .map_err(|error| ErrorSelectingPlan::Cost {
+        candidate: "every plan (the request overhead)".into(),
+        node: 0,
+        error,
+    })?;
     let costs = selection_costs(
         physical,
         &selectable,
@@ -90,6 +96,7 @@ pub fn select_plan(
         data,
         cost_inputs,
         formula_scale,
+        request_overhead_cost_per_second,
     );
     let roots: Vec<QueryRoot<MemoGroupId>> =
         queries.iter().map(|query| query.root.clone()).collect();
@@ -150,6 +157,7 @@ pub fn select_plan(
                 reason: PruneReason::UsageNotCostable,
             })
             .collect(),
+        selected_plan_cost_per_second: solved.objective_cost_per_second,
         milp_variables: solved.variables,
         milp_constraints: solved.constraints,
         milp_construction_ms: solved.construction_ms,

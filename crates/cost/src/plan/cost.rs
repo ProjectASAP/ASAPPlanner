@@ -180,12 +180,8 @@ pub fn plan_cost(
             continue;
         }
         let diagnostic_node = start.first().copied().unwrap_or(first);
-        let requests_per_second = evaluation_rate(
-            recurrence.get(query).map(|r| (r, None)),
-            settings.non_repeating_query_horizon_seconds,
-        )
-        .map_err(|error| (diagnostic_node, error))?;
-        let ops_per_second = evaluation_ms / speed.ms_per_cpu_op * requests_per_second;
+        let (requests_per_second, ops_per_second) = request_overhead(entries.get(query), settings)
+            .map_err(|error| (diagnostic_node, error))?;
         usage.cpu_ops_per_second += ops_per_second;
         request_ms_per_second += evaluation_ms * requests_per_second;
         if !usage.cpu_ops_per_second.is_finite() || !request_ms_per_second.is_finite() {
@@ -225,8 +221,11 @@ pub fn plan_cost(
         let node = per_node.get_mut(&id).expect("every node is measured");
         usage.disk_bytes = usage.disk_bytes.saturating_add(bytes);
         node.detail += &format!("; keeps {bytes} bytes of raw data on disk");
-        if let (Some(cost), Some(prices)) = (&mut node.cost_per_second, usage_prices) {
-            *cost += prices.cost_per_disk_byte_second * bytes as f64;
+        if let (Some(cost), Some(disk_cost)) = (
+            &mut node.cost_per_second,
+            raw_data_disk_cost_per_second(bytes, settings),
+        ) {
+            *cost += disk_cost;
         }
     }
     // With k ingest workers, each of the k − 1 beyond the first builds its
@@ -319,6 +318,62 @@ pub fn plan_cost(
         },
         fit,
     ))
+}
+
+/// The runtime's fixed overhead of query `entry`'s requests: its requests
+/// per second (once per evaluation of its recurrence, a range query's
+/// steps in one request) and the CPU operations per second they cost,
+/// `measured_operation_costs.ns_per_evaluation` each. `(0, 0)` without an
+/// entry.
+fn request_overhead(
+    entry: Option<&QueryWorkloadEntry>,
+    settings: &CostInputs,
+) -> Result<(f64, f64), AnalyticalCostError> {
+    let requests_per_second = evaluation_rate(
+        entry.map(|entry| (&entry.recurrence, None)),
+        settings.non_repeating_query_horizon_seconds,
+    )?;
+    let evaluation_ms = settings.measured_operation_costs.ns_per_evaluation * 1e-6;
+    Ok((
+        requests_per_second,
+        evaluation_ms / settings.resource_speed.ms_per_cpu_op * requests_per_second,
+    ))
+}
+
+/// Cost model 1's cost per second of the runtime's fixed overhead per
+/// query request, over every query of `entries`: what [`plan_cost`]
+/// charges every plan for them, whichever nodes it has. 0 under cost
+/// models 2 and 3 and when `ns_per_evaluation` is 0.
+pub fn request_overhead_cost_per_second(
+    entries: &[QueryWorkloadEntry],
+    settings: &CostInputs,
+) -> Result<f64, AnalyticalCostError> {
+    let CostModel::UsageOverTime(unit_cost) = &settings.cost_model else {
+        return Ok(0.0);
+    };
+    if settings.measured_operation_costs.ns_per_evaluation <= 0.0 {
+        return Ok(0.0);
+    }
+    let mut cost = 0.0;
+    for entry in entries {
+        cost += unit_cost.cost_per_cpu_op * request_overhead(Some(entry), settings)?.1;
+    }
+    match cost.is_finite() {
+        true => Ok(cost),
+        false => Err(AnalyticalCostError::Overflow),
+    }
+}
+
+/// Cost model 1's cost per second of keeping `bytes` of raw data on disk;
+/// `None` under cost models 2 and 3. A plan keeps each source once, for its
+/// scan that keeps the most ([`plan_cost`]).
+pub fn raw_data_disk_cost_per_second(bytes: u64, settings: &CostInputs) -> Option<f64> {
+    match &settings.cost_model {
+        CostModel::UsageOverTime(unit_cost) => {
+            Some(unit_cost.cost_per_disk_byte_second * bytes as f64)
+        }
+        _ => None,
+    }
 }
 
 /// Every node of a physical DAG priced ([`each_node_resource_usage_and_cost`]), with each

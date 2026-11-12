@@ -135,8 +135,7 @@ impl std::fmt::Display for AcceptedAccuracy {
 }
 
 /// What Stage 3 reports about its own run, beside the plan
-/// ([`select_plan`](crate::select_plan)). The plan's cost is
-/// `asap_cost::plan_cost` of the plan; this does not repeat it.
+/// ([`select_plan`](crate::select_plan)).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selection {
     /// Per query, the accuracy Stage 3 accepted for the selected plan.
@@ -144,6 +143,10 @@ pub struct Selection {
     /// The candidates Stage 3 ruled out before the selection MILP:
     /// dominated ones and those whose usage could not be costed.
     pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidate>>,
+    /// The selection MILP's optimum: the selected plan's cost per second
+    /// under cost model 1, which `asap_cost::plan_cost` of the plan
+    /// reports too.
+    pub selected_plan_cost_per_second: f64,
     /// The selection MILP's size.
     pub milp_variables: usize,
     pub milp_constraints: usize,

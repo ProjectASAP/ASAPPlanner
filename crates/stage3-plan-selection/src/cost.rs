@@ -27,8 +27,10 @@ use std::collections::HashMap;
 
 use asap_cost::plan::execution_demand::evaluation_rate;
 use asap_cost::{
-    node_resource_usage_and_cost, CostInputs, CostModel, NodeResourceUsageAndCost, ProducerOutput,
+    node_resource_usage_and_cost, raw_data_disk_cost_per_second, CostInputs,
+    NodeResourceUsageAndCost, ProducerOutput,
 };
+use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::properties::{DataPrimitive, ExecutionDataState};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
@@ -49,6 +51,16 @@ pub(crate) struct SelectionCosts {
     /// $c_{u,c,i}$ per second of each selectable edge whose producer and
     /// consumer are costable; an edge missing here cannot be selected.
     pub(crate) edge: HashMap<PhysicalEdgeId, f64>,
+    /// By [`PhysicalCandidateId`], for a query-time `Scan`: its source and
+    /// the cost per second of keeping the raw data it reads on disk
+    /// ([`asap_cost::raw_data_disk_cost_per_second`]). A plan keeps each
+    /// source once, for the selected scan that keeps the most, as
+    /// `plan_cost` charges it.
+    pub(crate) raw_data_on_disk: Vec<Option<(Source, f64)>>,
+    /// The runtime's fixed overhead per query request, per second
+    /// ([`asap_cost::request_overhead_cost_per_second`]): every plan pays
+    /// it.
+    pub(crate) request_overhead_cost_per_second: f64,
 }
 
 /// Candidate `v` as a plan node with id `id`, its input `i` read from node
@@ -183,6 +195,7 @@ pub(crate) fn selection_costs(
     data: &DataWorkload,
     cost_inputs: &CostInputs,
     formula_scale: f64,
+    request_overhead_cost_per_second: f64,
 ) -> SelectionCosts {
     let memo = &physical.logical_candidates.memo;
     let count = physical.physical_candidates.len();
@@ -275,9 +288,17 @@ pub(crate) fn selection_costs(
     let candidate: Vec<Result<f64, String>> = usage
         .iter()
         .map(|usage| match usage {
-            Some(Ok(usage)) => cost_per_second(usage, cost_inputs),
+            Some(Ok(usage)) => cost_per_second(usage),
             Some(Err(error)) => Err(error.clone()),
             None => Err("it reads a group on a cycle of candidates".to_string()),
+        })
+        .collect();
+    let raw_data_on_disk = usage
+        .iter()
+        .map(|usage| {
+            let (source, bytes) = usage.as_ref()?.as_ref().ok()?.raw_scan?;
+            let cost = raw_data_disk_cost_per_second(bytes, cost_inputs)?;
+            Some((source.clone(), cost))
         })
         .collect();
     let mut edge = HashMap::new();
@@ -304,12 +325,17 @@ pub(crate) fn selection_costs(
             formula_scale,
             scan_read[c.0],
         )
-        .and_then(|usage| cost_per_second(&usage, cost_inputs));
+        .and_then(|usage| cost_per_second(&usage));
         if let Ok(with_u) = with_u {
             edge.insert(id, with_u - own);
         }
     }
-    SelectionCosts { candidate, edge }
+    SelectionCosts {
+        candidate,
+        edge,
+        raw_data_on_disk,
+        request_overhead_cost_per_second,
+    }
 }
 
 /// The logical output of each input of `v` over the costed candidates
@@ -476,22 +502,13 @@ fn cost_node<'a>(
 }
 
 /// $w_v$ from a candidate's usage: its cost per second under cost model 1
-/// plus the raw data a query-time scan retains on disk.
-fn cost_per_second(
-    usage: &NodeResourceUsageAndCost<'_>,
-    cost_inputs: &CostInputs,
-) -> Result<f64, String> {
-    let CostModel::UsageOverTime(unit_cost) = &cost_inputs.cost_model else {
-        return Err("the selection MILP costs under cost model 1 only".into());
-    };
-    let own = usage
+/// (the raw data a query-time scan keeps on disk is charged per source,
+/// [`SelectionCosts::raw_data_on_disk`]).
+fn cost_per_second(usage: &NodeResourceUsageAndCost<'_>) -> Result<f64, String> {
+    let cost = usage
         .cost
         .cost_per_second
-        .ok_or("cost model 1 gives every node a cost per second")?;
-    let raw_data = usage.raw_scan.map_or(0.0, |(_, bytes)| {
-        unit_cost.cost_per_disk_byte_second * bytes as f64
-    });
-    let cost = own + raw_data;
+        .ok_or("the selection MILP costs under cost model 1 only")?;
     match cost.is_finite() && cost >= 0.0 {
         true => Ok(cost),
         false => Err(format!(

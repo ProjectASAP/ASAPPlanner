@@ -40,7 +40,10 @@ pub use node::usage::{
     node_resource_usage_and_cost, summary_type_name, NodeCost, NodeResourceUsageAndCost,
     ProducerOutput,
 };
-pub use plan::cost::{plan_cost, PlanCost, QueryLatency};
+pub use plan::cost::{
+    plan_cost, raw_data_disk_cost_per_second, request_overhead_cost_per_second, PlanCost,
+    QueryLatency,
+};
 pub use plan::ranking::{cheaper, worst_latency_ms, PlanRanking};
 pub use plan::read_back::read_back_ms;
 pub use resources::ResourceUsage;
