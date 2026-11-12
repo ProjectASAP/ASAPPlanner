@@ -168,7 +168,7 @@ async fn plan_with_report_for(
     workload: PlanningWorkload,
     capabilities: &DeploymentCapabilities,
 ) -> (InstallablePlan, SelectedPlanReport) {
-    // The deployment's Stage 3 prices, from its JSON file: cost model 1.
+    // The deployment's unit costs, from its JSON file: cost model 1.
     let settings: CostInputs = serde_json::from_str(
         r#"{"cost_model": {"usage_over_time": {
               "cost_per_cpu_op": 1e-6, "cost_per_scanned_byte": 1e-7,
@@ -195,7 +195,7 @@ fn query_roots(plan: &InstallablePlan) -> Vec<u64> {
 
 /// The plan file carries Stage 3's predicted usage of the selected plan, so
 /// a runtime reports it against what it measures without planning again:
-/// for Example 4b's tumbling windows maintained at ingestion time, its nodes' prices
+/// for Example 4b's tumbling windows maintained at ingestion time, its nodes' costs
 /// add up to Stage 3's selection cost and their CPU to the plan's, with
 /// one latency per query, each node naming the installed nodes that run it.
 #[tokio::test]

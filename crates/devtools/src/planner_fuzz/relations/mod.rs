@@ -1569,11 +1569,11 @@ fn evaluate_inner(planner: &mut Planner, check: &Check) -> Result<Outcome, Strin
     })
 }
 
-/// The marginal relation: the cheapest witness that builds and prices,
+/// The marginal relation: the cheapest witness that builds and costs,
 /// against the planner's marginal cost. Violated only when both the
 /// relation (`Δ > derive_cost + tolerance`) and its plain reading (the
 /// witness is cheaper than the planner's `W ∪ {q'}` by more than the
-/// tolerance) fail, so a search that prices `W` below Stage 3's price of
+/// tolerance) fail, so a search that costs `W` below Stage 3's cost of
 /// the same plan cannot make a false violation.
 fn evaluate_marginal(
     planner: &mut Planner,
@@ -1589,7 +1589,7 @@ fn evaluate_marginal(
     };
     let base_reference = planner
         .reference_cost(base_workload, &base_roots)
-        .or_else(|e| inconclusive(format!("W's plan does not price: {e}")))?;
+        .or_else(|e| inconclusive(format!("W's plan does not cost: {e}")))?;
     let mut best: Option<(Witness, Costed)> = None;
     let mut failures = Vec::new();
     for witness in &derived.witnesses {

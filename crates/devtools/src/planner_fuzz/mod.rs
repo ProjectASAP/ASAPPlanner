@@ -7,8 +7,8 @@
 //! from `q`'s result or state (the same query with a looser accuracy
 //! target, a filter on a group key, a coarser grouping, ...), it builds a
 //! *witness*: `W`'s selected logical plan plus `q'` derived from `q`'s
-//! node by one operator. Stage 2 and Stage 3 implement and price the
-//! witness exactly as they price any candidate, and the relation
+//! node by one operator. Stage 2 and Stage 3 implement and cost the
+//! witness exactly as they cost any candidate, and the relation
 //!
 //! ```text
 //! cost(W ∪ {q'}) − cost(W) ≤ derive_cost + tolerance,
@@ -16,8 +16,8 @@
 //! ```
 //!
 //! must hold. `derive_cost` is what Stage 3 charges for the derived
-//! operator alone (its per-node price, plus any change it causes in the
-//! shared nodes' prices, such as a shared node now materialized); it is
+//! operator alone (its per-node cost, plus any change it causes in the
+//! shared nodes' costs, such as a shared node now materialized); it is
 //! never a guess. A violation means a cheaper plan for `W ∪ {q'}` exists
 //! that the planner did not select. Monotonicity and invariance relations
 //! (tightening accuracy, adding a query or dropping raw retention never
@@ -343,7 +343,7 @@ impl FuzzSettings {
 pub struct Planned {
     /// The selected physical plan's stable archive ID.
     pub selected: String,
-    /// Its price per second under cost model 1.
+    /// Its cost per second under cost model 1.
     pub cost_per_second: f64,
     /// The frontends' roots, one per query.
     pub stage0_roots: Vec<QueryRoot>,
@@ -372,8 +372,8 @@ pub struct PrivateNodes {
     pub operators: Vec<String>,
 }
 
-/// Plans and prices workloads, caching each workload's plan and the
-/// reference price of its selected logical plan.
+/// Plans and costs workloads, caching each workload's plan and the
+/// reference cost of its selected logical plan.
 pub struct Planner {
     pub settings: FuzzSettings,
     cache: HashMap<String, Result<Rc<Planned>, String>>,
@@ -511,7 +511,7 @@ impl Planner {
     }
 
     /// [`cost`](Self::cost) of `workload`'s selected logical plan
-    /// `roots`, cached per workload: every marginal check of a case prices
+    /// `roots`, cached per workload: every marginal check of a case costs
     /// the same `W`.
     pub fn reference_cost(
         &mut self,
