@@ -4,11 +4,14 @@
 //! | Family | Variables | Constraints |
 //! |---|---|---|
 //! | baseline (section 3) | $x_v$, $y_{u,c,i}$, $z_{q,v}$, $t_v$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) and one consumer of a query-time result that is not materialized [`use_constraints`], each source's raw data on disk once [`raw_data_disk_constraints`]; (G), (H): $y$ exists only on admissible edges |
-//! | execution contexts (section 5) | $x^{\mathrm{mat}}_v$, $x_{\kappa,v}$, $y_{\kappa,u,c,i}$, $h_v$ ([`ExecutionContextVariables`]) | (R) [`retention_constraints`] |
-//! | accuracy (section 4) | $E_{c,m}$, $F_{c,i,m}$, $D_c$, $H_{c,i}$ ([`AccuracyVariables`]) | (K) [`accuracy_constraints`] |
+//! | execution contexts (section 5) | $x^{\mathrm{mat}}_v$, $x_{\kappa,v}$, $y_{\kappa,u,c,i}$, $h_v$ (`ExecutionContextVariables`) | (R) `retention_constraints` |
+//! | accuracy (section 4) | $E_{c,m}$, $F_{c,i,m}$, $D_c$, $H_{c,i}$ (`AccuracyVariables`) | (K) `accuracy_constraints` |
 //!
-//! The baseline is solved by [`solve_selection`]; the extensions' bodies
-//! are `todo!()` until execution contexts and constraint (K) are added.
+//! The baseline is solved by [`solve_selection`]; the extensions'
+//! variables and constraints are in [`super::execution_contexts`] and
+//! [`super::accuracy`], `todo!()` until they are added. The strongly
+//! connected components (E) needs are in [`super::graph`]; the bound that
+//! leaves out candidates before scaling in [`super::upper_bound`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
@@ -18,16 +21,14 @@ use good_lp::{
     constraint, variable, Constraint, Expression, ProblemVariables, SolverModel, Variable,
 };
 
-use asap_types::accuracy::AccuracyMetric;
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::stages::Lifetime;
-use asap_types::stages::{
-    ExecutionContextId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId,
-};
+use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId};
 
+use super::graph::Components;
 use super::upper_bound::dearer_than_a_feasible_plan;
-use crate::cost::{input_count, SelectionCosts};
+use crate::cost::SelectionCosts;
 
 /// A query, by index in the workload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -37,8 +38,8 @@ pub struct QueryId(pub usize);
 pub(crate) struct SelectionInputs<'a> {
     pub(crate) physical: &'a PhysicalASAPMemoCandidates,
     /// $w_v$ and $c_{u,c,i}$: $y$ exists only on the edges
-    /// [`SelectionCosts::edge`] costs, $x_v$ is 0 for a candidate it could
-    /// not cost.
+    /// [`SelectionCosts::edge_cost_change_per_second`] costs, $x_v$ is 0 for a
+    /// candidate it could not cost.
     pub(crate) costs: &'a SelectionCosts,
     /// Each query output reference (a query, or one operator a scalar query
     /// reads), with the candidates that may answer it: $z_{q,v}$ exists
@@ -75,7 +76,7 @@ fn selection_variables(
     let count = inputs.physical.physical_candidates.len();
     let x = (0..count)
         .map(
-            |v| match inputs.costs.candidate[v].is_ok() && !left_out[v] {
+            |v| match inputs.costs.candidate_cost_per_second[v].is_ok() && !left_out[v] {
                 true => problem.add(variable().binary()),
                 false => problem.add(variable().min(0).max(0)),
             },
@@ -83,7 +84,7 @@ fn selection_variables(
         .collect();
     let mut edges: Vec<PhysicalEdgeId> = inputs
         .costs
-        .edge
+        .edge_cost_change_per_second
         .keys()
         .copied()
         .filter(|&edge| {
@@ -133,7 +134,7 @@ fn input_satisfaction_constraints(
     let physical = inputs.physical;
     let mut constraints = Vec::new();
     for c in (0..physical.physical_candidates.len()).map(PhysicalCandidateId) {
-        for i in 0..input_count(physical, c) {
+        for i in 0..physical.input_count(c) {
             let producers: Expression = physical
                 .admissible_edges_into(c, i)
                 .iter()
@@ -267,84 +268,6 @@ fn uses_of(inputs: &SelectionInputs<'_>, variables: &SelectionVariables) -> Vec<
     uses
 }
 
-/// Each candidate's strongly connected component of the selectable edges
-/// (those [`SelectionCosts::edge`] costs), computed once per model.
-pub(crate) struct Components {
-    /// Each candidate's component number.
-    of: Vec<usize>,
-    /// The size of each candidate's component: 1 for a candidate on no
-    /// cycle.
-    size: Vec<usize>,
-}
-
-impl Components {
-    fn of(inputs: &SelectionInputs<'_>) -> Self {
-        let of = strongly_connected_components(
-            inputs.physical.physical_candidates.len(),
-            inputs.costs.edge.keys().map(|&edge| {
-                let edge = inputs.physical.edge(edge);
-                (edge.producer_candidate_id.0, edge.consumer_candidate_id.0)
-            }),
-        );
-        let mut count: HashMap<usize, usize> = HashMap::new();
-        for &component in &of {
-            *count.entry(component).or_default() += 1;
-        }
-        let size = of.iter().map(|component| count[component]).collect();
-        Self { of, size }
-    }
-}
-
-/// Each node's strongly connected component of the graph with `arcs`
-/// (Kosaraju), as a component number.
-fn strongly_connected_components(
-    node_count: usize,
-    arcs: impl Iterator<Item = (usize, usize)>,
-) -> Vec<usize> {
-    let mut forward = vec![Vec::new(); node_count];
-    let mut backward = vec![Vec::new(); node_count];
-    for (from, to) in arcs {
-        forward[from].push(to);
-        backward[to].push(from);
-    }
-    // Nodes by finishing time of a depth-first search over `forward`.
-    let mut finished = Vec::with_capacity(node_count);
-    let mut visited = vec![false; node_count];
-    for start in 0..node_count {
-        if std::mem::replace(&mut visited[start], true) {
-            continue;
-        }
-        let mut stack = vec![(start, 0)];
-        while let Some((node, next)) = stack.pop() {
-            if let Some(&to) = forward[node].get(next) {
-                stack.push((node, next + 1));
-                if !std::mem::replace(&mut visited[to], true) {
-                    stack.push((to, 0));
-                }
-            } else {
-                finished.push(node);
-            }
-        }
-    }
-    let mut component = vec![usize::MAX; node_count];
-    for (number, &start) in finished.iter().rev().enumerate() {
-        if component[start] != usize::MAX {
-            continue;
-        }
-        component[start] = number;
-        let mut stack = vec![start];
-        while let Some(node) = stack.pop() {
-            for &from in &backward[node] {
-                if component[from] == usize::MAX {
-                    component[from] = number;
-                    stack.push(from);
-                }
-            }
-        }
-    }
-    component
-}
-
 /// The baseline MILP's optimum: $\{x = 1\}$, $\{y = 1\}$ and $\{z = 1\}$,
 /// and the MILP's size and time.
 #[derive(Debug, Clone)]
@@ -358,8 +281,9 @@ pub(crate) struct SolvedSelection {
     pub(crate) outputs: Vec<PhysicalCandidateId>,
     /// The optimum, unscaled: the selected plan's cost per second.
     pub(crate) objective_cost_per_second: f64,
-    pub(crate) variables: usize,
-    pub(crate) constraints: usize,
+    /// The MILP's variables and constraint rows.
+    pub(crate) variable_count: usize,
+    pub(crate) constraint_count: usize,
     pub(crate) construction_ms: u64,
     pub(crate) solve_ms: u64,
 }
@@ -403,8 +327,13 @@ pub(crate) fn solve_selection(
     let kept = |v: &usize| !left_out[*v];
     let largest = (0..left_out.len())
         .filter(kept)
-        .filter_map(|v| inputs.costs.candidate[v].as_ref().ok())
-        .chain(variables.y.keys().map(|edge| &inputs.costs.edge[edge]))
+        .filter_map(|v| inputs.costs.candidate_cost_per_second[v].as_ref().ok())
+        .chain(
+            variables
+                .y
+                .keys()
+                .map(|edge| &inputs.costs.edge_cost_change_per_second[edge]),
+        )
         .chain(
             (0..left_out.len())
                 .filter(kept)
@@ -417,13 +346,13 @@ pub(crate) fn solve_selection(
         false => 1.0,
     };
     let candidate_terms = (0..left_out.len()).filter(kept).filter_map(|v| {
-        let cost = inputs.costs.candidate[v].as_ref().ok()?;
+        let cost = inputs.costs.candidate_cost_per_second[v].as_ref().ok()?;
         Some(cost * scale * variables.x[v])
     });
     let edge_terms = variables
         .y
         .iter()
-        .map(|(edge, &y)| inputs.costs.edge[edge] * scale * y);
+        .map(|(edge, &y)| inputs.costs.edge_cost_change_per_second[edge] * scale * y);
     let raw_data_terms = variables
         .raw_data_on_disk
         .values()
@@ -485,13 +414,13 @@ pub(crate) fn solve_selection(
     }
     let objective_cost_per_second = (0..variables.x.len())
         .filter(|&v| chosen(variables.x[v]))
-        .filter_map(|v| inputs.costs.candidate[v].as_ref().ok())
+        .filter_map(|v| inputs.costs.candidate_cost_per_second[v].as_ref().ok())
         .sum::<f64>()
         + variables
             .y
             .iter()
             .filter(|&(_, &y)| chosen(y))
-            .map(|(edge, _)| inputs.costs.edge[edge])
+            .map(|(edge, _)| inputs.costs.edge_cost_change_per_second[edge])
             .sum::<f64>()
         + raw_data_on_disk.values().sum::<f64>()
         + inputs.costs.request_overhead_cost_per_second;
@@ -518,67 +447,11 @@ pub(crate) fn solve_selection(
                     .expect("(C): one output per query output reference")
             })
             .collect(),
-        variables: variable_count,
-        constraints: constraint_count,
+        variable_count,
+        constraint_count,
         construction_ms,
         solve_ms,
     })
-}
-
-/// The execution-context variables (section 5), which replace $x$ and the
-/// unindexed $y$ of the baseline.
-#[allow(dead_code)] // Read once execution contexts are selected.
-struct ExecutionContextVariables {
-    /// $x^{\mathrm{mat}}_v$, for an `AcrossEvaluations` candidate.
-    x_materialized: HashMap<PhysicalCandidateId, Variable>,
-    /// $x_{\kappa,v}$, for a candidate with $\ell$ = None or `OneEvaluation`.
-    x_in_execution_context: HashMap<(ExecutionContextId, PhysicalCandidateId), Variable>,
-    /// $y_{\kappa,u,c,i}$, indexed by the consumer's context.
-    y_in_execution_context: HashMap<(ExecutionContextId, PhysicalEdgeId), Variable>,
-    /// $h_v$, for an `AcrossEvaluations` producer.
-    retention_amount: HashMap<PhysicalCandidateId, Variable>,
-}
-
-/// The accuracy variables of constraint (K) (section 4), all continuous.
-#[allow(dead_code)] // Read once constraint (K) is added.
-struct AccuracyVariables {
-    /// $E_{c,m}$: candidate $c$'s error bound in metric $m$.
-    error_bound: HashMap<(PhysicalCandidateId, AccuracyMetric), Variable>,
-    /// $F_{c,i,m}$: the chosen producer's error bound in metric $m$ on input
-    /// $i$ of $c$.
-    error_bound_of_input: HashMap<(PhysicalCandidateId, usize, AccuracyMetric), Variable>,
-    /// $D_c$, by [`PhysicalCandidateId`].
-    failure_probability: Vec<Variable>,
-    /// $H_{c,i}$: the chosen producer's failure probability on input $i$ of $c$.
-    failure_probability_of_input: HashMap<(PhysicalCandidateId, usize), Variable>,
-}
-
-/// (R) $h_v \ge \operatorname{need}_{\kappa,v,c,i}\, y_{\kappa,v,c,i}$: for a
-/// time-indexed producer (raw data, a chain, results stored per evaluation
-/// time) the reading path's offset plus range, a constant per edge, so (R)
-/// is linear. Query latency is ignored: a result counts as read when its
-/// evaluation starts.
-#[allow(dead_code)] // Called once execution contexts are selected.
-fn retention_constraints(
-    physical: &PhysicalASAPMemoCandidates,
-    variables: &ExecutionContextVariables,
-) -> Vec<Constraint> {
-    let _ = (physical, variables);
-    todo!("#1207 PR 7: constraint (R)")
-}
-
-/// (K): $E_{c,m}$ per candidate and metric and $D_c$ per candidate, big-M on
-/// selected edges, the metric rule on the selected path, and the root
-/// checks $E_{v,m_q} \le \varepsilon_q + M_q(1 - z_{q,v})$,
-/// $D_v \le \delta_q + (1 - z_{q,v})$.
-#[allow(dead_code)] // Called once constraint (K) is added.
-fn accuracy_constraints(
-    physical: &PhysicalASAPMemoCandidates,
-    selection: &SelectionVariables,
-    accuracy: &AccuracyVariables,
-) -> Vec<Constraint> {
-    let _ = (physical, selection, accuracy);
-    todo!("#1207 PR 8: constraint (K)")
 }
 
 #[cfg(test)]

@@ -78,6 +78,18 @@ impl PhysicalASAPMemoCandidates {
         &self.edges[id.0]
     }
 
+    /// The number of inputs of candidate `v`: its logical candidate's
+    /// operator's children (e.g. 2 for a binary operator).
+    pub fn input_count(&self, v: PhysicalCandidateId) -> usize {
+        self.logical_candidates
+            .memo
+            .candidate(self.physical_candidates[v.0].logical_candidate_id)
+            .expression
+            .operator
+            .children()
+            .len()
+    }
+
     /// $P^{\mathrm{adm}}_{c,i}$: the admissible edges into input
     /// `input_index_of_consumer` of `consumer`
     /// ($\alpha^{\log} = \alpha^{\mathrm{phys}} = 1$).

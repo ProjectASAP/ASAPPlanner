@@ -32,26 +32,27 @@ use asap_cost::{
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::properties::{DataPrimitive, ExecutionDataState};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload,
 };
-use asap_types::plan::time_window::TimeIndexedRead;
-use asap_types::plan::view_coverage;
 use asap_types::stages::{
-    Lifetime, Memo, MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId,
+    Memo, MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId,
 };
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
+use crate::plan::candidate_node;
+use crate::retention::{retention_need_ms, scan_read_ms};
+
 /// $w_v$ and $c_{u,c,i}$.
 pub(crate) struct SelectionCosts {
-    /// $w_v$ per second, by [`PhysicalCandidateId`], or why `asap-cost`
-    /// could not cost it (the MILP leaves such a candidate out).
-    pub(crate) candidate: Vec<Result<f64, String>>,
-    /// $c_{u,c,i}$ per second of each selectable edge whose producer and
-    /// consumer are costable; an edge missing here cannot be selected.
-    pub(crate) edge: HashMap<PhysicalEdgeId, f64>,
+    /// $w_v$, cost per second, by [`PhysicalCandidateId`], or why
+    /// `asap-cost` could not cost it (the MILP leaves such a candidate out).
+    pub(crate) candidate_cost_per_second: Vec<Result<f64, String>>,
+    /// $c_{u,c,i}$, the change of its consumer's cost per second, of each
+    /// selectable edge whose producer and consumer are costable; an edge
+    /// missing here cannot be selected.
+    pub(crate) edge_cost_change_per_second: HashMap<PhysicalEdgeId, f64>,
     /// By [`PhysicalCandidateId`], for a query-time `Scan`: its source and
     /// the cost per second of keeping the raw data it reads on disk
     /// ([`asap_cost::raw_data_disk_cost_per_second`]). A plan keeps each
@@ -64,128 +65,10 @@ pub(crate) struct SelectionCosts {
     pub(crate) request_overhead_cost_per_second: f64,
 }
 
-/// Candidate `v` as a plan node with id `id`, its input `i` read from node
-/// `input_ids[i]`: its operator, timing, lifetime and θ, its group's schema
-/// and, materialized across evaluations, its group's coverage.
-/// `retention_ms` is left `None` for the caller to set.
-pub(crate) fn candidate_node(
-    physical: &PhysicalASAPMemoCandidates,
-    v: PhysicalCandidateId,
-    id: PhysicalASAPNodeId,
-    input_ids: &[PhysicalASAPNodeId],
-) -> PhysicalASAPDAGNode {
-    let memo = &physical.logical_candidates.memo;
-    let candidate = &physical.physical_candidates[v.0];
-    let logical = memo.candidate(candidate.logical_candidate_id);
-    let group = &memo.groups()[candidate.logical_candidate_id.group.0 as usize].group_properties;
-    let mut inputs = input_ids.iter();
-    let payload = logical
-        .expression
-        .operator
-        .map_children(|_| *inputs.next().expect("one node per input"));
-    let lifetime = candidate.physical_properties.lifetime();
-    PhysicalASAPDAGNode {
-        id,
-        output_state: ExecutionDataState {
-            timing: candidate.physical_properties.timing(),
-            primitive: DataPrimitive::of(&payload, group.result_kind),
-        },
-        payload,
-        lifetime,
-        parameters: logical.logical_properties.parameters().cloned(),
-        output_schema: group.schema.clone(),
-        retention_ms: None,
-        selected_physical_candidate: Some(v),
-        view_coverage: matches!(lifetime, Lifetime::AcrossEvaluations(_))
-            .then(|| view_coverage(memo, candidate.logical_candidate_id.group))
-            .flatten(),
-    }
-}
-
-/// The number of inputs of candidate `v`.
-pub(crate) fn input_count(physical: &PhysicalASAPMemoCandidates, v: PhysicalCandidateId) -> usize {
-    physical
-        .logical_candidates
-        .memo
-        .candidate(physical.physical_candidates[v.0].logical_candidate_id)
-        .expression
-        .operator
-        .children()
-        .len()
-}
-
-/// How far back from the evaluation time `producer`'s rows must be kept
-/// for its readers (`readers_of`, the candidates that may read it):
-/// [`asap_cost::read_back_ms`] with, at each reader, the longest
-/// range-evaluation span of the queries reaching it.
-pub(crate) fn retention_need_ms<R: IntoIterator<Item = PhysicalCandidateId>>(
-    physical: &PhysicalASAPMemoCandidates,
-    entries: &[QueryWorkloadEntry],
-    producer: PhysicalCandidateId,
-    readers_of: impl Fn(PhysicalCandidateId) -> R,
-) -> Option<u64> {
-    let memo = &physical.logical_candidates.memo;
-    let span_ms = |v: PhysicalCandidateId| {
-        let group = physical.physical_candidates[v.0].logical_candidate_id.group;
-        memo.groups()[group.0 as usize]
-            .reached_by_queries()
-            .iter()
-            .filter_map(|&query| entries.get(query)?.range_evaluation)
-            .map(|range| range.span_ms)
-            .max()
-            .unwrap_or(0)
-    };
-    read_back(physical, producer, readers_of, span_ms)
-}
-
-/// How far back from the evaluation time one execution of the query-time
-/// `Scan` `producer` reads, for its readers (`readers_of`):
-/// [`asap_cost::read_back_ms`] without a range-evaluation span.
-pub(crate) fn scan_read_ms<R: IntoIterator<Item = PhysicalCandidateId>>(
-    physical: &PhysicalASAPMemoCandidates,
-    producer: PhysicalCandidateId,
-    readers_of: impl Fn(PhysicalCandidateId) -> R,
-) -> Option<u64> {
-    read_back(physical, producer, readers_of, |_| 0)
-}
-
-/// [`asap_cost::read_back_ms`] over candidates, each read as its operator
-/// at its timing reads ([`TimeIndexedRead::of`]).
-fn read_back<R: IntoIterator<Item = PhysicalCandidateId>>(
-    physical: &PhysicalASAPMemoCandidates,
-    producer: PhysicalCandidateId,
-    readers_of: impl Fn(PhysicalCandidateId) -> R,
-    span_ms: impl Fn(PhysicalCandidateId) -> u64,
-) -> Option<u64> {
-    let memo = &physical.logical_candidates.memo;
-    let operator_of = |v: PhysicalCandidateId| {
-        &memo
-            .candidate(physical.physical_candidates[v.0].logical_candidate_id)
-            .expression
-            .operator
-    };
-    asap_cost::read_back_ms(
-        producer,
-        readers_of,
-        |v| {
-            TimeIndexedRead::of(
-                operator_of(v),
-                physical.physical_candidates[v.0]
-                    .physical_properties
-                    .timing(),
-            )
-        },
-        span_ms,
-        matches!(
-            operator_of(producer),
-            Operator::NonASAP(NonASAPOp::Scan { .. })
-        ),
-    )
-}
-
 /// [`SelectionCosts`] over `selectable` (each admissible edge a plan may
 /// select, by consumer and input). Errs on nothing: a candidate
-/// `asap-cost` cannot cost is reported in [`SelectionCosts::candidate`].
+/// `asap-cost` cannot cost is reported in
+/// [`SelectionCosts::candidate_cost_per_second`].
 pub(crate) fn selection_costs(
     physical: &PhysicalASAPMemoCandidates,
     selectable: &[PhysicalEdgeId],
@@ -211,7 +94,7 @@ pub(crate) fn selection_costs(
     let nodes: Vec<PhysicalASAPDAGNode> = (0..count)
         .map(PhysicalCandidateId)
         .map(|v| {
-            let inputs: Vec<PhysicalASAPNodeId> = (0..input_count(physical, v)).collect();
+            let inputs: Vec<PhysicalASAPNodeId> = (0..physical.input_count(v)).collect();
             let mut node = candidate_node(physical, v, v.0, &inputs);
             if node.retains_rows() {
                 node.retention_ms = retention_need_ms(physical, entries, v, readers_of);
@@ -270,7 +153,7 @@ pub(crate) fn selection_costs(
             inputs_of[v.0] = inputs;
         }
     }
-    let candidate: Vec<Result<f64, String>> = usage
+    let candidate_cost_per_second: Vec<Result<f64, String>> = usage
         .iter()
         .map(|usage| match usage {
             Some(Ok(usage)) => cost_per_second(usage),
@@ -286,11 +169,11 @@ pub(crate) fn selection_costs(
             Some((source.clone(), cost))
         })
         .collect();
-    let mut edge = HashMap::new();
+    let mut edge_cost_change_per_second = HashMap::new();
     for &id in selectable {
         let e = physical.edge(id);
         let (u, c) = (e.producer_candidate_id, e.consumer_candidate_id);
-        let (Some(Ok(produced)), Ok(own)) = (&usage[u.0], &candidate[c.0]) else {
+        let (Some(Ok(produced)), Ok(own)) = (&usage[u.0], &candidate_cost_per_second[c.0]) else {
             continue;
         };
         let Some(mut inputs) = inputs_of[c.0].clone() else {
@@ -309,12 +192,12 @@ pub(crate) fn selection_costs(
         )
         .and_then(|usage| cost_per_second(&usage));
         if let Ok(with_u) = with_u {
-            edge.insert(id, with_u - own);
+            edge_cost_change_per_second.insert(id, with_u - own);
         }
     }
     SelectionCosts {
-        candidate,
-        edge,
+        candidate_cost_per_second,
+        edge_cost_change_per_second,
         raw_data_on_disk,
         request_overhead_cost_per_second,
     }

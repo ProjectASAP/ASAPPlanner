@@ -19,7 +19,6 @@ use asap_types::ir::properties::ExecutionTiming;
 use asap_types::stages::{Lifetime, PhysicalCandidateId};
 
 use super::model::SelectionInputs;
-use crate::cost::input_count;
 
 /// How many times the greedy plan is rebuilt without a candidate that
 /// made it infeasible before giving up on a bound.
@@ -45,7 +44,7 @@ pub(crate) fn dearer_than_a_feasible_plan(inputs: &SelectionInputs<'_>) -> Vec<b
         return vec![false; count];
     };
     let mut cheapest_input_edge: HashMap<(PhysicalCandidateId, usize), f64> = HashMap::new();
-    for (&edge, &cost) in &inputs.costs.edge {
+    for (&edge, &cost) in &inputs.costs.edge_cost_change_per_second {
         let edge = inputs.physical.edge(edge);
         let key = (edge.consumer_candidate_id, edge.input_index_of_consumer);
         let cheapest = cheapest_input_edge.entry(key).or_insert(0.0);
@@ -55,11 +54,11 @@ pub(crate) fn dearer_than_a_feasible_plan(inputs: &SelectionInputs<'_>) -> Vec<b
     (0..count)
         .map(PhysicalCandidateId)
         .map(|v| {
-            let Ok(own) = &inputs.costs.candidate[v.0] else {
+            let Ok(own) = &inputs.costs.candidate_cost_per_second[v.0] else {
                 return false;
             };
             let least = own
-                + (0..input_count(inputs.physical, v))
+                + (0..inputs.physical.input_count(v))
                     .filter_map(|i| cheapest_input_edge.get(&(v, i)))
                     .sum::<f64>();
             least > bound + tolerance
@@ -80,14 +79,14 @@ fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
     let count = physical.physical_candidates.len();
     // Each (consumer, input)'s costed edges: (edge, producer, c_{u,c,i}).
     let mut into: EdgesInto = HashMap::new();
-    for (&id, &cost) in &inputs.costs.edge {
+    for (&id, &cost) in &inputs.costs.edge_cost_change_per_second {
         let edge = physical.edge(id);
         into.entry((edge.consumer_candidate_id.0, edge.input_index_of_consumer))
             .or_default()
             .push((edge.producer_candidate_id.0, cost));
     }
     let inputs_of: Vec<usize> = (0..count)
-        .map(|v| input_count(physical, PhysicalCandidateId(v)))
+        .map(|v| physical.input_count(PhysicalCandidateId(v)))
         .collect();
     let unshared = |v: usize| {
         let properties = physical.physical_candidates[v].physical_properties;
@@ -137,7 +136,7 @@ fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
         let cost = plan
             .candidates
             .iter()
-            .filter_map(|&v| inputs.costs.candidate[v].as_ref().ok())
+            .filter_map(|&v| inputs.costs.candidate_cost_per_second[v].as_ref().ok())
             .sum::<f64>()
             + plan.edges.iter().map(|&(_, cost)| cost).sum::<f64>()
             + raw_data_on_disk.values().sum::<f64>();
@@ -162,7 +161,7 @@ fn cheapest_trees(
     for _ in 0..count.max(1) {
         let mut changed = false;
         for v in 0..count {
-            let Ok(own) = &inputs.costs.candidate[v] else {
+            let Ok(own) = &inputs.costs.candidate_cost_per_second[v] else {
                 continue;
             };
             if excluded[v] {

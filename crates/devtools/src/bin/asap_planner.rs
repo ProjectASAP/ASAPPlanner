@@ -619,8 +619,8 @@ fn selection_json(selection: &Result<(PhysicalASAPDAG, Selection), SelectionErro
             .iter()
             .map(|p| json!({ "candidate": format!("{:?}", p.candidate), "reason": format!("{:?}", p.reason) }))
             .collect::<Vec<_>>(),
-        "milp_variables": selection.milp_variables,
-        "milp_constraints": selection.milp_constraints,
+        "milp_variables": selection.milp_variable_count,
+        "milp_constraints": selection.milp_constraint_count,
         "milp_construction_ms": selection.milp_construction_ms,
         "milp_solve_ms": selection.milp_solve_ms,
     })

@@ -117,8 +117,8 @@ fn costs(
         edge_cost.insert(edge(physical, u, c), cost);
     }
     SelectionCosts {
-        candidate: w.iter().map(|&w| Ok(w)).collect(),
-        edge: edge_cost,
+        candidate_cost_per_second: w.iter().map(|&w| Ok(w)).collect(),
+        edge_cost_change_per_second: edge_cost,
         raw_data_on_disk: vec![None; w.len()],
         request_overhead_cost_per_second: 0.0,
     }

@@ -1,21 +1,62 @@
 //! The plan Stage 3 builds from the baseline MILP's optimum as its last
-//! step (concepts doc, section 3, "Plan output"): one `PhysicalASAPDAG`
-//! node per selected candidate, its inputs from the selected edges, each
-//! node's `selected_physical_candidate` set.
+//! step (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
+//! section 3, "Plan output"): one `PhysicalASAPDAG` node per selected
+//! candidate ([`candidate_node`], which costing builds too), its inputs
+//! from the selected edges, each node's `selected_physical_candidate` set.
 
 use std::collections::{BTreeMap, HashMap};
 
+use asap_types::ir::properties::{DataPrimitive, ExecutionDataState};
 use asap_types::ir::QueryRoot;
 use asap_types::plan::physical_asap_dag::{
-    PhysicalASAPDAG, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
+    PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
 };
+use asap_types::plan::view_coverage;
 use asap_types::stages::{
-    MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId,
+    Lifetime, MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId,
 };
 use asap_types::workload::QueryWorkloadEntry;
 
-use crate::cost::{candidate_node, input_count, retention_need_ms};
 use crate::milp::model::{QueryId, SolvedSelection};
+use crate::retention::retention_need_ms;
+
+/// Candidate `v` as a plan node with id `id`, its input `i` read from node
+/// `input_ids[i]`: its operator, timing, lifetime and θ, its group's schema
+/// and, materialized across evaluations, its group's coverage.
+/// `retention_ms` is left `None` for the caller to set.
+pub(crate) fn candidate_node(
+    physical: &PhysicalASAPMemoCandidates,
+    v: PhysicalCandidateId,
+    id: PhysicalASAPNodeId,
+    input_ids: &[PhysicalASAPNodeId],
+) -> PhysicalASAPDAGNode {
+    let memo = &physical.logical_candidates.memo;
+    let candidate = &physical.physical_candidates[v.0];
+    let logical = memo.candidate(candidate.logical_candidate_id);
+    let group = &memo.groups()[candidate.logical_candidate_id.group.0 as usize].group_properties;
+    let mut inputs = input_ids.iter();
+    let payload = logical
+        .expression
+        .operator
+        .map_children(|_| *inputs.next().expect("one node per input"));
+    let lifetime = candidate.physical_properties.lifetime();
+    PhysicalASAPDAGNode {
+        id,
+        output_state: ExecutionDataState {
+            timing: candidate.physical_properties.timing(),
+            primitive: DataPrimitive::of(&payload, group.result_kind),
+        },
+        payload,
+        lifetime,
+        parameters: logical.logical_properties.parameters().cloned(),
+        output_schema: group.schema.clone(),
+        retention_ms: None,
+        selected_physical_candidate: Some(v),
+        view_coverage: matches!(lifetime, Lifetime::AcrossEvaluations(_))
+            .then(|| view_coverage(memo, candidate.logical_candidate_id.group))
+            .flatten(),
+    }
+}
 
 /// The plan of `solved`, whose output `j` answers `outputs[j]` (a query and
 /// the group its root, or one operator its scalar root, reads). Nodes are
@@ -47,7 +88,7 @@ pub(crate) fn plan_of(
     let readers_of =
         |v: PhysicalCandidateId| consumers(v).map(|edge| physical.edge(edge).consumer_candidate_id);
     let inputs = |v: PhysicalCandidateId| -> Vec<PhysicalCandidateId> {
-        (0..input_count(physical, v))
+        (0..physical.input_count(v))
             .map(|i| producer_of[&(v, i)])
             .collect()
     };
@@ -56,7 +97,7 @@ pub(crate) fn plan_of(
     let mut waiting: HashMap<PhysicalCandidateId, usize> = solved
         .candidates
         .iter()
-        .map(|&v| (v, input_count(physical, v)))
+        .map(|&v| (v, physical.input_count(v)))
         .collect();
     let mut ready: Vec<PhysicalCandidateId> = solved
         .candidates
