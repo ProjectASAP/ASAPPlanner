@@ -81,8 +81,9 @@ contains the candidate and that Stage 3 prices it.
    (`crates/types/src/stages/physical/properties/mod.rs`, `PhysicalProperties::new` and
    `readable_at`) and its placement in
    `crates/types/src/ir/properties/timing.rs`, with its data-state edge rules.
-2. Offer it in `crates/stage2-physical-optimization/src/candidates.rs`
-   (`LIFETIMES`, `enumerate_candidate_configurations`), and gate it on the
+2. Offer it in `crates/stage2-physical-optimization/src/candidate.rs`
+   (`LIFETIMES`, `offered_physical_properties`; a per-group offer in
+   `group.rs`), and gate it on the
    deployment input that allows it with a `PruneReason`.
 3. Price it in `crates/cost/src/node/usage.rs` (`asap_cost::node_usage`): what it keeps in memory or on
    disk, and what each evaluation rebuilds.
