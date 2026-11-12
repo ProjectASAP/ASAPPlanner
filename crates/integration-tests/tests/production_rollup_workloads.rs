@@ -14,7 +14,7 @@ use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
 use asap_types::workload::{
     DataWorkload, Predictability, QueryRecurrence, QueryRequirements, QueryWorkloadEntry,
-    RepeatedDemand, RepetitionInterval,
+    RepeatedDemand, RepetitionInterval, TimestampMs,
 };
 use std::collections::HashSet;
 
@@ -40,9 +40,10 @@ fn entry(accuracy: &AccuracyTarget, interval_ms: u32) -> QueryWorkloadEntry {
             max_latency_ms: None,
         },
         predictability: Predictability::Predictable { known_at: None },
-        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
-            interval_ms,
-        ))),
+        recurrence: QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+            interval: RepetitionInterval(interval_ms),
+            evaluation_phase: TimestampMs(0),
+        }),
         range_evaluation: None,
     }
 }

@@ -47,7 +47,10 @@ pub const EXAMPLE1_Q2: &str = "topk by (job) (10, sum_over_time(http_requests_to
 pub fn example1() -> PlanningWorkload {
     let panel = |query: &str, accuracy, max_latency_ms| RepeatingEntry {
         query: Query(query.into()),
-        demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
+        demand: RepeatedDemand::FixedIntervalAt {
+            interval: RepetitionInterval(10_000),
+            evaluation_phase: TimestampMs(0),
+        },
         requirements: QueryRequirements {
             accuracy,
             max_latency_ms,
@@ -126,7 +129,10 @@ pub fn example2() -> (PlanningWorkload, asap_frontend_sql::SqlCatalog) {
                     .iter()
                     .map(|&(query, epsilon, delta)| RepeatingEntry {
                         query: Query(query.into()),
-                        demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
+                        demand: RepeatedDemand::FixedIntervalAt {
+                            interval: RepetitionInterval(10_000),
+                            evaluation_phase: TimestampMs(0),
+                        },
                         requirements: QueryRequirements {
                             accuracy: AccuracyTarget::max_error(epsilon).failure_probability(delta),
                             max_latency_ms: None,
@@ -256,9 +262,10 @@ pub fn pattern_a(recurrence: PatternARecurrence, arrival: DataArrival) -> Planni
                     .iter()
                     .map(|pattern| RepeatingEntry {
                         query: Query(pattern.promql.into()),
-                        demand: RepeatedDemand::FixedInterval(RepetitionInterval(
-                            (30 * 24 * 60 * MINUTE_MS) as u32,
-                        )),
+                        demand: RepeatedDemand::FixedIntervalAt {
+                            interval: RepetitionInterval((30 * 24 * 60 * MINUTE_MS) as u32),
+                            evaluation_phase: TimestampMs(0),
+                        },
                         requirements: pattern_a_requirements(),
                         predictability: Predictability::Predictable {
                             known_at: Some(TimestampMs(T_MS)),
@@ -291,9 +298,10 @@ pub fn pattern_b() -> PlanningWorkload {
             query_batch: None,
             repeating_queries: Some(vec![RepeatingEntry {
                 query: Query(PATTERN_B.into()),
-                demand: RepeatedDemand::FixedInterval(RepetitionInterval(
-                    PATTERN_B_INTERVAL_MS as u32,
-                )),
+                demand: RepeatedDemand::FixedIntervalAt {
+                    interval: RepetitionInterval(PATTERN_B_INTERVAL_MS as u32),
+                    evaluation_phase: TimestampMs(0),
+                },
                 requirements: QueryRequirements {
                     accuracy: AccuracyTarget::max_error(0.01)
                         .failure_probability(0.01)

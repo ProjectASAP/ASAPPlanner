@@ -111,6 +111,11 @@ test('materialized views group by tumbling-window chain', { skip }, () => {
   assert.equal(groups[0].tumblingWindowsText, `${body.tumbling_window_count} × 10 s`);
 });
 
+test('queries show a fixed interval and its phase', () => {
+  assert.equal(call('queryScheduleText', { recurrence: { repeated: { fixed_interval_at: { interval: 60000, evaluation_phase: 0 } } } }), 'every 1 min');
+  assert.equal(call('queryScheduleText', { recurrence: { repeated: { fixed_interval_at: { interval: 60000, evaluation_phase: 15000 } } } }), 'every 1 min at phase 15 s');
+});
+
 test('the candidate header shows the selection\'s warnings', () => {
   const warned = {
     stage1_logical_asap_optimization: { combinations: 2 },

@@ -25,7 +25,7 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator, QueryRoot};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::Lifetime;
 use asap_types::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
-use asap_types::workload::{PlanningWorkload, QueryRecurrence, RepeatedDemand};
+use asap_types::workload::PlanningWorkload;
 
 pub use asap_devtools::planner_layering_examples::*;
 
@@ -370,10 +370,12 @@ pub fn computations(dag: &PhysicalASAPDAG) -> BTreeMap<NodeId, u64> {
 /// The evaluation interval of entry `query`, for a fixed-interval repeating
 /// entry.
 pub fn evaluation_interval_ms(workload: &PlanningWorkload, query: usize) -> Option<u64> {
-    match &workload.query_workload.entries().nth(query)?.recurrence {
-        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(i)) => Some(u64::from(i.0)),
-        _ => None,
-    }
+    workload
+        .query_workload
+        .entries()
+        .nth(query)?
+        .recurrence
+        .fixed_interval_ms()
 }
 
 // ── Materialized outputs ─────────────────────────────────────────────────────────

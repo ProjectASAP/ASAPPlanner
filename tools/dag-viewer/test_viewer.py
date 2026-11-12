@@ -48,7 +48,7 @@ needs_planner = unittest.skipUnless(server.BINARY.exists(), "needs a built asap_
 def promql_workload(queries: list[str], sources: list[str]) -> dict:
     """A PlanningWorkload of exact PromQL `queries`, each every 10 s, over
     `sources` of 100 series sampled every second."""
-    repeating = [{"query": query, "demand": {"fixed_interval": 10000},
+    repeating = [{"query": query, "demand": {"fixed_interval_at": {"interval": 10000, "evaluation_phase": 0}},
                   "requirements": {"accuracy": {"max_error": 0.0, "failure_probability": 0.0, "accuracy_scope": "whole_result"},
                                    "max_latency_ms": None},
                   "predictability": {"predictable": {"known_at": None}}} for query in queries]

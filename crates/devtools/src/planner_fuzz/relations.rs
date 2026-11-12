@@ -369,13 +369,15 @@ fn shorter_window(window_ms: u64) -> Option<u64> {
 }
 
 fn repeat_interval_ms(query: &FuzzQuery) -> Option<u64> {
-    serde_json::to_value(&query.entry.demand).ok()?["fixed_interval"].as_u64()
+    serde_json::to_value(&query.entry.demand).ok()?["fixed_interval_at"]["interval"].as_u64()
 }
 
 fn with_repeat_interval(query: &FuzzQuery, interval_ms: u64) -> FuzzQuery {
     let mut query = query.clone();
-    query.entry.demand =
-        serde_json::from_value(json!({"fixed_interval": interval_ms})).expect("a fixed interval");
+    query.entry.demand = serde_json::from_value(
+        json!({"fixed_interval_at": {"interval": interval_ms, "evaluation_phase": 0}}),
+    )
+    .expect("a fixed interval");
     query
 }
 

@@ -675,7 +675,7 @@ mod tests {
         let workload: crate::PlanningWorkload = serde_json::from_str(
             r#"{"query_workload": {"language": "promql", "repeating_queries": [{
                   "query": "avg by (job) (quantile_over_time(0.99, data[300s]))",
-                  "demand": {"fixed_interval": 1000},
+                  "demand": {"fixed_interval_at": {"interval": 1000, "evaluation_phase": 0}},
                   "requirements": {"accuracy": {"max_error": 0.05, "failure_probability": 0.3,
                       "accuracy_scope": "whole_result"}},
                   "predictability": {"predictable": {"known_at": null}}}]},

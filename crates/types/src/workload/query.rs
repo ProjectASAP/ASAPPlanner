@@ -142,7 +142,10 @@ pub struct DemandEstimate {
 /// ```
 /// use asap_types::workload::{RepeatedDemand, RepetitionInterval, TimestampMs};
 ///
-/// let dashboard = RepeatedDemand::FixedInterval(RepetitionInterval(10_000));
+/// let dashboard = RepeatedDemand::FixedIntervalAt {
+///     interval: RepetitionInterval(10_000),
+///     evaluation_phase: TimestampMs(0),
+/// };
 /// let scheduled = RepeatedDemand::Scheduled(vec![
 ///     TimestampMs(100_000),
 ///     TimestampMs(200_000),
@@ -151,9 +154,11 @@ pub struct DemandEstimate {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepeatedDemand {
-    FixedInterval(RepetitionInterval),
     /// Fixed cadence with a known evaluation phase. The timestamp is any
     /// evaluation endpoint on that cadence, not necessarily its first run.
+    /// There is no variant without a phase: Pass 2's chains and Stage 3's
+    /// contexts need the evaluation times, and phase 0 is no safe default
+    /// (Prometheus staggers rule groups by a hash).
     FixedIntervalAt {
         interval: RepetitionInterval,
         evaluation_phase: TimestampMs,
@@ -176,7 +181,10 @@ pub enum RepeatedDemand {
 ///     execute_at: Some(TimestampMs(100_000)),
 /// };
 /// let every_minute = QueryRecurrence::Repeated(
-///     RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
+///     RepeatedDemand::FixedIntervalAt {
+///         interval: RepetitionInterval(60_000),
+///         evaluation_phase: TimestampMs(0),
+///     },
 /// );
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -196,10 +204,9 @@ impl QueryRecurrence {
     /// `Some` only for a fixed-interval repetition with a positive interval.
     pub fn fixed_interval_ms(&self) -> Option<u64> {
         match self {
-            QueryRecurrence::Repeated(
-                RepeatedDemand::FixedInterval(interval)
-                | RepeatedDemand::FixedIntervalAt { interval, .. },
-            ) => Some(u64::from(interval.0)).filter(|&ms| ms > 0),
+            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt { interval, .. }) => {
+                Some(u64::from(interval.0)).filter(|&ms| ms > 0)
+            }
             _ => None,
         }
     }
@@ -212,10 +219,8 @@ impl QueryRecurrence {
     /// a one-off query's time. A range evaluation of more than one step also
     /// takes the greatest common divisor with its step, since each run
     /// evaluates at every step up to its end. `None` when the times are not
-    /// known: a fixed interval without a declared phase (Prometheus staggers
-    /// rule groups by a hash, so it does not mean phase 0), an estimated
-    /// rate, a one-off query without a time, an unknown recurrence, or a
-    /// zero interval. Pass 2's chain widths and the evaluation grids of
+    /// known: an estimated rate, a one-off query without a time, an unknown
+    /// recurrence, or a zero interval. Pass 2's chain widths and the evaluation grids of
     /// Stage 3's contexts, which
     /// [`PhysicalCandidate::delivers_on`](crate::stages::PhysicalCandidate::delivers_on)
     /// reads, both come from it.
@@ -231,9 +236,7 @@ impl QueryRecurrence {
                 execute_at: Some(time),
                 ..
             } => time.0,
-            QueryRecurrence::Repeated(
-                RepeatedDemand::FixedInterval(_) | RepeatedDemand::EstimatedRate(_),
-            )
+            QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(_))
             | QueryRecurrence::OneTime {
                 execute_at: None, ..
             }
@@ -343,7 +346,10 @@ pub struct BatchEntry {
 ///
 /// let dashboard = RepeatingEntry {
 ///     query: Query("rate(requests[5m])".into()),
-///     demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
+///     demand: RepeatedDemand::FixedIntervalAt {
+///         interval: RepetitionInterval(10_000),
+///         evaluation_phase: TimestampMs(0),
+///     },
 ///     requirements: QueryRequirements::default(),
 ///     predictability: Predictability::Predictable { known_at: None },
 ///     // Each refresh evaluates the last hour at 1-minute steps.
@@ -380,7 +386,10 @@ pub struct RepeatingEntry {
 ///     requirements: QueryRequirements::default(),
 ///     predictability: Predictability::Predictable { known_at: None },
 ///     recurrence: QueryRecurrence::Repeated(
-///         RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
+///         RepeatedDemand::FixedIntervalAt {
+///             interval: RepetitionInterval(10_000),
+///             evaluation_phase: TimestampMs(0),
+///         },
 ///     ),
 ///     range_evaluation: None,
 /// };
@@ -496,8 +505,7 @@ fn validate_entry(entry: &QueryWorkloadEntry) -> Result<(), WorkloadError> {
         QueryRecurrence::OneTime { invocations: 0, .. } => {
             return Err(WorkloadError::ZeroInvocations)
         }
-        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(0)))
-        | QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+        QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
             interval: RepetitionInterval(0),
             ..
         }) => return Err(WorkloadError::ZeroRepetitionInterval),
@@ -539,7 +547,11 @@ mod tests {
     fn fixed_interval_ms_is_set_only_for_a_positive_fixed_interval() {
         let repeated = |demand| QueryRecurrence::Repeated(demand);
         assert_eq!(
-            repeated(RepeatedDemand::FixedInterval(RepetitionInterval(10_000))).fixed_interval_ms(),
+            repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(10_000),
+                evaluation_phase: TimestampMs(0),
+            })
+            .fixed_interval_ms(),
             Some(10_000)
         );
         assert_eq!(
@@ -551,7 +563,11 @@ mod tests {
             Some(60_000)
         );
         assert_eq!(
-            repeated(RepeatedDemand::FixedInterval(RepetitionInterval(0))).fixed_interval_ms(),
+            repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(0),
+                evaluation_phase: TimestampMs(0),
+            })
+            .fixed_interval_ms(),
             None
         );
         assert_eq!(
@@ -597,13 +613,27 @@ mod tests {
         }
     }
 
+    /// A fixed interval without an evaluation phase is rejected at parse
+    /// time, naming `fixed_interval_at` (#1260).
+    #[test]
+    fn fixed_interval_without_phase_is_rejected() {
+        let error =
+            serde_json::from_value::<RepeatedDemand>(serde_json::json!({"fixed_interval": 60000}))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("fixed_interval_at"), "{error}");
+    }
+
     /// A repeating query with a zero fixed interval is rejected.
     #[test]
     fn zero_repetition_interval_is_rejected() {
         let mut workload = base_workload();
         workload.repeating_queries = Some(vec![RepeatingEntry {
             query: Query("dashboard".into()),
-            demand: RepeatedDemand::FixedInterval(RepetitionInterval(0)),
+            demand: RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(0),
+                evaluation_phase: TimestampMs(0),
+            },
             requirements: QueryRequirements::default(),
             predictability: Predictability::Predictable { known_at: None },
             range_evaluation: None,
@@ -623,7 +653,7 @@ mod tests {
         let dashboard = |range: serde_json::Value| {
             let mut entry = serde_json::json!({
                 "query": "rate(requests_total[5m])",
-                "demand": {"fixed_interval": 30000},
+                "demand": {"fixed_interval_at": {"interval": 30000, "evaluation_phase": 0}},
                 "requirements": {},
                 "predictability": {"predictable": {"known_at": null}},
             });
@@ -648,13 +678,11 @@ mod tests {
         assert_eq!(range.evaluations_per_request(), 61);
         let entry = QueryWorkloadEntry::from(&hour);
         assert_eq!(entry.range_evaluation, Some(range));
-        // A fixed interval without a declared phase: the evaluation times
-        // are not known, so there is no grid.
         let grid = |entry: &QueryWorkloadEntry| {
             entry.recurrence.evaluation_grid_ms(entry.range_evaluation)
         };
-        assert_eq!(grid(&entry), None);
-        assert_eq!(grid(&QueryWorkloadEntry::from(&plain)), None);
+        assert_eq!(grid(&entry), Some(30_000));
+        assert_eq!(grid(&QueryWorkloadEntry::from(&plain)), Some(30_000));
         let every = |interval_ms, phase_ms| {
             QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
                 interval: RepetitionInterval(interval_ms),
@@ -759,7 +787,10 @@ mod tests {
         }]);
         workload.repeating_queries = Some(vec![RepeatingEntry {
             query: Query("dashboard".into()),
-            demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
+            demand: RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(10_000),
+                evaluation_phase: TimestampMs(0),
+            },
             requirements: QueryRequirements::default(),
             predictability: Predictability::Predictable { known_at: None },
             range_evaluation: None,
@@ -773,7 +804,7 @@ mod tests {
         ));
         assert!(matches!(
             entries[1].recurrence,
-            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(_))
+            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt { .. })
         ));
         workload.validate().unwrap();
     }
