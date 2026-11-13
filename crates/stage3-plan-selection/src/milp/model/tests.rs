@@ -8,7 +8,7 @@ use asap_types::ir::operator::Reduction;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::{ASAPOp, Operator, QueryRoot};
+use asap_types::ir::{ASAPOp, Operator};
 use asap_types::stages::{
     CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, MemoGroupId,
     PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalEdge,
@@ -28,8 +28,10 @@ use asap_types::workload::{
 
 use super::*;
 use crate::cost::ExecutionCosts;
+use crate::milp::exact_only::must_not_read;
 use crate::plan::plan_of;
-use crate::selectable::ExecutionContexts;
+use crate::retention::edge_retention_need_ms;
+use crate::selectable::output_groups;
 
 const NONE: Lifetime = Lifetime::None;
 const ONE_EVALUATION: Lifetime = Lifetime::OneEvaluation(StorageMedium::Memory);
@@ -133,48 +135,38 @@ fn every(interval_ms: u32) -> QueryWorkloadEntry {
     }
 }
 
-/// Each query output reference of `physical`'s memo: query `q` reads its
-/// operator root.
-fn outputs(physical: &PhysicalASAPMemoCandidates) -> Vec<(QueryId, MemoGroupId)> {
-    physical
-        .logical_candidates
-        .memo
-        .queries()
-        .iter()
-        .enumerate()
-        .map(|(query, memo_query)| match memo_query.root {
-            QueryRoot::Operator(group) => (QueryId(query), group),
-            QueryRoot::Scalar(_) => unreachable!("operator roots only"),
-        })
-        .collect()
-}
-
-/// Solves over `physical` for `entries` with every execution of candidate
-/// `v` costing `w[v]`, every edge from `u` to `c` `edge_costs[(u, c)]` (0
-/// when missing) and candidate `v` retaining at `retention[v]` per ms;
-/// returns the solution and the contexts it is over.
-fn solve(
+/// What the MILP is built over for `physical` and `entries`, with every
+/// execution of candidate `v` costing `w[v]`, every edge from `u` to `c`
+/// `edge_costs[(u, c)]` (0 when missing) and candidate `v` retaining at
+/// `retention[v]` per second retained; each query output answered, as
+/// `crate::select_plan` does, by the executions its query may read (X).
+fn selection_inputs(
     physical: &PhysicalASAPMemoCandidates,
     entries: &[QueryWorkloadEntry],
     w: &[f64],
     edge_costs: &[((usize, usize), f64)],
     retention: &[(usize, f64)],
-) -> (
-    Result<SolvedSelection, SelectionMilpError>,
-    ExecutionContexts,
-) {
-    let (contexts, query_outputs) = ExecutionContexts::new(physical, entries, &outputs(physical));
+) -> (SelectableExecutions, ExecutionCosts) {
+    let mut selectable = SelectableExecutions::new(physical, entries, &output_groups(physical));
+    selectable.retain_answering(|query, _, execution| {
+        !must_not_read(physical, query, execution.candidate)
+    });
+    let retention_cost_per_retained_second: HashMap<PhysicalCandidateId, f64> = retention
+        .iter()
+        .map(|&(v, per_retained_second)| (PhysicalCandidateId(v), per_retained_second))
+        .collect();
+    let edge_of = |&(_, id, _): &(usize, PhysicalEdgeId, usize)| physical.edge(id);
     let costs = ExecutionCosts {
-        per_execution: contexts
+        per_execution: selectable
             .executions()
             .iter()
             .map(|execution| Ok(w[execution.candidate.0]))
             .collect(),
-        per_edge: contexts
+        per_edge: selectable
             .edges()
             .iter()
-            .map(|&(_, id, _)| {
-                let edge = physical.edge(id);
+            .map(|selectable_edge| {
+                let edge = edge_of(selectable_edge);
                 let key = (edge.producer_candidate_id.0, edge.consumer_candidate_id.0);
                 Some(
                     edge_costs
@@ -184,22 +176,44 @@ fn solve(
                 )
             })
             .collect(),
-        retention_cost_per_second: retention
+        retention_need_ms_per_edge: selectable
+            .edges()
             .iter()
-            .map(|&(v, per_ms)| (PhysicalCandidateId(v), per_ms))
+            .map(|selectable_edge| {
+                let edge = edge_of(selectable_edge);
+                retention_cost_per_retained_second
+                    .contains_key(&edge.producer_candidate_id)
+                    .then(|| edge_retention_need_ms(physical, entries, selectable_edge.1))
+                    .flatten()
+            })
             .collect(),
+        retention_cost_per_retained_second,
         raw_data_source: HashMap::new(),
         unbounded_raw_data_on_disk_cost_per_second: HashMap::new(),
-        request_overhead_cost_per_second: 0.0,
     };
+    (selectable, costs)
+}
+
+/// Solves over [`selection_inputs`]; returns the solution and the
+/// executions it is over.
+fn solve(
+    physical: &PhysicalASAPMemoCandidates,
+    entries: &[QueryWorkloadEntry],
+    w: &[f64],
+    edge_costs: &[((usize, usize), f64)],
+    retention: &[(usize, f64)],
+) -> (
+    Result<SolvedSelection, SelectionMilpError>,
+    SelectableExecutions,
+) {
+    let (selectable, costs) = selection_inputs(physical, entries, w, edge_costs, retention);
     let solved = solve_selection(&SelectionInputs {
         physical,
         entries,
-        contexts: &contexts,
+        selectable: &selectable,
         costs: &costs,
-        query_outputs: &query_outputs,
     });
-    (solved, contexts)
+    (solved, selectable)
 }
 
 /// The candidates of `solved`'s executions, one per execution, ascending.
@@ -236,7 +250,7 @@ fn selects_the_producer_whose_own_and_edge_costs_are_lowest() {
         &every_10s(1),
         &[1.0, 2.0, 1.0],
         &[((0, 2), 5.0)],
-        &[(1, 1e-9)],
+        &[(1, 1e-6)],
     );
     let solved = solved.unwrap();
     assert_eq!(candidates(&solved), vec![1, 2]);
@@ -244,7 +258,7 @@ fn selects_the_producer_whose_own_and_edge_costs_are_lowest() {
     assert_eq!(solved.edges[0].1, edge(&physical, 1, 2));
     assert_eq!(solved.outputs[0].candidate, PhysicalCandidateId(2));
 
-    let plan = plan_of(&physical, &solved, &outputs(&physical)).unwrap();
+    let plan = plan_of(&physical, &solved, &output_groups(&physical)).unwrap();
     assert_eq!(plan.roots, vec![1]);
     assert_eq!(plan.edges.len(), 1);
     assert_eq!((plan.edges[0].producer, plan.edges[0].consumer), (0, 1));
@@ -342,7 +356,7 @@ fn a_result_that_is_not_materialized_runs_once_per_context_that_reads_it() {
         .map(|execution| execution.context)
         .collect();
     assert_ne!(scan_contexts[0], scan_contexts[1]);
-    let plan = plan_of(&physical, &solved, &outputs(&physical)).unwrap();
+    let plan = plan_of(&physical, &solved, &output_groups(&physical)).unwrap();
     assert_eq!(plan.nodes.len(), 4);
     assert_eq!(contexts.executions().len(), 6);
 }
@@ -384,7 +398,7 @@ fn a_materialized_chain_runs_once_and_retains_what_its_consumers_read_back() {
         &[every(10_000), every(20_000)],
         &[1.0, 1.0, 1.0, 1.0],
         &[],
-        &[(1, 1e-6)],
+        &[(1, 1e-3)],
     );
     let solved = solved.unwrap();
     assert_eq!(candidates(&solved), vec![0, 1, 2, 3]);
@@ -392,7 +406,7 @@ fn a_materialized_chain_runs_once_and_retains_what_its_consumers_read_back() {
         solved.retention_ms.get(&PhysicalCandidateId(1)),
         Some(&300_000)
     );
-    let plan = plan_of(&physical, &solved, &outputs(&physical)).unwrap();
+    let plan = plan_of(&physical, &solved, &output_groups(&physical)).unwrap();
     let chain_node = plan
         .nodes
         .iter()
@@ -440,7 +454,7 @@ fn acyclicity_forbids_two_groups_reading_each_other() {
         selected == vec![0, 1, 4] || selected == vec![0, 2, 3],
         "{selected:?}"
     );
-    plan_of(&physical, &solved, &outputs(&physical)).unwrap();
+    plan_of(&physical, &solved, &output_groups(&physical)).unwrap();
 }
 
 /// x08's shape: `max by (job)(count_over_time(m[1m]))`. Path A (scan and
@@ -490,6 +504,12 @@ fn a_candidate_dearer_than_a_feasible_plan_does_not_hide_a_cheaper_plan() {
         2_553_517.822_748_626_6,
     ];
     let (solved, _) = solve(&physical, &every_10s(1), &w, &[], &[]);
+    assert_eq!(candidates(&solved.unwrap()), vec![3, 4, 5, 6, 7, 8]);
+    // The unused candidate also retains rows at 2.55e6/s per second
+    // retained (z05's unused UnivMon chain): it has no h_v once its
+    // executions are left out, so its retention cost does not scale the
+    // objective either.
+    let (solved, _) = solve(&physical, &every_10s(1), &w, &[], &[(9, w[9])]);
     assert_eq!(candidates(&solved.unwrap()), vec![3, 4, 5, 6, 7, 8]);
 }
 
@@ -564,4 +584,85 @@ fn a_query_reads_its_exact_only_groups_through_exact_candidates_only() {
             "{outputs:?}"
         );
     }
+}
+
+/// x07's shape: `quantile_over_time(0.9, m[5m])` read by Q0 every 10 s,
+/// whose only paths read the KLL state (its exact quantile cannot be
+/// costed), and by Q1 every 30 s, which may read every group only exactly.
+/// The greedy bound leaves out of each query's trees only what that query
+/// must not read, so it finds a plan (Q0 through the state, Q1 through the
+/// exact quantile) and leaves out an unused scan costing 1e6/s; leaving
+/// out of every query's trees what some query must not read found none.
+#[test]
+fn the_bound_leaves_out_of_each_query_only_what_it_must_not_read() {
+    let mut memo = empty_memo();
+    let m = scan(&mut memo);
+    let window = range(&mut memo, 300, m);
+    let quantile = quantile_over_time_readouts(&mut memo, window, 0.9, &[SketchAlgorithm::Kll]);
+    let state = quantile.by_algorithm[0].state;
+    query(&mut memo, quantile.result, None);
+    query(&mut memo, quantile.result, None);
+    let mut candidates: Vec<(CandidateForMemoGroupId, Lifetime)> = (0..memo.groups().len())
+        .map(|group| MemoGroupId(group as u32))
+        .flat_map(|group| {
+            let count = match group == state {
+                true => 1,
+                false => memo.groups()[group.0 as usize].candidates.len(),
+            };
+            (0..count).map(move |index_in_group| {
+                (
+                    CandidateForMemoGroupId {
+                        group,
+                        index_in_group,
+                    },
+                    ONE_EVALUATION,
+                )
+            })
+        })
+        .collect();
+    let exact_quantile = candidates
+        .iter()
+        .position(|&(candidate, _)| candidate == own_candidate(quantile.result))
+        .unwrap();
+    let unused_scan = candidates.len();
+    candidates.push((own_candidate(m), NONE));
+    let w: Vec<f64> = (0..candidates.len())
+        .map(|v| match v {
+            _ if v == unused_scan => 1e6,
+            _ if v == exact_quantile => 100.0,
+            _ => 1.0,
+        })
+        .collect();
+    let mut physical = physical(memo, &candidates);
+    physical.logical_candidates.exact_only_groups_of_query = vec![
+        BTreeSet::new(),
+        (0..physical.logical_candidates.memo.groups().len())
+            .map(|group| MemoGroupId(group as u32))
+            .collect(),
+    ];
+    let entries = [every(10_000), every(30_000)];
+    let (mut selectable, mut costs) = selection_inputs(&physical, &entries, &w, &[], &[]);
+    let q0_context = selectable.executions()[selectable.answering[0].1[0]].context;
+    for (index, execution) in selectable.executions().iter().enumerate() {
+        if execution.candidate.0 == exact_quantile && execution.context == q0_context {
+            costs.per_execution[index] = Err("not costable".into());
+        }
+    }
+    selectable.retain_answering(|_, index, _| costs.per_execution[index].is_ok());
+    let inputs = SelectionInputs {
+        physical: &physical,
+        entries: &entries,
+        selectable: &selectable,
+        costs: &costs,
+    };
+    let left_out = dearer_than_a_feasible_plan(&inputs);
+    let unused: Vec<bool> = selectable
+        .executions()
+        .iter()
+        .zip(&left_out)
+        .filter(|(execution, _)| execution.candidate.0 == unused_scan)
+        .map(|(_, &left_out)| left_out)
+        .collect();
+    assert_eq!(unused, vec![true, true]);
+    assert!(solve_selection(&inputs).is_ok());
 }

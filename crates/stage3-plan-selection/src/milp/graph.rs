@@ -8,7 +8,7 @@ use super::model::SelectionInputs;
 
 /// Each execution's strongly connected component of the selectable edges
 /// (those [`crate::cost::ExecutionCosts::per_edge`] costs), computed once
-/// per model, by position in `ExecutionContexts::executions`.
+/// per model, by position in `SelectableExecutions::executions`.
 pub(crate) struct Components {
     /// Each execution's component number.
     pub(crate) of: Vec<usize>,
@@ -19,17 +19,15 @@ pub(crate) struct Components {
 
 impl Components {
     pub(crate) fn of(inputs: &SelectionInputs<'_>) -> Self {
-        let contexts = inputs.contexts;
+        let selectable = inputs.selectable;
         let of = strongly_connected_components(
-            contexts.executions().len(),
-            contexts
+            selectable.executions().len(),
+            selectable
                 .edges()
                 .iter()
                 .zip(&inputs.costs.per_edge)
                 .filter(|(_, cost)| cost.is_some())
-                .map(|(&(consumer, _, producer), _)| {
-                    (contexts.index_of(producer), contexts.index_of(consumer))
-                }),
+                .map(|(&(consumer, _, producer), _)| (producer, consumer)),
         );
         let mut count: HashMap<usize, usize> = HashMap::new();
         for &component in &of {
