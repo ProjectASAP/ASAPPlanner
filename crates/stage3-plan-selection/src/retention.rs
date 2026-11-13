@@ -13,9 +13,10 @@ use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, Physic
 use asap_types::workload::QueryWorkloadEntry;
 
 /// $\operatorname{need}_{\kappa,u,c,i}$: how far back from the evaluation
-/// time `edge`'s producer $u$ must keep its rows for its consumer $c$
-/// ([`retention_need_ms`] with $c$ $u$'s only reader, and every candidate
-/// that may read $c$ above it); `None` when read unbounded.
+/// time `edge`'s producer $u$ must keep its rows for its consumer $c$, with
+/// $c$ $u$'s only reader and every candidate that may read $c$ above it
+/// ([`read_back`]), at each reader the longest range-evaluation span of
+/// the queries reaching it; `None` when read unbounded.
 ///
 /// Example: `TimeRange(5m)` over a chain of 10 s windows, read by a range
 /// query with a 1 h span: 3,900,000 ms.
@@ -24,57 +25,8 @@ pub(crate) fn edge_retention_need_ms(
     entries: &[QueryWorkloadEntry],
     edge: PhysicalEdgeId,
 ) -> Option<u64> {
-    let producer = physical.edge(edge).producer_candidate_id;
-    retention_need_ms(physical, entries, producer, readers_through(physical, edge))
-}
-
-/// How far back one execution of the query-time `Scan` that is `edge`'s
-/// producer reads for its consumer ([`scan_read_ms`] with that consumer
-/// its only reader); `None` when read whole.
-pub(crate) fn edge_scan_read_ms(
-    physical: &PhysicalASAPMemoCandidates,
-    edge: PhysicalEdgeId,
-) -> Option<u64> {
-    let producer = physical.edge(edge).producer_candidate_id;
-    scan_read_ms(physical, producer, readers_through(physical, edge))
-}
-
-/// How far back a query reads the output it reads directly: its
-/// range-evaluation span (0 without one).
-pub(crate) fn output_retention_need_ms(entry: &QueryWorkloadEntry) -> u64 {
-    entry.range_evaluation.map_or(0, |range| range.span_ms)
-}
-
-/// The readers of each candidate when `edge`'s producer is read over
-/// `edge` only: its consumer, and above it every candidate that may read
-/// one (its admissible edges out).
-fn readers_through(
-    physical: &PhysicalASAPMemoCandidates,
-    edge: PhysicalEdgeId,
-) -> impl Fn(PhysicalCandidateId) -> Vec<PhysicalCandidateId> + '_ {
-    let edge = physical.edge(edge);
-    move |v| match v == edge.producer_candidate_id {
-        true => vec![edge.consumer_candidate_id],
-        false => physical
-            .admissible_edges_out_of(v)
-            .iter()
-            .map(|&out| physical.edge(out).consumer_candidate_id)
-            .collect(),
-    }
-}
-
-/// How far back from the evaluation time `producer`'s rows must be kept
-/// for its readers (`readers_of`, the candidates that may read it):
-/// [`asap_cost::read_back_ms`] with, at each reader, the longest
-/// range-evaluation span of the queries reaching it.
-fn retention_need_ms<R: IntoIterator<Item = PhysicalCandidateId>>(
-    physical: &PhysicalASAPMemoCandidates,
-    entries: &[QueryWorkloadEntry],
-    producer: PhysicalCandidateId,
-    readers_of: impl Fn(PhysicalCandidateId) -> R,
-) -> Option<u64> {
     let memo = &physical.logical_candidates.memo;
-    let span_ms = |v: PhysicalCandidateId| {
+    read_back(physical, edge, |v| {
         let group = physical.physical_candidates[v.0].logical_candidate_id.group;
         memo.groups()[group.0 as usize]
             .reached_by_queries()
@@ -83,35 +35,50 @@ fn retention_need_ms<R: IntoIterator<Item = PhysicalCandidateId>>(
             .map(|range| range.span_ms)
             .max()
             .unwrap_or(0)
-    };
-    read_back(physical, producer, readers_of, span_ms)
+    })
 }
 
-/// How far back from the evaluation time one execution of the query-time
-/// `Scan` `producer` reads, for its readers (`readers_of`):
-/// [`asap_cost::read_back_ms`] without a range-evaluation span.
-fn scan_read_ms<R: IntoIterator<Item = PhysicalCandidateId>>(
+/// How far back one execution of the query-time `Scan` that is `edge`'s
+/// producer reads for its consumer ([`read_back`] without a
+/// range-evaluation span); `None` when read whole.
+pub(crate) fn edge_scan_read_ms(
     physical: &PhysicalASAPMemoCandidates,
-    producer: PhysicalCandidateId,
-    readers_of: impl Fn(PhysicalCandidateId) -> R,
+    edge: PhysicalEdgeId,
 ) -> Option<u64> {
-    read_back(physical, producer, readers_of, |_| 0)
+    read_back(physical, edge, |_| 0)
 }
 
-/// [`asap_cost::read_back_ms`] over candidates, each read as its operator
-/// at its timing reads ([`TimeIndexedRead::of`]).
-fn read_back<R: IntoIterator<Item = PhysicalCandidateId>>(
+/// How far back a query reads the output it reads directly: its
+/// range-evaluation span (0 without one).
+pub(crate) fn output_retention_need_ms(entry: &QueryWorkloadEntry) -> u64 {
+    entry.range_evaluation.map_or(0, |range| range.span_ms)
+}
+
+/// [`asap_cost::read_back_ms`] of `edge`'s producer over candidates, read
+/// by `edge`'s consumer only and above it by every candidate that may read
+/// one (its admissible edges out), each read as its operator at its timing
+/// reads ([`TimeIndexedRead::of`]), with `span_ms` at each reader.
+fn read_back(
     physical: &PhysicalASAPMemoCandidates,
-    producer: PhysicalCandidateId,
-    readers_of: impl Fn(PhysicalCandidateId) -> R,
+    edge: PhysicalEdgeId,
     span_ms: impl Fn(PhysicalCandidateId) -> u64,
 ) -> Option<u64> {
     let memo = &physical.logical_candidates.memo;
+    let edge = physical.edge(edge);
+    let producer = edge.producer_candidate_id;
     let operator_of = |v: PhysicalCandidateId| {
         &memo
             .candidate(physical.physical_candidates[v.0].logical_candidate_id)
             .expression
             .operator
+    };
+    let readers_of = |v: PhysicalCandidateId| match v == producer {
+        true => vec![edge.consumer_candidate_id],
+        false => physical
+            .admissible_edges_out_of(v)
+            .iter()
+            .map(|&out| physical.edge(out).consumer_candidate_id)
+            .collect(),
     };
     asap_cost::read_back_ms(
         producer,
