@@ -6,6 +6,10 @@
 use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_planner::{DeploymentCapabilities, PlanningModels};
+use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::NonASAPOp;
+use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use asap_types::stages::Lifetime;
 use asap_types::workload::PlanningWorkload;
 
 /// PromQL `queries`, each `(query, interval_ms, accuracy JSON)`, over the
@@ -36,6 +40,16 @@ fn objective_and_plan_cost(
     settings: &CostInputs,
     raw_data_retained: bool,
 ) -> (f64, f64) {
+    selected_plan_objective_and_plan_cost(workload, settings, raw_data_retained).1
+}
+
+/// The plan Stage 3 selects for `workload` under `settings`, with raw data
+/// kept or not, with the MILP's optimum and its `plan_cost`.
+fn selected_plan_objective_and_plan_cost(
+    workload: &PlanningWorkload,
+    settings: &CostInputs,
+    raw_data_retained: bool,
+) -> (PhysicalASAPDAG, (f64, f64)) {
     let capabilities = DeploymentCapabilities {
         raw_data_retained,
         ..Default::default()
@@ -50,8 +64,11 @@ fn objective_and_plan_cost(
     let (plan, selection) = run.run.selection.as_ref().expect("a plan is selected");
     let (cost, _) = asap_cost::plan_cost(plan, &entries, &data, settings).unwrap();
     (
-        selection.selected_plan_cost_per_second,
-        cost.cost_per_second.expect("cost model 1"),
+        plan.clone(),
+        (
+            selection.selected_plan_cost_per_second,
+            cost.cost_per_second.expect("cost model 1"),
+        ),
     )
 }
 
@@ -112,5 +129,54 @@ fn the_objective_includes_request_overhead_and_charges_raw_data_on_disk_once_per
     ];
     for (name, w) in &workloads {
         assert_equal(name, objective_and_plan_cost(w, &settings, true));
+    }
+}
+
+/// Offset windows, no raw data kept: `sum_over_time(m[5m] offset 90s)`
+/// every minute, and `sum_over_time(m[1m] offset 1h)` every hour with
+/// `sum_over_time(m[1m])` every 10 s. An ingestion-time `TimeShift` view
+/// over the arriving rows keeps the rows its retention and its offset
+/// cover (390 s and 61 min of rows), not one second of them, so it is
+/// dearer than the chain plans and is not selected; the selected plan
+/// installs, and the objective is its `plan_cost`.
+#[test]
+fn offset_windows_without_raw_data_select_installable_plans_costed_for_their_retention() {
+    let workloads = [
+        (
+            "offset 90s",
+            workload(&[("sum_over_time(m[5m] offset 90s)", 60_000, "")]),
+        ),
+        (
+            "offset 1h every hour",
+            workload(&[
+                ("sum_over_time(m[1m] offset 1h)", 3_600_000, ""),
+                ("sum_over_time(m[1m])", 10_000, ""),
+            ]),
+        ),
+    ];
+    for (name, w) in &workloads {
+        let (plan, costs) = selected_plan_objective_and_plan_cost(w, &CostInputs::default(), false);
+        assert_equal(name, costs);
+        let ingestion_time_shift_views: Vec<_> = plan
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.output_state.timing == ExecutionTiming::IngestionTime
+                    && matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
+                    && matches!(
+                        node.payload,
+                        PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::TimeShift { .. })
+                    )
+            })
+            .map(|node| node.id)
+            .collect();
+        assert!(
+            ingestion_time_shift_views.is_empty(),
+            "{name}: an ingestion-time TimeShift view is selected: {ingestion_time_shift_views:?}"
+        );
+        let entries: Vec<_> = w.query_workload.entries().collect();
+        asap_planner::installable_plan_of(plan, &entries).unwrap_or_else(|error| {
+            panic!("{name}: the selected plan does not install: {error:?}")
+        });
     }
 }

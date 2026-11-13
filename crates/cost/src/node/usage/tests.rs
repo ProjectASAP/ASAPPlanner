@@ -196,3 +196,58 @@ fn a_query_time_scan_reads_what_its_consumers_read_and_keeps_its_retention() {
     let (_, kept_bytes) = usage.raw_scan.expect("a query-time scan keeps raw data");
     assert_eq!(kept_bytes, usage.output.bytes * 3_601);
 }
+
+/// An ingestion-time view of raw rows with no window below it (a
+/// `TimeShift` by 90 s over the arriving rows) keeps what its
+/// `retention_ms` and its offset cover: one second of rows per second, and
+/// the second being built. Over 1,000 rows per second of 64 bytes, a 300 s
+/// retention keeps 64,000 × 391 bytes, not one second's 64,000 × 2; a
+/// 600 s one keeps 64,000 × 691.
+#[test]
+fn an_ingestion_time_view_of_raw_rows_keeps_the_rows_its_retention_covers() {
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let scan = node(Payload::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries { metric: "m".into() },
+        predicates: vec![],
+        schema: Schema::default(),
+    }));
+    let one_second_of_rows = ProducerOutput {
+        payload: &scan.payload,
+        output_schema: &scan.output_schema,
+        output: EdgeStatistics {
+            rows: 1_000,
+            bytes: 64_000,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::None,
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 1,
+    };
+    let kept_bytes = |retention_ms: u64| {
+        let shift = PhysicalASAPDAGNode {
+            output_state: ExecutionDataState::INGESTION_ROWS,
+            lifetime: Lifetime::AcrossEvaluations(StorageMedium::Memory),
+            retention_ms: Some(retention_ms),
+            ..node(Payload::NonASAP(NonASAPOp::TimeShift {
+                shift: asap_types::ir::operator::arguments::TimeShift {
+                    offset_ms: 90_000,
+                    at: None,
+                },
+                child: 0,
+            }))
+        };
+        node_resource_usage_and_cost(
+            &shift,
+            std::slice::from_ref(&one_second_of_rows),
+            (1, 1.0),
+            None,
+            &data,
+            &settings,
+        )
+        .unwrap()
+        .peak_memory_bytes
+    };
+    assert_eq!(kept_bytes(300_000), 64_000 * 391);
+    assert_eq!(kept_bytes(600_000), 64_000 * 691);
+}

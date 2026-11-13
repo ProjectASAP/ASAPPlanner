@@ -235,8 +235,10 @@ pub fn maintained_window_ms<'o, N: Copy + Ord, C: 'o>(
 /// most offset + range its consumers read ([`read_back_ms`] without a span;
 /// `None`: it reads what it retains). A materialized node keeps what its
 /// `retention_ms` ($h_v$) covers: a tumbling-window chain its windows in
-/// it, a query-time `Scan` its raw rows in it. The formulas' CPU is scaled
-/// by `settings.frozen_calibration_factor` (1 when unset).
+/// it, a query-time `Scan` its raw rows in it, any other view materialized
+/// at ingestion time one output per refresh in it (one second of rows
+/// when it maintains no window; a `TimeShift`'s offset more). The formulas' CPU is scaled by
+/// `settings.frozen_calibration_factor` (1 when unset).
 ///
 /// [`executions_per_second`]: crate::plan::execution_demand::executions_per_second
 pub fn node_resource_usage_and_cost<'a>(
@@ -923,8 +925,42 @@ pub fn node_resource_usage_and_cost<'a>(
         (true, Lifetime::AcrossEvaluations(medium), Payload::NonASAP(NonASAPOp::Scan { .. })) => {
             (edge(raw_retained_rows.unwrap_or(out.rows))?.bytes, medium)
         }
-        // A whole state materialized across evaluations: it and the one being built.
-        (_, Lifetime::AcrossEvaluations(medium), _) => (
+        // Any other view materialized at ingestion time: the outputs its
+        // `retention_ms` covers, one per refresh (per window it maintains;
+        // per second of arriving rows without one), and the one being
+        // built. A `TimeShift` by an offset holds each output that much
+        // longer before its readers read it: over the arriving rows, the
+        // rows of its retention plus its offset, not one second of them.
+        (true, Lifetime::AcrossEvaluations(medium), _) => {
+            let refresh_interval_ms = window_ms.unwrap_or(1_000).max(1);
+            let shift_offset_ms = match &node.payload {
+                Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_none() => {
+                    u64::try_from(shift.offset_ms).unwrap_or(0)
+                }
+                _ => 0,
+            };
+            let retained_output_count = node
+                .retention_ms
+                .map_or(1, |retention_ms| {
+                    retention_ms
+                        .saturating_add(shift_offset_ms)
+                        .div_ceil(refresh_interval_ms)
+                })
+                .max(1);
+            (
+                state
+                    .checked_mul(
+                        retained_output_count
+                            .checked_add(1)
+                            .ok_or(AnalyticalCostError::Overflow)?,
+                    )
+                    .ok_or(AnalyticalCostError::Overflow)?,
+                medium,
+            )
+        }
+        // A whole state materialized across evaluations at query time: it
+        // and the one being built.
+        (false, Lifetime::AcrossEvaluations(medium), _) => (
             state.checked_mul(2).ok_or(AnalyticalCostError::Overflow)?,
             medium,
         ),
