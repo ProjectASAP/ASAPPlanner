@@ -86,6 +86,12 @@ impl PhysicalProperties {
     pub fn is_materialized(&self) -> bool {
         self.lifetime != Lifetime::None
     }
+
+    /// Whether $\ell_v$ = `AcrossEvaluations`: its result is kept from one
+    /// evaluation to the next. Derived, not stored.
+    pub fn is_across_evaluations(&self) -> bool {
+        matches!(self.lifetime, Lifetime::AcrossEvaluations(_))
+    }
 }
 
 #[cfg(test)]
