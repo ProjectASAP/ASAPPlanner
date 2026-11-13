@@ -34,7 +34,7 @@ use asap_cost::{
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
+use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload,
 };
@@ -313,25 +313,19 @@ fn cost_node<'a>(
     .map_err(|error| error.to_string())?;
     let window_ms = match node.output_state.timing {
         ExecutionTiming::QueryTime => scan_read_ms,
-        // A chain maintains its own window; any other grouping the first
-        // range below its group.
-        ExecutionTiming::IngestionTime => match &node.payload {
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }) => Some(*tumbling_window_width_ms),
-            _ => maintained_window_ms(
-                group,
-                |group: MemoGroupId| &memo.groups()[group.0 as usize].expression,
-                |group| {
-                    memo.groups()[group.0 as usize]
-                        .expression
-                        .children()
-                        .first()
-                        .map(|g| **g)
-                },
-            ),
-        },
+        // A chain's group computes the chain (Pass 2 adds chain candidates
+        // only to it), so the group's window is the chain's.
+        ExecutionTiming::IngestionTime => maintained_window_ms(
+            group,
+            |group: MemoGroupId| &memo.groups()[group.0 as usize].expression,
+            |group| {
+                memo.groups()[group.0 as usize]
+                    .expression
+                    .children()
+                    .first()
+                    .map(|g| **g)
+            },
+        ),
     };
     node_resource_usage_and_cost(node, inputs, (1, per_second), window_ms, data, cost_inputs)
         .map_err(|error| error.to_string())

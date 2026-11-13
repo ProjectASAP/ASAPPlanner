@@ -81,9 +81,9 @@ impl QueryLatency {
 /// rows. A materialized node's state is counted in byte-seconds per
 /// second; a node materialized across evaluations keeps what its
 /// `retention_ms` ($h_v$) covers ([`node_resource_usage_and_cost`]).
-/// `entries[q]` says how often query `q`
-/// runs and how many steps each run evaluates; the formulas are scaled by
-/// `settings.frozen_calibration_factor` (1 when unset).
+/// `entries[q]` says how often query `q` runs and how many steps each run
+/// evaluates; the formulas are scaled by `settings.frozen_calibration_factor`
+/// (1 when unset).
 pub fn plan_cost(
     dag: &PhysicalASAPDAG,
     entries: &[QueryWorkloadEntry],

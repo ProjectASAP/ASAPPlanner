@@ -12,13 +12,11 @@
 //! greedy plan bounds the optimum by about 0.0088/s, so the chain is left
 //! out and the largest coefficient left is about 0.006/s.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
-use asap_types::ir::operator::Source;
-use asap_types::ir::properties::ExecutionTiming;
-use asap_types::stages::{Lifetime, PhysicalCandidateId};
+use asap_types::stages::PhysicalCandidateId;
 
-use super::model::SelectionInputs;
+use super::model::{is_unmaterialized_query_time, plan_cost_per_second, SelectionInputs};
 
 /// How many times the greedy plan is rebuilt without a candidate that
 /// made it infeasible before giving up on a bound.
@@ -88,10 +86,7 @@ fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
     let inputs_of: Vec<usize> = (0..count)
         .map(|v| physical.input_count(PhysicalCandidateId(v)))
         .collect();
-    let unshared = |v: usize| {
-        let properties = physical.physical_candidates[v].physical_properties;
-        properties.lifetime() == Lifetime::None && properties.timing() == ExecutionTiming::QueryTime
-    };
+    let unshared = |v: usize| is_unmaterialized_query_time(inputs, v);
     let mut excluded = vec![false; count];
     for _ in 0..REPAIRS {
         let (tree_cost, chosen) = cheapest_trees(inputs, &into, &inputs_of, &excluded);
@@ -126,20 +121,11 @@ fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
             excluded[shared] = true;
             continue;
         }
-        let mut raw_data_on_disk: BTreeMap<&Source, f64> = BTreeMap::new();
-        for &v in &plan.candidates {
-            if let Some((source, cost)) = &inputs.costs.raw_data_on_disk[v] {
-                let kept = raw_data_on_disk.entry(source).or_default();
-                *kept = kept.max(*cost);
-            }
-        }
-        let cost = plan
-            .candidates
-            .iter()
-            .filter_map(|&v| inputs.costs.candidate_cost_per_second[v].as_ref().ok())
-            .sum::<f64>()
-            + plan.edges.iter().map(|&(_, cost)| cost).sum::<f64>()
-            + raw_data_on_disk.values().sum::<f64>();
+        let cost = plan_cost_per_second(
+            inputs,
+            plan.candidates.iter().copied(),
+            plan.edges.iter().map(|&(_, cost)| cost),
+        );
         return cost.is_finite().then_some(cost);
     }
     None

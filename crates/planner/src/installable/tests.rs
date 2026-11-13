@@ -131,15 +131,16 @@ fn chain_plan(
     let scan_id = producer_of(&dag, chain_id);
     let at_ingestion = [Some(chain_id), shift_id, Some(scan_id)];
     for node in &mut dag.nodes {
-        let (retention_ms, coverage) = match node.id {
-            id if id == chain_id => (chain_retention_ms, "sum of latency by job"),
-            id if Some(id) == shift_id => (
+        // The views: the chain, and the shift when it is one.
+        let view = match node.id {
+            id if id == chain_id => Some((chain_retention_ms, "sum of latency by job")),
+            id if Some(id) == shift_id => Some((
                 shift_view.map(|(_, retention_ms)| retention_ms),
                 "sum of latency by job, shifted",
-            ),
-            _ => (None, ""),
+            )),
+            _ => None,
         };
-        if !coverage.is_empty() {
+        if let Some((retention_ms, coverage)) = view {
             node.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
             node.retention_ms = retention_ms;
             node.view_coverage = Some(ViewCoverage::new(coverage.into(), vec![]));

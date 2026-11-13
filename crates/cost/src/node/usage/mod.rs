@@ -897,15 +897,14 @@ pub fn node_resource_usage_and_cost<'a>(
             Lifetime::AcrossEvaluations(medium),
             Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
         ) => {
-            let retained = retained_output_count;
             let between = state
-                .checked_mul(retained - 1)
+                .checked_mul(retained_output_count - 1)
                 .ok_or(AnalyticalCostError::Overflow)?;
             match medium {
                 StorageMedium::Memory => {
                     average_memory_bytes = between as f64;
                     peak_memory_bytes = state
-                        .checked_mul(retained)
+                        .checked_mul(retained_output_count)
                         .ok_or(AnalyticalCostError::Overflow)?;
                 }
                 StorageMedium::Disk => disk_bytes = between,

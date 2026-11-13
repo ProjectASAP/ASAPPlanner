@@ -147,8 +147,8 @@ fn input_satisfaction_constraints(
     constraints
 }
 
-/// (B) $y_{u,c,i} \le x_u$, except for a producer with at most one
-/// consumer ([`has_at_most_one_consumer`]), whose (F) row implies it.
+/// (B) $y_{u,c,i} \le x_u$, except for an unmaterialized query-time
+/// producer ([`is_unmaterialized_query_time`]), whose (F) row implies it.
 fn producer_selection_constraints(
     inputs: &SelectionInputs<'_>,
     variables: &SelectionVariables,
@@ -158,15 +158,15 @@ fn producer_selection_constraints(
         .iter()
         .filter_map(|(&edge, &y)| {
             let producer = inputs.physical.edge(edge).producer_candidate_id;
-            (!has_at_most_one_consumer(inputs, producer.0))
+            (!is_unmaterialized_query_time(inputs, producer.0))
                 .then(|| constraint!(y <= variables.x[producer.0]))
         })
         .collect()
 }
 
 /// (C) $\sum_{v \in G_q} z_{q,v} = 1$; (D) $z_{q,v} \le x_v$, except for
-/// a candidate with at most one consumer ([`has_at_most_one_consumer`]),
-/// whose (F) row implies it.
+/// an unmaterialized query-time candidate
+/// ([`is_unmaterialized_query_time`]), whose (F) row implies it.
 fn query_coverage_constraints(
     inputs: &SelectionInputs<'_>,
     variables: &SelectionVariables,
@@ -177,7 +177,7 @@ fn query_coverage_constraints(
         constraints.push(constraint!(covered == 1));
     }
     for (&(_, v), &z) in &variables.z {
-        if !has_at_most_one_consumer(inputs, v.0) {
+        if !is_unmaterialized_query_time(inputs, v.0) {
             constraints.push(constraint!(z <= variables.x[v.0]));
         }
     }
@@ -185,14 +185,37 @@ fn query_coverage_constraints(
 }
 
 /// Whether candidate `v` is a query-time result that is not materialized
-/// ($\ell$ = None): it has at most one consumer, and its (F) row is the
+/// ($\ell$ = None), so it has at most one consumer and its (F) row is the
 /// equality $\sum_{(v,c,i)} y_{v,c,i} + \sum_q z_{q,v} = x_v$
 /// ([`use_constraints`]). With $y, z \ge 0$ that equality implies (B)
 /// $y_{v,c,i} \le x_v$ and (D) $z_{q,v} \le x_v$, so those rows are left
 /// out for it.
-fn has_at_most_one_consumer(inputs: &SelectionInputs<'_>, v: usize) -> bool {
+pub(super) fn is_unmaterialized_query_time(inputs: &SelectionInputs<'_>, v: usize) -> bool {
     let properties = inputs.physical.physical_candidates[v].physical_properties;
     properties.lifetime() == Lifetime::None && properties.timing() == ExecutionTiming::QueryTime
+}
+
+/// The cost per second of a plan of `candidates` reading over edges that
+/// cost `edge_costs` ($c_{u,c,i}$), without the request overhead every plan
+/// pays: the candidates' $w_v$, the edges' costs, and each source's raw
+/// data on disk once, at its largest selected scan.
+pub(super) fn plan_cost_per_second(
+    inputs: &SelectionInputs<'_>,
+    candidates: impl IntoIterator<Item = usize>,
+    edge_costs: impl IntoIterator<Item = f64>,
+) -> f64 {
+    let mut raw_data_on_disk: BTreeMap<&Source, f64> = BTreeMap::new();
+    let mut cost = 0.0;
+    for v in candidates {
+        if let Ok(own) = &inputs.costs.candidate_cost_per_second[v] {
+            cost += own;
+        }
+        if let Some((source, on_disk)) = &inputs.costs.raw_data_on_disk[v] {
+            let kept = raw_data_on_disk.entry(source).or_default();
+            *kept = kept.max(*on_disk);
+        }
+    }
+    cost + edge_costs.into_iter().sum::<f64>() + raw_data_on_disk.values().sum::<f64>()
 }
 
 /// (E) $t_u + 1 \le t_c + n(1 - y_{u,c,i})$, only on edges inside a strongly
@@ -234,7 +257,7 @@ fn use_constraints(
     uses_of(inputs, variables)
         .into_iter()
         .enumerate()
-        .map(|(v, used)| match has_at_most_one_consumer(inputs, v) {
+        .map(|(v, used)| match is_unmaterialized_query_time(inputs, v) {
             true => constraint!(used == variables.x[v]),
             false => constraint!(variables.x[v] <= used),
         })
@@ -418,29 +441,16 @@ pub(crate) fn solve_selection(
         other => return Err(SelectionMilpError::Solver(format!("{other:?}"))),
     };
     let chosen = |variable: Variable| columns[column_of[&variable]] > 0.5;
-    // The optimum, unscaled: the selected candidates' and edges' costs,
-    // each source's raw data on disk at its largest selected scan, and the
-    // request overhead every plan pays.
-    let mut raw_data_on_disk: BTreeMap<&Source, f64> = BTreeMap::new();
-    for (source, cost) in (0..variables.x.len())
-        .filter(|&v| chosen(variables.x[v]))
-        .filter_map(|v| inputs.costs.raw_data_on_disk[v].as_ref())
-    {
-        let kept = raw_data_on_disk.entry(source).or_default();
-        *kept = kept.max(*cost);
-    }
-    let objective_cost_per_second = (0..variables.x.len())
-        .filter(|&v| chosen(variables.x[v]))
-        .filter_map(|v| inputs.costs.candidate_cost_per_second[v].as_ref().ok())
-        .sum::<f64>()
-        + variables
+    // The optimum, unscaled, with the request overhead every plan pays.
+    let objective_cost_per_second = plan_cost_per_second(
+        inputs,
+        (0..variables.x.len()).filter(|&v| chosen(variables.x[v])),
+        variables
             .y
             .iter()
             .filter(|&(_, &y)| chosen(y))
-            .map(|(edge, _)| inputs.costs.edge_cost_change_per_second[edge])
-            .sum::<f64>()
-        + raw_data_on_disk.values().sum::<f64>()
-        + inputs.costs.request_overhead_cost_per_second;
+            .map(|(edge, _)| inputs.costs.edge_cost_change_per_second[edge]),
+    ) + inputs.costs.request_overhead_cost_per_second;
     Ok(SolvedSelection {
         objective_cost_per_second,
         candidates: (0..variables.x.len())
