@@ -467,3 +467,41 @@ fn the_objective_is_the_plan_cost_on_anchored_and_plain_queries_on_one_grid() {
         objective_and_plan_cost(&w, &CostInputs::default(), true),
     );
 }
+
+/// Example 3a of the planner-layering design doc: five one-off p99s over
+/// 1,000,000 series sampled every 15 s, over the last 5 y, 1 y, 1 y offset
+/// 1 y and 2 y, and 3 y offset 2 y, accuracy guarantees ignored. An
+/// ingestion-time view behind an offset retains one output per window it
+/// maintains, so its $\pi_v$ is one output's cost over that window: costed
+/// per second instead, $\pi_v h_v$ of a view kept for years was 6.6e12/s,
+/// its $W^{\mathrm{mat}}_v$ as negative, and the objective's scale left the
+/// solver at a plan costing 4.68e7/s instead of 2.17e4/s.
+#[test]
+fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
+    let query = |query: &str| {
+        serde_json::json!({
+            "query": query,
+            "requirements": {"accuracy": {"accuracy_metric": "rank", "max_error": 0.005, "failure_probability": 0.01, "accuracy_scope": "whole_result"}},
+            "predictability": "ad_hoc", "invocations": 1, "execute_at": 1767225600000_u64,
+        })
+    };
+    let w: PlanningWorkload = serde_json::from_value(serde_json::json!({
+        "query_workload": {"language": "promql", "query_batch": [
+            query("quantile_over_time(0.99, latency_ms[5y])"),
+            query("quantile_over_time(0.99, latency_ms[1y])"),
+            query("quantile_over_time(0.99, latency_ms[1y] offset 1y)"),
+            query("quantile_over_time(0.99, latency_ms[1y] offset 2y)"),
+            query("quantile_over_time(0.99, latency_ms[3y] offset 2y)"),
+        ]},
+        "data_workload": {
+            "arrival": {"mixed": {"rows_per_second": 1_000_000.0 / 15.0}},
+            "sources": {"latency_ms": {"series_count": 1_000_000, "sample_interval": 15_000}},
+        },
+    }))
+    .unwrap();
+    let models = PlanningModels::builtin().with_ignore_accuracy_guarantees(true);
+    let (objective, plan_cost) =
+        selected_plan_objective_and_plan_cost_with(&w, models, &CostInputs::default()).1;
+    assert_equal("one-off queries over years", (objective, plan_cost));
+    assert!(objective < 30_000.0, "objective {objective}");
+}
