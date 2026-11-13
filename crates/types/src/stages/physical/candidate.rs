@@ -3,6 +3,7 @@
 
 use crate::ir::properties::ExecutionTiming;
 use crate::ir::{ASAPOp, Operator};
+use crate::plan::materialized_view::RefreshWindow;
 use crate::stages::{CandidateForMemoGroupId, ExecutionContext, PhysicalASAPMemoCandidates};
 use crate::stages::{Lifetime, PhysicalProperties};
 use crate::workload::DataArrival;
@@ -50,10 +51,8 @@ impl PhysicalCandidate {
     ///
     /// `DataArrival::Unknown` counts as arriving.
     /// The times of a
-    /// `Materialized(v)` context are $v$'s own: every window end of a chain
-    /// $v$ (its width at phase 0), else its group's evaluation grid; with
-    /// neither they are not known, and no time-dependent producer delivers
-    /// on it.
+    /// `Materialized(v)` context are $v$'s own ([`Self::own_schedule`]);
+    /// when they are not known, no non-final producer delivers on it.
     pub fn delivers_on(
         &self,
         candidates: &PhysicalASAPMemoCandidates,
@@ -81,15 +80,9 @@ impl PhysicalCandidate {
                         (window.width_ms, window.phase_ms)
                     }
                     ExecutionContext::Materialized(v) => {
-                        let materialized = &candidates.physical_candidates[v.0];
-                        match materialized.chain_tumbling_window_width_ms(candidates) {
-                            Some(width_ms) => (width_ms, 0),
-                            None => match logical.evaluation_grid_of_group
-                                [materialized.logical_candidate_id.group.0 as usize]
-                            {
-                                Some(grid) => (grid.period_ms, grid.phase_ms),
-                                None => return false,
-                            },
+                        match candidates.physical_candidates[v.0].own_schedule(candidates) {
+                            Some(window) => (window.width_ms, window.phase_ms),
+                            None => return false,
                         }
                     }
                 };
@@ -105,6 +98,25 @@ impl PhysicalCandidate {
                     }
                 }
             }
+        }
+    }
+
+    /// The times it computes at when materialized across evaluations, on
+    /// its own schedule: every window end of a chain (its width at phase
+    /// 0), else its group's evaluation grid (`evaluation_grid_of_group`);
+    /// `None` when neither is known.
+    pub fn own_schedule(&self, candidates: &PhysicalASAPMemoCandidates) -> Option<RefreshWindow> {
+        match self.chain_tumbling_window_width_ms(candidates) {
+            Some(width_ms) => Some(RefreshWindow {
+                width_ms,
+                phase_ms: 0,
+            }),
+            None => candidates.logical_candidates.evaluation_grid_of_group
+                [self.logical_candidate_id.group.0 as usize]
+                .map(|grid| RefreshWindow {
+                    width_ms: grid.period_ms,
+                    phase_ms: grid.phase_ms,
+                }),
         }
     }
 
