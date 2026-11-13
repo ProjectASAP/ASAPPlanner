@@ -61,7 +61,8 @@
 //     `lifetime` and `reason`);
 //   - stage3_plan_selection (from `stage3`): the `plan` Stage 3 built (a
 //     `PhysicalASAPDAG`) and its `Selection`: `accepted_accuracy_per_query`,
-//     `pruned_candidates`, `milp_variables`, `milp_constraints`,
+//     `pruned_candidates`, `milp_objective_cost_per_second` (the selected
+//     plan's cost per second), `milp_variables`, `milp_constraints`,
 //     `milp_construction_ms` and `milp_solve_ms`; `error` when no plan was
 //     selected.
 //     `materialized_views` are the plan's materialized views as
@@ -619,6 +620,7 @@ fn selection_json(selection: &Result<(PhysicalASAPDAG, Selection), SelectionErro
             .iter()
             .map(|p| json!({ "candidate": format!("{:?}", p.candidate), "reason": format!("{:?}", p.reason) }))
             .collect::<Vec<_>>(),
+        "milp_objective_cost_per_second": selection.selected_plan_cost_per_second,
         "milp_variables": selection.milp_variable_count,
         "milp_constraints": selection.milp_constraint_count,
         "milp_construction_ms": selection.milp_construction_ms,

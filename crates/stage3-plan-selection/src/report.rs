@@ -153,8 +153,9 @@ pub struct Selection {
     /// under cost model 1, which `asap_cost::plan_cost` of the plan
     /// reports too.
     pub selected_plan_cost_per_second: f64,
-    /// The selection MILP's size: its variables and its constraint rows.
+    /// The selection MILP's variables (columns).
     pub milp_variable_count: usize,
+    /// The selection MILP's constraint rows.
     pub milp_constraint_count: usize,
     /// How long building and solving the selection MILP took.
     pub milp_construction_ms: u64,
