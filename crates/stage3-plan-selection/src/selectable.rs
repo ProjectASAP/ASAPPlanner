@@ -72,9 +72,10 @@ pub(crate) struct SelectableExecutions {
     contexts: Vec<ExecutionContext>,
     /// Per context, by [`ExecutionContextId`]: for the inputs of a
     /// `TimeShift` anchored with `@ end()` or `@ start()`, the anchor and
-    /// the evaluation grid of the queries whose requests they run for;
-    /// `None` for any other context.
-    request_anchor_of_context: Vec<Option<(AtModifier, EvaluationGrid)>>,
+    /// the queries whose requests they run for (those on the shift's
+    /// evaluation grid that reach it), ascending; `None` for any other
+    /// context.
+    request_anchor_of_context: Vec<Option<(AtModifier, Vec<QueryId>)>>,
     /// Every execution reached from a query output, ascending.
     executions: Vec<Execution>,
     /// Every $y_{\kappa,u,c,i}$ as (consumer execution, edge $(u,c,i)$,
@@ -191,7 +192,7 @@ impl SelectableExecutions {
     fn context_id(
         &mut self,
         context: ExecutionContext,
-        request_anchor: Option<(AtModifier, EvaluationGrid)>,
+        request_anchor: Option<(AtModifier, Vec<QueryId>)>,
     ) -> ExecutionContextId {
         match self
             .contexts
@@ -277,14 +278,19 @@ impl SelectableExecutions {
         else {
             return consumer.context;
         };
-        let period_ms = memo.groups()[group.0 as usize]
+        let queries: Vec<QueryId> = memo.groups()[group.0 as usize]
             .reached_by_queries()
             .iter()
-            .filter_map(|&query| entries.get(query))
-            .filter(|entry| evaluation_grid(entry) == grid)
-            .fold(0, |period_ms, entry| {
-                greatest_common_divisor(period_ms, request_time_grid_ms(entry, at))
-            });
+            .filter(|&&query| {
+                entries
+                    .get(query)
+                    .is_some_and(|entry| evaluation_grid(entry) == grid)
+            })
+            .map(|&query| QueryId(query))
+            .collect();
+        let period_ms = queries.iter().fold(0, |period_ms, query| {
+            greatest_common_divisor(period_ms, request_time_grid_ms(&entries[query.0], at))
+        });
         match period_ms {
             0 => consumer.context,
             period_ms => self.context_id(
@@ -294,7 +300,7 @@ impl SelectableExecutions {
                         phase_ms: 0,
                     },
                 },
-                Some((at, grid)),
+                Some((at, queries)),
             ),
         }
     }
@@ -318,13 +324,15 @@ impl SelectableExecutions {
     }
 
     /// For the context with id `id` that runs the inputs of a `TimeShift`
-    /// anchored with `@ end()` or `@ start()`: the anchor, and the
-    /// evaluation grid of the queries whose requests it runs for.
+    /// anchored with `@ end()` or `@ start()`: the anchor, and the queries
+    /// whose requests it runs for.
     pub(crate) fn request_anchor(
         &self,
         id: ExecutionContextId,
-    ) -> Option<(AtModifier, EvaluationGrid)> {
+    ) -> Option<(AtModifier, &[QueryId])> {
         self.request_anchor_of_context[id.0]
+            .as_ref()
+            .map(|(at, queries)| (*at, queries.as_slice()))
     }
 
     /// Every execution reached from a query output, ascending.

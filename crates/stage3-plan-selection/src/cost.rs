@@ -473,7 +473,8 @@ fn is_query_time_scan(physical: &PhysicalASAPMemoCandidates, v: PhysicalCandidat
 /// the queries on its grid that reach the execution's group
 /// ([`context_executions_per_second`], which `plan_cost` uses too): at
 /// their evaluations, or, for the inputs of a `TimeShift` anchored with
-/// `@`, once per request of the queries on the anchored evaluation grid;
+/// `@`, once per request of the queries on the shift's grid that reach the
+/// shift;
 /// in `Materialized(m)`, as often as $m$ runs
 /// ([`asap_cost::plan::execution_demand::executions_per_second`]); in the
 /// ingestion pipeline, once per second of arriving rows.
@@ -496,18 +497,19 @@ pub(crate) fn executions_per_second(
             .filter_map(|&query| entries.get(query))
     };
     let rate = match selectable.context(execution.context) {
-        ExecutionContext::Evaluation { grid } => {
-            let (anchor, queries_grid) = match selectable.request_anchor(execution.context) {
-                Some((at, queries_grid)) => (Some(at), queries_grid),
-                None => (None, grid),
-            };
-            context_executions_per_second(
-                anchor,
-                reaching(execution.candidate)
-                    .filter(|entry| evaluation_grid(entry) == queries_grid),
+        ExecutionContext::Evaluation { grid } => match selectable.request_anchor(execution.context)
+        {
+            Some((at, queries)) => context_executions_per_second(
+                Some(at),
+                queries.iter().filter_map(|query| entries.get(query.0)),
                 non_repeating_query_horizon_seconds,
-            )
-        }
+            ),
+            None => context_executions_per_second(
+                None,
+                reaching(execution.candidate).filter(|entry| evaluation_grid(entry) == grid),
+                non_repeating_query_horizon_seconds,
+            ),
+        },
         ExecutionContext::Materialized(m) => {
             let properties = physical.physical_candidates[m.0].physical_properties;
             rate_of_materialized(

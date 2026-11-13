@@ -441,3 +441,29 @@ fn an_at_start_subtree_shares_no_evaluation_result_with_an_instant_query() {
         "{instant:?} and {at_start:?} share a node: {plan:#?}"
     );
 }
+
+/// `@ end()` and `@ start()` range queries every 300 s at 30 s steps next
+/// to the plain `sum_over_time(m[5m])` every 30 s, on the same 30 s grid:
+/// an anchored input runs once per request of the queries that reach its
+/// shift, not of every query on the grid reaching `m[5m]` (the objective
+/// was 0.2404/s for a plan `plan_cost` charged 0.1364/s).
+#[test]
+fn the_objective_is_the_plan_cost_on_anchored_and_plain_queries_on_one_grid() {
+    let w = over_m(vec![
+        requested(
+            "sum_over_time(m[5m] @ end())",
+            300_000,
+            Some((30_000, 600_000)),
+        ),
+        requested(
+            "max_over_time(m[5m] @ start())",
+            300_000,
+            Some((30_000, 600_000)),
+        ),
+        requested("sum_over_time(m[5m])", 30_000, None),
+    ]);
+    assert_equal(
+        "anchored and plain queries on one grid",
+        objective_and_plan_cost(&w, &CostInputs::default(), true),
+    );
+}
