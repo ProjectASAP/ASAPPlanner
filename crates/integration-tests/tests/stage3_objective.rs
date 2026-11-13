@@ -180,3 +180,53 @@ fn offset_windows_without_raw_data_select_installable_plans_costed_for_their_ret
         });
     }
 }
+
+/// Unit costs with a disk price like a cloud block volume's (3.1e-17 per
+/// byte-second): what keeping raw data on disk costs per second is below
+/// 1e-9, where the solver drops a constraint coefficient as zero.
+fn small_disk_costs() -> CostInputs {
+    CostInputs {
+        cost_model: CostModel::UsageOverTime(ResourceUnitCost {
+            cost_per_cpu_op: 1.1244e-14,
+            cost_per_scanned_byte: 1.1244e-15,
+            cost_per_memory_byte_second: 1.150183379650116e-15,
+            cost_per_disk_byte_second: 3.1e-17,
+            ..ResourceUnitCost::illustrative()
+        }),
+        ..CostInputs::default()
+    }
+}
+
+/// `sum_over_time(m[5m] offset 30m)` and `sum_over_time(m[5m])` every
+/// minute and `count_over_time(m[2m])` every hour, raw data kept, disk
+/// charged at 3.1e-17 per byte-second: raw data on disk costs about 2e-9
+/// per second. Its row carries the objective's scale, so the solver keeps
+/// it, and the plan selected costs less than the one selected when disk
+/// is free, costed at the disk price. With the scale on the raw-data
+/// variable's objective coefficient instead, the solver dropped the
+/// unscaled coefficients and selected that plan, 57% dearer.
+#[test]
+fn raw_data_on_disk_costing_less_than_the_solver_tolerance_still_steers_selection() {
+    let w = workload(&[
+        ("sum_over_time(m[5m] offset 30m)", 60_000, ""),
+        ("sum_over_time(m[5m])", 60_000, ""),
+        ("count_over_time(m[2m])", 3_600_000, ""),
+    ]);
+    let settings = small_disk_costs();
+    let (_, (objective, plan_cost)) = selected_plan_objective_and_plan_cost(&w, &settings, true);
+    assert_equal("small disk price", (objective, plan_cost));
+    let mut free_disk = settings.clone();
+    if let CostModel::UsageOverTime(unit_costs) = &mut free_disk.cost_model {
+        unit_costs.cost_per_disk_byte_second = 0.0;
+    }
+    let (ignoring_disk, _) = selected_plan_objective_and_plan_cost(&w, &free_disk, true);
+    let entries: Vec<_> = w.query_workload.entries().collect();
+    let data = w.data_workload.clone().unwrap();
+    let (ignoring_disk_cost, _) =
+        asap_cost::plan_cost(&ignoring_disk, &entries, &data, &settings).unwrap();
+    let ignoring_disk_cost = ignoring_disk_cost.cost_per_second.unwrap();
+    assert!(
+        plan_cost < ignoring_disk_cost * (1.0 - 1e-6),
+        "selected {plan_cost} is not cheaper than {ignoring_disk_cost}, the plan selected ignoring disk"
+    );
+}
