@@ -30,7 +30,7 @@ use asap_types::workload::QueryWorkloadEntry;
 use super::exact_only::{exact_only_constraints, exact_only_variables};
 use super::graph::Components;
 use super::retention::{least_retention_ms, retention_constraints, retention_variables};
-use super::upper_bound::dearer_than_a_feasible_plan;
+use super::upper_bound::{dearer_than_a_feasible_plan, dominated_by_one_evaluation_twin};
 use crate::cost::ExecutionCosts;
 use crate::selectable::{has_one_reader_per_context, Execution, QueryId, SelectableExecutions};
 
@@ -326,8 +326,10 @@ pub(crate) enum SelectionMilpError {
 /// y_{\kappa,u,c,i} + \sum_v \pi_v h_v + \sum_s r_s$ ($\pi_v h_v$ of a
 /// query-time scan is in $r_s$) under (A)–(F), [`use_constraints`],
 /// [`raw_data_disk_constraints`], (R) and (X), with HiGHS at gap 0 on one
-/// thread. The executions dearer than a feasible plan are left out first
-/// ([`dearer_than_a_feasible_plan`]), with the $h_v$ of a candidate whose
+/// thread. The executions dearer than a feasible plan
+/// ([`dearer_than_a_feasible_plan`]) or dominated by their `OneEvaluation`
+/// twin ([`dominated_by_one_evaluation_twin`]) are left out first, with
+/// the $h_v$ of a candidate whose
 /// executions are all left out, then the coefficients kept are scaled so
 /// the largest is 1,000 (HiGHS's tolerances are absolute).
 pub(crate) fn solve_selection(
@@ -337,8 +339,9 @@ pub(crate) fn solve_selection(
     let costs = inputs.costs;
     let kept: Vec<bool> = dearer_than_a_feasible_plan(inputs)
         .iter()
+        .zip(dominated_by_one_evaluation_twin(inputs))
         .zip(&costs.per_execution)
-        .map(|(&left_out, cost)| cost.is_ok() && !left_out)
+        .map(|((&dearer, dominated), cost)| cost.is_ok() && !dearer && !dominated)
         .collect();
     let components = Components::of(inputs);
     let mut problem = ProblemVariables::new();
