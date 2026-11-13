@@ -147,7 +147,8 @@ fn input_satisfaction_constraints(
     constraints
 }
 
-/// (B) $y_{u,c,i} \le x_u$.
+/// (B) $y_{u,c,i} \le x_u$, except for a producer with at most one
+/// consumer ([`has_at_most_one_consumer`]), whose (F) row implies it.
 fn producer_selection_constraints(
     inputs: &SelectionInputs<'_>,
     variables: &SelectionVariables,
@@ -155,14 +156,17 @@ fn producer_selection_constraints(
     variables
         .y
         .iter()
-        .map(|(&edge, &y)| {
+        .filter_map(|(&edge, &y)| {
             let producer = inputs.physical.edge(edge).producer_candidate_id;
-            constraint!(y <= variables.x[producer.0])
+            (!has_at_most_one_consumer(inputs, producer.0))
+                .then(|| constraint!(y <= variables.x[producer.0]))
         })
         .collect()
 }
 
-/// (C) $\sum_{v \in G_q} z_{q,v} = 1$; (D) $z_{q,v} \le x_v$.
+/// (C) $\sum_{v \in G_q} z_{q,v} = 1$; (D) $z_{q,v} \le x_v$, except for
+/// a candidate with at most one consumer ([`has_at_most_one_consumer`]),
+/// whose (F) row implies it.
 fn query_coverage_constraints(
     inputs: &SelectionInputs<'_>,
     variables: &SelectionVariables,
@@ -173,9 +177,22 @@ fn query_coverage_constraints(
         constraints.push(constraint!(covered == 1));
     }
     for (&(_, v), &z) in &variables.z {
-        constraints.push(constraint!(z <= variables.x[v.0]));
+        if !has_at_most_one_consumer(inputs, v.0) {
+            constraints.push(constraint!(z <= variables.x[v.0]));
+        }
     }
     constraints
+}
+
+/// Whether candidate `v` is a query-time result that is not materialized
+/// ($\ell$ = None): it has at most one consumer, and its (F) row is the
+/// equality $\sum_{(v,c,i)} y_{v,c,i} + \sum_q z_{q,v} = x_v$
+/// ([`use_constraints`]). With $y, z \ge 0$ that equality implies (B)
+/// $y_{v,c,i} \le x_v$ and (D) $z_{q,v} \le x_v$, so those rows are left
+/// out for it.
+fn has_at_most_one_consumer(inputs: &SelectionInputs<'_>, v: usize) -> bool {
+    let properties = inputs.physical.physical_candidates[v].physical_properties;
+    properties.lifetime() == Lifetime::None && properties.timing() == ExecutionTiming::QueryTime
 }
 
 /// (E) $t_u + 1 \le t_c + n(1 - y_{u,c,i})$, only on edges inside a strongly
@@ -217,24 +234,22 @@ fn use_constraints(
     uses_of(inputs, variables)
         .into_iter()
         .enumerate()
-        .map(|(v, used)| {
-            let properties = inputs.physical.physical_candidates[v].physical_properties;
-            match properties.lifetime() == Lifetime::None
-                && properties.timing() == ExecutionTiming::QueryTime
-            {
-                true => constraint!(used == variables.x[v]),
-                false => constraint!(variables.x[v] <= used),
-            }
+        .map(|(v, used)| match has_at_most_one_consumer(inputs, v) {
+            true => constraint!(used == variables.x[v]),
+            false => constraint!(variables.x[v] <= used),
         })
         .collect()
 }
 
 /// The raw data of each source is kept on disk once, for the selected scan
-/// that keeps the most: $r_s \ge d_v x_v$ for each query-time `Scan` $v$ of
-/// source $s$, $d_v$ its cost per second of the raw data it keeps.
+/// that keeps the most: $r_s \ge \mathrm{scale} \cdot d_v x_v$ for each
+/// query-time `Scan` $v$ of source $s$, $d_v$ its cost per second of the
+/// raw data it keeps. The objective's scale is in the row, so $r_s$ is the
+/// scaled cost and its objective coefficient is 1.
 fn raw_data_disk_constraints(
     inputs: &SelectionInputs<'_>,
     variables: &SelectionVariables,
+    objective_scale: f64,
 ) -> Vec<Constraint> {
     inputs
         .costs
@@ -244,7 +259,7 @@ fn raw_data_disk_constraints(
         .filter_map(|(v, on_disk)| {
             let (source, cost) = on_disk.as_ref()?;
             Some(constraint!(
-                variables.raw_data_on_disk[source] >= *cost * variables.x[v]
+                variables.raw_data_on_disk[source] >= *cost * objective_scale * variables.x[v]
             ))
         })
         .collect()
@@ -313,17 +328,6 @@ pub(crate) fn solve_selection(
     let components = Components::of(inputs);
     let mut problem = ProblemVariables::new();
     let variables = selection_variables(inputs, &left_out, &components, &mut problem);
-    let constraints: Vec<Constraint> = [
-        input_satisfaction_constraints(inputs, &variables),
-        producer_selection_constraints(inputs, &variables),
-        query_coverage_constraints(inputs, &variables),
-        acyclicity_constraints(inputs, &variables, &components),
-        use_constraints(inputs, &variables),
-        raw_data_disk_constraints(inputs, &variables),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
     // Scaled by the largest coefficient of a candidate the bound keeps.
     let kept = |v: &usize| !left_out[*v];
     let largest = (0..left_out.len())
@@ -346,6 +350,17 @@ pub(crate) fn solve_selection(
         true => 1_000.0 / largest,
         false => 1.0,
     };
+    let constraints: Vec<Constraint> = [
+        input_satisfaction_constraints(inputs, &variables),
+        producer_selection_constraints(inputs, &variables),
+        query_coverage_constraints(inputs, &variables),
+        acyclicity_constraints(inputs, &variables, &components),
+        use_constraints(inputs, &variables),
+        raw_data_disk_constraints(inputs, &variables, scale),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let candidate_terms = (0..left_out.len()).filter(kept).filter_map(|v| {
         let cost = inputs.costs.candidate_cost_per_second[v].as_ref().ok()?;
         Some(cost * scale * variables.x[v])
@@ -354,10 +369,11 @@ pub(crate) fn solve_selection(
         .y
         .iter()
         .map(|(edge, &y)| inputs.costs.edge_cost_change_per_second[edge] * scale * y);
+    // Already scaled by its rows ([`raw_data_disk_constraints`]).
     let raw_data_terms = variables
         .raw_data_on_disk
         .values()
-        .map(|&on_disk| scale * on_disk);
+        .map(|&on_disk| Expression::from(on_disk));
     let objective: Expression = candidate_terms
         .chain(edge_terms)
         .chain(raw_data_terms)
