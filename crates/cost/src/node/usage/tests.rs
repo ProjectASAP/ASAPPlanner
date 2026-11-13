@@ -199,10 +199,11 @@ fn a_query_time_scan_reads_what_its_consumers_read_and_keeps_its_retention() {
 
 /// An ingestion-time view of raw rows with no window below it (a
 /// `TimeShift` by 90 s over the arriving rows) keeps what its
-/// `retention_ms` and its offset cover: one second of rows per second, and
-/// the second being built. Over 1,000 rows per second of 64 bytes, a 300 s
+/// `retention_ms` covers, its offset included (a 5-minute read is retained
+/// for 390 s, [`read_back_ms`]): one second of rows per second, and the
+/// second being built. Over 1,000 rows per second of 64 bytes, a 390 s
 /// retention keeps 64,000 × 391 bytes, not one second's 64,000 × 2; a
-/// 600 s one keeps 64,000 × 691.
+/// 690 s one keeps 64,000 × 691.
 #[test]
 fn an_ingestion_time_view_of_raw_rows_keeps_the_rows_its_retention_covers() {
     let settings = CostInputs::default();
@@ -248,6 +249,67 @@ fn an_ingestion_time_view_of_raw_rows_keeps_the_rows_its_retention_covers() {
         .unwrap()
         .peak_memory_bytes
     };
-    assert_eq!(kept_bytes(300_000), 64_000 * 391);
-    assert_eq!(kept_bytes(600_000), 64_000 * 691);
+    assert_eq!(kept_bytes(390_000), 64_000 * 391);
+    assert_eq!(kept_bytes(690_000), 64_000 * 691);
+}
+
+/// A view over an ingestion-time chain of 60 s windows is refreshed once
+/// per chain window, not once per second: `TimeShift(1h)` over the chain
+/// maintains the chain's 60 s window ([`maintained_window_ms`]), and,
+/// retained for 1 h 5 m (its 5-minute reader and its offset), keeps 65
+/// windows' outputs and the one being built, as many as the chain below
+/// it, not 3,901 seconds' worth.
+#[test]
+fn a_view_over_an_ingestion_time_chain_keeps_one_output_per_chain_window() {
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let chain = node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+        child: 0,
+        summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::PerEntity,
+        filter: None,
+        tumbling_window_width_ms: 60_000,
+    }));
+    let shift = PhysicalASAPDAGNode {
+        id: 1,
+        output_state: ExecutionDataState::INGESTION_ROWS,
+        lifetime: Lifetime::AcrossEvaluations(StorageMedium::Memory),
+        retention_ms: Some(3_900_000),
+        ..node(Payload::NonASAP(NonASAPOp::TimeShift {
+            shift: asap_types::ir::operator::arguments::TimeShift {
+                offset_ms: 3_600_000,
+                at: None,
+            },
+            child: 0,
+        }))
+    };
+    let operator_of = |id: u32| match id {
+        0 => &chain.payload,
+        _ => &shift.payload,
+    };
+    let window_ms = maintained_window_ms(1, operator_of, |id| (id == 1).then_some(0));
+    assert_eq!(window_ms, Some(60_000));
+    let one_window_of_states = ProducerOutput {
+        payload: &chain.payload,
+        output_schema: &chain.output_schema,
+        output: EdgeStatistics {
+            rows: 1_000,
+            bytes: 16_000,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::Exact(&ExactKind::Sum),
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 1,
+    };
+    let usage = node_resource_usage_and_cost(
+        &shift,
+        &[one_window_of_states],
+        (1, 1.0),
+        window_ms,
+        &data,
+        &settings,
+    )
+    .unwrap();
+    assert_eq!(usage.peak_memory_bytes, 16_000 * 66);
 }

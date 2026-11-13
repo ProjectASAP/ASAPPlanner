@@ -46,14 +46,16 @@ pub struct NodeCost {
     /// and 3, which cost (or limit) the whole candidate's peaks.
     pub cost_per_second: Option<f64>,
     /// Core-seconds of CPU it takes per second of wall time: its CPU
-    /// operations and scanned bytes timed by [`ResourceSpeed`](crate::ResourceSpeed), what a
-    /// runtime measures it against. A query's fixed per-request cost
-    /// ([`MeasuredOperationCosts::ns_per_evaluation`](crate::MeasuredOperationCosts::ns_per_evaluation)) is counted on the
-    /// node the query reads first.
+    /// operations and scanned bytes timed by
+    /// [`ResourceSpeed`](crate::ResourceSpeed), what a runtime measures it
+    /// against. A query's fixed per-request cost
+    /// ([`MeasuredOperationCosts::ns_per_evaluation`](crate::MeasuredOperationCosts::ns_per_evaluation))
+    /// is counted on the node the query reads first.
     pub cpu_core_seconds_per_second: f64,
-    /// The number of consumers it is computed for, with the
-    /// consumers materialized at ingestion time of one refresh window counted once (1
-    /// when materialized, [`execution_demand::computations`](crate::plan::execution_demand::computations)).
+    /// The number of consumers it is computed for, with the consumers
+    /// materialized at ingestion time of one refresh window counted once
+    /// (1 when materialized,
+    /// [`execution_demand::computations`](crate::plan::execution_demand::computations)).
     pub multiplier: u64,
     /// How it was measured, e.g. "scan 1000 samples; x 1.0000/s; keeps
     /// ... bytes": one computation's work, the times it is computed per
@@ -125,12 +127,13 @@ pub struct ProducerOutput<'a> {
     pub tumbling_windows: u64,
 }
 
-/// What one node uses and outputs ([`node_resource_usage_and_cost`]): its output statistics, sources and state family for its
-/// consumers; its work for one computation (one execution) in ms on one
-/// core; its usage per second (query-time memory held while it computes
-/// included); what is charged once the whole plan is known (an in-memory
-/// ingestion window's partial copies, the raw data a query-time scan keeps
-/// on disk); its calibration fit and its [`NodeCost`].
+/// What one node uses and outputs ([`node_resource_usage_and_cost`]): its
+/// output statistics, sources and state family for its consumers; its work
+/// for one computation (one execution) in ms on one core; its usage per
+/// second (query-time memory held while it computes included); what is
+/// charged once the whole plan is known (an in-memory ingestion window's
+/// partial copies, the raw data a query-time scan keeps on disk); its
+/// calibration fit and its [`NodeCost`].
 #[derive(Debug, Clone)]
 pub struct NodeResourceUsageAndCost<'a> {
     /// Its output rows and bytes.
@@ -188,14 +191,21 @@ impl<'a> NodeResourceUsageAndCost<'a> {
     }
 }
 
+/// One second, in ms: an ingestion-time node runs over the rows arriving
+/// in one second, and an ingestion-time view that maintains no window is
+/// refreshed once per second.
+const ONE_SECOND_MS: u64 = 1_000;
+
 /// The window an ingestion-time grouping `node` maintains, in ms: a
 /// tumbling-window chain's tumbling window, a `TimeRange`'s range, or the
-/// first `TimeRange` below it through filters, projections and time shifts
-/// (`input_of` gives a node's first input, `operator_of` its operator).
-/// `None` when there is none. Over plan nodes ([`plan_cost`]) or memo
-/// groups (Stage 3, before any plan exists).
+/// first `TimeRange` or chain below it through filters, projections and
+/// time shifts (a view over an ingestion-time chain is refreshed once per
+/// chain window; `input_of` gives a node's first input, `operator_of` its
+/// operator). `None` when there is none. Over plan nodes ([`plan_cost`])
+/// or memo groups (Stage 3, before any plan exists).
 ///
-/// Example: `Aggregate(Sum) <- Filter <- TimeRange(1m) <- Scan`: 60,000.
+/// Example: `Aggregate(Sum) <- Filter <- TimeRange(1m) <- Scan`: 60,000;
+/// `TimeShift(1h) <- SummaryTumblingWindowChain(1m)`: 60,000.
 ///
 /// [`plan_cost`]: crate::plan_cost
 pub fn maintained_window_ms<'o, N: Copy + Ord, C: 'o>(
@@ -217,6 +227,10 @@ pub fn maintained_window_ms<'o, N: Copy + Ord, C: 'o>(
     while seen.insert(below) {
         match operator_of(below) {
             Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => return range_ms(range),
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }) => return Some(*tumbling_window_width_ms),
             Operator::NonASAP(
                 NonASAPOp::Filter { .. } | NonASAPOp::Project { .. } | NonASAPOp::TimeShift { .. },
             ) => below = input_of(below)?,
@@ -237,7 +251,7 @@ pub fn maintained_window_ms<'o, N: Copy + Ord, C: 'o>(
 /// `retention_ms` ($h_v$) covers: a tumbling-window chain its windows in
 /// it, a query-time `Scan` its raw rows in it, any other view materialized
 /// at ingestion time one output per refresh in it (one second of rows
-/// when it maintains no window; a `TimeShift`'s offset more). The formulas' CPU is scaled by
+/// when it maintains no window). The formulas' CPU is scaled by
 /// `settings.frozen_calibration_factor` (1 when unset).
 ///
 /// [`executions_per_second`]: crate::plan::execution_demand::executions_per_second
@@ -267,20 +281,23 @@ pub fn node_resource_usage_and_cost<'a>(
     // A query-time scan's raw rows retained.
     let mut raw_retained_rows = None;
     let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
-    // The completed tumbling windows a chain retains: its `retention_ms`
-    // over its window width, at least one.
-    let retained_tumbling_window_count = match &node.payload {
+    // The outputs a node retains: its `retention_ms` over the time between
+    // two outputs, at least one. A chain's outputs are its tumbling
+    // windows; any other view materialized at ingestion time has one output
+    // per refresh (per window it maintains, `window_ms`; per second of
+    // arriving rows without one).
+    let output_interval_ms = match &node.payload {
         Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
             tumbling_window_width_ms,
             ..
-        }) => node
-            .retention_ms
-            .map_or(1, |retention_ms| {
-                retention_ms.div_ceil((*tumbling_window_width_ms).max(1))
-            })
-            .max(1),
-        _ => 1,
-    };
+        }) => *tumbling_window_width_ms,
+        _ => window_ms.unwrap_or(ONE_SECOND_MS),
+    }
+    .max(1);
+    let retained_output_count = node
+        .retention_ms
+        .map_or(1, |retention_ms| retention_ms.div_ceil(output_interval_ms))
+        .max(1);
     let inputs: Vec<EdgeStatistics> = producers.iter().map(|p| p.output).collect();
     // The tumbling windows its rows span: those a `TimeRange` selects from
     // a chain, 1 otherwise.
@@ -427,7 +444,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 // else what the scan retains (its `retention_ms`, $h_v$);
                 // `None` reads every row held.
                 let lookback = match ingestion {
-                    true => Some(1_000),
+                    true => Some(ONE_SECOND_MS),
                     false => window_ms.or(node.retention_ms),
                 };
                 let by_rate = |lookback: Option<u64>| {
@@ -710,10 +727,10 @@ pub fn node_resource_usage_and_cost<'a>(
             let rows_per_tumbling_window = match ingestion {
                 true => u64::try_from(
                     (u128::from(input.rows) * u128::from(*tumbling_window_width_ms))
-                        .div_ceil(1_000),
+                        .div_ceil(u128::from(ONE_SECOND_MS)),
                 )
                 .map_err(|_| AnalyticalCostError::Overflow)?,
-                false => input.rows.div_ceil(retained_tumbling_window_count),
+                false => input.rows.div_ceil(retained_output_count),
             };
             let input_rows = StateInputRows {
                 rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
@@ -855,12 +872,12 @@ pub fn node_resource_usage_and_cost<'a>(
     let mut peak_memory_bytes = 0u64;
     let mut disk_bytes = 0u64;
     let mut detail = format!("{detail}; x {per_second:.4}/s");
-    // State retained between computations: at ingestion time, the window
-    // being built and the completed ones queries read (a chain of N
-    // tumbling windows keeps N + 1), every second. At query time the output is
-    // held only while the node computes (below). The state is what the
-    // node holds: its output, or the values an exact aggregate keeps per
-    // group when that is more. A computation that keeps nothing holds its
+    // State retained between computations: at ingestion time, the output
+    // being built and the completed ones its retention covers (a view of N
+    // retained outputs keeps N + 1), every second. At query time the
+    // output is held only while the node computes (below). The state is
+    // what the node holds: its output, or the values an exact aggregate
+    // keeps per group when that is more. A computation that keeps nothing holds its
     // working memory while it runs.
     let state = out.bytes.max(estimate.peak_memory_bytes());
     let (materialized_bytes, medium) = match (ingestion, node.lifetime, &node.payload) {
@@ -880,7 +897,7 @@ pub fn node_resource_usage_and_cost<'a>(
             Lifetime::AcrossEvaluations(medium),
             Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
         ) => {
-            let retained = retained_tumbling_window_count;
+            let retained = retained_output_count;
             let between = state
                 .checked_mul(retained - 1)
                 .ok_or(AnalyticalCostError::Overflow)?;
@@ -906,58 +923,24 @@ pub fn node_resource_usage_and_cost<'a>(
             }
             (0, medium)
         }
-        // The retained tumbling windows and the one being built.
-        (
-            true,
-            Lifetime::AcrossEvaluations(medium),
-            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-        ) => (
+        // Raw data materialized at ingestion time: the rows it retains.
+        (true, Lifetime::AcrossEvaluations(medium), Payload::NonASAP(NonASAPOp::Scan { .. })) => {
+            (edge(raw_retained_rows.unwrap_or(out.rows))?.bytes, medium)
+        }
+        // Any other view materialized at ingestion time, a chain included:
+        // the outputs its `retention_ms` covers and the one being built. A
+        // `TimeShift`'s retention includes its offset: it holds each output
+        // that much longer before its readers read it.
+        (true, Lifetime::AcrossEvaluations(medium), _) => (
             state
                 .checked_mul(
-                    retained_tumbling_window_count
+                    retained_output_count
                         .checked_add(1)
                         .ok_or(AnalyticalCostError::Overflow)?,
                 )
                 .ok_or(AnalyticalCostError::Overflow)?,
             medium,
         ),
-        // Raw data materialized at ingestion time: the rows it retains.
-        (true, Lifetime::AcrossEvaluations(medium), Payload::NonASAP(NonASAPOp::Scan { .. })) => {
-            (edge(raw_retained_rows.unwrap_or(out.rows))?.bytes, medium)
-        }
-        // Any other view materialized at ingestion time: the outputs its
-        // `retention_ms` covers, one per refresh (per window it maintains;
-        // per second of arriving rows without one), and the one being
-        // built. A `TimeShift` by an offset holds each output that much
-        // longer before its readers read it: over the arriving rows, the
-        // rows of its retention plus its offset, not one second of them.
-        (true, Lifetime::AcrossEvaluations(medium), _) => {
-            let refresh_interval_ms = window_ms.unwrap_or(1_000).max(1);
-            let shift_offset_ms = match &node.payload {
-                Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_none() => {
-                    u64::try_from(shift.offset_ms).unwrap_or(0)
-                }
-                _ => 0,
-            };
-            let retained_output_count = node
-                .retention_ms
-                .map_or(1, |retention_ms| {
-                    retention_ms
-                        .saturating_add(shift_offset_ms)
-                        .div_ceil(refresh_interval_ms)
-                })
-                .max(1);
-            (
-                state
-                    .checked_mul(
-                        retained_output_count
-                            .checked_add(1)
-                            .ok_or(AnalyticalCostError::Overflow)?,
-                    )
-                    .ok_or(AnalyticalCostError::Overflow)?,
-                medium,
-            )
-        }
         // A whole state materialized across evaluations at query time: it
         // and the one being built.
         (false, Lifetime::AcrossEvaluations(medium), _) => (

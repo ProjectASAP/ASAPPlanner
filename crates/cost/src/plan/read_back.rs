@@ -20,7 +20,8 @@ use asap_types::plan::time_window::{windows_read_above, TimeIndexedRead};
 ///
 /// Example: `sum_over_time(m[5m] offset 1h)` reads `m` back 1h + 5m,
 /// directly or through a query-time chain of 1-minute windows; through an
-/// ingestion-time chain of 1-minute windows, `m` is read back 1 minute.
+/// ingestion-time chain of 1-minute windows, `m` is read back 1 minute. A
+/// stored `TimeShift(1h)` read by `TimeRange(5m)` is read back 1h + 5m.
 pub fn read_back_ms<N: Copy + Ord, R: IntoIterator<Item = N>>(
     producer: N,
     readers_of: impl Fn(N) -> R,

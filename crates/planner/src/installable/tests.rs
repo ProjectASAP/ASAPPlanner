@@ -61,8 +61,14 @@ async fn view_refreshes_compile_only_the_nodes_below_them() {
 /// it: a chain of 10-minute windows of exact sums per `job` over
 /// `latency`, built at ingestion and retained for `chain_retention_ms`,
 /// read through `TimeRange(1h)` by a merge and its finalization at query
-/// time; and the chain's node id.
-fn chain_plan(chain_retention_ms: Option<u64>) -> (PhysicalASAPDAG, PhysicalASAPNodeId) {
+/// time; and the chain's node id. With `shift_view` `(offset_ms,
+/// retention_ms)`, the `TimeRange` reads the chain through a `TimeShift`
+/// by `offset_ms`, materialized at ingestion and retained for
+/// `retention_ms`.
+fn chain_plan(
+    chain_retention_ms: Option<u64>,
+    shift_view: Option<(i64, u64)>,
+) -> (PhysicalASAPDAG, PhysicalASAPNodeId) {
     use asap_types::ir::operator::{Reduction, Source};
     use asap_types::ir::scalar::ColumnRef;
     use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
@@ -94,10 +100,19 @@ fn chain_plan(chain_retention_ms: Option<u64>) -> (PhysicalASAPDAG, PhysicalASAP
         filter: None,
         tumbling_window_width_ms: 600_000,
     }));
+    let shift = shift_view.map(|(offset_ms, _)| {
+        node(Operator::NonASAP(NonASAPOp::TimeShift {
+            shift: asap_types::ir::operator::arguments::TimeShift {
+                offset_ms,
+                at: None,
+            },
+            child: chain.clone(),
+        }))
+    });
     let windows = node(Operator::NonASAP(NonASAPOp::TimeRange {
         range: std::time::Duration::from_secs(3_600),
         kind: TimeRangeKind::Range,
-        child: chain.clone(),
+        child: shift.clone().unwrap_or_else(|| chain.clone()),
     }));
     let merged = node(Operator::ASAP(ASAPOp::SummaryMerge {
         children: vec![windows],
@@ -112,19 +127,29 @@ fn chain_plan(chain_retention_ms: Option<u64>) -> (PhysicalASAPDAG, PhysicalASAP
         ])
         .unwrap();
     let chain_id = nodes.iter().position(|n| Rc::ptr_eq(n, &chain)).unwrap();
+    let shift_id = shift.map(|shift| nodes.iter().position(|n| Rc::ptr_eq(n, &shift)).unwrap());
     let scan_id = producer_of(&dag, chain_id);
+    let at_ingestion = [Some(chain_id), shift_id, Some(scan_id)];
     for node in &mut dag.nodes {
-        if node.id == chain_id {
+        let (retention_ms, coverage) = match node.id {
+            id if id == chain_id => (chain_retention_ms, "sum of latency by job"),
+            id if Some(id) == shift_id => (
+                shift_view.map(|(_, retention_ms)| retention_ms),
+                "sum of latency by job, shifted",
+            ),
+            _ => (None, ""),
+        };
+        if !coverage.is_empty() {
             node.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
-            node.retention_ms = chain_retention_ms;
-            node.view_coverage = Some(ViewCoverage::new("sum of latency by job".into(), vec![]));
+            node.retention_ms = retention_ms;
+            node.view_coverage = Some(ViewCoverage::new(coverage.into(), vec![]));
         }
-        if node.id == chain_id || node.id == scan_id {
+        if at_ingestion.contains(&Some(node.id)) {
             node.output_state.timing = ExecutionTiming::IngestionTime;
         }
     }
     for edge in &mut dag.edges {
-        if edge.producer == chain_id || edge.producer == scan_id {
+        if at_ingestion.contains(&Some(edge.producer)) {
             edge.data_state_mut().timing = ExecutionTiming::IngestionTime;
         }
     }
@@ -159,7 +184,7 @@ fn producer_of(dag: &PhysicalASAPDAG, consumer: PhysicalASAPNodeId) -> PhysicalA
 /// one 10-minute window per run, and no raw data is kept for queries.
 #[test]
 fn a_chain_is_installed_as_one_view() {
-    let (dag, chain) = chain_plan(Some(3_600_000));
+    let (dag, chain) = chain_plan(Some(3_600_000), None);
     let plan = installable_plan_of(dag.clone(), &[entry()]).unwrap();
     assert_eq!(plan.dag, dag);
     let views = plan.materialized_views().unwrap();
@@ -185,17 +210,44 @@ fn a_chain_is_installed_as_one_view() {
 fn installation_checks_the_retention_stage3_set() {
     let entries = [entry()];
     assert!(matches!(
-        installable_plan_of(chain_plan(None).0, &entries),
+        installable_plan_of(chain_plan(None, None).0, &entries),
         Err(InstallablePlanError::Uninstallable(
             InstallableDagError::ViewWithoutRetention { .. }
         ))
     ));
     assert!(matches!(
-        installable_plan_of(chain_plan(Some(3_000_000)).0, &entries),
+        installable_plan_of(chain_plan(Some(3_000_000), None).0, &entries),
         Err(InstallablePlanError::Uninstallable(
             InstallableDagError::ViewRetentionTooShort { .. }
         ))
     ));
+}
+
+/// A `TimeShift(1h)` view over the chain, read by `TimeRange(1h)`, keeps
+/// each row an hour before it is read: its retention must cover 2 h, the
+/// hour its reader reads and the hour of its offset, not only the hour
+/// read. (The chain below it is read back 2 h too.)
+#[test]
+fn a_time_shift_view_keeps_its_offset_more() {
+    let entries = [entry()];
+    let shifted = |retention_ms| chain_plan(Some(7_200_000), Some((3_600_000, retention_ms))).0;
+    assert!(matches!(
+        installable_plan_of(shifted(3_600_000), &entries),
+        Err(InstallablePlanError::Uninstallable(
+            InstallableDagError::ViewRetentionTooShort { .. }
+        ))
+    ));
+    let views = installable_plan_of(shifted(7_200_000), &entries)
+        .unwrap()
+        .materialized_views()
+        .unwrap();
+    assert_eq!(
+        views
+            .iter()
+            .map(|view| view.retention_ms())
+            .collect::<Vec<_>>(),
+        [7_200_000, 7_200_000]
+    );
 }
 
 /// A query-time `Scan` read through a window carries its retention;
@@ -204,7 +256,7 @@ fn installation_checks_the_retention_stage3_set() {
 /// back as the chain's `TimeRange(1h)` reads, not one 10-minute window.
 #[test]
 fn a_query_time_scan_carries_its_retention() {
-    let (mut dag, chain) = chain_plan(Some(3_600_000));
+    let (mut dag, chain) = chain_plan(Some(3_600_000), None);
     let scan = producer_of(&dag, chain);
     for node in &mut dag.nodes {
         if node.id == chain || node.id == scan {

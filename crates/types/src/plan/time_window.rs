@@ -114,15 +114,19 @@ impl TimeIndexedRead {
 /// walking up from it through `Through` readers (`readers_of` gives a
 /// node's readers, `read_of` how a reader reads), each reader that ends a
 /// path with the window it reads back from the evaluation time, the
-/// offsets of the shifts walked through included: a `Window` reader its
-/// window, an `AtEvaluationTime` reader the empty window at its offset.
+/// offsets of the shifts walked through included, starting with the
+/// producer's own when it is a `Through` reader itself (a stored
+/// `TimeShift(1h)` keeps each row an hour before its readers read it): a
+/// `Window` reader its window, an `AtEvaluationTime` reader the empty
+/// window at its offset.
 /// `None`, unbounded, when one reads it `Whole`, an `AtEvaluationTime`
 /// reader reads it and `at_evaluation_time_reads_whole` (raw data, which
 /// is not stored by evaluation time), or a path's offsets are negative or
 /// overflow.
 ///
 /// Example: a `Scan` read by `TimeRange(5m)` and by `TimeShift(1h) ->
-/// TimeRange(5m)` is read through `{0, 5m}` and `{1h, 5m}`.
+/// TimeRange(5m)` is read through `{0, 5m}` and `{1h, 5m}`; the
+/// `TimeShift(1h)` itself through `{1h, 5m}`.
 pub fn windows_read_above<N: Copy + Ord, R: IntoIterator<Item = N>>(
     producer: N,
     readers_of: impl Fn(N) -> R,
@@ -131,7 +135,11 @@ pub fn windows_read_above<N: Copy + Ord, R: IntoIterator<Item = N>>(
 ) -> Option<Vec<(N, TimeWindow)>> {
     let mut windows = Vec::new();
     // (node whose readers are next, the offsets walked through below them)
-    let mut pending: Vec<(N, i64)> = vec![(producer, 0)];
+    let own_offset_ms = match read_of(producer) {
+        TimeIndexedRead::Through { offset_ms } => offset_ms,
+        _ => 0,
+    };
+    let mut pending: Vec<(N, i64)> = vec![(producer, own_offset_ms)];
     let mut seen = std::collections::BTreeSet::new();
     while let Some((node, offset_ms)) = pending.pop() {
         if !seen.insert((node, offset_ms)) {
@@ -262,8 +270,9 @@ mod tests {
 
     /// Nodes 0 (a scan) ← 1 `TimeRange(5m)`, and 0 ← 2 `TimeShift(1h)` ← 3
     /// `TimeRange(5m)`; node 4, a reader at the evaluation time, reads 0
-    /// too. The scan is read through `{0, 5m}` and `{1h, 5m}`; the reader
-    /// at the evaluation time reads raw data whole.
+    /// too. The scan is read through `{0, 5m}` and `{1h, 5m}`, the shift
+    /// through `{1h, 5m}`; the reader at the evaluation time reads raw data
+    /// whole.
     #[test]
     fn readers_read_a_producer_through_the_shifts_above_it() {
         let readers = |node: u32| -> Vec<u32> {
@@ -281,6 +290,18 @@ mod tests {
             _ => TimeIndexedRead::AtEvaluationTime,
         };
         let mut windows = windows_read_above(0, readers, read_of, true).unwrap();
+        // The shift itself is read an hour back too: what it stores is read
+        // an hour after it is stored.
+        assert_eq!(
+            windows_read_above(2, readers, read_of, false),
+            Some(vec![(
+                3,
+                TimeWindow {
+                    end_offset_ms: 3_600_000,
+                    width_ms: 300_000
+                }
+            )])
+        );
         windows.sort();
         assert_eq!(
             windows,

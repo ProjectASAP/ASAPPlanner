@@ -85,12 +85,14 @@ pub struct PhysicalASAPDAGNode {
     pub parameters: Option<SketchParams>,
     pub output_schema: Schema,
     /// For a materialized view (a node whose lifetime materializes its output
-    /// across evaluations), how far back from the newest evaluation
-    /// time its stored rows are kept; for a raw-data `Scan` (at query time or materialized), how far back
-    /// its source's rows are kept (`None` when it reads them unbounded):
-    /// $h_v$, which Stage 3 sets. `None` on every other node. A
-    /// node field rather than part of [`Lifetime`], because Stage 2
-    /// enumerates lifetimes before Stage 3 knows retention.
+    /// across evaluations), how far back from the newest evaluation time
+    /// its stored rows are kept (a `TimeShift`'s offset included: its
+    /// readers read each row that much later); for a raw-data `Scan` (at
+    /// query time or materialized), how far back its source's rows are kept
+    /// (`None` when it reads them unbounded): $h_v$, which Stage 3 sets.
+    /// `None` on every other node. A node field rather than part of
+    /// [`Lifetime`], because Stage 2 enumerates lifetimes before Stage 3
+    /// knows retention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_ms: Option<u64>,
     /// The physical candidate the node was built from: in-memory provenance
