@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::exact_only::must_not_read;
 use super::model::{selection_cost_per_second, SelectionInputs};
+use crate::retention::output_retention_need_ms;
 use crate::selectable::{has_one_reader_per_context, QueryId};
 
 /// How many times the greedy plan is rebuilt without an execution that
@@ -28,9 +29,10 @@ type TreeInputs = Vec<Option<(usize, usize)>>;
 
 /// Per execution, by position in `SelectableExecutions::executions`,
 /// whether it costs more than a feasible plan
-/// ([`feasible_plan_cost_per_second`]): its own cost plus the most its
-/// input edges can take off ($\min(0, c_{\kappa,u,v,i})$ per input) is over
-/// the bound. Such an execution is in no optimal plan, as long as every
+/// ([`feasible_plan_cost_per_second`]): its own cost, plus the least
+/// retention $\pi_v h_v$ (R) makes it pay, plus the most its input edges
+/// can take off ($\min(0, c_{\kappa,u,v,i})$ per input) is over the
+/// bound. Such an execution is in no optimal plan, as long as every
 /// other selected execution costs at least 0 with its selected inputs.
 /// None is ruled out when no feasible plan is found.
 pub(crate) fn dearer_than_a_feasible_plan(inputs: &SelectionInputs<'_>) -> Vec<bool> {
@@ -39,19 +41,58 @@ pub(crate) fn dearer_than_a_feasible_plan(inputs: &SelectionInputs<'_>) -> Vec<b
     let Some(bound) = feasible_plan_cost_per_second(inputs) else {
         return vec![false; count];
     };
+    let costs = inputs.costs;
+    let executions = selectable.executions();
+    // The least retention, in ms, each execution of a candidate with $h_v$
+    // is read back over its uses (a costed edge out, or a query output):
+    // (F) gives a selected execution a use, and (R) then retains at least
+    // that. A query-time scan's retention is its source's $r_s$, left out.
+    let mut least_need_ms: Vec<Option<u64>> = vec![None; count];
+    let mut read = |index: usize, need_ms: u64| {
+        let least = &mut least_need_ms[index];
+        *least = Some(least.map_or(need_ms, |least| least.min(need_ms)));
+    };
+    for (position, &(_, _, producer)) in selectable.edges().iter().enumerate() {
+        if let (Some(_), Some(need_ms)) = (
+            costs.per_edge[position],
+            costs.retention_need_ms_per_edge[position],
+        ) {
+            read(producer, need_ms);
+        }
+    }
+    for (query, answering) in &selectable.answering {
+        for &index in answering {
+            read(index, output_retention_need_ms(&inputs.entries[query.0]));
+        }
+    }
+    let least_retention_cost = |index: usize| {
+        let v = executions[index].candidate;
+        match (
+            costs.retention_cost_per_retained_second.get(&v),
+            least_need_ms[index],
+        ) {
+            (Some(per_retained_second), Some(need_ms))
+                if !costs.raw_data_source.contains_key(&v) =>
+            {
+                per_retained_second * need_ms as f64 / 1_000.0
+            }
+            _ => 0.0,
+        }
+    };
     let tolerance = 1e-9 * bound.abs().max(1e-12);
     (0..count)
         .map(|index| {
-            let Ok(own) = &inputs.costs.per_execution[index] else {
+            let Ok(own) = &costs.per_execution[index] else {
                 return false;
             };
             let least = own
+                + least_retention_cost(index)
                 + (0..selectable.input_count(index))
                     .map(|i| {
                         selectable
                             .edges_into(index, i)
                             .iter()
-                            .filter_map(|&position| inputs.costs.per_edge[position])
+                            .filter_map(|&position| costs.per_edge[position])
                             .fold(0.0, f64::min)
                     })
                     .sum::<f64>();

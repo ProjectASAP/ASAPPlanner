@@ -666,3 +666,41 @@ fn the_bound_leaves_out_of_each_query_only_what_it_must_not_read() {
     assert_eq!(unused, vec![true, true]);
     assert!(solve_selection(&inputs).is_ok());
 }
+
+/// `m[5m]` every 10 s over a scan that is not materialized (cost 1) or a
+/// `OneEvaluation` one (cost 2, retaining at 1e6/s per second retained).
+/// The greedy plan reads the first, at 2/s. The second's own cost alone is
+/// no dearer than that, but (R) makes it retain the 5 minutes its one
+/// consumer reads, 3e8/s: the bound leaves it out.
+#[test]
+fn the_bound_counts_the_least_retention_an_execution_pays() {
+    let mut memo = empty_memo();
+    let m = scan(&mut memo);
+    let last_5m = range(&mut memo, 300, m);
+    query(&mut memo, last_5m, None);
+    let physical = physical(
+        memo,
+        &[
+            (own_candidate(m), NONE),
+            (own_candidate(m), ONE_EVALUATION),
+            (own_candidate(last_5m), NONE),
+        ],
+    );
+    let entries = every_10s(1);
+    let (selectable, costs) =
+        selection_inputs(&physical, &entries, &[1.0, 2.0, 1.0], &[], &[(1, 1e6)]);
+    let left_out = dearer_than_a_feasible_plan(&SelectionInputs {
+        physical: &physical,
+        entries: &entries,
+        selectable: &selectable,
+        costs: &costs,
+    });
+    let left_out: Vec<usize> = selectable
+        .executions()
+        .iter()
+        .zip(&left_out)
+        .filter(|(_, &left_out)| left_out)
+        .map(|(execution, _)| execution.candidate.0)
+        .collect();
+    assert_eq!(left_out, vec![1]);
+}
