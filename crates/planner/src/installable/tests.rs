@@ -227,11 +227,12 @@ fn installation_checks_the_retention_stage3_set() {
 /// A `TimeShift(1h)` view over the chain, read by `TimeRange(1h)`, keeps
 /// each row an hour before it is read: its retention must cover 2 h, the
 /// hour its reader reads and the hour of its offset, not only the hour
-/// read. (The chain below it is read back 2 h too.)
+/// read. Its refresh reads the chain's newest window, so the chain keeps
+/// only that (here one 10-minute window), not the 2 h too.
 #[test]
 fn a_time_shift_view_keeps_its_offset_more() {
     let entries = [entry()];
-    let shifted = |retention_ms| chain_plan(Some(7_200_000), Some((3_600_000, retention_ms))).0;
+    let shifted = |retention_ms| chain_plan(Some(600_000), Some((3_600_000, retention_ms))).0;
     assert!(matches!(
         installable_plan_of(shifted(3_600_000), &entries),
         Err(InstallablePlanError::Uninstallable(
@@ -247,7 +248,7 @@ fn a_time_shift_view_keeps_its_offset_more() {
             .iter()
             .map(|view| view.retention_ms())
             .collect::<Vec<_>>(),
-        [7_200_000, 7_200_000]
+        [600_000, 7_200_000]
     );
 }
 

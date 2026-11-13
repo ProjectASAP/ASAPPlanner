@@ -64,12 +64,8 @@ fn read_back<R: IntoIterator<Item = PhysicalCandidateId>>(
         producer,
         readers_of,
         |v| {
-            TimeIndexedRead::of(
-                operator_of(v),
-                physical.physical_candidates[v.0]
-                    .physical_properties
-                    .timing(),
-            )
+            let properties = physical.physical_candidates[v.0].physical_properties;
+            TimeIndexedRead::of(operator_of(v), properties.timing(), properties.lifetime())
         },
         span_ms,
         matches!(

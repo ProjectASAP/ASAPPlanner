@@ -411,7 +411,13 @@ fn scan_read_ms(
     read_back_ms(
         node.id,
         |id| consumers_of.get(&id).into_iter().flatten().copied(),
-        |id| TimeIndexedRead::of(&nodes[&id].payload, nodes[&id].output_state.timing),
+        |id| {
+            TimeIndexedRead::of(
+                &nodes[&id].payload,
+                nodes[&id].output_state.timing,
+                nodes[&id].lifetime,
+            )
+        },
         |_| 0,
         true,
     )

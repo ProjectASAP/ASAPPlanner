@@ -22,6 +22,7 @@ use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::Operator;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
+use crate::stages::Lifetime;
 
 /// A time window relative to an evaluation time t: (t - end_offset_ms - width_ms, t - end_offset_ms].
 ///
@@ -69,6 +70,12 @@ pub enum TimeIndexedRead {
     /// without `@`, or, with offset 0, a chain built at query time, which
     /// builds at each evaluation the windows its readers read.
     Through { offset_ms: i64 },
+    /// A `TimeShift` without `@` materialized across evaluations at
+    /// ingestion time: it keeps its rows, which its own readers read
+    /// `offset_ms` later (as through `Through`), and each refresh reads the
+    /// newest output of its input, so its input is read at its evaluation
+    /// time and does not keep the offset too.
+    StoredThrough { offset_ms: i64 },
     /// The window ending at its evaluation time, `width_ms` wide: a
     /// `TimeRange`'s range, or a chain built at ingestion time's tumbling
     /// window (it builds its newest window from it).
@@ -81,13 +88,22 @@ pub enum TimeIndexedRead {
 }
 
 impl TimeIndexedRead {
-    /// How `operator`, run at `timing`, reads its input.
+    /// How `operator`, run at `timing` with `lifetime`, reads its input.
     ///
     /// Example: `TimeRange(5m)` is `Window { width_ms: 300_000 }`; a
-    /// query-time chain `Through { offset_ms: 0 }`.
-    pub fn of<C>(operator: &Operator<C>, timing: ExecutionTiming) -> Self {
+    /// query-time chain `Through { offset_ms: 0 }`; `TimeShift(1h)` at
+    /// query time `Through { offset_ms: 3_600_000 }`, stored at ingestion
+    /// time `StoredThrough { offset_ms: 3_600_000 }`.
+    pub fn of<C>(operator: &Operator<C>, timing: ExecutionTiming, lifetime: Lifetime) -> Self {
         match operator {
             Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => match shift.at {
+                None if timing == ExecutionTiming::IngestionTime
+                    && matches!(lifetime, Lifetime::AcrossEvaluations(_)) =>
+                {
+                    Self::StoredThrough {
+                        offset_ms: shift.offset_ms,
+                    }
+                }
                 None => Self::Through {
                     offset_ms: shift.offset_ms,
                 },
@@ -115,10 +131,11 @@ impl TimeIndexedRead {
 /// node's readers, `read_of` how a reader reads), each reader that ends a
 /// path with the window it reads back from the evaluation time, the
 /// offsets of the shifts walked through included, starting with the
-/// producer's own when it is a `Through` reader itself (a stored
-/// `TimeShift(1h)` keeps each row an hour before its readers read it): a
-/// `Window` reader its window, an `AtEvaluationTime` reader the empty
-/// window at its offset.
+/// producer's own when it is a `Through` or `StoredThrough` reader itself
+/// (a stored `TimeShift(1h)` keeps each row an hour before its readers
+/// read it): a `Window` reader its window, an `AtEvaluationTime` or
+/// `StoredThrough` reader the empty window at its offset (a stored shift
+/// keeps the offset in its own rows, not its input's).
 /// `None`, unbounded, when one reads it `Whole`, an `AtEvaluationTime`
 /// reader reads it and `at_evaluation_time_reads_whole` (raw data, which
 /// is not stored by evaluation time), or a path's offsets are negative or
@@ -126,7 +143,8 @@ impl TimeIndexedRead {
 ///
 /// Example: a `Scan` read by `TimeRange(5m)` and by `TimeShift(1h) ->
 /// TimeRange(5m)` is read through `{0, 5m}` and `{1h, 5m}`; the
-/// `TimeShift(1h)` itself through `{1h, 5m}`.
+/// `TimeShift(1h)` itself through `{1h, 5m}`. A chain read by a stored
+/// `TimeShift(1h)` is read through `{0, 0}`, its newest window.
 pub fn windows_read_above<N: Copy + Ord, R: IntoIterator<Item = N>>(
     producer: N,
     readers_of: impl Fn(N) -> R,
@@ -136,7 +154,9 @@ pub fn windows_read_above<N: Copy + Ord, R: IntoIterator<Item = N>>(
     let mut windows = Vec::new();
     // (node whose readers are next, the offsets walked through below them)
     let own_offset_ms = match read_of(producer) {
-        TimeIndexedRead::Through { offset_ms } => offset_ms,
+        TimeIndexedRead::Through { offset_ms } | TimeIndexedRead::StoredThrough { offset_ms } => {
+            offset_ms
+        }
         _ => 0,
     };
     let mut pending: Vec<(N, i64)> = vec![(producer, own_offset_ms)];
@@ -154,6 +174,7 @@ pub fn windows_read_above<N: Copy + Ord, R: IntoIterator<Item = N>>(
                     continue;
                 }
                 TimeIndexedRead::Window { width_ms } => width_ms,
+                TimeIndexedRead::StoredThrough { .. } => 0,
                 TimeIndexedRead::AtEvaluationTime if !at_evaluation_time_reads_whole => 0,
                 TimeIndexedRead::AtEvaluationTime | TimeIndexedRead::Whole => return None,
             };
@@ -272,7 +293,8 @@ mod tests {
     /// `TimeRange(5m)`; node 4, a reader at the evaluation time, reads 0
     /// too. The scan is read through `{0, 5m}` and `{1h, 5m}`, the shift
     /// through `{1h, 5m}`; the reader at the evaluation time reads raw data
-    /// whole.
+    /// whole. A shift stored at ingestion time is read through `{1h, 5m}`
+    /// too, and reads the scan through `{0, 0}`.
     #[test]
     fn readers_read_a_producer_through_the_shifts_above_it() {
         let readers = |node: u32| -> Vec<u32> {
@@ -312,6 +334,34 @@ mod tests {
                     TimeWindow {
                         end_offset_ms: 3_600_000,
                         width_ms: 300_000
+                    }
+                )
+            ]
+        );
+        // Stored at ingestion time, the shift keeps the hour itself: it is
+        // still read through `{1h, 5m}`, and the producer below it only
+        // through its newest output, `{0, 0}`.
+        let stored = |node: u32| match node {
+            2 => TimeIndexedRead::StoredThrough {
+                offset_ms: 3_600_000,
+            },
+            node => read_of(node),
+        };
+        assert_eq!(
+            windows_read_above(2, readers, stored, false),
+            windows_read_above(2, readers, read_of, false)
+        );
+        let mut windows = windows_read_above(0, readers, stored, true).unwrap();
+        windows.sort();
+        assert_eq!(
+            windows,
+            vec![
+                (1, FIVE_MINUTES),
+                (
+                    2,
+                    TimeWindow {
+                        end_offset_ms: 0,
+                        width_ms: 0
                     }
                 )
             ]

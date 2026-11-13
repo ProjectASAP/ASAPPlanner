@@ -168,7 +168,11 @@ pub(super) fn window_read_above(
     windows_read_above(
         id,
         |node| consumers.get(&node).into_iter().flatten().copied(),
-        |node| match TimeIndexedRead::of(&nodes[&node].payload, nodes[&node].output_state.timing) {
+        |node| match TimeIndexedRead::of(
+            &nodes[&node].payload,
+            nodes[&node].output_state.timing,
+            nodes[&node].lifetime,
+        ) {
             TimeIndexedRead::Through { .. } if roots.contains(&node) => TimeIndexedRead::Whole,
             read => read,
         },

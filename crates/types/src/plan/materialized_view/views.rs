@@ -369,6 +369,7 @@ impl<'a> ViewIndex<'a> {
             |id| match TimeIndexedRead::of(
                 &self.nodes[&id].payload,
                 self.nodes[&id].output_state.timing,
+                self.nodes[&id].lifetime,
             ) {
                 TimeIndexedRead::Through { .. } if root(id) => TimeIndexedRead::Whole,
                 read => read,
