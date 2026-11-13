@@ -298,10 +298,7 @@ pub fn node_resource_usage_and_cost<'a>(
     // covers. Without one (a reader reads it unbounded: a negative offset,
     // an `@` anchor) nothing bounds what it keeps and it cannot be
     // installed, so it is not costed; a `Scan` keeps raw rows (below).
-    if matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
-        && !matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. }))
-        && node.retention_ms.is_none()
-    {
+    if node.is_view() && node.retention_ms.is_none() {
         return Err(AnalyticalCostError::MissingOrZero("retention_ms"));
     }
     let retained_output_count = node

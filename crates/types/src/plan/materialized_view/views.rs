@@ -16,7 +16,6 @@ use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
 use crate::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId};
 use crate::plan::time_window::{self, TimeIndexedRead, TimeWindow};
-use crate::stages::Lifetime;
 
 impl PhysicalASAPDAG {
     /// Every materialized view, in dependency order (each after the views
@@ -26,11 +25,11 @@ impl PhysicalASAPDAG {
     /// covers what the `TimeRange`s and `TimeShift`s above it read back.
     /// O(views · nodes) for the inputs, plus O(nodes + edges).
     pub fn materialized_views(&self) -> Result<Vec<MaterializedView>, InstallableDagError> {
-        if let Some(node) = self.nodes.iter().find(|node| {
-            matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
-                && !is_raw_data_scan(node)
-                && node.retention_ms.is_none()
-        }) {
+        if let Some(node) = self
+            .nodes
+            .iter()
+            .find(|node| node.is_view() && node.retention_ms.is_none())
+        {
             return Err(InstallableDagError::ViewWithoutRetention { node_id: node.id });
         }
         self.validate()?;
@@ -286,9 +285,7 @@ impl<'a> ViewIndex<'a> {
             .dag
             .nodes
             .iter()
-            .filter(|node| {
-                matches!(node.lifetime, Lifetime::AcrossEvaluations(_)) && !is_raw_data_scan(node)
-            })
+            .filter(|node| node.is_view())
             .map(|node| node.id)
             .collect();
         let mut derived = Vec::new();
@@ -371,6 +368,11 @@ impl<'a> ViewIndex<'a> {
                 self.nodes[&id].output_state.timing,
                 self.nodes[&id].lifetime,
             ) {
+                // A root's output is read at evaluation time, so a root
+                // read through is read whole. A materialized shift that is a
+                // root still reads its input's newest output: its readers do
+                // not change that, so it is not mapped to `Whole` (the
+                // executor refuses its refresh over a chain for now).
                 TimeIndexedRead::Through { .. } if root(id) => TimeIndexedRead::Whole,
                 read => read,
             },

@@ -86,7 +86,6 @@ fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
     let inputs_of: Vec<usize> = (0..count)
         .map(|v| physical.input_count(PhysicalCandidateId(v)))
         .collect();
-    let unshared = |v: usize| is_unmaterialized_query_time(inputs, v);
     let mut excluded = vec![false; count];
     for _ in 0..REPAIRS {
         let (tree_cost, chosen) = cheapest_trees(inputs, &into, &inputs_of, &excluded);
@@ -116,7 +115,7 @@ fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
             .candidates
             .iter()
             .copied()
-            .find(|&v| unshared(v) && uses[v] > 1)
+            .find(|&v| is_unmaterialized_query_time(inputs, v) && uses[v] > 1)
         {
             excluded[shared] = true;
             continue;

@@ -86,6 +86,16 @@ impl PhysicalASAPDAGNode {
     pub fn retains_rows(&self) -> bool {
         matches!(self.lifetime, Lifetime::AcrossEvaluations(_)) || is_raw_data_scan(self)
     }
+
+    /// Whether it is a materialized view: materialized across evaluations
+    /// and not raw data kept for its source (a `Scan`), so it keeps what
+    /// its `retention_ms` covers.
+    ///
+    /// Example: a stored chain or `TimeShift` is a view; a `Scan` kept at
+    /// ingestion time is not.
+    pub fn is_view(&self) -> bool {
+        matches!(self.lifetime, Lifetime::AcrossEvaluations(_)) && !is_raw_data_scan(self)
+    }
 }
 
 impl ViewIndex<'_> {

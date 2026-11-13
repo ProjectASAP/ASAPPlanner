@@ -372,10 +372,7 @@ impl PhysicalASAPDAG {
                     },
                 );
             }
-            if node.retention_ms.is_some()
-                && !matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
-                && !super::materialized_view::is_raw_data_scan(node)
-            {
+            if node.retention_ms.is_some() && !node.retains_rows() {
                 return Err(PhysicalASAPDAGValidationError::UnexpectedRetention(node.id));
             }
             if let Operator::ASAP(ASAPOp::SummaryAgg {
