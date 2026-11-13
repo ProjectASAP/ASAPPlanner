@@ -79,8 +79,9 @@ impl QueryLatency {
 /// time ranges keep, times how often it is computed per second
 /// ([`computations`]); an ingestion-time node over one second of arriving
 /// rows. A materialized node's state is counted in byte-seconds per
-/// second; a tumbling-window chain materialized beyond one evaluation keeps the tumbling windows its
-/// `retention_ms` ($h_v$) covers. `entries[q]` says how often query `q`
+/// second; a node materialized across evaluations keeps what its
+/// `retention_ms` ($h_v$) covers ([`node_resource_usage_and_cost`]).
+/// `entries[q]` says how often query `q`
 /// runs and how many steps each run evaluates; the formulas are scaled by
 /// `settings.frozen_calibration_factor` (1 when unset).
 pub fn plan_cost(
@@ -100,10 +101,43 @@ pub fn plan_cost(
         CostModel::UsageOverTime(unit_cost) => Some(unit_cost),
         _ => None,
     };
-    let EachNodeResourceUsageAndCost {
-        costed,
-        multipliers,
-    } = each_node_resource_usage_and_cost(dag, nodes, entries, data, settings)?;
+    // Each node's `(multiplier, per_second)` ([`computations`]), then its
+    // usage and cost ([`node_resource_usage_and_cost`]), children first.
+    let multipliers = computations(dag, entries, settings.non_repeating_query_horizon_seconds)
+        .map_err(|error| (first, error))?;
+    let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
+    let mut consumers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
+    for e in &dag.edges {
+        producers_of.entry(e.consumer).or_default().push(e.producer);
+        consumers_of.entry(e.producer).or_default().push(e.consumer);
+    }
+    let mut costed: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'_>> = HashMap::new();
+    for node in &dag.nodes {
+        let views: Vec<ProducerOutput<'_>> = producers_of
+            .get(&node.id)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .map(|p| costed[p].producer_output(&nodes[p].payload, &nodes[p].output_schema))
+            .collect();
+        let window_ms = match node.output_state.timing {
+            ExecutionTiming::IngestionTime => maintained_window_ms(
+                node.id,
+                |id| &nodes[&id].payload,
+                |id| producers_of.get(&id)?.first().copied(),
+            ),
+            ExecutionTiming::QueryTime => scan_read_ms(node, nodes, &consumers_of),
+        };
+        let node_costed = node_resource_usage_and_cost(
+            node,
+            &views,
+            multipliers[&node.id],
+            window_ms,
+            data,
+            settings,
+        )
+        .map_err(|error| (node.id, error))?;
+        costed.insert(node.id, node_costed);
+    }
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();
     let mut per_node = BTreeMap::new();
     // The candidate's usage, accumulated node by node; peak cores and
@@ -360,64 +394,6 @@ pub fn raw_data_disk_cost_per_second(bytes: u64, settings: &CostInputs) -> Optio
         }
         _ => None,
     }
-}
-
-/// Every node of a physical DAG costed ([`each_node_resource_usage_and_cost`]), with each
-/// node's `(multiplier, per_second)` ([`computations`]).
-struct EachNodeResourceUsageAndCost<'a> {
-    costed: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'a>>,
-    multipliers: HashMap<PhysicalASAPNodeId, (u64, f64)>,
-}
-
-/// [`node_resource_usage_and_cost`] over every node of `dag`, children
-/// first, with the arguments of [`plan_cost`].
-fn each_node_resource_usage_and_cost<'a>(
-    dag: &'a PhysicalASAPDAG,
-    nodes: &NodeMap<'a>,
-    entries: &[QueryWorkloadEntry],
-    data: &DataWorkload,
-    settings: &'a CostInputs,
-) -> Result<EachNodeResourceUsageAndCost<'a>, (PhysicalASAPNodeId, AnalyticalCostError)> {
-    let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
-    let multipliers = computations(dag, entries, settings.non_repeating_query_horizon_seconds)
-        .map_err(|error| (first, error))?;
-    let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
-    let mut consumers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
-    for e in &dag.edges {
-        producers_of.entry(e.consumer).or_default().push(e.producer);
-        consumers_of.entry(e.producer).or_default().push(e.consumer);
-    }
-    let mut costed: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'a>> = HashMap::new();
-    for node in &dag.nodes {
-        let views: Vec<ProducerOutput<'a>> = producers_of
-            .get(&node.id)
-            .map_or(&[][..], Vec::as_slice)
-            .iter()
-            .map(|p| costed[p].producer_output(&nodes[p].payload, &nodes[p].output_schema))
-            .collect();
-        let window_ms = match node.output_state.timing {
-            ExecutionTiming::IngestionTime => maintained_window_ms(
-                node.id,
-                |id| &nodes[&id].payload,
-                |id| producers_of.get(&id)?.first().copied(),
-            ),
-            ExecutionTiming::QueryTime => scan_read_ms(node, nodes, &consumers_of),
-        };
-        let node_costed = node_resource_usage_and_cost(
-            node,
-            &views,
-            multipliers[&node.id],
-            window_ms,
-            data,
-            settings,
-        )
-        .map_err(|error| (node.id, error))?;
-        costed.insert(node.id, node_costed);
-    }
-    Ok(EachNodeResourceUsageAndCost {
-        costed,
-        multipliers,
-    })
 }
 
 /// The window a query-time `Scan` `node` reads per execution: the most
