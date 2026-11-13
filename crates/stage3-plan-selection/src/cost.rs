@@ -41,7 +41,7 @@
 //! (`PhysicalASAPDAGNode::retains_rows`) is costed retaining the most its
 //! consumers read back ([`edge_retention_need_ms`]), the largest $h_v$ (R)
 //! allows. Retention is linear in that amount: $\pi_v$ is what retaining
-//! one more window (or second) costs there, and $W^{\mathrm{mat}}_v$ of a
+//! one more output (a window, or a second) costs there, and $W^{\mathrm{mat}}_v$ of a
 //! materialized candidate is its cost less $\pi_v h_v$. A query-time
 //! scan's retention is raw data on disk, kept once per source for the
 //! selected scan that keeps the most: $r_s \ge \pi_v h_v$
@@ -321,8 +321,10 @@ pub(crate) fn execution_costs(
         .map(|(index, execution)| (execution.candidate, index))
         .collect();
     // π_v of a candidate retaining rows every consumer reads within a bound:
-    // what one more Δ ms of retention costs, per second retained (Δ a
-    // window of a chain, else a second), at its retention's largest; its
+    // what one more Δ ms of retention costs, per second retained (Δ the
+    // time between two of its outputs: a chain's window, the window an
+    // ingestion-time view maintains, else a second; a retention is a whole
+    // number of outputs), at its retention's largest; its
     // whole own cost when it is materialized, its raw data on disk for a
     // query-time scan (each of its runs reads what it reads at that
     // retention, ρ_κ c_{κ,v}).
@@ -331,10 +333,13 @@ pub(crate) fn execution_costs(
         let Some(retention_ms) = most_read_ms else {
             continue;
         };
-        let delta_ms = physical.physical_candidates[v.0]
-            .chain_tumbling_window_width_ms(physical)
-            .unwrap_or(1_000)
-            .max(1);
+        let candidate = &physical.physical_candidates[v.0];
+        let delta_ms = match candidate.physical_properties.timing() {
+            ExecutionTiming::IngestionTime => ingestion_window_ms(physical, v),
+            ExecutionTiming::QueryTime => candidate.chain_tumbling_window_width_ms(physical),
+        }
+        .unwrap_or(1_000)
+        .max(1);
         let longer = node_retaining(v, Some(retention_ms + delta_ms));
         let delta_seconds = delta_ms as f64 / 1_000.0;
         let per_retained_second = match is_across_evaluations(physical, v) {
@@ -622,30 +627,39 @@ fn cost_node<'a>(
     data: &DataWorkload,
     cost_inputs: &'a CostInputs,
 ) -> Result<NodeResourceUsageAndCost<'a>, String> {
-    let memo = &physical.logical_candidates.memo;
-    let group = physical.physical_candidates[v.0].logical_candidate_id.group;
     let window_ms = match node.output_state.timing {
         ExecutionTiming::QueryTime => scan_read_ms,
-        // A chain maintains its own window; any other grouping the first
-        // range below its group.
-        ExecutionTiming::IngestionTime => physical.physical_candidates[v.0]
-            .chain_tumbling_window_width_ms(physical)
-            .or_else(|| {
-                maintained_window_ms(
-                    group,
-                    |group: MemoGroupId| &memo.groups()[group.0 as usize].expression,
-                    |group| {
-                        memo.groups()[group.0 as usize]
-                            .expression
-                            .children()
-                            .first()
-                            .map(|g| **g)
-                    },
-                )
-            }),
+        ExecutionTiming::IngestionTime => ingestion_window_ms(physical, v),
     };
     node_resource_usage_and_cost(node, inputs, (1, per_second), window_ms, data, cost_inputs)
         .map_err(|error| error.to_string())
+}
+
+/// The window ingestion-time candidate `v` maintains, the time between
+/// two of its outputs: a chain its own window, any other grouping the
+/// first range or chain below its group ([`asap_cost::maintained_window_ms`],
+/// over the memo's groups); `None` without one (one output per second).
+fn ingestion_window_ms(
+    physical: &PhysicalASAPMemoCandidates,
+    v: PhysicalCandidateId,
+) -> Option<u64> {
+    let memo = &physical.logical_candidates.memo;
+    let group = physical.physical_candidates[v.0].logical_candidate_id.group;
+    physical.physical_candidates[v.0]
+        .chain_tumbling_window_width_ms(physical)
+        .or_else(|| {
+            maintained_window_ms(
+                group,
+                |group: MemoGroupId| &memo.groups()[group.0 as usize].expression,
+                |group| {
+                    memo.groups()[group.0 as usize]
+                        .expression
+                        .children()
+                        .first()
+                        .map(|g| **g)
+                },
+            )
+        })
 }
 
 /// A candidate's cost per second from its usage under cost model 1: its
