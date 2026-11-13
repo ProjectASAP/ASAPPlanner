@@ -294,6 +294,16 @@ pub fn node_resource_usage_and_cost<'a>(
         _ => window_ms.unwrap_or(ONE_SECOND_MS),
     }
     .max(1);
+    // A view materialized across evaluations keeps what its retention
+    // covers. Without one (a reader reads it unbounded: a negative offset,
+    // an `@` anchor) nothing bounds what it keeps and it cannot be
+    // installed, so it is not costed; a `Scan` keeps raw rows (below).
+    if matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
+        && !matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. }))
+        && node.retention_ms.is_none()
+    {
+        return Err(AnalyticalCostError::MissingOrZero("retention_ms"));
+    }
     let retained_output_count = node
         .retention_ms
         .map_or(1, |retention_ms| retention_ms.div_ceil(output_interval_ms))

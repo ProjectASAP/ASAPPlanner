@@ -253,6 +253,58 @@ fn an_ingestion_time_view_of_raw_rows_keeps_the_rows_its_retention_covers() {
     assert_eq!(kept_bytes(690_000), 64_000 * 691);
 }
 
+/// A view materialized across evaluations without a retention is read
+/// unbounded (here `sum_over_time(m[5m] offset -5m)`: a `TimeShift` by
+/// -5 m over the arriving rows, which no retention covers), so nothing
+/// bounds what it keeps and it cannot be installed: it is not costed,
+/// rather than charged for one output and selected as the cheapest.
+#[test]
+fn a_view_without_retention_is_not_costed() {
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let scan = node(Payload::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries { metric: "m".into() },
+        predicates: vec![],
+        schema: Schema::default(),
+    }));
+    let one_second_of_rows = ProducerOutput {
+        payload: &scan.payload,
+        output_schema: &scan.output_schema,
+        output: EdgeStatistics {
+            rows: 1_000,
+            bytes: 64_000,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::None,
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 1,
+    };
+    let shift = PhysicalASAPDAGNode {
+        output_state: ExecutionDataState::INGESTION_ROWS,
+        lifetime: Lifetime::AcrossEvaluations(StorageMedium::Memory),
+        retention_ms: None,
+        ..node(Payload::NonASAP(NonASAPOp::TimeShift {
+            shift: asap_types::ir::operator::arguments::TimeShift {
+                offset_ms: -300_000,
+                at: None,
+            },
+            child: 0,
+        }))
+    };
+    let usage = node_resource_usage_and_cost(
+        &shift,
+        std::slice::from_ref(&one_second_of_rows),
+        (1, 1.0),
+        None,
+        &data,
+        &settings,
+    );
+    assert!(matches!(
+        usage,
+        Err(AnalyticalCostError::MissingOrZero("retention_ms"))
+    ));
+}
+
 /// A view over an ingestion-time chain of 60 s windows is refreshed once
 /// per chain window, not once per second: `TimeShift(1h)` over the chain
 /// maintains the chain's 60 s window ([`maintained_window_ms`]), and,
