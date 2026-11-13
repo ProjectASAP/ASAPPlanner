@@ -298,6 +298,94 @@ fn a_range_query_computes_its_at_end_subtree_once_per_request() {
     }
 }
 
+/// `m[5m]` below a `TimeShift` anchored with `at`, the shift a
+/// `OneEvaluation` result read by every query (`roots`).
+fn anchored_dag(at: AtModifier, roots: Vec<PhysicalASAPNodeId>) -> PhysicalASAPDAG {
+    use asap_types::ir::operator::TimeShift;
+    use asap_types::stages::StorageMedium;
+    let query_time = ExecutionTiming::QueryTime;
+    let shift = Operator::NonASAP(NonASAPOp::TimeShift {
+        shift: TimeShift {
+            offset_ms: 0,
+            at: Some(at),
+        },
+        child: 1,
+    });
+    PhysicalASAPDAG::new(
+        vec![
+            node(0, scan(), query_time, Lifetime::None),
+            node(1, last(300, 0), query_time, Lifetime::None),
+            node(
+                2,
+                shift,
+                query_time,
+                Lifetime::OneEvaluation(StorageMedium::Memory),
+            ),
+        ],
+        roots,
+        vec![],
+    )
+    .unwrap()
+}
+
+/// Two range queries every 300 s at a 30 s step over 600 s (21 steps per
+/// request) share one `OneEvaluation` `@ end()` shift: it runs at every
+/// step of their one context, 21/300 per second, and its input once per
+/// request, 1/300: a walk goes through a `OneEvaluation` node.
+#[test]
+fn a_shared_one_evaluation_at_end_shift_runs_its_input_once_per_request() {
+    let span = RangeEvaluation {
+        step_ms: 30_000,
+        span_ms: 600_000,
+    };
+    let recurrence = [fixed(300_000, 0), fixed(300_000, 0)];
+    let rates = computations(
+        &anchored_dag(AtModifier::End, vec![2, 2]),
+        &entries(&recurrence, Some(span)),
+        3600.0,
+    )
+    .unwrap();
+    assert_eq!(rates[&2].0, 1);
+    close(rates[&2].1, 21.0 / 300.0);
+    for id in [0, 1] {
+        assert_eq!(rates[&id].0, 1);
+        close(rates[&id].1, 1.0 / 300.0);
+    }
+}
+
+/// Two range queries every 60 s at a 30 s step, over 1 h and over 90 s,
+/// below one `@ start()` shift: one context (one evaluation grid, one
+/// anchor), whose requests start at `k · 60 s` and `k · 60 s + 30 s`: the
+/// input runs 2/60 per second.
+#[test]
+fn at_start_inputs_run_once_per_distinct_request_start() {
+    let with_span = |span_ms| QueryWorkloadEntry {
+        query: asap_types::workload::Query("q".into()),
+        requirements: Default::default(),
+        predictability: Default::default(),
+        recurrence: fixed(60_000, 0),
+        range_evaluation: Some(RangeEvaluation {
+            step_ms: 30_000,
+            span_ms,
+        }),
+    };
+    let entries = [with_span(3_600_000), with_span(90_000)];
+    let rates = computations(
+        &anchored_dag(AtModifier::Start, vec![2, 2]),
+        &entries,
+        3600.0,
+    )
+    .unwrap();
+    for id in [0, 1] {
+        assert_eq!(rates[&id].0, 1);
+        close(rates[&id].1, 2.0 / 60.0);
+    }
+    close(
+        context_executions_per_second(Some(AtModifier::End), &entries, 3600.0).unwrap(),
+        1.0 / 60.0,
+    );
+}
+
 // Invalid fixed intervals and estimated rates still produce the evaluator's error.
 #[test]
 fn invalid_recurrence_is_rejected() {

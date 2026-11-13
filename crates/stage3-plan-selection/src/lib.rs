@@ -34,10 +34,11 @@ use asap_types::stages::{PhysicalASAPMemoCandidates, PruneReason, PrunedCandidat
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::cost::execution_costs;
-use crate::milp::model::{solve_selection, QueryId, SelectionInputs, SelectionMilpError};
+use crate::milp::exact_only::must_not_read;
+use crate::milp::model::{solve_selection, SelectionInputs, SelectionMilpError};
 use crate::plan::plan_of;
 use crate::report::{accepted_accuracy, infeasible};
-use crate::selectable::{output_groups, Execution, ExecutionContexts};
+use crate::selectable::{output_groups, SelectableExecutions};
 
 pub use report::{
     large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, Selection,
@@ -77,33 +78,21 @@ pub fn select_plan(
         });
     }
     let outputs = output_groups(physical);
-    let (contexts, output_executions) = ExecutionContexts::new(physical, entries, &outputs);
+    let mut selectable = SelectableExecutions::new(physical, entries, &outputs);
     let request_overhead_cost_per_second = request_overhead_cost_per_second(entries, cost_inputs)
         .map_err(|error| ErrorSelectingPlan::Cost {
         candidate: "every plan (the request overhead)".into(),
         node: 0,
         error,
     })?;
-    let costs = execution_costs(
-        physical,
-        &contexts,
-        &output_executions,
-        entries,
-        data,
-        cost_inputs,
-        request_overhead_cost_per_second,
-    );
-    let query_outputs: Vec<(QueryId, Vec<Execution>)> = output_executions
-        .into_iter()
-        .map(|(query, executions)| {
-            let costed = executions
-                .into_iter()
-                .filter(|&execution| costs.per_execution[contexts.index_of(execution)].is_ok())
-                .collect();
-            (query, costed)
-        })
-        .collect();
-    if query_outputs
+    let costs = execution_costs(physical, &selectable, entries, data, cost_inputs);
+    // A query output is answered by an execution that could be costed and
+    // that its query may read (X).
+    selectable.retain_answering(|query, index, execution| {
+        costs.per_execution[index].is_ok() && !must_not_read(physical, query, execution.candidate)
+    });
+    if selectable
+        .answering
         .iter()
         .any(|(_, executions)| executions.is_empty())
     {
@@ -112,9 +101,8 @@ pub fn select_plan(
     let solved = solve_selection(&SelectionInputs {
         physical,
         entries,
-        contexts: &contexts,
+        selectable: &selectable,
         costs: &costs,
-        query_outputs: &query_outputs,
     })
     .map_err(|error| match error {
         SelectionMilpError::Infeasible => infeasible(&costs),
@@ -125,7 +113,7 @@ pub fn select_plan(
     })?;
     // A candidate none of whose executions could be costed.
     let mut costed = vec![None; physical.physical_candidates.len()];
-    for (execution, cost) in contexts.executions().iter().zip(&costs.per_execution) {
+    for (execution, cost) in selectable.executions().iter().zip(&costs.per_execution) {
         let known = costed[execution.candidate.0].get_or_insert(false);
         *known |= cost.is_ok();
     }
@@ -140,7 +128,8 @@ pub fn select_plan(
                 reason: PruneReason::UsageNotCostable,
             })
             .collect(),
-        selected_plan_cost_per_second: solved.objective_cost_per_second,
+        selected_plan_cost_per_second: solved.cost_per_second_without_request_overhead
+            + request_overhead_cost_per_second,
         milp_variable_count: solved.variable_count,
         milp_constraint_count: solved.constraint_count,
         milp_construction_ms: solved.construction_ms,

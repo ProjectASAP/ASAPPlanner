@@ -317,3 +317,127 @@ fn every_10s(query: &str) -> serde_json::Value {
         "predictability": {"predictable": {"known_at": null}},
     })
 }
+
+/// `query` requested every `interval_ms` at phase 0 as a range query with
+/// steps of `step_ms` over `span_ms`, or as an instant query without one.
+fn requested(query: &str, interval_ms: u32, range: Option<(u64, u64)>) -> serde_json::Value {
+    let mut entry = serde_json::json!({
+        "query": query,
+        "demand": {"fixed_interval_at": {"interval": interval_ms, "evaluation_phase": 0}},
+        "requirements": {"max_latency_ms": null},
+        "predictability": {"predictable": {"known_at": null}},
+    });
+    if let Some((step_ms, span_ms)) = range {
+        entry["range_evaluation"] = serde_json::json!({"step_ms": step_ms, "span_ms": span_ms});
+    }
+    entry
+}
+
+/// `entries` over the gauge `m` (1,000 series, one sample per second).
+fn over_m(entries: Vec<serde_json::Value>) -> PlanningWorkload {
+    serde_json::from_value(serde_json::json!({
+        "query_workload": {"language": "promql", "repeating_queries": entries},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 1000.0}},
+            "sources": {"m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000}},
+        },
+    }))
+    .unwrap()
+}
+
+/// Two range queries every 300 s at 30 s steps over 600 s that read one
+/// `@ end()` subtree: they share its shift, `OneEvaluation`, and its input
+/// runs once per request, in the MILP and in `plan_cost` alike
+/// (`plan_cost` charged it at every step: 0.1513/s for an objective of
+/// 0.0473/s).
+#[test]
+fn the_objective_is_the_plan_cost_on_a_shared_at_end_subtree() {
+    let w = over_m(vec![
+        requested(
+            "sum_over_time(m[5m] @ end())",
+            300_000,
+            Some((30_000, 600_000)),
+        ),
+        requested(
+            "max_over_time(m[5m] @ end())",
+            300_000,
+            Some((30_000, 600_000)),
+        ),
+    ]);
+    assert_equal(
+        "shared @ end() subtree",
+        objective_and_plan_cost(&w, &CostInputs::default(), true),
+    );
+}
+
+/// Two range queries every 60 s at 30 s steps, over 1 h and over 90 s,
+/// below `@ start()`: one context, whose requests start at two times each
+/// minute, `k · 60 s` and `k · 60 s + 30 s`; Stage 3 and `plan_cost` count
+/// both.
+#[test]
+fn the_objective_is_the_plan_cost_on_at_start_subtrees_of_two_spans() {
+    let w = over_m(vec![
+        requested(
+            "max_over_time(m[5m] @ start())",
+            60_000,
+            Some((30_000, 3_600_000)),
+        ),
+        requested(
+            "max_over_time(m[5m] @ start())",
+            60_000,
+            Some((30_000, 90_000)),
+        ),
+    ]);
+    assert_equal(
+        "@ start() subtrees of two spans",
+        objective_and_plan_cost(&w, &CostInputs::default(), true),
+    );
+}
+
+/// An instant `max_over_time(m[5m])` every 300 s and the range query
+/// `max_over_time(m[5m] @ start())` every 300 s at 30 s steps over 600 s:
+/// the range query reads `m[5m]` at its requests' start, 600 s before the
+/// instant query's evaluation, so no result computed for one evaluation is
+/// read by both (a `OneEvaluation` `m[5m]` served both).
+#[test]
+fn an_at_start_subtree_shares_no_evaluation_result_with_an_instant_query() {
+    let w = over_m(vec![
+        requested("max_over_time(m[5m])", 300_000, None),
+        requested(
+            "max_over_time(m[5m] @ start())",
+            300_000,
+            Some((30_000, 600_000)),
+        ),
+    ]);
+    let (plan, objective_and_plan_cost) =
+        selected_plan_objective_and_plan_cost(&w, &CostInputs::default(), true);
+    assert_equal("@ start() beside an instant query", objective_and_plan_cost);
+    let producers = |id| {
+        plan.edges
+            .iter()
+            .filter(move |edge| edge.consumer == id)
+            .map(|edge| edge.producer)
+    };
+    // The nodes each query's walk reaches below its root, stopping at
+    // results kept across evaluations or computed at ingestion time.
+    let reached = |root: usize| {
+        let mut reached = std::collections::BTreeSet::new();
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            let node = &plan.nodes[id];
+            if matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
+                || node.output_state.timing == ExecutionTiming::IngestionTime
+                || !reached.insert(id)
+            {
+                continue;
+            }
+            pending.extend(producers(id));
+        }
+        reached
+    };
+    let (instant, at_start) = (reached(plan.roots[0]), reached(plan.roots[1]));
+    assert!(
+        instant.is_disjoint(&at_start),
+        "{instant:?} and {at_start:?} share a node: {plan:#?}"
+    );
+}
