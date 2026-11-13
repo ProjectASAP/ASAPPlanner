@@ -19,7 +19,7 @@ use asap_types::workload::{
 
 use super::*;
 use crate::retention::edge_retention_need_ms;
-use crate::selectable::ExecutionContexts;
+use crate::selectable::{QueryId, SelectableExecutions};
 
 const DAY_MS: u64 = 86_400_000;
 
@@ -172,50 +172,48 @@ fn no_execution_reading_a_producer_costs_less_than_nothing() {
         "sources": {"m": {"series_count": 1_000_000, "sample_interval": 15_000}}
     }))
     .unwrap();
-    let (contexts, query_outputs) = ExecutionContexts::new(
+    let selectable = SelectableExecutions::new(
         &physical,
         &entries,
         &[(QueryId(0), state), (QueryId(1), newest_day)],
     );
     let costs = execution_costs(
         &physical,
-        &contexts,
-        &query_outputs,
+        &selectable,
         &entries,
         &data,
         &CostInputs::default(),
-        0.0,
     );
     // π_v times the least any consumer of `v` reads back, the least
     // retention (R) lets a plan selecting `v` keep.
     let least_retention = |v: PhysicalCandidateId| {
-        let least_need_ms = contexts
+        let least_need_ms = selectable
             .edges()
             .iter()
-            .filter(|(_, _, producer)| producer.candidate == v)
+            .filter(|&&(_, _, producer)| selectable.executions()[producer].candidate == v)
             .filter_map(|&(_, edge, _)| edge_retention_need_ms(&physical, &entries, edge))
             .min()
             .unwrap_or(0);
         costs
-            .retention_cost_per_second
+            .retention_cost_per_retained_second
             .get(&v)
             .copied()
             .unwrap_or(0.0)
             * least_need_ms as f64
+            / 1_000.0
     };
     let mut checked = 0;
-    for (index, &(consumer, edge, _)) in contexts.edges().iter().enumerate() {
-        let (Ok(execution), Some(edge_cost)) = (
-            &costs.per_execution[contexts.index_of(consumer)],
-            costs.per_edge[index],
-        ) else {
+    for (index, &(consumer, edge, _)) in selectable.edges().iter().enumerate() {
+        let (Ok(execution), Some(edge_cost)) =
+            (&costs.per_execution[consumer], costs.per_edge[index])
+        else {
             continue;
         };
-        let total = execution + edge_cost + least_retention(consumer.candidate);
+        let consumer = selectable.executions()[consumer].candidate;
+        let total = execution + edge_cost + least_retention(consumer);
         assert!(
             total >= 0.0,
-            "{:?} reading through {edge:?}: {execution} + {edge_cost} + retention = {total}",
-            consumer.candidate
+            "{consumer:?} reading through {edge:?}: {execution} + {edge_cost} + retention = {total}"
         );
         checked += 1;
     }

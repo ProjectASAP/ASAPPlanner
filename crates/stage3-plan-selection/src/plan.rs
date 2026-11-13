@@ -14,10 +14,10 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
 };
 use asap_types::plan::view_coverage;
-use asap_types::stages::{Lifetime, MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId};
+use asap_types::stages::{MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId};
 
-use crate::milp::model::{QueryId, SolvedSelection};
-use crate::selectable::Execution;
+use crate::milp::model::SolvedSelection;
+use crate::selectable::{Execution, QueryId};
 
 /// Candidate `v` as a plan node with id `id`, its input `i` read from node
 /// `input_ids[i]`: its operator, timing, lifetime and θ, its group's schema
@@ -51,7 +51,9 @@ pub(crate) fn candidate_node(
         output_schema: group.schema.clone(),
         retention_ms: None,
         selected_physical_candidate: Some(v),
-        view_coverage: matches!(lifetime, Lifetime::AcrossEvaluations(_))
+        view_coverage: candidate
+            .physical_properties
+            .is_across_evaluations()
             .then(|| view_coverage(memo, candidate.logical_candidate_id.group))
             .flatten(),
     }
