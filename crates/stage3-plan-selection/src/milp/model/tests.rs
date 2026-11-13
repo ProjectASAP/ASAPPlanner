@@ -704,3 +704,50 @@ fn the_bound_counts_the_least_retention_an_execution_pays() {
         .collect();
     assert_eq!(left_out, vec![1]);
 }
+
+/// `m[5m]` every 10 s over a scan offered with ℓ = None (v0) and
+/// `OneEvaluation` (v1). At equal cost and with the same consumer, v1
+/// dominates v0, which is left out; v0 is kept when v1 costs more, or when
+/// v1 cannot be read by v0's consumer (its edge is not costed).
+#[test]
+fn a_none_execution_its_one_evaluation_twin_dominates_is_left_out() {
+    let mut memo = empty_memo();
+    let m = scan(&mut memo);
+    let last_5m = range(&mut memo, 300, m);
+    query(&mut memo, last_5m, None);
+    let physical = physical(
+        memo,
+        &[
+            (own_candidate(m), NONE),
+            (own_candidate(m), ONE_EVALUATION),
+            (own_candidate(last_5m), NONE),
+        ],
+    );
+    let entries = every_10s(1);
+    let dominated = |w: &[f64], twin_edge_costed: bool| {
+        let (selectable, mut costs) = selection_inputs(&physical, &entries, w, &[], &[]);
+        for (position, &(_, edge, _)) in selectable.edges().iter().enumerate() {
+            if physical.edge(edge).producer_candidate_id.0 == 1 && !twin_edge_costed {
+                costs.per_edge[position] = None;
+            }
+        }
+        let inputs = SelectionInputs {
+            physical: &physical,
+            entries: &entries,
+            selectable: &selectable,
+            costs: &costs,
+        };
+        let candidates: Vec<usize> = selectable
+            .executions()
+            .iter()
+            .zip(dominated_by_one_evaluation_twin(&inputs))
+            .filter(|(_, dominated)| *dominated)
+            .map(|(execution, _)| execution.candidate.0)
+            .collect();
+        let solved = solve_selection(&inputs).unwrap();
+        (candidates, self::candidates(&solved))
+    };
+    assert_eq!(dominated(&[1.0, 1.0, 1.0], true), (vec![0], vec![1, 2]));
+    assert_eq!(dominated(&[1.0, 2.0, 1.0], true), (vec![], vec![0, 2]));
+    assert_eq!(dominated(&[1.0, 1.0, 1.0], false), (vec![], vec![0, 2]));
+}
