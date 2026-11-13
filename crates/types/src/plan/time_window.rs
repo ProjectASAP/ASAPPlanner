@@ -136,10 +136,10 @@ impl TimeIndexedRead {
 /// read it): a `Window` reader its window, an `AtEvaluationTime` or
 /// `StoredThrough` reader the empty window at its offset (a stored shift
 /// keeps the offset in its own rows, not its input's).
-/// `None`, unbounded, when one reads it `Whole`, an `AtEvaluationTime`
-/// reader reads it and `at_evaluation_time_reads_whole` (raw data, which
-/// is not stored by evaluation time), or a path's offsets are negative or
-/// overflow.
+/// `None`, unbounded, when one reads it `Whole`, an `AtEvaluationTime` or
+/// `StoredThrough` reader reads it and `at_evaluation_time_reads_whole`
+/// (raw data, which is not stored by evaluation time, so has no newest
+/// output), or a path's offsets are negative or overflow.
 ///
 /// Example: a `Scan` read by `TimeRange(5m)` and by `TimeShift(1h) ->
 /// TimeRange(5m)` is read through `{0, 5m}` and `{1h, 5m}`; the
@@ -174,9 +174,14 @@ pub fn windows_read_above<N: Copy + Ord, R: IntoIterator<Item = N>>(
                     continue;
                 }
                 TimeIndexedRead::Window { width_ms } => width_ms,
-                TimeIndexedRead::StoredThrough { .. } => 0,
-                TimeIndexedRead::AtEvaluationTime if !at_evaluation_time_reads_whole => 0,
-                TimeIndexedRead::AtEvaluationTime | TimeIndexedRead::Whole => return None,
+                TimeIndexedRead::AtEvaluationTime | TimeIndexedRead::StoredThrough { .. }
+                    if !at_evaluation_time_reads_whole =>
+                {
+                    0
+                }
+                TimeIndexedRead::AtEvaluationTime
+                | TimeIndexedRead::StoredThrough { .. }
+                | TimeIndexedRead::Whole => return None,
             };
             let end_offset_ms = u64::try_from(offset_ms).ok()?;
             windows.push((
@@ -293,8 +298,9 @@ mod tests {
     /// `TimeRange(5m)`; node 4, a reader at the evaluation time, reads 0
     /// too. The scan is read through `{0, 5m}` and `{1h, 5m}`, the shift
     /// through `{1h, 5m}`; the reader at the evaluation time reads raw data
-    /// whole. A shift stored at ingestion time is read through `{1h, 5m}`
-    /// too, and reads the scan through `{0, 0}`.
+    /// whole. A shift stored at ingestion time (`TimeIndexedRead::of`) is
+    /// read through `{1h, 5m}` too, and reads its input through `{0, 0}`,
+    /// its newest output, or, raw data, unbounded.
     #[test]
     fn readers_read_a_producer_through_the_shifts_above_it() {
         let readers = |node: u32| -> Vec<u32> {
@@ -339,19 +345,37 @@ mod tests {
             ]
         );
         // Stored at ingestion time, the shift keeps the hour itself: it is
-        // still read through `{1h, 5m}`, and the producer below it only
-        // through its newest output, `{0, 0}`.
-        let stored = |node: u32| match node {
-            2 => TimeIndexedRead::StoredThrough {
+        // still read through `{1h, 5m}`, and the producer below it (here a
+        // chain, not raw data) only through its newest output, `{0, 0}`.
+        let shift = Operator::<u32>::NonASAP(NonASAPOp::TimeShift {
+            shift: crate::ir::operator::arguments::TimeShift {
                 offset_ms: 3_600_000,
+                at: None,
             },
+            child: 0,
+        });
+        let stored_shift = TimeIndexedRead::of(
+            &shift,
+            ExecutionTiming::IngestionTime,
+            Lifetime::AcrossEvaluations(crate::stages::StorageMedium::Memory),
+        );
+        assert_eq!(
+            stored_shift,
+            TimeIndexedRead::StoredThrough {
+                offset_ms: 3_600_000
+            }
+        );
+        let stored = |node: u32| match node {
+            2 => stored_shift,
             node => read_of(node),
         };
         assert_eq!(
             windows_read_above(2, readers, stored, false),
             windows_read_above(2, readers, read_of, false)
         );
-        let mut windows = windows_read_above(0, readers, stored, true).unwrap();
+        // Over raw data, which has no newest output, it reads unbounded.
+        assert_eq!(windows_read_above(0, readers, stored, true), None);
+        let mut windows = windows_read_above(0, readers, stored, false).unwrap();
         windows.sort();
         assert_eq!(
             windows,

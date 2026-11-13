@@ -150,8 +150,13 @@ pub(super) fn time_range_window(
 /// evaluation time) over shifts summing to `s` reads `{s, w}`; several read
 /// the smallest window holding all of theirs. A chain built at query time
 /// builds the windows its own readers read, so the walk passes up through
-/// it. `None` when `id` or a shift above it (stored or not) is a compile
-/// root, another consumer reads it outside a window, or nothing reads it.
+/// it. `None` when `id` or a shift above it is a compile root, another
+/// consumer reads it outside a window, or nothing reads it.
+///
+/// A `TimeShift` materialized at ingestion time reads its input at its
+/// evaluation time, which this walk reads unbounded (every consumer
+/// outside a window is): its refresh over a chain slot is refused ("read
+/// unbounded"), and over a raw `Scan` it compiles and reads every row.
 ///
 /// Example: a `Scan` read by a query-time chain of 1-minute windows, which
 /// `TimeRange(5m)` and `TimeShift(1m) -> TimeRange(5m)` read, is read for
@@ -173,14 +178,7 @@ pub(super) fn window_read_above(
             nodes[&node].output_state.timing,
             nodes[&node].lifetime,
         ) {
-            // A stored shift's refresh is a compile root too: how it stamps
-            // the rows it stores is not defined yet, so it reads its input
-            // whole (refused) rather than the newest window.
-            TimeIndexedRead::Through { .. } | TimeIndexedRead::StoredThrough { .. }
-                if roots.contains(&node) =>
-            {
-                TimeIndexedRead::Whole
-            }
+            TimeIndexedRead::Through { .. } if roots.contains(&node) => TimeIndexedRead::Whole,
             read => read,
         },
         true,
