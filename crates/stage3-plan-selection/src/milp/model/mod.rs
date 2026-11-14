@@ -408,7 +408,13 @@ pub(crate) fn solve_selection(
             .iter()
             .map(|&(r, coefficient, variable)| constraint!(r >= coefficient * scale * variable))
             .collect(),
-        retention_constraints(inputs, &variables.h, &variables.y, &variables.z),
+        retention_constraints(
+            inputs,
+            &variables.h,
+            &variables.x,
+            &variables.y,
+            &variables.z,
+        ),
         exact_only_constraints(inputs, &variables.read_by_query, &variables.y, &variables.z),
     ]
     .into_iter()
