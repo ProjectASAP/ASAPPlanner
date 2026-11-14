@@ -92,7 +92,7 @@ pub fn select_plan(
         costs.per_execution[index].is_ok() && !must_not_read(physical, query, execution.candidate)
     });
     if selectable
-        .answering
+        .answering()
         .iter()
         .any(|(_, executions)| executions.is_empty())
     {

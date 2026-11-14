@@ -53,6 +53,7 @@ use std::collections::HashMap;
 
 use asap_cost::plan::execution_demand::{
     context_executions_per_second, executions_per_second as rate_of_materialized,
+    queries_of_context,
 };
 use asap_cost::{
     maintained_window_ms, node_resource_usage_and_cost, raw_data_disk_cost_per_second, CostInputs,
@@ -71,8 +72,8 @@ use asap_types::stages::{
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::plan::candidate_node;
-use crate::retention::{edge_retention_need_ms, edge_scan_read_ms, output_retention_need_ms};
-use crate::selectable::{evaluation_grid, Execution, SelectableExecutions};
+use crate::retention::{edge_retention_need_ms, edge_scan_read_ms, ms_to_seconds, reads_back};
+use crate::selectable::{Execution, SelectableExecutions};
 
 /// The objective's coefficients
 /// (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
@@ -106,6 +107,22 @@ pub(crate) struct ExecutionCosts {
     pub(crate) unbounded_raw_data_on_disk_cost_per_second: HashMap<PhysicalCandidateId, f64>,
 }
 
+impl ExecutionCosts {
+    /// $\pi_v h_v$ of candidate `v` retaining `retention_ms`, per second; 0
+    /// for a candidate with no retention cost.
+    pub(crate) fn retention_cost_per_second(
+        &self,
+        v: PhysicalCandidateId,
+        retention_ms: u64,
+    ) -> f64 {
+        self.retention_cost_per_retained_second
+            .get(&v)
+            .map_or(0.0, |per_retained_second| {
+                per_retained_second * ms_to_seconds(retention_ms)
+            })
+    }
+}
+
 /// The objective's coefficients of every execution and edge of
 /// `selectable` ([`ExecutionCosts`]; module doc). Errs on nothing: what
 /// `asap-cost` cannot cost is reported in [`ExecutionCosts::per_execution`]
@@ -135,8 +152,8 @@ pub(crate) fn execution_costs(
         .map(|v| is_query_time_scan(physical, PhysicalCandidateId(v)))
         .collect();
     let producer_of = |position: usize| {
-        let (_, edge, producer) = selectable.edges()[position];
-        (edge, executions[producer].candidate)
+        let edge = selectable.edges()[position];
+        (edge.edge, executions[edge.producer].candidate)
     };
     // Each edge's need, computed once per edge of the physical memo: an
     // edge is read in every context it is selectable in.
@@ -163,16 +180,8 @@ pub(crate) fn execution_costs(
             *most = most.zip(need_ms).map(|(most, need)| most.max(need));
         }
     };
-    for (position, &need_ms) in retention_need_ms_per_edge.iter().enumerate() {
-        read(producer_of(position).1, need_ms);
-    }
-    for (query, answering) in &selectable.answering {
-        for &index in answering {
-            read(
-                executions[index].candidate,
-                Some(output_retention_need_ms(&entries[query.0])),
-            );
-        }
+    for (index, _, need_ms) in reads_back(selectable, &retention_need_ms_per_edge, entries) {
+        read(executions[index].candidate, need_ms);
     }
     // How far back a query-time `Scan` reads for the consumer of each edge
     // out of it, in one run (`None`: read whole), once per memo edge.
@@ -205,7 +214,7 @@ pub(crate) fn execution_costs(
         let Some(read_ms) = *read_ms else {
             continue;
         };
-        let (_, _, producer) = selectable.edges()[position];
+        let producer = selectable.edges()[position].producer;
         let u = executions[producer].candidate;
         let most = baseline_scan_read_ms
             .get_mut(&u)
@@ -341,7 +350,7 @@ pub(crate) fn execution_costs(
         .unwrap_or(1_000)
         .max(1);
         let longer = node_retaining(v, Some(retention_ms + delta_ms));
-        let delta_seconds = delta_ms as f64 / 1_000.0;
+        let delta_seconds = ms_to_seconds(delta_ms);
         let per_retained_second = match is_across_evaluations(physical, v) {
             true => own_execution.get(&v).and_then(|&index| {
                 let (own, raw_data, per_second) = at_rate[index].as_ref().ok()?;
@@ -393,14 +402,17 @@ pub(crate) fn execution_costs(
         .map(|(execution, at_rate)| {
             let &(own, raw_data, _) = at_rate.as_ref().map_err(Clone::clone)?;
             let v = execution.candidate;
-            Ok(match retention_cost_per_retained_second.get(&v) {
+            let per_retained_second = retention_cost_per_retained_second.get(&v);
+            Ok(if query_time_scan[v.0] {
                 // A query-time scan's raw data is charged per source.
-                _ if query_time_scan[v.0] => own,
-                Some(per_retained_second) if is_across_evaluations(physical, v) => {
-                    let retention_seconds = most_read_ms[&v].unwrap_or(0) as f64 / 1_000.0;
-                    own + raw_data - per_retained_second * retention_seconds
-                }
-                _ => own + raw_data,
+                own
+            } else if let (Some(per_retained_second), true) =
+                (per_retained_second, is_across_evaluations(physical, v))
+            {
+                let retention_seconds = ms_to_seconds(most_read_ms[&v].unwrap_or(0));
+                own + raw_data - per_retained_second * retention_seconds
+            } else {
+                own + raw_data
             })
         })
         .collect();
@@ -408,8 +420,9 @@ pub(crate) fn execution_costs(
         .edges()
         .iter()
         .zip(&scan_read_ms_per_edge)
-        .map(|(&(consumer, edge, producer), scan_read_ms)| {
-            let e = physical.edge(edge);
+        .map(|(edge, scan_read_ms)| {
+            let (consumer, producer) = (edge.consumer, edge.producer);
+            let e = physical.edge(edge.edge);
             let (u, c) = (e.producer_candidate_id, e.consumer_candidate_id);
             per_execution[producer].as_ref().ok()?;
             let &(own, raw_data, per_second) = at_rate[consumer].as_ref().ok()?;
@@ -499,19 +512,29 @@ pub(crate) fn executions_per_second(
         memo.groups()[group.0 as usize]
             .reached_by_queries()
             .iter()
-            .filter_map(|&query| entries.get(query))
+            .copied()
+    };
+    let entries_of = |queries: Vec<usize>| -> Vec<&QueryWorkloadEntry> {
+        queries
+            .into_iter()
+            .filter_map(|query| entries.get(query))
+            .collect()
     };
     let rate = match selectable.context(execution.context) {
         ExecutionContext::Evaluation { grid } => match selectable.request_anchor(execution.context)
         {
             Some((at, queries)) => context_executions_per_second(
                 Some(at),
-                queries.iter().filter_map(|query| entries.get(query.0)),
+                entries_of(queries.iter().map(|query| query.0).collect()),
                 non_repeating_query_horizon_seconds,
             ),
             None => context_executions_per_second(
                 None,
-                reaching(execution.candidate).filter(|entry| evaluation_grid(entry) == grid),
+                entries_of(queries_of_context(
+                    grid.period_ms,
+                    reaching(execution.candidate),
+                    entries,
+                )),
                 non_repeating_query_horizon_seconds,
             ),
         },
@@ -520,7 +543,7 @@ pub(crate) fn executions_per_second(
             rate_of_materialized(
                 properties.timing(),
                 properties.lifetime(),
-                reaching(m),
+                entries_of(reaching(m).collect()),
                 non_repeating_query_horizon_seconds,
             )
         }
