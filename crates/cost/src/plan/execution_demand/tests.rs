@@ -403,3 +403,21 @@ fn invalid_recurrence_is_rejected() {
         Err(AnalyticalCostError::InvalidRecurrence)
     ));
 }
+
+/// `m[5m]` below an `@ end()` shift read by an instant query every 60 s,
+/// and read directly by another instant query every 60 s: the anchor is
+/// the evaluation time, so the range and the scan are computed in the one
+/// evaluation context, once per minute.
+#[test]
+fn an_instant_at_end_input_runs_in_the_evaluation_context() {
+    let rates = computations(
+        &anchored_dag(AtModifier::End, vec![2, 1]),
+        &entries(&[fixed(60_000, 0), fixed(60_000, 0)], None),
+        3600.0,
+    )
+    .unwrap();
+    for id in [0, 1] {
+        assert_eq!(rates[&id].0, 1);
+        close(rates[&id].1, 1.0 / 60.0);
+    }
+}
