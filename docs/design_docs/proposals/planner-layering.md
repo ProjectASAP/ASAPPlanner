@@ -479,10 +479,17 @@ then the Pass 2 transformations), and expand shared sizes, tumbling-window horiz
 (planned) raw windows into concrete groups, so that choosing a threshold is
 choosing a group; choose one candidate per needed group; compose the choice
 into one plan and check and cost it with Stage 2 and Stage 3. The search is
-the group selection MILP (mixed-integer linear program, #1095): it chooses one
-candidate per memo group and execution context, with each shareable candidate
-charged once, and is solved once; it prices cost model 1 only (cost models 2
-and 3 are an `UnsupportedCostModel` error, #888). Stage 3 builds the chosen
+the selection MILP (mixed-integer linear program, concepts doc
+sections 3 and 5) over execution contexts: a candidate with lifetime None or
+`OneEvaluation` runs once per context that selects it ($x_{\kappa,v}$; a
+context is an evaluation grid shared by the queries on it, an ingestion
+pipeline's refresh window, or a materialized candidate's own computation), an
+`AcrossEvaluations` candidate once ($x^{\mathrm{mat}}_v$), every edge per
+context of its consumer ($y_{\kappa,u,c,i}$, only where `delivers_on`
+holds), and a candidate that retains time-indexed rows retains what its
+selected consumers read back ($h_v$, constraint (R)). It is solved once and
+costs under cost model 1 only (cost models 2 and 3 are an
+`UnsupportedCostModel` error). Stage 3 builds the chosen
 plan, a `PhysicalASAPDAG`, as its last step, so it does not depend on the
 Stage 2 crate. The facade runs Pass 2, Stage 2 and Stage 3 once, over the
 full tumbling-window-width domain, with no time limit.
@@ -496,7 +503,7 @@ exactly come from `asap_accuracy::ErrorMetricsOfMemo`): the crate
 root's `generate_logical_asap_memo_candidates` runs them); the memo types Stage 1 hands Stage 2 are in
 `crates/types/src/stages/` (`asap_types::stages`); the facade that runs the
 stages is in `crates/planner/src/run.rs`; the search over Stage 2's
-candidates is in `crates/stage3-plan-selection/src/` (`lib.rs`, `groups/`, `milp/`).
+candidates is in `crates/stage3-plan-selection/src/` (`lib.rs`, `selectable.rs`, `cost.rs`, `retention.rs`, `milp/`, `plan.rs`, `report.rs`).
 
 | Step | Entry point | Path |
 |---|---|---|
@@ -504,7 +511,7 @@ candidates is in `crates/stage3-plan-selection/src/` (`lib.rs`, `groups/`, `milp
 | Pass 1 | `pass1_memo` → `Memo`, the one entry: inside it, the computation targets (walking the memo groups, less the summaries the deployment does not support; `ComputationTarget` is Pass 1's private working type), then each target's ways to compute added as candidates of the groups, a summary with one build per configuration of its `parameter_list` | `stage1-pass1-per-computation-candidates/src/lib.rs`; `computation_targets.rs`; `candidates/` (`mod.rs`, `pending.rs`, `measure_output.rs`); `summary_realization.rs` builds the summary inputs (the sketch algorithms that serve an intent, each row's update) |
 | Memo types | `Memo`, `MemoGroup`, `CandidateForMemoGroup`, `OriginOfCandidateForMemoGroup`, `LogicalASAPMemoCandidates`, `root_groups`, `queries_rooted_at` | `crates/types/src/stages/` (`asap_types::stages`) |
 | Pass 2 | `generate_logical_asap_memo_candidates` → `LogicalASAPMemoCandidates`, from Pass 1's output. It calls in this order: 1. rollup from the finest common group; 2. top-k reuse; 3. reach, caps and readout requirements; 4. dead-candidate elimination; 5. chain groups; 6. the logical edges; then each group's evaluation grid and the groups each query may read only exactly | `stage1-pass2-reuse-candidates/src/` (`lib.rs`, `rules/{candidates.rs,rollup/,topk.rs,chains.rs}`, `readout_requirements.rs`, `dead_candidates.rs`, `edges.rs`, `evaluation_grids.rs`; the readout levels: `asap_accuracy::readout_levels`; the groups each query may read only exactly: `asap_accuracy::ErrorMetricsOfMemo::exact_only_groups_of_query`; `LogicalASAPMemoCandidates` itself: `asap_types::stages`) |
-| Production memo build and search | The facade's `run_planning` builds Stage 0's memo (`memo_of_queries`) and runs Pass 1 (`pass1_memo`) once; then `generate_logical_asap_memo_candidates`, `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`, once each; `select_plan` builds the plan. Behind `select_plan`: the group selection MILP (#1095), `groups/` and `milp/` | `crates/planner/src/run.rs`; `crates/stage3-plan-selection/src/lib.rs` |
+| Production memo build and search | The facade's `run_planning` builds Stage 0's memo (`memo_of_queries`) and runs Pass 1 (`pass1_memo`) once; then `generate_logical_asap_memo_candidates`, `generate_physical_asap_memo_candidates` and Stage 3's `select_plan`, once each; `select_plan` builds the plan. Behind `select_plan`: the executions and edges it may select (`selectable.rs`), their costs (`cost.rs`) and the selection MILP over execution contexts (`milp/`: `model/`, `retention.rs` for $h_v$ and (R), `exact_only.rs` for each query's exact-only reads $a_{q,e}$ and (X), `dominance.rs` for executions their `OneEvaluation` twin dominates, `graph.rs`, `upper_bound.rs`) | `crates/planner/src/run.rs`; `crates/stage3-plan-selection/src/lib.rs` |
 
 ## ASAPPlanner Detailed Design: Planning Stages and their decisions/Strategies
 
@@ -1273,11 +1280,9 @@ not check executor support. It
 then removes the candidates no buildable input or query output can use
 (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`),
 repeating until nothing more is removed. Stage 2 makes no execution-scope
-copies: how many times a candidate runs is Stage 3's choice, and a
-selection names each run as a node of its `DagOfSelectedCandidates`.
-Today's Stage 3 engine, whose MILP runs each candidate at most once, makes
-the copies it needs itself before solving and decodes each selected copy
-into a node.
+copies: how many times a candidate runs is Stage 3's choice. Stage 3 runs
+a candidate with lifetime None or `OneEvaluation` once per execution
+context that selects it, and builds each run as a node of the plan.
 
 *Example for Algorithm 3* ([Example 4, Pattern B](#example-4-materialization-of-window-summaries-in-physical-planning)).
 The logical candidate is the `Tumbling(1m)` KLL option from Algorithm 2. The

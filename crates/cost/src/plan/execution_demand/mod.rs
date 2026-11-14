@@ -8,9 +8,11 @@
 //! to cost once per request, as `computations` does.
 
 use crate::node::analytical::AnalyticalCostError;
+use asap_types::ir::operator::AtModifier;
 use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::Operator;
 use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
-use asap_types::stages::Lifetime;
+use asap_types::stages::{queries_of_context, query_reads, Lifetime};
 use asap_types::workload::{QueryRecurrence, QueryWorkloadEntry, RangeEvaluation, RepeatedDemand};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -281,86 +283,178 @@ pub fn executions_per_second<'e>(
     )
 }
 
-/// What computes a not-materialized node once per its own execution
-/// ([`consumers`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// What computes a node that is not materialized across evaluations once
+/// per its own execution ([`consumers`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Consumer {
     /// Query `.0` (an operator or scalar root), at its own rate.
     Query(usize),
-    /// A materialized node, at that node's rate.
+    /// Query `query` below a `TimeShift` anchored with `at` (`@ end()` or
+    /// `@ start()`): once per request ([`context_executions_per_second`]).
+    QueryRequest { query: usize, at: AtModifier },
+    /// A node materialized across evaluations, at that node's rate.
     Materialized(PhysicalASAPNodeId),
 }
 
-/// The consumers of each not-materialized node of `dag` that any consumer
-/// reaches ([`computations`]): the queries and the materialized nodes whose
-/// walk down their inputs reaches it before meeting a materialized node,
-/// each once; the queries first, in order, then the materialized nodes in
-/// `dag`'s node order.
-pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consumer>> {
+/// The consumers of each node of `dag` not materialized across evaluations
+/// that any consumer reaches ([`computations`]): the queries
+/// ([`query_reads`](asap_types::stages::query_reads)) and the nodes materialized across evaluations whose
+/// walk down their inputs reaches it before meeting such a node, each
+/// once, sorted. A `OneEvaluation` node is computed within its consumers'
+/// context, so a walk goes through it.
+pub fn consumers(
+    dag: &PhysicalASAPDAG,
+    entries: &[QueryWorkloadEntry],
+) -> HashMap<PhysicalASAPNodeId, Vec<Consumer>> {
     let materialized_nodes: Vec<PhysicalASAPNodeId> = dag
         .nodes
         .iter()
-        .filter(|n| n.lifetime != Lifetime::None)
+        .filter(|n| matches!(n.lifetime, Lifetime::AcrossEvaluations(_)))
         .map(|n| n.id)
         .collect();
     let is_materialized: HashSet<PhysicalASAPNodeId> = materialized_nodes.iter().copied().collect();
-    let inputs = |id: PhysicalASAPNodeId| {
+    let inputs = |id: PhysicalASAPNodeId| -> Vec<PhysicalASAPNodeId> {
         dag.edges
             .iter()
-            .filter(move |e| e.consumer == id)
+            .filter(|e| e.consumer == id)
             .map(|e| e.producer)
+            .collect()
     };
-    let walks = query_starts(dag)
-        .into_iter()
-        .enumerate()
-        .map(|(query, start)| (Consumer::Query(query), start))
-        .chain(
-            materialized_nodes
-                .iter()
-                .map(|&id| (Consumer::Materialized(id), inputs(id).collect())),
-        );
+    let payload: HashMap<PhysicalASAPNodeId, &Operator<PhysicalASAPNodeId>> = dag
+        .nodes
+        .iter()
+        .map(|node| (node.id, &node.payload))
+        .collect();
     let mut consumers: HashMap<_, Vec<Consumer>> = HashMap::new();
-    for (consumer, start) in walks {
+    let queries = query_reads(
+        &query_starts(dag),
+        inputs,
+        |id| {
+            payload
+                .get(&id)
+                .and_then(|operator| operator.request_anchor())
+        },
+        |id| is_materialized.contains(&id),
+        entries,
+    );
+    for (id, reads) in queries {
+        consumers
+            .entry(id)
+            .or_default()
+            .extend(reads.into_iter().map(|read| match read {
+                (query, None) => Consumer::Query(query),
+                (query, Some(at)) => Consumer::QueryRequest { query, at },
+            }));
+    }
+    // Each node materialized across evaluations, over the nodes it reads
+    // down to the next such node.
+    for &materialized in &materialized_nodes {
         let mut seen = HashSet::new();
-        let mut stack: Vec<PhysicalASAPNodeId> = start;
+        let mut stack = inputs(materialized);
         while let Some(id) = stack.pop() {
             if is_materialized.contains(&id) || !seen.insert(id) {
                 continue;
             }
-            consumers.entry(id).or_default().push(consumer);
+            consumers
+                .entry(id)
+                .or_default()
+                .push(Consumer::Materialized(materialized));
             stack.extend(inputs(id));
         }
+    }
+    // Queries first, in order, then the materialized nodes.
+    for of_node in consumers.values_mut() {
+        of_node.sort();
     }
     consumers
 }
 
+/// How many times per second a node runs in one execution context of the
+/// queries `queries` (a node not materialized across evaluations, run once
+/// per execution of the context; Stage 3 and [`computations`] both cost it
+/// so): with no `anchor`, at every evaluation of theirs, a range query's
+/// steps each one ([`evaluation_rate`]); below a `TimeShift` anchored with
+/// `anchor`, once per request: below `@ end()` once per distinct request
+/// end ([`evaluation_rate`] of their request schedules); below
+/// `@ start()` that per span, summed over the distinct spans, as two
+/// queries requested together with different spans need the input at two
+/// start times, and a result not kept across evaluations serves only the
+/// request it is computed for.
+///
+/// Example: two range queries every 60 s at phase 0 with steps of 30 s,
+/// spans 1 h and 2 m: below `@ start()` 2/60 per second (one run per
+/// request of each); below `@ end()` both end at `k · 60 s`, 1/60 per
+/// second.
+pub fn context_executions_per_second<'e>(
+    anchor: Option<AtModifier>,
+    queries: impl IntoIterator<Item = &'e QueryWorkloadEntry>,
+    non_repeating_query_horizon_seconds: f64,
+) -> Result<f64, AnalyticalCostError> {
+    let queries = queries.into_iter();
+    match anchor {
+        // Requests of one span need the input at one start time each;
+        // different spans need it at different times of one request.
+        Some(AtModifier::Start) => {
+            let mut by_span: BTreeMap<Option<u64>, Vec<&QueryRecurrence>> = BTreeMap::new();
+            for entry in queries {
+                by_span
+                    .entry(entry.range_evaluation.map(|range| range.span_ms))
+                    .or_default()
+                    .push(&entry.recurrence);
+            }
+            by_span
+                .values()
+                .map(|recurrences| {
+                    evaluation_rate(
+                        recurrences.iter().map(|&recurrence| (recurrence, None)),
+                        non_repeating_query_horizon_seconds,
+                    )
+                })
+                .sum()
+        }
+        // Once per request end, however many steps the request evaluates.
+        Some(_) => evaluation_rate(
+            queries.map(|entry| (&entry.recurrence, None)),
+            non_repeating_query_horizon_seconds,
+        ),
+        None => evaluation_rate(
+            queries.map(|entry| (&entry.recurrence, entry.range_evaluation)),
+            non_repeating_query_horizon_seconds,
+        ),
+    }
+}
+
 /// How often each node of `dag` is computed: `(multiplier, per_second)`
-/// (module doc, "Cost model"). A materialized node is computed once for all
-/// its queries: once per second at ingestion time (materialized at ingestion time), at
-/// the combined rate of the queries reaching it (`OneEvaluation`,
-/// [`evaluation_rate`]), or once per request of those queries for a chain
-/// materialized across evaluations, whose request builds only its newest tumbling window
-/// however many range steps it evaluates ([`executions_per_second`]).
-/// `entries[q]` is query `q`'s workload entry (its recurrence and range
-/// evaluation). A not-materialized node is computed once per
-/// consumer that reaches it ([`consumers`]), at that consumer's rate. A consumer is a query
-/// (operator or scalar root), at its own rate, or a materialized node, at
-/// that node's rate; a walk stops at the first materialized node it meets,
-/// and a node read several times within one consumer's walk counts once for
-/// it; its `multiplier` is that number of consumers. A node computed at
-/// ingestion time, materialized or not, computes each arriving row once:
-/// once per second, `(1, 1.0)`, however many ingestion-time views of
-/// however many refresh windows read it.
+/// (module doc, "Cost model"). A node materialized across evaluations is
+/// computed once for all its queries: once per second at ingestion time,
+/// or once per request of the queries reaching it at query time, a chain
+/// building only its newest tumbling window however many range steps it
+/// evaluates ([`executions_per_second`]). `entries[q]` is query `q`'s
+/// workload entry (its recurrence and range evaluation). Any other node
+/// (ℓ None or `OneEvaluation`) is computed once per execution context of
+/// the consumers that reach it ([`consumers`]; the execution contexts of
+/// the concepts doc, section 5). A consumer is a query (operator or scalar
+/// root) or a node materialized across evaluations; a walk stops at the
+/// first such node it meets, and a node read several times within one
+/// consumer's walk counts once for it. The queries on one evaluation grid
+/// ([`QueryWorkloadEntry::evaluation_grid_ms`]) are one context, and the requests of the
+/// queries on one grid below a `TimeShift` anchored with `@ end()` (or
+/// `@ start()`) another, each at [`context_executions_per_second`]; a
+/// materialized node is a context of its own, at its rate. Its
+/// `multiplier` is that number of contexts. A node computed at ingestion
+/// time, materialized or not, computes each arriving row once: once per
+/// second, `(1, 1.0)`, however many ingestion-time views of however many
+/// refresh windows read it.
 pub fn computations(
     dag: &PhysicalASAPDAG,
     entries: &[QueryWorkloadEntry],
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<HashMap<PhysicalASAPNodeId, (u64, f64)>, AnalyticalCostError> {
-    // Each materialized node's timing and lifetime.
+    // Each node materialized across evaluations: its timing and lifetime.
     let materialized_nodes: HashMap<PhysicalASAPNodeId, (ExecutionTiming, Lifetime)> = dag
         .nodes
         .iter()
-        .filter(|node| node.lifetime != Lifetime::None)
+        .filter(|node| matches!(node.lifetime, Lifetime::AcrossEvaluations(_)))
         .map(|node| (node.id, (node.output_state.timing, node.lifetime)))
         .collect();
     let inputs = |id: PhysicalASAPNodeId| {
@@ -398,25 +492,42 @@ pub fn computations(
         )?;
         rate_of_materialized.insert(id, rate);
     }
-    // Each query consumer's rate.
-    let mut query_rates = Vec::new();
-    for query in 0..starts.len() {
-        query_rates.push(evaluation_rate(
-            entries
-                .get(query)
-                .map(|entry| (&entry.recurrence, entry.range_evaluation)),
-            non_repeating_query_horizon_seconds,
-        )?);
-    }
     let mut count: HashMap<_, (u64, f64)> = HashMap::new();
-    for (id, of_node) in consumers(dag) {
+    for (id, of_node) in consumers(dag, entries) {
         let entry = count.entry(id).or_default();
+        // The queries reaching it, per anchor.
+        let mut queries_by_anchor: BTreeMap<Option<AtModifier>, BTreeSet<usize>> = BTreeMap::new();
         for consumer in of_node {
-            entry.0 += 1;
-            entry.1 += match consumer {
-                Consumer::Query(query) => query_rates[query],
-                Consumer::Materialized(node) => rate_of_materialized[&node],
+            let (query, anchor) = match consumer {
+                Consumer::Query(query) => (query, None),
+                Consumer::QueryRequest { query, at } => (query, Some(at)),
+                Consumer::Materialized(node) => {
+                    entry.0 += 1;
+                    entry.1 += rate_of_materialized[&node];
+                    continue;
+                }
             };
+            queries_by_anchor.entry(anchor).or_default().insert(query);
+        }
+        // One context per (evaluation grid, anchor).
+        for (anchor, reaching) in queries_by_anchor {
+            let grids: BTreeSet<u64> = reaching
+                .iter()
+                .map(|&query| {
+                    entries
+                        .get(query)
+                        .map_or(1, QueryWorkloadEntry::evaluation_grid_ms)
+                })
+                .collect();
+            for grid_ms in grids {
+                let queries = queries_of_context(grid_ms, reaching.iter().copied(), entries);
+                entry.0 += 1;
+                entry.1 += context_executions_per_second(
+                    anchor,
+                    queries.iter().filter_map(|&query| entries.get(query)),
+                    non_repeating_query_horizon_seconds,
+                )?;
+            }
         }
     }
     Ok(dag
@@ -436,187 +547,4 @@ pub fn computations(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use asap_types::workload::{DemandEstimate, Rate, RepetitionInterval, TimestampMs};
-
-    fn fixed(interval: u32, phase: u64) -> QueryRecurrence {
-        QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
-            interval: RepetitionInterval(interval),
-            evaluation_phase: TimestampMs(phase),
-        })
-    }
-
-    fn close(actual: f64, expected: f64) {
-        assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
-    }
-
-    // Equal phases share evaluations; separate phases add.
-    #[test]
-    fn chosen_readers_preserve_phase_accounting() {
-        let queries = [
-            fixed(20_000, 5_000),
-            fixed(20_000, 25_000),
-            fixed(20_000, 0),
-        ];
-        close(
-            evaluation_rate(queries[..2].iter().map(|r| (r, None)), 3600.0).unwrap(),
-            1.0 / 20.0,
-        );
-        close(
-            evaluation_rate(queries.iter().map(|r| (r, None)), 3600.0).unwrap(),
-            2.0 / 20.0,
-        );
-        // No global subset cache: each caller's selected queries determine the rate.
-        close(evaluation_rate(std::iter::empty(), 3600.0).unwrap(), 0.0);
-    }
-
-    // Range offsets union within one cadence; retained state instead uses requests.
-    #[test]
-    fn range_offsets_and_request_rates_stay_distinct() {
-        let recurrence = fixed(60_000, 0);
-        let ranges = [
-            Some(RangeEvaluation {
-                step_ms: 60_000,
-                span_ms: 3_600_000,
-            }),
-            Some(RangeEvaluation {
-                step_ms: 30_000,
-                span_ms: 600_000,
-            }),
-            None,
-        ];
-        close(
-            evaluation_rate(ranges.iter().map(|r| (&recurrence, *r)), 3600.0).unwrap(),
-            71.0 / 60.0,
-        );
-        close(
-            evaluation_rate(ranges.iter().map(|_| (&recurrence, None)), 3600.0).unwrap(),
-            1.0 / 60.0,
-        );
-    }
-
-    // Different fixed intervals remain additive even if timestamps can coincide.
-    #[test]
-    fn different_intervals_preserve_existing_conservative_rate() {
-        let queries = [fixed(20_000, 0), fixed(30_000, 0)];
-        close(
-            evaluation_rate(queries.iter().map(|r| (r, None)), 3600.0).unwrap(),
-            1.0 / 20.0 + 1.0 / 30.0,
-        );
-    }
-
-    // Estimates add with range multiplicity; scheduled/one-off/unknown use a maximum.
-    #[test]
-    fn estimated_and_batched_nonrepeating_demand_keep_their_policy() {
-        let estimate = QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(DemandEstimate {
-            expected_rate: Rate(2.0),
-            observed_at: None,
-            valid_for: None,
-        }));
-        let scheduled = QueryRecurrence::Repeated(RepeatedDemand::Scheduled(vec![
-            TimestampMs(0),
-            TimestampMs(10),
-        ]));
-        let once = QueryRecurrence::OneTime {
-            invocations: 4,
-            execute_at: None,
-        };
-        let unknown = QueryRecurrence::Unknown;
-        let range = Some(RangeEvaluation {
-            step_ms: 1000,
-            span_ms: 2000,
-        });
-        close(
-            evaluation_rate(
-                [
-                    (&estimate, range),
-                    (&estimate, None),
-                    (&scheduled, range),
-                    (&once, None),
-                    (&unknown, None),
-                ],
-                100.0,
-            )
-            .unwrap(),
-            8.0 + 6.0 / 100.0,
-        );
-    }
-
-    #[test]
-    fn billion_offset_mixed_ranges_are_counted_arithmetically() {
-        let recurrence = fixed(1000, 0);
-        let rate = evaluation_rate(
-            [
-                (
-                    &recurrence,
-                    Some(RangeEvaluation {
-                        span_ms: 1_000_000_000,
-                        step_ms: 2,
-                    }),
-                ),
-                (
-                    &recurrence,
-                    Some(RangeEvaluation {
-                        span_ms: 1_000_000_000,
-                        step_ms: 3,
-                    }),
-                ),
-            ],
-            60.0,
-        )
-        .unwrap();
-        assert_eq!(rate, 666_666_668.0);
-    }
-
-    #[test]
-    fn arithmetic_union_matches_small_explicit_offset_sets() {
-        for left_step in 1..=7 {
-            for right_step in 1..=7 {
-                for left_span in [0, 5, 17, 30] {
-                    for right_span in [0, 9, 23, 30] {
-                        let mut ranges = BTreeMap::new();
-                        for (step, span) in
-                            [(left_step, left_span), (right_step, right_span), (11, 29)]
-                        {
-                            let longest = ranges.entry(step).or_insert(0u64);
-                            *longest = (*longest).max(span);
-                        }
-                        let mut oracle = BTreeSet::new();
-                        for (&step, &span) in &ranges {
-                            oracle.extend((0..=span / step).map(|k| k * step));
-                        }
-                        assert_eq!(
-                            distinct_instants_per_request(&ranges),
-                            oracle.len() as u64,
-                            "{ranges:?}"
-                        );
-                    }
-                }
-            }
-        }
-        let large = 1u64 << 63;
-        assert_eq!(
-            offset_intersection_count(&[(large - 1, large), (large - 3, large)]),
-            1
-        );
-    }
-
-    // Invalid fixed intervals and estimated rates still produce the evaluator's error.
-    #[test]
-    fn invalid_recurrence_is_rejected() {
-        assert!(matches!(
-            evaluation_rate([(&fixed(0, 0), None)], 3600.0),
-            Err(AnalyticalCostError::InvalidRecurrence)
-        ));
-        let invalid = QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(DemandEstimate {
-            expected_rate: Rate(-1.0),
-            observed_at: None,
-            valid_for: None,
-        }));
-        assert!(matches!(
-            evaluation_rate([(&invalid, None)], 3600.0),
-            Err(AnalyticalCostError::InvalidRecurrence)
-        ));
-    }
-}
+mod tests;

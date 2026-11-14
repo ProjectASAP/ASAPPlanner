@@ -1,27 +1,37 @@
 //! How far back from the evaluation time a candidate that retains rows (a
-//! materialized one, or a query-time `Scan`) must keep them, and how far
-//! back one execution of a query-time `Scan` reads, for the candidates
-//! that may read it: [`asap_cost::read_back_ms`] over candidates
+//! materialized one, or a query-time `Scan`) must keep them for a reader
+//! over one edge, $\operatorname{need}_{\kappa,u,c,i}$ of constraint (R),
+//! or for a query reading it directly, and how far back one execution of a
+//! query-time `Scan` reads for that reader: [`asap_cost::read_back_ms`]
+//! over candidates; and every read of an execution's rows
+//! (`SelectableExecutions::reads_back`)
 //! (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
 //! section 5, "Cost and retention").
 
 use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::plan::time_window::{InputTimeAccess, TimeIndexedPlan};
-use asap_types::stages::{MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId};
+use asap_types::stages::{
+    MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdge, PhysicalEdgeId,
+};
 use asap_types::workload::QueryWorkloadEntry;
 
-/// How far back from the evaluation time `producer`'s rows must be kept
-/// for its readers (`readers_of`, the candidates that may read it):
-/// [`asap_cost::read_back_ms`] with, at each reader, the longest
-/// range-evaluation span of the queries reaching it.
-pub(crate) fn retention_need_ms<R: IntoIterator<Item = PhysicalCandidateId>>(
+use crate::selectable::{Reader, SelectableExecutions};
+
+/// $\operatorname{need}_{\kappa,u,c,i}$: how far back from the evaluation
+/// time `edge`'s producer $u$ must keep its rows for its consumer $c$, with
+/// $c$ $u$'s only reader and every candidate that may read $c$ above it
+/// ([`read_back`]), at each reader the longest range-evaluation span of
+/// the queries reaching it; `None` when read unbounded.
+///
+/// Example: `TimeRange(5m)` over a chain of 10 s windows, read by a range
+/// query with a 1 h span: 3,900,000 ms.
+pub(crate) fn edge_retention_need_ms(
     physical: &PhysicalASAPMemoCandidates,
     entries: &[QueryWorkloadEntry],
-    producer: PhysicalCandidateId,
-    readers_of: impl Fn(PhysicalCandidateId) -> R,
+    edge: PhysicalEdgeId,
 ) -> Option<u64> {
     let memo = &physical.logical_candidates.memo;
-    let span_ms = |v: PhysicalCandidateId| {
+    read_back(physical, edge, |v| {
         let group = physical.physical_candidates[v.0].logical_candidate_id.group;
         memo.groups()[group.0 as usize]
             .reached_by_queries()
@@ -30,44 +40,76 @@ pub(crate) fn retention_need_ms<R: IntoIterator<Item = PhysicalCandidateId>>(
             .map(|range| range.span_ms)
             .max()
             .unwrap_or(0)
-    };
-    read_back(physical, producer, readers_of, span_ms)
+    })
 }
 
-/// How far back from the evaluation time one execution of the query-time
-/// `Scan` `producer` reads, for its readers (`readers_of`):
-/// [`asap_cost::read_back_ms`] without a range-evaluation span.
-pub(crate) fn scan_read_ms<R: IntoIterator<Item = PhysicalCandidateId>>(
+/// How far back one execution of the query-time `Scan` that is `edge`'s
+/// producer reads for its consumer ([`read_back`] without a
+/// range-evaluation span); `None` when read whole.
+pub(crate) fn edge_scan_read_ms(
     physical: &PhysicalASAPMemoCandidates,
-    producer: PhysicalCandidateId,
-    readers_of: impl Fn(PhysicalCandidateId) -> R,
+    edge: PhysicalEdgeId,
 ) -> Option<u64> {
-    read_back(physical, producer, readers_of, |_| 0)
+    read_back(physical, edge, |_| 0)
 }
 
-/// [`asap_cost::read_back_ms`] over candidates ([`Candidates`]).
-fn read_back<R: IntoIterator<Item = PhysicalCandidateId>>(
+/// The least need, in ms, over each execution's costed reads
+/// (`SelectableExecutions::reads_back`: an edge out of it `per_edge` costs, or a query output
+/// it may answer), by position in [`SelectableExecutions::executions`];
+/// `None` without a bounded one. (F) gives a selected execution a use and
+/// (R) then retains at least that: the greedy bound charges it, and the
+/// MILP has $h_v \ge$ it $\cdot x$.
+pub(crate) fn least_need_ms_per_execution(
+    selectable: &SelectableExecutions,
+    per_edge: &[Option<f64>],
+    need_ms_per_edge: &[Option<u64>],
+    entries: &[QueryWorkloadEntry],
+) -> Vec<Option<u64>> {
+    let mut least_need_ms = vec![None; selectable.executions().len()];
+    for (index, reader, need_ms) in selectable.reads_back(need_ms_per_edge, entries) {
+        let costed = match reader {
+            Reader::Edge(position) => per_edge[position].is_some(),
+            Reader::Output(_) => true,
+        };
+        if let (true, Some(need_ms)) = (costed, need_ms) {
+            let least: &mut Option<u64> = &mut least_need_ms[index];
+            *least = Some(least.map_or(need_ms, |least| least.min(need_ms)));
+        }
+    }
+    least_need_ms
+}
+
+/// `ms` in seconds, the unit of $h_v$ in the MILP and of the costs per
+/// second retained.
+pub(crate) fn ms_to_seconds(ms: u64) -> f64 {
+    ms as f64 / 1_000.0
+}
+
+/// [`asap_cost::read_back_ms`] of `edge`'s producer over candidates, read
+/// by `edge`'s consumer only and above it by every candidate that may read
+/// one (its admissible edges out), each read as its operator at its timing
+/// reads ([`Candidates`]), with `span_ms` at each reader.
+fn read_back(
     physical: &PhysicalASAPMemoCandidates,
-    producer: PhysicalCandidateId,
-    readers_of: impl Fn(PhysicalCandidateId) -> R,
+    edge: PhysicalEdgeId,
     span_ms: impl Fn(PhysicalCandidateId) -> u64,
 ) -> Option<u64> {
-    let readers_of = |v| readers_of(v).into_iter().collect();
     let candidates = Candidates {
         physical,
-        readers_of: &readers_of,
+        edge: physical.edge(edge),
     };
-    asap_cost::read_back_ms(&candidates, producer, span_ms)
+    asap_cost::read_back_ms(&candidates, candidates.edge.producer_candidate_id, span_ms)
 }
 
-/// Stage 3's candidates as the time walks see them: the readers a caller
-/// gives (those that may read a candidate, or the selected ones), each
-/// candidate's admissible producers as its inputs, its operator at its
-/// timing and lifetime ([`InputTimeAccess::of`]), and a current-time read
-/// of a `Scan` (raw data) needing every row.
+/// Stage 3's candidates as the time walks see them above `edge`: its
+/// producer read by its consumer only, any other candidate by every
+/// candidate that may read it (its admissible edges out); each candidate's
+/// admissible producers as its inputs, its operator at its timing and
+/// lifetime ([`InputTimeAccess::of`]), and a current-time read of a
+/// `Scan` (raw data) needing every row.
 struct Candidates<'a> {
     physical: &'a PhysicalASAPMemoCandidates,
-    readers_of: &'a dyn Fn(PhysicalCandidateId) -> Vec<PhysicalCandidateId>,
+    edge: &'a PhysicalEdge,
 }
 
 impl TimeIndexedPlan for Candidates<'_> {
@@ -75,7 +117,15 @@ impl TimeIndexedPlan for Candidates<'_> {
     type Child = MemoGroupId;
 
     fn readers_of(&self, v: PhysicalCandidateId) -> Vec<PhysicalCandidateId> {
-        (self.readers_of)(v)
+        match v == self.edge.producer_candidate_id {
+            true => vec![self.edge.consumer_candidate_id],
+            false => self
+                .physical
+                .admissible_edges_out_of(v)
+                .iter()
+                .map(|&out| self.physical.edge(out).consumer_candidate_id)
+                .collect(),
+        }
     }
 
     fn inputs_of(&self, v: PhysicalCandidateId) -> Vec<PhysicalCandidateId> {
@@ -102,12 +152,6 @@ impl TimeIndexedPlan for Candidates<'_> {
     }
 
     fn operator_of(&self, v: PhysicalCandidateId) -> &Operator<MemoGroupId> {
-        &self
-            .physical
-            .logical_candidates
-            .memo
-            .candidate(self.physical.physical_candidates[v.0].logical_candidate_id)
-            .expression
-            .operator
+        self.physical.operator(v)
     }
 }

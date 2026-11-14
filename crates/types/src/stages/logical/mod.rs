@@ -26,5 +26,5 @@ pub use group::{
     GroupProperties, MemoGroup, MemoGroupError, MemoGroupId, ValueSign,
 };
 pub use memo::{Memo, MemoQuery};
-pub use memo_candidates::LogicalASAPMemoCandidates;
+pub use memo_candidates::{EvaluationGrid, LogicalASAPMemoCandidates};
 pub use requirements::{LogicalRequirements, RequiredAccuracy};

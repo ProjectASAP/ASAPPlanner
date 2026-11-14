@@ -1,6 +1,6 @@
-//! An upper bound on the baseline MILP's optimum, and the candidates it
+//! An upper bound on the selection MILP's optimum, and the executions it
 //! rules out: the cost of one feasible plan found greedily, and every
-//! candidate that alone costs more than it. Leaving those out before the
+//! execution that alone costs more than it. Leaving those out before the
 //! objective is scaled keeps a candidate costing millions per second from
 //! shrinking the differences between plans costing thousandths under the
 //! solver's tolerances.
@@ -12,160 +12,167 @@
 //! greedy plan bounds the optimum by about 0.0088/s, so the chain is left
 //! out and the largest coefficient left is about 0.006/s.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use asap_types::stages::PhysicalCandidateId;
+use super::model::{has_one_reader, selection_cost_per_second, SelectionInputs};
+use crate::selectable::QueryId;
 
-use super::model::{is_unmaterialized_query_time, plan_cost_per_second, SelectionInputs};
-
-/// How many times the greedy plan is rebuilt without a candidate that
+/// How many times the greedy plan is rebuilt without an execution that
 /// made it infeasible before giving up on a bound.
 const REPAIRS: usize = 32;
 
-/// Per (consumer, input), the costed edges into it, each as (producer,
-/// $c_{u,c,i}$).
-type EdgesInto = HashMap<(usize, usize), Vec<(usize, f64)>>;
+/// Per input of an execution, the edge its cheapest tree reads it over, as
+/// (edge position, producer execution).
+type TreeInputs = Vec<Option<(usize, usize)>>;
 
-/// Per input of a candidate, the edge its cheapest tree reads it over, as
-/// (producer, $c_{u,c,i}$).
-type TreeInputs = Vec<Option<(usize, f64)>>;
-
-/// Per candidate, whether it costs more than a feasible plan
-/// ([`feasible_plan_cost_per_second`]): its own $w_v$ plus the most its
-/// input edges can take off ($\min(0, c_{u,v,i})$ per input) is over the
-/// bound. Such a candidate is in no optimal plan, as long as every other
-/// selected candidate costs at least 0 with its selected inputs. None is
-/// ruled out when no feasible plan is found.
+/// Per execution, by position in `SelectableExecutions::executions`,
+/// whether it costs more than a feasible plan
+/// ([`feasible_plan_cost_per_second`]): its own cost, plus the least
+/// retention $\pi_v h_v$ (R) makes it pay, plus the most its input edges
+/// can take off ($\min(0, c_{\kappa,u,v,i})$ per input) is over the
+/// bound. Such an execution is in no optimal plan, as long as every
+/// other selected execution costs at least 0 with its selected inputs.
+/// None is ruled out when no feasible plan is found.
 pub(crate) fn dearer_than_a_feasible_plan(inputs: &SelectionInputs<'_>) -> Vec<bool> {
-    let count = inputs.physical.physical_candidates.len();
+    let selectable = inputs.selectable;
+    let count = selectable.executions().len();
     let Some(bound) = feasible_plan_cost_per_second(inputs) else {
         return vec![false; count];
     };
-    let mut cheapest_input_edge: HashMap<(PhysicalCandidateId, usize), f64> = HashMap::new();
-    for (&edge, &cost) in &inputs.costs.edge_cost_change_per_second {
-        let edge = inputs.physical.edge(edge);
-        let key = (edge.consumer_candidate_id, edge.input_index_of_consumer);
-        let cheapest = cheapest_input_edge.entry(key).or_insert(0.0);
-        *cheapest = cheapest.min(cost);
-    }
+    let costs = inputs.costs;
+    let executions = selectable.executions();
+    // The least retention (R) makes each execution pay; a query-time
+    // scan's retention is its source's $r_s$, left out.
+    let least_retention_cost = |index: usize| {
+        let v = executions[index].candidate;
+        match costs.least_need_ms_per_execution[index] {
+            Some(need_ms) if !costs.raw_data_source.contains_key(&v) => {
+                costs.retention_cost_per_second(v, need_ms)
+            }
+            _ => 0.0,
+        }
+    };
     let tolerance = 1e-9 * bound.abs().max(1e-12);
     (0..count)
-        .map(PhysicalCandidateId)
-        .map(|v| {
-            let Ok(own) = &inputs.costs.candidate_cost_per_second[v.0] else {
+        .map(|index| {
+            let Ok(own) = &costs.per_execution[index] else {
                 return false;
             };
             let least = own
-                + (0..inputs.physical.input_count(v))
-                    .filter_map(|i| cheapest_input_edge.get(&(v, i)))
+                + least_retention_cost(index)
+                + (0..selectable.input_count(index))
+                    .map(|i| {
+                        selectable
+                            .edges_into(index, i)
+                            .iter()
+                            .filter_map(|&position| costs.per_edge[position])
+                            .fold(0.0, f64::min)
+                    })
                     .sum::<f64>();
             least > bound + tolerance
         })
         .collect()
 }
 
-/// The cost per second (without the request overhead every plan pays) of
-/// a feasible plan: each query output reads the cheapest tree of
-/// candidates below it, each candidate's input from the producer whose
-/// tree is cheapest ($w_v + \sum_i \min_u (c_{u,v,i} + \text{tree}_u)$).
-/// Trees share the candidates they have in common; when that gives a
-/// query-time result that is not materialized two consumers, or a cycle,
-/// the plan is rebuilt without that candidate. `None` when no feasible
-/// plan is found that way.
+/// The cost per second (less the request overhead every plan pays) of a
+/// feasible plan ([`selection_cost_per_second`]): each query output reads
+/// the cheapest tree of executions below it, each execution's input from
+/// the producer whose tree is cheapest ($\rho_\kappa c_{\kappa,v} + \sum_i
+/// \min_u (\rho_\kappa c_{\kappa,u,v,i} + \text{tree}_u)$), over the
+/// executions its query may read (constraint (X)). The query outputs are
+/// added in order, a later tree reusing the executions an earlier one
+/// added. When that gives an execution with one reader per context a
+/// second consumer, closes a cycle, or reuses a tree with an execution
+/// the query must not read, the plan is rebuilt with that execution left
+/// out of the query's trees. `None` when no feasible plan is found that
+/// way.
 fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
-    let physical = inputs.physical;
-    let count = physical.physical_candidates.len();
-    // Each (consumer, input)'s costed edges: (edge, producer, c_{u,c,i}).
-    let mut into: EdgesInto = HashMap::new();
-    for (&id, &cost) in &inputs.costs.edge_cost_change_per_second {
-        let edge = physical.edge(id);
-        into.entry((edge.consumer_candidate_id.0, edge.input_index_of_consumer))
-            .or_default()
-            .push((edge.producer_candidate_id.0, cost));
-    }
-    let inputs_of: Vec<usize> = (0..count)
-        .map(|v| physical.input_count(PhysicalCandidateId(v)))
+    let selectable = inputs.selectable;
+    let executions = selectable.executions();
+    let count = executions.len();
+    let one_reader: Vec<bool> = (0..count)
+        .map(|index| has_one_reader(inputs, index))
         .collect();
-    let mut excluded = vec![false; count];
-    for _ in 0..REPAIRS {
-        let (tree_cost, chosen) = cheapest_trees(inputs, &into, &inputs_of, &excluded);
-        // Each query output's cheapest candidate, then the trees below.
-        let mut uses = vec![0usize; count];
-        let mut outputs = Vec::new();
-        for (_, candidates) in inputs.query_outputs {
-            let best = candidates
+    let forbidden = |query: QueryId, e: usize| {
+        inputs.physical.logical_candidates.query_must_not_read(
+            query.0,
+            inputs.physical.physical_candidates[executions[e].candidate.0].logical_candidate_id,
+        )
+    };
+    // Per query, the executions its trees leave out: those it must not
+    // read, and those a repair left out for it.
+    let mut excluded: BTreeMap<QueryId, Vec<bool>> = BTreeMap::new();
+    for (query, _) in selectable.answering() {
+        excluded
+            .entry(*query)
+            .or_insert_with(|| (0..count).map(|e| forbidden(*query, e)).collect());
+    }
+    // The cheapest trees, per set of executions left out.
+    let mut trees: HashMap<Vec<bool>, (Vec<f64>, Vec<TreeInputs>)> = HashMap::new();
+    'repair: for _ in 0..REPAIRS {
+        let mut plan = GreedyPlan::new(count);
+        let mut answering: Vec<(QueryId, usize)> = Vec::new();
+        for (query, outputs) in selectable.answering() {
+            let left_out = &excluded[query];
+            let (tree_cost, chosen) = trees
+                .entry(left_out.clone())
+                .or_insert_with(|| cheapest_trees(inputs, left_out));
+            let best = outputs
                 .iter()
-                .map(|v| v.0)
-                .filter(|&v| tree_cost[v].is_finite())
+                .copied()
+                .filter(|&index| tree_cost[index].is_finite())
                 .min_by(|&a, &b| tree_cost[a].total_cmp(&tree_cost[b]))?;
-            uses[best] += 1;
-            outputs.push(best);
-        }
-        let plan = match plan_below(&outputs, &chosen, &inputs_of) {
-            Ok(plan) => plan,
-            Err(on_cycle) => {
-                excluded[on_cycle] = true;
-                continue;
+            answering.push((*query, best));
+            if let Err(repair) = plan.add_tree(best, chosen, &one_reader, |e| forbidden(*query, e))
+            {
+                excluded.get_mut(query).expect("a query")[repair] = true;
+                continue 'repair;
             }
-        };
-        for &(v, _) in &plan.edges {
-            uses[v] += 1;
         }
-        if let Some(shared) = plan
-            .candidates
-            .iter()
-            .copied()
-            .find(|&v| is_unmaterialized_query_time(inputs, v) && uses[v] > 1)
-        {
-            excluded[shared] = true;
-            continue;
-        }
-        let cost = plan_cost_per_second(
-            inputs,
-            plan.candidates.iter().copied(),
-            plan.edges.iter().map(|&(_, cost)| cost),
-        );
+        let (cost, _) =
+            selection_cost_per_second(inputs, &plan.executions, &plan.edges, &answering);
         return cost.is_finite().then_some(cost);
     }
     None
 }
 
-/// Per candidate not `excluded`, the cost of its cheapest tree and, per
+/// Per execution not `excluded`, the cost of its cheapest tree and, per
 /// input, the edge it reads it over: relaxed until no tree gets cheaper
-/// (at most once per candidate), so a tree over a cycle of candidates is
+/// (at most once per execution), so a tree over a cycle of executions is
 /// never cheaper than one without it when costs are not negative.
-fn cheapest_trees(
-    inputs: &SelectionInputs<'_>,
-    into: &EdgesInto,
-    inputs_of: &[usize],
-    excluded: &[bool],
-) -> (Vec<f64>, Vec<TreeInputs>) {
-    let count = inputs_of.len();
+fn cheapest_trees(inputs: &SelectionInputs<'_>, excluded: &[bool]) -> (Vec<f64>, Vec<TreeInputs>) {
+    let selectable = inputs.selectable;
+    let count = excluded.len();
     let mut tree_cost = vec![f64::INFINITY; count];
-    let mut chosen: Vec<TreeInputs> = inputs_of.iter().map(|&n| vec![None; n]).collect();
+    let mut chosen: Vec<TreeInputs> = (0..count)
+        .map(|v| vec![None; selectable.input_count(v)])
+        .collect();
     for _ in 0..count.max(1) {
         let mut changed = false;
         for v in 0..count {
-            let Ok(own) = &inputs.costs.candidate_cost_per_second[v] else {
+            let Ok(own) = &inputs.costs.per_execution[v] else {
                 continue;
             };
             if excluded[v] {
                 continue;
             }
             let mut cost = *own;
-            let mut reads = Vec::with_capacity(inputs_of[v]);
-            for i in 0..inputs_of[v] {
-                let cheapest = into
-                    .get(&(v, i))
-                    .into_iter()
-                    .flatten()
-                    .filter(|&&(u, _)| !excluded[u] && tree_cost[u].is_finite())
-                    .map(|&(u, c)| (u, c, c + tree_cost[u]))
+            let mut reads = Vec::with_capacity(selectable.input_count(v));
+            for i in 0..selectable.input_count(v) {
+                let cheapest = selectable
+                    .edges_into(v, i)
+                    .iter()
+                    .filter_map(|&position| {
+                        let c = inputs.costs.per_edge[position]?;
+                        let u = selectable.edges()[position].producer;
+                        (!excluded[u] && tree_cost[u].is_finite())
+                            .then(|| (position, u, c + tree_cost[u]))
+                    })
                     .min_by(|a, b| a.2.total_cmp(&b.2));
                 match cheapest {
-                    Some((u, c, through)) => {
+                    Some((position, u, through)) => {
                         cost += through;
-                        reads.push(Some((u, c)));
+                        reads.push(Some((position, u)));
                     }
                     None => {
                         cost = f64::INFINITY;
@@ -188,49 +195,93 @@ fn cheapest_trees(
 
 /// A plan of the trees below some query outputs.
 struct GreedyPlan {
-    /// Its candidates, each once.
-    candidates: Vec<usize>,
-    /// Its edges, as (producer, $c_{u,c,i}$).
-    edges: Vec<(usize, f64)>,
+    /// Its executions, each once, producers first.
+    executions: Vec<usize>,
+    /// Its edges, by position in `SelectableExecutions::edges`.
+    edges: Vec<usize>,
+    /// Per execution, its producers in the plan; `None` when not in it yet.
+    producers: Vec<Option<Vec<usize>>>,
 }
 
-/// The plan of the trees `chosen` below `outputs`; Err with a candidate
-/// on a cycle of them.
-fn plan_below(
-    outputs: &[usize],
-    chosen: &[TreeInputs],
-    inputs_of: &[usize],
-) -> Result<GreedyPlan, usize> {
-    // 0 unvisited, 1 on the walk, 2 done.
-    let mut state = vec![0u8; inputs_of.len()];
-    let mut plan = GreedyPlan {
-        candidates: Vec::new(),
-        edges: Vec::new(),
-    };
-    for &output in outputs {
-        if state[output] == 2 {
-            continue;
+impl GreedyPlan {
+    /// The empty plan over `count` executions.
+    fn new(count: usize) -> Self {
+        Self {
+            executions: Vec::new(),
+            edges: Vec::new(),
+            producers: vec![None; count],
         }
+    }
+
+    /// Adds the tree `chosen` below `output` (each execution's inputs, by
+    /// execution), reusing the executions already in the plan with their
+    /// trees; Err with an execution to leave out of the query's trees: one
+    /// with `one_reader` per context read a second time, one closing a
+    /// cycle, or one already in the plan whose tree reads an execution
+    /// `forbidden` to the query.
+    fn add_tree(
+        &mut self,
+        output: usize,
+        chosen: &[TreeInputs],
+        one_reader: &[bool],
+        forbidden: impl Fn(usize) -> bool,
+    ) -> Result<(), usize> {
+        if self.producers[output].is_some() {
+            return self.reuse(output, one_reader, &forbidden);
+        }
+        // Executions on the walk, not yet in the plan.
+        let mut on_walk = vec![false; self.producers.len()];
+        on_walk[output] = true;
         let mut stack = vec![(output, 0usize)];
-        state[output] = 1;
+        let mut walked: Vec<Vec<usize>> = vec![Vec::new(); self.producers.len()];
         while let Some((v, i)) = stack.pop() {
-            if i == inputs_of[v] {
-                state[v] = 2;
-                plan.candidates.push(v);
+            if i == chosen[v].len() {
+                on_walk[v] = false;
+                self.producers[v] = Some(std::mem::take(&mut walked[v]));
+                self.executions.push(v);
                 continue;
             }
             stack.push((v, i + 1));
-            let (u, c) = chosen[v][i].expect("a finite tree reads every input");
-            plan.edges.push((u, c));
-            match state[u] {
-                0 => {
-                    state[u] = 1;
+            let (position, u) = chosen[v][i].expect("a finite tree reads every input");
+            self.edges.push(position);
+            walked[v].push(u);
+            if on_walk[u] {
+                return Err(u);
+            }
+            match self.producers[u] {
+                Some(_) => self.reuse(u, one_reader, &forbidden)?,
+                None => {
+                    on_walk[u] = true;
                     stack.push((u, 0));
                 }
-                1 => return Err(u),
-                _ => {}
             }
         }
+        Ok(())
     }
-    Ok(plan)
+
+    /// Reads `execution`, already in the plan, a second time: Err with it
+    /// when it has `one_reader` per context or its tree reads an execution
+    /// `forbidden` to the reader's query.
+    fn reuse(
+        &self,
+        execution: usize,
+        one_reader: &[bool],
+        forbidden: &impl Fn(usize) -> bool,
+    ) -> Result<(), usize> {
+        if one_reader[execution] {
+            return Err(execution);
+        }
+        let mut pending = vec![execution];
+        let mut seen = vec![false; self.producers.len()];
+        while let Some(e) = pending.pop() {
+            if std::mem::replace(&mut seen[e], true) {
+                continue;
+            }
+            if forbidden(e) {
+                return Err(execution);
+            }
+            pending.extend(self.producers[e].iter().flatten());
+        }
+        Ok(())
+    }
 }

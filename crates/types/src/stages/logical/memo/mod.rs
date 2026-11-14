@@ -177,6 +177,22 @@ impl Memo {
         &self.queries
     }
 
+    /// Each query output reference (the query's index, and the group its
+    /// operator root, or one operator of its scalar root, reads),
+    /// deduplicated, ascending.
+    pub fn output_groups(&self) -> Vec<(usize, MemoGroupId)> {
+        let roots: Vec<QueryRoot<MemoGroupId>> = self
+            .queries
+            .iter()
+            .map(|query| query.root.clone())
+            .collect();
+        crate::stages::output_references(&roots)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     /// Adds `query` and returns its index: its root's groups and every
     /// group below them list it ([`MemoGroup::reached_by_queries`]). Stage 0
     /// adds each query once.

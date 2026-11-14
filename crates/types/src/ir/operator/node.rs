@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
-use super::arguments::Source;
+use super::arguments::{AtModifier, Source};
 use super::asap::ASAPOp;
 use super::input::OperatorInput;
 use super::non_asap::NonASAPOp;
@@ -58,6 +58,30 @@ impl<C> Operator<C> {
         match self {
             Operator::NonASAP(op) => op.kind_name(),
             Operator::ASAP(op) => op.kind_name(),
+        }
+    }
+
+    /// Its tumbling-window width when it is a `SummaryTumblingWindowChain`.
+    pub fn chain_tumbling_window_width_ms(&self) -> Option<u64> {
+        match self {
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }) => Some(*tumbling_window_width_ms),
+            _ => None,
+        }
+    }
+
+    /// The anchor of a `TimeShift` with `@ end()` or `@ start()`, whose
+    /// input runs once per request; `None` for any other operator (`@ <ts>`
+    /// included).
+    pub fn request_anchor(&self) -> Option<AtModifier> {
+        match self {
+            Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => match shift.at {
+                Some(at @ (AtModifier::End | AtModifier::Start)) => Some(at),
+                _ => None,
+            },
+            _ => None,
         }
     }
 }

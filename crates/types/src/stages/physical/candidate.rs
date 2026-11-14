@@ -2,7 +2,6 @@
 //! valid $p^{\mathrm{phys}} = (\tau, \ell)$.
 
 use crate::ir::properties::ExecutionTiming;
-use crate::ir::{ASAPOp, Operator};
 use crate::stages::{CandidateForMemoGroupId, ExecutionContext, PhysicalASAPMemoCandidates};
 use crate::stages::{Lifetime, PhysicalProperties};
 use crate::workload::DataArrival;
@@ -49,6 +48,10 @@ impl PhysicalCandidate {
     /// | at query time over arriving rows, a window ending at E (`sum_over_time(x[5m] @ T)`, `ts BETWEEN a AND b`) | its own grid: final only from E on, and a context carries no absolute time to compare with E |
     ///
     /// `DataArrival::Unknown` counts as arriving.
+    /// The times of a
+    /// `Materialized(v)` context are $v$'s own
+    /// ([`LogicalASAPMemoCandidates::own_schedule`](crate::stages::LogicalASAPMemoCandidates::own_schedule));
+    /// when they are not known, no non-final producer delivers on it.
     pub fn delivers_on(
         &self,
         candidates: &PhysicalASAPMemoCandidates,
@@ -60,24 +63,20 @@ impl PhysicalCandidate {
             Lifetime::AcrossEvaluations(_) => {
                 let logical = &candidates.logical_candidates;
                 let group = self.logical_candidate_id.group;
-                let chain_width_ms = match logical
-                    .memo
-                    .candidate(self.logical_candidate_id)
-                    .expression
-                    .operator
-                {
-                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                        tumbling_window_width_ms,
-                        ..
-                    }) => Some(tumbling_window_width_ms),
-                    _ => None,
-                };
                 let group_properties = &logical.memo.groups()[group.0 as usize].group_properties;
                 let final_at_every_time = !group_properties.depends_on_evaluation_time
                     && (self.physical_properties.timing() == ExecutionTiming::IngestionTime
                         || logical.memo.data_arrival() == DataArrival::AtRest
                         || group_properties.scanned_sources.is_empty());
-                if chain_width_ms.is_none() && final_at_every_time {
+                if logical
+                    .memo
+                    .candidate(self.logical_candidate_id)
+                    .expression
+                    .operator
+                    .chain_tumbling_window_width_ms()
+                    .is_none()
+                    && final_at_every_time
+                {
                     return true;
                 }
                 let (period_ms, phase_ms) = match context {
@@ -85,23 +84,21 @@ impl PhysicalCandidate {
                     ExecutionContext::IngestionPipeline(window) => {
                         (window.width_ms, window.phase_ms)
                     }
-                    ExecutionContext::Materialized(_) => {
-                        todo!(
-                            "#1207 PR 7: the times of a Materialized(v) context, v's own schedule"
-                        )
+                    ExecutionContext::Materialized(v) => {
+                        let materialized = candidates.physical_candidates[v.0].logical_candidate_id;
+                        match logical.own_schedule(materialized) {
+                            Some(grid) => (grid.period_ms, grid.phase_ms),
+                            None => return false,
+                        }
                     }
                 };
-                match chain_width_ms {
-                    Some(width_ms) => {
-                        period_ms.is_multiple_of(width_ms) && phase_ms.is_multiple_of(width_ms)
-                    }
-                    None => {
-                        logical.evaluation_grid_of_group[group.0 as usize].is_some_and(|grid| {
-                            period_ms.is_multiple_of(grid.period_ms)
-                                && phase_ms % grid.period_ms == grid.phase_ms % grid.period_ms
-                        })
-                    }
-                }
+                logical
+                    .own_schedule(self.logical_candidate_id)
+                    .is_some_and(|stored| {
+                        stored.period_ms > 0
+                            && period_ms.is_multiple_of(stored.period_ms)
+                            && phase_ms % stored.period_ms == stored.phase_ms % stored.period_ms
+                    })
             }
         }
     }

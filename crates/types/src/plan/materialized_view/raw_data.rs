@@ -96,6 +96,24 @@ impl PhysicalASAPDAGNode {
     pub fn is_view(&self) -> bool {
         matches!(self.lifetime, Lifetime::AcrossEvaluations(_)) && !is_raw_data_scan(self)
     }
+
+    /// Whether it keeps raw rows stored at ingestion time across
+    /// evaluations: a `Scan`, or a `TimeShift` without `@` whose input
+    /// (`input`, its first producer's operator) is a `Scan`. Its readers
+    /// read the rows it retains; an ingestion-time reader reads one batch
+    /// of them (`asap_cost::reads_one_batch_of`).
+    pub fn keeps_raw_rows_at_ingestion<C>(&self, input: Option<&Operator<C>>) -> bool {
+        self.output_state.timing == ExecutionTiming::IngestionTime
+            && matches!(self.lifetime, Lifetime::AcrossEvaluations(_))
+            && match &self.payload {
+                Operator::NonASAP(NonASAPOp::Scan { .. }) => true,
+                Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
+                    shift.at.is_none()
+                        && matches!(input, Some(Operator::NonASAP(NonASAPOp::Scan { .. })))
+                }
+                _ => false,
+            }
+    }
 }
 
 impl ViewIndex<'_> {

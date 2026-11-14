@@ -23,7 +23,7 @@ use crate::ir::{NonASAPOp, TimeRangeKind};
 
 use crate::stages::StorageMedium;
 
-use crate::stages::physical::execution_context::EvaluationGrid;
+use crate::stages::EvaluationGrid;
 
 use crate::stages::{
     CandidateForMemoGroup, LogicalASAPMemoCandidates, Memo, MemoGroupId,
@@ -410,6 +410,36 @@ fn a_count_over_arriving_rows_computed_at_query_time_delivers_on_its_own_grid_on
     );
 }
 
+/// A view kept up to date at ingestion time with no window (SQL
+/// `count(*)` over the arriving rows, stored across evaluations) folds in
+/// every arriving batch, so it is current at every time: it delivers on
+/// every evaluation grid and every ingestion pipeline, whatever its period
+/// and phase, not only on its group's 60 s grid.
+#[test]
+fn an_ingestion_time_view_without_a_window_delivers_on_every_context() {
+    for arrival in ARRIVING {
+        let examples = finality_examples(arrival);
+        let stored = candidate(
+            examples.count_of_table,
+            IngestionTime,
+            Lifetime::AcrossEvaluations(MEMORY),
+        );
+        for context in [
+            evaluation(60_000, 0),
+            evaluation(30_000, 0),
+            evaluation(45_000, 15_000),
+            evaluation(7_000, 3_000),
+            ingestion(1_000, 0),
+            ingestion(60_000, 30_000),
+        ] {
+            assert!(
+                stored.delivers_on(&examples.candidates, &context),
+                "{arrival:?} {context:?}"
+            );
+        }
+    }
+}
+
 /// Case (b) of #1264: in `max_over_time((rate(latency[5m] @ end()))[10m:1m]
 /// @ T)`, `@ T` pins only the subquery's own time; the inner `@ end()`
 /// still moves with the request. Even over data at rest, a stored result
@@ -468,6 +498,70 @@ fn a_window_pinned_by_at_t_delivers_on_every_context_once_nothing_changes_it() {
             delivers_on_grid_and_off_it(&examples, producer, IngestionTime),
             (true, true),
             "{arrival:?}"
+        );
+    }
+}
+
+/// In `Materialized(v)` a producer delivers on $v$'s own times: a
+/// 5 s chain inside the computation of a 10 s chain (every 10 s) and of
+/// X = the scan's last 5 minutes stored on its 60 s grid, but not a
+/// 10 s chain inside X's computation every 25 s, nor anything
+/// time-dependent inside a build with neither a width nor a grid.
+#[test]
+fn delivers_on_the_own_times_of_a_materialized_computation() {
+    let grid = |period_ms| {
+        Some(EvaluationGrid {
+            period_ms,
+            phase_ms: 0,
+        })
+    };
+    let materialized = |grid_of_x| {
+        let mut candidates = candidates(memo(), vec![None, None, None, None, grid_of_x]);
+        candidates.physical_candidates = vec![
+            candidate(WINDOWS_10S, QueryTime, Lifetime::AcrossEvaluations(MEMORY)),
+            candidate(LAST_5M, QueryTime, Lifetime::AcrossEvaluations(MEMORY)),
+            candidate(BUILD, QueryTime, Lifetime::AcrossEvaluations(MEMORY)),
+        ];
+        candidates
+    };
+    let across_5s = candidate(WINDOWS_5S, QueryTime, Lifetime::AcrossEvaluations(MEMORY));
+    let across_10s = candidate(
+        WINDOWS_10S,
+        IngestionTime,
+        Lifetime::AcrossEvaluations(MEMORY),
+    );
+    let in_computation_of = |v| ExecutionContext::Materialized(PhysicalCandidateId(v));
+    for (candidates, producer, context, delivers) in [
+        (
+            materialized(grid(60_000)),
+            &across_5s,
+            in_computation_of(0),
+            true,
+        ),
+        (
+            materialized(grid(60_000)),
+            &across_5s,
+            in_computation_of(1),
+            true,
+        ),
+        (
+            materialized(grid(25_000)),
+            &across_10s,
+            in_computation_of(1),
+            false,
+        ),
+        (
+            materialized(grid(60_000)),
+            &across_5s,
+            in_computation_of(2),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            producer.delivers_on(&candidates, &context),
+            delivers,
+            "{:?} in {context:?}",
+            producer.logical_candidate_id
         );
     }
 }
