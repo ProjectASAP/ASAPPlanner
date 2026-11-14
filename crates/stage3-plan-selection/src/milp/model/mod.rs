@@ -4,7 +4,7 @@
 //!
 //! | Family | Variables | Constraints |
 //! |---|---|---|
-//! | baseline (section 3) over execution contexts (section 5) | $x_{\kappa,v}$ (with $x^{\mathrm{mat}}_v = x_{\mathrm{Materialized}(v),v}$), $y_{\kappa,u,c,i}$, $z_{q,v}$, $t$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) and one consumer per context of a query-time result that is not materialized [`use_constraints`], each source's raw data on disk once [`raw_data_disk_constraints`]; (G), (H): $y$ exists only on admissible edges where the producer delivers on the consumer's context |
+//! | baseline (section 3) over execution contexts (section 5) | $x_{\kappa,v}$ (with $x^{\mathrm{mat}}_v = x_{\mathrm{Materialized}(v),v}$), $y_{\kappa,u,c,i}$, $z_{q,v}$, $t$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) and one consumer per context of a query-time result that is not materialized [`use_constraints`], each source's raw data on disk once [`raw_data_disk_rows`]; (G), (H): $y$ exists only on admissible edges where the producer delivers on the consumer's context |
 //! | retention (section 5) | $h_v$ | (R) [`super::retention::retention_constraints`] |
 //! | exact-only reads per query | $a_{q,e}$ | (X) [`super::exact_only::exact_only_constraints`] |
 //! | accuracy (section 4) | $E_{c,m}$, $F_{c,i,m}$, $D_c$, $H_{c,i}$ (`AccuracyVariables`) | (K) `accuracy_constraints` |
@@ -27,10 +27,11 @@ use asap_types::ir::operator::Source;
 use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId};
 use asap_types::workload::QueryWorkloadEntry;
 
+use super::dominance::dominated_by_one_evaluation_twin;
 use super::exact_only::{exact_only_constraints, exact_only_variables};
 use super::graph::Components;
 use super::retention::{least_retention_ms, retention_constraints, retention_variables};
-use super::upper_bound::{dearer_than_a_feasible_plan, dominated_by_one_evaluation_twin};
+use super::upper_bound::dearer_than_a_feasible_plan;
 use crate::cost::ExecutionCosts;
 use crate::selectable::{has_one_reader_per_context, Execution, QueryId, SelectableExecutions};
 
@@ -67,8 +68,8 @@ pub(crate) struct SelectionVariables {
     /// an execution kept ([`retention_variables`]).
     h: BTreeMap<PhysicalCandidateId, Variable>,
     /// Per raw-data source a query-time scan keeps on disk at a cost: the
-    /// cost per second of keeping it, at least each selected scan's
-    /// ([`raw_data_disk_constraints`]).
+    /// cost per second of keeping it, at least each selected scan's,
+    /// scaled by the objective's scale ([`raw_data_disk_rows`]).
     raw_data_on_disk: BTreeMap<Source, Variable>,
     /// $a_{q,e}$: query $q$'s selected path reads execution $e$, where
     /// (X) needs it ([`exact_only_variables`]).
@@ -97,13 +98,11 @@ fn selection_variables(
         .iter()
         .zip(&inputs.costs.per_edge)
         .enumerate()
-        .filter(|(_, (&(consumer, _, producer), cost))| {
-            cost.is_some() && kept[consumer] && kept[producer]
-        })
+        .filter(|(_, (edge, cost))| cost.is_some() && kept[edge.consumer] && kept[edge.producer])
         .map(|(position, _)| (position, problem.add(variable().binary())))
         .collect();
     let mut z = BTreeMap::new();
-    for (query, executions) in &selectable.answering {
+    for (query, executions) in selectable.answering() {
         for &execution in executions {
             z.entry((*query, execution))
                 .or_insert_with(|| problem.add(variable().binary()));
@@ -157,7 +156,7 @@ fn input_satisfaction_constraints(
 }
 
 /// (B) $y_{\kappa,u,c,i} \le x$ of $u$'s execution it reads, except for
-/// a producer with one reader per context ([`reads_once`]), whose (F) row
+/// a producer with one reader per context ([`has_one_reader`]), whose (F) row
 /// implies it.
 fn producer_selection_constraints(
     inputs: &SelectionInputs<'_>,
@@ -167,21 +166,21 @@ fn producer_selection_constraints(
         .y
         .iter()
         .filter_map(|(&position, &y)| {
-            let (_, _, producer) = inputs.selectable.edges()[position];
-            (!reads_once(inputs, producer)).then(|| constraint!(y <= variables.x[producer]))
+            let producer = inputs.selectable.edges()[position].producer;
+            (!has_one_reader(inputs, producer)).then(|| constraint!(y <= variables.x[producer]))
         })
         .collect()
 }
 
 /// (C) $\sum_{v \in G_q} z_{q,v} = 1$; (D) $z_{q,v} \le x$ of $v$'s
 /// execution answering $q$, except for one with one reader per context
-/// ([`reads_once`]), whose (F) row implies it.
+/// ([`has_one_reader`]), whose (F) row implies it.
 fn query_coverage_constraints(
     inputs: &SelectionInputs<'_>,
     variables: &SelectionVariables,
 ) -> Vec<Constraint> {
     let mut constraints = Vec::new();
-    for (query, executions) in &inputs.selectable.answering {
+    for (query, executions) in inputs.selectable.answering() {
         let covered: Expression = executions
             .iter()
             .map(|&execution| variables.z[&(*query, execution)])
@@ -189,7 +188,7 @@ fn query_coverage_constraints(
         constraints.push(constraint!(covered == 1));
     }
     for (&(_, execution), &z) in &variables.z {
-        if !reads_once(inputs, execution) {
+        if !has_one_reader(inputs, execution) {
             constraints.push(constraint!(z <= variables.x[execution]));
         }
     }
@@ -201,7 +200,7 @@ fn query_coverage_constraints(
 /// $\sum y + \sum_q z_{q,v} = x_{\kappa,v}$ ([`use_constraints`]), which
 /// with $y, z \ge 0$ implies (B) and (D) for it, so those rows are left
 /// out.
-fn reads_once(inputs: &SelectionInputs<'_>, index: usize) -> bool {
+fn has_one_reader(inputs: &SelectionInputs<'_>, index: usize) -> bool {
     let v = inputs.selectable.executions()[index].candidate;
     has_one_reader_per_context(inputs.physical.physical_candidates[v.0].physical_properties)
 }
@@ -218,7 +217,8 @@ fn acyclicity_constraints(
         .y
         .iter()
         .filter_map(|(&position, &y)| {
-            let (c, _, u) = inputs.selectable.edges()[position];
+            let edge = inputs.selectable.edges()[position];
+            let (c, u) = (edge.consumer, edge.producer);
             if components.of[u] != components.of[c] {
                 return None;
             }
@@ -244,7 +244,7 @@ fn use_constraints(
     uses_of(inputs, variables)
         .into_iter()
         .enumerate()
-        .map(|(index, used)| match reads_once(inputs, index) {
+        .map(|(index, used)| match has_one_reader(inputs, index) {
             true => constraint!(used == variables.x[index]),
             false => constraint!(variables.x[index] <= used),
         })
@@ -255,32 +255,37 @@ fn use_constraints(
 /// that keeps the most: $r_s \ge \pi_v h_v$ for each query-time `Scan` $v$
 /// of source $s$ with $h_v$, and $r_s \ge d_v x_{\kappa,v}$ for each kept
 /// execution of one without, $d_v$ its cost per second of the raw data it
-/// keeps retaining everything. The objective's scale is in the rows, so
-/// $r_s$ is the scaled cost and its objective coefficient is 1.
-fn raw_data_disk_constraints(
+/// keeps retaining everything: each row as ($r_s$, its coefficient, the
+/// variable it multiplies), unscaled.
+fn raw_data_disk_rows(
     inputs: &SelectionInputs<'_>,
     variables: &SelectionVariables,
     kept: &[bool],
-    objective_scale: f64,
-) -> Vec<Constraint> {
+) -> Vec<(Variable, f64, Variable)> {
     let costs = inputs.costs;
     let mut scans: Vec<(&PhysicalCandidateId, &Source)> = costs.raw_data_source.iter().collect();
     scans.sort_unstable_by_key(|(v, _)| **v);
-    let mut constraints = Vec::new();
+    let mut executions_of: HashMap<PhysicalCandidateId, Vec<usize>> = HashMap::new();
+    for (index, execution) in inputs.selectable.executions().iter().enumerate() {
+        if kept[index] {
+            executions_of
+                .entry(execution.candidate)
+                .or_default()
+                .push(index);
+        }
+    }
+    let mut rows = Vec::new();
     for (v, source) in scans {
         let r = variables.raw_data_on_disk[source];
         if let Some(&h) = variables.h.get(v) {
-            let per_retained_second = costs.retention_cost_per_retained_second[v];
-            constraints.push(constraint!(r >= per_retained_second * objective_scale * h));
+            rows.push((r, costs.retention_cost_per_retained_second[v], h));
         } else if let Some(&d) = costs.unbounded_raw_data_on_disk_cost_per_second.get(v) {
-            for (index, execution) in inputs.selectable.executions().iter().enumerate() {
-                if execution.candidate == *v && kept[index] {
-                    constraints.push(constraint!(r >= d * objective_scale * variables.x[index]));
-                }
+            for &index in executions_of.get(v).into_iter().flatten() {
+                rows.push((r, d, variables.x[index]));
             }
         }
     }
-    constraints
+    rows
 }
 
 /// Per execution, its selected edges to consumers and query outputs:
@@ -288,8 +293,7 @@ fn raw_data_disk_constraints(
 fn uses_of(inputs: &SelectionInputs<'_>, variables: &SelectionVariables) -> Vec<Expression> {
     let mut uses: Vec<Expression> = vec![Expression::default(); variables.x.len()];
     for (&position, &y) in &variables.y {
-        let (_, _, producer) = inputs.selectable.edges()[position];
-        uses[producer] += y;
+        uses[inputs.selectable.edges()[position].producer] += y;
     }
     for (&(_, execution), &z) in &variables.z {
         uses[execution] += z;
@@ -337,7 +341,7 @@ pub(crate) enum SelectionMilpError {
 /// \rho_\kappa c_{\kappa,v} x_{\kappa,v} + \sum \rho_\kappa c_{\kappa,u,c,i}
 /// y_{\kappa,u,c,i} + \sum_v \pi_v h_v + \sum_s r_s$ ($\pi_v h_v$ of a
 /// query-time scan is in $r_s$) under (A)–(F), [`use_constraints`],
-/// [`raw_data_disk_constraints`], (R) and (X), with HiGHS at gap 0 on one
+/// [`raw_data_disk_rows`], (R) and (X), with HiGHS at gap 0 on one
 /// thread. The executions dearer than a feasible plan
 /// ([`dearer_than_a_feasible_plan`]) or dominated by their `OneEvaluation`
 /// twin ([`dominated_by_one_evaluation_twin`]) are left out first, with
@@ -381,31 +385,12 @@ pub(crate) fn solve_selection(
                 .map(|(v, &h)| (costs.retention_cost_per_retained_second[v], h)),
         )
         .collect();
-    // Scaled by the largest coefficient kept, the raw-data bounds of the
-    // scans kept included.
-    let raw_data_bounds =
-        costs
-            .raw_data_source
-            .keys()
-            .filter_map(|v| match variables.h.contains_key(v) {
-                true => Some(costs.retention_cost_per_retained_second[v]),
-                false => costs
-                    .unbounded_raw_data_on_disk_cost_per_second
-                    .get(v)
-                    .copied()
-                    .filter(|_| {
-                        inputs
-                            .selectable
-                            .executions()
-                            .iter()
-                            .zip(&kept)
-                            .any(|(execution, &kept)| kept && execution.candidate == *v)
-                    }),
-            });
+    // Scaled by the largest coefficient kept, the raw-data rows' included.
+    let raw_data_rows = raw_data_disk_rows(inputs, &variables, &kept);
     let largest = terms
         .iter()
         .map(|(cost, _)| *cost)
-        .chain(raw_data_bounds)
+        .chain(raw_data_rows.iter().map(|&(_, coefficient, _)| coefficient))
         .fold(0.0_f64, |largest, cost| largest.max(cost.abs()));
     let scale = match largest > 0.0 && largest.is_finite() {
         true => 1_000.0 / largest,
@@ -417,14 +402,19 @@ pub(crate) fn solve_selection(
         query_coverage_constraints(inputs, &variables),
         acyclicity_constraints(inputs, &variables, &components),
         use_constraints(inputs, &variables),
-        raw_data_disk_constraints(inputs, &variables, &kept, scale),
+        // The objective's scale is in the raw-data rows, so $r_s$ is the
+        // scaled cost and its objective coefficient is 1.
+        raw_data_rows
+            .iter()
+            .map(|&(r, coefficient, variable)| constraint!(r >= coefficient * scale * variable))
+            .collect(),
         retention_constraints(inputs, &variables.h, &variables.y, &variables.z),
         exact_only_constraints(inputs, &variables.read_by_query, &variables.y, &variables.z),
     ]
     .into_iter()
     .flatten()
     .collect();
-    // The raw data on disk is scaled by its rows ([`raw_data_disk_constraints`]).
+    // The raw data on disk is scaled by its rows ([`raw_data_disk_rows`]).
     let objective: Expression = terms
         .iter()
         .map(|&(cost, v)| cost * scale * v)
@@ -487,7 +477,7 @@ pub(crate) fn solve_selection(
         .map(|(&position, _)| position)
         .collect();
     let answering: Vec<(QueryId, usize)> = selectable
-        .answering
+        .answering()
         .iter()
         .map(|(query, answering)| {
             let execution = answering
@@ -505,8 +495,9 @@ pub(crate) fn solve_selection(
         edges: selected_edges
             .iter()
             .map(|&position| {
-                let (consumer, edge, producer) = selectable.edges()[position];
-                (executions[consumer], edge, executions[producer])
+                let edge = selectable.edges()[position];
+                let (consumer, producer) = (edge.consumer, edge.producer);
+                (executions[consumer], edge.edge, executions[producer])
             })
             .collect(),
         outputs: answering
@@ -540,7 +531,7 @@ pub(crate) fn selection_cost_per_second(
     let mut raw_data_on_disk: BTreeMap<&Source, f64> = BTreeMap::new();
     let mut retention_cost_per_second = 0.0;
     for (&v, &ms) in &retention_ms {
-        let cost = costs.retention_cost_per_retained_second[&v] * ms as f64 / 1_000.0;
+        let cost = costs.retention_cost_per_second(v, ms);
         match costs.raw_data_source.get(&v) {
             Some(source) => {
                 let kept = raw_data_on_disk.entry(source).or_default();

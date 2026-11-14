@@ -31,7 +31,7 @@ use crate::cost::ExecutionCosts;
 use crate::milp::exact_only::must_not_read;
 use crate::plan::plan_of;
 use crate::retention::edge_retention_need_ms;
-use crate::selectable::output_groups;
+use crate::selectable::{output_groups, SelectableEdge};
 
 const NONE: Lifetime = Lifetime::None;
 const ONE_EVALUATION: Lifetime = Lifetime::OneEvaluation(StorageMedium::Memory);
@@ -155,7 +155,7 @@ fn selection_inputs(
         .iter()
         .map(|&(v, per_retained_second)| (PhysicalCandidateId(v), per_retained_second))
         .collect();
-    let edge_of = |&(_, id, _): &(usize, PhysicalEdgeId, usize)| physical.edge(id);
+    let edge_of = |edge: &SelectableEdge| physical.edge(edge.edge);
     let costs = ExecutionCosts {
         per_execution: selectable
             .executions()
@@ -183,7 +183,7 @@ fn selection_inputs(
                 let edge = edge_of(selectable_edge);
                 retention_cost_per_retained_second
                     .contains_key(&edge.producer_candidate_id)
-                    .then(|| edge_retention_need_ms(physical, entries, selectable_edge.1))
+                    .then(|| edge_retention_need_ms(physical, entries, selectable_edge.edge))
                     .flatten()
             })
             .collect(),
@@ -642,7 +642,7 @@ fn the_bound_leaves_out_of_each_query_only_what_it_must_not_read() {
     ];
     let entries = [every(10_000), every(30_000)];
     let (mut selectable, mut costs) = selection_inputs(&physical, &entries, &w, &[], &[]);
-    let q0_context = selectable.executions()[selectable.answering[0].1[0]].context;
+    let q0_context = selectable.executions()[selectable.answering()[0].1[0]].context;
     for (index, execution) in selectable.executions().iter().enumerate() {
         if execution.candidate.0 == exact_quantile && execution.context == q0_context {
             costs.per_execution[index] = Err("not costable".into());
@@ -726,7 +726,7 @@ fn a_none_execution_its_one_evaluation_twin_dominates_is_left_out() {
     let entries = every_10s(1);
     let dominated = |w: &[f64], twin_edge_costed: bool| {
         let (selectable, mut costs) = selection_inputs(&physical, &entries, w, &[], &[]);
-        for (position, &(_, edge, _)) in selectable.edges().iter().enumerate() {
+        for (position, &SelectableEdge { edge, .. }) in selectable.edges().iter().enumerate() {
             if physical.edge(edge).producer_candidate_id.0 == 1 && !twin_edge_costed {
                 costs.per_edge[position] = None;
             }

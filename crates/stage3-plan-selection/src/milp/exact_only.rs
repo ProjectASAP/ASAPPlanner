@@ -57,30 +57,38 @@ pub(crate) fn exact_only_variables(
 ) -> BTreeMap<(QueryId, usize), Variable> {
     let selectable = inputs.selectable;
     let count = selectable.executions().len();
-    // The selectable edges, as producers per consumer and back.
-    let mut producers = vec![Vec::new(); count];
-    let mut consumers = vec![Vec::new(); count];
-    for &position in y.keys() {
-        let (c, _, u) = selectable.edges()[position];
-        producers[c].push(u);
-        consumers[u].push(c);
-    }
+    let edges = selectable.edges();
+    // The selectable edges (those with a `y`), producers per consumer and
+    // back.
+    let producers = |e: usize| {
+        (0..selectable.input_count(e))
+            .flat_map(move |input| selectable.edges_into(e, input))
+            .filter(|position| y.contains_key(position))
+            .map(|&position| edges[position].producer)
+    };
+    let consumers = |e: usize| {
+        selectable
+            .edges_out_of(e)
+            .iter()
+            .filter(|position| y.contains_key(position))
+            .map(|&position| edges[position].consumer)
+    };
     let forbidden = |query: QueryId, e: usize| {
         must_not_read(inputs.physical, query, selectable.executions()[e].candidate)
     };
-    let queries: BTreeSet<QueryId> = selectable.answering.iter().map(|(q, _)| *q).collect();
+    let queries: BTreeSet<QueryId> = selectable.answering().iter().map(|(q, _)| *q).collect();
     let mut tracked = BTreeMap::new();
     for query in queries {
         let mut reached = vec![false; count];
         let mut pending: Vec<usize> = selectable
-            .answering
+            .answering()
             .iter()
             .filter(|(q, _)| *q == query)
             .flat_map(|(_, executions)| executions.iter().copied())
             .collect();
         while let Some(e) = pending.pop() {
             if !std::mem::replace(&mut reached[e], true) {
-                pending.extend(&producers[e]);
+                pending.extend(producers(e));
             }
         }
         let mut reaches_forbidden = vec![false; count];
@@ -89,7 +97,7 @@ pub(crate) fn exact_only_variables(
             .collect();
         while let Some(e) = pending.pop() {
             if reached[e] && !std::mem::replace(&mut reaches_forbidden[e], true) {
-                pending.extend(&consumers[e]);
+                pending.extend(consumers(e));
             }
         }
         for e in (0..count).filter(|&e| reaches_forbidden[e] && !forbidden(query, e)) {
@@ -125,7 +133,8 @@ pub(crate) fn exact_only_constraints(
         readers.entry(execution).or_default().push((query, a));
     }
     for (&position, &y) in y {
-        let (consumer, _, producer) = selectable.edges()[position];
+        let edge = selectable.edges()[position];
+        let (consumer, producer) = (edge.consumer, edge.producer);
         for &(query, a_consumer) in readers.get(&consumer).into_iter().flatten() {
             let v = selectable.executions()[producer].candidate;
             if must_not_read(inputs.physical, query, v) {

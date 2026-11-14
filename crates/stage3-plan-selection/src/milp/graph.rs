@@ -20,14 +20,25 @@ pub(crate) struct Components {
 impl Components {
     pub(crate) fn of(inputs: &SelectionInputs<'_>) -> Self {
         let selectable = inputs.selectable;
+        let edges = selectable.edges();
+        let costed = |position: &&usize| inputs.costs.per_edge[**position].is_some();
         let of = strongly_connected_components(
             selectable.executions().len(),
-            selectable
-                .edges()
-                .iter()
-                .zip(&inputs.costs.per_edge)
-                .filter(|(_, cost)| cost.is_some())
-                .map(|(&(consumer, _, producer), _)| (producer, consumer)),
+            |producer| {
+                selectable
+                    .edges_out_of(producer)
+                    .iter()
+                    .filter(costed)
+                    .map(|&position| edges[position].consumer)
+                    .collect()
+            },
+            |consumer| {
+                (0..selectable.input_count(consumer))
+                    .flat_map(|input| selectable.edges_into(consumer, input))
+                    .filter(costed)
+                    .map(|&position| edges[position].producer)
+                    .collect()
+            },
         );
         let mut count: HashMap<usize, usize> = HashMap::new();
         for &component in &of {
@@ -38,18 +49,14 @@ impl Components {
     }
 }
 
-/// Each node's strongly connected component of the graph with `arcs`
-/// (Kosaraju), as a component number.
+/// Each node's strongly connected component of the graph whose arcs out of
+/// a node are `forward(node)` and into it `backward(node)` (Kosaraju), as
+/// a component number.
 fn strongly_connected_components(
     node_count: usize,
-    arcs: impl Iterator<Item = (usize, usize)>,
+    forward: impl Fn(usize) -> Vec<usize>,
+    backward: impl Fn(usize) -> Vec<usize>,
 ) -> Vec<usize> {
-    let mut forward = vec![Vec::new(); node_count];
-    let mut backward = vec![Vec::new(); node_count];
-    for (from, to) in arcs {
-        forward[from].push(to);
-        backward[to].push(from);
-    }
     // Nodes by finishing time of a depth-first search over `forward`.
     let mut finished = Vec::with_capacity(node_count);
     let mut visited = vec![false; node_count];
@@ -57,12 +64,12 @@ fn strongly_connected_components(
         if std::mem::replace(&mut visited[start], true) {
             continue;
         }
-        let mut stack = vec![(start, 0)];
-        while let Some((node, next)) = stack.pop() {
-            if let Some(&to) = forward[node].get(next) {
-                stack.push((node, next + 1));
+        let mut stack = vec![(start, forward(start), 0)];
+        while let Some((node, out, next)) = stack.pop() {
+            if let Some(&to) = out.get(next) {
+                stack.push((node, out, next + 1));
                 if !std::mem::replace(&mut visited[to], true) {
-                    stack.push((to, 0));
+                    stack.push((to, forward(to), 0));
                 }
             } else {
                 finished.push(node);
@@ -77,7 +84,7 @@ fn strongly_connected_components(
         component[start] = number;
         let mut stack = vec![start];
         while let Some(node) = stack.pop() {
-            for &from in &backward[node] {
+            for from in backward(node) {
                 if component[from] == usize::MAX {
                     component[from] = number;
                     stack.push(from);

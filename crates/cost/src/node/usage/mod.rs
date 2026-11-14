@@ -359,9 +359,9 @@ pub fn node_resource_usage_and_cost<'a>(
             }
             _ => false,
         };
-    // The raw rows of its sources back `lookback_ms` (every row held
-    // without one): by arrival rate, at most the rows they hold.
-    let retained_raw_rows = |lookback_ms: Option<u64>| -> Option<u64> {
+    // The raw rows of its sources back `lookback_ms`: (by arrival rate,
+    // when known; the rows they hold, when declared).
+    let raw_rows = |lookback_ms: Option<u64>| -> (Option<u64>, Option<u64>) {
         let by_rate = rows_per_ms
             .zip(lookback_ms)
             .map(|(rows_per_ms, lookback_ms)| (rows_per_ms * lookback_ms as f64).round() as u64);
@@ -369,7 +369,12 @@ pub fn node_resource_usage_and_cost<'a>(
             .iter()
             .map(|source| data.sources.get(*source).and_then(|facts| facts.rows_held))
             .sum();
-        match (by_rate, rows_held) {
+        (by_rate, rows_held)
+    };
+    // The raw rows its sources keep back `lookback_ms` (every row held
+    // without one): by arrival rate, at most the rows they hold.
+    let retained_raw_rows = |lookback_ms: Option<u64>| -> Option<u64> {
+        match raw_rows(lookback_ms) {
             (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
             (by_rate, rows_held) => by_rate.or(rows_held),
         }
@@ -496,7 +501,6 @@ pub fn node_resource_usage_and_cost<'a>(
                 // it, at most the rows the source holds (all of them
                 // without a window).
                 let source = source_name(source);
-                let rows_held = data.sources.get(source).and_then(|facts| facts.rows_held);
                 // At ingestion, one second of rows; at query time, one
                 // execution reads the most its consumers read (`window_ms`),
                 // else what the scan retains (its `retention_ms`, $h_v$);
@@ -505,11 +509,6 @@ pub fn node_resource_usage_and_cost<'a>(
                     true => Some(ONE_SECOND_MS),
                     false => window_ms.or(node.retention_ms),
                 };
-                let by_rate = |lookback: Option<u64>| {
-                    rows_per_ms.zip(lookback).map(|(rows_per_ms, lookback)| {
-                        (rows_per_ms * lookback as f64).round() as u64
-                    })
-                };
                 // The raw rows a query-time scan, or an ingestion-time scan
                 // materialized across evaluations, keeps: back to the
                 // oldest row read, its `retention_ms` ($h_v$; an offset
@@ -517,7 +516,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 if !ingestion || raw_rows_materialized_at_ingestion {
                     raw_retained_rows = retained_raw_rows(node.retention_ms);
                 }
-                let by_rate = by_rate(lookback);
+                let (by_rate, rows_held) = raw_rows(lookback);
                 let rows = match (ingestion, by_rate, rows_held) {
                     (true, by_rate, _) => by_rate.ok_or_else(|| missing_rate(source))?,
                     (false, Some(by_rate), Some(rows_held)) => by_rate.min(rows_held),

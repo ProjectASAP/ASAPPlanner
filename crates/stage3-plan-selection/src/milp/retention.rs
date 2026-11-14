@@ -4,14 +4,14 @@
 //! executions $x_{\kappa,v}$ and edges $y_{\kappa,u,c,i}$ it selects over
 //! are [`crate::selectable::SelectableExecutions`]'s, in [`super::model`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use good_lp::{constraint, variable, Constraint, ProblemVariables, Variable};
 
 use asap_types::stages::PhysicalCandidateId;
 
 use super::model::SelectionInputs;
-use crate::retention::output_retention_need_ms;
+use crate::retention::{ms_to_seconds, reads_back, Reader};
 use crate::selectable::QueryId;
 
 /// $h_v$ in seconds retained (the unit keeps (R)'s coefficients near the
@@ -58,19 +58,21 @@ pub(crate) fn retention_constraints(
 ) -> Vec<Constraint> {
     let executions = inputs.selectable.executions();
     let mut constraints = Vec::new();
-    for (&position, &y) in y {
-        let (_, _, producer) = inputs.selectable.edges()[position];
-        let Some(&h) = h.get(&executions[producer].candidate) else {
+    for (index, reader, need_ms) in reads_back(
+        inputs.selectable,
+        &inputs.costs.retention_need_ms_per_edge,
+        inputs.entries,
+    ) {
+        let Some(&h) = h.get(&executions[index].candidate) else {
             continue;
         };
-        let need_ms = inputs.costs.retention_need_ms_per_edge[position]
-            .expect("a candidate with h_v is read within a bound");
-        constraints.push(constraint!(h >= seconds(need_ms) * y));
-    }
-    for (&(query, execution), &z) in z {
-        if let Some(&h) = h.get(&executions[execution].candidate) {
-            let need_ms = output_retention_need_ms(&inputs.entries[query.0]);
-            constraints.push(constraint!(h >= seconds(need_ms) * z));
+        let read = match reader {
+            Reader::Edge(position) => y.get(&position),
+            Reader::Output(query) => z.get(&(query, index)),
+        };
+        if let Some(&read) = read {
+            let need_ms = need_ms.expect("a candidate with h_v is read within a bound");
+            constraints.push(constraint!(h >= ms_to_seconds(need_ms) * read));
         }
     }
     constraints
@@ -88,30 +90,23 @@ pub(crate) fn least_retention_ms(
 ) -> HashMap<PhysicalCandidateId, u64> {
     let executions = inputs.selectable.executions();
     let retaining = &inputs.costs.retention_cost_per_retained_second;
-    let reads = edges
-        .into_iter()
-        .filter_map(|position| {
-            let (_, _, producer) = inputs.selectable.edges()[position];
-            Some((
-                executions[producer].candidate,
-                inputs.costs.retention_need_ms_per_edge[position]?,
-            ))
-        })
-        .chain(outputs.into_iter().map(|(query, execution)| {
-            (
-                executions[execution].candidate,
-                output_retention_need_ms(&inputs.entries[query.0]),
-            )
-        }));
+    let edges: HashSet<usize> = edges.into_iter().collect();
+    let outputs: HashSet<(QueryId, usize)> = outputs.into_iter().collect();
     let mut retention_ms: HashMap<PhysicalCandidateId, u64> = HashMap::new();
-    for (v, need_ms) in reads.filter(|(v, _)| retaining.contains_key(v)) {
-        let most = retention_ms.entry(v).or_default();
-        *most = (*most).max(need_ms);
+    for (index, reader, need_ms) in reads_back(
+        inputs.selectable,
+        &inputs.costs.retention_need_ms_per_edge,
+        inputs.entries,
+    ) {
+        let selected = match reader {
+            Reader::Edge(position) => edges.contains(&position),
+            Reader::Output(query) => outputs.contains(&(query, index)),
+        };
+        let v = executions[index].candidate;
+        if let (true, Some(need_ms), true) = (selected, need_ms, retaining.contains_key(&v)) {
+            let most = retention_ms.entry(v).or_default();
+            *most = (*most).max(need_ms);
+        }
     }
     retention_ms
-}
-
-/// `ms` in seconds, the unit of $h_v$ in the MILP.
-fn seconds(ms: u64) -> f64 {
-    ms as f64 / 1_000.0
 }

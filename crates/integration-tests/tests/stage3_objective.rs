@@ -524,3 +524,18 @@ fn an_instant_at_end_input_shares_the_evaluation_context() {
     );
     assert!(objective < 0.04, "objective {objective}");
 }
+
+/// `sum_over_time(m[1m])` every 20 s at phase 10 s and
+/// `max_over_time(m[1m])` every 10 s: one 10 s grid, two phases. Stage 3
+/// and `plan_cost` pick the queries of each context with one rule
+/// (`queries_of_context`), and the optimum is the plan's cost.
+#[test]
+fn the_objective_is_the_plan_cost_on_two_phases_of_one_grid() {
+    let mut late = requested("sum_over_time(m[1m])", 20_000, None);
+    late["demand"]["fixed_interval_at"]["evaluation_phase"] = serde_json::json!(10_000);
+    let w = over_m(vec![late, requested("max_over_time(m[1m])", 10_000, None)]);
+    assert_equal(
+        "two phases of one grid",
+        objective_and_plan_cost(&w, &CostInputs::default(), true),
+    );
+}

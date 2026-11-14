@@ -357,16 +357,12 @@ pub fn consumers(
         let Some(entry) = entries.get(query) else {
             return false;
         };
-        let grid_ms = evaluation_grid_ms(entry);
-        anchor_is_evaluation_time(
-            at,
-            reaching_shift
-                .get(&shift)
-                .into_iter()
-                .flatten()
-                .filter_map(|&q| entries.get(q))
-                .filter(|other| evaluation_grid_ms(other) == grid_ms),
-        )
+        let on_grid = queries_of_context(
+            evaluation_grid_ms(entry),
+            reaching_shift.get(&shift).into_iter().flatten().copied(),
+            entries,
+        );
+        anchor_is_evaluation_time(at, on_grid.iter().map(|&q| &entries[q]))
     };
     let walks = starts
         .into_iter()
@@ -423,6 +419,23 @@ pub fn anchor_is_evaluation_time<'e>(
                 .range_evaluation
                 .is_none_or(|range| range.evaluations_per_request() <= 1)
         })
+}
+
+/// The queries of the execution context on evaluation grid `grid_ms`
+/// among `reaching` (the queries reaching a node, by index in `entries`):
+/// those evaluated on that grid ([`evaluation_grid_ms`]; 1 ms for a query
+/// without an entry). Stage 3 (over the queries reaching a memo group or
+/// an anchored shift) and [`computations`] (over the queries whose walk
+/// reaches a plan node) pick a context's queries with it.
+pub fn queries_of_context(
+    grid_ms: u64,
+    reaching: impl IntoIterator<Item = usize>,
+    entries: &[QueryWorkloadEntry],
+) -> Vec<usize> {
+    reaching
+        .into_iter()
+        .filter(|&query| entries.get(query).map_or(1, evaluation_grid_ms) == grid_ms)
+        .collect()
 }
 
 /// The grid, in ms, every evaluation of `entry`'s query falls on
@@ -603,9 +616,8 @@ pub fn computations(
     let mut count: HashMap<_, (u64, f64)> = HashMap::new();
     for (id, of_node) in consumers(dag, entries) {
         let entry = count.entry(id).or_default();
-        // The queries reaching it, per context: (evaluation grid, anchor).
-        let mut queries_by_context: BTreeMap<(u64, Option<AtModifier>), BTreeSet<usize>> =
-            BTreeMap::new();
+        // The queries reaching it, per anchor.
+        let mut queries_by_anchor: BTreeMap<Option<AtModifier>, BTreeSet<usize>> = BTreeMap::new();
         for consumer in of_node {
             let (query, anchor) = match consumer {
                 Consumer::Query(query) => (query, None),
@@ -616,19 +628,23 @@ pub fn computations(
                     continue;
                 }
             };
-            let grid_ms = entries.get(query).map_or(1, evaluation_grid_ms);
-            queries_by_context
-                .entry((grid_ms, anchor))
-                .or_default()
-                .insert(query);
+            queries_by_anchor.entry(anchor).or_default().insert(query);
         }
-        for ((_, anchor), queries) in queries_by_context {
-            entry.0 += 1;
-            entry.1 += context_executions_per_second(
-                anchor,
-                queries.iter().filter_map(|&query| entries.get(query)),
-                non_repeating_query_horizon_seconds,
-            )?;
+        // One context per (evaluation grid, anchor).
+        for (anchor, reaching) in queries_by_anchor {
+            let grids: BTreeSet<u64> = reaching
+                .iter()
+                .map(|&query| entries.get(query).map_or(1, evaluation_grid_ms))
+                .collect();
+            for grid_ms in grids {
+                let queries = queries_of_context(grid_ms, reaching.iter().copied(), entries);
+                entry.0 += 1;
+                entry.1 += context_executions_per_second(
+                    anchor,
+                    queries.iter().filter_map(|&query| entries.get(query)),
+                    non_repeating_query_horizon_seconds,
+                )?;
+            }
         }
     }
     Ok(dag
