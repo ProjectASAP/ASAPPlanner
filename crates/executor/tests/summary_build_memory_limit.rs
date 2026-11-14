@@ -9,6 +9,7 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
 use asap_executor::Error;
 use futures::{executor::block_on, StreamExt};
+use planner_types::stages::Lifetime;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -61,6 +62,7 @@ fn one_large_batch_fails_near_the_memory_limit() {
         0,
         vec![],
         Operator::source(input.clone(), vec![batch]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     dag.add(
@@ -75,6 +77,7 @@ fn one_large_batch_fails_near_the_memory_limit() {
             vec![0],
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let context = RunContext::new(
@@ -83,7 +86,6 @@ fn one_large_batch_fails_near_the_memory_limit() {
         },
         Limits {
             max_bytes: LIMIT_BYTES,
-            ..Limits::default()
         },
     )
     .unwrap();

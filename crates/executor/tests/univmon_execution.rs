@@ -16,6 +16,7 @@ use planner_types::ir::schema::{DataType, Schema};
 use planner_types::ir::schema::{Field, FieldDataType};
 use planner_types::ir::ASAPOp;
 use planner_types::plan::physical_asap_dag::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
+use planner_types::stages::{Lifetime, StorageMedium};
 use planner_types::summary_type::{
     SketchAlgorithm, SketchStatistic, SummaryInputExpr, SummaryUpdate,
 };
@@ -60,8 +61,14 @@ fn three_statistics(batch: Batch, build: Operator) -> Result<Vec<f64>, Error> {
         0,
         vec![],
         Operator::source(batch.schema().clone(), vec![batch])?,
+        Lifetime::None,
     )?;
-    dag.add(1, vec![0], build)?;
+    dag.add(
+        1,
+        vec![0],
+        build,
+        Lifetime::OneEvaluation(StorageMedium::Memory),
+    )?;
     for (id, statistic) in [
         (2, SketchStatistic::Cardinality),
         (3, SketchStatistic::FrequencyL2),
@@ -71,6 +78,7 @@ fn three_statistics(batch: Batch, build: Operator) -> Result<Vec<f64>, Error> {
             id,
             vec![1],
             Operator::evaluation(state.clone(), 0, SummaryEvaluation::Sketch(statistic))?,
+            Lifetime::None,
         )?;
     }
     let outputs = block_on(futures::future::join_all(

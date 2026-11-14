@@ -91,10 +91,15 @@ fn top_items(build: Operator, input: SchemaRef, batch: Batch) -> Vec<(String, St
     ]);
     let evaluation = Operator::keyed_evaluation(build.schema(), 1, 8, output).unwrap();
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], Operator::source(input, vec![batch]).unwrap())
-        .unwrap();
-    dag.add(1, vec![0], build).unwrap();
-    dag.add(2, vec![1], evaluation).unwrap();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(input, vec![batch]).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
+    dag.add(1, vec![0], build, Lifetime::None).unwrap();
+    dag.add(2, vec![1], evaluation, Lifetime::None).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
@@ -290,10 +295,11 @@ fn int64_weight_column_equals_float64_column() {
             vec![batch(&int64, Some(Value::Int64((1 << 53) + 1)))],
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
-    dag.add(1, vec![0], build).unwrap();
-    dag.add(2, vec![1], evaluation).unwrap();
+    dag.add(1, vec![0], build, Lifetime::None).unwrap();
+    dag.add(2, vec![1], evaluation, Lifetime::None).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
@@ -332,10 +338,16 @@ fn null_weight_adds_nothing() {
         0,
         vec![],
         Operator::source(nullable.clone(), vec![nulls.clone()]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
-    dag.add(1, vec![0], keyed_build(&nullable, RowWeight::Column(2)))
-        .unwrap();
+    dag.add(
+        1,
+        vec![0],
+        keyed_build(&nullable, RowWeight::Column(2)),
+        Lifetime::None,
+    )
+    .unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,

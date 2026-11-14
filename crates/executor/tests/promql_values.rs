@@ -1,6 +1,7 @@
 //! Compile, persist and rebind dynamic-label computation without deployment lowering.
 use asap_executor::expressions::binary::{BinaryOpKind, BinaryOperator};
 use asap_executor::sources::InMemoryDataStore;
+use planner_types::stages::Lifetime;
 use std::sync::Arc;
 
 use asap_executor::{
@@ -269,7 +270,14 @@ fn run_inputs(computation: Computation, batches: Vec<Batch>) -> Result<Vec<Vec<V
         let source = Operator::source(batch.schema().clone(), vec![batch]).unwrap();
         operators.insert(id as u64, (vec![], source));
     }
-    let dag = CompiledPhysicalDAG::from_operators(operators, vec![computation.root]).unwrap();
+    let dag = CompiledPhysicalDAG::from_operators(
+        operators
+            .into_iter()
+            .map(|(id, (inputs, operator))| (id, (inputs, operator, Lifetime::None)))
+            .collect(),
+        vec![computation.root],
+    )
+    .unwrap();
     execute(&dag)
 }
 /// The rows of `dag`'s root at time 0, over a store with no data.

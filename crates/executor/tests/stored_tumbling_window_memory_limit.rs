@@ -11,6 +11,7 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, BatchColumn};
 use asap_executor::{Error, StateColumnUpdater};
 use futures::{executor::block_on, StreamExt};
+use planner_types::stages::Lifetime;
 use std::sync::Arc;
 
 const SERIES: u32 = 1_000;
@@ -80,22 +81,21 @@ fn merge_stored_tumbling_windows(max_bytes: usize) -> Result<usize, Error> {
         0,
         vec![],
         Operator::source(schema.clone(), vec![tumbling_window; TUMBLING_WINDOW_COUNT]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     dag.add(
         1,
         vec![0],
         Operator::summary_merge(schema, 1, vec![0]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
         },
-        Limits {
-            max_bytes,
-            ..Limits::default()
-        },
+        Limits { max_bytes },
     )
     .unwrap();
     block_on(async {
@@ -141,22 +141,21 @@ fn compacting_a_stored_tumbling_window_does_not_charge_its_shared_sketches() {
             0,
             vec![],
             Operator::source(schema.clone(), vec![tumbling_window]).unwrap(),
+            Lifetime::None,
         )
         .unwrap();
         dag.add(
             1,
             vec![0],
             Operator::limit(schema, kept, 0, vec![]).unwrap(),
+            Lifetime::None,
         )
         .unwrap();
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 0,
             },
-            Limits {
-                max_bytes: 8 << 20,
-                ..Limits::default()
-            },
+            Limits { max_bytes: 8 << 20 },
         )
         .unwrap();
         let rows = block_on(async {
@@ -184,6 +183,7 @@ fn sorting_then_limiting_stored_tumbling_windows_does_not_charge_their_sketches(
         0,
         vec![],
         Operator::source(schema.clone(), vec![first, second]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let key = SortKey {
@@ -195,18 +195,21 @@ fn sorting_then_limiting_stored_tumbling_windows_does_not_charge_their_sketches(
         1,
         vec![0],
         Operator::sort(schema.clone(), vec![key], vec![]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
-    dag.add(2, vec![1], Operator::limit(schema, 980, 0, vec![]).unwrap())
-        .unwrap();
+    dag.add(
+        2,
+        vec![1],
+        Operator::limit(schema, 980, 0, vec![]).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
         },
-        Limits {
-            max_bytes: 8 << 20,
-            ..Limits::default()
-        },
+        Limits { max_bytes: 8 << 20 },
     )
     .unwrap();
     let rows = block_on(async {
@@ -231,22 +234,21 @@ fn a_merge_passing_stored_states_through_does_not_charge_them() {
         0,
         vec![],
         Operator::source(schema.clone(), vec![tumbling_window]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     dag.add(
         1,
         vec![0],
         Operator::summary_merge(schema, 1, vec![0]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
         },
-        Limits {
-            max_bytes: 8 << 20,
-            ..Limits::default()
-        },
+        Limits { max_bytes: 8 << 20 },
     )
     .unwrap();
     let rows = block_on(async {
@@ -410,7 +412,6 @@ fn a_materialized_view_providers_states_are_not_charged_to_the_run() {
         },
         Limits {
             max_bytes: 32 << 20,
-            ..Limits::default()
         },
     )
     .unwrap();
