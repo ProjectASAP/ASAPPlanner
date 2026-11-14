@@ -5,7 +5,7 @@ use std::time::Duration;
 use asap_types::ir::properties::ExecutionDataState;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode;
-use asap_types::plan::time_window::TimeIndexedRead;
+use asap_types::plan::time_window::{InputTimeAccess, TimeIndexedPlan};
 use asap_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
 
 use super::*;
@@ -179,22 +179,37 @@ fn a_query_time_scan_reads_what_its_consumers_read_and_keeps_its_retention() {
         kind: TimeRangeKind::Range,
         child: 0,
     }));
-    let read_ms = read_back_ms(
-        0,
-        |id| match id {
-            0 => vec![1],
-            _ => vec![],
-        },
-        |_| {
-            TimeIndexedRead::of(
-                &instant.payload,
-                ExecutionTiming::QueryTime,
-                instant.lifetime,
-            )
-        },
-        |_| 0,
-        true,
-    );
+    // The scan (0) read by the range (1).
+    struct ScanReadByRange<'a>([&'a PhysicalASAPDAGNode; 2]);
+    impl TimeIndexedPlan for ScanReadByRange<'_> {
+        type Node = usize;
+        type Child = usize;
+        fn readers_of(&self, node: usize) -> Vec<usize> {
+            if node == 0 {
+                vec![1]
+            } else {
+                vec![]
+            }
+        }
+        fn inputs_of(&self, node: usize) -> Vec<usize> {
+            if node == 1 {
+                vec![0]
+            } else {
+                vec![]
+            }
+        }
+        fn input_time_access(&self, node: usize) -> InputTimeAccess {
+            let node = self.0[node];
+            InputTimeAccess::of(&node.payload, ExecutionTiming::QueryTime, node.lifetime)
+        }
+        fn is_raw_data(&self, node: usize) -> bool {
+            node == 0
+        }
+        fn operator_of(&self, node: usize) -> &Payload {
+            &self.0[node].payload
+        }
+    }
+    let read_ms = read_back_ms(&ScanReadByRange([&scan, &instant]), 0, |_| 0);
     assert_eq!(read_ms, Some(1_000));
     let usage =
         node_resource_usage_and_cost(&scan, &[], (1, 1.0), read_ms, &data, &settings).unwrap();

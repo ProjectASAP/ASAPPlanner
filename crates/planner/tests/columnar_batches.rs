@@ -67,8 +67,8 @@ async fn a_tumbling_window_is_built_from_arrow_columns_with_one_label_entry_per_
     let newest_window = |node_id| {
         let refresh = plan.dag.refresh_window(node_id).expect("a bounded window");
         asap_planner::TimeWindow {
-            end_offset_ms: refresh.phase_ms,
-            width_ms: refresh.width_ms,
+            ends_before_evaluation_ms: refresh.phase_ms,
+            length_ms: refresh.width_ms,
         }
     };
     let output = views

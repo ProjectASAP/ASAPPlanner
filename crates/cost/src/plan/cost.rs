@@ -27,7 +27,6 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload,
 };
-use asap_types::plan::time_window::TimeIndexedRead;
 use asap_types::summary_type::SketchParams;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
@@ -106,10 +105,8 @@ pub fn plan_cost(
     let multipliers = computations(dag, entries, settings.non_repeating_query_horizon_seconds)
         .map_err(|error| (first, error))?;
     let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
-    let mut consumers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
     for e in &dag.edges {
         producers_of.entry(e.consumer).or_default().push(e.producer);
-        consumers_of.entry(e.producer).or_default().push(e.consumer);
     }
     let mut costed: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'_>> = HashMap::new();
     for node in &dag.nodes {
@@ -125,7 +122,7 @@ pub fn plan_cost(
                 |id| &nodes[&id].payload,
                 |id| producers_of.get(&id)?.first().copied(),
             ),
-            ExecutionTiming::QueryTime => scan_read_ms(node, nodes, &consumers_of),
+            ExecutionTiming::QueryTime => scan_read_ms(dag, node),
         };
         let node_costed = node_resource_usage_and_cost(
             node,
@@ -396,31 +393,15 @@ pub fn raw_data_disk_cost_per_second(bytes: u64, settings: &CostInputs) -> Optio
     }
 }
 
-/// The window a query-time `Scan` `node` reads per execution: the most
-/// offset + range its consumers read ([`read_back_ms`], no range-evaluation
-/// span), once however many consumers read it. `None` for any other node,
-/// or when a consumer reads it whole.
-fn scan_read_ms(
-    node: &PhysicalASAPDAGNode,
-    nodes: &NodeMap<'_>,
-    consumers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
-) -> Option<u64> {
+/// The window a query-time `Scan` `node` of `dag` reads per execution: the
+/// most offset + range its consumers read ([`read_back_ms`], no
+/// range-evaluation span), once however many consumers read it. `None` for
+/// any other node, or when a consumer reads it whole.
+fn scan_read_ms(dag: &PhysicalASAPDAG, node: &PhysicalASAPDAGNode) -> Option<u64> {
     if !matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. })) {
         return None;
     }
-    read_back_ms(
-        node.id,
-        |id| consumers_of.get(&id).into_iter().flatten().copied(),
-        |id| {
-            TimeIndexedRead::of(
-                &nodes[&id].payload,
-                nodes[&id].output_state.timing,
-                nodes[&id].lifetime,
-            )
-        },
-        |_| 0,
-        true,
-    )
+    read_back_ms(dag, node.id, |_| 0)
 }
 
 /// The CPU cores a candidate needs at its peak: enough for its

@@ -222,8 +222,8 @@ fn a_chain_built_at_ingestion_answers_queries_through_its_time_ranges() {
         dag.refresh_window(chain),
         planner_types::plan::materialized_view::RefreshWindow::of_window(
             planner_types::plan::TimeWindow {
-                end_offset_ms: 0,
-                width_ms: WIDTH_MS as u64,
+                ends_before_evaluation_ms: 0,
+                length_ms: WIDTH_MS as u64,
             }
         )
     );

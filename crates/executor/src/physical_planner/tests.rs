@@ -64,7 +64,14 @@ fn a_stored_time_shift_over_a_chain_reads_the_chain_unbounded() {
     );
     let nodes: BTreeMap<NodeId, &PhysicalASAPDAGNode> = [(0, &chain), (1, &shift)].into();
     let consumers: BTreeMap<NodeId, Vec<NodeId>> = [(0, vec![1])].into();
+    let dependencies: BTreeMap<NodeId, Vec<NodeId>> = [(1, vec![0])].into();
     for roots in [BTreeSet::from([1]), BTreeSet::new()] {
-        assert_eq!(window_read_above(0, &roots, &consumers, &nodes), None);
+        let graph = CompileGraph {
+            nodes: &nodes,
+            dependencies: &dependencies,
+            consumers: &consumers,
+            roots: &roots,
+        };
+        assert_eq!(window_read_above(0, &graph), None);
     }
 }

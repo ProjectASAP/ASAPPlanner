@@ -131,8 +131,8 @@ fn materialized_views_equal_the_stored_outputs_main_listed() {
                 .map(|window| {
                     source_of(window["scan_node_id"].as_u64().unwrap());
                     TimeWindow {
-                        end_offset_ms: window["end_offset_ms"].as_u64().unwrap(),
-                        width_ms: window["width_ms"].as_u64().unwrap(),
+                        ends_before_evaluation_ms: window["end_offset_ms"].as_u64().unwrap(),
+                        length_ms: window["width_ms"].as_u64().unwrap(),
                     }
                 })
                 .collect();

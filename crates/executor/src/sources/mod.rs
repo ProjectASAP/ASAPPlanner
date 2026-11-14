@@ -181,8 +181,9 @@ impl Scan {
         // offset.
         let at_ms = match context.scope {
             Scope::Query { evaluation_time_ms } => evaluation_time_ms,
-            Scope::Ingestion { window_end_ms, .. } => window_end_ms
-                .saturating_add(i64::try_from(read_window.end_offset_ms).unwrap_or(i64::MAX)),
+            Scope::Ingestion { window_end_ms, .. } => window_end_ms.saturating_add(
+                i64::try_from(read_window.ends_before_evaluation_ms).unwrap_or(i64::MAX),
+            ),
         };
         let time_range_ms = read_window.bounds_ms(at_ms);
         let opening = context.clone();

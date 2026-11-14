@@ -272,8 +272,8 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
                 .refresh_window(view.node_id)
                 .map(|refresh| {
                     asap_planner::TimeWindow {
-                        end_offset_ms: refresh.phase_ms,
-                        width_ms: refresh.width_ms,
+                        ends_before_evaluation_ms: refresh.phase_ms,
+                        length_ms: refresh.width_ms,
                     }
                     .bounds_ms(EVALUATION_MS)
                 })

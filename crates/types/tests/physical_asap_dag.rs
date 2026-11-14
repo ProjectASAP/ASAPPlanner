@@ -263,8 +263,8 @@ fn physical_node_ids_serialize_in_deterministic_binding_order() {
 #[test]
 fn a_time_window_ends_its_offset_before_the_evaluation() {
     let window = asap_types::plan::TimeWindow {
-        end_offset_ms: 300_000,
-        width_ms: 600_000,
+        ends_before_evaluation_ms: 300_000,
+        length_ms: 600_000,
     };
     assert_eq!(window.bounds_ms(3_600_000), (2_700_000, 3_300_000));
 }

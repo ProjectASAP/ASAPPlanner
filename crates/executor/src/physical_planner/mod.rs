@@ -53,7 +53,7 @@ pub use compiled::CompiledPhysicalDAG;
 mod time_window;
 use time_window::{
     below_time_shifts, counter_window, first_input, node_below_shifts, time_window_operator,
-    window_below, window_read_above,
+    window_below, window_read_above, CompileGraph,
 };
 
 mod row_values;
@@ -167,6 +167,12 @@ fn compile_internal(
         }
     }
     let compile_roots: BTreeSet<NodeId> = roots.iter().copied().collect();
+    let graph = CompileGraph {
+        nodes: &nodes,
+        dependencies: &dependencies,
+        consumers: &consumers,
+        roots: &compile_roots,
+    };
     let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec());
     for id in ordered {
         let node = nodes[&id];
@@ -179,9 +185,9 @@ fn compile_internal(
             // the window of data it summarizes. Either is exact, so bounded.
             let read_window = match node.payload {
                 Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
-                    window_read_above(id, &compile_roots, &consumers, &nodes)
+                    window_read_above(id, &graph)
                 }
-                _ => window_below(id, &nodes, &dependencies),
+                _ => window_below(id, &graph),
             }
             .ok_or_else(|| invalid(format!("materialized view {id} is read unbounded")))?;
             physical_dag.add_materialized_view(
@@ -217,7 +223,7 @@ fn compile_internal(
             // The rows its consumers read; a compile root reads them all.
             let read_window = output
                 .time_index
-                .and_then(|_| window_read_above(id, &compile_roots, &consumers, &nodes));
+                .and_then(|_| window_read_above(id, &graph));
             physical_dag.add_raw_data(
                 id,
                 compiled::RawDataSlot {
@@ -486,18 +492,19 @@ fn compile_internal(
                 };
                 let window = if query_time {
                     // The windows its readers read, whole tumbling windows.
-                    let read = window_read_above(id, &compile_roots, &consumers, &nodes)
-                        .ok_or_else(|| {
-                            invalid(format!(
-                                "node {id}: a query-time tumbling-window chain is read \
+                    let read = window_read_above(id, &graph).ok_or_else(|| {
+                        invalid(format!(
+                            "node {id}: a query-time tumbling-window chain is read \
                                  outside the time ranges above it"
-                            ))
-                        })?;
+                        ))
+                    })?;
                     let millis = |ms: u64| {
                         i64::try_from(ms).map_err(|_| invalid("a chain's read overflows Int64"))
                     };
-                    let (end_offset_ms, read_width_ms) =
-                        (millis(read.end_offset_ms)?, millis(read.width_ms)?);
+                    let (end_offset_ms, read_width_ms) = (
+                        millis(read.ends_before_evaluation_ms)?,
+                        millis(read.length_ms)?,
+                    );
                     if end_offset_ms % width_ms != 0 || read_width_ms % width_ms != 0 {
                         return Err(invalid(format!(
                             "node {id}: a window ({end_offset_ms} ms back, {read_width_ms} ms \
@@ -784,7 +791,7 @@ fn compile_internal(
             }
             // A window over a table or a time series (and a tumbling window's
             // shift under it) runs natively on the time column.
-            if let Some(operator) = time_window_operator(id, &nodes, &dependencies, &schemas)
+            if let Some(operator) = time_window_operator(id, &graph, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?
             {
                 physical_dag.add(id, inputs, operator.with_output_schema(output)?)?;

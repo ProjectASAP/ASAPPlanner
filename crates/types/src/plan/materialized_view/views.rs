@@ -7,15 +7,15 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    is_raw_data_scan, IngestionRefreshGroup, InstallableDagError, MaterializedView,
-    MaterializedViewInputs, MaterializedViewRefresh, RefreshWindow,
+    IngestionRefreshGroup, InstallableDagError, MaterializedView, MaterializedViewInputs,
+    MaterializedViewRefresh, RefreshWindow,
 };
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::Operator;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
 use crate::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId};
-use crate::plan::time_window::{self, TimeIndexedRead, TimeWindow};
+use crate::plan::time_window::{self, TimeWindow};
 
 impl PhysicalASAPDAG {
     /// Every materialized view, in dependency order (each after the views
@@ -155,7 +155,7 @@ impl PhysicalASAPDAG {
             .into_iter()
             .map(|node| {
                 let refresh_window = index
-                    .windows_below(node)
+                    .windows_computed_from(node)
                     .and_then(|windows| windows.into_iter().reduce(TimeWindow::union))
                     .and_then(RefreshWindow::of_window);
                 (node, refresh_window)
@@ -164,15 +164,13 @@ impl PhysicalASAPDAG {
     }
 }
 
-/// The nodes of a DAG by id, each node's inputs and consumers in edge
-/// order, and two facts every raw-data window check reads, computed in one
+/// The nodes of a DAG by id, each node's inputs in edge order, and two facts every raw-data window check reads, computed in one
 /// pass each over the DAG (O(nodes + edges)); it walks down from each
 /// window to check its shape.
 pub(super) struct ViewIndex<'a> {
     pub(super) dag: &'a PhysicalASAPDAG,
     pub(super) nodes: HashMap<PhysicalASAPNodeId, &'a PhysicalASAPDAGNode>,
     pub(super) inputs: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
-    pub(super) consumers: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
     /// Every node after its inputs, from the DAG's node order.
     pub(super) children_first: Vec<PhysicalASAPNodeId>,
     /// The nodes whose rows come from raw data: a `Scan` is reachable below
@@ -199,13 +197,8 @@ impl<'a> ViewIndex<'a> {
     pub(super) fn new(dag: &'a PhysicalASAPDAG) -> Self {
         let nodes: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n)).collect();
         let mut inputs: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
-        let mut consumers: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
         for edge in &dag.edges {
             inputs.entry(edge.consumer).or_default().push(edge.producer);
-            consumers
-                .entry(edge.producer)
-                .or_default()
-                .push(edge.consumer);
         }
         // Every node after its inputs: an iterative depth-first postorder.
         let mut children_first = Vec::with_capacity(dag.nodes.len());
@@ -252,7 +245,6 @@ impl<'a> ViewIndex<'a> {
             dag,
             nodes,
             inputs,
-            consumers,
             children_first,
             reading_raw_data,
             re_timed_from_above,
@@ -297,10 +289,10 @@ impl<'a> ViewIndex<'a> {
                 // An ingestion run builds the windows ending at its end, so
                 // every window the view reads must end at one offset.
                 let mut end_offsets_ms: Vec<u64> = self
-                    .windows_below(id)
+                    .windows_computed_from(id)
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|window| window.end_offset_ms)
+                    .map(|window| window.ends_before_evaluation_ms)
                     .collect();
                 end_offsets_ms.sort_unstable();
                 end_offsets_ms.dedup();
@@ -334,54 +326,35 @@ impl<'a> ViewIndex<'a> {
         Ok(derived)
     }
 
-    /// The windows back from the evaluation time that `node` reads
-    /// ([`time_window::windows_below`]): a chain its own tumbling window;
-    /// any other node each `TimeRange` below it and each chain below it
-    /// reached without passing a `TimeRange`. `None` when one is read
+    /// The windows of input rows `node`'s result is computed from
+    /// ([`time_window::windows_computed_from`]): a chain its own tumbling
+    /// window; any other node each `TimeRange` below it and each chain below
+    /// it reached without passing a `TimeRange`. `None` when one is read
     /// through an `@` anchor or a negative offset.
-    fn windows_below(&self, node: PhysicalASAPNodeId) -> Option<Vec<TimeWindow>> {
-        time_window::windows_below(
-            node,
-            |id| self.inputs.get(&id).into_iter().flatten().copied(),
-            |id| self.only_input(id),
-            |id| &self.nodes[&id].payload,
-        )
+    fn windows_computed_from(&self, node: PhysicalASAPNodeId) -> Option<Vec<TimeWindow>> {
+        time_window::windows_computed_from(self.dag, node)
     }
 
     /// How far back from the evaluation time the readers of `node` read it
-    /// ([`time_window::windows_read_above`]): the most any reads back.
-    /// `None`, unbounded, when a root or a reader at a time not relative
-    /// to the evaluation (`@`) reads it, or, for a raw-data `Scan`, a reader
-    /// other than a window (a `TimeRange` or an ingestion-time chain).
+    /// ([`time_window::windows_readers_need`]): the most any reaches back.
+    /// `None`, unbounded, when `node` is a root, a root or a reader at a time
+    /// not relative to the evaluation (`@`) reads it, or, for a raw-data
+    /// `Scan`, a reader other than a window (a `TimeRange` or an
+    /// ingestion-time chain). A materialized shift that is a root still
+    /// reads its input's newest output: its readers do not change that, so
+    /// it is not read whole (the executor refuses its refresh over a chain
+    /// for now).
     ///
     /// Example: a `Scan` read by `TimeShift(1m) -> TimeRange(5m)`: 360,000.
     pub(super) fn read_back_ms(&self, node: PhysicalASAPNodeId) -> Option<u64> {
-        let root = |id: PhysicalASAPNodeId| self.dag.roots.contains(&id);
-        if root(node) {
+        if self.dag.roots.contains(&node) {
             return None;
         }
-        let windows = time_window::windows_read_above(
-            node,
-            |id| self.consumers.get(&id).into_iter().flatten().copied(),
-            |id| match TimeIndexedRead::of(
-                &self.nodes[&id].payload,
-                self.nodes[&id].output_state.timing,
-                self.nodes[&id].lifetime,
-            ) {
-                // A root's output is read at evaluation time, so a root
-                // read through is read whole. A materialized shift that is a
-                // root still reads its input's newest output: its readers do
-                // not change that, so it is not mapped to `Whole` (the
-                // executor refuses its refresh over a chain for now).
-                TimeIndexedRead::Through { .. } if root(id) => TimeIndexedRead::Whole,
-                read => read,
-            },
-            is_raw_data_scan(self.nodes[&node]),
-        )?;
+        let windows = time_window::windows_readers_need(self.dag, node)?;
         Some(
             windows
                 .iter()
-                .map(|(_, window)| window.read_back_ms())
+                .map(|(_, window)| window.reaches_back_ms())
                 .max()
                 .unwrap_or(0),
         )

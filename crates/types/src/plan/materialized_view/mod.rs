@@ -160,12 +160,15 @@ pub struct RefreshWindow {
 }
 
 impl RefreshWindow {
-    /// The refresh window of `window`: `(width_ms, end_offset_ms mod
-    /// width_ms)`; `None` for an empty window.
+    /// The refresh window of `window`: `(length_ms,
+    /// ends_before_evaluation_ms mod length_ms)`; `None` for an empty
+    /// window.
     pub fn of_window(window: TimeWindow) -> Option<Self> {
-        let phase_ms = window.end_offset_ms.checked_rem(window.width_ms)?;
+        let phase_ms = window
+            .ends_before_evaluation_ms
+            .checked_rem(window.length_ms)?;
         Some(RefreshWindow {
-            width_ms: window.width_ms,
+            width_ms: window.length_ms,
             phase_ms,
         })
     }
@@ -285,5 +288,3 @@ pub enum InstallableDagError {
 
 mod raw_data;
 mod views;
-
-pub(crate) use raw_data::is_raw_data_scan;
