@@ -283,9 +283,9 @@ impl StateColumnUpdater {
     /// Add one sample to `group`'s state: `value` observed at
     /// `timestamp_ms` (read only by counters). Bad input for a group never
     /// added; an operator error when the state cannot take the value (not
-    /// finite, outside a DDSketch's domain, a counter sample not after the
-    /// group's previous one) or the family is keyed. The state is then
-    /// unchanged.
+    /// finite for a sketch or a counter, outside a DDSketch's domain, a
+    /// counter sample not after the group's previous one) or the family is
+    /// keyed. The state is then unchanged.
     pub fn update(&mut self, group: u32, value: f64, timestamp_ms: i64) -> Result<(), Error> {
         self.update_value(group, &Value::Float64(value), timestamp_ms)
     }
@@ -309,15 +309,18 @@ impl StateColumnUpdater {
         }
         match &mut self.states {
             GroupStates::Exact { states, .. } => {
-                // The exact kernel's input contract (`AccumulatorUpdater`); a
-                // count counts every non-NULL value of any type, NaN included
-                // (SQL `COUNT(col)`).
+                // The exact kernel's input contract
+                // (`factory::exact_accumulator_input`): a count counts every
+                // non-NULL value of any type, NaN included (SQL
+                // `COUNT(col)`); a sum, min or max takes any Float64, ±Inf
+                // and NaN included; a counter needs finite samples.
                 match (&states[index], value) {
                     (ScalarState::Count(_), _) => states[index].update(0.0, timestamp_ms),
-                    (_, Value::Float64(value)) => {
+                    (ScalarState::Counter(_), Value::Float64(value)) => {
                         super::factory::finite_input(*value).map_err(operator_error)?;
                         states[index].update(*value, timestamp_ms);
                     }
+                    (_, Value::Float64(value)) => states[index].update(*value, timestamp_ms),
                     _ => return Err(operator_error("summary update requires Float64")),
                 }
             }

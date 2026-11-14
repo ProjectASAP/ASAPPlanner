@@ -291,6 +291,109 @@ fn avg_of_readouts_of_values_of_one_sign_keeps_the_ddsketch_edge() {
     }
 }
 
+/// `sum(-quantile_over_time(0.99, m[5m]))` and
+/// `sum(abs(quantile_over_time(0.99, m[5m])))` with a relative target,
+/// `m` declared non-negative: the negation's values are non-positive and
+/// `abs`'s non-negative, so the `sum` reads values of one sign and keeps
+/// their relative error; the negation and `abs` keep each value's
+/// relative error (q = 10, q̂ = 10.5: −q̂ = −10.5 is 5% off −10). The
+/// DDSketch readout's edge into the `Project` holds, as does the
+/// `Project`'s edge into the `sum`; the KLL readout's rank error is cut.
+#[test]
+fn a_sum_of_negated_or_absolute_readouts_keeps_the_ddsketch_edge() {
+    use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, ProjectItem, ScalarExpr};
+    let data = DataWorkload {
+        sources: BTreeMap::from([(
+            "m".to_string(),
+            SourceFacts {
+                column_signs: BTreeMap::from([("value".to_string(), ValueSign::NonNegative)]),
+                ..SourceFacts::default()
+            },
+        )]),
+        ..DataWorkload::default()
+    };
+    let negated = |column| ScalarExpr::Negative {
+        expr: Box::new(ScalarExpr::Column(column)),
+        semantics: ExprSemantics::Promql,
+    };
+    let absolute = |column| ScalarExpr::FunctionCall {
+        name: "promql_abs".into(),
+        args: vec![ScalarExpr::Column(column)],
+    };
+    for (function, sign) in [
+        (
+            &negated as &dyn Fn(usize) -> ScalarExpr<MemoGroupId>,
+            ValueSign::NonPositive,
+        ),
+        (&absolute, ValueSign::NonNegative),
+    ] {
+        let mut memo = Memo::new(&data);
+        let p99 = quantile_readouts(&mut memo, 0.99);
+        let schema = memo.groups()[p99.result.0 as usize]
+            .group_properties
+            .schema
+            .clone();
+        let value = resolve_column_ref(&ColumnRef::SampleValue, &schema).unwrap();
+        let mapped = group(
+            &mut memo,
+            Operator::NonASAP(NonASAPOp::Project {
+                cols: schema
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(column, field)| ProjectItem {
+                        alias: Some(field.name.clone()),
+                        expr: if column == value {
+                            function(column)
+                        } else {
+                            ScalarExpr::Column(column)
+                        },
+                    })
+                    .collect(),
+                child: p99.result,
+            }),
+        );
+        assert_eq!(
+            memo.groups()[mapped.0 as usize]
+                .group_properties
+                .column_signs[value],
+            sign
+        );
+        let sum = group(
+            &mut memo,
+            Operator::NonASAP(NonASAPOp::Aggregate {
+                child: mapped,
+                reduction: Reduction::by(vec![]),
+                measures: vec![AggIntent::Sum { col: None }],
+                output_names: vec!["sum".into()],
+                filters: vec![None],
+                having: None,
+            }),
+        );
+        let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
+        query(&mut memo, sum, Some(target));
+        let into_sum = edge(&memo, own_candidate(mapped), own_candidate(sum), 0);
+        assert!(into_sum.is_ok(), "{sign:?}: {into_sum:?}");
+        for readout in &p99.by_algorithm {
+            let result = readout_edge(&memo, readout, own_candidate(mapped), 0);
+            match readout.algorithm {
+                SketchAlgorithm::DDSketch => assert!(result.is_ok(), "{sign:?}: {result:?}"),
+                _ => assert!(
+                    matches!(
+                        result,
+                        Err(RootPruneReason::MetricRule {
+                            producer_metric: AccuracyMetric::Rank,
+                            ..
+                        })
+                    ),
+                    "{sign:?}: {:?} {result:?}",
+                    readout.algorithm
+                ),
+            }
+        }
+    }
+}
+
 /// A scalar root's operands are roots: `scalar(v)` returns the value
 /// it reads, so `scalar(quantile_over_time(0.99, m[5m]))` at a relative
 /// target allows relative error at the quantile group, and the DDSketch
