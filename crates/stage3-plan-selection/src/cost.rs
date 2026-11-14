@@ -72,7 +72,10 @@ use asap_types::stages::{
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::plan::candidate_node;
-use crate::retention::{edge_retention_need_ms, edge_scan_read_ms, ms_to_seconds, reads_back};
+use crate::retention::{
+    edge_retention_need_ms, edge_scan_read_ms, least_need_ms_per_execution, ms_to_seconds,
+    reads_back,
+};
 use crate::selectable::{Execution, SelectableExecutions};
 
 /// The objective's coefficients
@@ -98,6 +101,10 @@ pub(crate) struct ExecutionCosts {
     /// `None` when its producer retains no rows or the edge reads it
     /// unbounded.
     pub(crate) retention_need_ms_per_edge: Vec<Option<u64>>,
+    /// The least need, in ms, over each execution's costed reads, by
+    /// position in `SelectableExecutions::executions`
+    /// ([`least_need_ms_per_execution`]).
+    pub(crate) least_need_ms_per_execution: Vec<Option<u64>>,
     /// The source of each query-time `Scan`: its retention is raw data on
     /// disk, which a plan keeps once per source for the selected scan that
     /// keeps the most, as `plan_cost` charges it ($r_s$).
@@ -326,7 +333,11 @@ pub(crate) fn execution_costs(
     let own_execution: HashMap<PhysicalCandidateId, usize> = executions
         .iter()
         .enumerate()
-        .filter(|(_, execution)| is_across_evaluations(physical, execution.candidate))
+        .filter(|(_, execution)| {
+            physical.physical_candidates[execution.candidate.0]
+                .physical_properties
+                .is_across_evaluations()
+        })
         .map(|(index, execution)| (execution.candidate, index))
         .collect();
     // π_v of a candidate retaining rows every consumer reads within a bound:
@@ -351,7 +362,10 @@ pub(crate) fn execution_costs(
         .max(1);
         let longer = node_retaining(v, Some(retention_ms + delta_ms));
         let delta_seconds = ms_to_seconds(delta_ms);
-        let per_retained_second = match is_across_evaluations(physical, v) {
+        let per_retained_second = match physical.physical_candidates[v.0]
+            .physical_properties
+            .is_across_evaluations()
+        {
             true => own_execution.get(&v).and_then(|&index| {
                 let (own, raw_data, per_second) = at_rate[index].as_ref().ok()?;
                 let inputs = baseline[v.0].as_ref()?;
@@ -406,9 +420,12 @@ pub(crate) fn execution_costs(
             Ok(if query_time_scan[v.0] {
                 // A query-time scan's raw data is charged per source.
                 own
-            } else if let (Some(per_retained_second), true) =
-                (per_retained_second, is_across_evaluations(physical, v))
-            {
+            } else if let (Some(per_retained_second), true) = (
+                per_retained_second,
+                physical.physical_candidates[v.0]
+                    .physical_properties
+                    .is_across_evaluations(),
+            ) {
                 let retention_seconds = ms_to_seconds(most_read_ms[&v].unwrap_or(0));
                 own + raw_data - per_retained_second * retention_seconds
             } else {
@@ -416,7 +433,7 @@ pub(crate) fn execution_costs(
             })
         })
         .collect();
-    let per_edge = selectable
+    let per_edge: Vec<Option<f64>> = selectable
         .edges()
         .iter()
         .zip(&scan_read_ms_per_edge)
@@ -453,21 +470,17 @@ pub(crate) fn execution_costs(
             Some(with_u_own + with_u_raw_data - own - raw_data + scan_read)
         })
         .collect();
+    let least_need_ms_per_execution =
+        least_need_ms_per_execution(selectable, &per_edge, &retention_need_ms_per_edge, entries);
     ExecutionCosts {
         per_execution,
         per_edge,
         retention_cost_per_retained_second,
         retention_need_ms_per_edge,
+        least_need_ms_per_execution,
         raw_data_source,
         unbounded_raw_data_on_disk_cost_per_second,
     }
-}
-
-/// Whether candidate `v` is materialized across evaluations.
-fn is_across_evaluations(physical: &PhysicalASAPMemoCandidates, v: PhysicalCandidateId) -> bool {
-    physical.physical_candidates[v.0]
-        .physical_properties
-        .is_across_evaluations()
 }
 
 /// Whether candidate `v` is a `Scan` at query time, which reads raw data
@@ -487,12 +500,15 @@ fn is_query_time_scan(physical: &PhysicalASAPMemoCandidates, v: PhysicalCandidat
 }
 
 /// $\rho$ of `execution`'s context, how often it runs, from the queries it
-/// serves: in an evaluation context, as often as that context runs for
-/// the queries on its grid that reach the execution's group
-/// ([`context_executions_per_second`], which `plan_cost` uses too): at
-/// their evaluations, or, for the inputs of a `TimeShift` anchored with
-/// `@`, once per request of the queries on the shift's grid that reach the
-/// shift;
+/// serves ([`context_executions_per_second`], which `plan_cost` uses too):
+/// in an evaluation context, for the queries on its grid whose walk over
+/// the memo reaches the execution's group in their evaluation context
+/// (`SelectableExecutions::readers_of`, [`asap_cost::plan::execution_demand::query_reads`],
+/// the walk `plan_cost` takes over the plan), at their evaluations; for
+/// the inputs of a `TimeShift` anchored with `@`, once per request of the
+/// queries on the shift's grid that reach the shift. The memo walk goes
+/// through every candidate of a group, so a query reading a group through
+/// one candidate counts for its other candidates too;
 /// in `Materialized(m)`, as often as $m$ runs
 /// ([`asap_cost::plan::execution_demand::executions_per_second`]); in the
 /// ingestion pipeline, once per second of arriving rows.
@@ -507,9 +523,10 @@ pub(crate) fn executions_per_second(
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<f64, String> {
     let memo = &physical.logical_candidates.memo;
+    let group_of =
+        |v: PhysicalCandidateId| physical.physical_candidates[v.0].logical_candidate_id.group;
     let reaching = |v: PhysicalCandidateId| {
-        let group = physical.physical_candidates[v.0].logical_candidate_id.group;
-        memo.groups()[group.0 as usize]
+        memo.groups()[group_of(v).0 as usize]
             .reached_by_queries()
             .iter()
             .copied()
@@ -532,7 +549,7 @@ pub(crate) fn executions_per_second(
                 None,
                 entries_of(queries_of_context(
                     grid.period_ms,
-                    reaching(execution.candidate),
+                    selectable.readers_of(group_of(execution.candidate), |anchor| anchor.is_none()),
                     entries,
                 )),
                 non_repeating_query_horizon_seconds,

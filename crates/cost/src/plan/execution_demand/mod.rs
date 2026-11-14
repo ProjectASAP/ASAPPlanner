@@ -15,7 +15,6 @@ use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::stages::Lifetime;
 use asap_types::workload::{
     greatest_common_divisor, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation, RepeatedDemand,
-    TimestampMs,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -299,13 +298,92 @@ pub enum Consumer {
     Materialized(PhysicalASAPNodeId),
 }
 
+/// How each query reads the nodes below it, in a plan or a memo: per node,
+/// each (query, anchor) whose walk from the query's `starts` down
+/// `inputs_of` reaches it, once, skipping (and stopping at) a node
+/// `stops_at` keeps. Below a `TimeShift` anchored with `@ end()` or
+/// `@ start()` (`anchor_of`) a query reads per request, with that anchor,
+/// unless the anchor is its evaluation time ([`anchor_is_evaluation_time`]
+/// over the queries on its grid that reach the shift through any node);
+/// elsewhere with none. Stage 3 walks memo groups with it and
+/// [`consumers`] plan nodes, so both rate a context by the queries whose
+/// walk reaches it. Stage 3 walks every candidate of a group, so a query
+/// reading a group through one candidate counts for the group's other
+/// candidates too.
+///
+/// Example: an instant `sum_over_time(m[5m] @ end())` and a range
+/// `sum_over_time(m[5m] @ end() offset 10m)`, both every 60 s: `m[5m]` is
+/// read by the instant query with no anchor and by the range query with
+/// `@ end()` (its requests' ends are not its evaluations).
+pub fn query_reads<N: Copy + Eq + std::hash::Hash>(
+    starts: &[Vec<N>],
+    inputs_of: impl Fn(N) -> Vec<N>,
+    anchor_of: impl Fn(N) -> Option<AtModifier>,
+    stops_at: impl Fn(N) -> bool,
+    entries: &[QueryWorkloadEntry],
+) -> HashMap<N, Vec<(usize, Option<AtModifier>)>> {
+    // The queries reaching each anchored shift, through any node.
+    let mut reaching_shift: HashMap<N, BTreeSet<usize>> = HashMap::new();
+    for (query, start) in starts.iter().enumerate() {
+        let mut seen = HashSet::new();
+        let mut stack = start.clone();
+        while let Some(id) = stack.pop() {
+            if seen.insert(id) {
+                if anchor_of(id).is_some() {
+                    reaching_shift.entry(id).or_default().insert(query);
+                }
+                stack.extend(inputs_of(id));
+            }
+        }
+    }
+    let in_evaluation_context = |shift: N, query: usize, at: AtModifier| {
+        let Some(entry) = entries.get(query) else {
+            return false;
+        };
+        let on_grid = queries_of_context(
+            evaluation_grid_ms(entry),
+            reaching_shift.get(&shift).into_iter().flatten().copied(),
+            entries,
+        );
+        anchor_is_evaluation_time(at, on_grid.iter().map(|&q| &entries[q]))
+    };
+    let mut reads: HashMap<N, Vec<(usize, Option<AtModifier>)>> = HashMap::new();
+    for (query, start) in starts.iter().enumerate() {
+        let mut seen = HashSet::new();
+        let mut stack: Vec<(N, Option<AtModifier>)> = start.iter().map(|&id| (id, None)).collect();
+        while let Some((id, anchor)) = stack.pop() {
+            if stops_at(id) || !seen.insert((id, anchor)) {
+                continue;
+            }
+            reads.entry(id).or_default().push((query, anchor));
+            let below = match (anchor, anchor_of(id)) {
+                (None, Some(at)) if !in_evaluation_context(id, query, at) => Some(at),
+                (anchor, _) => anchor,
+            };
+            stack.extend(inputs_of(id).into_iter().map(|input| (input, below)));
+        }
+    }
+    reads
+}
+
+/// The anchor of `operator` when it is a `TimeShift` anchored with
+/// `@ end()` or `@ start()` ([`query_reads`]).
+pub fn request_anchor<C>(operator: &Operator<C>) -> Option<AtModifier> {
+    match operator {
+        Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => match shift.at {
+            Some(at @ (AtModifier::End | AtModifier::Start)) => Some(at),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The consumers of each node of `dag` not materialized across evaluations
-/// that any consumer reaches ([`computations`]): the queries and the nodes
-/// materialized across evaluations whose walk down their inputs reaches it
-/// before meeting such a node, each once; the queries first, in order,
-/// then the materialized nodes in `dag`'s node order. A `OneEvaluation`
-/// node is computed within its consumers' context, so a walk goes through
-/// it.
+/// that any consumer reaches ([`computations`]): the queries
+/// ([`query_reads`]) and the nodes materialized across evaluations whose
+/// walk down their inputs reaches it before meeting such a node, each
+/// once, sorted. A `OneEvaluation` node is computed within its consumers'
+/// context, so a walk goes through it.
 pub fn consumers(
     dag: &PhysicalASAPDAG,
     entries: &[QueryWorkloadEntry],
@@ -317,83 +395,58 @@ pub fn consumers(
         .map(|n| n.id)
         .collect();
     let is_materialized: HashSet<PhysicalASAPNodeId> = materialized_nodes.iter().copied().collect();
-    let inputs = |id: PhysicalASAPNodeId| {
+    let inputs = |id: PhysicalASAPNodeId| -> Vec<PhysicalASAPNodeId> {
         dag.edges
             .iter()
-            .filter(move |e| e.consumer == id)
+            .filter(|e| e.consumer == id)
             .map(|e| e.producer)
+            .collect()
     };
-    // The anchor of each `TimeShift` anchored with `@ end()` or `@ start()`.
-    let request_anchor: HashMap<PhysicalASAPNodeId, AtModifier> = dag
+    let payload: HashMap<PhysicalASAPNodeId, &Operator<PhysicalASAPNodeId>> = dag
         .nodes
         .iter()
-        .filter_map(|node| match &node.payload {
-            Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => match shift.at {
-                Some(at @ (AtModifier::End | AtModifier::Start)) => Some((node.id, at)),
-                _ => None,
-            },
-            _ => None,
-        })
+        .map(|node| (node.id, &node.payload))
         .collect();
-    let starts = query_starts(dag);
-    // The queries reaching each anchored shift, through any node.
-    let mut reaching_shift: HashMap<PhysicalASAPNodeId, BTreeSet<usize>> = HashMap::new();
-    for (query, start) in starts.iter().enumerate() {
-        let mut seen = HashSet::new();
-        let mut stack = start.clone();
-        while let Some(id) = stack.pop() {
-            if seen.insert(id) {
-                if request_anchor.contains_key(&id) {
-                    reaching_shift.entry(id).or_default().insert(query);
-                }
-                stack.extend(inputs(id));
-            }
-        }
-    }
-    // Whether query `query`'s input of shift `shift` anchored with `at`
-    // runs in its evaluation context ([`anchor_is_evaluation_time`] over
-    // the queries on its grid reaching the shift).
-    let in_evaluation_context = |shift: PhysicalASAPNodeId, query: usize, at: AtModifier| {
-        let Some(entry) = entries.get(query) else {
-            return false;
-        };
-        let on_grid = queries_of_context(
-            evaluation_grid_ms(entry),
-            reaching_shift.get(&shift).into_iter().flatten().copied(),
-            entries,
-        );
-        anchor_is_evaluation_time(at, on_grid.iter().map(|&q| &entries[q]))
-    };
-    let walks = starts
-        .into_iter()
-        .enumerate()
-        .map(|(query, start)| (Consumer::Query(query), start))
-        .chain(
-            materialized_nodes
-                .iter()
-                .map(|&id| (Consumer::Materialized(id), inputs(id).collect())),
-        );
     let mut consumers: HashMap<_, Vec<Consumer>> = HashMap::new();
-    for (consumer, start) in walks {
+    let queries = query_reads(
+        &query_starts(dag),
+        inputs,
+        |id| {
+            payload
+                .get(&id)
+                .and_then(|operator| request_anchor(operator))
+        },
+        |id| is_materialized.contains(&id),
+        entries,
+    );
+    for (id, reads) in queries {
+        consumers
+            .entry(id)
+            .or_default()
+            .extend(reads.into_iter().map(|read| match read {
+                (query, None) => Consumer::Query(query),
+                (query, Some(at)) => Consumer::QueryRequest { query, at },
+            }));
+    }
+    // Each node materialized across evaluations, over the nodes it reads
+    // down to the next such node.
+    for &materialized in &materialized_nodes {
         let mut seen = HashSet::new();
-        let mut stack: Vec<(PhysicalASAPNodeId, Consumer)> =
-            start.into_iter().map(|id| (id, consumer)).collect();
-        while let Some((id, consumer)) = stack.pop() {
-            if is_materialized.contains(&id) || !seen.insert((id, consumer)) {
+        let mut stack = inputs(materialized);
+        while let Some(id) = stack.pop() {
+            if is_materialized.contains(&id) || !seen.insert(id) {
                 continue;
             }
-            consumers.entry(id).or_default().push(consumer);
-            // A query's input of an `@ end()` / `@ start()` shift runs once
-            // per request, or in its evaluation context when the anchor is
-            // its evaluation time.
-            let below = match (consumer, request_anchor.get(&id)) {
-                (Consumer::Query(query), Some(&at)) if !in_evaluation_context(id, query, at) => {
-                    Consumer::QueryRequest { query, at }
-                }
-                (consumer, _) => consumer,
-            };
-            stack.extend(inputs(id).map(|input| (input, below)));
+            consumers
+                .entry(id)
+                .or_default()
+                .push(Consumer::Materialized(materialized));
+            stack.extend(inputs(id));
         }
+    }
+    // Queries first, in order, then the materialized nodes.
+    for of_node in consumers.values_mut() {
+        of_node.sort();
     }
     consumers
 }
@@ -405,6 +458,9 @@ pub fn consumers(
 /// instant query's request ends at its evaluation; the input computed at
 /// every evaluation of the grid serves the range queries' request ends
 /// too). Otherwise it runs once per request, in a context of its own.
+///
+/// `@ start()` of an instant query is its evaluation time too; it keeps
+/// its request context here, as the user decided for `@ end()` only.
 ///
 /// Example: `sum_over_time(m[5m] @ end())` and `sum_over_time(m[5m])`,
 /// both instant every 60 s: true, so `m[5m]` is computed once per minute
@@ -469,10 +525,11 @@ pub fn request_time_grid_ms(entry: &QueryWorkloadEntry, at: AtModifier) -> u64 {
 /// so): with no `anchor`, at every evaluation of theirs, a range query's
 /// steps each one ([`evaluation_rate`]); below a `TimeShift` anchored with
 /// `anchor`, once per request: below `@ end()` once per distinct request
-/// end; below `@ start()` once per distinct (request schedule, span), as
-/// two queries requested together with different spans need the input at
-/// two start times, and a result not kept across evaluations serves only
-/// the request it is computed for.
+/// end ([`evaluation_rate`] of their request schedules); below
+/// `@ start()` that per span, summed over the distinct spans, as two
+/// queries requested together with different spans need the input at two
+/// start times, and a result not kept across evaluations serves only the
+/// request it is computed for.
 ///
 /// Example: two range queries every 60 s at phase 0 with steps of 30 s,
 /// spans 1 h and 2 m: below `@ start()` 2/60 per second (one run per
@@ -483,65 +540,37 @@ pub fn context_executions_per_second<'e>(
     queries: impl IntoIterator<Item = &'e QueryWorkloadEntry>,
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<f64, AnalyticalCostError> {
-    let queries: Vec<&QueryWorkloadEntry> = queries.into_iter().collect();
-    if anchor == Some(AtModifier::Start) {
-        // One run per request of each distinct (schedule, span).
-        let mut runs: Vec<(&QueryRecurrence, Option<u64>)> = Vec::new();
-        let mut rate = 0.0;
-        for entry in queries {
-            let key = (
-                &entry.recurrence,
-                entry.range_evaluation.map(|range| range.span_ms),
-            );
-            if runs.contains(&key) {
-                continue;
+    let queries = queries.into_iter();
+    match anchor {
+        // Requests of one span need the input at one start time each;
+        // different spans need it at different times of one request.
+        Some(AtModifier::Start) => {
+            let mut by_span: BTreeMap<Option<u64>, Vec<&QueryRecurrence>> = BTreeMap::new();
+            for entry in queries {
+                by_span
+                    .entry(entry.range_evaluation.map(|range| range.span_ms))
+                    .or_default()
+                    .push(&entry.recurrence);
             }
-            runs.push(key);
-            rate += evaluation_rate(
-                [(&anchored_request_recurrence(entry, AtModifier::Start), None)],
-                non_repeating_query_horizon_seconds,
-            )?;
+            by_span
+                .values()
+                .map(|recurrences| {
+                    evaluation_rate(
+                        recurrences.iter().map(|&recurrence| (recurrence, None)),
+                        non_repeating_query_horizon_seconds,
+                    )
+                })
+                .sum()
         }
-        return Ok(rate);
-    }
-    let per_evaluation: Vec<(QueryRecurrence, Option<RangeEvaluation>)> = queries
-        .into_iter()
-        .map(|entry| match anchor {
-            None => (entry.recurrence.clone(), entry.range_evaluation),
-            Some(at) => (anchored_request_recurrence(entry, at), None),
-        })
-        .collect();
-    evaluation_rate(
-        per_evaluation
-            .iter()
-            .map(|(recurrence, range)| (recurrence, *range)),
-        non_repeating_query_horizon_seconds,
-    )
-}
-
-/// The recurrence of the times `entry`'s requests anchor `at` at: its own,
-/// with a fixed interval's phase moved back by the range-evaluation span
-/// for `@ start()`.
-fn anchored_request_recurrence(entry: &QueryWorkloadEntry, at: AtModifier) -> QueryRecurrence {
-    match (&entry.recurrence, at, entry.range_evaluation) {
-        (
-            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
-                interval,
-                evaluation_phase,
-            }),
-            AtModifier::Start,
-            Some(range),
-        ) if interval.0 > 0 => {
-            let interval_ms = u64::from(interval.0);
-            let phase_ms = (evaluation_phase.0 % interval_ms + interval_ms
-                - range.span_ms % interval_ms)
-                % interval_ms;
-            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
-                interval: *interval,
-                evaluation_phase: TimestampMs(phase_ms),
-            })
-        }
-        (recurrence, _, _) => recurrence.clone(),
+        // Once per request end, however many steps the request evaluates.
+        Some(_) => evaluation_rate(
+            queries.map(|entry| (&entry.recurrence, None)),
+            non_repeating_query_horizon_seconds,
+        ),
+        None => evaluation_rate(
+            queries.map(|entry| (&entry.recurrence, entry.range_evaluation)),
+            non_repeating_query_horizon_seconds,
+        ),
     }
 }
 

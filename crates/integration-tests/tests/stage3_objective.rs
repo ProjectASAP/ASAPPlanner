@@ -539,3 +539,41 @@ fn the_objective_is_the_plan_cost_on_two_phases_of_one_grid() {
         objective_and_plan_cost(&w, &CostInputs::default(), true),
     );
 }
+
+/// An instant `sum_over_time(m[5m] @ end())` and a range
+/// `sum_over_time(m[5m] @ end() offset 10m)` over the last 10 minutes,
+/// both every 60 s: `m[5m]` is read by the instant query in its
+/// evaluation context and by the range query once per request below its
+/// shift, so a run in the evaluation context is rated by the instant query
+/// only, in the MILP and in `plan_cost` alike (the objective was 0.3642/s
+/// for a plan `plan_cost` charged 0.1542/s).
+#[test]
+fn the_objective_is_the_plan_cost_on_an_instant_and_a_shifted_range_at_end() {
+    let w: PlanningWorkload = serde_json::from_value(serde_json::json!({
+        "query_workload": {"language": "promql", "repeating_queries": [
+            requested("sum_over_time(m[5m] @ end())", 60_000, None),
+            requested(
+                "sum_over_time(m[5m] @ end() offset 600s)",
+                60_000,
+                Some((60_000, 600_000)),
+            ),
+        ]},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 2000.0}},
+            "sources": {
+                "m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000},
+                "c": {"series_count": 1000, "metric_type": "counter", "sample_interval": 1000},
+            },
+        },
+    }))
+    .unwrap();
+    let capabilities = DeploymentCapabilities {
+        supported_summaries: Some(asap_executor::supported_summary_families()),
+        ..Default::default()
+    };
+    let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
+    assert_equal(
+        "instant and shifted range @ end()",
+        selected_plan_objective_and_plan_cost_with(&w, models, &CostInputs::default()).1,
+    );
+}

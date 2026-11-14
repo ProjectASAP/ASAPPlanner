@@ -12,8 +12,9 @@
 //! [`solve_selection`] solves it without (K), whose variables and
 //! constraint are in [`super::accuracy`], `todo!()` until it is added. The
 //! strongly connected components (E) needs are in [`super::graph`]; the
-//! bound that leaves out executions before scaling in
-//! [`super::upper_bound`].
+//! executions left out before scaling, those dearer than a feasible plan
+//! and those their `OneEvaluation` twin dominates, in
+//! [`super::upper_bound`] and [`super::dominance`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
@@ -200,7 +201,7 @@ fn query_coverage_constraints(
 /// $\sum y + \sum_q z_{q,v} = x_{\kappa,v}$ ([`use_constraints`]), which
 /// with $y, z \ge 0$ implies (B) and (D) for it, so those rows are left
 /// out.
-fn has_one_reader(inputs: &SelectionInputs<'_>, index: usize) -> bool {
+pub(super) fn has_one_reader(inputs: &SelectionInputs<'_>, index: usize) -> bool {
     let v = inputs.selectable.executions()[index].candidate;
     has_one_reader_per_context(inputs.physical.physical_candidates[v.0].physical_properties)
 }
@@ -309,8 +310,8 @@ fn uses_of(inputs: &SelectionInputs<'_>, variables: &SelectionVariables) -> Vec<
 pub(crate) struct SolvedSelection {
     /// The selected executions, ascending.
     pub(crate) executions: Vec<Execution>,
-    /// The selected edges as (consumer, edge, producer), ascending.
-    pub(crate) edges: Vec<(Execution, PhysicalEdgeId, Execution)>,
+    /// The selected edges, ascending.
+    pub(crate) edges: Vec<SelectedEdge>,
     /// The execution answering each of `SelectableExecutions::answering`,
     /// in its order.
     pub(crate) outputs: Vec<Execution>,
@@ -325,6 +326,15 @@ pub(crate) struct SolvedSelection {
     pub(crate) constraint_count: usize,
     pub(crate) construction_ms: u64,
     pub(crate) solve_ms: u64,
+}
+
+/// A selected $y_{\kappa,u,c,i}$: edge `edge` from execution `producer`
+/// into execution `consumer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SelectedEdge {
+    pub(crate) consumer: Execution,
+    pub(crate) edge: PhysicalEdgeId,
+    pub(crate) producer: Execution,
 }
 
 /// Why the MILP has no optimum.
@@ -503,7 +513,11 @@ pub(crate) fn solve_selection(
             .map(|&position| {
                 let edge = selectable.edges()[position];
                 let (consumer, producer) = (edge.consumer, edge.producer);
-                (executions[consumer], edge.edge, executions[producer])
+                SelectedEdge {
+                    consumer: executions[consumer],
+                    edge: edge.edge,
+                    producer: executions[producer],
+                }
             })
             .collect(),
         outputs: answering

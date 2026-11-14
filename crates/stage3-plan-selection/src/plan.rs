@@ -16,7 +16,7 @@ use asap_types::plan::physical_asap_dag::{
 use asap_types::plan::view_coverage;
 use asap_types::stages::{MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId};
 
-use crate::milp::model::SolvedSelection;
+use crate::milp::model::{SelectedEdge, SolvedSelection};
 use crate::selectable::{Execution, QueryId};
 
 /// Candidate `v` as a plan node with id `id`, its input `i` read from node
@@ -71,7 +71,12 @@ pub(crate) fn plan_of(
 ) -> Result<PhysicalASAPDAG, PhysicalASAPDAGValidationError> {
     let mut producer_of: HashMap<(Execution, usize), Execution> = HashMap::new();
     let mut consumers_of: BTreeMap<Execution, Vec<Execution>> = BTreeMap::new();
-    for &(consumer, edge, producer) in &solved.edges {
+    for &SelectedEdge {
+        consumer,
+        edge,
+        producer,
+    } in &solved.edges
+    {
         producer_of.insert(
             (consumer, physical.edge(edge).input_index_of_consumer),
             producer,

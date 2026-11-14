@@ -371,9 +371,10 @@ pub fn node_resource_usage_and_cost<'a>(
             .sum();
         (by_rate, rows_held)
     };
-    // The raw rows its sources keep back `lookback_ms` (every row held
-    // without one): by arrival rate, at most the rows they hold.
-    let retained_raw_rows = |lookback_ms: Option<u64>| -> Option<u64> {
+    // The raw rows of its sources back `lookback_ms` (every row held
+    // without one), which a scan reads or keeps: by arrival rate, at most
+    // the rows they hold.
+    let raw_rows_back = |lookback_ms: Option<u64>| -> Option<u64> {
         match raw_rows(lookback_ms) {
             (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
             (by_rate, rows_held) => by_rate.or(rows_held),
@@ -514,13 +515,11 @@ pub fn node_resource_usage_and_cost<'a>(
                 // oldest row read, its `retention_ms` ($h_v$; an offset
                 // window keeps more than it reads), at most those held.
                 if !ingestion || raw_rows_materialized_at_ingestion {
-                    raw_retained_rows = retained_raw_rows(node.retention_ms);
+                    raw_retained_rows = raw_rows_back(node.retention_ms);
                 }
-                let (by_rate, rows_held) = raw_rows(lookback);
-                let rows = match (ingestion, by_rate, rows_held) {
-                    (true, by_rate, _) => by_rate.ok_or_else(|| missing_rate(source))?,
-                    (false, Some(by_rate), Some(rows_held)) => by_rate.min(rows_held),
-                    (false, by_rate, rows_held) => by_rate.or(rows_held).ok_or_else(|| {
+                let rows = match ingestion {
+                    true => raw_rows(lookback).0.ok_or_else(|| missing_rate(source))?,
+                    false => raw_rows_back(lookback).ok_or_else(|| {
                         AnalyticalCostError::MissingSourceFact {
                             source_name: source.to_string(),
                             missing: match lookback {
@@ -650,7 +649,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 // second of them.
                 let out = match raw_rows_materialized_at_ingestion {
                     true => {
-                        raw_retained_rows = retained_raw_rows(node.retention_ms);
+                        raw_retained_rows = raw_rows_back(node.retention_ms);
                         let source = sources.first().copied().unwrap_or("(none)");
                         edge(raw_retained_rows.ok_or(retained_without_a_bound(source))?)?
                     }

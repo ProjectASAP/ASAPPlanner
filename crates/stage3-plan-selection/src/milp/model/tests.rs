@@ -30,7 +30,7 @@ use super::*;
 use crate::cost::ExecutionCosts;
 use crate::milp::exact_only::must_not_read;
 use crate::plan::plan_of;
-use crate::retention::edge_retention_need_ms;
+use crate::retention::{edge_retention_need_ms, least_need_ms_per_execution};
 use crate::selectable::{output_groups, SelectableEdge};
 
 const NONE: Lifetime = Lifetime::None;
@@ -156,7 +156,7 @@ fn selection_inputs(
         .map(|&(v, per_retained_second)| (PhysicalCandidateId(v), per_retained_second))
         .collect();
     let edge_of = |edge: &SelectableEdge| physical.edge(edge.edge);
-    let costs = ExecutionCosts {
+    let mut costs = ExecutionCosts {
         per_execution: selectable
             .executions()
             .iter()
@@ -188,9 +188,16 @@ fn selection_inputs(
             })
             .collect(),
         retention_cost_per_retained_second,
+        least_need_ms_per_execution: Vec::new(),
         raw_data_source: HashMap::new(),
         unbounded_raw_data_on_disk_cost_per_second: HashMap::new(),
     };
+    costs.least_need_ms_per_execution = least_need_ms_per_execution(
+        &selectable,
+        &costs.per_edge,
+        &costs.retention_need_ms_per_edge,
+        entries,
+    );
     (selectable, costs)
 }
 
@@ -255,7 +262,7 @@ fn selects_the_producer_whose_own_and_edge_costs_are_lowest() {
     let solved = solved.unwrap();
     assert_eq!(candidates(&solved), vec![1, 2]);
     assert_eq!(solved.edges.len(), 1);
-    assert_eq!(solved.edges[0].1, edge(&physical, 1, 2));
+    assert_eq!(solved.edges[0].edge, edge(&physical, 1, 2));
     assert_eq!(solved.outputs[0].candidate, PhysicalCandidateId(2));
 
     let plan = plan_of(&physical, &solved, &output_groups(&physical)).unwrap();
