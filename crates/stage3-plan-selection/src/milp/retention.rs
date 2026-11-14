@@ -50,14 +50,23 @@ pub(crate) fn retention_variables(
 /// query reading it directly (its range-evaluation span), a constant per
 /// edge, so (R) is linear. Query latency is ignored: a result counts as
 /// read when its evaluation starts.
+///
+/// With them, per execution $u$ of such a $v$, $h_v \ge
+/// \min_{\text{uses}} \operatorname{need} \cdot x_u$ over the reads that
+/// may select it: (F) gives a selected execution a use, and (R) then
+/// retains at least the least need. It is implied for integer $x$, $y$,
+/// $z$, but tightens the relaxation where fractional $y$ leave $h_v$ low.
 pub(crate) fn retention_constraints(
     inputs: &SelectionInputs<'_>,
     h: &BTreeMap<PhysicalCandidateId, Variable>,
+    x: &[Variable],
     y: &BTreeMap<usize, Variable>,
     z: &BTreeMap<(QueryId, usize), Variable>,
 ) -> Vec<Constraint> {
     let executions = inputs.selectable.executions();
     let mut constraints = Vec::new();
+    // The least need over each execution's uses, for one with $h_v$.
+    let mut least_need_ms: BTreeMap<usize, u64> = BTreeMap::new();
     for (index, reader, need_ms) in reads_back(
         inputs.selectable,
         &inputs.costs.retention_need_ms_per_edge,
@@ -73,6 +82,14 @@ pub(crate) fn retention_constraints(
         if let Some(&read) = read {
             let need_ms = need_ms.expect("a candidate with h_v is read within a bound");
             constraints.push(constraint!(h >= ms_to_seconds(need_ms) * read));
+            let least = least_need_ms.entry(index).or_insert(need_ms);
+            *least = (*least).min(need_ms);
+        }
+    }
+    for (index, need_ms) in least_need_ms {
+        if need_ms > 0 {
+            let h = h[&executions[index].candidate];
+            constraints.push(constraint!(h >= ms_to_seconds(need_ms) * x[index]));
         }
     }
     constraints
