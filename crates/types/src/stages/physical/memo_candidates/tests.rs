@@ -410,6 +410,36 @@ fn a_count_over_arriving_rows_computed_at_query_time_delivers_on_its_own_grid_on
     );
 }
 
+/// A view kept up to date at ingestion time with no window (SQL
+/// `count(*)` over the arriving rows, stored across evaluations) folds in
+/// every arriving batch, so it is current at every time: it delivers on
+/// every evaluation grid and every ingestion pipeline, whatever its period
+/// and phase, not only on its group's 60 s grid.
+#[test]
+fn an_ingestion_time_view_without_a_window_delivers_on_every_context() {
+    for arrival in ARRIVING {
+        let examples = finality_examples(arrival);
+        let stored = candidate(
+            examples.count_of_table,
+            IngestionTime,
+            Lifetime::AcrossEvaluations(MEMORY),
+        );
+        for context in [
+            evaluation(60_000, 0),
+            evaluation(30_000, 0),
+            evaluation(45_000, 15_000),
+            evaluation(7_000, 3_000),
+            ingestion(1_000, 0),
+            ingestion(60_000, 30_000),
+        ] {
+            assert!(
+                stored.delivers_on(&examples.candidates, &context),
+                "{arrival:?} {context:?}"
+            );
+        }
+    }
+}
+
 /// Case (b) of #1264: in `max_over_time((rate(latency[5m] @ end()))[10m:1m]
 /// @ T)`, `@ T` pins only the subquery's own time; the inner `@ end()`
 /// still moves with the request. Even over data at rest, a stored result
