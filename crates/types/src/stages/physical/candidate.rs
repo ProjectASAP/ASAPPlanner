@@ -46,12 +46,12 @@ impl PhysicalCandidate {
             Lifetime::AcrossEvaluations(_) => {
                 let logical = &candidates.logical_candidates;
                 let group = self.logical_candidate_id.group;
-                let chain_tumbling_window_width_ms =
-                    self.chain_tumbling_window_width_ms(candidates);
                 let depends_on_evaluation_time = logical.memo.groups()[group.0 as usize]
                     .group_properties
                     .depends_on_evaluation_time;
-                if chain_tumbling_window_width_ms.is_none() && !depends_on_evaluation_time {
+                if self.chain_tumbling_window_width_ms(candidates).is_none()
+                    && !depends_on_evaluation_time
+                {
                     return true;
                 }
                 let (period_ms, phase_ms) = match context {
@@ -66,17 +66,11 @@ impl PhysicalCandidate {
                         }
                     }
                 };
-                match chain_tumbling_window_width_ms {
-                    Some(width_ms) => {
-                        period_ms.is_multiple_of(width_ms) && phase_ms.is_multiple_of(width_ms)
-                    }
-                    None => {
-                        logical.evaluation_grid_of_group[group.0 as usize].is_some_and(|grid| {
-                            period_ms.is_multiple_of(grid.period_ms)
-                                && phase_ms % grid.period_ms == grid.phase_ms % grid.period_ms
-                        })
-                    }
-                }
+                self.own_schedule(candidates).is_some_and(|stored| {
+                    stored.width_ms > 0
+                        && period_ms.is_multiple_of(stored.width_ms)
+                        && phase_ms % stored.width_ms == stored.phase_ms % stored.width_ms
+                })
             }
         }
     }

@@ -19,7 +19,7 @@ use asap_types::workload::{
 
 use super::*;
 use crate::retention::edge_retention_need_ms;
-use crate::selectable::{QueryId, SelectableExecutions};
+use crate::selectable::{QueryId, SelectableEdge, SelectableExecutions};
 
 const DAY_MS: u64 = 86_400_000;
 
@@ -190,20 +190,14 @@ fn no_execution_reading_a_producer_costs_less_than_nothing() {
         let least_need_ms = selectable
             .edges()
             .iter()
-            .filter(|&&(_, _, producer)| selectable.executions()[producer].candidate == v)
-            .filter_map(|&(_, edge, _)| edge_retention_need_ms(&physical, &entries, edge))
+            .filter(|edge| selectable.executions()[edge.producer].candidate == v)
+            .filter_map(|edge| edge_retention_need_ms(&physical, &entries, edge.edge))
             .min()
             .unwrap_or(0);
-        costs
-            .retention_cost_per_retained_second
-            .get(&v)
-            .copied()
-            .unwrap_or(0.0)
-            * least_need_ms as f64
-            / 1_000.0
+        costs.retention_cost_per_second(v, least_need_ms)
     };
     let mut checked = 0;
-    for (index, &(consumer, edge, _)) in selectable.edges().iter().enumerate() {
+    for (index, &SelectableEdge { consumer, edge, .. }) in selectable.edges().iter().enumerate() {
         let (Ok(execution), Some(edge_cost)) =
             (&costs.per_execution[consumer], costs.per_edge[index])
         else {

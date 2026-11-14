@@ -29,10 +29,10 @@
 //!   edge, only where the producer delivers on $\kappa$
 //!   (`PhysicalCandidate::delivers_on`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use asap_cost::plan::execution_demand::{
-    anchor_is_evaluation_time, evaluation_grid_ms, request_time_grid_ms,
+    anchor_is_evaluation_time, evaluation_grid_ms, queries_of_context, request_time_grid_ms,
 };
 use asap_types::ir::operator::AtModifier;
 use asap_types::ir::properties::ExecutionTiming;
@@ -67,6 +67,22 @@ pub(crate) struct Execution {
     pub(crate) candidate: PhysicalCandidateId,
 }
 
+/// One $y_{\kappa,u,c,i}$ the selection may choose: edge `edge` from the
+/// producer execution `producer` into the consumer execution `consumer`,
+/// executions by position in [`SelectableExecutions::executions`];
+/// $\kappa$ is the consumer's context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SelectableEdge {
+    pub(crate) consumer: usize,
+    pub(crate) edge: PhysicalEdgeId,
+    pub(crate) producer: usize,
+}
+
+/// A context's request anchor ([`SelectableExecutions::request_anchor`]):
+/// the anchor of the `TimeShift` whose inputs it runs, and the queries
+/// whose requests it runs for.
+type RequestAnchor = Option<(AtModifier, Vec<QueryId>)>;
+
 /// The distinct contexts of a workload and every execution and edge the
 /// selection may choose, with the executions that may answer each query
 /// output ([`Self::new`]). Executions are referred to by position in
@@ -79,21 +95,24 @@ pub(crate) struct SelectableExecutions {
     /// the queries whose requests they run for (those on the shift's
     /// evaluation grid that reach it), ascending; `None` for any other
     /// context.
-    request_anchor_of_context: Vec<Option<(AtModifier, Vec<QueryId>)>>,
+    request_anchor_of_context: Vec<RequestAnchor>,
+    /// The id of each context with its request anchor.
+    context_ids: HashMap<(ExecutionContext, RequestAnchor), ExecutionContextId>,
     /// Every execution reached from a query output, ascending.
     executions: Vec<Execution>,
-    /// Every $y_{\kappa,u,c,i}$ as (consumer execution, edge $(u,c,i)$,
-    /// producer execution), executions by position, ascending; $\kappa$ is
-    /// the consumer's context.
-    edges: Vec<(usize, PhysicalEdgeId, usize)>,
+    /// Every $y_{\kappa,u,c,i}$, ascending.
+    edges: Vec<SelectableEdge>,
     /// Per execution, by position, and per input of its candidate, the
     /// positions in [`Self::edges`] of the edges into it.
     edges_into: Vec<Vec<Vec<usize>>>,
+    /// Per execution, by position, the positions in [`Self::edges`] of the
+    /// edges out of it.
+    edges_out_of: Vec<Vec<usize>>,
     /// Each query output reference (a query, and the group its operator
     /// root, or one operator of its scalar root, reads), in
     /// [`output_groups`] order, with the executions, by position, that may
     /// answer it: $z_{q,v}$ exists only for them.
-    pub(crate) answering: Vec<(QueryId, Vec<usize>)>,
+    answering: Vec<(QueryId, Vec<usize>)>,
 }
 
 impl SelectableExecutions {
@@ -112,9 +131,11 @@ impl SelectableExecutions {
         let mut selectable = Self {
             contexts: Vec::new(),
             request_anchor_of_context: Vec::new(),
+            context_ids: HashMap::new(),
             executions: Vec::new(),
             edges: Vec::new(),
             edges_into: Vec::new(),
+            edges_out_of: Vec::new(),
             answering: Vec::new(),
         };
         let mut reached: BTreeSet<Execution> = BTreeSet::new();
@@ -173,7 +194,11 @@ impl SelectableExecutions {
         };
         selectable.edges = edges
             .into_iter()
-            .map(|(consumer, edge, producer)| (position(consumer), edge, position(producer)))
+            .map(|(consumer, edge, producer)| SelectableEdge {
+                consumer: position(consumer),
+                edge,
+                producer: position(producer),
+            })
             .collect();
         selectable.answering = answering
             .into_iter()
@@ -184,9 +209,11 @@ impl SelectableExecutions {
             .iter()
             .map(|execution| vec![Vec::new(); physical.input_count(execution.candidate)])
             .collect();
-        for (position, &(consumer, edge, _)) in selectable.edges.iter().enumerate() {
-            selectable.edges_into[consumer][physical.edge(edge).input_index_of_consumer]
+        selectable.edges_out_of = vec![Vec::new(); selectable.executions.len()];
+        for (position, edge) in selectable.edges.iter().enumerate() {
+            selectable.edges_into[edge.consumer][physical.edge(edge.edge).input_index_of_consumer]
                 .push(position);
+            selectable.edges_out_of[edge.producer].push(position);
         }
         selectable
     }
@@ -196,21 +223,17 @@ impl SelectableExecutions {
     fn context_id(
         &mut self,
         context: ExecutionContext,
-        request_anchor: Option<(AtModifier, Vec<QueryId>)>,
+        request_anchor: RequestAnchor,
     ) -> ExecutionContextId {
-        match self
-            .contexts
-            .iter()
-            .zip(&self.request_anchor_of_context)
-            .position(|known| known == (&context, &request_anchor))
-        {
-            Some(index) => ExecutionContextId(index),
-            None => {
+        let id = ExecutionContextId(self.contexts.len());
+        *self
+            .context_ids
+            .entry((context, request_anchor.clone()))
+            .or_insert_with(|| {
                 self.contexts.push(context);
                 self.request_anchor_of_context.push(request_anchor);
-                ExecutionContextId(self.contexts.len() - 1)
-            }
-        }
+                id
+            })
     }
 
     /// The execution of producer `u` a consumer whose inputs run in
@@ -283,16 +306,17 @@ impl SelectableExecutions {
         else {
             return consumer.context;
         };
-        let queries: Vec<QueryId> = memo.groups()[group.0 as usize]
-            .reached_by_queries()
-            .iter()
-            .filter(|&&query| {
-                entries
-                    .get(query)
-                    .is_some_and(|entry| evaluation_grid(entry) == grid)
-            })
-            .map(|&query| QueryId(query))
-            .collect();
+        let queries: Vec<QueryId> = queries_of_context(
+            grid.period_ms,
+            memo.groups()[group.0 as usize]
+                .reached_by_queries()
+                .iter()
+                .copied(),
+            entries,
+        )
+        .into_iter()
+        .map(QueryId)
+        .collect();
         if anchor_is_evaluation_time(at, queries.iter().map(|query| &entries[query.0])) {
             return consumer.context;
         }
@@ -348,10 +372,21 @@ impl SelectableExecutions {
         &self.executions
     }
 
-    /// Every $y_{\kappa,u,c,i}$ as (consumer execution, edge, producer
-    /// execution), executions by position, ascending.
-    pub(crate) fn edges(&self) -> &[(usize, PhysicalEdgeId, usize)] {
+    /// Every $y_{\kappa,u,c,i}$, ascending.
+    pub(crate) fn edges(&self) -> &[SelectableEdge] {
         &self.edges
+    }
+
+    /// The positions in [`Self::edges`] of the edges out of the execution
+    /// at position `producer`.
+    pub(crate) fn edges_out_of(&self, producer: usize) -> &[usize] {
+        &self.edges_out_of[producer]
+    }
+
+    /// Each query output reference with the executions, by position, that
+    /// may answer it, in [`output_groups`] order.
+    pub(crate) fn answering(&self) -> &[(QueryId, Vec<usize>)] {
+        &self.answering
     }
 
     /// The positions in [`Self::edges`] of the edges into input `input` of
