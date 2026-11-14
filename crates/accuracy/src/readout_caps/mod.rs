@@ -162,7 +162,7 @@ fn group_levels(
 /// The requirement levels one query gives a readout in `metric` whose cap
 /// for it is `cap`; `None` when its target's failure probability has no
 /// per-value one. A whole-result δ splits over the values one evaluation
-/// returns, $n_q$; a reduction (`max`, `min`, `avg`) fails when any
+/// returns, $n_q$; a reduction (`max`, `min`, `avg`, `sum`) fails when any
 /// readout it reads does, so δ also splits over the readout group's values
 /// per evaluation, `readout_values` (`Memo::max_values_per_evaluation`):
 /// the per-value failure probability is

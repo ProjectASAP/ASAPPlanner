@@ -322,7 +322,7 @@ fn sums_and_averages_carry_relative_error_over_values_of_one_sign() {
             .find_or_add_group(Operator::ASAP(ASAPOp::SummaryAgg {
                 child: g1,
                 summary_type: FieldDataType::Sketch(SketchAlgorithm::DDSketch),
-                input: SummaryUpdate::column(asap_types::ir::scalar::ColumnRef::SampleValue),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::by(vec![2]),
                 filter: None,
             }))
@@ -342,7 +342,7 @@ fn sums_and_averages_carry_relative_error_over_values_of_one_sign() {
         let exact_sum = Operator::ASAP(ASAPOp::SummaryAgg {
             child: readout,
             summary_type: FieldDataType::exact(ExactKind::Sum),
-            input: SummaryUpdate::column(asap_types::ir::scalar::ColumnRef::SampleValue),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
             reduction: by_job(),
             filter: None,
         });

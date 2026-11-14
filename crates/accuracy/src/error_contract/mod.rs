@@ -83,6 +83,7 @@ pub(crate) fn error_contract(
                 && !measures.is_empty()
                 && keys_copied_from_a_source(memo, *child, reduction) =>
             {
+                let child_schema = &memo.groups()[child.0 as usize].group_properties.schema;
                 let mut factor: f64 = 0.0;
                 for measure in measures {
                     match measure {
@@ -93,7 +94,14 @@ pub(crate) fn error_contract(
                         AggIntent::Avg { .. } if absolute => factor = factor.max(1.0),
                         AggIntent::Sum { col } | AggIntent::Avg { col }
                             if metric == AccuracyMetric::Relative
-                                && values_of_one_sign(memo, *child, *col) =>
+                                && col
+                                    .or_else(|| {
+                                        resolve_column_ref(&ColumnRef::SampleValue, child_schema)
+                                            .ok()
+                                    })
+                                    .is_some_and(|column| {
+                                        values_of_one_sign(memo, *child, column)
+                                    }) =>
                         {
                             factor = factor.max(1.0)
                         }
@@ -157,7 +165,7 @@ pub(crate) fn error_contract(
                     };
                     let schema = &memo.groups()[child.0 as usize].group_properties.schema;
                     let column = resolve_column_ref(column, schema).ok()?;
-                    values_of_one_sign(memo, *child, Some(column)).then(|| uniform(1.0))
+                    values_of_one_sign(memo, *child, column).then(|| uniform(1.0))
                 }
                 _ => None,
             },
@@ -182,22 +190,20 @@ fn copied_from_a_source(
         .all(|column| matches!(lineage.get(column), Some(ColumnLineage::SourceColumn(_))))
 }
 
-/// Whether the values of column `column` of `group`'s output (its sample
-/// value when `None`) all have one sign (`column_signs` `NonNegative` or
+/// Whether the values of column `column` of `group`'s output all have one
+/// sign (`column_signs` `NonNegative` or
 /// `NonPositive`, derived through the operators below `group`): then a
 /// relative error ε on each value is at most ε on their sum and mean,
 /// $|\sum_i (\hat{x}_i - x_i)| \le \varepsilon \sum_i |x_i| =
 /// \varepsilon |\sum_i x_i|$. Values of unknown sign may cancel.
-fn values_of_one_sign(memo: &Memo, group: MemoGroupId, column: Option<usize>) -> bool {
-    let properties = &memo.groups()[group.0 as usize].group_properties;
-    let column =
-        column.or_else(|| resolve_column_ref(&ColumnRef::SampleValue, &properties.schema).ok());
-    column.is_some_and(|column| {
-        matches!(
-            properties.column_signs.get(column),
-            Some(ValueSign::NonNegative | ValueSign::NonPositive)
-        )
-    })
+fn values_of_one_sign(memo: &Memo, group: MemoGroupId, column: usize) -> bool {
+    matches!(
+        memo.groups()[group.0 as usize]
+            .group_properties
+            .column_signs
+            .get(column),
+        Some(ValueSign::NonNegative | ValueSign::NonPositive)
+    )
 }
 
 /// Whether every key `reduction` groups `child`'s rows by is copied from a
