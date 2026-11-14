@@ -306,7 +306,10 @@ pub enum Consumer {
 /// then the materialized nodes in `dag`'s node order. A `OneEvaluation`
 /// node is computed within its consumers' context, so a walk goes through
 /// it.
-pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consumer>> {
+pub fn consumers(
+    dag: &PhysicalASAPDAG,
+    entries: &[QueryWorkloadEntry],
+) -> HashMap<PhysicalASAPNodeId, Vec<Consumer>> {
     let materialized_nodes: Vec<PhysicalASAPNodeId> = dag
         .nodes
         .iter()
@@ -332,7 +335,40 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
             _ => None,
         })
         .collect();
-    let walks = query_starts(dag)
+    let starts = query_starts(dag);
+    // The queries reaching each anchored shift, through any node.
+    let mut reaching_shift: HashMap<PhysicalASAPNodeId, BTreeSet<usize>> = HashMap::new();
+    for (query, start) in starts.iter().enumerate() {
+        let mut seen = HashSet::new();
+        let mut stack = start.clone();
+        while let Some(id) = stack.pop() {
+            if seen.insert(id) {
+                if request_anchor.contains_key(&id) {
+                    reaching_shift.entry(id).or_default().insert(query);
+                }
+                stack.extend(inputs(id));
+            }
+        }
+    }
+    // Whether query `query`'s input of shift `shift` anchored with `at`
+    // runs in its evaluation context ([`anchor_is_evaluation_time`] over
+    // the queries on its grid reaching the shift).
+    let in_evaluation_context = |shift: PhysicalASAPNodeId, query: usize, at: AtModifier| {
+        let Some(entry) = entries.get(query) else {
+            return false;
+        };
+        let grid_ms = evaluation_grid_ms(entry);
+        anchor_is_evaluation_time(
+            at,
+            reaching_shift
+                .get(&shift)
+                .into_iter()
+                .flatten()
+                .filter_map(|&q| entries.get(q))
+                .filter(|other| evaluation_grid_ms(other) == grid_ms),
+        )
+    };
+    let walks = starts
         .into_iter()
         .enumerate()
         .map(|(query, start)| (Consumer::Query(query), start))
@@ -352,15 +388,41 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
             }
             consumers.entry(id).or_default().push(consumer);
             // A query's input of an `@ end()` / `@ start()` shift runs once
-            // per request.
+            // per request, or in its evaluation context when the anchor is
+            // its evaluation time.
             let below = match (consumer, request_anchor.get(&id)) {
-                (Consumer::Query(query), Some(&at)) => Consumer::QueryRequest { query, at },
+                (Consumer::Query(query), Some(&at)) if !in_evaluation_context(id, query, at) => {
+                    Consumer::QueryRequest { query, at }
+                }
                 (consumer, _) => consumer,
             };
             stack.extend(inputs(id).map(|input| (input, below)));
         }
     }
     consumers
+}
+
+/// Whether a `TimeShift` anchored with `at`, read by `queries` (those on
+/// one evaluation grid that reach it), is anchored at their evaluation
+/// times, so its input runs in their evaluation context, shared with
+/// their other reads: `@ end()` with an instant query among them (an
+/// instant query's request ends at its evaluation; the input computed at
+/// every evaluation of the grid serves the range queries' request ends
+/// too). Otherwise it runs once per request, in a context of its own.
+///
+/// Example: `sum_over_time(m[5m] @ end())` and `sum_over_time(m[5m])`,
+/// both instant every 60 s: true, so `m[5m]` is computed once per minute
+/// for both; the same `@ end()` in a range query alone: false.
+pub fn anchor_is_evaluation_time<'e>(
+    at: AtModifier,
+    queries: impl IntoIterator<Item = &'e QueryWorkloadEntry>,
+) -> bool {
+    at == AtModifier::End
+        && queries.into_iter().any(|entry| {
+            entry
+                .range_evaluation
+                .is_none_or(|range| range.evaluations_per_request() <= 1)
+        })
 }
 
 /// The grid, in ms, every evaluation of `entry`'s query falls on
@@ -516,7 +578,7 @@ pub fn computations(
         rate_of_materialized.insert(id, rate);
     }
     let mut count: HashMap<_, (u64, f64)> = HashMap::new();
-    for (id, of_node) in consumers(dag) {
+    for (id, of_node) in consumers(dag, entries) {
         let entry = count.entry(id).or_default();
         // The queries reaching it, per context: (evaluation grid, anchor).
         let mut queries_by_context: BTreeMap<(u64, Option<AtModifier>), BTreeSet<usize>> =
