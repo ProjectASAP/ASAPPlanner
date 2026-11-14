@@ -356,9 +356,10 @@ fn a_shared_one_evaluation_at_end_shift_runs_its_input_once_per_request() {
 /// Two range queries every 60 s at a 30 s step, over 1 h and over 90 s,
 /// below one `@ start()` shift: one context (one evaluation grid, one
 /// anchor), whose requests start at `k · 60 s` and `k · 60 s + 30 s`: the
-/// input runs 2/60 per second. Over 1 h and over 2 m, both start at
-/// `k · 60 s` but at different times of one request: still 2/60. The same
-/// query twice runs once.
+/// input runs 2/60 per second. Over 1 h and over 2 m, one request needs
+/// the input at two start times, its end less 1 h and its end less 2 m:
+/// still 2/60. The same query twice runs once, and so does one schedule
+/// written at phases 10 s and 70 s.
 #[test]
 fn at_start_inputs_run_once_per_request_of_each_span() {
     let with_span = |span_ms| QueryWorkloadEntry {
@@ -394,6 +395,15 @@ fn at_start_inputs_run_once_per_request_of_each_span() {
     let twice = [with_span(120_000), with_span(120_000)];
     close(
         context_executions_per_second(Some(AtModifier::Start), &twice, 3600.0).unwrap(),
+        1.0 / 60.0,
+    );
+    let mut phase_70s = with_span(120_000);
+    phase_70s.recurrence = fixed(60_000, 70_000);
+    let mut phase_10s = with_span(120_000);
+    phase_10s.recurrence = fixed(60_000, 10_000);
+    close(
+        context_executions_per_second(Some(AtModifier::Start), &[phase_10s, phase_70s], 3600.0)
+            .unwrap(),
         1.0 / 60.0,
     );
 }

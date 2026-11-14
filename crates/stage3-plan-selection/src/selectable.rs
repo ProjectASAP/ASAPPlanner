@@ -32,7 +32,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use asap_cost::plan::execution_demand::{
-    anchor_is_evaluation_time, evaluation_grid_ms, queries_of_context, request_time_grid_ms,
+    anchor_is_evaluation_time, evaluation_grid_ms, queries_of_context, query_reads, request_anchor,
+    request_time_grid_ms,
 };
 use asap_types::ir::operator::AtModifier;
 use asap_types::ir::properties::ExecutionTiming;
@@ -98,6 +99,10 @@ pub(crate) struct SelectableExecutions {
     request_anchor_of_context: Vec<RequestAnchor>,
     /// The id of each context with its request anchor.
     context_ids: HashMap<(ExecutionContext, RequestAnchor), ExecutionContextId>,
+    /// Per memo group, each (query, anchor) whose walk over the memo reaches
+    /// it ([`query_reads`]): the anchor of the `TimeShift` above it it is
+    /// read per request below, `None` in the query's evaluation context.
+    reads_of_group: HashMap<MemoGroupId, Vec<(usize, Option<AtModifier>)>>,
     /// Every execution reached from a query output, ascending.
     executions: Vec<Execution>,
     /// Every $y_{\kappa,u,c,i}$, ascending.
@@ -129,6 +134,7 @@ impl SelectableExecutions {
         outputs: &[(QueryId, MemoGroupId)],
     ) -> Self {
         let mut selectable = Self {
+            reads_of_group: reads_of_groups(physical, entries, outputs),
             contexts: Vec::new(),
             request_anchor_of_context: Vec::new(),
             context_ids: HashMap::new(),
@@ -306,17 +312,11 @@ impl SelectableExecutions {
         else {
             return consumer.context;
         };
-        let queries: Vec<QueryId> = queries_of_context(
-            grid.period_ms,
-            memo.groups()[group.0 as usize]
-                .reached_by_queries()
-                .iter()
-                .copied(),
-            entries,
-        )
-        .into_iter()
-        .map(QueryId)
-        .collect();
+        let queries: Vec<QueryId> =
+            queries_of_context(grid.period_ms, self.readers_of(group, |_| true), entries)
+                .into_iter()
+                .map(QueryId)
+                .collect();
         if anchor_is_evaluation_time(at, queries.iter().map(|query| &entries[query.0])) {
             return consumer.context;
         }
@@ -335,6 +335,22 @@ impl SelectableExecutions {
                 Some((at, queries)),
             ),
         }
+    }
+
+    /// The queries whose walk reaches `group` ([`Self::reads_of_group`]),
+    /// each once, reading it with an anchor `anchored` keeps.
+    pub(crate) fn readers_of(
+        &self,
+        group: MemoGroupId,
+        anchored: impl Fn(Option<AtModifier>) -> bool,
+    ) -> BTreeSet<usize> {
+        self.reads_of_group
+            .get(&group)
+            .into_iter()
+            .flatten()
+            .filter(|(_, anchor)| anchored(*anchor))
+            .map(|&(query, _)| query)
+            .collect()
     }
 
     /// Keeps, of the executions answering each query output, those `keep`
@@ -408,6 +424,42 @@ impl SelectableExecutions {
 /// rows.
 pub(crate) fn has_one_reader_per_context(properties: PhysicalProperties) -> bool {
     properties.lifetime() == Lifetime::None && properties.timing() == ExecutionTiming::QueryTime
+}
+
+/// Per memo group of `physical`, each (query, anchor) whose walk from the
+/// groups its outputs read (`outputs`) reaches it ([`query_reads`]),
+/// through the inputs of every candidate of a group.
+fn reads_of_groups(
+    physical: &PhysicalASAPMemoCandidates,
+    entries: &[QueryWorkloadEntry],
+    outputs: &[(QueryId, MemoGroupId)],
+) -> HashMap<MemoGroupId, Vec<(usize, Option<AtModifier>)>> {
+    let memo = &physical.logical_candidates.memo;
+    let query_count = outputs
+        .iter()
+        .map(|(query, _)| query.0 + 1)
+        .max()
+        .unwrap_or(0);
+    let mut starts = vec![Vec::new(); query_count];
+    for &(query, group) in outputs {
+        starts[query.0].push(group);
+    }
+    let inputs_of = |group: MemoGroupId| -> Vec<MemoGroupId> {
+        let inputs: BTreeSet<MemoGroupId> = memo.groups()[group.0 as usize]
+            .candidates
+            .iter()
+            .flat_map(|candidate| candidate.expression.operator.children())
+            .copied()
+            .collect();
+        inputs.into_iter().collect()
+    };
+    query_reads(
+        &starts,
+        inputs_of,
+        |group| request_anchor(&memo.groups()[group.0 as usize].expression),
+        |_| false,
+        entries,
+    )
 }
 
 /// Each query output reference (a query, and the group its operator root,

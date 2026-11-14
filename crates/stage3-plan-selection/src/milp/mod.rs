@@ -4,9 +4,9 @@
 //! per constraint family ([`model`]), the retention amount $h_v$ and
 //! constraint (R) ([`retention`]), each query's exact-only reads,
 //! constraint (X) ([`exact_only`]), the executions other executions
-//! dominate ([`dominance`]), the graph algorithm it needs
-//! ([`graph`]), the bound it scales by ([`upper_bound`]), and the accuracy
-//! extension ([`accuracy`]).
+//! dominate ([`dominance`]), the graph algorithm it needs ([`graph`]),
+//! the bound that leaves out executions dearer than a feasible plan before
+//! scaling ([`upper_bound`]), and the accuracy extension ([`accuracy`]).
 mod accuracy;
 mod dominance;
 pub(crate) mod exact_only;

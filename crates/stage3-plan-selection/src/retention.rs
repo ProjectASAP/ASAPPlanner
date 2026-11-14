@@ -11,7 +11,7 @@
 use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::plan::time_window::{InputTimeAccess, TimeIndexedPlan};
 use asap_types::stages::{
-    MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId,
+    MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdge, PhysicalEdgeId,
 };
 use asap_types::workload::QueryWorkloadEntry;
 
@@ -99,6 +99,32 @@ pub(crate) fn reads_back<'a>(
     edges.chain(outputs)
 }
 
+/// The least need, in ms, over each execution's costed reads
+/// ([`reads_back`]: an edge out of it `per_edge` costs, or a query output
+/// it may answer), by position in [`SelectableExecutions::executions`];
+/// `None` without a bounded one. (F) gives a selected execution a use and
+/// (R) then retains at least that: the greedy bound charges it, and the
+/// MILP has $h_v \ge$ it $\cdot x$.
+pub(crate) fn least_need_ms_per_execution(
+    selectable: &SelectableExecutions,
+    per_edge: &[Option<f64>],
+    need_ms_per_edge: &[Option<u64>],
+    entries: &[QueryWorkloadEntry],
+) -> Vec<Option<u64>> {
+    let mut least_need_ms = vec![None; selectable.executions().len()];
+    for (index, reader, need_ms) in reads_back(selectable, need_ms_per_edge, entries) {
+        let costed = match reader {
+            Reader::Edge(position) => per_edge[position].is_some(),
+            Reader::Output(_) => true,
+        };
+        if let (true, Some(need_ms)) = (costed, need_ms) {
+            let least: &mut Option<u64> = &mut least_need_ms[index];
+            *least = Some(least.map_or(need_ms, |least| least.min(need_ms)));
+        }
+    }
+    least_need_ms
+}
+
 /// `ms` in seconds, the unit of $h_v$ in the MILP and of the costs per
 /// second retained.
 pub(crate) fn ms_to_seconds(ms: u64) -> f64 {
@@ -114,31 +140,22 @@ fn read_back(
     edge: PhysicalEdgeId,
     span_ms: impl Fn(PhysicalCandidateId) -> u64,
 ) -> Option<u64> {
-    let edge = physical.edge(edge);
-    let producer = edge.producer_candidate_id;
-    let readers_of = |v: PhysicalCandidateId| match v == producer {
-        true => vec![edge.consumer_candidate_id],
-        false => physical
-            .admissible_edges_out_of(v)
-            .iter()
-            .map(|&out| physical.edge(out).consumer_candidate_id)
-            .collect(),
-    };
     let candidates = Candidates {
         physical,
-        readers_of: &readers_of,
+        edge: physical.edge(edge),
     };
-    asap_cost::read_back_ms(&candidates, producer, span_ms)
+    asap_cost::read_back_ms(&candidates, candidates.edge.producer_candidate_id, span_ms)
 }
 
-/// Stage 3's candidates as the time walks see them: the readers a caller
-/// gives (those that may read a candidate, or the selected ones), each
-/// candidate's admissible producers as its inputs, its operator at its
-/// timing and lifetime ([`InputTimeAccess::of`]), and a current-time read
-/// of a `Scan` (raw data) needing every row.
+/// Stage 3's candidates as the time walks see them above `edge`: its
+/// producer read by its consumer only, any other candidate by every
+/// candidate that may read it (its admissible edges out); each candidate's
+/// admissible producers as its inputs, its operator at its timing and
+/// lifetime ([`InputTimeAccess::of`]), and a current-time read of a
+/// `Scan` (raw data) needing every row.
 struct Candidates<'a> {
     physical: &'a PhysicalASAPMemoCandidates,
-    readers_of: &'a dyn Fn(PhysicalCandidateId) -> Vec<PhysicalCandidateId>,
+    edge: &'a PhysicalEdge,
 }
 
 impl TimeIndexedPlan for Candidates<'_> {
@@ -146,7 +163,15 @@ impl TimeIndexedPlan for Candidates<'_> {
     type Child = MemoGroupId;
 
     fn readers_of(&self, v: PhysicalCandidateId) -> Vec<PhysicalCandidateId> {
-        (self.readers_of)(v)
+        match v == self.edge.producer_candidate_id {
+            true => vec![self.edge.consumer_candidate_id],
+            false => self
+                .physical
+                .admissible_edges_out_of(v)
+                .iter()
+                .map(|&out| self.physical.edge(out).consumer_candidate_id)
+                .collect(),
+        }
     }
 
     fn inputs_of(&self, v: PhysicalCandidateId) -> Vec<PhysicalCandidateId> {
