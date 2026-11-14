@@ -11,27 +11,17 @@
 //! plans became 4e-7, and the solver returned a plan 12.6% dearer. The
 //! greedy plan bounds the optimum by about 0.0088/s, so the chain is left
 //! out and the largest coefficient left is about 0.006/s.
-//!
-//! Also left out: an execution with $\ell$ = None that its `OneEvaluation`
-//! twin dominates ([`dominated_by_one_evaluation_twin`]).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-
-use asap_types::ir::properties::ExecutionTiming;
-use asap_types::stages::{CandidateForMemoGroupId, ExecutionContextId, Lifetime};
+use std::collections::{BTreeMap, HashMap};
 
 use super::exact_only::must_not_read;
 use super::model::{selection_cost_per_second, SelectionInputs};
-use crate::retention::output_retention_need_ms;
+use crate::retention::{reads_back, Reader};
 use crate::selectable::{has_one_reader_per_context, QueryId};
 
 /// How many times the greedy plan is rebuilt without an execution that
 /// made it infeasible before giving up on a bound.
 const REPAIRS: usize = 32;
-
-/// Per (context, logical candidate), its query-time executions as
-/// (execution, lifetime, cost per second).
-type Twins = HashMap<(ExecutionContextId, CandidateForMemoGroupId), Vec<(usize, Lifetime, f64)>>;
 
 /// Per input of an execution, the edge its cheapest tree reads it over, as
 /// (edge position, producer execution).
@@ -58,33 +48,25 @@ pub(crate) fn dearer_than_a_feasible_plan(inputs: &SelectionInputs<'_>) -> Vec<b
     // (F) gives a selected execution a use, and (R) then retains at least
     // that. A query-time scan's retention is its source's $r_s$, left out.
     let mut least_need_ms: Vec<Option<u64>> = vec![None; count];
-    let mut read = |index: usize, need_ms: u64| {
-        let least = &mut least_need_ms[index];
-        *least = Some(least.map_or(need_ms, |least| least.min(need_ms)));
-    };
-    for (position, &(_, _, producer)) in selectable.edges().iter().enumerate() {
-        if let (Some(_), Some(need_ms)) = (
-            costs.per_edge[position],
-            costs.retention_need_ms_per_edge[position],
-        ) {
-            read(producer, need_ms);
-        }
-    }
-    for (query, answering) in &selectable.answering {
-        for &index in answering {
-            read(index, output_retention_need_ms(&inputs.entries[query.0]));
+    for (index, reader, need_ms) in reads_back(
+        selectable,
+        &costs.retention_need_ms_per_edge,
+        inputs.entries,
+    ) {
+        let costed = match reader {
+            Reader::Edge(position) => costs.per_edge[position].is_some(),
+            Reader::Output(_) => true,
+        };
+        if let (true, Some(need_ms)) = (costed, need_ms) {
+            let least = &mut least_need_ms[index];
+            *least = Some(least.map_or(need_ms, |least| least.min(need_ms)));
         }
     }
     let least_retention_cost = |index: usize| {
         let v = executions[index].candidate;
-        match (
-            costs.retention_cost_per_retained_second.get(&v),
-            least_need_ms[index],
-        ) {
-            (Some(per_retained_second), Some(need_ms))
-                if !costs.raw_data_source.contains_key(&v) =>
-            {
-                per_retained_second * need_ms as f64 / 1_000.0
+        match least_need_ms[index] {
+            Some(need_ms) if !costs.raw_data_source.contains_key(&v) => {
+                costs.retention_cost_per_second(v, need_ms)
             }
             _ => 0.0,
         }
@@ -140,7 +122,7 @@ fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
     // Per query, the executions its trees leave out: those it must not
     // read, and those a repair left out for it.
     let mut excluded: BTreeMap<QueryId, Vec<bool>> = BTreeMap::new();
-    for (query, _) in &selectable.answering {
+    for (query, _) in selectable.answering() {
         excluded
             .entry(*query)
             .or_insert_with(|| (0..count).map(|e| forbidden(*query, e)).collect());
@@ -150,7 +132,7 @@ fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
     'repair: for _ in 0..REPAIRS {
         let mut plan = GreedyPlan::new(count);
         let mut answering: Vec<(QueryId, usize)> = Vec::new();
-        for (query, outputs) in &selectable.answering {
+        for (query, outputs) in selectable.answering() {
             let left_out = &excluded[query];
             let (tree_cost, chosen) = trees
                 .entry(left_out.clone())
@@ -202,7 +184,7 @@ fn cheapest_trees(inputs: &SelectionInputs<'_>, excluded: &[bool]) -> (Vec<f64>,
                     .iter()
                     .filter_map(|&position| {
                         let c = inputs.costs.per_edge[position]?;
-                        let (_, _, u) = selectable.edges()[position];
+                        let u = selectable.edges()[position].producer;
                         (!excluded[u] && tree_cost[u].is_finite())
                             .then(|| (position, u, c + tree_cost[u]))
                     })
@@ -322,92 +304,4 @@ impl GreedyPlan {
         }
         Ok(())
     }
-}
-
-/// Per execution, by position in `SelectableExecutions::executions`,
-/// whether it is a query-time execution with $\ell$ = None that its
-/// `OneEvaluation` twin $b$ (the same logical candidate, so the same θ and
-/// the same error bounds, in the same context) dominates: $b$ costs no
-/// more, reads each of its producers on the same input at no more, is
-/// read by each of its consumers on the same input at no more, and answers
-/// every query output it answers. A plan selecting it selects $b$ in its
-/// place at no more cost and stays feasible: $b$'s (F) is the looser
-/// $x \le$ uses, its edges are the same ones (so (A), (B), (E) and (X)
-/// hold as before), and (K), per execution, sees the same θ through the
-/// same producers. A candidate with $h_v$ or raw data on disk is never
-/// left out so, its retention depending on its own readers.
-///
-/// Example: a `SummaryAgg` KLL build read by one readout in a context,
-/// offered with $\ell$ = None and `OneEvaluation` at equal cost: the None
-/// execution is left out.
-pub(crate) fn dominated_by_one_evaluation_twin(inputs: &SelectionInputs<'_>) -> Vec<bool> {
-    let selectable = inputs.selectable;
-    let physical = inputs.physical;
-    let costs = inputs.costs;
-    let executions = selectable.executions();
-    let count = executions.len();
-    let no_more = |cost: f64, than: f64| cost <= than + 1e-12 * than.abs().max(1e-12);
-    // Per execution, its costed edges in, by (producer, input), and out, by
-    // (consumer, input).
-    let mut edges_in: Vec<HashMap<(usize, usize), f64>> = vec![HashMap::new(); count];
-    let mut edges_out: Vec<HashMap<(usize, usize), f64>> = vec![HashMap::new(); count];
-    for (position, &(consumer, edge, producer)) in selectable.edges().iter().enumerate() {
-        let Some(cost) = costs.per_edge[position] else {
-            continue;
-        };
-        let input = physical.edge(edge).input_index_of_consumer;
-        edges_in[consumer].insert((producer, input), cost);
-        edges_out[producer].insert((consumer, input), cost);
-    }
-    let mut answers: Vec<BTreeSet<QueryId>> = vec![BTreeSet::new(); count];
-    for (query, answering) in &selectable.answering {
-        for &index in answering {
-            answers[index].insert(*query);
-        }
-    }
-    // The query-time executions of each logical candidate in each context,
-    // without $h_v$ or raw data, with their cost.
-    let mut twins: Twins = HashMap::new();
-    for (index, execution) in executions.iter().enumerate() {
-        let v = execution.candidate;
-        let candidate = &physical.physical_candidates[v.0];
-        let properties = candidate.physical_properties;
-        if properties.timing() != ExecutionTiming::QueryTime
-            || costs.retention_cost_per_retained_second.contains_key(&v)
-            || costs.raw_data_source.contains_key(&v)
-        {
-            continue;
-        }
-        let Ok(cost) = costs.per_execution[index] else {
-            continue;
-        };
-        twins
-            .entry((execution.context, candidate.logical_candidate_id))
-            .or_default()
-            .push((index, properties.lifetime(), cost));
-    }
-    let mut dominated = vec![false; count];
-    for members in twins.values() {
-        for &(a, lifetime, cost_a) in members {
-            if lifetime != Lifetime::None {
-                continue;
-            }
-            dominated[a] = members.iter().any(|&(b, lifetime, cost_b)| {
-                matches!(lifetime, Lifetime::OneEvaluation(_))
-                    && no_more(cost_b, cost_a)
-                    && edges_in[a].iter().all(|(key, &cost)| {
-                        edges_in[b]
-                            .get(key)
-                            .is_some_and(|&twin| no_more(twin, cost))
-                    })
-                    && edges_out[a].iter().all(|(key, &cost)| {
-                        edges_out[b]
-                            .get(key)
-                            .is_some_and(|&twin| no_more(twin, cost))
-                    })
-                    && answers[a].is_subset(&answers[b])
-            });
-        }
-    }
-    dominated
 }
