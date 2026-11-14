@@ -384,6 +384,8 @@ fn a_top_k_ranks_values_of_its_inputs_sign() {
 /// | G15 | `TimeShift(@ end())(G14)` | yes |
 /// | G16 | `G15[10m:1m]` (a subquery) | yes |
 /// | G17 | `TimeShift(@ T)(G16)`: `(rate(latency[5m] @ end()))[10m:1m] @ T` | yes |
+/// | G18 | `TimeShift(@ T2)(max_over_time(G17)[1h:5m])`: the `@ end()` stays unpinned | yes |
+/// | G19 | `TimeShift(@ T2)(G12[1h:5m])`: everything below is pinned | no |
 #[test]
 fn a_result_depends_on_the_evaluation_time_under_a_time_range_or_now() {
     let mut memo = memo();
@@ -456,6 +458,28 @@ fn a_result_depends_on_the_evaluation_time_under_a_time_range_or_now() {
         }),
     );
     let g17 = add(&mut memo, shift(0, at_t(), g16));
+    let max_over_g17 = add(
+        &mut memo,
+        aggregate(
+            Reduction::PerEntity,
+            AggIntent::Max { col: Some(VALUE) },
+            g17,
+        ),
+    );
+    let at_t2 = || Some(AtModifier::Timestamp(1_700_003_600_000));
+    let mut hourly_subquery_at_t2 = |child| {
+        let subquery = add(
+            &mut memo,
+            Operator::NonASAP(NonASAPOp::PromqlSubquery {
+                range: std::time::Duration::from_secs(3_600),
+                resolution: Some(std::time::Duration::from_secs(300)),
+                child,
+            }),
+        );
+        add(&mut memo, shift(0, at_t2(), subquery))
+    };
+    let g18 = hourly_subquery_at_t2(max_over_g17);
+    let g19 = hourly_subquery_at_t2(g12);
     for (group, expected) in [
         (g1, false),
         (g2, false),
@@ -474,6 +498,8 @@ fn a_result_depends_on_the_evaluation_time_under_a_time_range_or_now() {
         (g15, true),
         (g16, true),
         (g17, true),
+        (g18, true),
+        (g19, false),
     ] {
         assert_eq!(depends(&memo, group), expected, "{group:?}");
     }

@@ -83,9 +83,9 @@ pub struct GroupProperties {
     pub column_signs: Vec<ValueSign>,
     /// Whether the result reads a time relative to the evaluation time:
     /// true for a group under a `TimeRange` relative to it
-    /// (`sum_over_time(m[5m])`), or reading `time()`, `now()` or
-    /// `@ start()`/`@ end()`, also under an `@ T`, which pins only its own
-    /// time; false for a window pinned by `@ T` (`sum_over_time(m[5m] @
+    /// (`sum_over_time(m[5m])`), reading `time()` or `now()`, or under an
+    /// `@ start()`/`@ end()` over a subtree that depends on it, also under
+    /// an `@ T`, which pins only its own time; false for a window pinned by `@ T` (`sum_over_time(m[5m] @
     /// T)`) or a group reading no time (a `Scan`, `count(*)` over it). It
     /// says nothing about whether rows keep arriving: a result that does
     /// not depend on the evaluation time is final, the same at every
@@ -181,10 +181,11 @@ pub(super) fn derive_group_properties(
 }
 
 /// Whether `operator`'s result changes with the evaluation time: a
-/// `TimeRange` reads the window before it, and `time()`, `now()` and
-/// `@ start()`/`@ end()` read it directly. `@ T` pins only its own time: a
-/// `TimeRange` directly over a `TimeShift { at: Timestamp }` reads a fixed
-/// window, and `@ T` over a subtree that reads a time it does not pin
+/// `TimeRange` reads the window before it, and `time()` and `now()` read it
+/// directly. An `@ start()`/`@ end()` depends on it when the subtree below
+/// it does. `@ T` pins only its own time: a `TimeRange` directly over a
+/// `TimeShift { at: Timestamp }` reads a fixed window, and `@ T` over a
+/// subtree that reads a time it does not pin
 /// ([`reads_time_not_pinned_by_at`]) still depends on it. Any other
 /// operator depends on it when an input group does. A `Scan` reads no time:
 /// whether its rows keep arriving is
@@ -193,26 +194,12 @@ pub(super) fn derive_group_properties(
 fn depends_on_evaluation_time(operator: &Operator<MemoGroupAsInput<'_>>) -> bool {
     match operator {
         Operator::NonASAP(NonASAPOp::TimeRange { child, .. }) => {
-            let pinned_at_timestamp = matches!(
-                child.group().expression,
-                Operator::NonASAP(NonASAPOp::TimeShift {
-                    shift: TimeShift {
-                        at: Some(AtModifier::Timestamp(_)),
-                        ..
-                    },
-                    ..
-                })
-            );
-            !pinned_at_timestamp || child.group_properties().depends_on_evaluation_time
+            !is_at_timestamp(&child.group().expression)
+                || child.group_properties().depends_on_evaluation_time
         }
-        Operator::NonASAP(NonASAPOp::TimeShift {
-            shift:
-                TimeShift {
-                    at: Some(AtModifier::Timestamp(_)),
-                    ..
-                },
-            child,
-        }) => reads_time_not_pinned_by_at(child),
+        Operator::NonASAP(NonASAPOp::TimeShift { child, .. }) if is_at_timestamp(operator) => {
+            reads_time_not_pinned_by_at(child)
+        }
         _ => {
             reads_evaluation_time_in_scalars(operator)
                 || operator
@@ -223,8 +210,9 @@ fn depends_on_evaluation_time(operator: &Operator<MemoGroupAsInput<'_>>) -> bool
     }
 }
 
-/// Whether `input`'s result reads a time no `@ T` above it pins: an
-/// `@ start()`/`@ end()`, `now()` or `time()` in its subtree. It walks only
+/// Whether `input`'s result reads a time no `@ T` above it pins: `now()`,
+/// `time()`, or an `@ start()`/`@ end()` over a subtree that depends on the
+/// evaluation time. It walks only
 /// into groups that depend on the evaluation time, and stops at any
 /// `TimeShift` with an `@`: an `@ start()`/`@ end()` that depends counts as
 /// such a read, and a nested `@ T2` already answered this in its own
@@ -238,20 +226,37 @@ fn reads_time_not_pinned_by_at(input: &MemoGroupAsInput<'_>) -> bool {
     if !input.group_properties().depends_on_evaluation_time {
         return false;
     }
-    let operator = input.operator();
-    match &operator {
+    let expression = &input.group().expression;
+    match expression {
         Operator::NonASAP(NonASAPOp::TimeShift {
             shift: TimeShift { at: Some(_), .. },
             ..
         }) => true,
         _ => {
-            reads_evaluation_time_in_scalars(&operator)
-                || operator
-                    .children()
-                    .into_iter()
-                    .any(|child| reads_time_not_pinned_by_at(child))
+            reads_evaluation_time_in_scalars(expression)
+                || expression.children().into_iter().any(|&group_id| {
+                    reads_time_not_pinned_by_at(&MemoGroupAsInput {
+                        memo: input.memo,
+                        group_id,
+                    })
+                })
         }
     }
+}
+
+/// Whether `operator` is a `TimeShift` pinned at an absolute time: PromQL
+/// `@ <timestamp>`.
+fn is_at_timestamp<C>(operator: &Operator<C>) -> bool {
+    matches!(
+        operator,
+        Operator::NonASAP(NonASAPOp::TimeShift {
+            shift: TimeShift {
+                at: Some(AtModifier::Timestamp(_)),
+                ..
+            },
+            ..
+        })
+    )
 }
 
 /// Whether `operator`'s own scalar expressions read the evaluation time

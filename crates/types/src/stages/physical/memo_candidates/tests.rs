@@ -13,7 +13,8 @@ use crate::ir::operator::arguments::{AtModifier, GroupKeys, Reduction, Source};
 use crate::ir::operator::AggIntent;
 use crate::test_support::memo_fixtures::{aggregate, range, scan, shift};
 
-use crate::ir::scalar::expr_ir::ColumnRef;
+use crate::ir::scalar::expr_ir::{ColumnRef, ScalarValue};
+use crate::ir::ScalarExpr;
 
 use crate::ir::schema::{DataType, Field, FieldDataType, Schema};
 use crate::summary_type::{SketchAlgorithm, SketchParams, SummaryUpdate};
@@ -268,6 +269,8 @@ struct FinalityExamples {
     /// `max_over_time((rate(latency[5m] @ end()))[10m:1m] @ T)`: `@ T`
     /// pins the subquery, but not the `@ end()` inside it.
     max_over_subquery_at_t: CandidateForMemoGroupId,
+    /// PromQL `vector(1)`: reads no source.
+    constant_vector: CandidateForMemoGroupId,
 }
 
 /// [`FinalityExamples`] over data arriving as `arrival`, every group
@@ -333,6 +336,9 @@ fn finality_examples(arrival: DataArrival) -> FinalityExamples {
         AggIntent::Max { col: Some(1) },
         subquery_at_t,
     ));
+    let constant_vector = add(Operator::NonASAP(NonASAPOp::PromqlVectorFromScalar(
+        ScalarExpr::Literal(ScalarValue::Float64(1.0)),
+    )));
     let grid_60s = Some(EvaluationGrid {
         period_ms: 60_000,
         phase_ms: 0,
@@ -343,6 +349,7 @@ fn finality_examples(arrival: DataArrival) -> FinalityExamples {
         count_of_table: first_candidate(count_of_table),
         sum_over_window_at_t: first_candidate(sum_over_window_at_t),
         max_over_subquery_at_t: first_candidate(max_over_subquery_at_t),
+        constant_vector: first_candidate(constant_vector),
     }
 }
 
@@ -415,6 +422,21 @@ fn an_end_anchor_under_at_t_keeps_a_stored_result_on_its_own_grid() {
         assert_eq!(
             delivers_on_grid_and_off_it(&examples, producer, QueryTime),
             (true, false),
+            "{arrival:?}"
+        );
+    }
+}
+
+/// PromQL `vector(1)` reads no source, so nothing it read can change: stored
+/// at query time it delivers on every context even while rows of other
+/// sources keep arriving.
+#[test]
+fn a_result_reading_no_source_delivers_on_every_context() {
+    for arrival in ARRIVING {
+        let examples = finality_examples(arrival);
+        assert_eq!(
+            delivers_on_grid_and_off_it(&examples, examples.constant_vector, QueryTime),
+            (true, true),
             "{arrival:?}"
         );
     }

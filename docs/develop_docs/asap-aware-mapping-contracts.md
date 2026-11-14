@@ -87,9 +87,10 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
   value not offered is not recorded. A group is time-independent when it
   reads no time relative to the evaluation time
   (`GroupProperties::depends_on_evaluation_time` is false): no `TimeRange`
-  except one directly over an `@ T`, and no `time()`, `now()`,
-  `@ start()` or `@ end()`, also under an `@ T`, which pins only its own
-  time. Whether its rows keep arriving is not part of it.
+  except one directly over an `@ T`, no `time()` or `now()`, and no
+  `@ start()` or `@ end()` over a subtree that depends on the evaluation
+  time, also under an `@ T`, which pins only its own time. Whether its
+  rows keep arriving is not part of it.
 - Every physical alternative Stage 2 prunes is recorded in
   `PhysicalASAPMemoCandidates::pruned_candidates` as
   `PrunedCandidate<PhysicalCandidate>` with a `PruneReason`: an
