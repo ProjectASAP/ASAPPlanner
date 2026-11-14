@@ -30,15 +30,14 @@ mod selectable;
 
 use asap_cost::{request_overhead_cost_per_second, CostInputs, CostModel};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
-use asap_types::stages::{PhysicalASAPMemoCandidates, PruneReason, PrunedCandidate};
+use asap_types::stages::{MemoGroupId, PhysicalASAPMemoCandidates, PruneReason, PrunedCandidate};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::cost::execution_costs;
-use crate::milp::exact_only::must_not_read;
 use crate::milp::model::{solve_selection, SelectionInputs, SelectionMilpError};
 use crate::plan::plan_of;
 use crate::report::{accepted_accuracy, infeasible};
-use crate::selectable::{output_groups, SelectableExecutions};
+use crate::selectable::{QueryId, SelectableExecutions};
 
 pub use report::{
     large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, Selection,
@@ -77,7 +76,13 @@ pub fn select_plan(
             entries: entries.len(),
         });
     }
-    let outputs = output_groups(physical);
+    let outputs: Vec<(QueryId, MemoGroupId)> = physical
+        .logical_candidates
+        .memo
+        .output_groups()
+        .into_iter()
+        .map(|(query, group)| (QueryId(query), group))
+        .collect();
     let mut selectable = SelectableExecutions::new(physical, entries, &outputs);
     let request_overhead_cost_per_second = request_overhead_cost_per_second(entries, cost_inputs)
         .map_err(|error| ErrorSelectingPlan::Cost {
@@ -89,7 +94,11 @@ pub fn select_plan(
     // A query output is answered by an execution that could be costed and
     // that its query may read (X).
     selectable.retain_answering(|query, index, execution| {
-        costs.per_execution[index].is_ok() && !must_not_read(physical, query, execution.candidate)
+        costs.per_execution[index].is_ok()
+            && !physical.logical_candidates.query_must_not_read(
+                query.0,
+                physical.physical_candidates[execution.candidate.0].logical_candidate_id,
+            )
     });
     if selectable
         .answering()

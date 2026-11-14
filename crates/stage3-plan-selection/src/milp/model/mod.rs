@@ -34,7 +34,7 @@ use super::graph::Components;
 use super::retention::{least_retention_ms, retention_constraints, retention_variables};
 use super::upper_bound::dearer_than_a_feasible_plan;
 use crate::cost::ExecutionCosts;
-use crate::selectable::{has_one_reader_per_context, Execution, QueryId, SelectableExecutions};
+use crate::selectable::{Execution, QueryId, SelectableExecutions};
 
 /// What the MILP is built over.
 pub(crate) struct SelectionInputs<'a> {
@@ -197,13 +197,15 @@ fn query_coverage_constraints(
 }
 
 /// Whether the execution at position `index` has one reader per context
-/// ([`has_one_reader_per_context`]): its (F) row is the equality
+/// (`PhysicalProperties::has_one_reader_per_context`): its (F) row is the equality
 /// $\sum y + \sum_q z_{q,v} = x_{\kappa,v}$ ([`use_constraints`]), which
 /// with $y, z \ge 0$ implies (B) and (D) for it, so those rows are left
 /// out.
 pub(super) fn has_one_reader(inputs: &SelectionInputs<'_>, index: usize) -> bool {
     let v = inputs.selectable.executions()[index].candidate;
-    has_one_reader_per_context(inputs.physical.physical_candidates[v.0].physical_properties)
+    inputs.physical.physical_candidates[v.0]
+        .physical_properties
+        .has_one_reader_per_context()
 }
 
 /// (E) $t_u + 1 \le t_c + n(1 - y_{\kappa,u,c,i})$ between the producer's
@@ -232,7 +234,7 @@ fn acyclicity_constraints(
 
 /// (F) $x_{\kappa,v} \le \sum y + \sum_q z_{q,v}$ over the edges and query
 /// outputs reading that execution; with it, a candidate with one reader
-/// per context ([`has_one_reader_per_context`]: a query-time result that
+/// per context (`PhysicalProperties::has_one_reader_per_context`: a query-time result that
 /// is not materialized) has $\sum y + \sum_q z_{q,v} \le x_{\kappa,v}$, so
 /// for such an execution the two are one row, $\sum y + \sum_q z_{q,v} =
 /// x_{\kappa,v}$. An ingestion-time producer is exempt from the

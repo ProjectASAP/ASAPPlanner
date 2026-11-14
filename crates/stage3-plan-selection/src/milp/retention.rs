@@ -11,8 +11,9 @@ use good_lp::{constraint, variable, Constraint, ProblemVariables, Variable};
 use asap_types::stages::PhysicalCandidateId;
 
 use super::model::SelectionInputs;
-use crate::retention::{ms_to_seconds, reads_back, Reader};
+use crate::retention::ms_to_seconds;
 use crate::selectable::QueryId;
+use crate::selectable::Reader;
 
 /// $h_v$ in seconds retained (the unit keeps (R)'s coefficients near the
 /// others'), added to `problem`, for each candidate with a retention cost
@@ -66,11 +67,10 @@ pub(crate) fn retention_constraints(
 ) -> Vec<Constraint> {
     let executions = inputs.selectable.executions();
     let mut constraints = Vec::new();
-    for (index, reader, need_ms) in reads_back(
-        inputs.selectable,
-        &inputs.costs.retention_need_ms_per_edge,
-        inputs.entries,
-    ) {
+    for (index, reader, need_ms) in inputs
+        .selectable
+        .reads_back(&inputs.costs.retention_need_ms_per_edge, inputs.entries)
+    {
         let Some(&h) = h.get(&executions[index].candidate) else {
             continue;
         };
@@ -108,11 +108,10 @@ pub(crate) fn least_retention_ms(
     let edges: HashSet<usize> = edges.into_iter().collect();
     let outputs: HashSet<(QueryId, usize)> = outputs.into_iter().collect();
     let mut retention_ms: HashMap<PhysicalCandidateId, u64> = HashMap::new();
-    for (index, reader, need_ms) in reads_back(
-        inputs.selectable,
-        &inputs.costs.retention_need_ms_per_edge,
-        inputs.entries,
-    ) {
+    for (index, reader, need_ms) in inputs
+        .selectable
+        .reads_back(&inputs.costs.retention_need_ms_per_edge, inputs.entries)
+    {
         let selected = match reader {
             Reader::Edge(position) => edges.contains(&position),
             Reader::Output(query) => outputs.contains(&(query, index)),

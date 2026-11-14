@@ -40,8 +40,8 @@ pub use model::{
 };
 pub use node::operator_statistics::EdgeStatistics;
 pub use node::usage::{
-    maintained_window_ms, node_resource_usage_and_cost, summary_type_name, NodeCost,
-    NodeResourceUsageAndCost, ProducerOutput,
+    maintained_window_ms, node_resource_usage_and_cost, output_interval_ms, reads_one_batch_of,
+    summary_type_name, NodeCost, NodeResourceUsageAndCost, ProducerOutput,
 };
 pub use plan::cost::{
     plan_cost, raw_data_disk_cost_per_second, request_overhead_cost_per_second, PlanCost,

@@ -18,6 +18,9 @@ pub use candidate::{
     producer_satisfies_physical_requirements, PhysicalCandidate, PhysicalCandidateId,
 };
 pub use edge::{PhysicalEdge, PhysicalEdgeId};
-pub use execution_context::{EvaluationGrid, ExecutionContext, ExecutionContextId};
+pub use execution_context::{
+    anchor_is_evaluation_time, queries_of_context, query_reads, ExecutionContext,
+    ExecutionContextId,
+};
 pub use memo_candidates::{output_references, PhysicalASAPMemoCandidates};
 pub use properties::{Lifetime, PhysicalProperties, PhysicalPropertiesError, StorageMedium};

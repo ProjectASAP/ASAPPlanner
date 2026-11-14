@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::node::analytical::AnalyticalCostError;
 use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_shape, StateInputRows};
-use crate::node::usage::{cost_source, maintained_window_ms};
+use crate::node::usage::{cost_source, maintained_window_ms, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
 use crate::plan::read_back::read_back_ms;
 use crate::{lookup, StateFamily};
@@ -27,6 +27,7 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload,
 };
+use asap_types::stages::Lifetime;
 use asap_types::summary_type::SketchParams;
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
@@ -108,13 +109,38 @@ pub fn plan_cost(
     for e in &dag.edges {
         producers_of.entry(e.consumer).or_default().push(e.producer);
     }
+    let first_input_of = |id: PhysicalASAPNodeId| {
+        let input = producers_of.get(&id)?.first()?;
+        Some(&nodes[input].payload)
+    };
+    // Each node keeping raw rows at ingestion, not stored: what an
+    // ingestion-time reader of it reads, one batch
+    // ([`reads_one_batch_of`]).
+    let one_batch_nodes: HashMap<PhysicalASAPNodeId, PhysicalASAPDAGNode> = dag
+        .nodes
+        .iter()
+        .filter(|node| node.keeps_raw_rows_at_ingestion(first_input_of(node.id)))
+        .map(|node| {
+            let mut one_batch = node.clone();
+            one_batch.lifetime = Lifetime::None;
+            one_batch.retention_ms = None;
+            (node.id, one_batch)
+        })
+        .collect();
     let mut costed: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'_>> = HashMap::new();
+    let mut one_batch: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'_>> = HashMap::new();
     for node in &dag.nodes {
         let views: Vec<ProducerOutput<'_>> = producers_of
             .get(&node.id)
             .map_or(&[][..], Vec::as_slice)
             .iter()
-            .map(|p| costed[p].producer_output(&nodes[p].payload, &nodes[p].output_schema))
+            .map(|p| {
+                let read = match reads_one_batch_of(node, nodes[p], first_input_of(*p)) {
+                    true => &one_batch[p],
+                    false => &costed[p],
+                };
+                read.producer_output(&nodes[p].payload, &nodes[p].output_schema)
+            })
             .collect();
         let window_ms = match node.output_state.timing {
             ExecutionTiming::IngestionTime => maintained_window_ms(
@@ -133,6 +159,18 @@ pub fn plan_cost(
             settings,
         )
         .map_err(|error| (node.id, error))?;
+        if let Some(unstored) = one_batch_nodes.get(&node.id) {
+            let batch = node_resource_usage_and_cost(
+                unstored,
+                &views,
+                multipliers[&node.id],
+                window_ms,
+                data,
+                settings,
+            )
+            .map_err(|error| (node.id, error))?;
+            one_batch.insert(node.id, batch);
+        }
         costed.insert(node.id, node_costed);
     }
     let mut output: HashMap<PhysicalASAPNodeId, EdgeStatistics> = HashMap::new();

@@ -4,7 +4,16 @@
 
 use std::collections::BTreeSet;
 
-use crate::stages::{EvaluationGrid, LogicalEdge, Memo, MemoGroupId, PrunedLogicalCandidate};
+use crate::stages::{
+    CandidateForMemoGroupId, LogicalEdge, Memo, MemoGroupId, PrunedLogicalCandidate,
+};
+
+/// The evaluation times `phase_ms + k · period_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EvaluationGrid {
+    pub period_ms: u64,
+    pub phase_ms: u64,
+}
 
 /// Stage 1, Pass 2's output.
 #[derive(Debug, Clone)]
@@ -40,4 +49,47 @@ pub struct LogicalASAPMemoCandidates {
     /// (its MILP's constraint (X)); Pass 2 only lists it. Empty for a query without an accuracy
     /// target.
     pub exact_only_groups_of_query: Vec<BTreeSet<MemoGroupId>>,
+}
+
+impl LogicalASAPMemoCandidates {
+    /// Whether query `query` must not read `candidate`: it is not exact
+    /// (it has sketch parameters θ) and its group is one the query may read
+    /// only exactly ([`Self::exact_only_groups_of_query`]). A readout's own
+    /// candidate has no θ, but the sketch states it reads are in the same
+    /// list, as every group below a listed one is.
+    ///
+    /// Example: `quantile_over_time(0.9, m[5m])` at a relative target lists
+    /// the quantile and every group below it; its KLL state builds (θ) are
+    /// candidates it must not read, the exact quantile one it may.
+    pub fn query_must_not_read(&self, query: usize, candidate: CandidateForMemoGroupId) -> bool {
+        self.exact_only_groups_of_query
+            .get(query)
+            .is_some_and(|groups| groups.contains(&candidate.group))
+            && self
+                .memo
+                .candidate(candidate)
+                .logical_properties
+                .parameters()
+                .is_some()
+    }
+
+    /// The times `candidate` is stored at when materialized across
+    /// evaluations, on its own schedule: every window end of a chain (its
+    /// width at phase 0), else its group's evaluation grid
+    /// ([`Self::evaluation_grid_of_group`]); `None` when neither is known.
+    pub fn own_schedule(&self, candidate: CandidateForMemoGroupId) -> Option<EvaluationGrid> {
+        match self
+            .memo
+            .candidate(candidate)
+            .expression
+            .operator
+            .chain_tumbling_window_width_ms()
+        {
+            Some(width_ms) => Some(EvaluationGrid {
+                period_ms: width_ms,
+                phase_ms: 0,
+            }),
+            None => self.evaluation_grid_of_group[candidate.group.0 as usize],
+        }
+    }
 }

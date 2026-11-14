@@ -6,9 +6,9 @@
 
 use std::collections::HashMap;
 
-use crate::ir::QueryRoot;
+use crate::ir::{Operator, QueryRoot};
 use crate::stages::{
-    LogicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalEdge,
+    LogicalASAPMemoCandidates, MemoGroupId, PhysicalCandidate, PhysicalCandidateId, PhysicalEdge,
     PhysicalEdgeId, PrunedCandidate,
 };
 
@@ -78,16 +78,20 @@ impl PhysicalASAPMemoCandidates {
         &self.edges[id.0]
     }
 
-    /// The number of inputs of candidate `v`: its logical candidate's
-    /// operator's children (e.g. 2 for a binary operator).
-    pub fn input_count(&self, v: PhysicalCandidateId) -> usize {
-        self.logical_candidates
+    /// The operator of candidate `v`'s logical candidate.
+    pub fn operator(&self, v: PhysicalCandidateId) -> &Operator<MemoGroupId> {
+        &self
+            .logical_candidates
             .memo
             .candidate(self.physical_candidates[v.0].logical_candidate_id)
             .expression
             .operator
-            .children()
-            .len()
+    }
+
+    /// The number of inputs of candidate `v`: its logical candidate's
+    /// operator's children (e.g. 2 for a binary operator).
+    pub fn input_count(&self, v: PhysicalCandidateId) -> usize {
+        self.operator(v).children().len()
     }
 
     /// $P^{\mathrm{adm}}_{c,i}$: the admissible edges into input

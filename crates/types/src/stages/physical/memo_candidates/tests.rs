@@ -23,7 +23,7 @@ use crate::ir::{NonASAPOp, TimeRangeKind};
 
 use crate::stages::StorageMedium;
 
-use crate::stages::physical::execution_context::EvaluationGrid;
+use crate::stages::EvaluationGrid;
 
 use crate::stages::{
     CandidateForMemoGroup, LogicalASAPMemoCandidates, Memo, MemoGroupId,

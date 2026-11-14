@@ -14,7 +14,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use super::exact_only::must_not_read;
 use super::model::{has_one_reader, selection_cost_per_second, SelectionInputs};
 use crate::selectable::QueryId;
 
@@ -94,8 +93,12 @@ fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
     let one_reader: Vec<bool> = (0..count)
         .map(|index| has_one_reader(inputs, index))
         .collect();
-    let forbidden =
-        |query: QueryId, e: usize| must_not_read(inputs.physical, query, executions[e].candidate);
+    let forbidden = |query: QueryId, e: usize| {
+        inputs.physical.logical_candidates.query_must_not_read(
+            query.0,
+            inputs.physical.physical_candidates[executions[e].candidate.0].logical_candidate_id,
+        )
+    };
     // Per query, the executions its trees leave out: those it must not
     // read, and those a repair left out for it.
     let mut excluded: BTreeMap<QueryId, Vec<bool>> = BTreeMap::new();

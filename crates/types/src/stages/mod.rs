@@ -16,16 +16,16 @@ mod pruning;
 pub use logical::{
     listed_build_parameters, ranked_column_of_group, AggregateCoverage, AggregateDefinition,
     CandidateError, CandidateExpression, CandidateForMemoGroup, CandidateForMemoGroupId,
-    ColumnLineage, CoverageError, GroupProperties, LogicalASAPMemoCandidates, LogicalEdge,
-    LogicalProperties, LogicalPropertiesError, LogicalRequirements, Memo, MemoGroup,
+    ColumnLineage, CoverageError, EvaluationGrid, GroupProperties, LogicalASAPMemoCandidates,
+    LogicalEdge, LogicalProperties, LogicalPropertiesError, LogicalRequirements, Memo, MemoGroup,
     MemoGroupError, MemoGroupId, MemoQuery, OriginOfCandidateForMemoGroup, RequiredAccuracy,
     ValueSign,
 };
 pub use physical::{
-    output_references, producer_satisfies_physical_requirements, EvaluationGrid, ExecutionContext,
-    ExecutionContextId, Lifetime, PhysicalASAPMemoCandidates, PhysicalCandidate,
-    PhysicalCandidateId, PhysicalEdge, PhysicalEdgeId, PhysicalProperties, PhysicalPropertiesError,
-    StorageMedium,
+    anchor_is_evaluation_time, output_references, producer_satisfies_physical_requirements,
+    queries_of_context, query_reads, ExecutionContext, ExecutionContextId, Lifetime,
+    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalEdge,
+    PhysicalEdgeId, PhysicalProperties, PhysicalPropertiesError, StorageMedium,
 };
 pub use pruning::{
     PruneCause, PruneReason, PrunedCandidate, PrunedLogicalCandidate, RootPruneReason,

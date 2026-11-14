@@ -13,42 +13,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use good_lp::{constraint, variable, Constraint, ProblemVariables, Variable};
 
-use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId};
-
 use super::model::SelectionInputs;
 use crate::selectable::QueryId;
-
-/// Whether query `query` must not read candidate `v`: it is not exact (it
-/// has sketch parameters θ) and its group is one the query may read only
-/// exactly. A readout's own candidate has no θ, but the sketch states it
-/// reads are in the same list, as every group below a listed one is.
-///
-/// Example: `quantile_over_time(0.9, m[5m])` at a relative target lists
-/// the quantile and every group below it; its KLL state builds (θ) are
-/// candidates it must not read, the exact quantile one it may.
-pub(crate) fn must_not_read(
-    physical: &PhysicalASAPMemoCandidates,
-    query: QueryId,
-    v: PhysicalCandidateId,
-) -> bool {
-    let logical = &physical.logical_candidates;
-    let id = physical.physical_candidates[v.0].logical_candidate_id;
-    logical
-        .exact_only_groups_of_query
-        .get(query.0)
-        .is_some_and(|groups| groups.contains(&id.group))
-        && logical
-            .memo
-            .candidate(id)
-            .logical_properties
-            .parameters()
-            .is_some()
-}
 
 /// $a_{q,e}$, added to `problem`, for each query $q$ and each execution $e$
 /// (by position in `SelectableExecutions::executions`) it may reach from
 /// its output executions over selectable edges (`y`) from which an
-/// execution it must not read ([`must_not_read`]) is reachable, less those
+/// execution it must not read
+/// (`LogicalASAPMemoCandidates::query_must_not_read`) is reachable, less those
 /// themselves. None for a query with no exact-only group.
 pub(crate) fn exact_only_variables(
     inputs: &SelectionInputs<'_>,
@@ -74,7 +46,11 @@ pub(crate) fn exact_only_variables(
             .map(|&position| edges[position].consumer)
     };
     let forbidden = |query: QueryId, e: usize| {
-        must_not_read(inputs.physical, query, selectable.executions()[e].candidate)
+        let v = selectable.executions()[e].candidate;
+        inputs.physical.logical_candidates.query_must_not_read(
+            query.0,
+            inputs.physical.physical_candidates[v.0].logical_candidate_id,
+        )
     };
     let queries: BTreeSet<QueryId> = selectable.answering().iter().map(|(q, _)| *q).collect();
     let mut tracked = BTreeMap::new();
@@ -111,7 +87,8 @@ pub(crate) fn exact_only_variables(
 /// candidates: $a_{q,e} \ge z_{q,e}$ for an output execution,
 /// $a_{q,p} \ge y_{\kappa,p,c,i} + a_{q,c} - 1$ along a selectable edge, so
 /// $a_{q,e} = 1$ on every execution $q$'s selected path reads; along an
-/// edge into an execution $p$ $q$ must not read ([`must_not_read`]),
+/// edge into an execution $p$ $q$ must not read
+/// (`LogicalASAPMemoCandidates::query_must_not_read`),
 /// $y_{\kappa,p,c,i} + a_{q,c} \le 1$. No $z_{q,e}$ exists for an output
 /// execution $q$ must not read (`crate::select_plan` leaves it out). Other
 /// queries may still read it, through their own paths. $a$ exists only
@@ -137,7 +114,10 @@ pub(crate) fn exact_only_constraints(
         let (consumer, producer) = (edge.consumer, edge.producer);
         for &(query, a_consumer) in readers.get(&consumer).into_iter().flatten() {
             let v = selectable.executions()[producer].candidate;
-            if must_not_read(inputs.physical, query, v) {
+            if inputs.physical.logical_candidates.query_must_not_read(
+                query.0,
+                inputs.physical.physical_candidates[v.0].logical_candidate_id,
+            ) {
                 constraints.push(constraint!(y + a_consumer <= 1));
             } else if let Some(&a_producer) = a.get(&(query, producer)) {
                 constraints.push(constraint!(a_producer >= y + a_consumer - 1));
