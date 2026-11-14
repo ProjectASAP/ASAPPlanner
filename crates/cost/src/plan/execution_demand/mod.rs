@@ -455,19 +455,42 @@ pub fn request_time_grid_ms(entry: &QueryWorkloadEntry, at: AtModifier) -> u64 {
 /// per execution of the context; Stage 3 and [`computations`] both cost it
 /// so): with no `anchor`, at every evaluation of theirs, a range query's
 /// steps each one ([`evaluation_rate`]); below a `TimeShift` anchored with
-/// `anchor` (`@ end()`, `@ start()`), once per distinct anchor time of
-/// their requests: a request's end, or its end less its range-evaluation
-/// span.
+/// `anchor`, once per request: below `@ end()` once per distinct request
+/// end; below `@ start()` once per distinct (request schedule, span), as
+/// two queries requested together with different spans need the input at
+/// two start times, and a result not kept across evaluations serves only
+/// the request it is computed for.
 ///
 /// Example: two range queries every 60 s at phase 0 with steps of 30 s,
-/// spans 1 h and 90 s, below `@ start()`: their requests start at
-/// `k · 60 s` and `k · 60 s + 30 s`, 2/60 per second; below `@ end()`
-/// both end at `k · 60 s`, 1/60 per second.
+/// spans 1 h and 2 m: below `@ start()` 2/60 per second (one run per
+/// request of each); below `@ end()` both end at `k · 60 s`, 1/60 per
+/// second.
 pub fn context_executions_per_second<'e>(
     anchor: Option<AtModifier>,
     queries: impl IntoIterator<Item = &'e QueryWorkloadEntry>,
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<f64, AnalyticalCostError> {
+    let queries: Vec<&QueryWorkloadEntry> = queries.into_iter().collect();
+    if anchor == Some(AtModifier::Start) {
+        // One run per request of each distinct (schedule, span).
+        let mut runs: Vec<(&QueryRecurrence, Option<u64>)> = Vec::new();
+        let mut rate = 0.0;
+        for entry in queries {
+            let key = (
+                &entry.recurrence,
+                entry.range_evaluation.map(|range| range.span_ms),
+            );
+            if runs.contains(&key) {
+                continue;
+            }
+            runs.push(key);
+            rate += evaluation_rate(
+                [(&anchored_request_recurrence(entry, AtModifier::Start), None)],
+                non_repeating_query_horizon_seconds,
+            )?;
+        }
+        return Ok(rate);
+    }
     let per_evaluation: Vec<(QueryRecurrence, Option<RangeEvaluation>)> = queries
         .into_iter()
         .map(|entry| match anchor {

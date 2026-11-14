@@ -356,9 +356,11 @@ fn a_shared_one_evaluation_at_end_shift_runs_its_input_once_per_request() {
 /// Two range queries every 60 s at a 30 s step, over 1 h and over 90 s,
 /// below one `@ start()` shift: one context (one evaluation grid, one
 /// anchor), whose requests start at `k · 60 s` and `k · 60 s + 30 s`: the
-/// input runs 2/60 per second.
+/// input runs 2/60 per second. Over 1 h and over 2 m, both start at
+/// `k · 60 s` but at different times of one request: still 2/60. The same
+/// query twice runs once.
 #[test]
-fn at_start_inputs_run_once_per_distinct_request_start() {
+fn at_start_inputs_run_once_per_request_of_each_span() {
     let with_span = |span_ms| QueryWorkloadEntry {
         query: asap_types::workload::Query("q".into()),
         requirements: Default::default(),
@@ -382,6 +384,16 @@ fn at_start_inputs_run_once_per_distinct_request_start() {
     }
     close(
         context_executions_per_second(Some(AtModifier::End), &entries, 3600.0).unwrap(),
+        1.0 / 60.0,
+    );
+    let same_start = [with_span(3_600_000), with_span(120_000)];
+    close(
+        context_executions_per_second(Some(AtModifier::Start), &same_start, 3600.0).unwrap(),
+        2.0 / 60.0,
+    );
+    let twice = [with_span(120_000), with_span(120_000)];
+    close(
+        context_executions_per_second(Some(AtModifier::Start), &twice, 3600.0).unwrap(),
         1.0 / 60.0,
     );
 }
