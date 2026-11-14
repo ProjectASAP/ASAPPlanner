@@ -6,14 +6,15 @@ use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
 use asap_types::ir::{ExprSemantics, NonASAPOp, Operator, Predicate};
-use asap_types::stages::{MemoQuery, RootPruneReason};
+use asap_types::stages::{MemoQuery, RootPruneReason, ValueSign};
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
 use asap_types::test_support::memo_builders::{
     estimate, group, own_candidate, quantile_over_time, quantile_over_time_readouts, query,
     scan_group, QuantileReadout, QuantileReadouts,
 };
 use asap_types::test_support::memo_fixtures::{arithmetic, compare, range};
-use asap_types::workload::DataWorkload;
+use asap_types::workload::{DataWorkload, SourceFacts};
+use std::collections::BTreeMap;
 
 fn error_metrics(memo: &Memo) -> ErrorMetricsOfMemo {
     ErrorMetricsOfMemo::of(memo, &memo.topological_order().expect("acyclic"))
@@ -201,11 +202,10 @@ fn a_key_only_filter_keeps_the_ddsketch_readout_admissible() {
     assert!(result.is_ok(), "{result:?}");
 }
 
-/// `avg` has an absolute contract only here; a relative bound on a
-/// mean needs the values' signs. So
-/// `avg(quantile_over_time(0.99, m[5m]))` with a relative target cuts
-/// the edges from the sketch readouts into the `avg`: it reads the
-/// exact quantile only.
+/// A relative bound on a mean needs its values' signs, and `m`'s are
+/// not declared. So `avg(quantile_over_time(0.99, m[5m]))` with a
+/// relative target cuts the edges from the sketch readouts into the
+/// `avg`: it reads the exact quantile only.
 #[test]
 fn avg_of_readouts_under_a_relative_target_reads_exact_only() {
     let mut memo = Memo::new(&DataWorkload::default());
@@ -235,6 +235,60 @@ fn avg_of_readouts_under_a_relative_target_reads_exact_only() {
     }
     let result = edge(&memo, own_candidate(p99.result), own_candidate(avg), 0);
     assert!(result.is_ok(), "{result:?}");
+}
+
+/// `avg(quantile_over_time(0.99, m[5m]))` with a relative target, where
+/// `m` is declared non-negative or non-positive: a 0.99-quantile of
+/// values of one sign has that sign, so the `avg` aggregates values of
+/// one sign and carries their relative error with factor 1. The
+/// DDSketch readout's edge into the `avg` holds; the KLL readout's
+/// rank error is still cut.
+#[test]
+fn avg_of_readouts_of_values_of_one_sign_keeps_the_ddsketch_edge() {
+    for sign in [ValueSign::NonNegative, ValueSign::NonPositive] {
+        let data = DataWorkload {
+            sources: BTreeMap::from([(
+                "m".to_string(),
+                SourceFacts {
+                    column_signs: BTreeMap::from([("value".to_string(), sign)]),
+                    ..SourceFacts::default()
+                },
+            )]),
+            ..DataWorkload::default()
+        };
+        let mut memo = Memo::new(&data);
+        let p99 = quantile_readouts(&mut memo, 0.99);
+        let avg = group(
+            &mut memo,
+            Operator::NonASAP(NonASAPOp::Aggregate {
+                child: p99.result,
+                reduction: Reduction::by(vec![]),
+                measures: vec![AggIntent::Avg { col: None }],
+                output_names: vec!["avg".into()],
+                filters: vec![None],
+                having: None,
+            }),
+        );
+        let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
+        query(&mut memo, avg, Some(target));
+        for readout in &p99.by_algorithm {
+            let result = readout_edge(&memo, readout, own_candidate(avg), 0);
+            match readout.algorithm {
+                SketchAlgorithm::DDSketch => assert!(result.is_ok(), "{sign:?}: {result:?}"),
+                _ => assert!(
+                    matches!(
+                        result,
+                        Err(RootPruneReason::MetricRule {
+                            producer_metric: AccuracyMetric::Rank,
+                            ..
+                        })
+                    ),
+                    "{sign:?}: {:?} {result:?}",
+                    readout.algorithm
+                ),
+            }
+        }
+    }
 }
 
 /// A scalar root's operands are roots: `scalar(v)` returns the value
