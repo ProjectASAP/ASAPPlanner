@@ -63,6 +63,7 @@ impl<V, S> Default for PhysicalDAG<'_, V, S> {
     }
 }
 impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> PhysicalDAG<'a, V, S> {
+    /// Add node `id`, reading `inputs`, run by its plan `lifetime`.
     pub fn add(
         &mut self,
         id: NodeId,
@@ -72,6 +73,7 @@ impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> PhysicalDAG<'a, V, S> {
     ) -> Result<(), Error> {
         self.add_boxed(id, inputs, Box::new(operator), lifetime)
     }
+    /// [`Self::add`] with an already boxed operator.
     pub fn add_boxed(
         &mut self,
         id: NodeId,
@@ -167,7 +169,10 @@ impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> PhysicalDAG<'a, V, S> {
             .collect())
     }
     /// A query run: one output stream per root, which the caller may drain
-    /// in any order.
+    /// in any order. Rejects an ingestion scope (run it with
+    /// [`Self::execute_ingestion`]), and a computed node with
+    /// `Lifetime::None` and more than one consumer at one evaluation time (a
+    /// planner bug), before any operator starts.
     pub fn execute<'r>(
         &'r self,
         roots: &[NodeId],
@@ -179,7 +184,8 @@ impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> PhysicalDAG<'a, V, S> {
         crate::runtime::execute(self, roots, context)
     }
     /// An ingestion run: one future that resolves to every root's batches,
-    /// in `roots` order, for the caller to write.
+    /// in `roots` order, for the caller to write. Rejects a query scope (run
+    /// it with [`Self::execute`]).
     pub fn execute_ingestion<'r>(
         &'r self,
         roots: &[NodeId],
