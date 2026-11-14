@@ -235,7 +235,7 @@ mod tests {
                 left: ColumnRef::Named("x".into()),
                 right: ColumnRef::Named("y".into()),
             }],
-            output_names: vec![],
+            output_names: vec![String::new()],
             filters: vec![],
             having: None,
             child: Rc::new(src("m")),

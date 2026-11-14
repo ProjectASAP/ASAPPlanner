@@ -402,7 +402,7 @@ impl<I: OperatorInput> ASAPOp<I> {
                         child: source.clone(),
                         reduction: Reduction::Reduce(keys),
                         measures: vec![measure],
-                        output_names: vec![],
+                        output_names: vec![String::new()],
                         filters: vec![],
                         having: None,
                     }
@@ -850,7 +850,7 @@ fn finalized_schema<J: OperatorInput>(
                         child: source.clone(),
                         reduction: reduction.clone(),
                         measures: vec![measure],
-                        output_names: vec![],
+                        output_names: vec![String::new()],
                         // A filtered SUM/MIN/MAX is NULL for a
                         // group without a matching row.
                         filters: vec![filter.clone()],

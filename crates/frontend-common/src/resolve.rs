@@ -1252,7 +1252,7 @@ mod tests {
         let unresolved = UnresolvedOp::Aggregate {
             reduction: Reduction::by(vec![ColumnRef::Named("job".into())]),
             measures: vec![AggIntent::Sum { col: None }],
-            output_names: vec![],
+            output_names: vec![String::new()],
             filters: vec![],
             having: None,
             child: Rc::new(UnresolvedOp::BinaryOp {
@@ -1413,7 +1413,7 @@ mod tests {
         let inner = UnresolvedOp::Aggregate {
             reduction: Reduction::by(vec![ColumnRef::Named("group".into())]),
             measures: vec![AggIntent::Sum { col: None }],
-            output_names: vec![],
+            output_names: vec![String::new()],
             filters: vec![],
             having: None,
             child: Rc::new(scan("m")),
@@ -1421,7 +1421,7 @@ mod tests {
         let outer = UnresolvedOp::Aggregate {
             reduction: Reduction::by(vec![ColumnRef::Named("job".into())]),
             measures: vec![AggIntent::Sum { col: None }],
-            output_names: vec![],
+            output_names: vec![String::new()],
             filters: vec![],
             having: None,
             child: Rc::new(inner),

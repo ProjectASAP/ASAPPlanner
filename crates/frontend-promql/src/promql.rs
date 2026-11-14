@@ -1100,7 +1100,9 @@ impl PromqlLowerer<'_> {
                         // whole input into one ordering, never per-entity).
                         reduction: Reduction::Reduce(keys.into()),
                         measures: vec![AggIntent::TopK { k: k as usize }],
-                        output_names: vec![],
+                        // One empty name per measure keeps the intent-keyed
+                        // default (`topk_{k}`), as in `outer_aggregate`.
+                        output_names: vec![String::new()],
                         filters: vec![],
                         having: None,
                         child: Rc::new(base),

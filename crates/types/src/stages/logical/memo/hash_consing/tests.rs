@@ -279,7 +279,7 @@ fn equal_keyless_expressions_that_return_the_same_rows_are_one_group() {
             Operator::NonASAP(NonASAPOp::Aggregate {
                 reduction: Reduction::Reduce(GroupKeys::without(vec![0])),
                 measures: vec![AggIntent::Count],
-                output_names: vec![],
+                output_names: vec![String::new()],
                 filters: vec![],
                 having: None,
                 child,

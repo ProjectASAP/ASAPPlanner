@@ -80,8 +80,8 @@ pub enum NonASAPOp<C = Rc<OperatorNode>> {
     Aggregate {
         reduction: Reduction,
         measures: Vec<AggIntent>,
-        /// Output column names parallel to `measures`; an empty entry falls
-        /// back to the intent's synthetic name.
+        /// Output column names, exactly one entry per measure; an empty
+        /// string means the default name (the intent's synthetic name).
         #[serde(default)]
         output_names: Vec<String>,
         #[serde(default)]
@@ -1080,11 +1080,19 @@ impl<I: OperatorInput> NonASAPOp<I> {
                 child,
                 filters,
                 measures,
+                output_names,
                 having,
                 reduction,
-                ..
             } => {
                 no_state(child, "Aggregate")?;
+                // One name per measure; an empty name keeps the default.
+                if output_names.len() != measures.len() {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(format!(
+                        "aggregate output names differ from measures: {} output names for {} measures",
+                        output_names.len(),
+                        measures.len()
+                    )));
+                }
                 if let Reduction::Reduce(keys) = reduction {
                     columns(keys.keys(), child.schema())?;
                 }
@@ -1427,7 +1435,7 @@ mod tests {
         NonASAPOp::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Rate],
-            output_names: vec![],
+            output_names: vec![String::new()],
             filters: vec![],
             having: None,
             child: node(child),
@@ -1651,7 +1659,7 @@ mod tests {
         let agg = NonASAPOp::Aggregate {
             reduction: Reduction::Reduce(GroupKeys::without(vec![2])),
             measures: vec![AggIntent::Sum { col: None }],
-            output_names: vec![],
+            output_names: vec![String::new()],
             filters: vec![],
             having: None,
             child: node(leaf),
@@ -1693,7 +1701,7 @@ mod tests {
             let reduced = NonASAPOp::Aggregate {
                 reduction: Reduction::PerEntity,
                 measures: vec![measure],
-                output_names: vec![],
+                output_names: vec![String::new()],
                 filters: vec![],
                 having: None,
                 child: node(NonASAPOp::TimeRange {
@@ -1723,7 +1731,7 @@ mod tests {
         let sum_by_job = NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }],
-            output_names: vec![],
+            output_names: vec![String::new()],
             filters: vec![],
             having: None,
             child: node(rate),
