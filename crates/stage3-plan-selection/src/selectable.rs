@@ -22,14 +22,18 @@
 //!   on the grid of the request end (start) times, once per request of a
 //!   range query, in a context of its own per anchor: a request's start,
 //!   its end and an evaluation are different times, so their results are
-//!   not shared.
+//!   not shared. An `@ end()` read by an instant query is anchored at its
+//!   evaluation time, so its input runs in the evaluation context
+//!   (`asap_cost::plan::execution_demand::anchor_is_evaluation_time`).
 //! - An input of a consumer in $\kappa$ reads a producer, over an admissible
 //!   edge, only where the producer delivers on $\kappa$
 //!   (`PhysicalCandidate::delivers_on`).
 
 use std::collections::BTreeSet;
 
-use asap_cost::plan::execution_demand::{evaluation_grid_ms, request_time_grid_ms};
+use asap_cost::plan::execution_demand::{
+    anchor_is_evaluation_time, evaluation_grid_ms, request_time_grid_ms,
+};
 use asap_types::ir::operator::AtModifier;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{NonASAPOp, Operator, QueryRoot};
@@ -244,7 +248,8 @@ impl SelectableExecutions {
     /// `@ end()` or `@ start()` in an evaluation context, a context of its
     /// own per anchor, on the grid of its queries' request end (start)
     /// times: a request's start and end, and an evaluation, are different
-    /// times; else the consumer's own context.
+    /// times (unless the anchor is the queries' evaluation time,
+    /// `anchor_is_evaluation_time`); else the consumer's own context.
     fn input_context(
         &mut self,
         physical: &PhysicalASAPMemoCandidates,
@@ -288,6 +293,9 @@ impl SelectableExecutions {
             })
             .map(|&query| QueryId(query))
             .collect();
+        if anchor_is_evaluation_time(at, queries.iter().map(|query| &entries[query.0])) {
+            return consumer.context;
+        }
         let period_ms = queries.iter().fold(0, |period_ms, query| {
             greatest_common_divisor(period_ms, request_time_grid_ms(&entries[query.0], at))
         });
