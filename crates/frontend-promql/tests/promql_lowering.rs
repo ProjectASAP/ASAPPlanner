@@ -586,6 +586,38 @@ fn topk_over_count_is_heavy_hitter_topk() {
     assert!(matches!(child.expect_non_asap(), NonASAPOp::Scan { .. }));
 }
 
+/// Issue #1303: a counter ranking keeps its `TopK` aggregate, and every
+/// aggregate it lowers to names each measure (the executor rejects a
+/// mismatch at install time).
+#[test]
+fn topk_over_counter_rate_names_every_aggregate_measure() {
+    for query in [
+        "topk by (region) (4, increase(data_total[5m]))",
+        "topk by (region) (4, rate(data_total[20m]))",
+    ] {
+        let qe = lower(query);
+        let NonASAPOp::Aggregate { measures, .. } = qe.expect_non_asap() else {
+            panic!("expected Aggregate with TopK for {query:?}, got {qe:?}");
+        };
+        assert!(matches!(measures.as_slice(), [AggIntent::TopK { k: 4 }]));
+        let mut aggregates = 0;
+        let mut pending = vec![qe.clone()];
+        while let Some(node) = pending.pop() {
+            if let Some(NonASAPOp::Aggregate {
+                measures,
+                output_names,
+                ..
+            }) = node.non_asap()
+            {
+                aggregates += 1;
+                assert_eq!(output_names.len(), measures.len(), "{query:?}: {node:?}");
+            }
+            pending.extend(node.children().into_iter().cloned());
+        }
+        assert!(aggregates >= 2, "{query:?}: TopK over the rate aggregate");
+    }
+}
+
 #[test]
 fn topk_over_sum_is_value_weighted_heavy_hitter_topk() {
     let qe = lower(r#"topk by (service) (5, sum_over_time(requests{env="prod"}[1m]))"#);

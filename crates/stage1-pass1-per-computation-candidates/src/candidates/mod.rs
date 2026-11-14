@@ -376,9 +376,7 @@ fn single_measure_part(
         child: input,
         reduction: reduction.clone(),
         measures: vec![measures[index].clone()],
-        output_names: output_names
-            .get(index)
-            .map_or_else(Vec::new, |name| vec![name.clone()]),
+        output_names: vec![output_names.get(index).cloned().unwrap_or_default()],
         filters: filters
             .get(index)
             .cloned()

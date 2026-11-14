@@ -25,8 +25,8 @@ fn aggregate(measures: Vec<AggIntent>) -> QueryRoot {
     });
     QueryRoot::Operator(node(NonASAPOp::Aggregate {
         reduction: Reduction::by(vec![]),
+        output_names: vec![String::new(); measures.len()],
         measures,
-        output_names: vec![],
         filters: vec![],
         having: None,
         child: scan,
@@ -120,7 +120,7 @@ fn a_per_entity_count_states_its_value_column_not_its_last_column() {
     let count = node(NonASAPOp::Aggregate {
         reduction: Reduction::PerEntity,
         measures: vec![AggIntent::Count],
-        output_names: vec![],
+        output_names: vec![String::new()],
         filters: vec![],
         having: None,
         child: scan,

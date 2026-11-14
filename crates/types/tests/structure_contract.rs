@@ -38,6 +38,26 @@ fn retained_result_kind_is_checked() {
     node.result_kind = OperatorResultKind::RangeVector;
     assert!(Rc::new(node).validate_structure().is_err());
 }
+/// An aggregate names each measure (an empty name keeps the default), so a
+/// plan whose names and measures differ is refused before installation
+/// (issue #1303).
+#[test]
+fn aggregate_output_names_match_measures() {
+    use asap_types::ir::operator::{AggIntent, Reduction};
+    use asap_types::test_support::forwarders::validate_non_asap_inputs;
+    let aggregate = |output_names: Vec<String>| NonASAPOp::Aggregate {
+        reduction: Reduction::by(vec![]),
+        measures: vec![AggIntent::Sum { col: Some(0) }],
+        output_names,
+        filters: vec![],
+        having: None,
+        child: scan(),
+    };
+    assert!(validate_non_asap_inputs(&aggregate(vec![String::new()])).is_ok());
+    assert!(validate_non_asap_inputs(&aggregate(vec!["total".into()])).is_ok());
+    assert!(validate_non_asap_inputs(&aggregate(vec![])).is_err());
+    assert!(validate_non_asap_inputs(&aggregate(vec![String::new(), String::new()])).is_err());
+}
 /// Values validates arity and declared nullability without inventing columns.
 #[test]
 fn values_contract_is_checked() {

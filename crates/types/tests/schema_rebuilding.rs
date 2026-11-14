@@ -32,7 +32,7 @@ fn aggregate(child: Rc<OperatorNode>, asap: bool) -> Rc<OperatorNode> {
             child,
             reduction: Reduction::by(vec![0]),
             measures: vec![AggIntent::Sum { col: Some(1) }],
-            output_names: vec![],
+            output_names: vec![String::new()],
             filters: vec![],
             having: None,
         })

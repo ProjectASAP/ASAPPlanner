@@ -130,7 +130,7 @@ mod tests {
         node(NonASAPOp::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![AggIntent::Quantile { col, q }],
-            output_names: vec![],
+            output_names: vec![String::new()],
             filters: vec![],
             having: None,
             child: scan(),
@@ -256,7 +256,7 @@ mod tests {
         let sum_up = node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![1]),
             measures: vec![AggIntent::Sum { col: Some(2) }],
-            output_names: vec![],
+            output_names: vec![String::new()],
             filters: vec![],
             having: None,
             child: scan(),

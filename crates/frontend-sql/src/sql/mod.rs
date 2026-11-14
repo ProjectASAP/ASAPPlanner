@@ -1013,7 +1013,8 @@ impl<'a> SqlLowerer<'a> {
         Ok(Unresolved::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![intent],
-            output_names: vec![],
+            // One empty name per measure keeps the intent-keyed default.
+            output_names: vec![String::new()],
             filters: vec![],
             having: None,
             child: Rc::new(child),

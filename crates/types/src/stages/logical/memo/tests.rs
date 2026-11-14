@@ -172,7 +172,7 @@ fn find_or_add_group_returns_an_error_for_an_expression_with_no_schema() {
     let out_of_range = Operator::NonASAP(NonASAPOp::Aggregate {
         reduction: Reduction::by(vec![9]),
         measures: vec![crate::ir::operator::agg_intent::AggIntent::Sum { col: Some(1) }],
-        output_names: vec![],
+        output_names: vec![String::new()],
         filters: vec![],
         having: None,
         child: g1,

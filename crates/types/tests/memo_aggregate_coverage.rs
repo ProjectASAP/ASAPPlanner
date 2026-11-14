@@ -557,7 +557,7 @@ fn an_exact_aggregate_has_coverage() {
         Operator::NonASAP(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![JOB]),
             measures: vec![AggIntent::Sum { col: Some(1) }],
-            output_names: vec![],
+            output_names: vec![String::new()],
             filters: vec![],
             having: None,
             child,

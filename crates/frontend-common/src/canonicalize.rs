@@ -280,7 +280,8 @@ fn try_promote_additive_top_ranking(
     OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(NonASAPOp::Aggregate {
         reduction: Reduction::by(partition),
         measures: vec![AggIntent::TopK { k: *k }],
-        output_names: Vec::new(),
+        // One empty name per measure keeps the default `topk_{k}`.
+        output_names: vec![String::new()],
         filters: vec![],
         having: None,
         child: Rc::clone(agg_node),
@@ -576,7 +577,7 @@ mod tests {
         node(NonASAPOp::Aggregate {
             reduction,
             measures: vec![agg],
-            output_names: vec![],
+            output_names: vec![String::new()],
             filters: vec![],
             having: None,
             child,
@@ -685,7 +686,7 @@ mod tests {
             let filtered = node(NonASAPOp::Aggregate {
                 reduction: Reduction::by(vec![1]),
                 measures: vec![count()],
-                output_names: vec![],
+                output_names: vec![String::new()],
                 filters: vec![Some(filter)],
                 having: None,
                 child: scan(),
