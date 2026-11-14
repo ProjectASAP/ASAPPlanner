@@ -21,7 +21,7 @@ use asap_types::ir::scalar::{ColumnRef, ProjectItem};
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{
     ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, Operator, OperatorResultKind, Predicate,
-    ScalarExpr,
+    ScalarExpr, TimeRangeKind,
 };
 use asap_types::stages::{Memo, MemoGroupId, ValueSign};
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
@@ -359,8 +359,11 @@ fn a_top_k_ranks_values_of_its_inputs_sign() {
 
 /// `depends_on_evaluation_time`: a `TimeRange` reads the window before the
 /// evaluation time, `now()` reads it directly, and everything above them
-/// depends on it, unless `@ T` pins the subtree; `@ end()` does not pin it
-/// to a fixed time.
+/// depends on it. `@ T` pins only its own time: a `TimeRange` directly over
+/// `@ T` reads a fixed window, and `@ T` over an `@ end()`, `now()` or
+/// `time()` still depends, since those are not pinned by it. `@ end()` does
+/// not pin a subtree to a fixed time. A `Scan` reads no time: whether its
+/// data arrives is `PhysicalCandidate::delivers_on`'s check.
 ///
 /// | Group | Expression | Depends |
 /// |---|---|---|
@@ -372,6 +375,17 @@ fn a_top_k_ranks_values_of_its_inputs_sign() {
 /// | G6 | `SummaryAgg[KLL](G5)` | no |
 /// | G7 | `TimeShift(@ end(), offset 1m)(G3)` | yes |
 /// | G8 | `Filter(ts > now())(G1)` | yes |
+/// | G9 | `TimeShift(@ T)(G8)` | yes |
+/// | G10 | `TimeShift(@ T)(G1)`: `latency @ T` below its range | no |
+/// | G11 | `latency[5m] @ T` = `TimeRange(5m)(G10)` | no |
+/// | G12 | `sum_over_time(G11)` | no |
+/// | G13 | `latency @ T` = `TimeRange(instant)(G10)` | no |
+/// | G14 | `rate(latency[5m])` | yes |
+/// | G15 | `TimeShift(@ end())(G14)` | yes |
+/// | G16 | `G15[10m:1m]` (a subquery) | yes |
+/// | G17 | `TimeShift(@ T)(G16)`: `(rate(latency[5m] @ end()))[10m:1m] @ T` | yes |
+/// | G18 | `TimeShift(@ T2)(max_over_time(G17)[1h:5m])`: the `@ end()` stays unpinned | yes |
+/// | G19 | `TimeShift(@ T2)(G12[1h:5m])`: everything below is pinned | no |
 #[test]
 fn a_result_depends_on_the_evaluation_time_under_a_time_range_or_now() {
     let mut memo = memo();
@@ -409,6 +423,63 @@ fn a_result_depends_on_the_evaluation_time_under_a_time_range_or_now() {
             g1,
         ),
     );
+    let at_t = || Some(AtModifier::Timestamp(1_700_000_000_000));
+    let g9 = add(&mut memo, shift(0, at_t(), g8));
+    let g10 = add(&mut memo, shift(0, at_t(), g1));
+    let g11 = add(&mut memo, range(5 * MINUTE_MS, g10));
+    let g12 = add(
+        &mut memo,
+        aggregate(
+            Reduction::PerEntity,
+            AggIntent::Sum { col: Some(VALUE) },
+            g11,
+        ),
+    );
+    let g13 = add(
+        &mut memo,
+        Operator::NonASAP(NonASAPOp::TimeRange {
+            range: std::time::Duration::from_secs(300),
+            kind: TimeRangeKind::Instant,
+            child: g10,
+        }),
+    );
+    let g14_range = add(&mut memo, range(5 * MINUTE_MS, g1));
+    let g14 = add(
+        &mut memo,
+        aggregate(Reduction::PerEntity, AggIntent::Rate, g14_range),
+    );
+    let g15 = add(&mut memo, shift(0, Some(AtModifier::End), g14));
+    let g16 = add(
+        &mut memo,
+        Operator::NonASAP(NonASAPOp::PromqlSubquery {
+            range: std::time::Duration::from_secs(600),
+            resolution: Some(std::time::Duration::from_secs(60)),
+            child: g15,
+        }),
+    );
+    let g17 = add(&mut memo, shift(0, at_t(), g16));
+    let max_over_g17 = add(
+        &mut memo,
+        aggregate(
+            Reduction::PerEntity,
+            AggIntent::Max { col: Some(VALUE) },
+            g17,
+        ),
+    );
+    let at_t2 = || Some(AtModifier::Timestamp(1_700_003_600_000));
+    let mut hourly_subquery_at_t2 = |child| {
+        let subquery = add(
+            &mut memo,
+            Operator::NonASAP(NonASAPOp::PromqlSubquery {
+                range: std::time::Duration::from_secs(3_600),
+                resolution: Some(std::time::Duration::from_secs(300)),
+                child,
+            }),
+        );
+        add(&mut memo, shift(0, at_t2(), subquery))
+    };
+    let g18 = hourly_subquery_at_t2(max_over_g17);
+    let g19 = hourly_subquery_at_t2(g12);
     for (group, expected) in [
         (g1, false),
         (g2, false),
@@ -418,6 +489,17 @@ fn a_result_depends_on_the_evaluation_time_under_a_time_range_or_now() {
         (g6, false),
         (g7, true),
         (g8, true),
+        (g9, true),
+        (g10, false),
+        (g11, false),
+        (g12, false),
+        (g13, false),
+        (g14, true),
+        (g15, true),
+        (g16, true),
+        (g17, true),
+        (g18, true),
+        (g19, false),
     ] {
         assert_eq!(depends(&memo, group), expected, "{group:?}");
     }

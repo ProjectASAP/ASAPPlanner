@@ -63,7 +63,8 @@ pub(super) fn ingestion_time_offered_per_group(
 /// Per group, by `MemoGroupId`: whether level 4 offers its candidates
 /// `AcrossEvaluations`. It does for a chain, for a group evaluated on a
 /// known grid (`evaluation_grid_of_group`) and for a time-independent
-/// group (its one result is stored as is and readable at any time), unless
+/// group (its stored result is read wherever it is final,
+/// `PhysicalCandidate::delivers_on`), unless
 /// the group is read under an absolute `@ T`
 /// ([`read_at_absolute_time_per_group`]).
 pub(super) fn across_evaluations_offered_per_group(

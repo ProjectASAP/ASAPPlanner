@@ -30,8 +30,9 @@ use crate::test_fixtures::{
 /// the readout) run only at query time; on the 60 s grid they may be
 /// materialized across evaluations. The scan and the chain are
 /// time-independent, so ingestion time is offered too, and so is
-/// `AcrossEvaluations` without a grid: their one result is readable at any
-/// time. A summary build is not offered (IT, None): fed at ingestion time
+/// `AcrossEvaluations` without a grid: kept up to date at ingestion time,
+/// their result is final at any time (`PhysicalCandidate::delivers_on`). A
+/// summary build is not offered (IT, None): fed at ingestion time
 /// it keeps its state, so the chain is offered (IT, AcrossEvaluations)
 /// only; the scan's (IT, None) feeds the chain built at ingestion time.
 #[test]

@@ -81,12 +81,16 @@ pub struct GroupProperties {
     /// Per output column, in schema order: the sign of its values, from the
     /// input groups' and, for a `Scan`, the declared ones.
     pub column_signs: Vec<ValueSign>,
-    /// Whether the result changes with the evaluation time: true for a
-    /// group under a `TimeRange` relative to the evaluation time
-    /// (`sum_over_time(m[5m])`) or reading it (`time()`, `now()`), false
-    /// for one under a fixed `@ T` or reading no time. A result that does
-    /// not depend on it is the same at every evaluation, so a stored copy
-    /// delivers on every grid.
+    /// Whether the result reads a time relative to the evaluation time:
+    /// true for a group under a `TimeRange` relative to it
+    /// (`sum_over_time(m[5m])`), reading `time()` or `now()`, or under an
+    /// `@ start()`/`@ end()` over a subtree that depends on it, also under
+    /// an `@ T`, which pins only its own time; false for a window pinned by `@ T` (`sum_over_time(m[5m] @
+    /// T)`) or a group reading no time (a `Scan`, `count(*)` over it). It
+    /// says nothing about whether rows keep arriving: a result that does
+    /// not depend on the evaluation time is final, the same at every
+    /// evaluation, only once its rows no longer change
+    /// ([`PhysicalCandidate::delivers_on`](crate::stages::PhysicalCandidate::delivers_on)).
     pub depends_on_evaluation_time: bool,
     /// What an aggregate group covers: a summary state, a chain, a
     /// `TimeRange`/`TimeShift` over a chain or a merge over one, or an exact
@@ -177,37 +181,103 @@ pub(super) fn derive_group_properties(
 }
 
 /// Whether `operator`'s result changes with the evaluation time: a
-/// `TimeRange` reads the window before it, and `time()` or `now()` read it
-/// directly; `@ T` pins its subtree to T. Any other operator depends on it
-/// when an input group does.
+/// `TimeRange` reads the window before it, and `time()` and `now()` read it
+/// directly. An `@ start()`/`@ end()` depends on it when the subtree below
+/// it does. `@ T` pins only its own time: a `TimeRange` directly over a
+/// `TimeShift { at: Timestamp }` reads a fixed window, and `@ T` over a
+/// subtree that reads a time it does not pin
+/// ([`reads_time_not_pinned_by_at`]) still depends on it. Any other
+/// operator depends on it when an input group does. A `Scan` reads no time:
+/// whether its rows keep arriving is
+/// [`PhysicalCandidate::delivers_on`](crate::stages::PhysicalCandidate::delivers_on)'s
+/// check.
 fn depends_on_evaluation_time(operator: &Operator<MemoGroupAsInput<'_>>) -> bool {
-    fn reads_evaluation_time<C>(expr: &ScalarExpr<C>) -> bool {
-        matches!(
-            expr,
-            ScalarExpr::EvalTimestamp | ScalarExpr::CurrentTimestamp
-        ) || expr.children().into_iter().any(reads_evaluation_time)
+    match operator {
+        Operator::NonASAP(NonASAPOp::TimeRange { child, .. }) => {
+            !is_at_timestamp(&child.group().expression)
+                || child.group_properties().depends_on_evaluation_time
+        }
+        Operator::NonASAP(NonASAPOp::TimeShift { child, .. }) if is_at_timestamp(operator) => {
+            reads_time_not_pinned_by_at(child)
+        }
+        _ => {
+            reads_evaluation_time_in_scalars(operator)
+                || operator
+                    .children()
+                    .into_iter()
+                    .any(|input| input.group_properties().depends_on_evaluation_time)
+        }
     }
-    let reads_it = match operator {
-        Operator::NonASAP(NonASAPOp::TimeRange { .. }) => return true,
+}
+
+/// Whether `input`'s result reads a time no `@ T` above it pins: `now()`,
+/// `time()`, or an `@ start()`/`@ end()` over a subtree that depends on the
+/// evaluation time. It walks only
+/// into groups that depend on the evaluation time, and stops at any
+/// `TimeShift` with an `@`: an `@ start()`/`@ end()` that depends counts as
+/// such a read, and a nested `@ T2` already answered this in its own
+/// `depends_on_evaluation_time`.
+///
+/// Example: in `max_over_time((rate(x[5m] @ end()))[10m:1m] @ T)`, the walk
+/// from `@ T` goes through the subquery to `TimeShift(@ end())`, which
+/// depends: true. In `sum_over_time(x[5m] @ T)` the input of `@ T` is
+/// `Scan x`, which does not depend: false.
+fn reads_time_not_pinned_by_at(input: &MemoGroupAsInput<'_>) -> bool {
+    if !input.group_properties().depends_on_evaluation_time {
+        return false;
+    }
+    let expression = &input.group().expression;
+    match expression {
         Operator::NonASAP(NonASAPOp::TimeShift {
-            shift:
-                TimeShift {
-                    at: Some(AtModifier::Timestamp(_)),
-                    ..
-                },
+            shift: TimeShift { at: Some(_), .. },
             ..
-        }) => return false,
+        }) => true,
+        _ => {
+            reads_evaluation_time_in_scalars(expression)
+                || expression.children().into_iter().any(|&group_id| {
+                    reads_time_not_pinned_by_at(&MemoGroupAsInput {
+                        memo: input.memo,
+                        group_id,
+                    })
+                })
+        }
+    }
+}
+
+/// Whether `operator` is a `TimeShift` pinned at an absolute time: PromQL
+/// `@ <timestamp>`.
+fn is_at_timestamp<C>(operator: &Operator<C>) -> bool {
+    matches!(
+        operator,
+        Operator::NonASAP(NonASAPOp::TimeShift {
+            shift: TimeShift {
+                at: Some(AtModifier::Timestamp(_)),
+                ..
+            },
+            ..
+        })
+    )
+}
+
+/// Whether `operator`'s own scalar expressions read the evaluation time
+/// (`time()`) or the wall clock (`now()`): a non-ASAP operator's, or a
+/// summary build's filter.
+fn reads_evaluation_time_in_scalars<C>(operator: &Operator<C>) -> bool {
+    match operator {
         Operator::NonASAP(op) => op.scalar_exprs().into_iter().any(reads_evaluation_time),
         Operator::ASAP(
             ASAPOp::SummaryAgg { filter, .. } | ASAPOp::SummaryTumblingWindowChain { filter, .. },
         ) => filter.iter().any(|pred| reads_evaluation_time(&pred.0)),
         Operator::ASAP(_) => false,
-    };
-    reads_it
-        || operator
-            .children()
-            .into_iter()
-            .any(|input| input.group_properties().depends_on_evaluation_time)
+    }
+}
+
+/// Whether `expr` reads `time()` or `now()`.
+fn reads_evaluation_time<C>(expr: &ScalarExpr<C>) -> bool {
+    matches!(
+        expr,
+        ScalarExpr::EvalTimestamp | ScalarExpr::CurrentTimestamp
+    ) || expr.children().into_iter().any(reads_evaluation_time)
 }
 
 /// A memo group read as an operator's input: its `group_properties` and

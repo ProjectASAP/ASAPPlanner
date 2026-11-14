@@ -5,6 +5,7 @@ use crate::ir::properties::ExecutionTiming;
 use crate::ir::{ASAPOp, Operator};
 use crate::stages::{CandidateForMemoGroupId, ExecutionContext, PhysicalASAPMemoCandidates};
 use crate::stages::{Lifetime, PhysicalProperties};
+use crate::workload::DataArrival;
 
 /// Index into [`PhysicalASAPMemoCandidates::physical_candidates`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
@@ -28,10 +29,26 @@ impl PhysicalCandidate {
     /// context must be a time the producer has stored: for a chain
     /// (`SummaryTumblingWindowChain`) of width $w$, $w$ divides an
     /// evaluation grid's period and phase, or a refresh window's width and
-    /// phase; any other result is stored on its group's evaluation grid
+    /// phase. Any other result is stored on its group's evaluation grid
     /// (`evaluation_grid_of_group`), which must hold every time of the
-    /// context, unless the group does not depend on the evaluation time
-    /// (then it delivers on every context).
+    /// context, unless it is final: the same at every time it is read.
+    ///
+    /// Finality assumes no row arrives out of order: at evaluation time t,
+    /// every row with `ts <= t` has arrived and never changes (#1298 adds
+    /// a declared lateness). A stored result is final when its group does
+    /// not depend on the evaluation time
+    /// ([`GroupProperties::depends_on_evaluation_time`](crate::stages::GroupProperties::depends_on_evaluation_time))
+    /// and the rows it read never change after it is computed:
+    ///
+    /// | Result | Delivers on |
+    /// |---|---|
+    /// | kept up to date at ingestion time (`IngestionTime`) | every context |
+    /// | over data at rest (`DataArrival::AtRest`) or reading no source | every context |
+    /// | at query time, reading a time relative to its evaluation (`rate(x[5m])`, `@ end()`, `now()`) | its own grid |
+    /// | at query time over arriving rows, no time bound (SQL `count(*)`) | its own grid: never final |
+    /// | at query time over arriving rows, a window ending at E (`sum_over_time(x[5m] @ T)`, `ts BETWEEN a AND b`) | its own grid: final only from E on, and a context carries no absolute time to compare with E |
+    ///
+    /// `DataArrival::Unknown` counts as arriving.
     pub fn delivers_on(
         &self,
         candidates: &PhysicalASAPMemoCandidates,
@@ -55,10 +72,12 @@ impl PhysicalCandidate {
                     }) => Some(tumbling_window_width_ms),
                     _ => None,
                 };
-                let depends_on_evaluation_time = logical.memo.groups()[group.0 as usize]
-                    .group_properties
-                    .depends_on_evaluation_time;
-                if chain_width_ms.is_none() && !depends_on_evaluation_time {
+                let group_properties = &logical.memo.groups()[group.0 as usize].group_properties;
+                let final_at_every_time = !group_properties.depends_on_evaluation_time
+                    && (self.physical_properties.timing() == ExecutionTiming::IngestionTime
+                        || logical.memo.data_arrival() == DataArrival::AtRest
+                        || group_properties.scanned_sources.is_empty());
+                if chain_width_ms.is_none() && final_at_every_time {
                     return true;
                 }
                 let (period_ms, phase_ms) = match context {

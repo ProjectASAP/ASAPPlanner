@@ -23,7 +23,7 @@ use crate::stages::{
 };
 use crate::summary_type::SketchStatistic;
 use crate::workload::bounds::source_name;
-use crate::workload::{series_facts, DataWorkload, SourceFacts};
+use crate::workload::{series_facts, DataArrival, DataWorkload, SourceFacts};
 use hash_consing::{
     expression_hash, same_candidate, same_serialized_expression, serialized_expression,
 };
@@ -46,6 +46,9 @@ pub struct Memo {
     /// The data workload's facts per source (`DataWorkload::sources`), fixed
     /// at construction: a `Scan` group's column signs read them.
     pub(super) source_facts: BTreeMap<String, SourceFacts>,
+    /// The data workload's arrival (`DataWorkload::arrival`), fixed at
+    /// construction ([`Self::data_arrival`]).
+    data_arrival: DataArrival,
 }
 
 /// One query of the memo: its root over groups, its accuracy target and
@@ -65,14 +68,23 @@ pub struct MemoQuery {
 impl Memo {
     /// A memo without groups over the sources `data` describes: a `Scan`
     /// group's column signs are the ones `data` declares for its source
-    /// (`GroupProperties::column_signs`).
+    /// (`GroupProperties::column_signs`), and its arrival is `data`'s
+    /// ([`Self::data_arrival`]).
     pub fn new(data: &DataWorkload) -> Self {
         Self {
             groups: Vec::new(),
             queries: Vec::new(),
             groups_by_expression_hash: HashMap::new(),
             source_facts: data.sources.clone(),
+            data_arrival: data.arrival,
         }
+    }
+
+    /// How the data the memo's sources hold arrives
+    /// (`DataWorkload::arrival`): whether a stored result over them can
+    /// change after it was computed. `Unknown` counts as arriving.
+    pub fn data_arrival(&self) -> DataArrival {
+        self.data_arrival
     }
 
     /// The groups, by id.
