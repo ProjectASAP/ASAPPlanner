@@ -3,9 +3,11 @@ use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::scalar::CompareOpKind;
 use asap_types::ir::schema::{DataType, PROMQL_SERIES_IDENTITY};
 use asap_types::ir::{ExprSemantics, Predicate, ProjectItem};
+use asap_types::stages::ValueSign;
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
 use asap_types::test_support::memo_fixtures::{aggregate, arithmetic, compare, readout, scan};
-use asap_types::workload::DataWorkload;
+use asap_types::workload::{DataWorkload, SourceFacts};
+use std::collections::BTreeMap;
 
 /// Constant error contracts. A `Filter` whose
 /// predicate reads only columns copied from a source keeps or drops
@@ -284,4 +286,88 @@ fn error_contracts_of_a_ratio_a_count_and_a_sum() {
         ),
         None
     );
+}
+
+/// Over values of one sign, a relative error ε on each input is at most
+/// ε on their sum and on their mean: $|\sum_i (\hat{x}_i - x_i)| \le
+/// \varepsilon \sum_i |x_i| = \varepsilon |\sum_i x_i|$. A `sum` and an
+/// `avg` by `job` over a DDSketch 0.99-quantile readout of `latency`,
+/// and an exact sum accumulator over it, carry relative error with
+/// factor 1 when `latency` is declared non-negative or non-positive (the
+/// quantile keeps its sign); undeclared, its values may have both signs
+/// and they have none. A `sum` has no absolute contract either way (its
+/// errors add up), an `avg` has one with factor 1.
+#[test]
+fn sums_and_averages_carry_relative_error_over_values_of_one_sign() {
+    for sign in [
+        ValueSign::NonNegative,
+        ValueSign::NonPositive,
+        ValueSign::Unknown,
+    ] {
+        let data = DataWorkload {
+            sources: BTreeMap::from([(
+                "latency".to_string(),
+                SourceFacts {
+                    column_signs: BTreeMap::from([("value".to_string(), sign)]),
+                    ..SourceFacts::default()
+                },
+            )]),
+            ..DataWorkload::default()
+        };
+        let mut memo = Memo::new(&data);
+        let g1 = memo
+            .find_or_add_group(scan("latency", &[("job", DataType::Utf8)], vec![]))
+            .unwrap();
+        let state = memo
+            .find_or_add_group(Operator::ASAP(ASAPOp::SummaryAgg {
+                child: g1,
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::DDSketch),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::by(vec![2]),
+                filter: None,
+            }))
+            .unwrap();
+        let readout = memo
+            .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.99 }, state))
+            .unwrap();
+        let job = memo.groups()[readout.0 as usize]
+            .group_properties
+            .column_lineage
+            .iter()
+            .position(|l| matches!(l, ColumnLineage::SourceColumn(_)))
+            .expect("the readout keeps job");
+        let by_job = || Reduction::by(vec![job]);
+        let sum = aggregate(by_job(), AggIntent::Sum { col: None }, readout);
+        let avg = aggregate(by_job(), AggIntent::Avg { col: None }, readout);
+        let exact_sum = Operator::ASAP(ASAPOp::SummaryAgg {
+            child: readout,
+            summary_type: FieldDataType::exact(ExactKind::Sum),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: by_job(),
+            filter: None,
+        });
+        let factors = |consumer: &Operator<MemoGroupId>, metric| {
+            error_contract(&memo, consumer, metric).map(|contract| contract.error_factor_per_input)
+        };
+        let relative = (sign != ValueSign::Unknown).then(|| vec![1.0]);
+        for consumer in [&sum, &avg, &exact_sum] {
+            assert_eq!(
+                factors(consumer, AccuracyMetric::Relative),
+                relative,
+                "{sign:?}: {consumer:?}"
+            );
+            assert_eq!(factors(consumer, AccuracyMetric::Rank), None, "{sign:?}");
+        }
+        assert_eq!(factors(&sum, AccuracyMetric::ABSOLUTE), None, "{sign:?}");
+        assert_eq!(
+            factors(&exact_sum, AccuracyMetric::ABSOLUTE),
+            None,
+            "{sign:?}"
+        );
+        assert_eq!(
+            factors(&avg, AccuracyMetric::ABSOLUTE),
+            Some(vec![1.0]),
+            "{sign:?}"
+        );
+    }
 }

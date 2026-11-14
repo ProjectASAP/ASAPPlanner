@@ -119,13 +119,15 @@ keeps the metric: an input's error and the output's are in the same one.
 | `Aggregate` (or exact accumulator build) by keys copied from a source, without measure filters or `HAVING`: `count` | any | 0 | none |
 | the same: `min`, `max` | absolute, relative | 1 | none |
 | the same: `avg` | absolute | 1 | none |
+| the same: `sum`, `avg` (or exact sum accumulator) of values of one sign (`column_signs` non-negative or non-positive) | relative | 1 | none |
 | `+`, `-` | absolute | 1 | none |
 | `/` | relative | `1 / (1 - b)` on both | `b` on the denominator |
 | `*` | relative | `1 + b` on the left, 1 on the right | `b` on the right operand |
 
 `b` is `RELATIVE_OPERAND_VALIDITY_CAP` (0.1, the weakest error of every
 parameter list). Every other operator has no contract: a filter or grouping
-on a computed value, a ranking, a `sum`, a comparison, any other function.
+on a computed value, a ranking, a `sum` in absolute error or of values of
+unknown sign, a comparison, any other function.
 
 The contracts are used in three places:
 
