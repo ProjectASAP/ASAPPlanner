@@ -210,7 +210,14 @@ fn try_run(
     )
     .unwrap();
     operators.insert(300, (vec![merged], read));
-    let compiled = CompiledPhysicalDAG::from_operators(operators, vec![300]).unwrap();
+    let compiled = CompiledPhysicalDAG::from_operators(
+        operators
+            .into_iter()
+            .map(|(id, (inputs, operator))| (id, (inputs, operator, Lifetime::None)))
+            .collect(),
+        vec![300],
+    )
+    .unwrap();
     let dag = compiled
         .instantiate(Arc::new(InMemoryDataStore::default()))
         .unwrap();

@@ -17,13 +17,11 @@ pub enum Scope {
 }
 #[derive(Clone, Debug)]
 pub struct Limits {
-    pub max_buffered_batches: usize,
     pub max_bytes: usize,
 }
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_buffered_batches: 8,
             max_bytes: 64 * 1024 * 1024,
         }
     }
@@ -43,7 +41,7 @@ pub struct RunContext {
 }
 impl RunContext {
     pub fn new(scope: Scope, limits: Limits) -> Result<Self, Error> {
-        if limits.max_buffered_batches == 0 || limits.max_bytes == 0 {
+        if limits.max_bytes == 0 {
             return Err(Error::Invalid("execution limits must be positive".into()));
         }
         if matches!(&scope, Scope::Ingestion { window_start_ms, window_end_ms, .. } if window_start_ms > window_end_ms)

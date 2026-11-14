@@ -12,6 +12,7 @@ use planner_types::ir::scalar::ScalarValue;
 use planner_types::ir::schema::{DataType, Field, FieldDataType};
 use planner_types::ir::Predicate;
 use planner_types::ir::ScalarExpr;
+use planner_types::stages::Lifetime;
 use std::sync::Arc;
 
 fn schema(width: usize) -> SchemaRef {
@@ -33,10 +34,7 @@ fn context(max_bytes: usize) -> RunContext {
         Scope::Query {
             evaluation_time_ms: 0,
         },
-        Limits {
-            max_bytes,
-            ..Limits::default()
-        },
+        Limits { max_bytes },
     )
     .unwrap()
 }
@@ -50,6 +48,7 @@ fn source(n: usize) -> PhysicalDAG<'static, Batch, SchemaRef> {
             vec![Batch::try_new(schema(1), vec![vec![Value::Int64(1)]; n]).unwrap()],
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     dag
@@ -151,8 +150,13 @@ fn cooperative_sort_preserves_ties_across_chunks() {
     )
     .unwrap();
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], Operator::source(schema(2), vec![batch]).unwrap())
-        .unwrap();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(schema(2), vec![batch]).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
     dag.add(
         1,
         vec![0],
@@ -166,6 +170,7 @@ fn cooperative_sort_preserves_ties_across_chunks() {
             vec![],
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let mut output = dag
@@ -217,6 +222,7 @@ fn weighted_summary_build_yields_within_a_batch() {
             0,
             vec![],
             Operator::source(input.clone(), vec![batch]).unwrap(),
+            Lifetime::None,
         )
         .unwrap();
     let family = FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap);
@@ -266,6 +272,7 @@ fn frequency_dictionary_enforces_memory_budget() {
                 .unwrap()],
             )
             .unwrap(),
+            Lifetime::None,
         )
         .unwrap();
     for (reduction, succeeds) in [

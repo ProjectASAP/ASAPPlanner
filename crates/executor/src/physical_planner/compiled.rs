@@ -2,6 +2,7 @@
 use super::*;
 use crate::sources::{DataStore, Scan};
 use planner_types::plan::materialized_view::MaterializedView;
+use planner_types::stages::Lifetime;
 
 #[derive(Clone)]
 #[cfg_attr(any(test, feature = "test-support"), derive(serde::Serialize))]
@@ -14,6 +15,7 @@ enum Node {
     Operator {
         inputs: Vec<NodeId>,
         operator: Operator,
+        lifetime: Lifetime,
     },
 }
 
@@ -58,12 +60,12 @@ impl CompiledPhysicalDAG {
     /// Assemble already-lowered operators; leaves read no data store (for
     /// example [`Operator::source`] holds its rows).
     pub fn from_operators(
-        operators: BTreeMap<NodeId, (Vec<NodeId>, Operator)>,
+        operators: BTreeMap<NodeId, (Vec<NodeId>, Operator, Lifetime)>,
         roots: Vec<NodeId>,
     ) -> Result<Self, Error> {
         let mut result = Self::new(roots);
-        for (id, (inputs, operator)) in operators {
-            result.add(id, inputs, operator)?;
+        for (id, (inputs, operator, lifetime)) in operators {
+            result.add(id, inputs, operator, lifetime)?;
         }
         result.validate()?;
         Ok(result)
@@ -89,8 +91,16 @@ impl CompiledPhysicalDAG {
         id: NodeId,
         inputs: Vec<NodeId>,
         operator: Operator,
+        lifetime: Lifetime,
     ) -> Result<(), Error> {
-        self.insert(id, Node::Operator { inputs, operator })
+        self.insert(
+            id,
+            Node::Operator {
+                inputs,
+                operator,
+                lifetime,
+            },
+        )
     }
     fn insert(&mut self, id: NodeId, node: Node) -> Result<(), Error> {
         if self.nodes.insert(id, node).is_some() {
@@ -103,7 +113,9 @@ impl CompiledPhysicalDAG {
     pub fn row_source(&self, id: NodeId) -> Option<NodeId> {
         match self.nodes.get(&id)? {
             Node::MaterializedView(_) | Node::RawData(_) => Some(id),
-            Node::Operator { inputs, operator } => {
+            Node::Operator {
+                inputs, operator, ..
+            } => {
                 let index = operator.row_preserving_input()?;
                 self.row_source(*inputs.get(index)?)
             }
@@ -160,11 +172,13 @@ impl CompiledPhysicalDAG {
             match node {
                 Node::MaterializedView(MaterializedViewSlot { schema, .. })
                 | Node::RawData(RawDataSlot { schema, .. }) => {
-                    dag.add(id, vec![], UnboundInput(schema.clone()))?
+                    dag.add(id, vec![], UnboundInput(schema.clone()), SLOT_LIFETIME)?
                 }
-                Node::Operator { inputs, operator } => {
-                    dag.add(id, inputs.clone(), operator.clone())?
-                }
+                Node::Operator {
+                    inputs,
+                    operator,
+                    lifetime,
+                } => dag.add(id, inputs.clone(), operator.clone(), *lifetime)?,
             }
         }
         dag.validate(&self.roots)?;
@@ -188,7 +202,7 @@ impl CompiledPhysicalDAG {
                         slot.schema.clone(),
                         slot.read_window,
                     );
-                    dag.add(id, vec![], scan)?;
+                    dag.add(id, vec![], scan, SLOT_LIFETIME)?;
                 }
                 Node::RawData(slot) => {
                     let scan = Scan::raw_data(
@@ -198,17 +212,24 @@ impl CompiledPhysicalDAG {
                         slot.predicates.clone(),
                         slot.read_window,
                     );
-                    dag.add(id, vec![], scan)?;
+                    dag.add(id, vec![], scan, SLOT_LIFETIME)?;
                 }
-                Node::Operator { inputs, operator } => {
-                    dag.add(id, inputs.clone(), operator.clone())?;
-                }
+                Node::Operator {
+                    inputs,
+                    operator,
+                    lifetime,
+                } => dag.add(id, inputs.clone(), operator.clone(), *lifetime)?,
             }
         }
         dag.validate(&self.roots)?;
         Ok(dag)
     }
 }
+/// An input slot's lifetime in the runtime DAG. The runtime runs a leaf by
+/// the run's scope, not by its lifetime: at query time each consumer reads
+/// the store, at ingestion time one read reaches every consumer.
+const SLOT_LIFETIME: Lifetime = Lifetime::None;
+
 /// Stands in for an input slot when validating or deriving properties.
 struct UnboundInput(SchemaRef);
 impl PhysicalOperator<Batch, SchemaRef> for UnboundInput {
