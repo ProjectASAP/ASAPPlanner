@@ -25,13 +25,16 @@ nodes below it at another time), as its `Lifetime` and the run's scope say:
 - Query time, `None`: streamed to its one consumer. A computed node with more
   than one consumer is a planner bug; `execute` returns an error naming the
   node before any operator starts.
-- Ingestion time, a node with several consumers (one per-row node feeding
-  several chain builds or views): the node runs once and each batch reaches
-  every consumer. `execute_ingestion` polls every root itself and returns one
-  future that resolves to each root's batches, for the caller to write.
+- Ingestion time: every node streams, whatever its lifetime. A node with
+  several consumers (one per-row node feeding several chain builds or views)
+  runs once and each batch reaches every consumer. `execute_ingestion` polls
+  every root itself and returns one future that resolves to each root's
+  batches, for the caller to write.
 
 `execute` runs a query and returns one stream per root; the caller may drain
-them in any order. Dropping one consumer does not cancel other consumers.
+them in any order. It rejects an ingestion scope, which `execute_ingestion`
+runs, and `execute_ingestion` rejects a query scope. Dropping one consumer
+does not cancel other consumers.
 
 `operators::Operator` implements native batch sources, scalar values,
 projection, filtering, grouped exact aggregation, semi-join, grouped Sort and

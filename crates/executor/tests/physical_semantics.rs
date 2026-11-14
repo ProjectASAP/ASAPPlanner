@@ -438,14 +438,17 @@ fn planner_comparisons_handle_nan_without_execution_errors() {
     }
 }
 
-// A bounded LIMIT branch must unsubscribe so another branch can drain the producer.
+// At ingestion time a LIMIT consumer of a fan-out node drops its read once it
+// has its rows: the node's later batches are not queued for it, and the
+// sibling reading the same node still gets every batch.
 #[test]
-fn limit_branch_finishes_without_blocking_shared_sibling() {
+fn limit_consumer_of_an_ingestion_fan_out_drops_its_read() {
     let input = schema(&[("v", DataType::Int64, false)]);
     let mut dag = PhysicalDAG::default();
-    let batches = (0..100)
+    let batches: Vec<_> = (0..100)
         .map(|v| Batch::try_new(input.clone(), vec![vec![Value::Int64(v)]]).unwrap())
         .collect();
+    let batch_bytes = batches[0].memory_bytes();
     dag.add(
         0,
         vec![],
@@ -467,29 +470,27 @@ fn limit_branch_finishes_without_blocking_shared_sibling() {
         Lifetime::None,
     )
     .unwrap();
-    // Bound polls as well as rows so a backpressure regression cannot hang the suite.
-    use futures::{task::noop_waker_ref, Stream};
-    use std::{
-        pin::Pin,
-        task::{Context, Poll},
-    };
-    let run = context();
-    let mut stream = dag.execute(&[2], run.clone()).unwrap().remove(0);
-    let mut cx = Context::from_waker(noop_waker_ref());
-    let mut count = 0;
-    for _ in 0..2000 {
-        match Pin::new(&mut stream).poll_next(&mut cx) {
-            Poll::Ready(Some(batch)) => count += batch.unwrap().to_rows().len(),
-            Poll::Ready(None) => {
-                assert_eq!(count, 101);
-                drop(stream);
-                assert_eq!(run.retained_bytes(), 0);
-                return;
-            }
-            Poll::Pending => {}
-        }
-    }
-    panic!("shared LIMIT/Union failed to make progress");
+    let run = RunContext::new(
+        Scope::Ingestion {
+            window_start_ms: 0,
+            window_end_ms: 1,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let outputs = block_on(dag.execute_ingestion(&[2], run.clone()).unwrap()).unwrap();
+    let rows: usize = outputs[0].iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(rows, 101);
+    // The run holds the 101 output batches it returns and no more: had the
+    // LIMIT kept its read, its queue would hold the 99 source batches it
+    // never reads.
+    assert!(
+        run.peak_bytes() <= (101 + 2) * batch_bytes,
+        "{}",
+        run.peak_bytes()
+    );
+    drop(outputs);
+    assert_eq!(run.retained_bytes(), 0);
 }
 
 // Mixed numeric comparisons must not round Int64 values through f64 before comparing.

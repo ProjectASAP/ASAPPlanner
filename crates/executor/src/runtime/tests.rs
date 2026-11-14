@@ -62,12 +62,13 @@ impl PhysicalOperator<u64, ()> for Identity {
             .boxed_local())
     }
 }
-fn context() -> RunContext {
+/// A query run at time 100 with a byte budget of `max_bytes`.
+fn query_context(max_bytes: usize) -> RunContext {
     RunContext::new(
         Scope::Query {
             evaluation_time_ms: 100,
         },
-        Limits { max_bytes: 1024 },
+        Limits { max_bytes },
     )
     .unwrap()
 }
@@ -95,7 +96,7 @@ fn query_time_leaves_are_read_per_consumer() {
     let (source, starts, polls) = source(false);
     let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], source, Lifetime::None).unwrap();
-    let context = context();
+    let context = query_context(1024);
     let mut readers = dag.execute(&[0, 0], context.clone()).unwrap();
     let second = readers.pop().unwrap();
     let mut first = readers.pop().unwrap();
@@ -122,7 +123,7 @@ fn materialized_node_runs_once_and_is_held() {
     dag.add(2, vec![1], Identity, Lifetime::None).unwrap();
     dag.add(3, vec![1], Identity, Lifetime::None).unwrap();
     for _ in 0..2 {
-        let run = context();
+        let run = query_context(1024);
         let outputs = dag.execute(&[2, 3], run.clone()).unwrap();
         for output in outputs {
             assert_eq!(
@@ -146,7 +147,7 @@ fn broadcast_error_and_cancel() {
     let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], source, Lifetime::None).unwrap();
     dag.add(1, vec![0], Identity, ONE_EVALUATION).unwrap();
-    let mut outputs = dag.execute(&[1, 1], context()).unwrap();
+    let mut outputs = dag.execute(&[1, 1], query_context(1024)).unwrap();
     let a = outputs.pop().unwrap();
     let b = outputs.pop().unwrap();
     let (a, b) = block_on(async { futures::join!(a.collect::<Vec<_>>(), b.collect::<Vec<_>>()) });
@@ -155,7 +156,7 @@ fn broadcast_error_and_cancel() {
         assert!(matches!(values[1], Err(Error::AtNode { node: 0, .. })));
     }
     assert_eq!(polls.get(), 2);
-    let run = context();
+    let run = query_context(1024);
     let mut output = dag.execute(&[0], run.clone()).unwrap().remove(0);
     run.cancel();
     assert!(matches!(
@@ -172,7 +173,7 @@ fn retained_outputs_count_against_budget() {
     let (source, _, _) = source(false);
     let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], source, Lifetime::None).unwrap();
-    let run = limits_context(8);
+    let run = query_context(8);
     let mut input = dag.execute(&[0], run.clone()).unwrap().remove(0);
     let held = block_on(input.next()).unwrap().unwrap();
     assert_eq!(run.retained_bytes(), 8);
@@ -194,7 +195,7 @@ fn invalid_dags_do_not_start_sources() {
     dag.add(0, vec![], source, Lifetime::None).unwrap();
     dag.add(1, vec![2], Identity, Lifetime::None).unwrap();
     dag.add(2, vec![1], Identity, Lifetime::None).unwrap();
-    assert!(dag.execute(&[0, 1], context()).is_err());
+    assert!(dag.execute(&[0, 1], query_context(1024)).is_err());
     assert_eq!(starts.get(), 0);
     let mut missing = PhysicalDAG::default();
     missing.add(1, vec![9], Identity, Lifetime::None).unwrap();
@@ -211,7 +212,7 @@ fn ready_sources_cooperate_with_cancellation() {
     source.end = 10_000;
     let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], source, Lifetime::None).unwrap();
-    let context = context();
+    let context = query_context(1024);
     let mut input = dag.execute(&[0], context.clone()).unwrap().remove(0);
     block_on(async {
         let drain = async {
@@ -319,15 +320,6 @@ fn two_readers_of_one_leaf(dag: &mut PhysicalDAG<'static, u64, ()>) -> Rc<Cell<u
     dag.add(2, vec![0], Identity, Lifetime::None).unwrap();
     starts
 }
-fn limits_context(max_bytes: usize) -> RunContext {
-    RunContext::new(
-        Scope::Query {
-            evaluation_time_ms: 0,
-        },
-        Limits { max_bytes },
-    )
-    .unwrap()
-}
 fn ingestion_context(max_bytes: usize) -> RunContext {
     RunContext::new(
         Scope::Ingestion {
@@ -352,7 +344,7 @@ fn roots_reading_one_leaf_drain_in_order() {
     within_timeout(|| {
         let mut dag = PhysicalDAG::default();
         two_readers_of_one_leaf(&mut dag);
-        let outputs = dag.execute(&[1, 2], limits_context(1024)).unwrap();
+        let outputs = dag.execute(&[1, 2], query_context(1024)).unwrap();
         let joined: Vec<_> = block_on(futures::future::join_all(
             outputs.into_iter().map(|output| output.collect::<Vec<_>>()),
         ))
@@ -360,7 +352,7 @@ fn roots_reading_one_leaf_drain_in_order() {
         .map(values)
         .collect();
         assert_eq!(joined, vec![all_batches(), all_batches()]);
-        let run = limits_context(1024);
+        let run = query_context(1024);
         let outputs = dag.execute(&[1, 2], run.clone()).unwrap();
         let drained: Vec<_> = outputs
             .into_iter()
@@ -380,7 +372,7 @@ fn one_root_with_two_branches_over_one_leaf() {
         two_readers_of_one_leaf(&mut dag);
         dag.add(3, vec![1, 2], LeftThenRight, Lifetime::None)
             .unwrap();
-        let output = dag.execute(&[3], limits_context(1024)).unwrap().remove(0);
+        let output = dag.execute(&[3], query_context(1024)).unwrap().remove(0);
         let both: Vec<_> = all_batches().into_iter().chain(all_batches()).collect();
         assert_eq!(values(block_on(output.collect::<Vec<_>>())), both);
     });
@@ -398,18 +390,40 @@ fn ingestion_fan_out_reads_the_source_once() {
             .unwrap();
         let run = ingestion_context(1024);
         let outputs = block_on(dag.execute_ingestion(&[3, 4], run.clone()).unwrap()).unwrap();
-        let outputs: Vec<_> = outputs
+        let outputs: Vec<Vec<Result<u64, Error>>> = outputs
             .into_iter()
-            .map(|batches| batches.into_iter().map(Ok).collect::<Vec<_>>())
-            .map(values)
+            .map(|batches| batches.into_iter().map(|v| Ok(*v)).collect())
             .collect();
         let both: Vec<_> = all_batches().into_iter().chain(all_batches()).collect();
         assert_eq!(outputs, vec![all_batches(), both]);
         assert_eq!(starts.get(), 1);
         assert_eq!(run.retained_bytes(), 0);
-        assert!(dag.execute(&[3], ingestion_context(1024)).is_err());
-        assert!(dag.execute_ingestion(&[3], limits_context(1024)).is_err());
     });
+}
+
+// Each entry point runs one scope and names the other for the other scope.
+#[test]
+fn execute_rejects_ingestion_scope_and_vice_versa() {
+    let mut dag = PhysicalDAG::default();
+    two_readers_of_one_leaf(&mut dag);
+    let Err(error) = dag.execute(&[1], ingestion_context(1024)) else {
+        panic!("`execute` ran an ingestion scope");
+    };
+    assert_eq!(
+        error,
+        Error::Invalid(
+            "`execute` takes a query scope; run an ingestion scope with `execute_ingestion`".into()
+        )
+    );
+    let Err(error) = dag.execute_ingestion(&[1], query_context(1024)) else {
+        panic!("`execute_ingestion` ran a query scope");
+    };
+    assert_eq!(
+        error,
+        Error::Invalid(
+            "`execute_ingestion` takes an ingestion scope; run a query scope with `execute`".into()
+        )
+    );
 }
 
 // A computed node that is not materialized has exactly one consumer at
@@ -422,19 +436,21 @@ fn query_time_fan_out_of_a_not_materialized_node_is_an_error() {
     dag.add(1, vec![0], Identity, Lifetime::None).unwrap();
     dag.add(2, vec![1], Identity, Lifetime::None).unwrap();
     dag.add(3, vec![1], Identity, Lifetime::None).unwrap();
-    let Err(error) = dag.execute(&[2, 3], context()) else {
+    let Err(error) = dag.execute(&[2, 3], query_context(1024)) else {
         panic!("a not-materialized node with two consumers ran");
     };
     assert_eq!(
         error,
         Error::Invalid(
-            "node 1 (Identity) is not materialized but has 2 consumers at query time".into()
+            "node 1 (Identity) at evaluation time 100 has 2 consumers but Lifetime::None; \
+             a shared query-time output must be OneEvaluation (planner bug)"
+                .into()
         )
     );
     assert_eq!(starts.get(), 0);
     // Read at two evaluation times, it runs once per time, each with one consumer.
     dag.add(4, vec![1], MinuteEarlier, Lifetime::None).unwrap();
-    let outputs = dag.execute(&[2, 4], context()).unwrap();
+    let outputs = dag.execute(&[2, 4], query_context(1024)).unwrap();
     for output in outputs {
         assert_eq!(values(block_on(output.collect::<Vec<_>>())).len(), 4);
     }
@@ -450,7 +466,7 @@ fn one_evaluation_output_over_budget_is_a_memory_limit() {
         source.end = MANY_BATCHES;
         dag.add(0, vec![], source, Lifetime::None).unwrap();
         dag.add(1, vec![0], Identity, ONE_EVALUATION).unwrap();
-        let run = limits_context(5 * 8);
+        let run = query_context(5 * 8);
         let output = dag.execute(&[1], run.clone()).unwrap().remove(0);
         let read = values(block_on(output.collect::<Vec<_>>()));
         assert_eq!(read.last(), Some(&Err(Error::MemoryLimit)));
