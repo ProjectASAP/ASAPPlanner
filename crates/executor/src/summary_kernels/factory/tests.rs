@@ -106,3 +106,45 @@ fn an_hll_takes_int64_and_utf8_items() {
         .unwrap();
     assert_eq!(estimate, 60.0);
 }
+
+/// An exact sum, count, min or max takes a non-finite value with PromQL's
+/// semantics, as a division by zero upstream gives (`q / 0` is +Inf,
+/// `0 / 0` NaN): a sum that sees +Inf is +Inf, then NaN once it also sees
+/// -Inf or NaN; a count counts it; min and max skip NaN unless every
+/// value is NaN. A counter's rate or increase still needs finite samples.
+#[test]
+fn exact_accumulators_take_non_finite_values_as_promql_does() {
+    use crate::values::Value;
+    use planner_types::summary_type::{ExactKind, SummaryUpdate};
+    let update = SummaryUpdate::column(planner_types::ir::scalar::ColumnRef::SampleValue);
+    let finalized = |kind: ExactKind, values: &[f64]| -> Result<Option<f64>, String> {
+        let family = SummaryFamilyType::exact(kind);
+        let mut updater = create_planner_accumulator(&family, None, &update)?;
+        for value in values {
+            updater.update_value(&Value::Float64(*value), 0)?;
+        }
+        let state = updater.take_accumulator();
+        let exact = state
+            .as_any()
+            .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
+            .expect("an exact state");
+        exact
+            .evaluation(kind, None, None)
+            .map_err(|error| error.to_string())
+    };
+    let (inf, nan) = (f64::INFINITY, f64::NAN);
+    assert_eq!(finalized(ExactKind::Sum, &[1.0, inf]), Ok(Some(inf)));
+    for values in [[1.0, nan], [inf, -inf]] {
+        assert!(finalized(ExactKind::Sum, &values)
+            .unwrap()
+            .unwrap()
+            .is_nan());
+    }
+    assert_eq!(finalized(ExactKind::Count, &[1.0, nan, inf]), Ok(Some(3.0)));
+    assert_eq!(finalized(ExactKind::Min, &[nan, 2.0, -inf]), Ok(Some(-inf)));
+    assert_eq!(finalized(ExactKind::Max, &[2.0, nan]), Ok(Some(2.0)));
+    assert!(finalized(ExactKind::Max, &[nan]).unwrap().unwrap().is_nan());
+    for kind in [ExactKind::Rate, ExactKind::Increase] {
+        assert!(finalized(kind, &[1.0, nan]).is_err(), "{kind:?}");
+    }
+}

@@ -1,5 +1,5 @@
 use super::*;
-use asap_types::ir::operator::arguments::Reduction;
+use asap_types::ir::operator::arguments::{PromQLVectorSetOpKind, Reduction};
 use asap_types::ir::scalar::CompareOpKind;
 use asap_types::ir::schema::{DataType, PROMQL_SERIES_IDENTITY};
 use asap_types::ir::{ExprSemantics, Predicate, ProjectItem};
@@ -15,8 +15,11 @@ use std::collections::BTreeMap;
 /// `latency` by `job`, `job = "api"` reads such a column; `value > 0.5`
 /// compares the computed estimate and has no contract. A `Project` of
 /// `abs`, `clamp` or a negation of the value changes it by at most its
-/// error: β = 1 for absolute errors only; one scaling it by a nonzero
-/// constant keeps its relative error: β = 1 for relative errors. Only
+/// error: β = 1 for absolute errors. `abs` and a negation also keep its
+/// magnitude, so they keep its relative error too (β = 1): q = 10,
+/// q̂ = 10.5 gives −q̂ = −10.5, 5% off −10. A clamp does not: it is not
+/// judged in relative error. One scaling it by a nonzero constant keeps
+/// its relative error: β = 1 for relative errors. Only
 /// the items reading the estimate are judged, so the series identity
 /// `promql_drop_metric_name` computes does not count.
 #[test]
@@ -136,7 +139,17 @@ fn key_filters_and_value_preserving_projects_have_unit_contracts() {
             Some(vec![1.0]),
             "{expr:?}"
         );
-        assert_eq!(factor(&project, AccuracyMetric::Relative), None, "{expr:?}");
+        let keeps_magnitude = match &expr {
+            ScalarExpr::Negative { .. } => true,
+            ScalarExpr::FunctionCall { name, .. } => name == "promql_abs",
+            _ => false,
+        };
+        assert_eq!(
+            factor(&project, AccuracyMetric::Relative),
+            keeps_magnitude.then(|| vec![1.0]),
+            "{expr:?}"
+        );
+        assert_eq!(factor(&project, AccuracyMetric::Rank), None, "{expr:?}");
     }
     // Scaling by a nonzero constant keeps a relative error: `q / 2`,
     // `q * 2`, `2 * q`; scaling by 0 has no contract.
@@ -368,6 +381,101 @@ fn sums_and_averages_carry_relative_error_over_values_of_one_sign() {
             factors(&avg, AccuracyMetric::ABSOLUTE),
             Some(vec![1.0]),
             "{sign:?}"
+        );
+    }
+}
+
+/// PromQL operators that copy values and only choose which series to
+/// keep, or rewrite a label, keep their input's error in every metric:
+/// - `lhs and rhs` / `lhs unless rhs` keep or drop each left series by
+///   whether a right series has its labels, and copy the kept value: the
+///   output's error is the left's (β = 1), and the right's values are not
+///   read (β = 0). With q̂ = 10.5 for q = 10 on the left, the output is
+///   10.5 or absent, whatever the right's values;
+/// - `lhs or rhs` copies each value from one side: β = 1 on both;
+/// - `label_replace(v, "x", "$1", "job", "(.*)")` writes label `x` from
+///   label `job` and copies the value: β = 1. A rewrite reading the
+///   estimate column itself has no contract.
+#[test]
+fn set_operators_and_relabels_copy_their_inputs_error() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let g1 = memo
+        .find_or_add_group(scan("latency", &[("job", DataType::Utf8)], vec![]))
+        .unwrap();
+    let state = memo
+        .find_or_add_group(Operator::ASAP(ASAPOp::SummaryAgg {
+            child: g1,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::DDSketch),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::by(vec![2]),
+            filter: None,
+        }))
+        .unwrap();
+    let readout = memo
+        .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.9 }, state))
+        .unwrap();
+    let lineage = &memo.groups()[readout.0 as usize]
+        .group_properties
+        .column_lineage;
+    let column_where = |copied: bool| {
+        lineage
+            .iter()
+            .position(|l| matches!(l, ColumnLineage::SourceColumn(_)) == copied)
+            .expect("the readout has a label and an estimate")
+    };
+    let (job, estimate) = (column_where(true), column_where(false));
+    let set_op = |kind| {
+        Operator::NonASAP(NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                checked_relative_division: false,
+                checked_finite_division: false,
+                kind: BinaryOpKind::Set(kind),
+                vector_match: None,
+            },
+            return_bool: false,
+            lhs: readout,
+            rhs: readout,
+        })
+    };
+    let relabel = |source_column| {
+        Operator::NonASAP(NonASAPOp::PromqlRelabel {
+            dst: "x".into(),
+            value: ScalarExpr::FunctionCall {
+                name: "label_replace".into(),
+                args: vec![
+                    ScalarExpr::Column(source_column),
+                    ScalarExpr::Literal(ScalarValue::Utf8("(.*)".into())),
+                    ScalarExpr::Literal(ScalarValue::Utf8("$1".into())),
+                ],
+            },
+            child: readout,
+        })
+    };
+    let factors = |consumer: &Operator<MemoGroupId>, metric| {
+        error_contract(&memo, consumer, metric).map(|contract| contract.error_factor_per_input)
+    };
+    for metric in AccuracyMetric::ALL {
+        for kind in [PromQLVectorSetOpKind::And, PromQLVectorSetOpKind::Unless] {
+            assert_eq!(
+                factors(&set_op(kind.clone()), metric),
+                Some(vec![1.0, 0.0]),
+                "{kind:?}, {metric:?}"
+            );
+        }
+        assert_eq!(
+            factors(&set_op(PromQLVectorSetOpKind::Or), metric),
+            Some(vec![1.0, 1.0]),
+            "or, {metric:?}"
+        );
+        assert_eq!(
+            factors(&relabel(job), metric),
+            Some(vec![1.0]),
+            "relabel from job, {metric:?}"
+        );
+        assert_eq!(
+            factors(&relabel(estimate), metric),
+            None,
+            "relabel from the estimate, {metric:?}"
         );
     }
 }

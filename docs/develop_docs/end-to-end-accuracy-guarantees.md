@@ -113,9 +113,12 @@ keeps the metric: an input's error and the output's are in the same one.
 | --- | --- | --- | --- |
 | `Sort`, `TimeRange`, `TimeShift`, `Concat`, a readout, a finalize, `SummaryMerge` | any | 1 | none |
 | `Filter` whose predicate reads only columns copied from a source (labels, keys) | any | 1 | none |
+| PromQL `and`, `unless` | any | 1 on the left, 0 on the right | none |
+| PromQL `or` | any | 1 on both | none |
+| `PromqlRelabel` (`label_replace`, `label_join`) whose new label reads no computed value | any | 1 | none |
 | `Project` whose items reading a computed value (not a copied label, the time or the series identity) are copies | any | 1 | none |
 | the same, with items computing `abs`, `clamp`, `clamp_min`, `clamp_max` (or PromQL's `promql_abs`, …) or a negation of a column | absolute | 1 | none |
-| the same, with items multiplying or dividing a column by a nonzero literal | relative | 1 | none |
+| the same, with items computing `abs` or a negation of a column, or multiplying or dividing a column by a nonzero literal | relative | 1 | none |
 | `Aggregate` (or exact accumulator build) by keys copied from a source, without measure filters or `HAVING`: `count` | any | 0 | none |
 | the same: `min`, `max` | absolute, relative | 1 | none |
 | the same: `avg` | absolute | 1 | none |
