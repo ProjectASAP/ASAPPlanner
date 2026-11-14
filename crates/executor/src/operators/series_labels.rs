@@ -1094,6 +1094,7 @@ mod columnar_tests {
     use crate::plan::PhysicalDAG;
     use crate::runtime::{Limits, Scope};
     use planner_types::ir::schema::Field;
+    use planner_types::stages::Lifetime;
 
     /// The row-at-a-time rewrite this operator ran before (the reference).
     fn reference(
@@ -1234,9 +1235,10 @@ mod columnar_tests {
                         ],
                     )
                     .unwrap(),
+                    Lifetime::None,
                 )
                 .unwrap();
-                dag.add(1, vec![0], operator).unwrap();
+                dag.add(1, vec![0], operator, Lifetime::None).unwrap();
                 let context = RunContext::new(
                     Scope::Query {
                         evaluation_time_ms: 0,

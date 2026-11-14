@@ -9,6 +9,7 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, BatchColumn};
 use asap_executor::Error;
 use futures::{executor::block_on, StreamExt};
+use planner_types::stages::Lifetime;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -87,12 +88,18 @@ fn run_aggregate(
         })
         .collect();
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], Operator::source(input.clone(), batches).unwrap())
-        .unwrap();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(input.clone(), batches).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
     dag.add(
         1,
         vec![0],
         Operator::aggregate(input, vec![0], measures).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let context = RunContext::new(
@@ -101,7 +108,6 @@ fn run_aggregate(
         },
         Limits {
             max_bytes: limit_bytes,
-            ..Limits::default()
         },
     )
     .unwrap();

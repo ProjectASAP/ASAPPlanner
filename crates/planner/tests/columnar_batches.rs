@@ -21,7 +21,6 @@ use asap_planner::{
     plan_installable, DeploymentCapabilities, FrontendInput, PlanningModels, PlanningWorkload,
     UserInput,
 };
-use futures::StreamExt;
 
 use crate::time_series;
 use time_series::{series_identity, RawDataSample};
@@ -163,13 +162,12 @@ async fn a_tumbling_window_is_built_from_arrow_columns_with_one_label_entry_per_
     .unwrap();
     // The built tumbling window: one row per series, its KLL in a state column.
     let tumbling_window = build
-        .execute(compiled.roots(), context)
+        .execute_ingestion(compiled.roots(), context)
         .unwrap()
-        .remove(0)
-        .next()
         .await
         .unwrap()
-        .unwrap();
+        .remove(0)
+        .remove(0);
     let state_column = tumbling_window
         .schema()
         .fields

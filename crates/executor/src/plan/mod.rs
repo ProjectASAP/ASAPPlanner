@@ -1,8 +1,9 @@
 //! Immutable physical DAG, operator contracts and pre-execution validation.
 use crate::{
-    runtime::{Input, OutputStream, RunContext},
+    runtime::{IngestionOutputs, Input, OutputStream, RunContext},
     Error,
 };
+use planner_types::stages::Lifetime;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
@@ -47,6 +48,9 @@ pub trait PhysicalOperator<V, S> {
 pub(crate) struct Node<'a, V, S> {
     pub(crate) inputs: Vec<NodeId>,
     pub(crate) operator: Box<dyn PhysicalOperator<V, S> + 'a>,
+    /// How long its output is kept, from the plan: what the runtime runs it
+    /// by (see the crate README).
+    pub(crate) lifetime: Lifetime,
 }
 pub struct PhysicalDAG<'a, V, S> {
     pub(crate) nodes: BTreeMap<NodeId, Node<'a, V, S>>,
@@ -59,24 +63,35 @@ impl<V, S> Default for PhysicalDAG<'_, V, S> {
     }
 }
 impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> PhysicalDAG<'a, V, S> {
+    /// Add node `id`, reading `inputs`, run by its plan `lifetime`.
     pub fn add(
         &mut self,
         id: NodeId,
         inputs: Vec<NodeId>,
         operator: impl PhysicalOperator<V, S> + 'a,
+        lifetime: Lifetime,
     ) -> Result<(), Error> {
-        self.add_boxed(id, inputs, Box::new(operator))
+        self.add_boxed(id, inputs, Box::new(operator), lifetime)
     }
+    /// [`Self::add`] with an already boxed operator.
     pub fn add_boxed(
         &mut self,
         id: NodeId,
         inputs: Vec<NodeId>,
         operator: Box<dyn PhysicalOperator<V, S> + 'a>,
+        lifetime: Lifetime,
     ) -> Result<(), Error> {
         if self.nodes.contains_key(&id) {
             return Err(Error::Invalid(format!("duplicate node {id}")));
         }
-        self.nodes.insert(id, Node { inputs, operator });
+        self.nodes.insert(
+            id,
+            Node {
+                inputs,
+                operator,
+                lifetime,
+            },
+        );
         Ok(())
     }
     pub fn validate(&self, roots: &[NodeId]) -> Result<(), Error> {
@@ -153,6 +168,11 @@ impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> PhysicalDAG<'a, V, S> {
             .map(|(id, (_, properties))| (id, properties))
             .collect())
     }
+    /// A query run: one output stream per root, which the caller may drain
+    /// in any order. Rejects an ingestion scope (run it with
+    /// [`Self::execute_ingestion`]), and a computed node with
+    /// `Lifetime::None` and more than one consumer at one evaluation time (a
+    /// planner bug), before any operator starts.
     pub fn execute<'r>(
         &'r self,
         roots: &[NodeId],
@@ -162,5 +182,18 @@ impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> PhysicalDAG<'a, V, S> {
         'a: 'r,
     {
         crate::runtime::execute(self, roots, context)
+    }
+    /// An ingestion run: one future that resolves to every root's batches,
+    /// in `roots` order, for the caller to write. Rejects a query scope (run
+    /// it with [`Self::execute`]).
+    pub fn execute_ingestion<'r>(
+        &'r self,
+        roots: &[NodeId],
+        context: RunContext,
+    ) -> Result<impl std::future::Future<Output = IngestionOutputs<V>> + 'r, Error>
+    where
+        'a: 'r,
+    {
+        crate::runtime::execute_ingestion(self, roots, context)
     }
 }

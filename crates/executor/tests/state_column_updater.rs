@@ -19,6 +19,7 @@ use asap_executor::summary_kernels::{
 use asap_executor::values::{Batch, SchemaRef, Value};
 use asap_executor::{AggregateCore, StateColumnUpdater};
 use futures::{executor::block_on, StreamExt};
+use planner_types::stages::Lifetime;
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -228,9 +229,10 @@ fn batch_build(build: Operator) -> BTreeMap<String, String> {
         0,
         vec![],
         Operator::source(input_schema(), vec![input_batch()]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
-    dag.add(1, vec![0], build).unwrap();
+    dag.add(1, vec![0], build, Lifetime::None).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 10_000,

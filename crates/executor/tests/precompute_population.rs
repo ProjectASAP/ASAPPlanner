@@ -5,7 +5,7 @@ use asap_executor::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
-use futures::{executor::block_on, StreamExt};
+
 use planner_types::ir::operator::{GroupKeys, Reduction};
 use planner_types::ir::properties::*;
 use planner_types::ir::scalar::ColumnRef;
@@ -217,14 +217,8 @@ fn native_run(
     // run's end.
     store.append_materialized_view(view, (2000 - 60_000, 2000), vec![input])?;
     let physical_dag = program.instantiate(Arc::new(store))?;
-    block_on(async {
-        let mut rows = Vec::new();
-        let mut stream = physical_dag.execute(program.roots(), context)?.remove(0);
-        while let Some(batch) = stream.next().await {
-            rows.extend(batch?.to_rows().iter().cloned());
-        }
-        Ok(rows)
-    })
+    let batches = crate::common::run_roots(&physical_dag, program.roots(), context)?.remove(0);
+    Ok(batches.iter().flat_map(Batch::to_rows).collect())
 }
 fn ingestion_context(limits: Limits) -> RunContext {
     RunContext::new(
@@ -356,10 +350,7 @@ fn precompute_dag_enforces_cancellation_and_budget() {
         &program,
         family,
         vec![sum_state(1.)],
-        ingestion_context(Limits {
-            max_bytes: 1,
-            ..Limits::default()
-        }),
+        ingestion_context(Limits { max_bytes: 1 }),
     )
     .unwrap_err();
     assert!(format!("{error:?}").contains("MemoryLimit"));

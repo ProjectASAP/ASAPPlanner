@@ -14,6 +14,7 @@ use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use planner_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, TimeRangeKind};
 use planner_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
+use planner_types::stages::Lifetime;
 use planner_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -143,19 +144,11 @@ fn run(
     roots: &[u64],
     context: RunContext,
 ) -> Vec<Vec<Vec<Value>>> {
-    // The roots share producers, so they are read together.
-    block_on(futures::future::join_all(
-        dag.execute(roots, context)
-            .unwrap()
-            .into_iter()
-            .map(|mut output| async move {
-                let mut rows = Vec::new();
-                while let Some(batch) = output.next().await {
-                    rows.extend(batch.unwrap().to_rows());
-                }
-                rows
-            }),
-    ))
+    crate::common::run_roots(dag, roots, context)
+        .unwrap()
+        .into_iter()
+        .map(|batches| batches.iter().flat_map(Batch::to_rows).collect())
+        .collect()
 }
 
 /// The id of the node of `dag` that is `operator`'s node in `nodes`.
@@ -265,13 +258,7 @@ fn a_chain_built_at_ingestion_answers_queries_through_its_time_ranges() {
         window_end += WIDTH_MS;
     }
     let evaluation_time_ms = 4 * HOUR_MS;
-    let context = RunContext::new(
-        Scope::Query { evaluation_time_ms },
-        Limits {
-            ..Limits::default()
-        },
-    )
-    .unwrap();
+    let context = RunContext::new(Scope::Query { evaluation_time_ms }, Limits::default()).unwrap();
     let answers = {
         let query = query.instantiate(store.clone()).unwrap();
         run(&query, &[now as u64, shifted as u64], context)
@@ -405,13 +392,14 @@ fn a_range_window_stamps_each_row_with_its_tumbling_windows_end() {
         0,
         vec![],
         ExecutorOperator::source(schema.clone(), vec![batch]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let window = ExecutorOperator::time_range(schema, 1, 0, 3 * MINUTE_MS, None, None)
         .unwrap()
         .with_tumbling_window_ends(MINUTE_MS)
         .unwrap();
-    dag.add(1, vec![0], window).unwrap();
+    dag.add(1, vec![0], window, Lifetime::None).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 10 * MINUTE_MS,

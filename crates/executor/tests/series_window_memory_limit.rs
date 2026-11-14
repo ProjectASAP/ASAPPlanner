@@ -8,6 +8,7 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
 use asap_executor::Error;
 use futures::{executor::block_on, StreamExt};
+use planner_types::stages::Lifetime;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -76,16 +77,20 @@ fn a_long_subquery_over_many_series_fails_near_the_memory_limit() {
     )
     .unwrap();
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], Operator::source(input, vec![batch]).unwrap())
-        .unwrap();
-    dag.add(1, vec![0], window).unwrap();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(input, vec![batch]).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
+    dag.add(1, vec![0], window, Lifetime::None).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 3_600_000,
         },
         Limits {
             max_bytes: LIMIT_BYTES,
-            ..Limits::default()
         },
     )
     .unwrap();

@@ -4,7 +4,7 @@ use asap_executor::{
     sources::InMemoryDataStore,
     values::Batch,
 };
-use futures::{executor::block_on, StreamExt};
+use futures::{executor::block_on, StreamExt, TryStreamExt};
 use std::sync::Arc;
 
 /// Run `plan` against `store` and collect each root's batches.
@@ -15,22 +15,22 @@ pub fn execute(
     scope: Scope,
 ) -> Vec<Vec<Batch>> {
     let dag = plan.instantiate(Arc::new(store)).unwrap();
-    block_on(async {
-        let streams = dag
-            .execute(
-                plan.roots(),
-                RunContext::new(scope, Limits::default()).unwrap(),
-            )
-            .unwrap();
-        futures::future::join_all(streams.into_iter().map(|mut stream| async move {
-            let mut batches = Vec::new();
-            while let Some(batch) = stream.next().await {
-                batches.push((*batch.unwrap()).clone());
-            }
-            batches
-        }))
-        .await
-    })
+    let context = RunContext::new(scope, Limits::default()).unwrap();
+    let outputs = match context.scope {
+        Scope::Ingestion { .. } => {
+            block_on(dag.execute_ingestion(plan.roots(), context).unwrap()).unwrap()
+        }
+        Scope::Query { .. } => dag
+            .execute(plan.roots(), context)
+            .unwrap()
+            .into_iter()
+            .map(|stream| block_on(stream.try_collect::<Vec<_>>()).unwrap())
+            .collect(),
+    };
+    outputs
+        .into_iter()
+        .map(|batches| batches.iter().map(|batch| (**batch).clone()).collect())
+        .collect()
 }
 
 /// Execute a relational DAG at query time against an in-memory connector

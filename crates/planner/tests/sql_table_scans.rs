@@ -23,7 +23,7 @@ use asap_types::ir::operator::Source;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp};
 use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
-use futures::{executor::block_on, StreamExt};
+use futures::{executor::block_on, TryStreamExt};
 
 const MINUTE_MS: i64 = 60_000;
 /// The evaluation time of every run.
@@ -205,18 +205,25 @@ fn run_bound(
         }
     }
     let instance = compiled.instantiate(Arc::new(store)).unwrap();
-    block_on(async {
-        let context = RunContext::new(scope, Limits::default()).unwrap();
-        let outputs = instance.execute(compiled.roots(), context).unwrap();
-        futures::future::join_all(outputs.into_iter().map(|mut output| async move {
-            let mut batches = Vec::new();
-            while let Some(batch) = output.next().await {
-                batches.push((*batch.unwrap()).clone());
-            }
-            batches
-        }))
-        .await
-    })
+    let context = RunContext::new(scope, Limits::default()).unwrap();
+    let outputs = match context.scope {
+        Scope::Ingestion { .. } => block_on(
+            instance
+                .execute_ingestion(compiled.roots(), context)
+                .unwrap(),
+        )
+        .unwrap(),
+        Scope::Query { .. } => instance
+            .execute(compiled.roots(), context)
+            .unwrap()
+            .into_iter()
+            .map(|output| block_on(output.try_collect::<Vec<_>>()).unwrap())
+            .collect(),
+    };
+    outputs
+        .into_iter()
+        .map(|batches| batches.iter().map(|batch| (**batch).clone()).collect())
+        .collect()
 }
 
 /// The data plane of `plan` at [`EVALUATION_MS`] over the table rows

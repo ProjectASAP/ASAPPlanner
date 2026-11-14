@@ -326,6 +326,7 @@ mod tests {
         values::Batch,
     };
     use futures::StreamExt;
+    use planner_types::stages::Lifetime;
 
     use planner_types::ir::schema::{
         DataType, Field as SummaryField, FieldDataType as SummaryFamilyType, Schema,
@@ -383,12 +384,21 @@ mod tests {
                     0,
                     vec![],
                     Operator::source(schema.clone(), vec![batch]).unwrap(),
+                    Lifetime::None,
                 )
                 .unwrap();
-                dag.add(1, vec![0], operator).unwrap();
+                dag.add(1, vec![0], operator, Lifetime::None).unwrap();
                 let context = RunContext::new(scope.clone(), Limits::default()).unwrap();
-                let mut output = dag.execute(&[1], context).unwrap().remove(0);
-                let result = futures::executor::block_on(output.next()).unwrap().unwrap();
+                let result = if matches!(scope, Scope::Ingestion { .. }) {
+                    let run = dag.execute_ingestion(&[1], context).unwrap();
+                    futures::executor::block_on(run)
+                        .unwrap()
+                        .remove(0)
+                        .remove(0)
+                } else {
+                    let mut output = dag.execute(&[1], context).unwrap().remove(0);
+                    futures::executor::block_on(output.next()).unwrap().unwrap()
+                };
                 assert_eq!(
                     format!("{:?}", result.to_rows()[0][0]),
                     format!("{expected:?}")

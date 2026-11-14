@@ -6,12 +6,35 @@ a storage implementation nor DataFusion. Batches are Arrow columns
 (`values::Batch`); DataFusion informed the design, it is not the execution
 framework.
 
-`plan::PhysicalDAG` binds typed operator inputs to node IDs. Each execution starts
-one producer per reachable node, shares output batches among its consumers, and
-bounds buffering. Dropping one consumer does not cancel other consumers. A
-`RunContext` carries query or ingestion scope, cancellation and byte accounting.
-Executions use the caller's worker and worker-local streams, with no internal
-thread pool. Poll multiple root streams concurrently when they share inputs.
+`plan::PhysicalDAG` binds typed operator inputs to node IDs, each node with the
+plan's `Lifetime`. A `RunContext` carries query or ingestion scope,
+cancellation and byte accounting. Executions use the caller's worker and
+worker-local streams, with no internal thread pool.
+
+A node runs once per evaluation time in a run (an `@` anchor evaluates the
+nodes below it at another time), as its `Lifetime` and the run's scope say:
+
+- Query time, a leaf (a raw data or materialized view slot, a store read):
+  each consumer reads the store on its own, as the planner charges a
+  not-materialized read on each edge.
+- Query time, `OneEvaluation` or `AcrossEvaluations`: the node runs to the
+  end before any consumer reads it, and every consumer reads its finished
+  output independently. The output is charged to the run's byte budget until
+  every consumer has read it; over the budget the run fails with
+  `MemoryLimit` (nothing spills).
+- Query time, `None`: streamed to its one consumer. A computed node with more
+  than one consumer is a planner bug; `execute` returns an error naming the
+  node before any operator starts.
+- Ingestion time: every node streams, whatever its lifetime. A node with
+  several consumers (one per-row node feeding several chain builds or views)
+  runs once and each batch reaches every consumer. `execute_ingestion` polls
+  every root itself and returns one future that resolves to each root's
+  batches, for the caller to write.
+
+`execute` runs a query and returns one stream per root; the caller may drain
+them in any order. It rejects an ingestion scope, which `execute_ingestion`
+runs, and `execute_ingestion` rejects a query scope. Dropping one consumer
+does not cancel other consumers.
 
 `operators::Operator` implements native batch sources, scalar values,
 projection, filtering, grouped exact aggregation, semi-join, grouped Sort and
@@ -28,6 +51,7 @@ use asap_executor::{
     plan::PhysicalDAG,
     runtime::{Limits, RunContext, Scope},
 };
+use asap_executor::planner::stages::Lifetime;
 use asap_executor::planner::ir::schema::DataType;
 use futures::{executor::block_on, StreamExt};
 
@@ -36,8 +60,8 @@ let negate = Operator::project(source.schema(), vec![
     ("value".into(), Expression::Negate(Box::new(Expression::Column(0)))),
 ])?;
 let mut plan = PhysicalDAG::default();
-plan.add(0, vec![], source)?;
-plan.add(1, vec![0], negate)?;
+plan.add(0, vec![], source, Lifetime::None)?;
+plan.add(1, vec![0], negate, Lifetime::None)?;
 let run = RunContext::new(
     Scope::Query { evaluation_time_ms: 1000 },
     Limits::default(),
@@ -76,7 +100,7 @@ See [the design](../../docs/design_docs/physical-planning-and-deployment.md).
 ## Module boundaries
 
 - `plan`: immutable DAG, operator interface, schemas and execution properties.
-- `runtime`: per-run streams, shared producers, memory reservations and cancellation.
+- `runtime`: per-run streams, how each node runs by its `Lifetime`, memory reservations and cancellation.
 - `expressions`: scalar evaluation; typed builders and the Planner expression adapter.
 - `operators`: projection, filter, joins, aggregate/window, sort, limit and summary implementations.
 - `sources`: the `DataStore` data interface, `Scan` and the in-memory store.
