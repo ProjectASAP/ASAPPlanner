@@ -18,4 +18,5 @@ users who want cheaper plans in exchange for a bounded error.
   costs side by side.
 - Reading what was accepted: [`AcceptedAccuracy`](crate::AcceptedAccuracy) in
   [`Selection`](crate::Selection), and why a target no candidate meets makes
-  selection fail.
+  selection fail with
+  [`ErrorSelectingPlan::NoValidCandidate`](crate::ErrorSelectingPlan::NoValidCandidate).

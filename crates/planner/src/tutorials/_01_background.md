@@ -19,7 +19,7 @@ PromQL or SQL.
   query that contains it (`Memo`, `MemoGroup`).
 - Candidate: one way to compute a memo group, exact or with a sketch, shared
   or reused (`CandidateForMemoGroup`).
-- Plan: one candidate chosen per memo group, joined into the
+- Plan: one candidate chosen for each group the queries need, joined into the
   [`PhysicalASAPDAG`](crate::PhysicalASAPDAG) that Stage 3 selects as the
   cheapest plan meeting every query's requirements.
 - The stages from workload to plan, in one picture: the

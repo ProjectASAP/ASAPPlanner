@@ -17,8 +17,10 @@ recipes in [extend ASAP-aware mapping](https://github.com/ProjectASAP/ASAPPlanne
 - Adding a reuse rule: a memo rule under Pass 2's `rules` that adds groups
   (`Memo::find_or_add_group`) or candidates (`Memo::add_candidate`), called
   from `generate_logical_asap_memo_candidates`.
-- The rules every extension keeps: no stage calls another, every candidate
-  is kept until Stage 3, and summary families are read only through
+- The rules every extension keeps: no stage calls another, a candidate is
+  pruned only with a recorded reason, never silently dropped (Pass 2's
+  dead-candidate elimination, Stage 3's `Selection::pruned_candidates`), and
+  summary families are read only through
   `SummaryTypeCapability`.
 - Testing an extension: unit tests beside the change and an end-to-end test
   in `integration-tests` that the planned workload uses it.

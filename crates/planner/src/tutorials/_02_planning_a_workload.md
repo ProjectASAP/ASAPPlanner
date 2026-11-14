@@ -17,10 +17,13 @@ each query gets.
   `PlanningModels::builtin()`, then
   [`plan_installable`](crate::plan_installable).
 - Reading the result: [`InstallablePlan`](crate::InstallablePlan) holds the
-  selected [`PhysicalASAPDAG`](crate::PhysicalASAPDAG) (`dag`, whose
-  `roots[i]` answers query `i`) and the `query_texts`;
+  selected [`PhysicalASAPDAG`](crate::PhysicalASAPDAG) (`dag`) and the
+  `query_texts`. The DAG's `roots` answer the queries over data, and
+  [`scalar_roots`](crate::PhysicalASAPDAG::scalar_roots) the standalone
+  scalar queries, each with its query index; `roots[i]` answers query `i`
+  only when the workload has no standalone scalar query.
   [`SelectedPlanReport`](crate::SelectedPlanReport) holds its
-  `cost_per_second` and `predicted_usage`.
+  `cost_per_second` (an `Option<f64>`) and `predicted_usage`.
 - The full selection report: [`run_planning`](crate::run_planning) returns a
   [`PlanningRun`](crate::PlanningRun) whose `selection` holds the plan and its
   [`Selection`](crate::Selection): `selected_plan_cost_per_second` and

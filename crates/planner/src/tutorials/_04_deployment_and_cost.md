@@ -11,12 +11,18 @@ the planner chose one plan over another.
   `supported_summaries` ([`SupportedSummary`](crate::SupportedSummary)),
   `raw_data_retained` and `query_time_results_retained`, set through
   `PlanningModels::with_deployment_capabilities`.
-- [`CostInputs`](crate::CostInputs): its [`CostModel`](crate::CostModel)
-  (cost model 1, 2 or 3, with [`ResourceUnitCost`](crate::ResourceUnitCost)),
+- [`CostInputs`](crate::CostInputs): its [`CostModel`](crate::CostModel),
   [`ResourceSpeed`](crate::ResourceSpeed) and measured operation costs, set
-  through `PlanningModels::with_cost_inputs`.
+  through `PlanningModels::with_cost_inputs`. Plan selection supports cost
+  model 1 (`CostModel::UsageOverTime` with its
+  [`ResourceUnitCost`](crate::ResourceUnitCost)); cost models 2 and 3 return
+  `ErrorSelectingPlan::UnsupportedCostModel`.
 - One query, several plans: the same query planned with and without raw
-  data retained, and under two cost models, with each selected plan and its
-  cost.
-- Why a candidate lost: reading [`Selection`](crate::Selection) and
-  [`RejectionCause`](crate::RejectionCause).
+  data retained, and under different `ResourceUnitCost` and `ResourceSpeed`
+  values, with each selected plan and its cost.
+- Candidates Stage 3 ruled out before selection, each with its reason:
+  [`Selection::pruned_candidates`](crate::Selection::pruned_candidates).
+- When no plan is selected:
+  [`ErrorSelectingPlan::NoValidCandidate`](crate::ErrorSelectingPlan::NoValidCandidate),
+  with one `Rejection` (`id`, [`RejectionCause`](crate::RejectionCause),
+  `reason`) per candidate.
