@@ -80,8 +80,8 @@ pub enum NonASAPOp<C = Rc<OperatorNode>> {
     Aggregate {
         reduction: Reduction,
         measures: Vec<AggIntent>,
-        /// Output column names parallel to `measures`; an empty entry falls
-        /// back to the intent's synthetic name.
+        /// Output column names, exactly one entry per measure; an empty
+        /// string means the default name (the intent's synthetic name).
         #[serde(default)]
         output_names: Vec<String>,
         #[serde(default)]
@@ -1087,7 +1087,11 @@ impl<I: OperatorInput> NonASAPOp<I> {
                 no_state(child, "Aggregate")?;
                 // One name per measure; an empty name keeps the default.
                 if output_names.len() != measures.len() {
-                    return Err(invalid("aggregate output names differ from measures"));
+                    return Err(SchemaDerivationError::InvalidScalarSignature(format!(
+                        "aggregate output names differ from measures: {} output names for {} measures",
+                        output_names.len(),
+                        measures.len()
+                    )));
                 }
                 if let Reduction::Reduce(keys) = reduction {
                     columns(keys.keys(), child.schema())?;
