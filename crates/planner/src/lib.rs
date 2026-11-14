@@ -16,6 +16,17 @@
 //! ([`InstallablePlan`]). A caller who already holds pre-ASAP IR — a
 //! new frontend, a deserialized plan, a test that does not want to build SQL
 //! and a catalog — calls [`optimize`] with its own [`ParsedWorkload`].
+//!
+//! # Tutorials
+//!
+//! The [`tutorials`] introduce the planner chapter by chapter, in order:
+//!
+//! 1. [Background](tutorials::_01_background)
+//! 2. [Planning a workload](tutorials::_02_planning_a_workload)
+//! 3. [Accuracy targets](tutorials::_03_accuracy_targets)
+//! 4. [Deployment capabilities and cost](tutorials::_04_deployment_and_cost)
+//! 5. [Executing a plan](tutorials::_05_executing_a_plan)
+//! 6. [Extending the planner](tutorials::_06_extending)
 
 use asap_types::workload::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
 use asap_types::workload::SqlDialect;
@@ -28,6 +39,7 @@ use asap_frontend_sql::{lower_sql_dialect, SqlError};
 mod models;
 mod pass;
 mod run;
+pub mod tutorials;
 pub use models::PlanningModels;
 pub use pass::{
     optimize, OptimizationInput, OptimizationInputError, OptimizationPass, OptimizeError,
