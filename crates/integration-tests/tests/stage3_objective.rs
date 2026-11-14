@@ -577,3 +577,30 @@ fn the_objective_is_the_plan_cost_on_an_instant_and_a_shifted_range_at_end() {
         selected_plan_objective_and_plan_cost_with(&w, models, &CostInputs::default()).1,
     );
 }
+
+/// Two range queries every 300 s on one grid reach one `@ end()` group,
+/// `m[5m] @ end()`, and may read it through different candidates: a sum
+/// over 10 minutes at 30 s steps and a median over an hour at 60 s steps,
+/// accuracy guarantees ignored (so the median may read a sketch). Stage 3
+/// rates the anchored context from the memo, `plan_cost` from the plan's
+/// walk; the optimum is the plan's cost.
+#[test]
+fn the_objective_is_the_plan_cost_when_two_queries_read_one_anchored_group() {
+    let w = over_m(vec![
+        requested(
+            "sum_over_time(m[5m] @ end())",
+            300_000,
+            Some((30_000, 600_000)),
+        ),
+        requested(
+            "quantile_over_time(0.5, m[5m] @ end())",
+            300_000,
+            Some((60_000, 3_600_000)),
+        ),
+    ]);
+    let models = PlanningModels::builtin().with_ignore_accuracy_guarantees(true);
+    assert_equal(
+        "two queries reading one anchored group",
+        selected_plan_objective_and_plan_cost_with(&w, models, &CostInputs::default()).1,
+    );
+}

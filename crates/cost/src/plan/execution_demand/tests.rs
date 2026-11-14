@@ -444,3 +444,67 @@ fn an_instant_at_end_input_runs_in_the_evaluation_context() {
         close(rates[&id].1, 1.0 / 60.0);
     }
 }
+
+/// An ingestion-time chain of 60 s windows over `m` (1,000 rows per
+/// second), read back 5 minutes at query time every 60 s, reading either
+/// a `Scan` that is not materialized or raw rows `m` kept at ingestion for
+/// an hour: either way it folds in one arriving batch per second
+/// (`reads_one_batch_of`), so `plan_cost` charges it the same, not as if
+/// it read the hour of stored rows.
+#[test]
+fn an_ingestion_time_reader_of_raw_rows_kept_at_ingestion_reads_one_batch() {
+    use asap_types::ir::operator::Reduction;
+    use asap_types::ir::scalar::ColumnRef;
+    use asap_types::ir::schema::FieldDataType;
+    use asap_types::stages::StorageMedium;
+    use asap_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
+    use asap_types::workload::{DataWorkload, DurationMs};
+    let ingestion = ExecutionTiming::IngestionTime;
+    let chain = Operator::ASAP(asap_types::ir::ASAPOp::SummaryTumblingWindowChain {
+        child: 0,
+        summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::PerEntity,
+        filter: None,
+        tumbling_window_width_ms: 60_000,
+    });
+    let mut data = DataWorkload::sampled_every(["m".to_string()], DurationMs(1_000));
+    for facts in data.sources.values_mut() {
+        facts.series_count = Some(1_000);
+    }
+    let chain_cost = |scan_lifetime: Lifetime, scan_retention_ms: Option<u64>| {
+        let mut stored_chain = node(
+            1,
+            chain.clone(),
+            ingestion,
+            Lifetime::AcrossEvaluations(StorageMedium::Memory),
+        );
+        stored_chain.retention_ms = Some(300_000);
+        let mut raw = node(0, scan(), ingestion, scan_lifetime);
+        raw.retention_ms = scan_retention_ms;
+        let dag = PhysicalASAPDAG::new(
+            vec![
+                raw,
+                stored_chain,
+                node(2, last(300, 1), ExecutionTiming::QueryTime, Lifetime::None),
+            ],
+            vec![2],
+            vec![],
+        )
+        .unwrap();
+        let (cost, _) = crate::plan_cost(
+            &dag,
+            &entries(&[fixed(60_000, 0)], None),
+            &data,
+            &crate::CostInputs::default(),
+        )
+        .unwrap();
+        cost.per_node[&1].cost_per_second.unwrap()
+    };
+    let over_arriving_rows = chain_cost(Lifetime::None, None);
+    let over_kept_rows = chain_cost(
+        Lifetime::AcrossEvaluations(StorageMedium::Memory),
+        Some(3_600_000),
+    );
+    close(over_kept_rows, over_arriving_rows);
+}
