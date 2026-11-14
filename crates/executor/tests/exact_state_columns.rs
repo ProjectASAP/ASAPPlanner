@@ -9,6 +9,7 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::summary_kernels::exact::ExactEvaluation;
 use asap_executor::values::{Batch, SchemaRef, Value};
 use futures::{executor::block_on, StreamExt};
+use planner_types::stages::Lifetime;
 use std::sync::Arc;
 
 fn field(name: &str, dtype: DataType) -> Field {
@@ -66,9 +67,14 @@ fn context() -> RunContext {
 fn run(operator: Operator, inputs: Vec<Batch>) -> Vec<Batch> {
     let mut dag = PhysicalDAG::default();
     let schema = inputs[0].schema().clone();
-    dag.add(0, vec![], Operator::source(schema, inputs).unwrap())
-        .unwrap();
-    dag.add(1, vec![0], operator).unwrap();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(schema, inputs).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
+    dag.add(1, vec![0], operator, Lifetime::None).unwrap();
     block_on(async {
         let mut output = dag.execute(&[1], context()).unwrap().remove(0);
         let mut batches = Vec::new();

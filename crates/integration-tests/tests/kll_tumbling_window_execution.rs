@@ -18,6 +18,7 @@ use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
 use asap_types::plan::materialized_view::MaterializedView;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::plan::physical_asap_dag::ViewCoverage;
+use asap_types::stages::{Lifetime, StorageMedium};
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
 use futures::{executor::block_on, StreamExt};
 use std::{
@@ -346,6 +347,7 @@ fn five_tumbling_windows_roundtrip_and_shared_merge_runs_once() {
             0,
             vec![],
             Operator::source(schema.clone(), vec![restored]).unwrap(),
+            Lifetime::None,
         )
         .unwrap();
         dag.add(
@@ -355,12 +357,23 @@ fn five_tumbling_windows_roundtrip_and_shared_merge_runs_once() {
                 operator: merge.clone(),
                 starts: starts.clone(),
             },
+            Lifetime::OneEvaluation(StorageMedium::Memory),
         )
         .unwrap();
-        dag.add(2, vec![1], evaluation(merge.output_schema(), 0.5))
-            .unwrap();
-        dag.add(3, vec![1], evaluation(merge.output_schema(), 0.99))
-            .unwrap();
+        dag.add(
+            2,
+            vec![1],
+            evaluation(merge.output_schema(), 0.5),
+            Lifetime::None,
+        )
+        .unwrap();
+        dag.add(
+            3,
+            vec![1],
+            evaluation(merge.output_schema(), 0.99),
+            Lifetime::None,
+        )
+        .unwrap();
         let outputs = block_on(futures::future::join_all(
             dag.execute(
                 &[2, 3],

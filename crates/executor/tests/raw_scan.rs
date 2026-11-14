@@ -191,14 +191,12 @@ fn raw_scan_to_sort_limit_at_both_phases() {
             )
             .unwrap()
         };
-        let rows = block_on(async {
-            let mut output = bound.execute(&[2], ctx.clone()).unwrap().remove(0);
-            let mut rows = vec![];
-            while let Some(batch) = output.next().await {
-                rows.extend(batch.unwrap().to_rows().iter().cloned());
-            }
-            rows
-        });
+        let rows: Vec<_> = crate::common::run_roots(&bound, &[2], ctx.clone())
+            .unwrap()
+            .remove(0)
+            .iter()
+            .flat_map(Batch::to_rows)
+            .collect();
         assert!(
             matches!(rows.as_slice(), [a,b] if matches!(a.as_slice(), [Value::Int64(9)]) && matches!(b.as_slice(), [Value::Int64(3)]))
         );
@@ -235,7 +233,8 @@ impl DataStore for CountingStore {
         no_data(view)
     }
 }
-// Binding and cancellation do not perform I/O; fan-out opens one cursor per run.
+// Binding and cancellation do not perform I/O; at query time each consumer
+// of a raw data slot opens its own cursor.
 #[test]
 fn lazy_open_shared_producer_and_cancellation() {
     let (scan, schema, _) = fixture();
@@ -260,7 +259,7 @@ fn lazy_open_shared_producer_and_cancellation() {
             assert!(all.iter().flatten().all(Result::is_ok));
         });
     }
-    assert_eq!(opened.load(Ordering::SeqCst), 2);
+    assert_eq!(opened.load(Ordering::SeqCst), 4);
 }
 // Unsupported predicates fail before opening any cursor; a store without
 // the source and a failing reader fail the run, not as an empty result.
@@ -340,10 +339,7 @@ fn schema_drift_and_memory_limits_fail_the_scan() {
         Scope::Query {
             evaluation_time_ms: 0,
         },
-        Limits {
-            max_bytes: 1,
-            max_buffered_batches: 1,
-        },
+        Limits { max_bytes: 1 },
     )
     .unwrap();
     block_on(async {
@@ -991,12 +987,7 @@ fn a_materialized_view_is_requested_for_the_window_it_summarizes() {
             Limits::default(),
         )
         .unwrap();
-        block_on(async {
-            let mut output = physical_dag.execute(&[4], ingestion).unwrap().remove(0);
-            while let Some(batch) = output.next().await {
-                batch.unwrap();
-            }
-        });
+        crate::common::run_roots(&physical_dag, &[4], ingestion).unwrap();
         assert_eq!(
             store.time_ranges_ms.lock().unwrap()[1],
             (window_end_ms - 5 * MINUTE_MS, window_end_ms)
