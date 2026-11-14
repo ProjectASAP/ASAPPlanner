@@ -28,10 +28,9 @@ use asap_types::workload::{
 
 use super::*;
 use crate::cost::ExecutionCosts;
-use crate::milp::exact_only::must_not_read;
 use crate::plan::plan_of;
 use crate::retention::{edge_retention_need_ms, least_need_ms_per_execution};
-use crate::selectable::{output_groups, SelectableEdge};
+use crate::selectable::{QueryId, SelectableEdge};
 
 const NONE: Lifetime = Lifetime::None;
 const ONE_EVALUATION: Lifetime = Lifetime::OneEvaluation(StorageMedium::Memory);
@@ -149,7 +148,10 @@ fn selection_inputs(
 ) -> (SelectableExecutions, ExecutionCosts) {
     let mut selectable = SelectableExecutions::new(physical, entries, &output_groups(physical));
     selectable.retain_answering(|query, _, execution| {
-        !must_not_read(physical, query, execution.candidate)
+        !physical.logical_candidates.query_must_not_read(
+            query.0,
+            physical.physical_candidates[execution.candidate.0].logical_candidate_id,
+        )
     });
     let retention_cost_per_retained_second: HashMap<PhysicalCandidateId, f64> = retention
         .iter()
@@ -221,6 +223,17 @@ fn solve(
         costs: &costs,
     });
     (solved, selectable)
+}
+
+/// Each query output reference of `physical`'s memo (`Memo::output_groups`).
+fn output_groups(physical: &PhysicalASAPMemoCandidates) -> Vec<(QueryId, MemoGroupId)> {
+    physical
+        .logical_candidates
+        .memo
+        .output_groups()
+        .into_iter()
+        .map(|(query, group)| (QueryId(query), group))
+        .collect()
 }
 
 /// The candidates of `solved`'s executions, one per execution, ascending.

@@ -1,4 +1,5 @@
 use super::*;
+use asap_types::ir::NonASAPOp;
 use asap_types::workload::{DemandEstimate, Rate, RepetitionInterval, TimestampMs};
 
 fn fixed(interval: u32, phase: u64) -> QueryRecurrence {

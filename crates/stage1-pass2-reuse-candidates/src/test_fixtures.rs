@@ -128,11 +128,11 @@ pub fn chain_widths_serving(memo: &Memo, state: MemoGroupId) -> BTreeSet<u64> {
 /// `TimeRange` and `TimeShift` groups, if any.
 pub fn chain_width_below(memo: &Memo, mut group: MemoGroupId) -> Option<u64> {
     loop {
-        match &memo.groups()[group.0 as usize].expression {
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }) => return Some(*tumbling_window_width_ms),
+        let expression = &memo.groups()[group.0 as usize].expression;
+        if let Some(width_ms) = expression.chain_tumbling_window_width_ms() {
+            return Some(width_ms);
+        }
+        match expression {
             Operator::NonASAP(
                 NonASAPOp::TimeRange { child, .. } | NonASAPOp::TimeShift { child, .. },
             ) => group = *child,

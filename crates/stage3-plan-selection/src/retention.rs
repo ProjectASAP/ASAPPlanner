@@ -4,7 +4,7 @@
 //! or for a query reading it directly, and how far back one execution of a
 //! query-time `Scan` reads for that reader: [`asap_cost::read_back_ms`]
 //! over candidates; and every read of an execution's rows
-//! ([`reads_back`])
+//! (`SelectableExecutions::reads_back`)
 //! (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
 //! section 5, "Cost and retention").
 
@@ -15,7 +15,7 @@ use asap_types::stages::{
 };
 use asap_types::workload::QueryWorkloadEntry;
 
-use crate::selectable::{QueryId, SelectableExecutions};
+use crate::selectable::{Reader, SelectableExecutions};
 
 /// $\operatorname{need}_{\kappa,u,c,i}$: how far back from the evaluation
 /// time `edge`'s producer $u$ must keep its rows for its consumer $c$, with
@@ -53,54 +53,8 @@ pub(crate) fn edge_scan_read_ms(
     read_back(physical, edge, |_| 0)
 }
 
-/// How far back a query reads the output it reads directly: its
-/// range-evaluation span (0 without one).
-fn output_retention_need_ms(entry: &QueryWorkloadEntry) -> u64 {
-    entry.range_evaluation.map_or(0, |range| range.span_ms)
-}
-
-/// What reads an execution's rows back ([`reads_back`]): a selectable edge
-/// out of it, by position in [`SelectableExecutions::edges`], or a query
-/// output it may answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Reader {
-    Edge(usize),
-    Output(QueryId),
-}
-
-/// Every read of an execution's rows, as (the execution read, by position
-/// in [`SelectableExecutions::executions`]; its reader; how far back it
-/// reads, in ms, `None` when unbounded): each selectable edge into its
-/// producer, `need_ms_per_edge` by edge position
-/// ([`edge_retention_need_ms`]), and each query output into each execution
-/// that may answer it, the query's range-evaluation span. Costing ($h_v$
-/// at its largest), (R), the least $h_v$ of a selection and the greedy
-/// bound each fold it.
-pub(crate) fn reads_back<'a>(
-    selectable: &'a SelectableExecutions,
-    need_ms_per_edge: &'a [Option<u64>],
-    entries: &'a [QueryWorkloadEntry],
-) -> impl Iterator<Item = (usize, Reader, Option<u64>)> + 'a {
-    let edges = selectable
-        .edges()
-        .iter()
-        .zip(need_ms_per_edge)
-        .enumerate()
-        .map(|(position, (edge, &need_ms))| (edge.producer, Reader::Edge(position), need_ms));
-    let outputs = selectable
-        .answering()
-        .iter()
-        .flat_map(move |(query, answering)| {
-            let need_ms = output_retention_need_ms(&entries[query.0]);
-            answering
-                .iter()
-                .map(move |&index| (index, Reader::Output(*query), Some(need_ms)))
-        });
-    edges.chain(outputs)
-}
-
 /// The least need, in ms, over each execution's costed reads
-/// ([`reads_back`]: an edge out of it `per_edge` costs, or a query output
+/// (`SelectableExecutions::reads_back`: an edge out of it `per_edge` costs, or a query output
 /// it may answer), by position in [`SelectableExecutions::executions`];
 /// `None` without a bounded one. (F) gives a selected execution a use and
 /// (R) then retains at least that: the greedy bound charges it, and the
@@ -112,7 +66,7 @@ pub(crate) fn least_need_ms_per_execution(
     entries: &[QueryWorkloadEntry],
 ) -> Vec<Option<u64>> {
     let mut least_need_ms = vec![None; selectable.executions().len()];
-    for (index, reader, need_ms) in reads_back(selectable, need_ms_per_edge, entries) {
+    for (index, reader, need_ms) in selectable.reads_back(need_ms_per_edge, entries) {
         let costed = match reader {
             Reader::Edge(position) => per_edge[position].is_some(),
             Reader::Output(_) => true,
@@ -198,12 +152,6 @@ impl TimeIndexedPlan for Candidates<'_> {
     }
 
     fn operator_of(&self, v: PhysicalCandidateId) -> &Operator<MemoGroupId> {
-        &self
-            .physical
-            .logical_candidates
-            .memo
-            .candidate(self.physical.physical_candidates[v.0].logical_candidate_id)
-            .expression
-            .operator
+        self.physical.operator(v)
     }
 }

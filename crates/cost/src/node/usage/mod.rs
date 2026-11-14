@@ -22,7 +22,7 @@ use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::{FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::plan::physical_asap_dag::{
-    PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
+    PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
 use asap_types::stages::{Lifetime, StorageMedium};
 use asap_types::summary_type::{SketchParams, SketchStatistic};
@@ -202,6 +202,22 @@ impl<'a> NodeResourceUsageAndCost<'a> {
     }
 }
 
+/// Whether `consumer` reads only one batch of `producer`'s output: it runs
+/// at ingestion time and `producer` keeps raw rows stored at ingestion
+/// (`PhysicalASAPDAGNode::keeps_raw_rows_at_ingestion`, over
+/// `producer_input`, its first producer's operator), whose output is the
+/// rows it retains, what a query-time reader reads. Such a reader reads
+/// the arriving batch, as from a `Scan` that is not materialized; Stage 3
+/// and [`plan_cost`](crate::plan_cost) both cost it so.
+pub fn reads_one_batch_of<C>(
+    consumer: &PhysicalASAPDAGNode,
+    producer: &PhysicalASAPDAGNode,
+    producer_input: Option<&Operator<C>>,
+) -> bool {
+    consumer.output_state.timing == ExecutionTiming::IngestionTime
+        && producer.keeps_raw_rows_at_ingestion(producer_input)
+}
+
 /// One second, in ms: an ingestion-time node runs over the rows arriving
 /// in one second, and an ingestion-time view that maintains no window is
 /// refreshed once per second.
@@ -225,23 +241,20 @@ pub fn maintained_window_ms<'o, N: Copy + Ord, C: 'o>(
     input_of: impl Fn(N) -> Option<N>,
 ) -> Option<u64> {
     let range_ms = |range: &std::time::Duration| u64::try_from(range.as_millis()).ok();
-    match operator_of(node) {
-        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-            tumbling_window_width_ms,
-            ..
-        }) => return Some(*tumbling_window_width_ms),
-        Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => return range_ms(range),
-        _ => {}
+    if let Some(width_ms) = operator_of(node).chain_tumbling_window_width_ms() {
+        return Some(width_ms);
+    }
+    if let Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) = operator_of(node) {
+        return range_ms(range);
     }
     let mut seen = BTreeSet::new();
     let mut below = input_of(node)?;
     while seen.insert(below) {
+        if let Some(width_ms) = operator_of(below).chain_tumbling_window_width_ms() {
+            return Some(width_ms);
+        }
         match operator_of(below) {
             Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => return range_ms(range),
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }) => return Some(*tumbling_window_width_ms),
             Operator::NonASAP(
                 NonASAPOp::Filter { .. } | NonASAPOp::Project { .. } | NonASAPOp::TimeShift { .. },
             ) => below = input_of(below)?,
@@ -249,6 +262,18 @@ pub fn maintained_window_ms<'o, N: Copy + Ord, C: 'o>(
         }
     }
     None
+}
+
+/// The time between two outputs of a node running `payload` that keeps
+/// rows, which its retention is divided by: a chain's tumbling window,
+/// else `window_ms` (the window it maintains), else one second of
+/// arriving rows; at least 1 ms. Stage 3's $\pi_v$ is the cost of one
+/// more of it.
+pub fn output_interval_ms<C>(payload: &Operator<C>, window_ms: Option<u64>) -> u64 {
+    payload
+        .chain_tumbling_window_width_ms()
+        .unwrap_or_else(|| window_ms.unwrap_or(ONE_SECOND_MS))
+        .max(1)
 }
 
 /// Measure and cost one node of a physical DAG (one step of
@@ -298,14 +323,7 @@ pub fn node_resource_usage_and_cost<'a>(
     // windows; any other view materialized at ingestion time has one output
     // per refresh (per window it maintains, `window_ms`; per second of
     // arriving rows without one).
-    let output_interval_ms = match &node.payload {
-        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-            tumbling_window_width_ms,
-            ..
-        }) => *tumbling_window_width_ms,
-        _ => window_ms.unwrap_or(ONE_SECOND_MS),
-    }
-    .max(1);
+    let output_interval_ms = output_interval_ms(&node.payload, window_ms);
     // A view materialized across evaluations keeps what its retention
     // covers. Without one (a reader reads it unbounded: a negative offset,
     // an `@` anchor) nothing bounds what it keeps and it cannot be
@@ -347,18 +365,8 @@ pub fn node_resource_usage_and_cost<'a>(
     // by an offset over one, across evaluations. It is a time-indexed store
     // its consumers read back in, retaining `retention_ms` ($h_v$) of rows,
     // which behind an offset includes the offset.
-    let raw_rows_materialized_at_ingestion = ingestion
-        && matches!(node.lifetime, Lifetime::AcrossEvaluations(_))
-        && match &node.payload {
-            Payload::NonASAP(NonASAPOp::Scan { .. }) => true,
-            Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
-                shift.at.is_none()
-                    && producers.first().is_some_and(|producer| {
-                        matches!(producer.payload, Payload::NonASAP(NonASAPOp::Scan { .. }))
-                    })
-            }
-            _ => false,
-        };
+    let raw_rows_materialized_at_ingestion =
+        node.keeps_raw_rows_at_ingestion(producers.first().map(|producer| producer.payload));
     // The raw rows of its sources back `lookback_ms`: (by arrival rate,
     // when known; the rows they hold, when declared).
     let raw_rows = |lookback_ms: Option<u64>| -> (Option<u64>, Option<u64>) {
@@ -1053,14 +1061,12 @@ pub fn node_resource_usage_and_cost<'a>(
     if cost.is_some_and(|cost| !cost.is_finite()) {
         return Err(AnalyticalCostError::Overflow);
     }
-    let chain_tumbling_window_width_ms = match &node.payload {
-        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-            tumbling_window_width_ms,
-            ..
-        }) => Some(*tumbling_window_width_ms),
-        Payload::NonASAP(NonASAPOp::TimeShift { .. }) => chain_tumbling_window_width_ms(producers),
-        _ => None,
-    };
+    let chain_tumbling_window_width_ms =
+        node.payload.chain_tumbling_window_width_ms().or_else(|| {
+            matches!(node.payload, Payload::NonASAP(NonASAPOp::TimeShift { .. }))
+                .then(|| chain_tumbling_window_width_ms(producers))
+                .flatten()
+        });
     Ok(NodeResourceUsageAndCost {
         output: out,
         sources,

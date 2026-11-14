@@ -231,14 +231,11 @@ fn chain_path(memo: &Memo, state: MemoGroupId) -> Option<ChainPath> {
 fn existing_chain_widths(memo: &Memo, path: &ChainPath) -> Vec<u64> {
     memo.groups()
         .iter()
-        .filter_map(|group| match &group.expression {
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }) if group.expression == path.chain(*tumbling_window_width_ms) => {
-                Some(*tumbling_window_width_ms)
-            }
-            _ => None,
+        .filter_map(|group| {
+            group
+                .expression
+                .chain_tumbling_window_width_ms()
+                .filter(|&width_ms| group.expression == path.chain(width_ms))
         })
         .collect()
 }

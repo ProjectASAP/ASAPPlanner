@@ -10,12 +10,10 @@
 use crate::node::analytical::AnalyticalCostError;
 use asap_types::ir::operator::AtModifier;
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::{NonASAPOp, Operator};
+use asap_types::ir::Operator;
 use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
-use asap_types::stages::Lifetime;
-use asap_types::workload::{
-    greatest_common_divisor, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation, RepeatedDemand,
-};
+use asap_types::stages::{queries_of_context, query_reads, Lifetime};
+use asap_types::workload::{QueryRecurrence, QueryWorkloadEntry, RangeEvaluation, RepeatedDemand};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// How a [`ScheduleGroup`]'s evaluations add to the others'.
@@ -298,89 +296,9 @@ pub enum Consumer {
     Materialized(PhysicalASAPNodeId),
 }
 
-/// How each query reads the nodes below it, in a plan or a memo: per node,
-/// each (query, anchor) whose walk from the query's `starts` down
-/// `inputs_of` reaches it, once, skipping (and stopping at) a node
-/// `stops_at` keeps. Below a `TimeShift` anchored with `@ end()` or
-/// `@ start()` (`anchor_of`) a query reads per request, with that anchor,
-/// unless the anchor is its evaluation time ([`anchor_is_evaluation_time`]
-/// over the queries on its grid that reach the shift through any node);
-/// elsewhere with none. Stage 3 walks memo groups with it and
-/// [`consumers`] plan nodes, so both rate a context by the queries whose
-/// walk reaches it. Stage 3 walks every candidate of a group, so a query
-/// reading a group through one candidate counts for the group's other
-/// candidates too.
-///
-/// Example: an instant `sum_over_time(m[5m] @ end())` and a range
-/// `sum_over_time(m[5m] @ end() offset 10m)`, both every 60 s: `m[5m]` is
-/// read by the instant query with no anchor and by the range query with
-/// `@ end()` (its requests' ends are not its evaluations).
-pub fn query_reads<N: Copy + Eq + std::hash::Hash>(
-    starts: &[Vec<N>],
-    inputs_of: impl Fn(N) -> Vec<N>,
-    anchor_of: impl Fn(N) -> Option<AtModifier>,
-    stops_at: impl Fn(N) -> bool,
-    entries: &[QueryWorkloadEntry],
-) -> HashMap<N, Vec<(usize, Option<AtModifier>)>> {
-    // The queries reaching each anchored shift, through any node.
-    let mut reaching_shift: HashMap<N, BTreeSet<usize>> = HashMap::new();
-    for (query, start) in starts.iter().enumerate() {
-        let mut seen = HashSet::new();
-        let mut stack = start.clone();
-        while let Some(id) = stack.pop() {
-            if seen.insert(id) {
-                if anchor_of(id).is_some() {
-                    reaching_shift.entry(id).or_default().insert(query);
-                }
-                stack.extend(inputs_of(id));
-            }
-        }
-    }
-    let in_evaluation_context = |shift: N, query: usize, at: AtModifier| {
-        let Some(entry) = entries.get(query) else {
-            return false;
-        };
-        let on_grid = queries_of_context(
-            evaluation_grid_ms(entry),
-            reaching_shift.get(&shift).into_iter().flatten().copied(),
-            entries,
-        );
-        anchor_is_evaluation_time(at, on_grid.iter().map(|&q| &entries[q]))
-    };
-    let mut reads: HashMap<N, Vec<(usize, Option<AtModifier>)>> = HashMap::new();
-    for (query, start) in starts.iter().enumerate() {
-        let mut seen = HashSet::new();
-        let mut stack: Vec<(N, Option<AtModifier>)> = start.iter().map(|&id| (id, None)).collect();
-        while let Some((id, anchor)) = stack.pop() {
-            if stops_at(id) || !seen.insert((id, anchor)) {
-                continue;
-            }
-            reads.entry(id).or_default().push((query, anchor));
-            let below = match (anchor, anchor_of(id)) {
-                (None, Some(at)) if !in_evaluation_context(id, query, at) => Some(at),
-                (anchor, _) => anchor,
-            };
-            stack.extend(inputs_of(id).into_iter().map(|input| (input, below)));
-        }
-    }
-    reads
-}
-
-/// The anchor of `operator` when it is a `TimeShift` anchored with
-/// `@ end()` or `@ start()` ([`query_reads`]).
-pub fn request_anchor<C>(operator: &Operator<C>) -> Option<AtModifier> {
-    match operator {
-        Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => match shift.at {
-            Some(at @ (AtModifier::End | AtModifier::Start)) => Some(at),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 /// The consumers of each node of `dag` not materialized across evaluations
 /// that any consumer reaches ([`computations`]): the queries
-/// ([`query_reads`]) and the nodes materialized across evaluations whose
+/// ([`query_reads`](asap_types::stages::query_reads)) and the nodes materialized across evaluations whose
 /// walk down their inputs reaches it before meeting such a node, each
 /// once, sorted. A `OneEvaluation` node is computed within its consumers'
 /// context, so a walk goes through it.
@@ -414,7 +332,7 @@ pub fn consumers(
         |id| {
             payload
                 .get(&id)
-                .and_then(|operator| request_anchor(operator))
+                .and_then(|operator| operator.request_anchor())
         },
         |id| is_materialized.contains(&id),
         entries,
@@ -449,74 +367,6 @@ pub fn consumers(
         of_node.sort();
     }
     consumers
-}
-
-/// Whether a `TimeShift` anchored with `at`, read by `queries` (those on
-/// one evaluation grid that reach it), is anchored at their evaluation
-/// times, so its input runs in their evaluation context, shared with
-/// their other reads: `@ end()` with an instant query among them (an
-/// instant query's request ends at its evaluation; the input computed at
-/// every evaluation of the grid serves the range queries' request ends
-/// too). Otherwise it runs once per request, in a context of its own.
-///
-/// `@ start()` of an instant query is its evaluation time too; it keeps
-/// its request context here, as the user decided for `@ end()` only.
-///
-/// Example: `sum_over_time(m[5m] @ end())` and `sum_over_time(m[5m])`,
-/// both instant every 60 s: true, so `m[5m]` is computed once per minute
-/// for both; the same `@ end()` in a range query alone: false.
-pub fn anchor_is_evaluation_time<'e>(
-    at: AtModifier,
-    queries: impl IntoIterator<Item = &'e QueryWorkloadEntry>,
-) -> bool {
-    at == AtModifier::End
-        && queries.into_iter().any(|entry| {
-            entry
-                .range_evaluation
-                .is_none_or(|range| range.evaluations_per_request() <= 1)
-        })
-}
-
-/// The queries of the execution context on evaluation grid `grid_ms`
-/// among `reaching` (the queries reaching a node, by index in `entries`):
-/// those evaluated on that grid ([`evaluation_grid_ms`]; 1 ms for a query
-/// without an entry). Stage 3 (over the queries reaching a memo group or
-/// an anchored shift) and [`computations`] (over the queries whose walk
-/// reaches a plan node) pick a context's queries with it.
-pub fn queries_of_context(
-    grid_ms: u64,
-    reaching: impl IntoIterator<Item = usize>,
-    entries: &[QueryWorkloadEntry],
-) -> Vec<usize> {
-    reaching
-        .into_iter()
-        .filter(|&query| entries.get(query).map_or(1, evaluation_grid_ms) == grid_ms)
-        .collect()
-}
-
-/// The grid, in ms, every evaluation of `entry`'s query falls on
-/// (`QueryRecurrence::evaluation_grid_ms` of its range evaluation), the
-/// grid of its evaluation context; 1 ms when not known, a grid on which
-/// only producers stored at every time deliver.
-pub fn evaluation_grid_ms(entry: &QueryWorkloadEntry) -> u64 {
-    entry
-        .recurrence
-        .evaluation_grid_ms(entry.range_evaluation)
-        .unwrap_or(1)
-}
-
-/// The grid, in ms, of the times `entry`'s requests anchor `@ end()` or
-/// `@ start()` (`at`) at: its request end times, shifted back by its
-/// range-evaluation span for `@ start()`; 1 ms when not known.
-///
-/// Example: a query every 60 s over the last hour: `@ end()` 60,000 ms,
-/// `@ start()` gcd(60,000, 3,600,000) = 60,000 ms.
-pub fn request_time_grid_ms(entry: &QueryWorkloadEntry, at: AtModifier) -> u64 {
-    let end_ms = entry.recurrence.evaluation_grid_ms(None).unwrap_or(1);
-    match (at, entry.range_evaluation) {
-        (AtModifier::Start, Some(range)) => greatest_common_divisor(end_ms, range.span_ms),
-        _ => end_ms,
-    }
 }
 
 /// How many times per second a node runs in one execution context of the
@@ -587,7 +437,7 @@ pub fn context_executions_per_second<'e>(
 /// root) or a node materialized across evaluations; a walk stops at the
 /// first such node it meets, and a node read several times within one
 /// consumer's walk counts once for it. The queries on one evaluation grid
-/// ([`evaluation_grid_ms`]) are one context, and the requests of the
+/// ([`QueryWorkloadEntry::evaluation_grid_ms`]) are one context, and the requests of the
 /// queries on one grid below a `TimeShift` anchored with `@ end()` (or
 /// `@ start()`) another, each at [`context_executions_per_second`]; a
 /// materialized node is a context of its own, at its rate. Its
@@ -663,7 +513,11 @@ pub fn computations(
         for (anchor, reaching) in queries_by_anchor {
             let grids: BTreeSet<u64> = reaching
                 .iter()
-                .map(|&query| entries.get(query).map_or(1, evaluation_grid_ms))
+                .map(|&query| {
+                    entries
+                        .get(query)
+                        .map_or(1, QueryWorkloadEntry::evaluation_grid_ms)
+                })
                 .collect();
             for grid_ms in grids {
                 let queries = queries_of_context(grid_ms, reaching.iter().copied(), entries);

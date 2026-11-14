@@ -34,9 +34,8 @@ pub(crate) fn candidate_node(
     let logical = memo.candidate(candidate.logical_candidate_id);
     let group = &memo.groups()[candidate.logical_candidate_id.group.0 as usize].group_properties;
     let mut inputs = input_ids.iter();
-    let payload = logical
-        .expression
-        .operator
+    let payload = physical
+        .operator(v)
         .map_children(|_| *inputs.next().expect("one node per input"));
     let lifetime = candidate.physical_properties.lifetime();
     PhysicalASAPDAGNode {

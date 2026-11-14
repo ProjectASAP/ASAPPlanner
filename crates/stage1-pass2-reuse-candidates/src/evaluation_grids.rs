@@ -5,7 +5,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
+use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::stages::{EvaluationGrid, Memo, MemoGroupId};
 use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
 
@@ -92,13 +92,9 @@ pub(crate) fn chain_off_the_evaluation_grid(
     group: MemoGroupId,
     input_group: MemoGroupId,
 ) -> Option<(u64, Option<u64>)> {
-    let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-        tumbling_window_width_ms,
-        ..
-    }) = memo.groups()[input_group.0 as usize].expression
-    else {
-        return None;
-    };
+    let tumbling_window_width_ms = memo.groups()[input_group.0 as usize]
+        .expression
+        .chain_tumbling_window_width_ms()?;
     if !memo.groups()[group.0 as usize]
         .group_properties
         .depends_on_evaluation_time

@@ -2,8 +2,6 @@
 //! valid $p^{\mathrm{phys}} = (\tau, \ell)$.
 
 use crate::ir::properties::ExecutionTiming;
-use crate::ir::{ASAPOp, Operator};
-use crate::plan::materialized_view::RefreshWindow;
 use crate::stages::{CandidateForMemoGroupId, ExecutionContext, PhysicalASAPMemoCandidates};
 use crate::stages::{Lifetime, PhysicalProperties};
 use crate::workload::DataArrival;
@@ -51,7 +49,8 @@ impl PhysicalCandidate {
     ///
     /// `DataArrival::Unknown` counts as arriving.
     /// The times of a
-    /// `Materialized(v)` context are $v$'s own ([`Self::own_schedule`]);
+    /// `Materialized(v)` context are $v$'s own
+    /// ([`LogicalASAPMemoCandidates::own_schedule`](crate::stages::LogicalASAPMemoCandidates::own_schedule));
     /// when they are not known, no non-final producer delivers on it.
     pub fn delivers_on(
         &self,
@@ -69,7 +68,14 @@ impl PhysicalCandidate {
                     && (self.physical_properties.timing() == ExecutionTiming::IngestionTime
                         || logical.memo.data_arrival() == DataArrival::AtRest
                         || group_properties.scanned_sources.is_empty());
-                if self.chain_tumbling_window_width_ms(candidates).is_none() && final_at_every_time
+                if logical
+                    .memo
+                    .candidate(self.logical_candidate_id)
+                    .expression
+                    .operator
+                    .chain_tumbling_window_width_ms()
+                    .is_none()
+                    && final_at_every_time
                 {
                     return true;
                 }
@@ -79,58 +85,21 @@ impl PhysicalCandidate {
                         (window.width_ms, window.phase_ms)
                     }
                     ExecutionContext::Materialized(v) => {
-                        match candidates.physical_candidates[v.0].own_schedule(candidates) {
-                            Some(window) => (window.width_ms, window.phase_ms),
+                        let materialized = candidates.physical_candidates[v.0].logical_candidate_id;
+                        match logical.own_schedule(materialized) {
+                            Some(grid) => (grid.period_ms, grid.phase_ms),
                             None => return false,
                         }
                     }
                 };
-                self.own_schedule(candidates).is_some_and(|stored| {
-                    stored.width_ms > 0
-                        && period_ms.is_multiple_of(stored.width_ms)
-                        && phase_ms % stored.width_ms == stored.phase_ms % stored.width_ms
-                })
+                logical
+                    .own_schedule(self.logical_candidate_id)
+                    .is_some_and(|stored| {
+                        stored.period_ms > 0
+                            && period_ms.is_multiple_of(stored.period_ms)
+                            && phase_ms % stored.period_ms == stored.phase_ms % stored.period_ms
+                    })
             }
-        }
-    }
-
-    /// The times it computes at when materialized across evaluations, on
-    /// its own schedule: every window end of a chain (its width at phase
-    /// 0), else its group's evaluation grid (`evaluation_grid_of_group`);
-    /// `None` when neither is known.
-    pub fn own_schedule(&self, candidates: &PhysicalASAPMemoCandidates) -> Option<RefreshWindow> {
-        match self.chain_tumbling_window_width_ms(candidates) {
-            Some(width_ms) => Some(RefreshWindow {
-                width_ms,
-                phase_ms: 0,
-            }),
-            None => candidates.logical_candidates.evaluation_grid_of_group
-                [self.logical_candidate_id.group.0 as usize]
-                .map(|grid| RefreshWindow {
-                    width_ms: grid.period_ms,
-                    phase_ms: grid.phase_ms,
-                }),
-        }
-    }
-
-    /// Its tumbling-window width when it is a chain
-    /// (`SummaryTumblingWindowChain`).
-    pub fn chain_tumbling_window_width_ms(
-        &self,
-        candidates: &PhysicalASAPMemoCandidates,
-    ) -> Option<u64> {
-        match candidates
-            .logical_candidates
-            .memo
-            .candidate(self.logical_candidate_id)
-            .expression
-            .operator
-        {
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }) => Some(tumbling_window_width_ms),
-            _ => None,
         }
     }
 }

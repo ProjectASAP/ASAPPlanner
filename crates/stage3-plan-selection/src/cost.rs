@@ -53,11 +53,10 @@ use std::collections::HashMap;
 
 use asap_cost::plan::execution_demand::{
     context_executions_per_second, executions_per_second as rate_of_materialized,
-    queries_of_context,
 };
 use asap_cost::{
-    maintained_window_ms, node_resource_usage_and_cost, raw_data_disk_cost_per_second, CostInputs,
-    NodeResourceUsageAndCost, ProducerOutput,
+    maintained_window_ms, node_resource_usage_and_cost, output_interval_ms,
+    raw_data_disk_cost_per_second, CostInputs, NodeResourceUsageAndCost, ProducerOutput,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
@@ -66,15 +65,14 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload,
 };
 use asap_types::stages::{
-    ExecutionContext, Lifetime, Memo, MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId,
-    PhysicalEdgeId,
+    queries_of_context, ExecutionContext, Lifetime, Memo, MemoGroupId, PhysicalASAPMemoCandidates,
+    PhysicalCandidateId, PhysicalEdgeId,
 };
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::plan::candidate_node;
 use crate::retention::{
     edge_retention_need_ms, edge_scan_read_ms, least_need_ms_per_execution, ms_to_seconds,
-    reads_back,
 };
 use crate::selectable::{Execution, SelectableExecutions};
 
@@ -187,7 +185,7 @@ pub(crate) fn execution_costs(
             *most = most.zip(need_ms).map(|(most, need)| most.max(need));
         }
     };
-    for (index, _, need_ms) in reads_back(selectable, &retention_need_ms_per_edge, entries) {
+    for (index, _, need_ms) in selectable.reads_back(&retention_need_ms_per_edge, entries) {
         read(executions[index].candidate, need_ms);
     }
     // How far back a query-time `Scan` reads for the consumer of each edge
@@ -353,13 +351,11 @@ pub(crate) fn execution_costs(
         let Some(retention_ms) = most_read_ms else {
             continue;
         };
-        let candidate = &physical.physical_candidates[v.0];
-        let delta_ms = match candidate.physical_properties.timing() {
+        let window_ms = match nodes[v.0].output_state.timing {
             ExecutionTiming::IngestionTime => ingestion_window_ms(physical, v),
-            ExecutionTiming::QueryTime => candidate.chain_tumbling_window_width_ms(physical),
-        }
-        .unwrap_or(1_000)
-        .max(1);
+            ExecutionTiming::QueryTime => None,
+        };
+        let delta_ms = output_interval_ms(&nodes[v.0].payload, window_ms);
         let longer = node_retaining(v, Some(retention_ms + delta_ms));
         let delta_seconds = ms_to_seconds(delta_ms);
         let per_retained_second = match physical.physical_candidates[v.0]
@@ -445,7 +441,7 @@ pub(crate) fn execution_costs(
             let &(own, raw_data, per_second) = at_rate[consumer].as_ref().ok()?;
             let produced = usage[u.0].as_ref()?.as_ref().ok()?;
             let mut inputs = baseline[c.0].clone()?;
-            if !reads_one_batch_of(&nodes, c, u) {
+            if !reads_one_batch_of(physical, &nodes, c, u) {
                 inputs[e.input_index_of_consumer] =
                     produced.producer_output(&nodes[u.0].payload, &nodes[u.0].output_schema);
             }
@@ -486,15 +482,12 @@ pub(crate) fn execution_costs(
 /// Whether candidate `v` is a `Scan` at query time, which reads raw data
 /// in each execution.
 fn is_query_time_scan(physical: &PhysicalASAPMemoCandidates, v: PhysicalCandidateId) -> bool {
-    let candidate = &physical.physical_candidates[v.0];
-    candidate.physical_properties.timing() == ExecutionTiming::QueryTime
+    physical.physical_candidates[v.0]
+        .physical_properties
+        .timing()
+        == ExecutionTiming::QueryTime
         && matches!(
-            physical
-                .logical_candidates
-                .memo
-                .candidate(candidate.logical_candidate_id)
-                .expression
-                .operator,
+            physical.operator(v),
             Operator::NonASAP(NonASAPOp::Scan { .. })
         )
 }
@@ -503,7 +496,7 @@ fn is_query_time_scan(physical: &PhysicalASAPMemoCandidates, v: PhysicalCandidat
 /// serves ([`context_executions_per_second`], which `plan_cost` uses too):
 /// in an evaluation context, for the queries on its grid whose walk over
 /// the memo reaches the execution's group in their evaluation context
-/// (`SelectableExecutions::readers_of`, [`asap_cost::plan::execution_demand::query_reads`],
+/// (`SelectableExecutions::readers_of`, [`asap_types::stages::query_reads`],
 /// the walk `plan_cost` takes over the plan), at their evaluations; for
 /// the inputs of a `TimeShift` anchored with `@`, once per request of the
 /// queries on the shift's grid that reach the shift. The memo walk goes
@@ -582,9 +575,8 @@ fn baseline_inputs<'a>(
     usage: &[Option<Result<NodeResourceUsageAndCost<'a>, String>>],
     v: PhysicalCandidateId,
 ) -> Option<Vec<ProducerOutput<'a>>> {
-    memo.candidate(physical.physical_candidates[v.0].logical_candidate_id)
-        .expression
-        .operator
+    physical
+        .operator(v)
         .children()
         .into_iter()
         .enumerate()
@@ -596,31 +588,30 @@ fn baseline_inputs<'a>(
                     .admissible_edges_into(v, i)
                     .iter()
                     .map(|&edge| physical.edge(edge).producer_candidate_id)
-                    .filter(|&u| !reads_one_batch_of(nodes, v, u))
+                    .filter(|&u| !reads_one_batch_of(physical, nodes, v, u))
                     .filter_map(|u| usage[u.0].as_ref()?.as_ref().ok()),
             )
         })
         .collect()
 }
 
-/// Whether consumer `c` reads only one batch of producer `u`'s output: `c`
-/// runs at ingestion time and `u` is a raw `Scan` materialized there, whose
-/// output is the rows it retains, what a query-time consumer reads. Such an
-/// edge costs what reading a `Scan` that is not materialized does.
+/// Whether consumer `c` reads only one batch of producer `u`'s output
+/// ([`asap_cost::reads_one_batch_of`], over `u`'s input group's
+/// operator): such an edge costs what reading a `Scan` that is not
+/// materialized does.
 fn reads_one_batch_of(
+    physical: &PhysicalASAPMemoCandidates,
     nodes: &[PhysicalASAPDAGNode],
     c: PhysicalCandidateId,
     u: PhysicalCandidateId,
 ) -> bool {
-    let ingestion_time =
-        |v: PhysicalCandidateId| nodes[v.0].output_state.timing == ExecutionTiming::IngestionTime;
-    ingestion_time(c)
-        && ingestion_time(u)
-        && nodes[u.0].retains_rows()
-        && matches!(
-            nodes[u.0].payload,
-            Operator::NonASAP(NonASAPOp::Scan { .. })
-        )
+    let memo = &physical.logical_candidates.memo;
+    let input = physical
+        .operator(u)
+        .children()
+        .first()
+        .map(|group| &memo.groups()[group.0 as usize].expression);
+    asap_cost::reads_one_batch_of(&nodes[c.0], &nodes[u.0], input)
 }
 
 /// An input's logical output over its readable costed candidates' `usages`: the most
@@ -685,8 +676,9 @@ fn ingestion_window_ms(
 ) -> Option<u64> {
     let memo = &physical.logical_candidates.memo;
     let group = physical.physical_candidates[v.0].logical_candidate_id.group;
-    physical.physical_candidates[v.0]
-        .chain_tumbling_window_width_ms(physical)
+    physical
+        .operator(v)
+        .chain_tumbling_window_width_ms()
         .or_else(|| {
             maintained_window_ms(
                 group,

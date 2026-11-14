@@ -92,6 +92,15 @@ impl PhysicalProperties {
     pub fn is_across_evaluations(&self) -> bool {
         matches!(self.lifetime, Lifetime::AcrossEvaluations(_))
     }
+
+    /// Whether it has at most one consumer per execution context: a
+    /// query-time result that is not materialized ($\ell$ = None).
+    /// Consumers in one context that share a result read a `OneEvaluation`
+    /// or a materialized producer; the consumers of one ingestion run share
+    /// its rows.
+    pub fn has_one_reader_per_context(&self) -> bool {
+        self.lifetime == Lifetime::None && self.timing == ExecutionTiming::QueryTime
+    }
 }
 
 #[cfg(test)]
