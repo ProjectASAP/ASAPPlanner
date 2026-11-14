@@ -228,11 +228,11 @@ within its validity cap `b_i` (`ErrorContract::error_factor_per_input` and
 | Sort, TimeRange, TimeShift, Concat, a readout, a finalize, a summary merge | `β = 1` in any metric |
 | Filter on columns copied from a source (labels and keys) | `β = 1` in any metric; a filter comparing a computed value has none |
 | Project | Judged on the items reading a computed value (labels, the time and the series identity are copied): `β = 1` in any metric for a copied column; absolute error, `β = 1`, for `abs`, `clamp`, `clamp_min`, `clamp_max` (also PromQL's `promql_` functions) and a negation; relative error, `β = 1`, for a product with or quotient by a nonzero constant |
-| Aggregate or exact-accumulator build of counts, min, max, avg | Counts `β = 0`; min and max absolute or relative with `β = 1`; avg absolute with `β = 1`; only when every group-by key is copied from a source (a `by` key as listed; for `without`, every column but the time, the sample value and the excluded ones); none with measure filters or `HAVING`, or with a key reading an estimate |
+| Aggregate or exact-accumulator build of counts, min, max, avg, sum | Counts `β = 0`; min and max absolute or relative with `β = 1`; avg absolute with `β = 1`; sum and avg relative with `β = 1` when the values they aggregate are of one sign (the input column's `column_signs` is non-negative or non-positive): `\|Σ (x̂_i − x_i)\| ≤ ε Σ \|x_i\| = ε \|Σ x_i\|`; only when every group-by key is copied from a source (a `by` key as listed; for `without`, every column but the time, the sample value and the excluded ones); none with measure filters or `HAVING`, or with a key reading an estimate |
 | `+`, `-` | Absolute error, `β = 1` |
 | `/` | Relative error, `β = 1/(1 − b)` on both operands, the denominator capped at `b` |
 | `*` | Relative error, `β = (1 + b, 1)`, the right operand capped at `b` |
-| Sum, comparison, ranking, counter rate or increase, any other function | No contract: the edge of an approximate input fails |
+| Sum in absolute error or of values of unknown sign, comparison, ranking, counter rate or increase, any other function | No contract: the edge of an approximate input fails |
 | Top-k over a sketch | Checked: the heap size is at least `k`, and the readout's value guarantee meets the requirement; membership has no check of its own |
 
 `b` is `RELATIVE_OPERAND_VALIDITY_CAP`, 0.1, the weakest error of every

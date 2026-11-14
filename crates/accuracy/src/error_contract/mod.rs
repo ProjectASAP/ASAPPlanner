@@ -8,8 +8,8 @@ use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, ScalarValue};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, BinaryOperator, NonASAPOp, Operator, ScalarExpr};
-use asap_types::stages::{ColumnLineage, Memo, MemoGroupId};
-use asap_types::summary_type::ExactKind;
+use asap_types::stages::{ColumnLineage, Memo, MemoGroupId, ValueSign};
+use asap_types::summary_type::{ExactKind, SummaryInputExpr};
 
 /// $g_c$'s linear bound for errors in `metric`, each input's and the
 /// output's: $\beta_{c,i}$ and $b_{c,i}$ per input, read from the
@@ -29,10 +29,12 @@ use asap_types::summary_type::ExactKind;
 /// - a `Filter` whose predicate reads only columns copied from a source
 ///   (lineage `SourceColumn`, labels and keys): $\beta = 1$ in any metric;
 /// - an `Aggregate` (or exact accumulator build) of counts ($\beta = 0$),
-///   min and max (absolute or relative, $\beta = 1$) and avg (absolute,
-///   $\beta = 1$), without measure filters or `HAVING`, whose group-by
-///   keys are copied from a source as a `Filter`'s predicate columns are
-///   (a count by an estimate has no bound);
+///   min and max (absolute or relative, $\beta = 1$), avg (absolute,
+///   $\beta = 1$) and sum and avg of values of one sign (relative,
+///   $\beta = 1$, [`values_of_one_sign`]), without measure filters or
+///   `HAVING`, whose group-by keys are copied from a source as a
+///   `Filter`'s predicate columns are (a count by an estimate has no
+///   bound);
 /// - `+` and `-`: absolute, $\beta = 1$; `/`: relative,
 ///   $\beta = 1/(1-b)$ on both, the denominator capped at $b$; `*`:
 ///   relative, $(1+b, 1)$, the right operand capped at $b$
@@ -40,7 +42,8 @@ use asap_types::summary_type::ExactKind;
 ///   [`RELATIVE_OPERAND_VALIDITY_CAP`].
 ///
 /// Every other operator (a filter comparing a computed value, a ranking,
-/// a `sum`, a comparison, another function) has none.
+/// a `sum` of values of unknown sign or in absolute error, a comparison,
+/// another function) has none.
 pub(crate) fn error_contract(
     memo: &Memo,
     consumer: &Operator<MemoGroupId>,
@@ -88,6 +91,12 @@ pub(crate) fn error_contract(
                             factor = factor.max(1.0)
                         }
                         AggIntent::Avg { .. } if absolute => factor = factor.max(1.0),
+                        AggIntent::Sum { col } | AggIntent::Avg { col }
+                            if metric == AccuracyMetric::Relative
+                                && values_of_one_sign(memo, *child, *col) =>
+                        {
+                            factor = factor.max(1.0)
+                        }
                         _ => return None,
                     }
                 }
@@ -127,13 +136,14 @@ pub(crate) fn error_contract(
             | ASAPOp::SummaryMerge { .. } => Some(uniform(1.0)),
             ASAPOp::SummaryAgg {
                 summary_type: FieldDataType::ExactAggregate(kind, _),
+                input,
                 filter: None,
                 reduction,
                 child,
-                ..
             }
             | ASAPOp::SummaryTumblingWindowChain {
                 summary_type: FieldDataType::ExactAggregate(kind, _),
+                input,
                 filter: None,
                 reduction,
                 child,
@@ -141,6 +151,14 @@ pub(crate) fn error_contract(
             } if keys_copied_from_a_source(memo, *child, reduction) => match kind {
                 ExactKind::Count => Some(uniform(0.0)),
                 ExactKind::Min | ExactKind::Max if extremum_metric => Some(uniform(1.0)),
+                ExactKind::Sum if metric == AccuracyMetric::Relative => {
+                    let SummaryInputExpr::Column(column) = &input.weight else {
+                        return None;
+                    };
+                    let schema = &memo.groups()[child.0 as usize].group_properties.schema;
+                    let column = resolve_column_ref(column, schema).ok()?;
+                    values_of_one_sign(memo, *child, Some(column)).then(|| uniform(1.0))
+                }
                 _ => None,
             },
             _ => None,
@@ -162,6 +180,24 @@ fn copied_from_a_source(
     columns
         .into_iter()
         .all(|column| matches!(lineage.get(column), Some(ColumnLineage::SourceColumn(_))))
+}
+
+/// Whether the values of column `column` of `group`'s output (its sample
+/// value when `None`) all have one sign (`column_signs` `NonNegative` or
+/// `NonPositive`, derived through the operators below `group`): then a
+/// relative error ε on each value is at most ε on their sum and mean,
+/// $|\sum_i (\hat{x}_i - x_i)| \le \varepsilon \sum_i |x_i| =
+/// \varepsilon |\sum_i x_i|$. Values of unknown sign may cancel.
+fn values_of_one_sign(memo: &Memo, group: MemoGroupId, column: Option<usize>) -> bool {
+    let properties = &memo.groups()[group.0 as usize].group_properties;
+    let column =
+        column.or_else(|| resolve_column_ref(&ColumnRef::SampleValue, &properties.schema).ok());
+    column.is_some_and(|column| {
+        matches!(
+            properties.column_signs.get(column),
+            Some(ValueSign::NonNegative | ValueSign::NonPositive)
+        )
+    })
 }
 
 /// Whether every key `reduction` groups `child`'s rows by is copied from a
