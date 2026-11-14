@@ -14,7 +14,7 @@ use super::{MemoGroupAsInput, MemoGroupId};
 use crate::ir::operator::arguments::{
     BinaryOpKind, GroupSide, JoinKind, PromQLVectorSetOpKind, Reduction, Source, SourceColumn,
 };
-use crate::ir::operator::asap::{summary_agg_layout, summary_build};
+use crate::ir::operator::asap::{exact_accumulator_measure, summary_agg_layout, summary_build};
 use crate::ir::operator::input::OperatorInput;
 use crate::ir::operator::AggIntent;
 use crate::ir::scalar::expr_ir::{ArithmeticOpKind, ScalarValue};
@@ -24,7 +24,7 @@ use crate::ir::schema::topk::{ranked_row_projection, topk_output_name};
 use crate::ir::schema::{ColumnId, FieldDataType, Schema};
 use crate::ir::{ASAPOp, NonASAPOp, Operator};
 use crate::summary_type::{
-    ExactKind, SketchStatistic, SummaryInputExpr, SummaryTypeCapability, SummaryUpdate,
+    SketchStatistic, SummaryInputExpr, SummaryTypeCapability, SummaryUpdate,
 };
 use crate::workload::bounds::source_name;
 use crate::workload::{series_facts, PrometheusMetricType, SourceFacts};
@@ -463,18 +463,17 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
             }
             SketchStatistic::PointCount { .. } | SketchStatistic::TopK { .. } => state,
         }),
+        // The finalized value has the sign of the aggregate the accumulator
+        // computes, over values of the state's recorded sign: a rate over
+        // non-positive samples (-5 then -3: +2; -3 then -5: a reset, -5)
+        // has none, a count is non-negative and a sum keeps its sign.
         FinalizeExactAccumulator { child } => {
-            let counts = child.schema().fields.iter().any(|field| {
-                matches!(
-                    field.dtype,
-                    FieldDataType::ExactAggregate(ExactKind::Count, _)
-                )
-            });
-            readout_columns(
-                child,
-                output,
-                |state, _| if counts { NonNegative } else { state },
-            )
+            readout_columns(child, output, |state, summary_type| match summary_type {
+                FieldDataType::ExactAggregate(kind, _) => {
+                    measure_sign(&exact_accumulator_measure(kind, None), state)
+                }
+                _ => Unknown,
+            })
         }
         MaintainPopulation { child, .. } => columns_of(child),
         EvaluatePopulation { child, .. } if output == child.schema() => columns_of(child),

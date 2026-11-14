@@ -823,48 +823,30 @@ fn finalized_schema<J: OperatorInput>(
         },
     ) = build
     {
-        {
-            use crate::ir::operator::AggIntent;
-            use crate::summary_type::{ExactKind, SummaryInputExpr};
-            let column = match &input.weight {
-                SummaryInputExpr::Column(col) => Some(
-                    crate::ir::scalar::column_resolution::resolve_column_ref(col, source.schema())
-                        .map_err(|e| {
-                            SchemaDerivationError::InvalidScalarSignature(e.to_string())
-                        })?,
-                ),
-                _ => None,
-            };
-            let measure = match kind {
-                ExactKind::Sum => Some(AggIntent::Sum { col: column }),
-                ExactKind::Min => Some(AggIntent::Min { col: column }),
-                ExactKind::Max => Some(AggIntent::Max { col: column }),
-                ExactKind::Count => Some(AggIntent::Count),
-                ExactKind::Rate => Some(AggIntent::Rate),
-                ExactKind::IRate => Some(AggIntent::IRate),
-                ExactKind::Increase => Some(AggIntent::Increase),
-            };
-            measure
-                .map(|measure| {
-                    crate::ir::NonASAPOp::Aggregate {
-                        child: source.clone(),
-                        reduction: reduction.clone(),
-                        measures: vec![measure],
-                        output_names: vec![],
-                        // A filtered SUM/MIN/MAX is NULL for a
-                        // group without a matching row.
-                        filters: vec![filter.clone()],
-                        having: None,
-                    }
-                    .output_schema()
-                })
-                .transpose()?
-                .and_then(|s| match reduction {
-                    Reduction::PerEntity => {
-                        s.column_id("value").and_then(|i| s.fields.get(i).cloned())
-                    }
-                    Reduction::Reduce(_) => s.fields.last().cloned(),
-                })
+        use crate::summary_type::SummaryInputExpr;
+        let column = match &input.weight {
+            SummaryInputExpr::Column(col) => Some(
+                crate::ir::scalar::column_resolution::resolve_column_ref(col, source.schema())
+                    .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e.to_string()))?,
+            ),
+            _ => None,
+        };
+        let aggregate_schema = crate::ir::NonASAPOp::Aggregate {
+            child: source.clone(),
+            reduction: reduction.clone(),
+            measures: vec![exact_accumulator_measure(kind, column)],
+            output_names: vec![],
+            // A filtered SUM/MIN/MAX is NULL for a
+            // group without a matching row.
+            filters: vec![filter.clone()],
+            having: None,
+        }
+        .output_schema()?;
+        match reduction {
+            Reduction::PerEntity => aggregate_schema
+                .column_id("value")
+                .and_then(|i| aggregate_schema.fields.get(i).cloned()),
+            Reduction::Reduce(_) => aggregate_schema.fields.last().cloned(),
         }
     } else {
         None
@@ -916,6 +898,26 @@ fn regrouped_schema(input: &Schema, keys: &[ColumnId]) -> Result<Schema, SchemaD
         },
         closed: true,
     })
+}
+
+/// The aggregate an exact accumulator of `kind` computes, of input column
+/// `column` (`None`: the sample value): `ExactKind::Rate` finalizes to
+/// what `AggIntent::Rate` computes.
+pub(crate) fn exact_accumulator_measure(
+    kind: &crate::summary_type::ExactKind,
+    column: Option<ColumnId>,
+) -> crate::ir::operator::AggIntent {
+    use crate::ir::operator::AggIntent;
+    use crate::summary_type::ExactKind;
+    match kind {
+        ExactKind::Sum => AggIntent::Sum { col: column },
+        ExactKind::Min => AggIntent::Min { col: column },
+        ExactKind::Max => AggIntent::Max { col: column },
+        ExactKind::Count => AggIntent::Count,
+        ExactKind::Rate => AggIntent::Rate,
+        ExactKind::IRate => AggIntent::IRate,
+        ExactKind::Increase => AggIntent::Increase,
+    }
 }
 
 /// The plain value an exact accumulator finalizes to.

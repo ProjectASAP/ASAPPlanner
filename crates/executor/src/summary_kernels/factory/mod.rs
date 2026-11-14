@@ -62,7 +62,7 @@ pub(crate) fn distinct_item(value: &crate::values::Value) -> Result<DistinctItem
     use crate::values::Value;
     Ok(match value {
         Value::Null => DistinctItem::Skipped,
-        // A sample must be finite, as every numeric kernel requires.
+        // A sample must be finite, as every sketch kernel requires.
         Value::Float64(value) => {
             finite_input(*value)?;
             DistinctItem::Sample(*value)
@@ -73,12 +73,30 @@ pub(crate) fn distinct_item(value: &crate::values::Value) -> Result<DistinctItem
     })
 }
 
-/// The default input rule of a numeric kernel: the value must be finite.
+/// The default input rule of a sketch kernel and a counter: the value must
+/// be finite.
 pub(crate) fn finite_input(value: f64) -> Result<(), String> {
     if value.is_finite() {
         Ok(())
     } else {
         Err("accumulator input must be finite".into())
+    }
+}
+
+/// The input rule of an exact accumulator of `kind`. A sum, count, min
+/// or max takes any value with PromQL's semantics, since a division by
+/// zero upstream gives one (`q / 0` is +Inf, `0 / 0` NaN): a sum that sees
+/// NaN, or +Inf and -Inf, is NaN; a count counts the value; min and max
+/// skip NaN unless every value is NaN. A counter's rate or increase needs
+/// finite samples ([`finite_input`]).
+pub(crate) fn exact_accumulator_input(
+    kind: planner_types::summary_type::ExactKind,
+    value: f64,
+) -> Result<(), String> {
+    use planner_types::summary_type::ExactKind;
+    match kind {
+        ExactKind::Sum | ExactKind::Count | ExactKind::Min | ExactKind::Max => Ok(()),
+        ExactKind::Increase | ExactKind::Rate | ExactKind::IRate => finite_input(value),
     }
 }
 
@@ -575,6 +593,12 @@ struct PlannerExactUpdater {
     acc: crate::summary_kernels::exact::ExactAccumulator,
 }
 impl AccumulatorUpdater for PlannerExactUpdater {
+    fn validate_single_input(&self, value: f64) -> Result<(), String> {
+        exact_accumulator_input(
+            crate::summary_kernels::exact::statistic_of(self.acc.family()),
+            value,
+        )
+    }
     fn update_single(&mut self, value: f64, timestamp: i64) -> Result<(), String> {
         self.acc.update(None, value, timestamp);
         Ok(())

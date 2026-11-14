@@ -2,7 +2,7 @@
 //! output error from its inputs' errors (concepts doc, section 4).
 
 use asap_types::accuracy::AccuracyMetric;
-use asap_types::ir::operator::arguments::BinaryOpKind;
+use asap_types::ir::operator::arguments::{BinaryOpKind, PromQLVectorSetOpKind};
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, ScalarValue};
@@ -20,12 +20,18 @@ use asap_types::summary_type::{ExactKind, SummaryInputExpr};
 /// (concepts doc, section 4, "Local propagation"):
 /// - value-preserving (`Sort`, `TimeRange`, `TimeShift`, `Concat`, a
 ///   readout, a finalize, a `SummaryMerge`): $\beta = 1$ in any metric;
+/// - PromQL `and`, `unless` and `or`, which copy values and choose series
+///   by labels only, and `label_replace` / `label_join` of labels
+///   ([`set_operator_error_factors`], [`reads_an_estimate`]): $\beta = 1$
+///   on each input whose values are copied, 0 on `and`'s and `unless`'s
+///   right input, in any metric;
 /// - a `Project` whose items reading an estimate ([`reads_an_estimate`])
 ///   each keep its error ([`keeps_error`]): $\beta = 1$, in any metric for
 ///   a copied column, in absolute error for `abs`, `clamp`, `clamp_min`,
 ///   `clamp_max` (also as the PromQL frontend's `promql_` functions) and a
-///   negation, in relative error for a product with or quotient by a
-///   nonzero literal (`q * 2`, `q / 1000`);
+///   negation, in relative error for `abs` and a negation
+///   ([`negation_or_abs`]) and a product with or quotient by a nonzero
+///   literal (`q * 2`, `q / 1000`);
 /// - a `Filter` whose predicate reads only columns copied from a source
 ///   (lineage `SourceColumn`, labels and keys): $\beta = 1$ in any metric;
 /// - an `Aggregate` (or exact accumulator build) of counts ($\beta = 0$),
@@ -69,6 +75,24 @@ pub(crate) fn error_contract(
                 .filter(|item| reads_an_estimate(memo, *child, &item.expr))
                 .all(|item| keeps_error(&item.expr, metric))
                 .then(|| uniform(1.0)),
+            // `label_replace(v, "x", "$1", "job", "(.*)")` writes label `x`
+            // from label `job` and copies every value: a value's error is
+            // unchanged in any metric, while the label it writes reads no
+            // estimate.
+            NonASAPOp::PromqlRelabel { value, child, .. } => {
+                (!reads_an_estimate(memo, *child, value)).then(|| uniform(1.0))
+            }
+            NonASAPOp::BinaryOp {
+                operator:
+                    BinaryOperator {
+                        kind: BinaryOpKind::Set(kind),
+                        ..
+                    },
+                ..
+            } => Some(ErrorContract {
+                error_factor_per_input: set_operator_error_factors(kind).to_vec(),
+                linear_bound_holds_up_to_per_input: vec![None; 2],
+            }),
             NonASAPOp::Filter { pred, child } => (pred.0.operator_refs().is_empty()
                 && copied_from_a_source(memo, *child, pred.0.columns_referenced()))
             .then(|| uniform(1.0)),
@@ -252,8 +276,9 @@ fn reads_an_estimate(memo: &Memo, child: MemoGroupId, expr: &ScalarExpr<MemoGrou
 /// column it reads, with $\beta = 1$: a copy of a column or a literal, or
 /// the series identity without its metric name (`promql_drop_metric_name`,
 /// which changes a label, not a value), in any metric; a 1-Lipschitz
-/// function of a column ([`one_lipschitz`]) in absolute error; a column
-/// times or divided by a nonzero literal in relative error.
+/// function of a column ([`one_lipschitz`]) in absolute error; a column's
+/// negation or `abs` ([`negation_or_abs`]), or a column times or divided
+/// by a nonzero literal, in relative error.
 fn keeps_error<C>(expr: &ScalarExpr<C>, metric: AccuracyMetric) -> bool {
     match expr {
         ScalarExpr::Column(_) | ScalarExpr::Literal(_) => true,
@@ -261,7 +286,9 @@ fn keeps_error<C>(expr: &ScalarExpr<C>, metric: AccuracyMetric) -> bool {
             matches!(args[..], [ScalarExpr::Column(_)])
         }
         _ if matches!(metric, AccuracyMetric::Absolute { .. }) => one_lipschitz(expr),
-        _ if metric == AccuracyMetric::Relative => scaled_by_a_constant(expr),
+        _ if metric == AccuracyMetric::Relative => {
+            negation_or_abs(expr) || scaled_by_a_constant(expr)
+        }
         _ => false,
     }
 }
@@ -271,19 +298,50 @@ fn keeps_error<C>(expr: &ScalarExpr<C>, metric: AccuracyMetric) -> bool {
 /// `promql_abs`, …) of a column with literal bounds, or a column's
 /// negation (1-Lipschitz).
 fn one_lipschitz<C>(expr: &ScalarExpr<C>) -> bool {
+    negation_or_abs(expr) || column_function_of_literals(expr, &["clamp", "clamp_min", "clamp_max"])
+}
+
+/// Whether `expr` is a column's negation or `abs` (`promql_abs`). Each
+/// moves the value by at most the column's error and keeps its magnitude,
+/// so it keeps the error both absolutely and as a share of the value:
+/// $|(-\hat{x}) - (-x)| = |\hat{x} - x|$ and
+/// $||\hat{x}| - |x|| \le |\hat{x} - x|$ (the reverse triangle
+/// inequality), while $|-x| = ||x|| = |x|$. With x = 10 and x̂ = 10.5 (5%
+/// off), −x̂ = −10.5 is 5% off −10; with x = −10 and x̂ = −10.5, |x̂| =
+/// 10.5 is 5% off 10.
+fn negation_or_abs<C>(expr: &ScalarExpr<C>) -> bool {
     match expr {
         ScalarExpr::Negative { expr, .. } => matches!(**expr, ScalarExpr::Column(_)),
-        ScalarExpr::FunctionCall { name, args } => {
-            let name = name.to_ascii_lowercase();
-            matches!(
-                name.strip_prefix("promql_").unwrap_or(&name),
-                "abs" | "clamp" | "clamp_min" | "clamp_max"
-            ) && matches!(args.first(), Some(ScalarExpr::Column(_)))
-                && args[1..]
-                    .iter()
-                    .all(|arg| matches!(arg, ScalarExpr::Literal(_)))
-        }
-        _ => false,
+        _ => column_function_of_literals(expr, &["abs"]),
+    }
+}
+
+/// Whether `expr` calls one of `functions` (or the PromQL frontend's
+/// `promql_` function of that name), any case, on a column and then
+/// literals only: `promql_clamp(value, 0, 100)`.
+fn column_function_of_literals<C>(expr: &ScalarExpr<C>, functions: &[&str]) -> bool {
+    let ScalarExpr::FunctionCall { name, args } = expr else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    functions.contains(&name.strip_prefix("promql_").unwrap_or(&name))
+        && matches!(args.first(), Some(ScalarExpr::Column(_)))
+        && args[1..]
+            .iter()
+            .all(|arg| matches!(arg, ScalarExpr::Literal(_)))
+}
+
+/// $\beta$ of a PromQL set operator's left and right inputs. Each output
+/// series is an input series, value copied, and which ones are kept
+/// depends only on which labels the other side has: `lhs and rhs` and
+/// `lhs unless rhs` keep left series, so the output's error is the left's
+/// and the right's values are never read, $(1, 0)$; `lhs or rhs` copies
+/// each value from one of them, $(1, 1)$. With q̂ = 10.5 for q = 10 on the
+/// left, `q unless r` outputs 10.5 or nothing, whatever `r`'s values.
+fn set_operator_error_factors(kind: &PromQLVectorSetOpKind) -> [f64; 2] {
+    match kind {
+        PromQLVectorSetOpKind::And | PromQLVectorSetOpKind::Unless => [1.0, 0.0],
+        PromQLVectorSetOpKind::Or => [1.0, 1.0],
     }
 }
 
