@@ -27,7 +27,7 @@ use crate::ir::properties::execution_data_state::{ExecutionDataState, ExecutionT
 use crate::ir::properties::selection::SelectionBox;
 use crate::ir::schema::Schema;
 use crate::stages::PhysicalCandidateId;
-use crate::stages::{Lifetime, PhysicalPropertiesError};
+use crate::stages::{Lifetime, PhysicalPropertiesError, StorageMedium};
 use crate::summary_type::SketchParams;
 
 /// A node's operator, with each child replaced by its node id.
@@ -640,8 +640,10 @@ impl PhysicalASAPDAG {
 /// no θ (every `parameters` is `None`), with each exported node's operator
 /// node by node id. A computed node with more than one consumer (edges and
 /// root positions) is held for one evaluation, as Stage 3 selects for a
-/// shared query-time output; every other node is not materialized. Executor tests hand-build
-/// DAGs this way; planning builds the plan in Stage 3.
+/// shared query-time output; every other node is not materialized. Consumers
+/// are counted per node, not per evaluation time, so a node read at two
+/// times under an `@` anchor is conservatively held too. Executor tests
+/// hand-build DAGs this way; planning builds the plan in Stage 3.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
     roots: &[crate::ir::QueryRoot],
@@ -697,7 +699,7 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
     }
     for node in &mut dag.nodes {
         if consumers[node.id] > 1 && computed[node.id] {
-            node.lifetime = Lifetime::OneEvaluation(crate::stages::StorageMedium::Memory);
+            node.lifetime = Lifetime::OneEvaluation(StorageMedium::Memory);
         }
     }
     Ok((dag, nodes_by_id))
