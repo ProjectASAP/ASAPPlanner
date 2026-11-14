@@ -15,9 +15,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use super::exact_only::must_not_read;
-use super::model::{selection_cost_per_second, SelectionInputs};
-use crate::retention::{reads_back, Reader};
-use crate::selectable::{has_one_reader_per_context, QueryId};
+use super::model::{has_one_reader, selection_cost_per_second, SelectionInputs};
+use crate::selectable::QueryId;
 
 /// How many times the greedy plan is rebuilt without an execution that
 /// made it infeasible before giving up on a bound.
@@ -43,28 +42,11 @@ pub(crate) fn dearer_than_a_feasible_plan(inputs: &SelectionInputs<'_>) -> Vec<b
     };
     let costs = inputs.costs;
     let executions = selectable.executions();
-    // The least retention, in ms, each execution of a candidate with $h_v$
-    // is read back over its uses (a costed edge out, or a query output):
-    // (F) gives a selected execution a use, and (R) then retains at least
-    // that. A query-time scan's retention is its source's $r_s$, left out.
-    let mut least_need_ms: Vec<Option<u64>> = vec![None; count];
-    for (index, reader, need_ms) in reads_back(
-        selectable,
-        &costs.retention_need_ms_per_edge,
-        inputs.entries,
-    ) {
-        let costed = match reader {
-            Reader::Edge(position) => costs.per_edge[position].is_some(),
-            Reader::Output(_) => true,
-        };
-        if let (true, Some(need_ms)) = (costed, need_ms) {
-            let least = &mut least_need_ms[index];
-            *least = Some(least.map_or(need_ms, |least| least.min(need_ms)));
-        }
-    }
+    // The least retention (R) makes each execution pay; a query-time
+    // scan's retention is its source's $r_s$, left out.
     let least_retention_cost = |index: usize| {
         let v = executions[index].candidate;
-        match least_need_ms[index] {
+        match costs.least_need_ms_per_execution[index] {
             Some(need_ms) if !costs.raw_data_source.contains_key(&v) => {
                 costs.retention_cost_per_second(v, need_ms)
             }
@@ -109,13 +91,8 @@ fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
     let selectable = inputs.selectable;
     let executions = selectable.executions();
     let count = executions.len();
-    let one_reader: Vec<bool> = executions
-        .iter()
-        .map(|execution| {
-            has_one_reader_per_context(
-                inputs.physical.physical_candidates[execution.candidate.0].physical_properties,
-            )
-        })
+    let one_reader: Vec<bool> = (0..count)
+        .map(|index| has_one_reader(inputs, index))
         .collect();
     let forbidden =
         |query: QueryId, e: usize| must_not_read(inputs.physical, query, executions[e].candidate);
