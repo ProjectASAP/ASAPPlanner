@@ -10,7 +10,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Debug,
     pin::Pin,
-    rc::Rc,
+    rc::{Rc, Weak},
     sync::Arc,
     task::{Context, Poll, Waker},
 };
@@ -149,6 +149,7 @@ fn build<'r, V: 'r, S: 'r>(
     context: &RunContext,
     reached: &Reached,
     states: &mut BTreeMap<ProducerKey, Rc<RefCell<Producer<'r, V>>>>,
+    run_producers: &RunProducers<'r, V>,
 ) -> Result<Rc<RefCell<Producer<'r, V>>>, Error> {
     let key = (id, context.evaluation_time_ms());
     let node = &dag.nodes[&id];
@@ -167,6 +168,7 @@ fn build<'r, V: 'r, S: 'r>(
             input_context,
             reached,
             states,
+            run_producers,
         )?));
     }
     let stream = node
@@ -185,6 +187,11 @@ fn build<'r, V: 'r, S: 'r>(
         size: Box::new(move |value| op.output_bytes(value)),
         context: context.clone(),
         hold_until_finished: run == NodeRun::Held,
+        expected_readers: match run {
+            NodeRun::ReadPerConsumer => 1,
+            NodeRun::Held | NodeRun::Streamed => reached[&key].0,
+        },
+        run_producers: Rc::clone(run_producers),
         unread: BTreeMap::new(),
         next_reader: 0,
         batches_polled: 0,
@@ -192,6 +199,7 @@ fn build<'r, V: 'r, S: 'r>(
         finished: false,
         failure: None,
     }));
+    run_producers.borrow_mut().push(Rc::downgrade(&state));
     if run != NodeRun::ReadPerConsumer {
         states.insert(key, Rc::clone(&state));
     }
@@ -222,11 +230,18 @@ fn start<'r, V: 'r, S: Clone + PartialEq + Debug + 'r>(
         }
     }
     let mut states = BTreeMap::new();
+    let run_producers = RunProducers::default();
     roots
         .iter()
-        .map(|&id| build(dag, id, &context, &reached, &mut states).map(Input::subscribe))
+        .map(|&id| {
+            build(dag, id, &context, &reached, &mut states, &run_producers).map(Input::subscribe)
+        })
         .collect()
 }
+/// Every producer of one run, so a cancellation seen by one releases the
+/// batches the others hold.
+type RunProducers<'a, V> = Rc<RefCell<Vec<Weak<RefCell<Producer<'a, V>>>>>>;
+
 /// One run of a node, read by every consumer it has in the run.
 struct Producer<'a, V> {
     node: NodeId,
@@ -238,6 +253,11 @@ struct Producer<'a, V> {
     /// to the end before any consumer reads it, and its batches stay
     /// charged to the run until every consumer has read them.
     hold_until_finished: bool,
+    /// How many consumers subscribe to it in the run; its stream is dropped
+    /// early only once all have subscribed and all have left.
+    expected_readers: usize,
+    /// The run's producers, this one included.
+    run_producers: RunProducers<'a, V>,
     /// The batches each reader has not read yet, by reader.
     unread: BTreeMap<u64, VecDeque<SharedValue<V>>>,
     next_reader: u64,
@@ -253,11 +273,24 @@ impl<V> Producer<'_, V> {
             waker.wake();
         }
     }
+    /// The end of the node's output. A failed held output is not read in
+    /// part: every consumer gets only the error.
     fn finish(&mut self, failure: Option<Error>) {
+        if failure.is_some() && self.hold_until_finished {
+            self.unread.values_mut().for_each(VecDeque::clear);
+        }
         self.failure = failure;
         self.finished = true;
         self.stream = None;
         self.wake_all();
+    }
+    /// Stop the run: every consumer gets `Cancelled` next, and the batches
+    /// not yet read are released.
+    fn cancel(&mut self) {
+        if self.failure != Some(Error::Cancelled) {
+            self.finish(Some(Error::Cancelled));
+            self.unread.values_mut().for_each(VecDeque::clear);
+        }
     }
 }
 pub struct Input<'a, V> {
@@ -286,7 +319,9 @@ impl<V> Drop for Input<'_, V> {
         let mut state = self.producer.borrow_mut();
         state.unread.remove(&self.reader);
         state.waiters.remove(&self.reader);
-        if state.unread.is_empty() {
+        // A consumer may drop its input in `start`, before a later consumer
+        // subscribes; the stream is kept for that one.
+        if state.unread.is_empty() && state.next_reader as usize >= state.expected_readers {
             state.stream = None;
         }
     }
@@ -301,10 +336,15 @@ impl<V> Stream for Input<'_, V> {
         let mut state = this.producer.borrow_mut();
         state.context.register(cx.waker());
         loop {
-            if state.context.is_cancelled() && !state.finished {
-                state.finish(Some(Error::Cancelled));
-                for unread in state.unread.values_mut() {
-                    unread.clear();
+            if state.context.is_cancelled() && state.failure != Some(Error::Cancelled) {
+                state.cancel();
+                // The others; a producer being polled up the stack sees the
+                // cancellation itself.
+                let run_producers = Rc::clone(&state.run_producers);
+                for producer in run_producers.borrow().iter().filter_map(Weak::upgrade) {
+                    if let Ok(mut producer) = producer.try_borrow_mut() {
+                        producer.cancel();
+                    }
                 }
             }
             if state.finished || !state.hold_until_finished {

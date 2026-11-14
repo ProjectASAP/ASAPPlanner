@@ -140,7 +140,9 @@ fn materialized_node_runs_once_and_is_held() {
     assert_eq!(polls.get(), 8);
 }
 
-// Failure reaches every consumer; cancellation stops further producer work.
+// Failure reaches every consumer, and a held node that fails partway is not
+// read in part: each consumer gets only the error, so none reports success
+// after its first batch. Cancellation stops further producer work.
 #[test]
 fn broadcast_error_and_cancel() {
     let (source, _, polls) = source(true);
@@ -152,8 +154,8 @@ fn broadcast_error_and_cancel() {
     let b = outputs.pop().unwrap();
     let (a, b) = block_on(async { futures::join!(a.collect::<Vec<_>>(), b.collect::<Vec<_>>()) });
     for values in [a, b] {
-        assert_eq!(values.len(), 2);
-        assert!(matches!(values[1], Err(Error::AtNode { node: 0, .. })));
+        assert_eq!(values.len(), 1);
+        assert!(matches!(values[0], Err(Error::AtNode { node: 0, .. })));
     }
     assert_eq!(polls.get(), 2);
     let run = query_context(1024);
@@ -472,4 +474,75 @@ fn one_evaluation_output_over_budget_is_a_memory_limit() {
         assert_eq!(read.last(), Some(&Err(Error::MemoryLimit)));
         assert_eq!(run.retained_bytes(), 0);
     });
+}
+
+// Ignores its input: drops it in `start` and emits nothing.
+struct DropsInput;
+impl PhysicalOperator<u64, ()> for DropsInput {
+    fn name(&self) -> &str {
+        "DropsInput"
+    }
+    fn input_schemas(&self) -> Vec<()> {
+        vec![()]
+    }
+    fn output_schema(&self) {}
+    fn output_bytes(&self, _: &u64) -> usize {
+        8
+    }
+    fn start<'a>(
+        &'a self,
+        _: Vec<Input<'a, u64>>,
+        _: RunContext,
+    ) -> Result<OutputStream<'a, u64>, Error> {
+        Ok(stream::empty().boxed_local())
+    }
+}
+
+// A consumer that drops its input in `start`, before the node's other
+// consumer subscribes, leaves the node running for that one.
+#[test]
+fn an_input_dropped_at_start_leaves_the_node_to_later_consumers() {
+    let (source, _, _) = source(false);
+    let mut dag = PhysicalDAG::default();
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    dag.add(1, vec![0], Identity, ONE_EVALUATION).unwrap();
+    dag.add(2, vec![1], DropsInput, Lifetime::None).unwrap();
+    dag.add(3, vec![1], Identity, Lifetime::None).unwrap();
+    let run = query_context(1024);
+    let outputs = dag.execute(&[2, 3], run.clone()).unwrap();
+    let drained: Vec<_> = outputs
+        .into_iter()
+        .map(|output| values(block_on(output.collect::<Vec<_>>())))
+        .collect();
+    assert_eq!(drained, vec![vec![], vec![Ok(0), Ok(1), Ok(2), Ok(3)]]);
+    assert_eq!(run.retained_bytes(), 0);
+}
+
+// A cancellation seen by one root releases what a held node keeps for a
+// root nobody polls, and every root then ends with `Cancelled`.
+#[test]
+fn cancellation_releases_held_batches_of_unpolled_roots() {
+    let (mut source, _, _) = source(false);
+    source.end = MANY_BATCHES;
+    let mut dag = PhysicalDAG::default();
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    dag.add(1, vec![0], Identity, ONE_EVALUATION).unwrap();
+    dag.add(2, vec![1], Identity, Lifetime::None).unwrap();
+    dag.add(3, vec![1], Identity, Lifetime::None).unwrap();
+    let run = query_context(1024);
+    let mut outputs = dag.execute(&[2, 3], run.clone()).unwrap();
+    let first = block_on(outputs[0].next()).unwrap().unwrap();
+    assert_eq!(*first, 0);
+    drop(first);
+    assert!(run.retained_bytes() > 0);
+    run.cancel();
+    assert!(matches!(
+        block_on(outputs[0].next()),
+        Some(Err(Error::Cancelled))
+    ));
+    assert_eq!(run.retained_bytes(), 0);
+    assert!(matches!(
+        block_on(outputs[1].next()),
+        Some(Err(Error::Cancelled))
+    ));
 }
