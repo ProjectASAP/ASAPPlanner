@@ -5,11 +5,13 @@ use crate::stages::{
     producer_satisfies_physical_requirements, CandidateForMemoGroupId, ExecutionContext, Lifetime,
     PhysicalProperties,
 };
-use crate::workload::DataWorkload;
+use crate::workload::{DataArrival, DataWorkload};
 
 use crate::plan::materialized_view::RefreshWindow;
 
-use crate::ir::operator::arguments::{Reduction, Source};
+use crate::ir::operator::arguments::{AtModifier, GroupKeys, Reduction, Source};
+use crate::ir::operator::AggIntent;
+use crate::test_support::memo_fixtures::{aggregate, range, scan, shift};
 
 use crate::ir::scalar::expr_ir::ColumnRef;
 
@@ -249,6 +251,202 @@ fn delivers_on_a_stored_result_on_its_group_grid() {
         (&without_grid, evaluation(60_000, 0), false),
     ] {
         assert_eq!(x.delivers_on(candidates, &context), delivers, "{context:?}");
+    }
+}
+
+/// T = 1,700,000,000 s, in ms: the instant an `@ T` pins.
+const AT_T: Option<AtModifier> = Some(AtModifier::Timestamp(1_700_000_000_000));
+
+/// The top groups of the finality examples, each with its own expression as
+/// its one candidate, over a memo whose data arrives as `arrival`.
+struct FinalityExamples {
+    candidates: PhysicalASAPMemoCandidates,
+    /// SQL `SELECT count(*) FROM metrics`: no time bound.
+    count_of_table: CandidateForMemoGroupId,
+    /// `sum_over_time(latency[5m] @ T)`: a window that ends at T.
+    sum_over_window_at_t: CandidateForMemoGroupId,
+    /// `max_over_time((rate(latency[5m] @ end()))[10m:1m] @ T)`: `@ T`
+    /// pins the subquery, but not the `@ end()` inside it.
+    max_over_subquery_at_t: CandidateForMemoGroupId,
+}
+
+/// [`FinalityExamples`] over data arriving as `arrival`, every group
+/// evaluated on the grid 60 s @ 0.
+fn finality_examples(arrival: DataArrival) -> FinalityExamples {
+    let mut memo = Memo::new(&DataWorkload {
+        arrival,
+        ..DataWorkload::default()
+    });
+    let mut add = |operator: Operator<MemoGroupId>| {
+        let group = memo.find_or_add_group(operator.clone()).unwrap();
+        let candidate = CandidateForMemoGroup::new(
+            operator,
+            None,
+            OriginOfCandidateForMemoGroup::Pass1,
+            vec![],
+        );
+        memo.add_candidate(group, candidate).unwrap();
+        group
+    };
+    let first_candidate = |group| CandidateForMemoGroupId {
+        group,
+        index_in_group: 0,
+    };
+    let table = add(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::Table {
+            table_ref: "metrics".into(),
+        },
+        predicates: vec![],
+        schema: Schema::with_time_index(
+            vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
+            ],
+            0,
+            vec![],
+        ),
+    }));
+    let count_of_table = add(aggregate(
+        Reduction::Reduce(GroupKeys::none()),
+        AggIntent::Count,
+        table,
+    ));
+    let series = add(scan("latency", &[], vec![]));
+    let at_t = add(shift(0, AT_T, series));
+    let window_at_t = add(range(300_000, at_t));
+    let sum_over_window_at_t = add(aggregate(
+        Reduction::PerEntity,
+        AggIntent::Sum { col: Some(1) },
+        window_at_t,
+    ));
+    let window = add(range(300_000, series));
+    let rate = add(aggregate(Reduction::PerEntity, AggIntent::Rate, window));
+    let rate_at_end = add(shift(0, Some(AtModifier::End), rate));
+    let subquery = add(Operator::NonASAP(NonASAPOp::PromqlSubquery {
+        range: std::time::Duration::from_secs(600),
+        resolution: Some(std::time::Duration::from_secs(60)),
+        child: rate_at_end,
+    }));
+    let subquery_at_t = add(shift(0, AT_T, subquery));
+    let max_over_subquery_at_t = add(aggregate(
+        Reduction::PerEntity,
+        AggIntent::Max { col: Some(1) },
+        subquery_at_t,
+    ));
+    let grid_60s = Some(EvaluationGrid {
+        period_ms: 60_000,
+        phase_ms: 0,
+    });
+    let group_count = memo.groups().len();
+    FinalityExamples {
+        candidates: candidates(memo, vec![grid_60s; group_count]),
+        count_of_table: first_candidate(count_of_table),
+        sum_over_window_at_t: first_candidate(sum_over_window_at_t),
+        max_over_subquery_at_t: first_candidate(max_over_subquery_at_t),
+    }
+}
+
+/// Every arrival under which rows keep arriving: an unknown arrival counts
+/// as arriving.
+const ARRIVING: [DataArrival; 3] = [
+    DataArrival::Ingesting {
+        rows_per_second: 1_000.0,
+        max_out_of_order_ms: None,
+    },
+    DataArrival::Mixed {
+        rows_per_second: 1_000.0,
+        max_out_of_order_ms: None,
+    },
+    DataArrival::Unknown,
+];
+
+/// Whether `producer` of `examples`, stored across evaluations at
+/// `timing`, delivers on its own grid (60 s @ 0) and on every context
+/// (the finer 30 s grid, which its stored times do not hold).
+fn delivers_on_grid_and_off_it(
+    examples: &FinalityExamples,
+    producer: CandidateForMemoGroupId,
+    timing: ExecutionTiming,
+) -> (bool, bool) {
+    let stored = candidate(producer, timing, Lifetime::AcrossEvaluations(MEMORY));
+    (
+        stored.delivers_on(&examples.candidates, &evaluation(60_000, 0)),
+        stored.delivers_on(&examples.candidates, &evaluation(30_000, 0)),
+    )
+}
+
+/// Case (a) of #1264: SQL `SELECT count(*) FROM metrics` reads no time, but
+/// rows keep arriving, so its result is never final. Computed at query time
+/// and stored, it is a snapshot of its own evaluation time and delivers on
+/// its own grid only. Kept up to date at ingestion time it delivers on
+/// every context, and so does any result over data at rest.
+#[test]
+fn a_count_over_arriving_rows_computed_at_query_time_delivers_on_its_own_grid_only() {
+    for arrival in ARRIVING {
+        let examples = finality_examples(arrival);
+        let producer = examples.count_of_table;
+        assert_eq!(
+            delivers_on_grid_and_off_it(&examples, producer, QueryTime),
+            (true, false),
+            "{arrival:?}"
+        );
+        assert_eq!(
+            delivers_on_grid_and_off_it(&examples, producer, IngestionTime),
+            (true, true),
+            "{arrival:?}"
+        );
+    }
+    let at_rest = finality_examples(DataArrival::AtRest);
+    assert_eq!(
+        delivers_on_grid_and_off_it(&at_rest, at_rest.count_of_table, QueryTime),
+        (true, true)
+    );
+}
+
+/// Case (b) of #1264: in `max_over_time((rate(latency[5m] @ end()))[10m:1m]
+/// @ T)`, `@ T` pins only the subquery's own time; the inner `@ end()`
+/// still moves with the request. Even over data at rest, a stored result
+/// delivers on its own grid only.
+#[test]
+fn an_end_anchor_under_at_t_keeps_a_stored_result_on_its_own_grid() {
+    for arrival in [DataArrival::AtRest, DataArrival::Unknown] {
+        let examples = finality_examples(arrival);
+        let producer = examples.max_over_subquery_at_t;
+        assert_eq!(
+            delivers_on_grid_and_off_it(&examples, producer, QueryTime),
+            (true, false),
+            "{arrival:?}"
+        );
+    }
+}
+
+/// Case (c) of #1264: `sum_over_time(latency[5m] @ T)` reads the fixed
+/// window `(T - 5m, T]`, which does not move with the evaluation time.
+/// Over data at rest, or kept up to date at ingestion time, it delivers on
+/// every context. Computed at query time over arriving rows it is final
+/// only from T on (no row arrives out of order), and no context says
+/// whether its times are past T, so it delivers on its own grid only
+/// (#1298).
+#[test]
+fn a_window_pinned_by_at_t_delivers_on_every_context_once_nothing_changes_it() {
+    let at_rest = finality_examples(DataArrival::AtRest);
+    assert_eq!(
+        delivers_on_grid_and_off_it(&at_rest, at_rest.sum_over_window_at_t, QueryTime),
+        (true, true)
+    );
+    for arrival in ARRIVING {
+        let examples = finality_examples(arrival);
+        let producer = examples.sum_over_window_at_t;
+        assert_eq!(
+            delivers_on_grid_and_off_it(&examples, producer, QueryTime),
+            (true, false),
+            "{arrival:?}"
+        );
+        assert_eq!(
+            delivers_on_grid_and_off_it(&examples, producer, IngestionTime),
+            (true, true),
+            "{arrival:?}"
+        );
     }
 }
 

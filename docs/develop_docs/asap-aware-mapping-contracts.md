@@ -84,7 +84,12 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
   ordered rows); `AcrossEvaluations` to a chain, a group on a known
   evaluation grid and a time-independent group, unless the group is read
   under an absolute `@ T`; (IngestionTime, None) not to a summary build. A
-  value not offered is not recorded.
+  value not offered is not recorded. A group is time-independent when it
+  reads no time relative to the evaluation time
+  (`GroupProperties::depends_on_evaluation_time` is false): no `TimeRange`
+  except one directly over an `@ T`, and no `time()`, `now()`,
+  `@ start()` or `@ end()`, also under an `@ T`, which pins only its own
+  time. Whether its rows keep arriving is not part of it.
 - Every physical alternative Stage 2 prunes is recorded in
   `PhysicalASAPMemoCandidates::pruned_candidates` as
   `PrunedCandidate<PhysicalCandidate>` with a `PruneReason`: an
@@ -120,6 +125,18 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
   under every cost model.
 - `Selection.plan` is the selected candidate's roots with the weight
   requirements Stage 3 confirmed from the data facts.
+- A producer feeds a consumer only in a context it delivers on
+  (`PhysicalCandidate::delivers_on`). A result stored across evaluations
+  delivers on every context only when it is final, the same at every time
+  it is read. This assumes no row arrives out of order: at evaluation time
+  t, every row with `ts <= t` has arrived and never changes. A result is
+  final when its group is time-independent and it is kept up to date at
+  ingestion time, or its data is at rest (`DataArrival::AtRest`), or it
+  reads no source. Any other stored result delivers only on its group's
+  evaluation grid: one computed at query time over arriving rows
+  (`Unknown` counts as arriving) is a snapshot of its own time, even over a
+  window ending at a fixed E (`@ T`, `ts BETWEEN a AND b`), since a context
+  carries no absolute time to compare with E.
 
 ## 6. Ownership
 
