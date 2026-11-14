@@ -505,3 +505,22 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     assert_equal("one-off queries over years", (objective, plan_cost));
     assert!(objective < 30_000.0, "objective {objective}");
 }
+
+/// `sum_over_time(m[5m] @ end())` and `sum_over_time(m[5m])`, both instant
+/// every 60 s: an instant query's `@ end()` is its evaluation time, so the
+/// anchored input runs in the evaluation context and shares `m[5m]` with
+/// the plain query, in the MILP and in `plan_cost` alike (0.0360/s; in a
+/// request context of its own it cost 0.0620/s).
+#[test]
+fn an_instant_at_end_input_shares_the_evaluation_context() {
+    let w = over_m(vec![
+        requested("sum_over_time(m[5m] @ end())", 60_000, None),
+        requested("sum_over_time(m[5m])", 60_000, None),
+    ]);
+    let (objective, plan_cost) = objective_and_plan_cost(&w, &CostInputs::default(), true);
+    assert_equal(
+        "instant @ end() beside a plain query",
+        (objective, plan_cost),
+    );
+    assert!(objective < 0.04, "objective {objective}");
+}
