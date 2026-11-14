@@ -36,6 +36,26 @@ pub enum DataPrimitive {
 }
 
 impl DataPrimitive {
+    /// What a node with `operator` and `result_kind` outputs: a summary
+    /// state (a summary operator's state or a maintained population, or any
+    /// `State` result) or raw values.
+    pub fn of<C>(
+        operator: &crate::ir::Operator<C>,
+        result_kind: crate::ir::OperatorResultKind,
+    ) -> Self {
+        use crate::ir::{ASAPOp, Operator, OperatorResultKind};
+        match operator {
+            Operator::ASAP(
+                ASAPOp::SummaryAgg { .. }
+                | ASAPOp::SummaryTumblingWindowChain { .. }
+                | ASAPOp::SummaryJoin { .. }
+                | ASAPOp::MaintainPopulation { .. },
+            ) => Self::SummaryState,
+            _ if result_kind == OperatorResultKind::State => Self::SummaryState,
+            _ => Self::Raw,
+        }
+    }
+
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Raw => "raw",
@@ -74,39 +94,4 @@ impl std::fmt::Display for ExecutionDataState {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Both execution phases use raw values, distinct from maintained state.
-    #[test]
-    fn raw_primitive_labels() {
-        assert_eq!(
-            ExecutionDataState::INGESTION_ROWS.primitive,
-            DataPrimitive::Raw
-        );
-        assert_eq!(ExecutionDataState::QUERY_ROWS.primitive, DataPrimitive::Raw);
-        assert_eq!(
-            ExecutionDataState::INGESTION_ROWS.to_string(),
-            "ingestion_time/raw"
-        );
-        assert_eq!(ExecutionDataState::QUERY_ROWS.to_string(), "query_time/raw");
-        assert_eq!(DataPrimitive::SummaryState.as_str(), "summary_state");
-    }
-
-    #[test]
-    fn execution_phase_wire_names_are_ingestion_and_query_time() {
-        for (phase, name) in [
-            (ExecutionTiming::IngestionTime, "ingestion_time"),
-            (ExecutionTiming::QueryTime, "query_time"),
-        ] {
-            assert_eq!(phase.as_str(), name);
-            assert_eq!(serde_json::to_value(phase).unwrap(), name);
-            assert_eq!(
-                serde_json::from_value::<ExecutionTiming>(serde_json::json!(name)).unwrap(),
-                phase
-            );
-        }
-        assert!(serde_json::from_str::<ExecutionTiming>("\"maintenance_time\"").is_err());
-        assert!(serde_json::from_str::<ExecutionTiming>("\"MaintenanceTime\"").is_err());
-    }
-}
+mod tests;

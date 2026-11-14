@@ -150,6 +150,12 @@ fn promql_binary_arithmetic_retains_two_summary_leaves() {
     }
 }
 
+/// Each operand of the ratio is an exact summary finalized at query time:
+/// a `FinalizeExactAccumulator` over a `SummaryAgg`, either the
+/// `sum by (job)` itself or an increase per series finalized and then
+/// summed by `job` (an `Aggregate` above it). The two plans' costs differ
+/// by about 2e-11 relative, below the solver's tolerances, so it may
+/// return either.
 #[test]
 fn value_ranked_topk_over_binary_ratio_finalizes_both_summary_operands() {
     let query = "topk(1, sum by(job)(increase(a[6h])) / sum by(job)(increase(b[6h])))";
@@ -170,7 +176,11 @@ fn value_ranked_topk_over_binary_ratio_finalizes_both_summary_operands() {
         panic!("expected BinaryOp below Sort, got {:?}", binary.operator);
     };
     for operand in [lhs, rhs] {
-        let Some(ASAPOp::FinalizeExactAccumulator { child }) = operand.asap() else {
+        let finalized = match operand.non_asap() {
+            Some(NonASAPOp::Aggregate { child, .. }) => child,
+            _ => operand,
+        };
+        let Some(ASAPOp::FinalizeExactAccumulator { child }) = finalized.asap() else {
             panic!(
                 "expected exact accumulator finalization, got {:?}",
                 operand.operator

@@ -32,4 +32,5 @@ mod schema;
 mod sql_cardinality;
 mod sql_frequency;
 mod sql_to_post_asap;
+mod stage3_objective;
 mod time_range;

@@ -2,26 +2,30 @@
 //! group: the code the `SummaryAgg` build runs row by row, exposed so a
 //! runtime that ingests sample by sample builds the same states.
 use super::exact::ScalarState;
-use super::factory::{create_hydra_cms, AccumulatorUpdater};
+use super::factory::{create_hydra_cms, create_planner_accumulator, AccumulatorUpdater};
 use super::hydra_cms::{hydra_group_name, hydra_item, hydra_weight, HydraCms, HydraCmsGroup};
 use super::weighted_frequency::WeightedFrequency;
 use crate::values::{StateColumn, Value};
 use crate::{AggregateCore, Error};
 
+use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::FieldDataType;
-use planner_types::summary_type::ExactKind;
+use planner_types::summary_type::{ExactKind, SketchParams, SummaryUpdate};
 use std::sync::Arc;
 
 /// The open summary states of one family, one per group, updated one sample
 /// at a time; sealed into an immutable [`StateColumn`].
 ///
-/// Built from the plan's family and parameters with [`Self::new`]. Groups are
+/// Built from the plan's family and θ with [`Self::new`]. Groups are
 /// numbered `0..group_count()` in the order [`Self::add_group`] (or
 /// [`Self::add_group_with_key`]) adds them; the caller keeps its own map from
 /// a group's labels to its number.
 pub struct StateColumnUpdater {
-    /// The family and parameters of every state.
+    /// The family of every state.
     family: FieldDataType,
+    /// θ of every state: the `parameters` of the exported build node
+    /// (`PhysicalASAPDAGNode::parameters`); `None` for an exact family.
+    parameters: Option<SketchParams>,
     /// The states, by group.
     states: GroupStates,
     /// For a counter (rate, increase), each group's latest sample time:
@@ -48,7 +52,6 @@ enum GroupStates {
     Sketches(Vec<Box<dyn AccumulatorUpdater>>),
     /// A keyed frequency sketch (Count-Min or Count Sketch with a heap) per
     /// group.
-    #[allow(dead_code)] // Used again once θ comes from the exported node.
     Keyed {
         /// An empty state of the family's shape, cloned for each new group
         /// (boxed: much larger than the other kinds' fields).
@@ -71,33 +74,49 @@ fn operator_error(message: impl ToString) -> Error {
 }
 
 impl StateColumnUpdater {
-    /// An updater with no group for `family`, the family and parameters of a
-    /// `SummaryAgg` the plan builds one state per group of: an exact
-    /// accumulator, a value sketch (KLL, DDSketch, HLL, KMV, UnivMon), a
-    /// keyed frequency sketch with a heap, or a HydraCms grid shared by all
-    /// groups. Bad input for any other summary type.
-    pub fn new(family: &FieldDataType) -> Result<Self, Error> {
+    /// An updater with no group for `family` and θ `parameters`, the family
+    /// and the exported node's `parameters` of a `SummaryAgg` the plan
+    /// builds one state per group of: an exact accumulator (no θ), a value
+    /// sketch (KLL, DDSketch, HLL, KMV, UnivMon), a keyed frequency sketch
+    /// with a heap, or a HydraCms grid shared by all groups. Bad input for
+    /// any other summary type, or θ its kernel does not build.
+    pub fn new(family: &FieldDataType, parameters: Option<&SketchParams>) -> Result<Self, Error> {
         crate::values::validate_family(family)?;
         let states = match family {
             FieldDataType::Sketch(planner_types::summary_type::SketchAlgorithm::HydraCms) => {
                 GroupStates::Hydra {
-                    grid: Box::new(create_hydra_cms(family).map_err(Error::Invalid)?),
+                    grid: Box::new(create_hydra_cms(family, parameters).map_err(Error::Invalid)?),
                     names: Vec::new(),
                 }
+            }
+            FieldDataType::ExactAggregate(..) if parameters.is_some() => {
+                return Err(Error::Invalid(
+                    "an exact summary has no parameters θ".into(),
+                ))
             }
             FieldDataType::ExactAggregate(..) => GroupStates::Exact {
                 empty: ScalarState::empty(family).map_err(Error::Invalid)?,
                 states: Vec::new(),
             },
             FieldDataType::Sketch(
-                planner_types::summary_type::SketchAlgorithm::CmsWithHeap
-                | planner_types::summary_type::SketchAlgorithm::CountSketchWithHeap,
+                algorithm @ (planner_types::summary_type::SketchAlgorithm::CmsWithHeap
+                | planner_types::summary_type::SketchAlgorithm::CountSketchWithHeap),
             ) => {
-                todo!("#1207 PR 6: the keyed frequency state of θ, which the exported node carries")
+                let Some(parameters) = parameters else {
+                    return Err(Error::Invalid(format!(
+                        "a {algorithm:?} summary needs its parameters θ"
+                    )));
+                };
+                let (algorithm, width, depth, capacity) =
+                    WeightedFrequency::configuration(algorithm, parameters)?;
+                GroupStates::Keyed {
+                    empty: Box::new(WeightedFrequency::new(algorithm, width, depth, capacity)?),
+                    states: Vec::new(),
+                }
             }
             FieldDataType::Sketch(..) => {
                 // Fails for a family with no per-group value kernel.
-                Self::sketch_updater(family)?;
+                Self::sketch_updater(family, parameters)?;
                 GroupStates::Sketches(Vec::new())
             }
             _ => return Err(Error::Invalid("unsupported summary family".into())),
@@ -113,6 +132,7 @@ impl StateColumnUpdater {
         };
         Ok(Self {
             family: family.clone(),
+            parameters: parameters.cloned(),
             states,
             latest_sample_ms: counter.then(Vec::new),
             memory_bytes,
@@ -120,9 +140,16 @@ impl StateColumnUpdater {
         })
     }
 
-    fn sketch_updater(family: &FieldDataType) -> Result<Box<dyn AccumulatorUpdater>, Error> {
-        let _ = family;
-        todo!("#1207 PR 6: build it with `create_planner_accumulator` and θ from the exported node's `parameters`")
+    fn sketch_updater(
+        family: &FieldDataType,
+        parameters: Option<&SketchParams>,
+    ) -> Result<Box<dyn AccumulatorUpdater>, Error> {
+        create_planner_accumulator(
+            family,
+            parameters,
+            &SummaryUpdate::column(ColumnRef::SampleValue),
+        )
+        .map_err(Error::Invalid)
     }
 
     /// The number of groups.
@@ -220,7 +247,7 @@ impl StateColumnUpdater {
                 (states.capacity() - before) * std::mem::size_of::<ScalarState>()
             }
             GroupStates::Sketches(states) => {
-                let state = Self::sketch_updater(&self.family)?;
+                let state = Self::sketch_updater(&self.family, self.parameters.as_ref())?;
                 let bytes = state.memory_usage_bytes();
                 states.push(state);
                 bytes
@@ -349,12 +376,12 @@ impl StateColumnUpdater {
     /// shards must be disjoint in time: one shard's last sample before the
     /// other's first. Overlapping shards would count the increase of their
     /// overlap twice, so they are refused as bad input, as are different
-    /// families. An operator error when a kernel refuses the merge. On an
-    /// error this updater may hold some groups already merged.
+    /// families or θ. An operator error when a kernel refuses the merge. On
+    /// an error this updater may hold some groups already merged.
     pub fn merge(&mut self, other: Self) -> Result<(), Error> {
-        if self.family != other.family {
+        if self.family != other.family || self.parameters != other.parameters {
             return Err(Error::Invalid(
-                "cannot merge different summary families".into(),
+                "cannot merge different summary families or parameters".into(),
             ));
         }
         if let (
@@ -473,31 +500,4 @@ impl StateColumnUpdater {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use planner_types::summary_type::ExactParams;
-
-    // An exact updater charges the buffer it holds (its capacity), the
-    // same bytes its sealed column charges.
-    #[test]
-    fn exact_memory_is_the_buffer_capacity() {
-        let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-        for groups in [1, 5, 17] {
-            let mut updater = StateColumnUpdater::new(&family).unwrap();
-            updater.ensure_groups(groups).unwrap();
-            let charged = updater.memory_bytes();
-            let GroupStates::Exact { states, .. } = &updater.states else {
-                unreachable!()
-            };
-            assert_eq!(
-                charged,
-                states.capacity() * std::mem::size_of::<ScalarState>()
-            );
-            assert_eq!(
-                charged,
-                updater.seal().charged_state_bytes(),
-                "{groups} groups"
-            );
-        }
-    }
-}
+mod tests;

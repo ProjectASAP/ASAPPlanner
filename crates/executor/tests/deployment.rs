@@ -4,16 +4,26 @@ use asap_executor::planner::ir::schema::FieldDataType;
 use asap_executor::planner::summary_type::{SketchAlgorithm, SketchParams, SummaryUpdate};
 use asap_executor::{factory::create_planner_accumulator, AggregateCore};
 
-fn family(_k: u32) -> FieldDataType {
-    FieldDataType::Sketch(SketchAlgorithm::Kll)
+/// A sketch family and its θ, as a build node carries them.
+type Family = (FieldDataType, SketchParams);
+
+/// The kernel of `family` for `update`.
+fn accumulator(
+    family: &Family,
+    update: &SummaryUpdate,
+) -> Result<Box<dyn asap_executor::factory::AccumulatorUpdater>, String> {
+    create_planner_accumulator(&family.0, Some(&family.1), update)
+}
+
+fn family(k: u32) -> Family {
+    (
+        FieldDataType::Sketch(SketchAlgorithm::Kll),
+        SketchParams::Kll { k },
+    )
 }
 fn build(values: &[f64]) -> Box<dyn AggregateCore> {
-    let mut operator = create_planner_accumulator(
-        &family(512),
-        None,
-        &SummaryUpdate::column(ColumnRef::SampleValue),
-    )
-    .unwrap();
+    let mut operator =
+        accumulator(&family(512), &SummaryUpdate::column(ColumnRef::SampleValue)).unwrap();
     for (at, value) in values.iter().enumerate() {
         operator.validate_single_input(*value).unwrap();
         operator.update_single(*value, at as i64).unwrap();
@@ -44,11 +54,7 @@ fn raw_partial_and_fully_precomputed_use_the_same_kernels() {
 // A compiler must reject invalid physical parameters before starting execution.
 #[test]
 fn invalid_kll_parameters_are_rejected_at_binding() {
-    let result = create_planner_accumulator(
-        &family(0),
-        None,
-        &SummaryUpdate::column(ColumnRef::SampleValue),
-    );
+    let result = accumulator(&family(0), &SummaryUpdate::column(ColumnRef::SampleValue));
     assert!(result.is_err());
 }
 
@@ -57,10 +63,17 @@ fn invalid_kll_parameters_are_rejected_at_binding() {
 #[test]
 fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
     use asap_executor::planner::summary_type::SummaryInputExpr;
-    let family = FieldDataType::Sketch(SketchAlgorithm::CountSketchWithHeap);
+    let family = (
+        FieldDataType::Sketch(SketchAlgorithm::CountSketchWithHeap),
+        SketchParams::CountSketchWithHeap {
+            width: 1200,
+            depth: 55,
+            heap_size: 3,
+        },
+    );
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
-    let mut operator = create_planner_accumulator(&family, None, &update).unwrap();
+    let mut operator = accumulator(&family, &update).unwrap();
     operator
         .update_keyed(&["a".to_string()], 7.0, 1000)
         .unwrap();
@@ -77,8 +90,11 @@ fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
     );
 }
 
-fn plain_count_sketch(_width: u32, _depth: u32) -> FieldDataType {
-    FieldDataType::Sketch(SketchAlgorithm::CountSketch)
+fn plain_count_sketch(width: u32, depth: u32) -> Family {
+    (
+        FieldDataType::Sketch(SketchAlgorithm::CountSketch),
+        SketchParams::CountSketch { width, depth },
+    )
 }
 
 fn host(i: usize) -> [String; 1] {
@@ -87,7 +103,7 @@ fn host(i: usize) -> [String; 1] {
 
 /// Build a plain CountSketch over unit events, one per key index.
 fn build_plain_count_sketch(
-    family: &FieldDataType,
+    family: &Family,
     events: impl IntoIterator<Item = usize>,
 ) -> Box<dyn AggregateCore> {
     build_weighted_frequency(family, events.into_iter().map(|i| (i, 1.0)))
@@ -95,13 +111,13 @@ fn build_plain_count_sketch(
 
 /// Build a keyed frequency summary over `(key index, weight)` updates.
 fn build_weighted_frequency(
-    family: &FieldDataType,
+    family: &Family,
     updates: impl IntoIterator<Item = (usize, f64)>,
 ) -> Box<dyn AggregateCore> {
     use asap_executor::planner::summary_type::SummaryInputExpr;
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
-    let mut operator = create_planner_accumulator(family, None, &update).unwrap();
+    let mut operator = accumulator(family, &update).unwrap();
     for (at, (i, weight)) in updates.into_iter().enumerate() {
         operator.validate_single_input(weight).unwrap();
         operator.update_keyed(&host(i), weight, at as i64).unwrap();
@@ -129,7 +145,7 @@ fn zipf_events(keys: usize) -> Vec<usize> {
 /// Decode, for `keys` keys, the column each row of `family` (a keyed
 /// frequency sketch of `width` x `depth`) puts the key in, and assert every
 /// pair of rows shares a column for few keys, as independent rows do.
-fn assert_rows_hash_independently(family: &FieldDataType, width: usize, depth: usize, keys: usize) {
+fn assert_rows_hash_independently(family: &Family, width: usize, depth: usize, keys: usize) {
     // Key `base + p` of a batch carries weight 3^p, so a cell holds a sum
     // whose balanced-ternary digits name the keys that hit it (CountSketch
     // signs give digits -1 or 1, Count-Min only 1).
@@ -187,13 +203,8 @@ fn deep_plain_count_sketch_rows_hash_independently() {
     assert_rows_hash_independently(&plain_count_sketch(30_000, 15), 30_000, 15, 2_000);
 }
 
-fn heap_sketch(
-    algorithm: SketchAlgorithm,
-    width: u32,
-    depth: u32,
-    heap_size: u32,
-) -> FieldDataType {
-    let _params = match algorithm {
+fn heap_sketch(algorithm: SketchAlgorithm, width: u32, depth: u32, heap_size: u32) -> Family {
+    let params = match algorithm {
         SketchAlgorithm::CmsWithHeap => SketchParams::CmsWithHeap {
             width,
             depth,
@@ -205,7 +216,7 @@ fn heap_sketch(
             heap_size,
         },
     };
-    FieldDataType::Sketch(algorithm)
+    (FieldDataType::Sketch(algorithm), params)
 }
 
 // The factory's top-k sketches use the same per-row-seeded kernel: past 20
@@ -245,7 +256,7 @@ fn heap_sketch_states_load_as_dag_summary_values() {
         let schema = std::sync::Arc::new(Schema {
             fields: vec![Field {
                 name: "state".into(),
-                dtype: family.clone(),
+                dtype: family.0.clone(),
                 nullable: false,
             }],
             unique_keys: vec![],
@@ -253,7 +264,7 @@ fn heap_sketch_states_load_as_dag_summary_values() {
             time_index: None,
         });
         let row = vec![Value::Summary {
-            family,
+            family: family.0,
             state: std::sync::Arc::from(state),
         }];
         assert!(Batch::try_new(schema, vec![row]).is_ok());
@@ -310,7 +321,7 @@ fn count_min_heap_rejects_negative_inputs() {
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
     let family = heap_sketch(SketchAlgorithm::CmsWithHeap, 64, 3, 4);
-    let operator = create_planner_accumulator(&family, None, &update).unwrap();
+    let operator = accumulator(&family, &update).unwrap();
     assert!(operator.validate_single_input(-1.0).is_err());
     assert!(operator.validate_single_input(0.5).is_ok());
 }
@@ -358,7 +369,7 @@ fn plain_count_sketch_merge_equals_union_build() {
     for i in 0..500 {
         assert_eq!(plain_estimate(&*merged, i), plain_estimate(&*union, i));
     }
-    // A different shape is a different family and does not merge.
+    // A different shape (θ) does not merge.
     assert!(merged
         .merge_with(&*build_plain_count_sketch(
             &plain_count_sketch(1_001, 5),
@@ -376,7 +387,7 @@ fn keyed_update_overflow_is_an_error_not_a_panic() {
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
     let family = plain_count_sketch(64, 3);
-    let mut operator = create_planner_accumulator(&family, None, &update).unwrap();
+    let mut operator = accumulator(&family, &update).unwrap();
     operator.validate_single_input(f64::MAX).unwrap();
     operator.update_keyed(&host(0), f64::MAX, 0).unwrap();
     let error = operator.update_keyed(&host(0), f64::MAX, 1).unwrap_err();

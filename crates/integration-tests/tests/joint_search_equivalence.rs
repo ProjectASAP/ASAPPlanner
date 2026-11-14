@@ -29,6 +29,8 @@ fn workload_of(queries: &[(&str, u32)], accuracy: AccuracyTarget) -> PlanningWor
                     .iter()
                     .map(|&(query, interval)| RepeatingEntry {
                         query: Query(query.into()),
+                        // Evaluated at multiples of the interval: a known grid,
+                        // which a chain delivers on.
                         demand: RepeatedDemand::FixedIntervalAt {
                             interval: RepetitionInterval(interval),
                             evaluation_phase: TimestampMs(0),

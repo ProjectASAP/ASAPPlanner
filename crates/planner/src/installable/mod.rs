@@ -18,10 +18,10 @@
 //! data (a time series is a table `(ts, value, *labels)` over the samples it
 //! buffers; a SQL table is read as is) and its stored views, and the
 //! DAG's own `TimeRange`s apply each window, an instant selector's lookback
-//! and Prometheus stale markers. How the Planner represents the plan
-//! internally (e.g. a tumbling-window chain, which the stage export keeps for
-//! costing and display) is not the runtime's concern: the installable DAG
-//! has every chain expanded into the tumbling windows the executor runs.
+//! and Prometheus stale markers. A tumbling-window chain runs as it is: each
+//! ingestion run builds its newest window, the runtime appends it to its
+//! store, and the `TimeRange`s above the chain select the windows a query
+//! merges.
 
 use std::collections::{HashMap, HashSet};
 
@@ -54,9 +54,8 @@ pub struct InstallablePlan {
     /// [`INSTALLABLE_PLAN_WIRE_VERSION`] of the planner that wrote it.
     pub wire_version: u32,
     /// The selected physical ASAP DAG with Stage 3's timings and
-    /// materialization, every tumbling-window chain expanded into its tumbling windows, each
-    /// materialized view and query-time `Scan` carrying its `retention_ms`;
-    /// the executor compiles it as is.
+    /// materialization, each materialized view and query-time `Scan`
+    /// carrying its `retention_ms`; the executor compiles it as is.
     pub dag: PhysicalASAPDAG,
     /// One per workload query, in `QueryWorkload::entries()` order, as the
     /// workload gave it: query `i` is answered by `dag.roots[i]`.
@@ -94,33 +93,25 @@ pub struct PredictedUsage {
     pub disk_bytes: u64,
     /// CPU cores to provision for the peak.
     pub peak_cpu_cores: u32,
-    /// One per operator node of the plan Stage 3 priced, in node order.
+    /// One per operator node of the plan Stage 3 costed, in node order.
     pub per_node: Vec<PredictedNodeUsage>,
     /// One per workload query, in workload order.
     pub per_query: Vec<PredictedQueryUsage>,
 }
 
-/// One operator node's predicted usage. The node is one of the physical
-/// DAG Stage 3 priced, where a tumbling-window chain is one node; `dag` has
-/// it expanded into its tumbling windows, so `installed_node_ids` says which of
-/// `dag`'s nodes run it.
+/// One operator node's predicted usage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PredictedNodeUsage {
-    /// Its id in Stage 3's physical DAG of the selected candidate.
-    pub stage3_node_id: PhysicalASAPNodeId,
-    /// The ids in `dag` that run it: a tumbling-window chain's tumbling windows, newest
-    /// first; for every other node, the one node it is installed as. Empty
-    /// for a node `dag` has no copy of: one the expansion rebuilds once per
-    /// tumbling window below a chain (e.g. the chain's input window).
-    pub installed_node_ids: Vec<PhysicalASAPNodeId>,
+    /// Its id in the installed DAG.
+    pub node_id: PhysicalASAPNodeId,
     /// Its operator, as the measured cost table names it.
     pub operator: OperatorKind,
     /// When it runs.
     pub timing: ExecutionTiming,
     /// Core-seconds of CPU per second.
     pub cpu_core_seconds_per_second: f64,
-    /// Its price per second under cost model 1; `None` under cost models
+    /// Its cost per second under cost model 1; `None` under cost models
     /// 2 and 3.
     pub cost_per_second: Option<f64>,
     /// Whether its CPU came from the measured cost table or the formulas.
@@ -179,6 +170,13 @@ pub enum InstallablePlanError {
     /// (`reason`).
     #[error("the executor cannot compile the plan's query run: {reason}")]
     QueryRunNotExecutable { reason: String },
+    /// Internal bug: the cost of the selected plan cannot be computed at
+    /// node `node_id` (`reason`).
+    #[error("the selected plan's cost at node {node_id}: {reason}")]
+    PlanCostFailed {
+        node_id: PhysicalASAPNodeId,
+        reason: String,
+    },
 }
 
 impl From<InstallableDagError> for InstallablePlanError {
@@ -203,7 +201,7 @@ impl From<InstallableDagError> for InstallablePlanError {
 /// [`InstallablePlanError::QueryRunNotExecutable`].
 pub async fn plan_installable(
     input: UserInput<'_>,
-) -> Result<(InstallablePlan, Option<SelectedPlanReport>), PlanError> {
+) -> Result<(InstallablePlan, SelectedPlanReport), PlanError> {
     let capabilities = executor_summaries_when_unrestricted(input.models.deployment_capabilities);
     let entries: Vec<_> = input.workload.query_workload.entries().collect();
     let models = input.models.with_deployment_capabilities(&capabilities);
@@ -213,39 +211,32 @@ pub async fn plan_installable(
         models,
         pass: input.pass,
     };
+    let data = input.workload.data_workload.clone().unwrap_or_default();
+    let cost_inputs = input.models.cost_inputs;
     let output = e2e_plan(input).await?;
-    let _ = (output, entries);
-    todo!("#1207 PR 6: install the plan Stage 3 built, with its plan_cost report")
+    let (cost, _) = asap_cost::plan_cost(&output.plan, &entries, &data, cost_inputs).map_err(
+        |(node_id, error)| {
+            PlanError::Installable(InstallablePlanError::PlanCostFailed {
+                node_id,
+                reason: error.to_string(),
+            })
+        },
+    )?;
+    let installable = installable_plan_of(output.plan, &entries).map_err(PlanError::Installable)?;
+    Ok((installable, report_of(&cost)))
 }
 
 /// The installable plan of `plan`, the plan Stage 3 built for a workload
-/// whose entries are `entries` (in `QueryWorkload::entries()` order), with
-/// the report of its `cost` (`asap_cost::plan_cost` of `plan`) when there is
-/// one: what [`plan_installable`] returns after planning. A caller that runs
-/// the planning stages itself (e.g. a developer tool) uses it to see what a
-/// runtime would install.
+/// whose entries are `entries` (in `QueryWorkload::entries()` order): what
+/// [`plan_installable`] returns after planning, without its cost report. A
+/// caller that runs the planning stages itself (e.g. a developer tool) uses
+/// it to see what a runtime would install.
 pub fn installable_plan_of(
-    plan: &PhysicalASAPDAG,
-    cost: Option<&PlanCost>,
+    plan: PhysicalASAPDAG,
     entries: &[QueryWorkloadEntry],
-) -> Result<(InstallablePlan, Option<SelectedPlanReport>), InstallablePlanError> {
-    // Each query's longest range-evaluation span, which the views it
-    // reads must stay available for.
-    let range_spans_ms: Vec<u64> = entries
-        .iter()
-        .map(|entry| entry.range_evaluation.map_or(0, |range| range.span_ms))
-        .collect();
+) -> Result<InstallablePlan, InstallablePlanError> {
     let query_texts: Vec<String> = entries.iter().map(|entry| entry.query.0.clone()).collect();
-    let expanded = tumbling_window_retention_of_expanded_tumbling_windows(plan)?;
-    let report = cost.map(|cost| report_of(cost, &expanded.installed_node_ids));
-    let reader_span_ms_by_node = reader_span_ms_by_node(&expanded.dag, &range_spans_ms);
-    let plan = InstallablePlan::of_dag(
-        expanded.dag,
-        query_texts,
-        &expanded.retention_ms_by_node,
-        &reader_span_ms_by_node,
-    )?;
-    Ok((plan, report))
+    InstallablePlan::of_dag(plan, query_texts)
 }
 
 impl InstallablePlan {
@@ -308,17 +299,16 @@ impl InstallablePlan {
     }
 
     /// The plan of `dag`, with each view's and query-time scan's retention
-    /// set ([`PhysicalASAPDAG::set_retention`]), each view's refresh and the
-    /// query run compiled ([`executor_compiles`]): a plan the executor
-    /// cannot run is refused here, not installed.
+    /// (which Stage 3 set) checked ([`PhysicalASAPDAG::materialized_views`],
+    /// [`PhysicalASAPDAG::raw_data_retention`]), and each view's refresh
+    /// and the query run compiled ([`executor_compiles`]): a plan the
+    /// executor cannot run is refused here, not installed.
     pub(crate) fn of_dag(
-        mut dag: PhysicalASAPDAG,
+        dag: PhysicalASAPDAG,
         query_texts: Vec<String>,
-        tumbling_window_retention_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
-        reader_span_ms_by_node: &HashMap<PhysicalASAPNodeId, u64>,
     ) -> Result<Self, InstallablePlanError> {
-        let views =
-            dag.set_retention(tumbling_window_retention_ms_by_node, reader_span_ms_by_node)?;
+        let views = dag.materialized_views()?;
+        dag.raw_data_retention()?;
         check_queries(&dag, &query_texts)?;
         executor_compiles(&dag, &views)?;
         let plan = InstallablePlan {
@@ -441,36 +431,6 @@ impl<'a> IndexedDag<'a> {
     }
 }
 
-/// For every node of `dag`, the longest range-evaluation span among the
-/// queries that read it (`range_spans_ms[i]` for root `i`); a node no
-/// range-evaluated query reads is absent. One walk per root:
-/// O(roots · (nodes + edges)).
-fn reader_span_ms_by_node(
-    dag: &PhysicalASAPDAG,
-    range_spans_ms: &[u64],
-) -> HashMap<PhysicalASAPNodeId, u64> {
-    let mut inputs: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
-    for edge in &dag.edges {
-        inputs.entry(edge.consumer).or_default().push(edge.producer);
-    }
-    let mut spans = HashMap::new();
-    for (&root, &span_ms) in dag.roots.iter().zip(range_spans_ms) {
-        if span_ms == 0 {
-            continue;
-        }
-        let mut seen = HashSet::new();
-        let mut pending = vec![root];
-        while let Some(id) = pending.pop() {
-            if seen.insert(id) {
-                let span = spans.entry(id).or_insert(0);
-                *span = (*span).max(span_ms);
-                pending.extend(inputs.get(&id).into_iter().flatten().copied());
-            }
-        }
-    }
-    spans
-}
-
 /// Whether the executor compiles `dag` as a runtime runs it: each refresh
 /// ([`executor_refreshes`]): one per refresh group of the views refreshed
 /// at ingestion ([`PhysicalASAPDAG::ingestion_refresh_groups_of`] `views`)
@@ -585,31 +545,8 @@ fn executor_refreshes(
         )
 }
 
-/// The installable DAG of the timed selected plan, with each expanded
-/// tumbling window's retention by node id.
-struct ExpandedWithRetention {
-    dag: PhysicalASAPDAG,
-    retention_ms_by_node: HashMap<PhysicalASAPNodeId, u64>,
-    /// Each node id of the selected candidate's physical DAG (its roots
-    /// exported, Stage 3's ids) with the ids in `dag` that run it
-    /// ([`PredictedNodeUsage::installed_node_ids`]).
-    installed_node_ids: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
-}
-
-/// The plan's DAG with its tumbling-window chains expanded; each tumbling
-/// window takes its chain's retention (`retention_ms`, Stage 3's $h_v$).
-fn tumbling_window_retention_of_expanded_tumbling_windows(
-    plan: &PhysicalASAPDAG,
-) -> Result<ExpandedWithRetention, InstallablePlanError> {
-    let _ = plan;
-    todo!("#1207 PR 6: expand the plan's tumbling-window chains")
-}
-
 /// The report of the selected plan's `cost`.
-fn report_of(
-    cost: &PlanCost,
-    installed_node_ids: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
-) -> SelectedPlanReport {
+fn report_of(cost: &PlanCost) -> SelectedPlanReport {
     SelectedPlanReport {
         cost_per_second: cost.cost_per_second,
         predicted_usage: PredictedUsage {
@@ -627,8 +564,7 @@ fn report_of(
                 .per_node
                 .iter()
                 .map(|(&id, node)| PredictedNodeUsage {
-                    stage3_node_id: id,
-                    installed_node_ids: installed_node_ids.get(&id).cloned().unwrap_or_default(),
+                    node_id: id,
                     operator: node.operator,
                     timing: node.timing,
                     cpu_core_seconds_per_second: node.cpu_core_seconds_per_second,
@@ -650,96 +586,4 @@ fn report_of(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use asap_types::summary_type::{SketchAlgorithm, StatisticKind, SupportedSummary};
-
-    thread_local! {
-        /// The plan nodes handed to the executor's compiler by the views'
-        /// refreshes in [`InstallablePlan::of_dag`] and
-        /// [`InstallablePlan::check_compiles`], summed over their compiles.
-        pub(super) static COMPILED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    }
-
-    /// A p99 panel over a 300 s window every second, with no raw data retained:
-    /// one DDSketch per series in each of 300 one-second tumbling windows built at
-    /// ingestion, about 300 materialized views in a DAG of about 900 nodes.
-    /// Each refresh (here one refresh group of all the tumbling windows) is compiled
-    /// over the nodes below its views, and the whole plan's checks run once,
-    /// so the nodes handed to the executor grow with the plan, not with the
-    /// plan times its views (before, every refresh compiled the whole
-    /// plan). The count
-    /// covers both `plan_installable`'s build and `check_compiles`.
-    #[tokio::test]
-    async fn view_refreshes_compile_only_the_nodes_below_them() {
-        let workload: crate::PlanningWorkload = serde_json::from_str(
-            r#"{"query_workload": {"language": "promql", "repeating_queries": [{
-                  "query": "avg by (job) (quantile_over_time(0.99, data[300s]))",
-                  "demand": {"fixed_interval_at": {"interval": 1000, "evaluation_phase": 0}},
-                  "requirements": {"accuracy": {"max_error": 0.05, "failure_probability": 0.3,
-                      "accuracy_scope": "whole_result"}},
-                  "predictability": {"predictable": {"known_at": null}}}]},
-                "data_workload": {"arrival": {"ingesting": {"rows_per_second": 10000.0}},
-                  "sources": {"data": {"series_count": 1000, "metric_type": "gauge",
-                      "sample_interval": 100, "column_signs": {"value": "non_negative"}}}}}"#,
-        )
-        .unwrap();
-        let capabilities = DeploymentCapabilities {
-            raw_data_retained: false,
-            ..DeploymentCapabilities::default()
-        };
-        COMPILED_NODES.with(|count| count.set(0));
-        let (plan, _) = plan_installable(crate::UserInput::new(
-            &workload,
-            crate::FrontendInput::Promql,
-            crate::PlanningModels::builtin().with_deployment_capabilities(&capabilities),
-        ))
-        .await
-        .expect("a plan");
-        let nodes = plan.dag.nodes.len();
-        let views = plan.materialized_views().unwrap().len();
-        assert!(views >= 300, "{views} materialized views");
-        // Measure one installation and one `check_compiles`, independently of
-        // how many candidates the optimizer explored before selecting this DAG.
-        COMPILED_NODES.with(|count| count.set(0));
-        let rebuilt = InstallablePlan::of_dag(
-            plan.dag.clone(),
-            plan.query_texts.clone(),
-            &HashMap::new(),
-            &HashMap::new(),
-        )
-        .unwrap();
-        assert_eq!(rebuilt.materialized_views().unwrap().len(), views);
-        plan.check_compiles().unwrap();
-        let compiled = COMPILED_NODES.with(std::cell::Cell::get);
-        assert!(
-            compiled <= 6 * nodes,
-            "{compiled} nodes compiled for a plan of {nodes} nodes and {views} views"
-        );
-    }
-
-    /// Unrestricted summaries become the executor's families; a caller's
-    /// own list and its retention flags are kept.
-    #[test]
-    fn unrestricted_summaries_default_to_the_executors_families() {
-        let unrestricted = DeploymentCapabilities {
-            raw_data_retained: false,
-            ..DeploymentCapabilities::default()
-        };
-        let defaulted = executor_summaries_when_unrestricted(&unrestricted);
-        assert_eq!(
-            defaulted.supported_summaries,
-            Some(asap_executor::supported_summary_families())
-        );
-        assert!(!defaulted.raw_data_retained);
-        assert!(!defaulted.supports(&SketchAlgorithm::CountSketch, StatisticKind::ItemFrequency));
-        let kll_only = DeploymentCapabilities {
-            supported_summaries: Some(vec![SupportedSummary {
-                summary_type: SketchAlgorithm::Kll,
-                readouts: vec![StatisticKind::Quantile],
-            }]),
-            ..DeploymentCapabilities::default()
-        };
-        assert_eq!(executor_summaries_when_unrestricted(&kll_only), kll_only);
-    }
-}
+mod tests;

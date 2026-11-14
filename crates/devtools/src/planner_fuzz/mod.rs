@@ -7,17 +7,17 @@
 //! from `q`'s result or state (the same query with a looser accuracy
 //! target, a filter on a group key, a coarser grouping, ...), it builds a
 //! *witness*: `W`'s selected logical plan plus `q'` derived from `q`'s
-//! node by one operator. Stage 2 and Stage 3 implement and price the
-//! witness exactly as they price any candidate, and the relation
+//! node by one operator. Stage 2 and Stage 3 implement and cost the
+//! witness exactly as they cost any candidate, and the relation
 //!
 //! ```text
 //! cost(W ∪ {q'}) − cost(W) ≤ derive_cost + tolerance,
-//! derive_cost = cost(witness) − cost(W's plan priced the same way)
+//! derive_cost = cost(witness) − cost(W's plan costed the same way)
 //! ```
 //!
 //! must hold. `derive_cost` is what Stage 3 charges for the derived
-//! operator alone (its per-node price, plus any change it causes in the
-//! shared nodes' prices, such as a shared node now materialized); it is
+//! operator alone (its per-node cost, plus any change it causes in the
+//! shared nodes' costs, such as a shared node now materialized); it is
 //! never a guess. A violation means a cheaper plan for `W ∪ {q'}` exists
 //! that the planner did not select. Monotonicity and invariance relations
 //! (tightening accuracy, adding a query or dropping raw retention never
@@ -34,7 +34,7 @@ pub mod relations;
 pub mod report;
 pub mod shrink;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
@@ -343,7 +343,7 @@ impl FuzzSettings {
 pub struct Planned {
     /// The selected physical plan's stable archive ID.
     pub selected: String,
-    /// Its price per second under cost model 1.
+    /// Its cost per second under cost model 1.
     pub cost_per_second: f64,
     /// The frontends' roots, one per query.
     pub stage0_roots: Vec<QueryRoot>,
@@ -352,10 +352,10 @@ pub struct Planned {
     pub logical_roots: Option<Vec<QueryRoot>>,
 }
 
-/// A plan priced by Stage 2 and Stage 3 outside the search: the cheapest
+/// A plan costed by Stage 2 and Stage 3 outside the search: the cheapest
 /// physical properties assignment of given logical roots.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Priced {
+pub struct Costed {
     pub selected: String,
     pub cost_per_second: f64,
     /// The nodes only the last root reads: in a witness, the operators
@@ -372,12 +372,12 @@ pub struct PrivateNodes {
     pub operators: Vec<String>,
 }
 
-/// Plans and prices workloads, caching each workload's plan and the
-/// reference price of its selected logical plan.
+/// Plans and costs workloads, caching each workload's plan and the
+/// reference cost of its selected logical plan.
 pub struct Planner {
     pub settings: FuzzSettings,
     cache: HashMap<String, Result<Rc<Planned>, String>>,
-    reference_prices: HashMap<String, Result<Priced, String>>,
+    reference_costs: HashMap<String, Result<Costed, String>>,
 }
 
 impl Planner {
@@ -385,7 +385,7 @@ impl Planner {
         Self {
             settings,
             cache: HashMap::new(),
-            reference_prices: HashMap::new(),
+            reference_costs: HashMap::new(),
         }
     }
 
@@ -445,41 +445,85 @@ impl Planner {
         todo!("#1207 PR 9: the selected plan's cost (plan_cost) and roots from its PhysicalASAPDAG")
     }
 
-    /// Stage 2 and Stage 3 over the logical plan `roots` of `workload`'s
-    /// queries (one root per query, in order): every materialization
-    /// assignment implemented and priced, the cheapest selected, with the
-    /// same models as [`plan`](Self::plan). Guarantees are composed again
-    /// first, so a derived node carries the guarantee of what it reads, and
-    /// summaries are sized for their consumers as Pass 1 sizes them.
-    /// With `last_root_is_key_filter`, the last root is a `Filter` on
-    /// group-key columns only and keeps its input's guarantee (whole groups
-    /// selected by an exact key keep each remaining row's bound), which
-    /// Stage 1's composition, giving no guarantee to any filter over
-    /// approximate rows, does not know.
-    pub fn price(
-        &self,
-        workload: &FuzzWorkload,
-        roots: &[QueryRoot],
-        last_root_is_key_filter: bool,
-    ) -> Result<Priced, String> {
-        let _ = (workload, roots, last_root_is_key_filter);
-        todo!("#1207 PR 6: price a witness plan through the new Stage 2 and Stage 3")
+    /// The planning stages over the logical plan `roots` of `workload`'s
+    /// queries (one root per query, in order), with the same models as
+    /// [`plan`](Self::plan): the selected plan's cost (`plan_cost`) and the
+    /// cost of the nodes only its last root reads.
+    pub fn cost(&self, workload: &FuzzWorkload, roots: &[QueryRoot]) -> Result<Costed, String> {
+        let planning = workload.planning_workload();
+        let entries: Vec<_> = planning.query_workload.entries().collect();
+        let cost_inputs = self.cost_inputs();
+        let deployment = workload.deployment();
+        let models = PlanningModels::builtin()
+            .with_cost_inputs(&cost_inputs)
+            .with_deployment_capabilities(&deployment)
+            .with_ignore_accuracy_guarantees(!self.settings.enforce_accuracy_guarantees);
+        let run = run_search_over(
+            roots.to_vec(),
+            &entries,
+            &workload.data,
+            models,
+            PlanSearchSettings::default(),
+        )
+        .map_err(|e| format!("witness: {e}"))?;
+        let (plan, _) = run
+            .run
+            .selection
+            .as_ref()
+            .map_err(|e| format!("witness selection: {e}"))?;
+        let (cost, _) = asap_cost::plan_cost(plan, &entries, &workload.data, &cost_inputs)
+            .map_err(|(node, error)| format!("witness cost, node {node}: {error}"))?;
+        let cost_per_second = cost
+            .cost_per_second
+            .ok_or("no cost per second (cost model 3)")?;
+        let mut inputs: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for edge in &plan.edges {
+            inputs.entry(edge.consumer).or_default().push(edge.producer);
+        }
+        let reached = |root| {
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![root];
+            while let Some(node) = stack.pop() {
+                if seen.insert(node) {
+                    stack.extend(inputs.get(&node).into_iter().flatten().copied());
+                }
+            }
+            seen
+        };
+        let reached_by_root: Vec<BTreeSet<_>> = plan.roots.iter().map(|r| reached(*r)).collect();
+        let (last, others) = reached_by_root.split_last().ok_or("no roots")?;
+        let private: Vec<_> = last
+            .iter()
+            .filter(|node| others.iter().all(|set| !set.contains(node)))
+            .filter_map(|node| cost.per_node.get(node))
+            .collect();
+        Ok(Costed {
+            selected: "selected".into(),
+            cost_per_second,
+            derived_root: PrivateNodes {
+                cost_per_second: private.iter().filter_map(|n| n.cost_per_second).sum(),
+                operators: private
+                    .iter()
+                    .map(|n| format!("{:?}", n.operator))
+                    .collect(),
+            },
+        })
     }
 
-    /// [`price`](Self::price) of `workload`'s selected logical plan
-    /// `roots`, cached per workload: every marginal check of a case prices
+    /// [`cost`](Self::cost) of `workload`'s selected logical plan
+    /// `roots`, cached per workload: every marginal check of a case costs
     /// the same `W`.
-    pub fn reference_price(
+    pub fn reference_cost(
         &mut self,
         workload: &FuzzWorkload,
         roots: &[QueryRoot],
-    ) -> Result<Priced, String> {
+    ) -> Result<Costed, String> {
         let key = serde_json::to_string(workload).expect("a workload serializes");
-        if let Some(priced) = self.reference_prices.get(&key) {
-            return priced.clone();
+        if let Some(costed) = self.reference_costs.get(&key) {
+            return costed.clone();
         }
-        let priced = self.price(workload, roots, false);
-        self.reference_prices.insert(key, priced.clone());
-        priced
+        let costed = self.cost(workload, roots);
+        self.reference_costs.insert(key, costed.clone());
+        costed
     }
 }

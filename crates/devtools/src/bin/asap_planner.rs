@@ -61,15 +61,13 @@
 //     `lifetime` and `reason`);
 //   - stage3_plan_selection (from `stage3`): the `plan` Stage 3 built (a
 //     `PhysicalASAPDAG`) and its `Selection`: `accepted_accuracy_per_query`,
-//     `pruned_candidates`, `milp_variables`, `milp_constraints`,
+//     `pruned_candidates`, `milp_objective_cost_per_second` (the selected
+//     plan's cost per second), `milp_variables`, `milp_constraints`,
 //     `milp_construction_ms` and `milp_solve_ms`; `error` when no plan was
 //     selected.
 //     `materialized_views` are the plan's materialized views as
-//     `plan_installable` derives them, each with the node of `P1` it is
-//     installed from (`stage2_node_id`), its position among that node's
-//     installed nodes (`installed_position`) and their number
-//     (`installed_count`); `materialized_views_error` when the plan is not
-//     installable. `warnings`: a PromQL query applying `rate`, `increase`
+//     `plan_installable` derives them; `materialized_views_error` when the
+//     plan is not installable. `warnings`: a PromQL query applying `rate`, `increase`
 //     or `irate` to a declared gauge or combining a declared summary's
 //     quantile series across series (`metric_type_warnings`), and a peak memory over 10^12 bytes
 //     when the cost model declares no memory capacity;
@@ -231,9 +229,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             .as_ref()
             .ok()
             .and_then(|run| run.run.selection.as_ref().ok())
-            .map(|(_plan, _selection)| -> u64 {
-                todo!("#1207 PR 6: the selected plan's peak memory, from plan_cost(&plan)")
-            })
+            .and_then(|(plan, _)| asap_cost::plan_cost(plan, &entries, &data, &cost_inputs).ok())
+            .map(|(cost, _)| cost.usage.peak_memory_bytes)
             .and_then(|peak_memory_bytes| {
                 large_peak_memory_warning(peak_memory_bytes, &cost_inputs.cost_model)
             }),
@@ -568,43 +565,16 @@ fn arrival_together(earlier: DataArrival, later: DataArrival) -> Option<DataArri
 
 /// The selected plan's materialized views, as the plan
 /// [`installable_plan_of`] (what `plan_installable` returns) derives them:
-/// each view's node id in the installable DAG, `refresh`, `coverage`,
-/// `inputs` and `retention_ms`,
-/// plus the node of the selected Stage 2 candidate it is installed from
-/// (`stage2_node_id`, null when Stage 3 recorded no cost to map it by), its
-/// position among that node's installed nodes (`installed_position`: a
-/// tumbling-window chain's tumbling windows, newest first) and their number (`installed_count`).
+/// each view's node id, `refresh`, `coverage`, `inputs` and `retention_ms`.
 fn materialized_views_json(
     plan: &asap_types::plan::physical_asap_dag::PhysicalASAPDAG,
     entries: &[QueryWorkloadEntry],
 ) -> Result<Vec<Value>, String> {
-    let (plan, report) = installable_plan_of(plan, None, entries).map_err(|e| e.to_string())?;
+    let plan = installable_plan_of(plan.clone(), entries).map_err(|e| e.to_string())?;
     let views = plan.materialized_views().map_err(|e| e.to_string())?;
-    let mut stage2_of = std::collections::HashMap::new();
-    for node in report
-        .iter()
-        .flat_map(|report| &report.predicted_usage.per_node)
-    {
-        for (position, installed) in node.installed_node_ids.iter().enumerate() {
-            stage2_of.insert(
-                *installed,
-                (node.stage3_node_id, position, node.installed_node_ids.len()),
-            );
-        }
-    }
     views
         .iter()
-        .map(|view| {
-            let mut value = serde_json::to_value(view).map_err(|e| e.to_string())?;
-            let (stage2_node_id, position, count) = match stage2_of.get(&view.node_id) {
-                Some((id, position, count)) => (json!(id), json!(position), json!(count)),
-                None => (Value::Null, Value::Null, Value::Null),
-            };
-            value["stage2_node_id"] = stage2_node_id;
-            value["installed_position"] = position;
-            value["installed_count"] = count;
-            Ok(value)
-        })
+        .map(|view| serde_json::to_value(view).map_err(|e| e.to_string()))
         .collect()
 }
 
@@ -650,8 +620,9 @@ fn selection_json(selection: &Result<(PhysicalASAPDAG, Selection), SelectionErro
             .iter()
             .map(|p| json!({ "candidate": format!("{:?}", p.candidate), "reason": format!("{:?}", p.reason) }))
             .collect::<Vec<_>>(),
-        "milp_variables": selection.milp_variables,
-        "milp_constraints": selection.milp_constraints,
+        "milp_objective_cost_per_second": selection.selected_plan_cost_per_second,
+        "milp_variables": selection.milp_variable_count,
+        "milp_constraints": selection.milp_constraint_count,
         "milp_construction_ms": selection.milp_construction_ms,
         "milp_solve_ms": selection.milp_solve_ms,
     })

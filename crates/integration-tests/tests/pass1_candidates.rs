@@ -3,6 +3,13 @@
 //! a query keeps its output columns (names, types and nullability); where
 //! each SQL `HAVING` is applied and what a Top-K heap sketch ranks.
 
+use std::rc::Rc;
+use std::sync::Arc;
+
+use asap_executor::physical_planner::compile;
+use asap_executor::runtime::{Limits, RunContext, Scope};
+use asap_executor::sources::InMemoryDataStore;
+use asap_executor::values::{Batch, Value};
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_stage1_pass1_per_computation_candidates::pass1_memo;
 use asap_types::accuracy::AccuracyTarget;
@@ -10,13 +17,18 @@ use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::{ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, Predicate, QueryRoot, ScalarExpr};
-use asap_types::stages::{Memo, MemoGroupId};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate, QueryRoot, ScalarExpr};
+use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
+use asap_types::stages::{
+    Memo, MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId,
+    PhysicalEdge,
+};
 use asap_types::summary_type::{SketchAlgorithm, SummaryInputExpr, SummaryUpdate};
 use asap_types::workload::{
     BatchEntry, DataWorkload, DurationMs, PlanningWorkload, Query, QueryLanguage,
     QueryRequirements, QueryWorkload,
 };
+use futures::StreamExt;
 
 fn accuracy() -> AccuracyTarget {
     AccuracyTarget::max_error(0.01).failure_probability(0.01)
@@ -283,6 +295,245 @@ fn avg_table() -> SqlCatalog {
             Field::plain("value", DataType::Float64, false),
         ]),
     )
+}
+
+/// Run the logical DAG `root` over `rows` of its one scanned table, each row
+/// given by column name. Rows come back shown and sorted.
+fn execute(root: &Rc<OperatorNode>, rows: &[Vec<(&str, Value)>]) -> Vec<Vec<String>> {
+    let dag = asap_types::test_support::forwarders::physical_asap_dag_at_query_time(root).unwrap();
+    let scan = dag
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                &node.payload,
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
+            )
+        })
+        .expect("one scan");
+    let PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { source, .. }) = &scan.payload else {
+        unreachable!()
+    };
+    let schema = Arc::new(scan.output_schema.clone());
+    let plan = compile(&dag, &[], &[dag.roots[0] as u64]).unwrap();
+    let rows = rows
+        .iter()
+        .map(|row| {
+            schema
+                .fields
+                .iter()
+                .map(|field| {
+                    row.iter()
+                        .find(|(name, _)| *name == field.name)
+                        .map(|(_, value)| value.clone())
+                        .expect("value for every column")
+                })
+                .collect()
+        })
+        .collect();
+    let store = InMemoryDataStore::default()
+        .with_raw_data(
+            source.clone(),
+            schema.clone(),
+            vec![Batch::try_new(schema.clone(), rows).unwrap()],
+        )
+        .unwrap();
+    let bound = plan.instantiate(Arc::new(store)).unwrap();
+    let context = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: 0,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let show = |value: &Value| match value {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Float64(value) => value.to_string(),
+        Value::Utf8(value) => format!("{value:?}"),
+        other => format!("{other:?}"),
+    };
+    let mut out: Vec<Vec<String>> = futures::executor::block_on(async {
+        let mut stream = bound.execute(plan.roots(), context).unwrap().remove(0);
+        let mut rows = Vec::new();
+        while let Some(batch) = stream.next().await {
+            rows.extend(
+                batch
+                    .unwrap()
+                    .to_rows()
+                    .iter()
+                    .map(|row| row.iter().map(show).collect()),
+            );
+        }
+        rows
+    });
+    out.sort();
+    out
+}
+
+/// SQL `avg` from its `sum` and `count` states: the exact plan and the
+/// plan computing `avg` as `sum` and `count`, to execute: Stage 3's plan
+/// over the physical candidates without the `avg` group's own expression.
+async fn avg_as_sum_and_count(
+    catalog: &SqlCatalog,
+    query: &str,
+) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
+    use asap_integration_tests::planning::{declared_data, run_all_stages, single_query_entry};
+    let exact = lower_sql(query, catalog).await.unwrap();
+    let run = run_all_stages(Rc::clone(&exact), accuracy());
+    let physical = run
+        .run
+        .physical_asap_candidates
+        .as_ref()
+        .expect("Stage 2 ran");
+    let avg = root_group(&physical.logical_candidates.memo);
+    let own = |candidate: &PhysicalCandidate| {
+        candidate.logical_candidate_id.group == avg
+            && candidate.logical_candidate_id.index_in_group == 0
+    };
+    let (plan, _) = asap_stage3_plan_selection::select_plan(
+        &without_candidates(physical, own),
+        &[single_query_entry(accuracy())],
+        &declared_data(&exact),
+        &asap_cost::CostInputs::default(),
+    )
+    .expect("a plan computing avg as sum over count");
+    match plan.query_roots().unwrap().as_slice() {
+        [QueryRoot::Operator(quotient)] => (exact, Rc::clone(quotient)),
+        other => panic!("one operator root: {other:?}"),
+    }
+}
+
+/// `physical` without the candidates `excluded` selects, and their edges.
+fn without_candidates(
+    physical: &PhysicalASAPMemoCandidates,
+    excluded: impl Fn(&PhysicalCandidate) -> bool,
+) -> PhysicalASAPMemoCandidates {
+    let mut new_id = Vec::with_capacity(physical.physical_candidates.len());
+    let mut kept = Vec::new();
+    for candidate in &physical.physical_candidates {
+        new_id.push((!excluded(candidate)).then_some(PhysicalCandidateId(kept.len())));
+        if !excluded(candidate) {
+            kept.push(*candidate);
+        }
+    }
+    let edges = physical
+        .edges()
+        .filter_map(|(_, edge)| {
+            Some(PhysicalEdge {
+                producer_candidate_id: new_id[edge.producer_candidate_id.0]?,
+                consumer_candidate_id: new_id[edge.consumer_candidate_id.0]?,
+                ..edge
+            })
+        })
+        .collect();
+    PhysicalASAPMemoCandidates::new(
+        physical.logical_candidates.clone(),
+        kept,
+        edges,
+        physical.pruned_candidates.clone(),
+    )
+}
+
+/// SQL `avg` as `sum` and `count` states executes as the exact aggregate:
+/// NULL and '' groups stay apart, a non-Utf8 key works, and an empty global
+/// input averages to NULL.
+#[tokio::test]
+async fn sql_avg_from_sum_and_count_executes_as_avg() {
+    let catalog = avg_table();
+    let row = |k: Option<&str>, ok: bool, value: f64| {
+        vec![
+            ("k", k.map_or(Value::Null, |k| Value::Utf8(k.into()))),
+            ("ok", Value::Bool(ok)),
+            ("value", Value::Float64(value)),
+        ]
+    };
+    let rows = vec![
+        row(None, true, 2.),
+        row(None, true, 4.),
+        row(Some(""), false, 10.),
+        row(Some("a"), false, 200.),
+        row(Some("a"), true, 1.),
+    ];
+    let rows_of = |rows: &[&[&str]]| -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|row| row.iter().map(|cell| cell.to_string()).collect())
+            .collect()
+    };
+    for (query, input, want) in [
+        (
+            "SELECT k, avg(value) FROM t GROUP BY k",
+            rows.clone(),
+            rows_of(&[&["\"\"", "10"], &["\"a\"", "100.5"], &["NULL", "3"]]),
+        ),
+        (
+            "SELECT ok, avg(value) FROM t GROUP BY ok",
+            rows.clone(),
+            rows_of(&[&["false", "105"], &["true", "2.3333333333333335"]]),
+        ),
+        (
+            "SELECT avg(value) FROM t",
+            rows.clone(),
+            rows_of(&[&["43.4"]]),
+        ),
+        ("SELECT avg(value) FROM t", vec![], rows_of(&[&["NULL"]])),
+    ] {
+        let (exact, root) = avg_as_sum_and_count(&catalog, query).await;
+        assert_eq!(execute(&exact, &input), want, "{query}");
+        assert_eq!(execute(&root, &input), want, "{query}");
+    }
+}
+
+/// `avg(c)`'s count counts `c`, not a nullable `value` column: the result is
+/// the exact `avg`.
+#[tokio::test]
+async fn sql_avg_counts_its_own_input() {
+    let catalog = table(&[("value", true), ("c", false)]);
+    let query = "SELECT k, avg(c) FROM t GROUP BY k";
+    let (exact, root) = avg_as_sum_and_count(&catalog, query).await;
+    let row = |k: &str, value: Option<f64>, c: f64| {
+        vec![
+            ("k", Value::Utf8(k.into())),
+            ("value", value.map_or(Value::Null, Value::Float64)),
+            ("c", Value::Float64(c)),
+        ]
+    };
+    let rows = vec![
+        row("a", None, 1.),
+        row("a", Some(5.), 3.),
+        row("b", None, 4.),
+    ];
+    let want = vec![
+        vec!["\"a\"".to_string(), "2".to_string()],
+        vec!["\"b\"".to_string(), "4".to_string()],
+    ];
+    assert_eq!(execute(&exact, &rows), want);
+    assert_eq!(execute(&root, &rows), want);
+}
+
+/// SQL `avg` of a non-null Int64 column as `sum` and `count` keeps the exact plan's Float64 columns.
+#[tokio::test]
+async fn sql_avg_of_an_int64_column_keeps_the_exact_columns() {
+    let catalog = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Field::plain("k", DataType::Utf8, true),
+            Field::plain("n", DataType::Int64, false),
+        ]),
+    );
+    let query = "SELECT k, avg(n) FROM t GROUP BY k";
+    let (exact, root) = avg_as_sum_and_count(&catalog, query).await;
+    assert_eq!(
+        root.schema.fields.last().unwrap().plain_dtype(),
+        Some(&DataType::Float64)
+    );
+    let row = |k: &str, n: i64| vec![("k", Value::Utf8(k.into())), ("n", Value::Int64(n))];
+    let rows = vec![row("a", 1), row("a", 2), row("b", 4)];
+    let want = vec![
+        vec!["\"a\"".to_string(), "1.5".to_string()],
+        vec!["\"b\"".to_string(), "4".to_string()],
+    ];
+    assert_eq!(execute(&exact, &rows), want);
 }
 
 /// A filtered SQL `avg` is NULL where no row passes the filter: its quotient

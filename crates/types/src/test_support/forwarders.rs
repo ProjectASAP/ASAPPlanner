@@ -6,7 +6,6 @@
 
 use crate::ir::operator::maintained_population::CurrentSeriesInput;
 use crate::ir::operator::node::Operator;
-use crate::plan::materialized_view::RawDataWindow;
 
 use crate::ir::schema::Schema;
 use crate::ir::{ASAPOp, NonASAPOp};
@@ -31,11 +30,6 @@ pub fn validate_asap_inputs(op: &ASAPOp) -> Result<(), SchemaDerivationError> {
 /// `CurrentSeriesInput::matches_node`.
 pub fn matches_node(input: &CurrentSeriesInput, node: &Rc<OperatorNode>) -> bool {
     input.matches_node(node)
-}
-
-/// `RawDataWindow::lookback_ms`.
-pub fn lookback_ms(window: &RawDataWindow) -> u64 {
-    window.lookback_ms()
 }
 
 /// `physical_asap_dag::physical_asap_dag_at_query_time_with_node_ids`: `roots`

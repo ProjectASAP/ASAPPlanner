@@ -3,7 +3,22 @@ use super::*;
 use crate::runtime::Scope;
 
 impl Operator {
+    /// `input`'s columns as `output`'s, its time column stamped with the
+    /// run's time: an ingestion run's window end, a query run's evaluation
+    /// time.
     pub(crate) fn scope_timestamp(input: SchemaRef, output: SchemaRef) -> Result<Self, Error> {
+        Self::window_end_timestamp(input, output, None)
+    }
+
+    /// As [`Self::scope_timestamp`], except that with `window_end`, the
+    /// time column copies that input column: each row's window end, for the
+    /// states of a tumbling-window chain built at query time, one per
+    /// window ([`Self::with_tumbling_window_ends`]).
+    pub(crate) fn window_end_timestamp(
+        input: SchemaRef,
+        output: SchemaRef,
+        window_end: Option<usize>,
+    ) -> Result<Self, Error> {
         crate::values::validate_schema(&output)?;
         let coordinate = output
             .time_index
@@ -15,7 +30,14 @@ impl Operator {
         let mut used = std::collections::BTreeSet::new();
         for (index, field) in output.fields.iter().enumerate() {
             if index == coordinate {
-                columns.push(None);
+                if let Some(window_end) = window_end {
+                    if plain(&input, window_end)?.0 != &DataType::Timestamp
+                        || !used.insert(window_end)
+                    {
+                        return Err(invalid("window end column must be a timestamp"));
+                    }
+                }
+                columns.push(window_end);
                 continue;
             }
             let matches: Vec<_> = input

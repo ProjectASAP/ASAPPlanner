@@ -1,6 +1,6 @@
 //! `asap-cost` — the cost model the planning stages share: how much of each
 //! resource a plan uses and what that usage costs. It depends only on
-//! `asap-types`, so any stage can price with it.
+//! `asap-types`, so any stage can cost with it.
 //!
 //! - Resource-usage estimation of one node ([`node`]):
 //!   [`node::analytical`] and `node::operator_statistics` (the analytical
@@ -9,17 +9,20 @@
 //!   their lookup) and `resources` (resource dimensions with explicit CPU
 //!   units).
 //! - The whole plan ([`plan`]): [`plan::execution_demand`] (how often each
-//!   node of a physical DAG is computed), its cost, retention and ranking.
+//!   node of a physical DAG is computed), its cost, how far back its
+//!   time-indexed nodes are read and how plans rank.
 //! - Cost models (`model`): [`ResourceUsage`], [`ResourceUnitCost`],
 //!   [`ResourceSpeed`], [`CostModel`] ([`ClusterLimits`],
 //!   [`ClusterObjective`]) and the deployment's [`CostInputs`], with the
 //!   per-node and per-plan costs ([`NodeCost`], [`PlanCost`]).
-//! - Costing a physical plan DAG: [`node_usage`] gives one node's
-//!   [`NodeUsage`]; [`plan_cost`] the whole plan's [`PlanCost`]. Stage 3
-//!   computes no cost of its own.
-//!
-//! Plan selection (Stage 3, `asap-stage3-plan-selection`) documents how it prices
-//! a candidate with these.
+//! - Costing a physical plan DAG: [`node_resource_usage_and_cost`] gives one node's
+//!   [`NodeResourceUsageAndCost`]; [`plan_cost`] the whole plan's [`PlanCost`].
+//!   Stage 3 (`asap-stage3-plan-selection`) costs each candidate as one node
+//!   with the same function and the rules `plan_cost` applies:
+//!   [`plan::execution_demand::executions_per_second`],
+//!   [`maintained_window_ms`], [`read_back_ms`],
+//!   [`raw_data_disk_cost_per_second`] and
+//!   [`request_overhead_cost_per_second`].
 mod measured;
 mod model;
 pub mod node;
@@ -37,12 +40,13 @@ pub use model::{
 };
 pub use node::operator_statistics::EdgeStatistics;
 pub use node::usage::{
-    node_map, node_usage, summary_type_name, NodeCost, NodeMap, NodeUsage, ProducerOutput,
+    maintained_window_ms, node_resource_usage_and_cost, summary_type_name, NodeCost,
+    NodeResourceUsageAndCost, ProducerOutput,
 };
-pub use plan::cost::{plan_cost, PlanCost, QueryLatency};
+pub use plan::cost::{
+    plan_cost, raw_data_disk_cost_per_second, request_overhead_cost_per_second, PlanCost,
+    QueryLatency,
+};
 pub use plan::ranking::{cheaper, worst_latency_ms, PlanRanking};
-pub use plan::retention::{
-    maintained_window_ms, query_reach, retained_tumbling_windows, tumbling_window_retention_ms,
-    tumbling_window_retention_ms_of_plan, tumbling_windows_of,
-};
+pub use plan::read_back::read_back_ms;
 pub use resources::ResourceUsage;

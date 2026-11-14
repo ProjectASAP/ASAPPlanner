@@ -469,7 +469,7 @@ pub fn create_planner_accumulator(
     parameters: Option<&SketchParams>,
     input: &planner_types::summary_type::SummaryUpdate,
 ) -> Result<Box<dyn AccumulatorUpdater>, String> {
-    crate::capability::validate_summary_kernel(family, input)?;
+    crate::capability::validate_summary_kernel(family, parameters, input)?;
     if matches!(family, SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms)) {
         return Err(
             "HydraCms has one state for all groups; build it with `create_hydra_cms`".into(),
@@ -558,11 +558,16 @@ pub fn create_planner_accumulator(
     Ok(updater)
 }
 
-/// Construct the one state a `SharedMultiSubpopulation { kind: HydraCms }`
-/// family shares across its groups. The update contract is checked with the
-/// plan by `validate_summary_kernel`.
-pub fn create_hydra_cms(family: &SummaryFamilyType) -> Result<HydraCms, String> {
-    let (shared_rows, shared_columns, width, depth) = crate::capability::hydra_cms_shape(family)?;
+/// Construct the one state a HydraCms family shares across its groups,
+/// sized by its θ `parameters` (`SketchParams::Hydra(HydraParams::HydraCms
+/// { .. })`). The update contract is checked with the plan by
+/// `validate_summary_kernel`.
+pub fn create_hydra_cms(
+    family: &SummaryFamilyType,
+    parameters: Option<&SketchParams>,
+) -> Result<HydraCms, String> {
+    let (shared_rows, shared_columns, width, depth) =
+        crate::capability::hydra_cms_shape(family, parameters)?;
     HydraCms::new(shared_rows, shared_columns, width, depth).map_err(|e| e.to_string())
 }
 

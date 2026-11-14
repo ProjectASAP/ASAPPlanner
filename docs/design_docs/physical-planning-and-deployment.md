@@ -478,21 +478,38 @@ needs that the DAG determines is derived from the DAG, so the plan file has no
 second copy to keep consistent. Stage 3's selection report is returned beside
 the plan, not inside it.
 
-**Retention.** Installation writes `retention_ms` on two kinds of node:
+**Retention.** Stage 3 writes `retention_ms` on two kinds of node, and
+installation checks it:
 
-- **Materialized view:** how long the view's output must stay available after
-  it is built.
-- **Query-time `Scan`:** how far back raw data must be kept. This is the
-  scan's window lookback (`end_offset + width`, from `scan_window`) plus the
-  longest range-evaluation span of the queries reading it. It is never less
-  than the retention of a view refreshed on first read from that scan.
+- **Materialized view:** how far back from the newest evaluation time its
+  stored rows are kept. A tumbling-window chain keeps the windows ending in
+  `(T - retention_ms, T]`; any other view its results of those times.
+- **Query-time `Scan`:** how far back raw data is kept.
 
-`raw_data_retention()` is the per-source maximum over these scans. Example: for
-`max_over_time(m[5m])` evaluated over the last hour, raw `m` is kept 65
-minutes, because refreshing the tumbling window for the oldest step reads that far back.
-A tumbling-window chain kept across evaluations counts as all its tumbling windows. Reusing a tumbling window is
-optional for a runtime, and a restart or an older step rebuilds older tumbling windows
-from raw data.
+Each covers what the `TimeRange` and `TimeShift` nodes above the node read
+back: through shifts summing to `o`, a `TimeRange(r)` reads `o + r` back
+(Stage 3 adds the longest range-evaluation span of the queries reading it).
+A chain built at ingestion time reads its newest window back; a chain built
+at query time reads what its own readers read, so the walk passes up through
+it. `raw_data_retention()` is the per-source maximum over the query-time scans.
+Example: for `max_over_time(m[5m])` evaluated over the last hour, raw `m` is
+kept 65 minutes.
+
+**The time-indexed store.** A runtime keeps every materialized node with a
+time index in one append-only store with retention: raw data by sample time,
+a chain's rows by the end of their window, any other view's state by the
+interval of data it summarizes. Each is read only through the `TimeRange` and
+`TimeShift` nodes above it, and rows older than the node's `retention_ms` are
+dropped. A chain runs natively: each ingestion run builds its window ending
+at the run's end (one row per key, `(window_end, keys, state)`), the runtime
+appends it, and a query reads the windows `TimeRange(W)` over shifts summing
+to `o` selects, `(T - o - W, T - o]` on `window_end`, which a `SummaryMerge`
+merges per key. A chain built at query time builds, in the query run at
+`T`, every window `(T - (k+1)c, T - kc]` its readers select, in one pass over
+its input: each row is grouped with its key by its window's end, and each
+state is stamped with that end, so the same `TimeRange` selects them. A
+`TimeShift { at }` evaluates its input once per request, at
+the request's end (`@ end()`), start (`@ start()`) or the given time.
 
 ### Input slots and compilation
 
@@ -502,8 +519,8 @@ time, together with that position's schema, which is the DAG node's
 
 | Slot | Where | Holds | Read by |
 | --- | --- | --- | --- |
-| **Raw data slot** | every `Scan` leaf | the `Scan`'s `Source`, schema, compiled predicates, and window (the union of its readers' windows, `scan_window`) | `Source` |
-| **Materialized view slot** | each view the DAG reads | the `MaterializedView`, its schema, and the window its state summarizes (`view_window`: the union of the windows of every `TimeRange` below it) | `MaterializedView` |
+| **Raw data slot** | every `Scan` leaf | the `Scan`'s `Source`, schema, compiled predicates, and the window its consumers read (from the `TimeRange`, `TimeShift` and chain nodes above it) | `Source` |
+| **Materialized view slot** | each view the DAG reads | the `MaterializedView`, its schema, and the rows a read selects: a chain's, the windows the `TimeRange`s above it select; any other view's, the window its state summarizes (the union of the windows of every `TimeRange` below it) | `MaterializedView` |
 
 ```rust
 pub fn compile(dag: &PhysicalASAPDAG, views: &[MaterializedView], roots: &[NodeId])
@@ -590,9 +607,9 @@ ingestion window, or a query evaluation time `T`.
 Two views refreshed at ingestion can be built in one ingestion run, with the
 run's interval equal to each one's window, exactly when they have the same
 **refresh window**: windows of width `W` that end `p` after a multiple of `W`
-(`0 ≤ p < W`), relative to the evaluation time. A view whose `view_window` is
-`(T - o - W, T - o]` has the refresh window `(W, o mod W)`. All tumbling windows of a
-tumbling-window chain have their newest tumbling window's refresh window. The source, the summary
+(`0 ≤ p < W`), relative to the evaluation time. A view whose window (below it)
+is `(T - o - W, T - o]` has the refresh window `(W, o mod W)`. A chain of width
+`w` over shifts summing to `s` has `(w, s mod w)`. The source, the summary
 family and where the state is kept do not enter. A view with an unbounded
 window is a group of its own.
 

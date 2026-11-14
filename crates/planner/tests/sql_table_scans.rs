@@ -21,7 +21,7 @@ use asap_planner::{
 
 use asap_types::ir::operator::Source;
 use asap_types::ir::schema::{DataType, Field, Schema};
-use asap_types::ir::NonASAPOp;
+use asap_types::ir::{ASAPOp, NonASAPOp};
 use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
 use futures::{executor::block_on, StreamExt};
 
@@ -51,7 +51,7 @@ fn workload(queries: &[&str], accuracy: &str, interval_ms: u64) -> PlanningWorkl
         .iter()
         .map(|query| {
             format!(
-                r#"{{"query": {query:?}, "demand": {{"fixed_interval_at": {{"interval": {interval_ms}, "evaluation_phase": 0}}}}}},
+                r#"{{"query": {query:?}, "demand": {{"fixed_interval_at": {{"interval": {interval_ms}, "evaluation_phase": 0}}}},
                 "requirements": {{"accuracy": {accuracy}}},
                 "predictability": {{"predictable": {{"known_at": null}}}}}}"#
             )
@@ -163,12 +163,15 @@ fn expected_distinct_users() -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Runs `ids` of `dag` in `scope` with each of `inputs` bound to the node
-/// its key names and `table` bound as `http`: the batches of each id's
-/// output.
+/// Runs `ids` of `dag` in `scope` with each of `inputs` (a state and the
+/// span of data it summarizes) stored for the node its key names and
+/// `table` bound as `http`: the batches of each id's output.
+/// One stored state of a view and the `(start, end]` of the data it holds.
+type WindowState = (Batch, (i64, i64));
+
 fn run_bound(
     dag: &asap_types::plan::physical_asap_dag::PhysicalASAPDAG,
-    inputs: BTreeMap<u64, Batch>,
+    inputs: BTreeMap<u64, Vec<WindowState>>,
     table: &Batch,
     ids: &[u64],
     scope: Scope,
@@ -194,8 +197,12 @@ fn run_bound(
             vec![table.clone()],
         )
         .unwrap();
-    for (id, batch) in inputs {
-        store = store.with_materialized_view(id as _, vec![batch]).unwrap();
+    for view in &views {
+        for (batch, span) in &inputs[&(view.node_id as u64)] {
+            store
+                .append_materialized_view(view, *span, vec![batch.clone()])
+                .unwrap();
+        }
     }
     let instance = compiled.instantiate(Arc::new(store)).unwrap();
     block_on(async {
@@ -233,39 +240,76 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
         })
         .expect("the plan scans the table");
     let table = Batch::try_new(schema, rows()).unwrap();
-    // Each view's state, by node id, with its data's span.
-    let mut built: BTreeMap<u64, (Batch, (i64, i64))> = BTreeMap::new();
+    // Each view's states, by node id, each with its data's span: a chain's
+    // one per tumbling window its retention keeps, newest last.
+    let mut built: BTreeMap<u64, Vec<WindowState>> = BTreeMap::new();
     for view in &views {
-        let span = view
-            .inputs
-            .raw_data_windows()
+        let width_ms = match &dag
+            .nodes
             .iter()
-            .map(|window| window.bounds_ms(EVALUATION_MS))
-            .chain(
-                view.inputs
-                    .materialized_views
-                    .iter()
-                    .map(|id| built[&(*id as u64)].1),
-            )
-            .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
-            .expect("a materialized view reads something");
-        let mut sources = BTreeMap::new();
-        for id in &view.inputs.materialized_views {
-            sources.insert(*id as u64, built[&(*id as u64)].0.clone());
-        }
-        let scope = match view.refresh() {
-            MaterializedViewRefresh::AtIngestion => Scope::Ingestion {
-                window_start_ms: span.0,
-                window_end_ms: span.1,
-            },
-            MaterializedViewRefresh::OnFirstRead => Scope::Query {
-                evaluation_time_ms: EVALUATION_MS,
-            },
+            .find(|n| n.id == view.node_id)
+            .unwrap()
+            .payload
+        {
+            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }) => Some(*tumbling_window_width_ms as i64),
+            _ => None,
         };
-        let batches = run_bound(dag, sources, &table, &[view.node_id as u64], scope).remove(0);
-        let state_rows = batches.iter().flat_map(|b| b.to_rows()).collect();
-        let state = Batch::try_new(batches[0].schema().clone(), state_rows).unwrap();
-        built.insert(view.node_id as u64, (state, span));
+        let spans: Vec<(i64, i64)> = match width_ms {
+            Some(width_ms) => {
+                let windows = (view.retention_ms() as i64 / width_ms).max(1);
+                (0..windows)
+                    .rev()
+                    .map(|k| {
+                        let end = EVALUATION_MS - k * width_ms;
+                        (end - width_ms, end)
+                    })
+                    .collect()
+            }
+            None => vec![dag
+                .refresh_window(view.node_id)
+                .map(|refresh| {
+                    asap_planner::TimeWindow {
+                        ends_before_evaluation_ms: refresh.phase_ms,
+                        length_ms: refresh.width_ms,
+                    }
+                    .bounds_ms(EVALUATION_MS)
+                })
+                .into_iter()
+                .chain(
+                    view.inputs
+                        .materialized_views
+                        .iter()
+                        .flat_map(|id| built[&(*id as u64)].iter().map(|(_, span)| *span)),
+                )
+                .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
+                .expect("a materialized view reads something")],
+        };
+        let mut states = Vec::new();
+        for span in spans {
+            let mut sources = BTreeMap::new();
+            for id in &view.inputs.materialized_views {
+                sources.insert(*id as u64, built[&(*id as u64)].clone());
+            }
+            let scope = match view.refresh() {
+                MaterializedViewRefresh::AtIngestion => Scope::Ingestion {
+                    window_start_ms: span.0,
+                    window_end_ms: span.1,
+                },
+                MaterializedViewRefresh::OnFirstRead => Scope::Query {
+                    evaluation_time_ms: EVALUATION_MS,
+                },
+            };
+            let batches = run_bound(dag, sources, &table, &[view.node_id as u64], scope).remove(0);
+            let state_rows = batches.iter().flat_map(|b| b.to_rows()).collect();
+            states.push((
+                Batch::try_new(batches[0].schema().clone(), state_rows).unwrap(),
+                span,
+            ));
+        }
+        built.insert(view.node_id as u64, states);
     }
     // The query run reads the views it reaches without passing another
     // one, and the windows it reads at query time.
@@ -278,8 +322,8 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
             continue;
         }
         match built.get(&id) {
-            Some((state, _)) => {
-                inputs.insert(id, state.clone());
+            Some(built) => {
+                inputs.insert(id, built.clone());
             }
             None => pending.extend(
                 dag.edges
@@ -311,15 +355,10 @@ async fn ingestion_time_tumbling_windows_built_from_table_rows_answer_exactly() 
         views
             .iter()
             .any(|v| v.refresh() == MaterializedViewRefresh::AtIngestion
-                && !v.inputs.raw_data_windows().is_empty()),
+                && v.inputs.materialized_views.is_empty()),
         "tumbling windows built at ingestion time from table rows: {:?}",
         views
     );
-    // Older tumbling windows read windows that end before the evaluation.
-    assert!(views
-        .iter()
-        .flat_map(|v| v.inputs.raw_data_windows())
-        .any(|w| w.end_offset_ms() > 0));
     let answers = run_data_plane(&plan);
     assert_eq!(by_key(answers[0].clone()), expected_distinct_users());
     let expected: BTreeMap<String, String> = (0..3)
@@ -368,7 +407,7 @@ async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_ro
         views
             .iter()
             .any(|v| v.refresh() == MaterializedViewRefresh::AtIngestion
-                && !v.inputs.raw_data_windows().is_empty()),
+                && v.inputs.materialized_views.is_empty()),
         "built at ingestion time from table rows: {:?}",
         views
     );

@@ -544,7 +544,7 @@ The sections below describe each stage.
 | 1, Pass 1 | nothing is recorded: a way the measure or the deployment cannot compute is not offered (the exact accumulator of an `avg` over a nullable input, a count sketch over relational rows, a summary the deployment does not support, a quantile summary outside [0, 1], a top-k heap over one row per item), nor a way Pass 1 cannot build | — | — |
 | 1, Pass 2 | nothing: it only adds candidates | — | — |
 | 2 | what cannot be built or materialized: `NoIngestionPipeline`, `RawDataNotRetained` (a scan of raw data the deployment does not keep, at query time or materialized across evaluations), `QueryTimeResultsNotRetained`, `CountMinWeightsNotProvenNonNegative`, `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`; the planner does not check executor support | `PhysicalASAPMemoCandidates::pruned_candidates` | the `PhysicalCandidate` it would have been |
-| 3 | valid candidates that lose, and the checks only a whole plan can make (accuracy, latency, cluster capacity) | its own `RejectionCause` | — |
+| 3 | valid candidates that lose, and the checks only a whole plan can make (accuracy; latency and cluster capacity later) | its own `RejectionCause` | — |
 
 Stage 2 records a pruned candidate as the `PhysicalCandidate` it would
 have been, since kept candidates are renumbered after pruning and a pruned
@@ -1326,9 +1326,9 @@ flowchart TB
 
 ### 3. Plan selection
 
-Selection rejects every candidate that misses an accuracy target or a latency
-bound, or that is over the cluster's capacity, and then picks the
-cheapest remaining plan. It is the only stage that uses the deployment's cost
+Selection rejects every candidate that misses an accuracy target and then
+picks the cheapest remaining plan. Query latency bounds and cluster capacity
+are left for later: selection does not check them yet. It is the only stage that uses the deployment's cost
 and accuracy models, and the only stage that discards valid candidates;
 earlier stages only prune provably invalid ones. Accuracy is
 estimated by the deployment's accuracy model, not assumed from a summary's
@@ -1607,10 +1607,9 @@ the 6 options do (all except the two ingestion-time ones). That adds
 **Stage 3: 1 plan.** Selection first rejects invalid candidates. The
 deployment's accuracy model checks the summary candidates against ε = 0.01,
 δ = 0.001, including the approximate heap merge of Count-Min with tumbling
-windows. Its cost model estimates Q2's latency against the 100 ms bound; for
-example, an exact top 10 rebuilt from one million series at every refresh may
-miss it. Among the rest, selection picks the cheapest plan for the whole
-workload. Typical winners:
+windows. Q2's 100 ms latency bound is left for later (selection does not
+check latency yet). Among the rest, selection picks the cheapest plan for the
+whole workload. Typical winners:
 
 * **Hydra for Q2, with both queries on tumbling windows at ingestion time**,
   when there are many small jobs: each sample updates one window, and each

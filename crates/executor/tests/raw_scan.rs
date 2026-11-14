@@ -918,8 +918,7 @@ impl DataStore for RecordingViewStore {
     }
 }
 
-// A materialized view slot (the count over the range, as an expanded tumbling window
-// over its range) is asked for its window, `(T - 5m, T]` or
+// A materialized view slot (the count over the range) is asked for its window, `(T - 5m, T]` or
 // `(T - 15m, T - 10m]` under a 10-minute shift, and its state is the
 // answer's.
 #[test]

@@ -160,7 +160,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
         SketchAlgorithm::CmsWithHeap,
         SketchAlgorithm::CountSketchWithHeap,
     ] {
-        let _params = match algorithm {
+        let params = match algorithm {
             SketchAlgorithm::CmsWithHeap => SketchParams::CmsWithHeap {
                 width: 2048,
                 depth: 5,
@@ -176,6 +176,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
         let build = Operator::per_group_keyed_summary_build(
             schema(),
             family,
+            Some(params),
             vec![3],
             asap_executor::operators::RowWeight::Column(1),
             vec![2],

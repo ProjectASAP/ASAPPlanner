@@ -31,6 +31,15 @@ const ROWS: [(&str, &str); 6] = [
     ("batch", "export"),
 ];
 
+/// θ of `heap_family`.
+fn heap_params() -> Option<SketchParams> {
+    Some(SketchParams::CmsWithHeap {
+        width: 1024,
+        depth: 3,
+        heap_size: 8,
+    })
+}
+
 fn heap_family() -> FieldDataType {
     FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap)
 }
@@ -147,7 +156,7 @@ fn query_time_count_heap_binds_a_constant_row_weight() {
         }),
         output_state: ExecutionDataState::QUERY_ROWS,
         lifetime: Lifetime::None,
-        parameters: None,
+        parameters: heap_params(),
         output_schema: (*schema(vec![
             Field::plain("job", DataType::Utf8, false),
             Field {
@@ -179,6 +188,7 @@ fn keyed_build(input: &SchemaRef, row_weight: RowWeight) -> Operator {
     Operator::per_group_keyed_summary_build(
         input.clone(),
         heap_family(),
+        heap_params(),
         vec![1],
         row_weight,
         vec![0],
@@ -239,6 +249,11 @@ fn int64_weight_column_equals_float64_column() {
     let signed = Operator::per_group_keyed_summary_build(
         int64.clone(),
         count_sketch,
+        Some(SketchParams::CountSketchWithHeap {
+            width: 1024,
+            depth: 3,
+            heap_size: 8,
+        }),
         vec![1],
         RowWeight::Column(2),
         vec![0],
@@ -296,6 +311,7 @@ fn int64_weight_column_equals_float64_column() {
     let error = Operator::per_group_keyed_summary_build(
         text,
         heap_family(),
+        heap_params(),
         vec![1],
         RowWeight::Column(2),
         vec![0],

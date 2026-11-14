@@ -17,6 +17,7 @@ use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
 use asap_types::plan::materialized_view::MaterializedView;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
+use asap_types::plan::physical_asap_dag::ViewCoverage;
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
 use futures::{executor::block_on, StreamExt};
 use std::{
@@ -29,7 +30,7 @@ use std::{
 
 const TUMBLING_WINDOW_WIDTH_MS: i64 = 60_000;
 
-fn family(_k: u32) -> FieldDataType {
+fn kll() -> FieldDataType {
     FieldDataType::Sketch(SketchAlgorithm::Kll)
 }
 /// `t(ts, value)`, time index `ts`.
@@ -85,7 +86,7 @@ fn fixture() -> Fixture {
             }));
             new(asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
                 child: range,
-                summary_type: family(200),
+                summary_type: kll(),
                 input: SummaryUpdate::column(ColumnRef::Named("value".into())),
                 reduction: Reduction::Reduce(GroupKeys::default()),
                 filter: None,
@@ -106,9 +107,13 @@ fn fixture() -> Fixture {
         QueryRoot::Operator(estimate(0.5)),
         QueryRoot::Operator(estimate(0.99)),
     ];
-    let (dag, operator_node_of_id) =
+    let (mut dag, operator_node_of_id) =
         asap_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&roots)
             .unwrap();
+    asap_executor::physical_planner::test_support::set_build_parameters(
+        &mut dag.nodes,
+        Some(&asap_types::summary_type::SketchParams::Kll { k: 200 }),
+    );
     let mut tumbling_window_ids = vec![0; 5];
     let (mut merge, mut p50, mut p99) = (0, 0, 0);
     for node in &dag.nodes {
@@ -132,7 +137,14 @@ fn fixture() -> Fixture {
             _ => {}
         }
     }
-    let mut dag = dag;
+    // The five tumbling windows compute one thing: one definition.
+    for node in dag
+        .nodes
+        .iter_mut()
+        .filter(|node| tumbling_window_ids.contains(&(node.id as u64)))
+    {
+        node.view_coverage = Some(ViewCoverage::new("kll of t.value".into(), vec![]));
+    }
     let views = views_at(&mut dag, &tumbling_window_ids).unwrap();
     Fixture {
         dag,
@@ -222,7 +234,7 @@ fn restore(schema: SchemaRef, states: &[Arc<dyn AggregateCore>]) -> Batch {
             .iter()
             .map(|state| {
                 vec![Value::Summary {
-                    family: family(200),
+                    family: kll(),
                     state: state.clone(),
                 }]
             })
@@ -300,27 +312,16 @@ fn five_tumbling_windows_roundtrip_and_shared_merge_runs_once() {
         let evaluation_time_ms = (5 + offset as i64) * 60_000;
         // View `i` holds the tumbling window ending `i` minutes before the evaluation time.
         let bind = |count: usize| {
-            fixture.tumbling_windows[..count].iter().enumerate().fold(
-                InMemoryDataStore::default(),
-                |store, (i, &view)| {
-                    store
-                        .with_materialized_view(
-                            view as usize,
-                            vec![tumbling_windows[offset + 4 - i].clone()],
-                        )
-                        .unwrap()
-                },
-            )
+            store_at(&fixture.views[..count], evaluation_time_ms, |i| {
+                tumbling_windows[offset + 4 - i].clone()
+            })
         };
         let scope = Scope::Query { evaluation_time_ms };
         // A five-tumbling-window deployment cannot bind only four materialized views.
         let missing = try_execute(&compiled, bind(4), scope.clone())
             .err()
             .unwrap();
-        assert!(
-            missing.to_string().contains("unbound materialized view"),
-            "{missing}"
-        );
+        assert!(missing.to_string().contains("no rows tiling"), "{missing}");
         let result = physical_common::execute(&compiled, bind(5), scope);
         let kll_state = summary(&result[0][0]);
         let kll = kll_state
@@ -376,37 +377,37 @@ fn five_tumbling_windows_roundtrip_and_shared_merge_runs_once() {
     }
 }
 
-/// Relabelled KLL parameters, a view bound in another schema and a missing
-/// view fail explicitly.
+/// A store holding, for each of `views`, its state `state(i)` for the
+/// window view `i` reads at `evaluation_time_ms`: the minute ending `i`
+/// minutes before it.
+fn store_at(
+    views: &[MaterializedView],
+    evaluation_time_ms: i64,
+    state: impl Fn(usize) -> Batch,
+) -> InMemoryDataStore {
+    let mut store = InMemoryDataStore::default();
+    for (i, view) in views.iter().enumerate() {
+        let end = evaluation_time_ms - i as i64 * TUMBLING_WINDOW_WIDTH_MS;
+        store
+            .append_materialized_view(view, (end - TUMBLING_WINDOW_WIDTH_MS, end), vec![state(i)])
+            .unwrap();
+    }
+    store
+}
+
+/// A view bound in another schema and a missing view fail explicitly.
 #[test]
 fn tumbling_windows_reject_parameters_schema_and_missing_binding() {
     let fixture = fixture();
-    let schema = schema_of(&fixture.dag, fixture.tumbling_windows[0]);
-    let wrong = Value::Summary {
-        family: family(200),
-        state: Arc::new(DatasketchesKLLAccumulator::new(128)),
-    };
-    assert!(Batch::try_new(schema, vec![vec![wrong]]).is_err());
     let compiled = compile(&fixture.dag, &fixture.views, &[fixture.merge]).unwrap();
     let missing = try_execute(&compiled, InMemoryDataStore::default(), query_scope())
         .err()
         .unwrap();
-    assert!(
-        missing.to_string().contains("unbound materialized view"),
-        "{missing}"
-    );
+    assert!(missing.to_string().contains("no rows tiling"), "{missing}");
     let raw = Arc::new(table_schema());
     let raw_rows =
         Batch::try_new(raw, vec![vec![Value::Timestamp(1), Value::Float64(1.)]]).unwrap();
-    let store =
-        fixture
-            .tumbling_windows
-            .iter()
-            .fold(InMemoryDataStore::default(), |store, &view| {
-                store
-                    .with_materialized_view(view as usize, vec![raw_rows.clone()])
-                    .unwrap()
-            });
+    let store = store_at(&fixture.views, 300_000, |_| raw_rows.clone());
     let relabelled = try_execute(&compiled, store, query_scope()).err().unwrap();
     assert!(
         relabelled.to_string().contains("another schema"),
@@ -522,14 +523,7 @@ fn a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows() {
             .collect::<Vec<_>>()
     );
     // View `i` holds the tumbling window ending `i` minutes before the evaluation time.
-    let by_node = fixture.tumbling_windows.iter().enumerate().fold(
-        InMemoryDataStore::default(),
-        |store, (i, &view)| {
-            store
-                .with_materialized_view(view as usize, vec![tumbling_windows[4 - i].clone()])
-                .unwrap()
-        },
-    );
+    let by_node = store_at(&fixture.views, 300_000, |i| tumbling_windows[4 - i].clone());
     let by_node: Vec<Vec<Vec<Value>>> = physical_common::execute(&compiled, by_node, scope)
         .iter()
         .map(|batches| batches.iter().flat_map(Batch::to_rows).collect())

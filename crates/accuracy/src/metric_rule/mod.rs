@@ -143,7 +143,7 @@ impl ErrorMetricsOfMemo {
     /// metric rule per query where the edges apply it per group. Walking
     /// down the live candidates (not in `dead`) from each root with a
     /// target, which allows its target's metrics
-    /// ([`query_roots_with_target`]), a candidate passes to its inputs the
+    /// ([`query_roots_with_target`]; an exact target none), a candidate passes to its inputs the
     /// metrics its error contract passes; a group keeps, per query, the
     /// metrics every path to it passes. A group is exact-only for a query
     /// when no metric reaches it (one path through a consumer without a
@@ -184,7 +184,13 @@ impl ErrorMetricsOfMemo {
                 .and_modify(|known| known.retain(|metric| metrics.contains(metric)))
                 .or_insert(metrics);
         }
-        for (query, root, _, metrics) in query_roots_with_target(memo) {
+        for (query, root, target, metrics) in query_roots_with_target(memo) {
+            // An exact target allows no error: the query reads every group
+            // below its root exactly.
+            let metrics = match target.is_exact() {
+                true => Vec::new(),
+                false => metrics,
+            };
             keep_common(&mut allowed, root, query, metrics);
         }
         let mut exact_only = vec![BTreeSet::new(); memo.queries().len()];

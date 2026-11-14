@@ -1,25 +1,38 @@
-//! #509 Stage 3, plan selection (concepts doc
-//! `memo-groups-properties-requirements.md`, section 3, "Stage 3: baseline
-//! selection and realization", and sections 4 and 5).
+//! Stage 3, plan selection
+//! (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
+//! section 3, "Stage 3: baseline selection and plan output", and sections
+//! 4 and 5).
 //!
 //! [`select_plan`] reads Stage 2's physical candidates $\mathcal C$ and the
-//! admissible part of the physical edges $\mathcal E$, selects with a MILP
-//! over $x_v$, $y_{u,c,i}$, $z_{q,v}$ and $t_v$ (constraints (A)–(I);
-//! (G) and (H) hold because $y$ exists only on admissible edges), and
-//! builds the plan (`PhysicalASAPDAG`) from $\{x = 1\}$ and $\{y = 1\}$
-//! as its last step. The extensions add execution contexts $\kappa$ with $x^{\mathrm{mat}}_v$,
+//! selectable part of the physical edges $\mathcal E$ ([`selectable`]),
+//! costs them with `asap-cost` ([`cost`]), selects with a MILP over $x_v$,
+//! $y_{u,c,i}$, $z_{q,v}$, $t_v$ and $r_s$ ([`milp`]; constraints (A)–(F)
+//! and the one-consumer rule; (G) and (H) hold because $y$ exists only on
+//! admissible edges), and builds the plan (`PhysicalASAPDAG`) from
+//! $\{x = 1\}$ and $\{y = 1\}$ as its last step ([`plan`], with each
+//! node's retention from [`retention`]). The extensions add execution contexts $\kappa$ with $x^{\mathrm{mat}}_v$,
 //! $x_{\kappa,v}$, $y_{\kappa,u,c,i}$ and the retention amount $h_v$
 //! (section 5), and accuracy at each query root, constraint (K), with
 //! per-candidate error bounds $E_c$ and $D_c$ (section 4). Costs come from
 //! `asap-cost`.
 
+mod cost;
 mod milp;
+mod plan;
 mod report;
+mod retention;
+mod selectable;
 
-use asap_cost::CostInputs;
+use asap_cost::{request_overhead_cost_per_second, CostInputs, CostModel};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
-use asap_types::stages::PhysicalASAPMemoCandidates;
+use asap_types::stages::{PhysicalASAPMemoCandidates, PruneReason, PrunedCandidate};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
+
+use crate::cost::selection_costs;
+use crate::milp::model::{solve_selection, SelectionInputs, SelectionMilpError};
+use crate::plan::plan_of;
+use crate::report::{accepted_accuracy, infeasible};
+use crate::selectable::{output_groups, query_outputs, selectable_edges};
 
 pub use report::{
     large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, Selection,
@@ -45,6 +58,71 @@ pub fn select_plan(
     cost_inputs
         .validate()
         .map_err(ErrorSelectingPlan::InvalidSettings)?;
-    let _ = (physical, entries, data);
-    todo!("#1207 PR 6: the baseline MILP over x, y, z, t, and the PhysicalASAPDAG of its solution, each materialized view node's view_coverage = asap_types::plan::view_coverage(memo, its group)")
+    if !matches!(cost_inputs.cost_model, CostModel::UsageOverTime(_)) {
+        return Err(ErrorSelectingPlan::UnsupportedCostModel(
+            "cost models 2 and 3 (the selection MILP implements cost model 1 only)".into(),
+        ));
+    }
+    let queries = physical.logical_candidates.memo.queries();
+    if entries.len() != queries.len() {
+        return Err(ErrorSelectingPlan::EntryCount {
+            candidate: "the physical memo".into(),
+            roots: queries.len(),
+            entries: entries.len(),
+        });
+    }
+    let selectable = selectable_edges(physical, entries);
+    let request_overhead_cost_per_second = request_overhead_cost_per_second(entries, cost_inputs)
+        .map_err(|error| ErrorSelectingPlan::Cost {
+        candidate: "every plan (the request overhead)".into(),
+        node: 0,
+        error,
+    })?;
+    let costs = selection_costs(
+        physical,
+        &selectable,
+        entries,
+        data,
+        cost_inputs,
+        request_overhead_cost_per_second,
+    );
+    let outputs = output_groups(physical);
+    let query_outputs = query_outputs(physical, entries, &costs, &outputs);
+    if query_outputs
+        .iter()
+        .any(|(_, candidates)| candidates.is_empty())
+    {
+        return Err(infeasible(&costs));
+    }
+    let solved = solve_selection(&SelectionInputs {
+        physical,
+        costs: &costs,
+        query_outputs: &query_outputs,
+    })
+    .map_err(|error| match error {
+        SelectionMilpError::Infeasible => infeasible(&costs),
+        SelectionMilpError::Solver(reason) => ErrorSelectingPlan::Solver(reason),
+    })?;
+    let plan = plan_of(physical, entries, &solved, &outputs).map_err(|error| {
+        ErrorSelectingPlan::Solver(format!("the selected plan is invalid: {error}"))
+    })?;
+    let selection = Selection {
+        accepted_accuracy_per_query: accepted_accuracy(physical, &plan),
+        pruned_candidates: costs
+            .candidate_cost_per_second
+            .iter()
+            .zip(&physical.physical_candidates)
+            .filter(|(cost, _)| cost.is_err())
+            .map(|(_, &candidate)| PrunedCandidate {
+                candidate,
+                reason: PruneReason::UsageNotCostable,
+            })
+            .collect(),
+        selected_plan_cost_per_second: solved.objective_cost_per_second,
+        milp_variable_count: solved.variable_count,
+        milp_constraint_count: solved.constraint_count,
+        milp_construction_ms: solved.construction_ms,
+        milp_solve_ms: solved.solve_ms,
+    };
+    Ok((plan, selection))
 }

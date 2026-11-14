@@ -1,5 +1,54 @@
 use super::*;
 
+// A sketch kernel needs θ of its own algorithm; an exact one takes none.
+#[test]
+fn sketch_kernels_need_their_own_parameters() {
+    use planner_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
+    let update = SummaryUpdate::column(planner_types::ir::scalar::ColumnRef::SampleValue);
+    let kll = SummaryFamilyType::Sketch(SketchAlgorithm::Kll);
+    let k200 = SketchParams::Kll { k: 200 };
+    assert!(create_planner_accumulator(&kll, Some(&k200), &update).is_ok());
+    assert!(create_planner_accumulator(&kll, None, &update).is_err());
+    let dd = SketchParams::DDSketch { alpha: 0.01 };
+    assert!(create_planner_accumulator(&kll, Some(&dd), &update).is_err());
+    let sum = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    assert!(create_planner_accumulator(&sum, None, &update).is_ok());
+    assert!(create_planner_accumulator(&sum, Some(&k200), &update).is_err());
+}
+
+// HydraCms builds one shared grid shaped by its Hydra θ, never a
+// per-group updater.
+#[test]
+fn hydra_cms_builds_one_shared_grid() {
+    use planner_types::summary_type::{HydraParams, SummaryInputExpr, SummaryUpdate};
+    let family = SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms);
+    let hydra = SketchParams::Hydra(HydraParams::HydraCms {
+        width: 128,
+        depth: 3,
+        shared_rows: 5,
+        shared_columns: 32,
+    });
+    assert_eq!(
+        create_hydra_cms(&family, Some(&hydra)).unwrap().shape(),
+        (5, 32, 128, 3)
+    );
+    // θ of the per-group Count-Min, not the Hydra grid's.
+    let cms = SketchParams::Cms {
+        width: 128,
+        depth: 3,
+    };
+    assert!(create_hydra_cms(&family, Some(&cms)).is_err());
+    assert!(create_hydra_cms(&family, None).is_err());
+    let update = SummaryUpdate {
+        item: Some(SummaryInputExpr::Column(
+            planner_types::ir::scalar::ColumnRef::Named("host".into()),
+        )),
+        weight: SummaryInputExpr::Constant(1.0),
+    };
+    assert!(crate::capability::validate_summary_kernel(&family, Some(&hydra), &update).is_ok());
+    assert!(create_planner_accumulator(&family, Some(&hydra), &update).is_err());
+}
+
 /// A DDSketch updater reports sketchlib's count of the bins its stores
 /// allocate: none before a sample, one 128-bin chunk of the positive
 /// store after a few positive samples.

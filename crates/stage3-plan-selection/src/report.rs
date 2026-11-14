@@ -2,12 +2,18 @@
 //! candidates it pruned and the selection MILP's size and time; and each
 //! rejected candidate and why.
 
+use std::collections::{BTreeSet, HashMap};
+
 use asap_cost::node::analytical::AnalyticalCostError;
-use asap_cost::CostModel;
+use asap_cost::{summary_type_name, CostModel};
 use asap_types::accuracy::AccuracyMetric;
-use asap_types::plan::physical_asap_dag::PhysicalASAPNodeId;
-use asap_types::stages::{PhysicalCandidate, PrunedCandidate};
+use asap_types::ir::schema::FieldDataType;
+use asap_types::ir::{ASAPOp, Operator};
+use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
+use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidate, PrunedCandidate};
 use thiserror::Error;
+
+use crate::cost::SelectionCosts;
 
 /// Peak memory above which a candidate's report carries a warning when the
 /// deployment declares no memory capacity: 10^12 bytes (1 TB), more than
@@ -135,8 +141,7 @@ impl std::fmt::Display for AcceptedAccuracy {
 }
 
 /// What Stage 3 reports about its own run, beside the plan
-/// ([`select_plan`](crate::select_plan)). The plan's cost is
-/// `asap_cost::plan_cost` of the plan; this does not repeat it.
+/// ([`select_plan`](crate::select_plan)).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selection {
     /// Per query, the accuracy Stage 3 accepted for the selected plan.
@@ -144,9 +149,14 @@ pub struct Selection {
     /// The candidates Stage 3 ruled out before the selection MILP:
     /// dominated ones and those whose usage could not be costed.
     pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidate>>,
-    /// The selection MILP's size.
-    pub milp_variables: usize,
-    pub milp_constraints: usize,
+    /// The selection MILP's optimum: the selected plan's cost per second
+    /// under cost model 1, which `asap_cost::plan_cost` of the plan
+    /// reports too.
+    pub selected_plan_cost_per_second: f64,
+    /// The selection MILP's variables (columns).
+    pub milp_variable_count: usize,
+    /// The selection MILP's constraint rows.
+    pub milp_constraint_count: usize,
     /// How long building and solving the selection MILP took.
     pub milp_construction_ms: u64,
     pub milp_solve_ms: u64,
@@ -181,6 +191,108 @@ pub enum ErrorSelectingPlan {
     /// The selection MILP implements cost model 1 only (#1095 §3).
     #[error("the selection MILP does not support {0}")]
     UnsupportedCostModel(String),
+}
+
+/// The selection MILP is infeasible, with the reasons candidates could not
+/// be costed.
+pub(crate) fn infeasible(costs: &SelectionCosts) -> ErrorSelectingPlan {
+    let mut reasons: Vec<&str> = Vec::new();
+    for reason in costs
+        .candidate_cost_per_second
+        .iter()
+        .filter_map(|cost| cost.as_ref().err())
+    {
+        if !reasons.contains(&reason.as_str()) {
+            reasons.push(reason);
+        }
+    }
+    let mut reason = "no plan gives every query output a candidate whose every input has an \
+                      admissible producer (the selection MILP is infeasible)"
+        .to_string();
+    if !reasons.is_empty() {
+        reason += &format!(
+            "; candidates left out because they could not be costed: {}",
+            reasons.join("; ")
+        );
+    }
+    ErrorSelectingPlan::NoValidCandidate(vec![Rejection {
+        id: "workload".into(),
+        cause: RejectionCause::Infeasible,
+        reason,
+    }])
+}
+
+/// Per query, the sketches its output reads in `plan` (each sketch build
+/// below its root, in node order) and, when it reads one, its target's
+/// metric.
+pub(crate) fn accepted_accuracy(
+    physical: &PhysicalASAPMemoCandidates,
+    plan: &PhysicalASAPDAG,
+) -> Vec<AcceptedAccuracy> {
+    let mut operator_roots = plan.roots.iter();
+    let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
+    for edge in &plan.edges {
+        producers_of
+            .entry(edge.consumer)
+            .or_default()
+            .push(edge.producer);
+    }
+    physical
+        .logical_candidates
+        .memo
+        .queries()
+        .iter()
+        .enumerate()
+        .map(|(query, memo_query)| {
+            let starts: Vec<PhysicalASAPNodeId> = match plan
+                .scalar_roots
+                .iter()
+                .find(|(position, _)| *position == query)
+            {
+                Some((_, expression)) => expression.operator_refs().into_iter().copied().collect(),
+                None => vec![*operator_roots.next().expect("one operator root per query")],
+            };
+            let sketches = sketches_below(plan, &producers_of, starts);
+            AcceptedAccuracy {
+                accepted_metric: (!sketches.is_empty())
+                    .then(|| memo_query.accuracy_target.as_ref()?.accuracy_metric)
+                    .flatten(),
+                sketches,
+            }
+        })
+        .collect()
+}
+
+/// The summary type names of the sketch builds at or below `starts` in
+/// `plan`, in node order, each once.
+fn sketches_below(
+    plan: &PhysicalASAPDAG,
+    producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
+    starts: Vec<PhysicalASAPNodeId>,
+) -> Vec<String> {
+    let mut below = BTreeSet::new();
+    let mut pending = starts;
+    while let Some(id) = pending.pop() {
+        if below.insert(id) {
+            pending.extend(producers_of.get(&id).into_iter().flatten().copied());
+        }
+    }
+    let mut sketches: Vec<String> = Vec::new();
+    for node in plan.nodes.iter().filter(|node| below.contains(&node.id)) {
+        if let Operator::ASAP(
+            ASAPOp::SummaryAgg { summary_type, .. }
+            | ASAPOp::SummaryTumblingWindowChain { summary_type, .. },
+        ) = &node.payload
+        {
+            if matches!(summary_type, FieldDataType::Sketch(_)) {
+                let name = summary_type_name(summary_type);
+                if !sketches.contains(&name) {
+                    sketches.push(name);
+                }
+            }
+        }
+    }
+    sketches
 }
 
 #[cfg(test)]

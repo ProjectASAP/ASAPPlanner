@@ -31,7 +31,12 @@ impl TryFrom<UncheckedOperator> for Operator {
             Kind::Source(_) => return Err(invalid("physical plans cannot serialize live sources")),
             Kind::EvaluationTime => Operator::evaluation_time(),
             Kind::Constant { value, dtype } => Operator::scalar(value, dtype)?,
-            Kind::ScopeTimestamp { .. } => Operator::scope_timestamp(input(0)?, output.clone())?,
+            Kind::ScopeTimestamp { columns } => {
+                // The time column copies an input column when stamped with
+                // its rows' window ends.
+                let window_end = output.time_index.and_then(|time| *columns.get(time)?);
+                Operator::window_end_timestamp(input(0)?, output.clone(), window_end)?
+            }
             Kind::Union => Operator::union(input(0)?, inputs.len())?,
             Kind::CurrentSeries {
                 identity,
@@ -108,20 +113,28 @@ impl TryFrom<UncheckedOperator> for Operator {
                 )?
             }
             Kind::Filter(expression) => Operator::filter(input(0)?, expression)?,
+            Kind::EvaluateAt { at, offset_ms } => Operator::evaluate_at(input(0)?, at, offset_ms)?,
             Kind::TimeRange {
                 time,
                 end_offset_ms,
                 width_ms,
                 sample_value,
                 latest_per_series,
-            } => Operator::time_range(
-                input(0)?,
-                time,
-                end_offset_ms,
-                width_ms,
-                sample_value,
-                latest_per_series,
-            )?,
+                tumbling_window_width_ms,
+            } => {
+                let time_range = Operator::time_range(
+                    input(0)?,
+                    time,
+                    end_offset_ms,
+                    width_ms,
+                    sample_value,
+                    latest_per_series,
+                )?;
+                match tumbling_window_width_ms {
+                    Some(width_ms) => time_range.with_tumbling_window_ends(width_ms)?,
+                    None => time_range,
+                }
+            }
             Kind::Limit { n, offset, groups } => Operator::limit(input(0)?, n, offset, groups)?,
             Kind::Sort { keys, groups } => Operator::sort(input(0)?, keys, groups)?,
             Kind::Window {
@@ -168,16 +181,25 @@ impl TryFrom<UncheckedOperator> for Operator {
             )?,
             Kind::PerGroupSummaryBuild {
                 family,
+                parameters,
                 value,
                 time,
                 groups,
                 filter,
             } => with_filter(
-                Operator::per_group_summary_build(input(0)?, family, value, time, groups)?,
+                Operator::per_group_summary_build(
+                    input(0)?,
+                    family,
+                    parameters,
+                    value,
+                    time,
+                    groups,
+                )?,
                 filter,
             )?,
             Kind::PerGroupKeyedSummaryBuild {
                 family,
+                parameters,
                 items,
                 row_weight,
                 groups,
@@ -186,6 +208,7 @@ impl TryFrom<UncheckedOperator> for Operator {
                 Operator::per_group_keyed_summary_build(
                     input(0)?,
                     family,
+                    parameters,
                     items,
                     row_weight,
                     groups,
@@ -194,12 +217,20 @@ impl TryFrom<UncheckedOperator> for Operator {
             )?,
             Kind::AllGroupsSummaryBuild {
                 family,
+                parameters,
                 item,
                 row_weight,
                 groups,
                 filter,
             } => with_filter(
-                Operator::all_groups_summary_build(input(0)?, family, item, row_weight, groups)?,
+                Operator::all_groups_summary_build(
+                    input(0)?,
+                    family,
+                    parameters,
+                    item,
+                    row_weight,
+                    groups,
+                )?,
                 filter,
             )?,
             Kind::KeyedEvaluation { state, k } => {
@@ -209,10 +240,15 @@ impl TryFrom<UncheckedOperator> for Operator {
                 state,
                 groups,
                 emit_empty_global,
+                parameters,
             } => {
                 let merge = Operator::summary_merge(input(0)?, state, groups)?;
                 if emit_empty_global {
-                    merge.with_emit_empty_global()?
+                    merge.with_emit_empty_global(parameters)?
+                } else if parameters.is_some() {
+                    return Err(invalid(
+                        "only a merge that outputs an empty global state takes parameters θ",
+                    ));
                 } else {
                     merge
                 }

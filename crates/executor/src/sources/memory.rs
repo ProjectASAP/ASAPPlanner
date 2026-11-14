@@ -2,11 +2,15 @@ use super::*;
 use planner_types::plan::physical_asap_dag::PhysicalASAPNodeId;
 use std::collections::BTreeMap;
 
-/// An immutable in-memory [`DataStore`], for tests and examples: raw tables
-/// by `Source`, and each materialized view's states by its node id. A
-/// deployment's store keys views by their coverage and selects their states
-/// by time range; this one returns every state bound to the node, and every
-/// row of a table (the executor re-applies the raw data request).
+/// An in-memory [`DataStore`], for tests and examples: raw tables by
+/// `Source`, and each materialized view's rows by its node id, time-indexed
+/// and append-only. A run's output for a view is appended with the time
+/// range its rows cover: a chain's window `(window_end - w, window_end]`,
+/// or the range of data another view's state summarizes. Appending drops the
+/// rows older than the view's `retention_ms` before the newest appended
+/// end. A read returns the rows whose time ranges tile the requested range
+/// exactly, and fails when one is missing. Raw tables return every row (the
+/// executor re-applies the raw data request).
 ///
 /// The store owns the resident batches (a run is not charged for their
 /// states again); each cursor clones only the next batch, not the entire
@@ -14,8 +18,12 @@ use std::collections::BTreeMap;
 #[derive(Default)]
 pub struct InMemoryDataStore {
     raw_data: Vec<(Source, SchemaRef, Vec<Batch>)>,
-    materialized_views: BTreeMap<PhysicalASAPNodeId, Vec<Batch>>,
+    /// Each view's appended rows, oldest first.
+    materialized_views: BTreeMap<PhysicalASAPNodeId, Vec<AppendedRows>>,
 }
+
+/// Rows appended for a view: the `(start, end]` they cover and their batches.
+type AppendedRows = ((i64, i64), Vec<Batch>);
 impl InMemoryDataStore {
     /// Bind `batches`, all in `schema`, as the rows of `source`. Bad input
     /// when `source` is already bound or a batch is in another schema.
@@ -38,21 +46,35 @@ impl InMemoryDataStore {
         self.raw_data.push((source, schema, batches));
         Ok(self)
     }
-    /// Bind `batches` as the states of the materialized view at node
-    /// `view`. Bad input when the node is already bound.
-    pub fn with_materialized_view(
-        mut self,
-        view: PhysicalASAPNodeId,
+    /// Append `batches` as the rows of `view` covering `time_range_ms`
+    /// (`(start, end]`), then drop its rows ending `view.retention_ms()` or
+    /// more before `end` (the newest rows are always kept). Bad input when
+    /// the range is empty or starts before the end of the rows appended
+    /// last (the store is append-only).
+    pub fn append_materialized_view(
+        &mut self,
+        view: &MaterializedView,
+        time_range_ms: (i64, i64),
         batches: Vec<Batch>,
-    ) -> Result<Self, Error> {
-        if self.materialized_views.contains_key(&view) {
+    ) -> Result<(), Error> {
+        let (start, end) = time_range_ms;
+        let rows = self.materialized_views.entry(view.node_id).or_default();
+        if start >= end
+            || rows
+                .last()
+                .is_some_and(|((_, last_end), _)| start < *last_end)
+        {
             return Err(Error::Invalid(format!(
-                "materialized view {view} is bound twice"
+                "materialized view {}: appended rows ({start}, {end}] are empty or not after the stored ones",
+                view.node_id
             )));
         }
         held_by_store(&batches);
-        self.materialized_views.insert(view, batches);
-        Ok(self)
+        rows.push((time_range_ms, batches));
+        let oldest_kept_end =
+            end.saturating_sub(i64::try_from(view.retention_ms()).unwrap_or(i64::MAX));
+        rows.retain(|((_, row_end), _)| *row_end > oldest_kept_end || *row_end == end);
+        Ok(())
     }
 }
 
@@ -103,14 +125,41 @@ impl DataStore for InMemoryDataStore {
     fn read_materialized_view(
         &self,
         view: &MaterializedView,
-        _: &MaterializedViewRequest,
+        request: &MaterializedViewRequest,
         context: RunContext,
     ) -> Result<OutputStream<'_, Batch>, Error> {
-        let batches = self
+        let (start, end) = request.time_range_ms;
+        let missing = || {
+            Error::Invalid(format!(
+                "materialized view {} has no rows tiling ({start}, {end}]",
+                view.node_id
+            ))
+        };
+        let rows = self
             .materialized_views
             .get(&view.node_id)
-            .ok_or_else(|| Error::Invalid(format!("unbound materialized view {}", view.node_id)))?;
-        Ok(stream_batches(batches.iter().cloned().map(Ok), context))
+            .ok_or_else(missing)?;
+        let selected: Vec<&AppendedRows> = rows
+            .iter()
+            .filter(|((row_start, row_end), _)| *row_start >= start && *row_end <= end)
+            .collect();
+        // The selected ranges, oldest first, must tile `(start, end]`.
+        let mut covered_to = start;
+        for ((row_start, row_end), _) in &selected {
+            if *row_start != covered_to {
+                return Err(missing());
+            }
+            covered_to = *row_end;
+        }
+        if covered_to != end {
+            return Err(missing());
+        }
+        Ok(stream_batches(
+            selected
+                .into_iter()
+                .flat_map(|(_, batches)| batches.iter().cloned().map(Ok)),
+            context,
+        ))
     }
 }
 

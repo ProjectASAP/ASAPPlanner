@@ -4,9 +4,9 @@
 use std::collections::HashSet;
 
 use asap_planner::{
-    InstallablePlan, InstallablePlanError, MaterializedViewRefresh, INSTALLABLE_PLAN_WIRE_VERSION,
+    InstallablePlan, InstallablePlanError, MaterializedViewRefresh, RefreshWindow, TimeWindow,
+    INSTALLABLE_PLAN_WIRE_VERSION,
 };
-use asap_types::ir::operator::Source;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 
 use asap_types::ir::{NonASAPOp, Operator};
@@ -122,27 +122,30 @@ fn materialized_views_equal_the_stored_outputs_main_listed() {
                 views_read,
                 "{name}"
             );
-            let windows: Vec<(Source, i64, i64)> = output["inputs"]["raw_sample_windows"]
+            // The raw-data windows it scans: each reads a source, and their
+            // union is its refresh window when it reads no view.
+            let windows: Vec<TimeWindow> = output["inputs"]["raw_sample_windows"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .map(|window| {
-                    (
-                        source_of(window["scan_node_id"].as_u64().unwrap()),
-                        window["end_offset_ms"].as_i64().unwrap(),
-                        window["width_ms"].as_i64().unwrap(),
-                    )
+                    source_of(window["scan_node_id"].as_u64().unwrap());
+                    TimeWindow {
+                        ends_before_evaluation_ms: window["end_offset_ms"].as_u64().unwrap(),
+                        length_ms: window["width_ms"].as_u64().unwrap(),
+                    }
                 })
                 .collect();
-            assert_eq!(
-                view.inputs
-                    .raw_data_windows()
-                    .iter()
-                    .map(|w| (w.source().clone(), w.end_offset_ms(), w.width_ms()))
-                    .collect::<Vec<_>>(),
-                windows,
-                "{name}"
-            );
+            if views_read.is_empty() && !windows.is_empty() {
+                assert_eq!(
+                    dag.refresh_window(view.node_id),
+                    windows
+                        .into_iter()
+                        .reduce(TimeWindow::union)
+                        .and_then(RefreshWindow::of_window),
+                    "{name}"
+                );
+            }
         }
     }
     assert_eq!(refreshes.len(), 2, "both refresh modes are covered");

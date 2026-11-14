@@ -59,19 +59,31 @@ pub(crate) fn execute<'r, V: 'r, S: Clone + PartialEq + Debug + 'r>(
             pending.extend(node.inputs.iter().copied());
         }
     }
+    // A node runs once per time it is evaluated at: an `@` anchor above it
+    // evaluates it at another time than the run's.
+    type ProducerKey = (NodeId, Option<i64>);
     fn build<'r, V: 'r, S: 'r>(
         dag: &'r PhysicalDAG<'_, V, S>,
         id: NodeId,
         context: &RunContext,
-        states: &mut BTreeMap<NodeId, Rc<RefCell<Producer<'r, V>>>>,
+        states: &mut BTreeMap<ProducerKey, Rc<RefCell<Producer<'r, V>>>>,
     ) -> Result<Rc<RefCell<Producer<'r, V>>>, Error> {
-        if let Some(state) = states.get(&id) {
+        let key = (id, context.evaluation_time_ms());
+        if let Some(state) = states.get(&key) {
             return Ok(Rc::clone(state));
         }
         let node = &dag.nodes[&id];
+        let input_context =
+            node.operator
+                .input_context(context)
+                .map_err(|source| Error::AtNode {
+                    node: id,
+                    operation: node.operator.name().into(),
+                    source: Box::new(source),
+                })?;
         let mut inputs = Vec::new();
         for &child in &node.inputs {
-            inputs.push(Input::subscribe(build(dag, child, context, states)?));
+            inputs.push(Input::subscribe(build(dag, child, &input_context, states)?));
         }
         let stream = node
             .operator
@@ -97,7 +109,7 @@ pub(crate) fn execute<'r, V: 'r, S: Clone + PartialEq + Debug + 'r>(
             finished: false,
             failure: None,
         }));
-        states.insert(id, Rc::clone(&state));
+        states.insert(key, Rc::clone(&state));
         Ok(state)
     }
     let mut states = BTreeMap::new();

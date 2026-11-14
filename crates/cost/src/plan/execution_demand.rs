@@ -5,13 +5,13 @@
 //! one-off/scheduled demand uses a batch maximum.
 //! Call `schedule_groups` or `evaluation_rate` on the chosen query subset
 //! only; neither enumerates subsets. For retained query-time state pass `None` for each range evaluation
-//! to price once per request, as `computations` does.
+//! to cost once per request, as `computations` does.
 
 use crate::node::analytical::AnalyticalCostError;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::stages::Lifetime;
-use asap_types::workload::{QueryRecurrence, RangeEvaluation, RepeatedDemand};
+use asap_types::workload::{QueryRecurrence, QueryWorkloadEntry, RangeEvaluation, RepeatedDemand};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// How a [`ScheduleGroup`]'s evaluations add to the others'.
@@ -250,6 +250,37 @@ pub fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
         .collect()
 }
 
+/// How many times per second a node computed once for the queries
+/// `reaching` it runs, at `timing` with `lifetime`: at ingestion time once
+/// per second (each arriving row once); at query time at their combined
+/// rate ([`evaluation_rate`]), a range query's steps each an evaluation,
+/// except a node materialized across evaluations, which is computed once
+/// per request (its newest window). Shared by [`computations`] and
+/// Stage 3, which costs each candidate at the queries reaching its group.
+///
+/// Example: two queries every 60 s at phase 0 reaching a query-time
+/// `OneEvaluation` node: 1/60 per second.
+pub fn executions_per_second<'e>(
+    timing: ExecutionTiming,
+    lifetime: Lifetime,
+    reaching: impl IntoIterator<Item = &'e QueryWorkloadEntry>,
+    non_repeating_query_horizon_seconds: f64,
+) -> Result<f64, AnalyticalCostError> {
+    if timing == ExecutionTiming::IngestionTime {
+        return Ok(1.0);
+    }
+    let per_request = matches!(lifetime, Lifetime::AcrossEvaluations(_));
+    evaluation_rate(
+        reaching.into_iter().map(|entry| {
+            (
+                &entry.recurrence,
+                (!per_request).then_some(entry.range_evaluation).flatten(),
+            )
+        }),
+        non_repeating_query_horizon_seconds,
+    )
+}
+
 /// What computes a not-materialized node once per its own execution
 /// ([`consumers`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -309,25 +340,22 @@ pub fn consumers(dag: &PhysicalASAPDAG) -> HashMap<PhysicalASAPNodeId, Vec<Consu
 /// the combined rate of the queries reaching it (`OneEvaluation`,
 /// [`evaluation_rate`]), or once per request of those queries for a chain
 /// materialized across evaluations, whose request builds only its newest tumbling window
-/// however many range steps it evaluates. `range_evaluations[q]` is query
-/// `q`'s range evaluation (none when missing). A not-materialized node is computed once per
+/// however many range steps it evaluates ([`executions_per_second`]).
+/// `entries[q]` is query `q`'s workload entry (its recurrence and range
+/// evaluation). A not-materialized node is computed once per
 /// consumer that reaches it ([`consumers`]), at that consumer's rate. A consumer is a query
 /// (operator or scalar root), at its own rate, or a materialized node, at
 /// that node's rate; a walk stops at the first materialized node it meets,
 /// and a node read several times within one consumer's walk counts once for
-/// it. The consumers materialized at ingestion time of one refresh window
-/// ([`PhysicalASAPDAG::refresh_window`]) are refreshed in one ingestion run,
-/// which computes the node once for all of them: they count as one
-/// consumer (a consumer with an unbounded window counts alone). Its
-/// `multiplier` is that number of consumers.
+/// it; its `multiplier` is that number of consumers. A node computed at
+/// ingestion time, materialized or not, computes each arriving row once:
+/// once per second, `(1, 1.0)`, however many ingestion-time views of
+/// however many refresh windows read it.
 pub fn computations(
     dag: &PhysicalASAPDAG,
-    recurrence: &[QueryRecurrence],
-    range_evaluations: &[Option<RangeEvaluation>],
+    entries: &[QueryWorkloadEntry],
     non_repeating_query_horizon_seconds: f64,
-    root_rates: Option<&[f64]>,
 ) -> Result<HashMap<PhysicalASAPNodeId, (u64, f64)>, AnalyticalCostError> {
-    let range_of = |query: usize| range_evaluations.get(query).copied().flatten();
     // Each materialized node's timing and lifetime.
     let materialized_nodes: HashMap<PhysicalASAPNodeId, (ExecutionTiming, Lifetime)> = dag
         .nodes
@@ -357,52 +385,33 @@ pub fn computations(
     }
     let mut rate_of_materialized = HashMap::new();
     for (&id, &(timing, lifetime)) in &materialized_nodes {
-        let at_ingestion = timing == ExecutionTiming::IngestionTime;
-        // A query-time chain materialized across evaluations is built once per request.
-        let per_request = !at_ingestion && matches!(lifetime, Lifetime::AcrossEvaluations(_));
-        let rate = match at_ingestion {
-            true => 1.0,
-            _ => evaluation_rate(
-                reached.get(&id).into_iter().flatten().filter_map(|&q| {
-                    let range = if per_request { None } else { range_of(q) };
-                    recurrence.get(q).map(|r| (r, range))
-                }),
-                non_repeating_query_horizon_seconds,
-            )?,
-        };
+        let reaching = reached
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter_map(|&q| entries.get(q));
+        let rate = executions_per_second(
+            timing,
+            lifetime,
+            reaching,
+            non_repeating_query_horizon_seconds,
+        )?;
         rate_of_materialized.insert(id, rate);
     }
     // Each query consumer's rate.
     let mut query_rates = Vec::new();
     for query in 0..starts.len() {
-        query_rates.push(match root_rates.and_then(|rates| rates.get(query)) {
-            Some(&rate) => rate,
-            None => evaluation_rate(
-                recurrence.get(query).map(|r| (r, range_of(query))),
-                non_repeating_query_horizon_seconds,
-            )?,
-        });
+        query_rates.push(evaluation_rate(
+            entries
+                .get(query)
+                .map(|entry| (&entry.recurrence, entry.range_evaluation)),
+            non_repeating_query_horizon_seconds,
+        )?);
     }
-    // The refresh window of each node refreshed at ingestion.
-    let refresh_windows = dag.refresh_windows(
-        materialized_nodes
-            .iter()
-            .filter(|(_, (timing, _))| *timing == ExecutionTiming::IngestionTime)
-            .map(|(&id, _)| id),
-    );
     let mut count: HashMap<_, (u64, f64)> = HashMap::new();
     for (id, of_node) in consumers(dag) {
         let entry = count.entry(id).or_default();
-        // The refresh windows whose ingestion run already computes the node.
-        let mut runs = HashSet::new();
         for consumer in of_node {
-            if let Consumer::Materialized(node) = consumer {
-                if let Some(Some(window)) = refresh_windows.get(&node) {
-                    if !runs.insert(*window) {
-                        continue;
-                    }
-                }
-            }
             entry.0 += 1;
             entry.1 += match consumer {
                 Consumer::Query(query) => query_rates[query],
@@ -416,6 +425,9 @@ pub fn computations(
         .map(|n| {
             let times = match rate_of_materialized.get(&n.id) {
                 Some(&rate) => (1, rate),
+                // Each arriving row is computed once at ingestion, whatever
+                // its consumers.
+                None if n.output_state.timing == ExecutionTiming::IngestionTime => (1, 1.0),
                 None => count.get(&n.id).copied().unwrap_or((0, 0.0)),
             };
             (n.id, times)

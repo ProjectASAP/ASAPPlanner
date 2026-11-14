@@ -96,36 +96,19 @@ impl DataStore for CountingStore {
     }
 }
 
-/// Compile `ids` of `dag` over the stored states `views` (by node id) and
-/// run them in `scope` over the raw `samples`, as a runtime does with the
-/// executor: each id's output batches.
+/// Compile `ids` of `dag` and run them in `scope` over the raw `samples`,
+/// as a runtime does with the executor: each id's output batches.
 fn run(
     dag: &PhysicalASAPDAG,
-    views: BTreeMap<u64, Batch>,
     samples: &[RawDataSample],
     ids: &[u64],
     scope: Scope,
 ) -> Vec<Vec<Batch>> {
-    // The materialized views the run reads; each one's schema is its DAG node's.
-    let read: Vec<MaterializedView> = if views.is_empty() {
-        Vec::new()
-    } else {
-        dag.materialized_views()
-            .unwrap()
-            .into_iter()
-            .filter(|view| views.contains_key(&(view.node_id as u64)))
-            .collect()
-    };
-    assert_eq!(read.len(), views.len(), "every bound state is a view's");
-    // The executor's plan for `ids`, reading the views; every `Scan` it
-    // reaches is a raw data slot.
-    let compiled = compile(dag, &read, ids).expect("the executor compiles the plan");
-    // The plan's data in one store: raw samples at the `Scan`s by metric,
-    // and each view's states by node id.
-    let mut store = time_series_tables(dag, samples);
-    for (id, batch) in views {
-        store = store.with_materialized_view(id as _, vec![batch]).unwrap();
-    }
+    // The executor's plan for `ids`; every `Scan` it reaches is a raw data
+    // slot.
+    let compiled = compile(dag, &[], ids).expect("the executor compiles the plan");
+    // The plan's raw samples at the `Scan`s by metric.
+    let store = time_series_tables(dag, samples);
     let instance = compiled
         .instantiate(Arc::new(CountingStore(store)))
         .unwrap();
@@ -171,7 +154,7 @@ fn answers(batches: &[Batch]) -> Vec<Answer> {
 /// The plan for `queries` on a deployment that keeps no raw samples, and
 /// Stage 3's report of the selection it made (which the plan file does not
 /// carry).
-async fn planned_with_report(queries: &[&str]) -> (InstallablePlan, Option<SelectedPlanReport>) {
+async fn planned_with_report(queries: &[&str]) -> (InstallablePlan, SelectedPlanReport) {
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
@@ -184,8 +167,8 @@ async fn planned_with_report(queries: &[&str]) -> (InstallablePlan, Option<Selec
 async fn plan_with_report_for(
     workload: PlanningWorkload,
     capabilities: &DeploymentCapabilities,
-) -> (InstallablePlan, Option<SelectedPlanReport>) {
-    // The deployment's Stage 3 prices, from its JSON file: cost model 1.
+) -> (InstallablePlan, SelectedPlanReport) {
+    // The deployment's unit costs, from its JSON file: cost model 1.
     let settings: CostInputs = serde_json::from_str(
         r#"{"cost_model": {"usage_over_time": {
               "cost_per_cpu_op": 1e-6, "cost_per_scanned_byte": 1e-7,
@@ -212,7 +195,7 @@ fn query_roots(plan: &InstallablePlan) -> Vec<u64> {
 
 /// The plan file carries Stage 3's predicted usage of the selected plan, so
 /// a runtime reports it against what it measures without planning again:
-/// for Example 4b's tumbling windows maintained at ingestion time, its nodes' prices
+/// for Example 4b's tumbling windows maintained at ingestion time, its nodes' costs
 /// add up to Stage 3's selection cost and their CPU to the plan's, with
 /// one latency per query, each node naming the installed nodes that run it.
 #[tokio::test]
@@ -225,7 +208,6 @@ async fn the_plan_carries_stage3s_predicted_usage() {
         plan.raw_data_retention().unwrap().is_empty(),
         "a tumbling-window-only plan"
     );
-    let selection = selection.as_ref().expect("Stage 3's report");
     let usage = &selection.predicted_usage;
     let node_costs: f64 = usage
         .per_node
@@ -249,33 +231,21 @@ async fn the_plan_carries_stage3s_predicted_usage() {
         && node.timing == asap_planner::ExecutionTiming::IngestionTime));
     assert_eq!(usage.per_query.len(), 1);
     assert!(usage.peak_memory_bytes > 0);
-    // Each prediction names the installed nodes that run it: the tumbling window
-    // chain its selected tumbling windows, the query's root its own node.
+    // Each prediction names its node of the installed DAG: the chain is
+    // one materialized view, and the query's root has its own.
     let installed: BTreeSet<_> = plan.dag.nodes.iter().map(|node| node.id).collect();
-    for node in &usage.per_node {
-        assert!(
-            node.installed_node_ids
-                .iter()
-                .all(|id| installed.contains(id)),
-            "{node:?}"
-        );
-    }
+    assert!(usage
+        .per_node
+        .iter()
+        .all(|node| installed.contains(&node.node_id)));
     let chain = usage
         .per_node
         .iter()
         .find(|node| node.operator == OperatorKind::SummaryTumblingWindowChain)
         .unwrap();
-    assert_eq!(chain.installed_node_ids.len(), views.len(), "{chain:?}");
-    let view_ids: BTreeSet<_> = views.iter().map(|v| v.node_id).collect();
-    assert!(chain
-        .installed_node_ids
-        .iter()
-        .all(|id| view_ids.contains(id)));
+    assert!(views.iter().any(|view| view.node_id == chain.node_id));
     let root = plan.dag.roots[0];
-    assert!(usage
-        .per_node
-        .iter()
-        .any(|node| node.installed_node_ids == [root]));
+    assert!(usage.per_node.iter().any(|node| node.node_id == root));
 }
 
 /// `sum(latency_ms)` reads an instant selector: per series, only the latest
@@ -309,7 +279,7 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
     };
-    let answered = answers(&run(dag, BTreeMap::new(), &samples, &query_roots(&plan), query)[0]);
+    let answered = answers(&run(dag, &samples, &query_roots(&plan), query)[0]);
     assert_eq!(answered.len(), 1);
     assert_eq!(answered[0].1, 110.0);
 }
@@ -352,7 +322,7 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
         ..DeploymentCapabilities::default()
     };
     let settings = CostInputs::default();
-    let (plan, report) = plan_installable(UserInput::new(
+    let (plan, _report) = plan_installable(UserInput::new(
         &p99_avg_workload(false),
         FrontendInput::Promql,
         PlanningModels::builtin()
@@ -362,7 +332,6 @@ async fn ignoring_accuracy_guarantees_plans_the_undeclared_p99_query() {
     ))
     .await
     .expect("a plan is selected");
-    report.as_ref().expect("the plan's cost report");
     assert!(
         plan.raw_data_retention().unwrap().is_empty(),
         "no raw samples read"
@@ -431,3 +400,208 @@ async fn check_compiles_reports_the_executors_error() {
 // ── Classic-histogram `histogram_quantile` (issue #890) ─────────────────────
 
 // ── PromQL absent() (issue #895) ─────────────────────────────────────────────
+
+// ── Tumbling-window chains built at query time ───────────────────────────────
+
+/// Repeating PromQL `queries`, each `(query, requirements)` every minute at
+/// phase 0, over 1,000 ingesting gauge series `m` sampled every second;
+/// `requirements` is the JSON inside the entry's `requirements` object
+/// (empty for none).
+fn every_minute_workload(queries: &[(&str, &str)]) -> PlanningWorkload {
+    let entries: Vec<String> = queries
+        .iter()
+        .map(|(query, requirements)| {
+            format!(
+                r#"{{"query": {query:?}, "demand": {{"fixed_interval_at": {{"interval": 60000, "evaluation_phase": 0}}}},
+                  "requirements": {{{requirements}}}, "predictability": {{"predictable": {{"known_at": null}}}}}}"#
+            )
+        })
+        .collect();
+    serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 1000.0}}}},
+              "sources": {{"m": {{"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000}}}}}}}}"#,
+        entries.join(",")
+    ))
+    .unwrap()
+}
+
+/// The built-in plan for `queries` ([`every_minute_workload`]), on a
+/// deployment that keeps raw data.
+async fn plan_every_minute(queries: &[(&str, &str)]) -> InstallablePlan {
+    let workload = every_minute_workload(queries);
+    let planned = plan_installable(UserInput::new(
+        &workload,
+        FrontendInput::Promql,
+        PlanningModels::builtin(),
+    ))
+    .await;
+    assert!(planned.is_ok(), "{:?}", planned.err());
+    planned.unwrap().0
+}
+
+/// One sample of `m` for series `(instance, job)`.
+fn m_sample(instance: &str, job: &str, timestamp_ms: i64, value: f64) -> RawDataSample {
+    RawDataSample {
+        labels: BTreeMap::from([
+            ("__name__".to_string(), "m".to_string()),
+            ("instance".to_string(), instance.to_string()),
+            ("job".to_string(), job.to_string()),
+        ]),
+        timestamp_ms,
+        value,
+    }
+}
+
+/// Samples of `m` for four series (instances `a`..`d`, jobs `x` and `y`)
+/// every 15 s from 8 minutes before [`EVALUATION_MS`] through it, so some
+/// lie exactly on the minute boundaries that tumbling windows end at.
+fn m_samples() -> Vec<RawDataSample> {
+    let series = [("a", "x"), ("b", "x"), ("c", "y"), ("d", "y")];
+    let mut samples = Vec::new();
+    for (index, (instance, job)) in series.iter().enumerate() {
+        for step in 0..=32i64 {
+            let timestamp_ms = EVALUATION_MS - 480_000 + step * 15_000;
+            let value = (index as f64 + 1.0) * 10.0 + step as f64;
+            samples.push(m_sample(instance, job, timestamp_ms, value));
+        }
+    }
+    samples
+}
+
+/// Per `labels(sample)`, the sum of `value(sample)` over the samples in
+/// `(T - end_offset_ms - width_ms, T - end_offset_ms]` at `T` =
+/// [`EVALUATION_MS`]: the exact answer of a range function over that
+/// window.
+fn exact_over_window(
+    samples: &[RawDataSample],
+    end_offset_ms: i64,
+    width_ms: i64,
+    labels: impl Fn(&RawDataSample) -> BTreeMap<String, String>,
+    value: impl Fn(&RawDataSample) -> f64,
+) -> Vec<Answer> {
+    let end = EVALUATION_MS - end_offset_ms;
+    let mut sums = BTreeMap::<BTreeMap<String, String>, f64>::new();
+    for sample in samples {
+        if end - width_ms < sample.timestamp_ms && sample.timestamp_ms <= end {
+            *sums.entry(labels(sample)).or_default() += value(sample);
+        }
+    }
+    sums.into_iter().collect()
+}
+
+/// A sample's labels without its metric name, as range functions output.
+fn labels_without_name(sample: &RawDataSample) -> BTreeMap<String, String> {
+    let mut labels = sample.labels.clone();
+    labels.remove("__name__");
+    labels
+}
+
+/// Each query root's answers of `plan` at [`EVALUATION_MS`] over `samples`.
+fn query_answers(plan: &InstallablePlan, samples: &[RawDataSample]) -> Vec<Vec<Answer>> {
+    let query = Scope::Query {
+        evaluation_time_ms: EVALUATION_MS,
+    };
+    run(&plan.dag, samples, &query_roots(plan), query)
+        .iter()
+        .map(|batches| answers(batches))
+        .collect()
+}
+
+/// Whether `answered` matches `expected`, label set for label set, each
+/// value within `tolerance`.
+fn assert_answers_near(answered: &[Answer], expected: &[Answer], tolerance: f64) {
+    assert_eq!(
+        answered.len(),
+        expected.len(),
+        "{answered:?} vs {expected:?}"
+    );
+    for (answer, expected) in answered.iter().zip(expected) {
+        assert_eq!(answer.0, expected.0, "{answered:?} vs {expected:?}");
+        assert!(
+            (answer.1 - expected.1).abs() <= tolerance,
+            "{answered:?} vs {expected:?}"
+        );
+    }
+}
+
+/// `sum_over_time(m[5m] offset 1m)` and `sum_over_time(m[5m])`, every
+/// minute, may share one tumbling-window chain of `m` built at query time:
+/// the plan installs, a query-time `Scan` read through such a chain keeps
+/// the 6 minutes its readers read back (5 m + 1 m offset, not one
+/// window), and both queries answer the exact sums of their windows.
+#[tokio::test]
+async fn shifted_and_unshifted_sums_over_a_shared_query_time_chain_install_and_answer_exactly() {
+    let plan = plan_every_minute(&[
+        ("sum_over_time(m[5m] offset 1m)", ""),
+        ("sum_over_time(m[5m])", ""),
+    ])
+    .await;
+    let query_time_chain = plan.dag.nodes.iter().any(|node| {
+        matches!(
+            node.payload,
+            asap_types::ir::Operator::ASAP(
+                asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. }
+            )
+        ) && node.output_state.timing == asap_planner::ExecutionTiming::QueryTime
+    });
+    if query_time_chain {
+        for node in &plan.dag.nodes {
+            if matches!(
+                node.payload,
+                asap_types::ir::Operator::NonASAP(asap_types::ir::NonASAPOp::Scan { .. })
+            ) && node.output_state.timing == asap_planner::ExecutionTiming::QueryTime
+            {
+                assert!(
+                    node.retention_ms.is_some_and(|kept_ms| kept_ms >= 360_000),
+                    "scan {} keeps {:?}",
+                    node.id,
+                    node.retention_ms
+                );
+            }
+        }
+    }
+    let samples = m_samples();
+    let answered = query_answers(&plan, &samples);
+    let value = |sample: &RawDataSample| sample.value;
+    assert_answers_near(
+        &answered[0],
+        &exact_over_window(&samples, 60_000, 300_000, labels_without_name, value),
+        1e-9,
+    );
+    assert_answers_near(
+        &answered[1],
+        &exact_over_window(&samples, 0, 300_000, labels_without_name, value),
+        1e-9,
+    );
+}
+
+/// `sum by (job) (count_over_time(m[1m]))` and `count_over_time(m[1m])`,
+/// every minute within absolute error 0.05, may share one tumbling-window
+/// chain of `m` built at query time: the plan installs and both queries
+/// answer their counts within 0.05.
+#[tokio::test]
+async fn grouped_and_per_series_counts_over_a_shared_query_time_chain_install_and_answer() {
+    let accuracy = r#""accuracy": {"max_error": 0.05, "accuracy_metric": "absolute"}"#;
+    let plan = plan_every_minute(&[
+        ("sum by (job) (count_over_time(m[1m]))", accuracy),
+        ("count_over_time(m[1m])", accuracy),
+    ])
+    .await;
+    let samples = m_samples();
+    let answered = query_answers(&plan, &samples);
+    let job = |sample: &RawDataSample| {
+        BTreeMap::from([("job".to_string(), sample.labels["job"].clone())])
+    };
+    let one = |_: &RawDataSample| 1.0;
+    assert_answers_near(
+        &answered[0],
+        &exact_over_window(&samples, 0, 60_000, job, one),
+        0.05,
+    );
+    assert_answers_near(
+        &answered[1],
+        &exact_over_window(&samples, 0, 60_000, labels_without_name, one),
+        0.05,
+    );
+}
