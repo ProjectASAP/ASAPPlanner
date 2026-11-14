@@ -317,3 +317,49 @@ fn unrestricted_summaries_default_to_the_executors_families() {
     };
     assert_eq!(executor_summaries_when_unrestricted(&kll_only), kll_only);
 }
+
+/// `TimeShift(5m)` as a query's root over a query-time `Scan`: no frontend
+/// builds this shape (a selector's shift sits below its `TimeRange`), so
+/// the DAG is built by hand. asap-cost reads the plan as Stage 3 reads its
+/// candidates, plainly: the shift reads what its readers read and nothing
+/// reads the root, so the scan is read back 0. The installer reads a root
+/// reached only through such nodes as reading every row: the scan's raw
+/// data is kept unbounded, so the plan installs without a retention on it.
+#[test]
+fn a_root_time_shift_is_read_whole_by_the_installer_not_by_the_cost() {
+    use asap_types::ir::operator::Source;
+    use asap_types::ir::schema::{DataType, Field, Schema};
+    use asap_types::ir::{NonASAPOp, Operator, OperatorNode, QueryRoot};
+    let node = |operator| OperatorNode::new_shared(operator).unwrap();
+    let scan = node(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries {
+            metric: "latency".into(),
+        },
+        predicates: vec![],
+        schema: Schema::with_time_index(
+            vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
+            ],
+            0,
+            vec![],
+        ),
+    }));
+    let root = node(Operator::NonASAP(NonASAPOp::TimeShift {
+        shift: asap_types::ir::operator::arguments::TimeShift {
+            offset_ms: 300_000,
+            at: None,
+        },
+        child: scan.clone(),
+    }));
+    let (dag, nodes) =
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&[
+            QueryRoot::Operator(root),
+        ])
+        .unwrap();
+    let scan_id = nodes.iter().position(|n| Rc::ptr_eq(n, &scan)).unwrap();
+    assert_eq!(asap_cost::read_back_ms(&dag, scan_id, |_| 0), Some(0));
+    let retention = dag.raw_data_retention().unwrap();
+    assert_eq!(retention.len(), 1);
+    assert_eq!(retention[0].lookback_ms(), None);
+}

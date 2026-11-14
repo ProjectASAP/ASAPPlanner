@@ -15,7 +15,7 @@ use crate::ir::operator::node::Operator;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
 use crate::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId};
-use crate::plan::time_window::{self, TimeWindow};
+use crate::plan::time_window::{self, InputRows, TimeIndexedPlan, TimeWindow};
 
 impl PhysicalASAPDAG {
     /// Every materialized view, in dependency order (each after the views
@@ -337,17 +337,15 @@ impl<'a> ViewIndex<'a> {
 
     /// How far back from the evaluation time the readers of `node` read it
     /// ([`time_window::windows_readers_need`]): the most any reaches back.
-    /// `None`, unbounded, when `node` is a root, a root or a reader at a time
-    /// not relative to the evaluation (`@`) reads it, or, for a raw-data
-    /// `Scan`, a reader other than a window (a `TimeRange` or an
-    /// ingestion-time chain). A materialized shift that is a root still
-    /// reads its input's newest output: its readers do not change that, so
-    /// it is not read whole (the executor refuses its refresh over a chain
-    /// for now).
+    /// `None`, unbounded, when `node` is a root, a root reads it through
+    /// nodes that read what their readers read ([`Self::read_through_a_root`]),
+    /// a reader at a time not relative to the evaluation (`@`) reads it, or,
+    /// for a raw-data `Scan`, a reader other than a window (a `TimeRange` or
+    /// an ingestion-time chain).
     ///
     /// Example: a `Scan` read by `TimeShift(1m) -> TimeRange(5m)`: 360,000.
     pub(super) fn read_back_ms(&self, node: PhysicalASAPNodeId) -> Option<u64> {
-        if self.dag.roots.contains(&node) {
+        if self.dag.roots.contains(&node) || self.read_through_a_root(node) {
             return None;
         }
         let windows = time_window::windows_readers_need(self.dag, node)?;
@@ -358,6 +356,34 @@ impl<'a> ViewIndex<'a> {
                 .max()
                 .unwrap_or(0),
         )
+    }
+
+    /// Whether a query root reads `node` through nodes that each read what
+    /// their readers read (`WhatItsReadersRead`: a query-time `TimeShift` or
+    /// chain), the root among them. The query reads the root's output at the
+    /// evaluation time, so nothing above it bounds what it reads: `node` is
+    /// read unbounded. A shift stored at ingestion time reads its input's
+    /// newest output whatever reads it, so a path stops there.
+    ///
+    /// Example: a query-time `Scan` read by `TimeShift(5m)`, the query's
+    /// root: true.
+    fn read_through_a_root(&self, node: PhysicalASAPNodeId) -> bool {
+        let mut pending = vec![node];
+        let mut seen = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            for reader in self.dag.readers_of(id) {
+                if self.dag.input_time_access(reader).reads == InputRows::WhatItsReadersRead {
+                    if self.dag.roots.contains(&reader) {
+                        return true;
+                    }
+                    pending.push(reader);
+                }
+            }
+        }
+        false
     }
 
     /// What view `node`'s refresh reads: below it, each view (`views`) it

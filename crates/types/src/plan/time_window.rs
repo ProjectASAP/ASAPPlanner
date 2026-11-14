@@ -170,9 +170,10 @@ pub trait TimeIndexedPlan {
     fn inputs_of(&self, node: Self::Node) -> Vec<Self::Node>;
     /// How `node` reads its time-indexed input ([`InputTimeAccess::of`]).
     fn input_time_access(&self, node: Self::Node) -> InputTimeAccess;
-    /// Raw data is not stored by evaluation time: a `CurrentTimeOnly`
-    /// read of it reads every row.
-    fn is_raw_data(&self, node: Self::Node) -> bool;
+    /// Whether a reader of `node` that reads only the rows at its
+    /// evaluation time (`CurrentTimeOnly`) in fact needs every row of
+    /// `node`: true for raw data, which is not stored by evaluation time.
+    fn current_time_read_needs_every_row(&self, node: Self::Node) -> bool;
     /// `node`'s operator, which the walks down read: a `TimeRange`'s range,
     /// a chain's tumbling window, a `TimeShift`'s offset.
     fn operator_of(&self, node: Self::Node) -> &Operator<Self::Child>;
@@ -180,10 +181,8 @@ pub trait TimeIndexedPlan {
 
 /// The plan as installed and costed: its edges give the readers and
 /// inputs, each node's operator, timing and lifetime its input time access
-/// ([`InputTimeAccess::of`]), and a `Scan` is raw data. A root reached
-/// through a node reading `WhatItsReadersRead` reads `AllRows`: the
-/// query reads the root's output at the evaluation time, so nothing above
-/// bounds what it reads. O(edges) per node asked.
+/// ([`InputTimeAccess::of`]), and a current-time read of a `Scan` (raw
+/// data) needs every row. O(edges) per node asked.
 impl TimeIndexedPlan for PhysicalASAPDAG {
     type Node = PhysicalASAPNodeId;
     type Child = PhysicalASAPNodeId;
@@ -200,21 +199,14 @@ impl TimeIndexedPlan for PhysicalASAPDAG {
 
     fn input_time_access(&self, node: PhysicalASAPNodeId) -> InputTimeAccess {
         let plan_node = plan_node(self, node);
-        let access = InputTimeAccess::of(
+        InputTimeAccess::of(
             &plan_node.payload,
             plan_node.output_state.timing,
             plan_node.lifetime,
-        );
-        match access.reads {
-            InputRows::WhatItsReadersRead if self.roots.contains(&node) => InputTimeAccess {
-                reads: InputRows::AllRows,
-                shifts_back_ms: 0,
-            },
-            _ => access,
-        }
+        )
     }
 
-    fn is_raw_data(&self, node: PhysicalASAPNodeId) -> bool {
+    fn current_time_read_needs_every_row(&self, node: PhysicalASAPNodeId) -> bool {
         matches!(
             plan_node(self, node).payload,
             Operator::NonASAP(NonASAPOp::Scan { .. })
@@ -240,8 +232,9 @@ fn plan_node(
 /// Up: the window each reader of `producer` needs from its rows, walking
 /// up through the readers that read `WhatItsReadersRead`. `None`,
 /// unbounded, when one reads `AllRows`, a `CurrentTimeOnly` reader reads
-/// raw data ([`TimeIndexedPlan::is_raw_data`]), or a path's offsets are
-/// negative or overflow. The retention `producer` needs is the largest
+/// a producer whose current-time read needs every row (raw data,
+/// [`TimeIndexedPlan::current_time_read_needs_every_row`]), or a path's
+/// offsets are negative or overflow. The retention `producer` needs is the largest
 /// [`TimeWindow::reaches_back_ms`].
 ///
 /// The walk starts at the producer's own `shifts_back_ms` (a stored
@@ -260,7 +253,7 @@ pub fn windows_readers_need<P: TimeIndexedPlan>(
     plan: &P,
     producer: P::Node,
 ) -> Option<Vec<(P::Node, TimeWindow)>> {
-    let reads_raw_data = plan.is_raw_data(producer);
+    let needs_every_row = plan.current_time_read_needs_every_row(producer);
     let mut windows = Vec::new();
     // (node whose readers are next, the offsets walked through below them)
     let mut pending = vec![(producer, plan.input_time_access(producer).shifts_back_ms)];
@@ -277,7 +270,7 @@ pub fn windows_readers_need<P: TimeIndexedPlan>(
                     continue;
                 }
                 InputRows::LastWindow { length_ms } => length_ms,
-                InputRows::CurrentTimeOnly if !reads_raw_data => 0,
+                InputRows::CurrentTimeOnly if !needs_every_row => 0,
                 InputRows::CurrentTimeOnly | InputRows::AllRows => return None,
             };
             windows.push((
@@ -406,7 +399,7 @@ mod tests {
         fn input_time_access(&self, node: u32) -> InputTimeAccess {
             (self.access)(node)
         }
-        fn is_raw_data(&self, node: u32) -> bool {
+        fn current_time_read_needs_every_row(&self, node: u32) -> bool {
             self.raw_data && node == 0
         }
         fn operator_of(&self, _: u32) -> &Operator<u32> {

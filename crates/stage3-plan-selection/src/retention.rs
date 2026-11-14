@@ -63,8 +63,8 @@ fn read_back<R: IntoIterator<Item = PhysicalCandidateId>>(
 /// Stage 3's candidates as the time walks see them: the readers a caller
 /// gives (those that may read a candidate, or the selected ones), each
 /// candidate's admissible producers as its inputs, its operator at its
-/// timing and lifetime ([`InputTimeAccess::of`]), and a `Scan` as raw
-/// data.
+/// timing and lifetime ([`InputTimeAccess::of`]), and a current-time read
+/// of a `Scan` (raw data) needing every row.
 struct Candidates<'a> {
     physical: &'a PhysicalASAPMemoCandidates,
     readers_of: &'a dyn Fn(PhysicalCandidateId) -> Vec<PhysicalCandidateId>,
@@ -94,7 +94,7 @@ impl TimeIndexedPlan for Candidates<'_> {
         )
     }
 
-    fn is_raw_data(&self, v: PhysicalCandidateId) -> bool {
+    fn current_time_read_needs_every_row(&self, v: PhysicalCandidateId) -> bool {
         matches!(
             self.operator_of(v),
             Operator::NonASAP(NonASAPOp::Scan { .. })

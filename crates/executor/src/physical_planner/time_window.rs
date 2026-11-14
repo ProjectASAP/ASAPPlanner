@@ -15,10 +15,10 @@ use planner_types::plan::time_window::{
 /// inputs (`dependencies`), the compiled nodes reading it (`consumers`;
 /// a materialized view's input is not compiled, so it has none), and the
 /// compile roots. A root reached through a node reading
-/// `WhatItsReadersRead` reads `AllRows`. Every node counts as raw data
-/// ([`TimeIndexedPlan::is_raw_data`]): the executor reads a slot only
-/// through the windows above it, so a consumer reading only its current
-/// time reads it unbounded.
+/// `WhatItsReadersRead` reads `AllRows`. A current-time read of any node
+/// needs every row ([`TimeIndexedPlan::current_time_read_needs_every_row`]):
+/// today's executor store reads a slot only through the windows above it,
+/// and reads every slot whole otherwise (#1291).
 pub(super) struct CompileGraph<'a> {
     pub(super) nodes: &'a BTreeMap<NodeId, &'a PhysicalASAPDAGNode>,
     pub(super) dependencies: &'a BTreeMap<NodeId, Vec<NodeId>>,
@@ -54,7 +54,7 @@ impl TimeIndexedPlan for CompileGraph<'_> {
         }
     }
 
-    fn is_raw_data(&self, _: NodeId) -> bool {
+    fn current_time_read_needs_every_row(&self, _: NodeId) -> bool {
         true
     }
 

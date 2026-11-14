@@ -202,7 +202,7 @@ fn a_query_time_scan_reads_what_its_consumers_read_and_keeps_its_retention() {
             let node = self.0[node];
             InputTimeAccess::of(&node.payload, ExecutionTiming::QueryTime, node.lifetime)
         }
-        fn is_raw_data(&self, node: usize) -> bool {
+        fn current_time_read_needs_every_row(&self, node: usize) -> bool {
             node == 0
         }
         fn operator_of(&self, node: usize) -> &Payload {
