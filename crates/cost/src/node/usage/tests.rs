@@ -486,3 +486,98 @@ fn a_view_over_an_ingestion_time_chain_keeps_one_output_per_chain_window() {
     .unwrap();
     assert_eq!(usage.peak_memory_bytes, 16_000 * 66);
 }
+
+/// A DDSketch built over a scan's `value` is priced at the bins its
+/// source's declared `column_magnitudes` span: 807 at α = 0.01 for
+/// [0.001, 10000], against 1,037 for the assumed [1, 1e9]. Undeclared, or
+/// a column its producer does not pass on unchanged, keeps the assumed
+/// range.
+#[test]
+fn a_ddsketch_over_a_scan_is_priced_at_its_declared_value_magnitude() {
+    use crate::node::state_bytes::{sketch_shape, StateInputRows};
+    use asap_types::ir::schema::{DataType, Field};
+    use asap_types::summary_type::SketchAlgorithm;
+    use asap_types::workload::{SourceFacts, ValueMagnitude};
+    let settings = CostInputs::default();
+    let alpha = 0.01;
+    let latency = ValueMagnitude {
+        min_abs: 0.001,
+        max_abs: 10_000.0,
+    };
+    let data = |magnitude: Option<ValueMagnitude>| DataWorkload {
+        sources: BTreeMap::from([(
+            "latency".to_string(),
+            SourceFacts {
+                column_magnitudes: magnitude
+                    .map(|magnitude| ("value".to_string(), magnitude))
+                    .into_iter()
+                    .collect(),
+                ..SourceFacts::default()
+            },
+        )]),
+        ..DataWorkload::default()
+    };
+    let scan = PhysicalASAPDAGNode {
+        output_schema: Schema::new(vec![
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+        ]),
+        ..node(Payload::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries {
+                metric: "latency".into(),
+            },
+            predicates: vec![],
+            schema: Schema::default(),
+        }))
+    };
+    let build = PhysicalASAPDAGNode {
+        parameters: Some(SketchParams::DDSketch { alpha }),
+        ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::DDSketch),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::Reduce(GroupKeys::default()),
+            filter: None,
+        }))
+    };
+    let state_bytes = |data: &DataWorkload, unchanged_columns: BTreeSet<&str>| {
+        let scan_output = ProducerOutput {
+            payload: &scan.payload,
+            output_schema: &scan.output_schema,
+            output: EdgeStatistics {
+                rows: 600,
+                bytes: 9_600,
+            },
+            sources: BTreeSet::from(["latency"]),
+            family: StateFamily::None,
+            unchanged_columns,
+            tumbling_windows: 1,
+        };
+        node_resource_usage_and_cost(&build, &[scan_output], (1, 1.0), None, data, &settings)
+            .unwrap()
+            .output
+            .bytes
+    };
+    let priced = |magnitude| {
+        sketch_shape(
+            &SketchParams::DDSketch { alpha },
+            StateInputRows {
+                rows_per_state: Some(600),
+                non_negative: false,
+            },
+            magnitude,
+        )
+        .1
+    };
+    let unchanged = || BTreeSet::from(["ts", "value"]);
+    assert_eq!(
+        state_bytes(&data(Some(latency)), unchanged()),
+        priced(Some(latency))
+    );
+    assert_eq!(state_bytes(&data(None), unchanged()), priced(None));
+    assert_eq!(
+        state_bytes(&data(Some(latency)), BTreeSet::from(["ts"])),
+        priced(None)
+    );
+    assert!(priced(Some(latency)) < priced(None));
+}

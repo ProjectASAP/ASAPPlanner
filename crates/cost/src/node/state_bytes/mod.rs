@@ -6,6 +6,7 @@ use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{DataType, FieldDataType, Schema};
 use asap_types::summary_type::KLL_MAX_K;
 use asap_types::summary_type::{SketchParams, EXACT_ACCUMULATOR_STATE_BYTES};
+use asap_types::workload::ValueMagnitude;
 
 /// Plain values are 8 bytes, strings 16; summary columns are sized apart.
 pub fn row_bytes(schema: &Schema) -> u64 {
@@ -43,7 +44,9 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
 ///   `ASSUMED_VALUE_KEY_BYTES`;
 /// - DDSketch and KMV: the rows the state folds, at least one (any number
 ///   when unknown), each a distinct item for KMV; a DDSketch's values span
-///   `DDSKETCH_ASSUMED_VALUE_RANGE` and fill its negative store too
+///   `value_magnitude` when declared (its bins are `ceil(log_γ(max_abs /
+///   min_abs))` for its α; this DDSketch has no bin limit to cap them),
+///   else `DDSKETCH_ASSUMED_VALUE_RANGE`, and fill its negative store too
 ///   unless proven non-negative.
 ///
 /// KLL is priced without the library's estimate: its fixed bytes
@@ -66,9 +69,12 @@ pub fn summary_shape(
     family: &FieldDataType,
     parameters: Option<&SketchParams>,
     input_rows: StateInputRows,
+    value_magnitude: Option<ValueMagnitude>,
 ) -> Result<(f64, u64), AnalyticalCostError> {
     Ok(match (family, parameters) {
-        (FieldDataType::Sketch(..), Some(parameters)) => sketch_shape(parameters, input_rows),
+        (FieldDataType::Sketch(..), Some(parameters)) => {
+            sketch_shape(parameters, input_rows, value_magnitude)
+        }
         (FieldDataType::Sketch(..), None) => return Err(AnalyticalCostError::UnsupportedCandidate),
         (FieldDataType::ExactAggregate(..), _) => (1.0, EXACT_ACCUMULATOR_STATE_BYTES),
         _ => (1.0, 8),
@@ -100,10 +106,14 @@ impl StateInputRows {
 }
 
 /// [`summary_shape`] of one sketch: its update operations per row and its
-/// bytes per state. With [`StateInputRows::UNKNOWN`], the bytes are also the
-/// size the measured table interpolates between
-/// (`crate::measured`).
-pub fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, u64) {
+/// bytes per state. With [`StateInputRows::UNKNOWN`] and no
+/// `value_magnitude`, the bytes are also the size the measured table
+/// interpolates between (`crate::measured`).
+pub fn sketch_shape(
+    params: &SketchParams,
+    input_rows: StateInputRows,
+    value_magnitude: Option<ValueMagnitude>,
+) -> (f64, u64) {
     use asap_sketchlib::{
         Classic, CountMinF64, CountMinSketchWithHeap, CountSketch, CountSketchWithHeap, DataInput,
         DdSketch, HyperLogLog, Kmv, RegularPath, UnivMon, Vector2D,
@@ -113,7 +123,9 @@ pub fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, 
         usize::try_from(rows.max(1)).unwrap_or(usize::MAX)
     });
     match params {
-        SketchParams::Hydra(hydra) => sketch_shape(&hydra.per_subpopulation(), input_rows),
+        SketchParams::Hydra(hydra) => {
+            sketch_shape(&hydra.per_subpopulation(), input_rows, value_magnitude)
+        }
         SketchParams::Cms { width, depth } => (
             f64::from(*depth),
             CountMinF64::estimated_memory_bytes(*depth as usize, *width as usize) as u64,
@@ -160,16 +172,22 @@ pub fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, 
         SketchParams::DDSketch { alpha } if !(*alpha > 0.0 && *alpha < 1.0) => {
             (1.0, std::mem::size_of::<DdSketch>() as u64)
         }
-        SketchParams::DDSketch { alpha } => (
-            1.0,
-            DdSketch::estimated_memory_bytes(
-                *alpha,
-                rows,
+        SketchParams::DDSketch { alpha } => {
+            let ValueMagnitude { min_abs, max_abs } = value_magnitude.unwrap_or(ValueMagnitude {
+                min_abs: 1.0,
+                max_abs: DDSKETCH_ASSUMED_VALUE_RANGE,
+            });
+            (
                 1.0,
-                DDSKETCH_ASSUMED_VALUE_RANGE,
-                !input_rows.non_negative,
-            ) as u64,
-        ),
+                DdSketch::estimated_memory_bytes(
+                    *alpha,
+                    rows,
+                    min_abs,
+                    max_abs,
+                    !input_rows.non_negative,
+                ) as u64,
+            )
+        }
         SketchParams::Hll { precision, .. } => (
             1.0,
             HyperLogLog::<Classic>::estimated_memory_bytes(usize::from(*precision)) as u64,
@@ -273,8 +291,8 @@ fn univmon_expected_layers(layers: u8) -> f64 {
 /// Ratio of the largest to the smallest value magnitude a DDSketch is
 /// assumed to see: nine decades, e.g. latencies from 1 ns to 1 s, priced as
 /// magnitudes in `[1, 1e9]` (its bins depend on the ratio alone). An
-/// assumption, not workload evidence: the data workload declares no value
-/// range.
+/// assumption, not workload evidence, for a column whose source declares
+/// no `column_magnitudes`.
 const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
 
 #[cfg(test)]
