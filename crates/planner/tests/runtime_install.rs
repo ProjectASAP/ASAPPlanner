@@ -673,3 +673,48 @@ async fn grouped_and_per_series_counts_over_a_shared_query_time_chain_install_an
         0.05,
     );
 }
+
+/// `sum by (job) (rate(requests_total[5m]))` every minute over 1,000
+/// counter series sampled every 100 ms, raw data kept, with the arrival
+/// left unknown (the default): the plan installs and answers. Four series
+/// (jobs `x` and `y`) each grow by 1 every 100 ms, so each series' rate is
+/// 10 per second and each job's sum 20.
+#[tokio::test]
+async fn sum_rate_at_10_hz_with_unknown_arrival_installs_and_answers() {
+    let workload: PlanningWorkload = serde_json::from_str(
+        r#"{"query_workload": {"language": "promql", "repeating_queries": [
+              {"query": "sum by (job) (rate(requests_total[5m]))",
+               "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
+               "requirements": {}, "predictability": {"predictable": {"known_at": null}}}]},
+            "data_workload": {"arrival": "unknown", "sources": {"requests_total": {
+              "series_count": 1000, "metric_type": "counter", "sample_interval": 100}}}}"#,
+    )
+    .unwrap();
+    let plan = plan_installable(UserInput::new(
+        &workload,
+        FrontendInput::Promql,
+        PlanningModels::builtin(),
+    ))
+    .await
+    .unwrap()
+    .0;
+    let series = [("a", "x"), ("b", "x"), ("c", "y"), ("d", "y")];
+    let mut samples = Vec::new();
+    for (instance, job) in series {
+        for step in 0..=3_600i64 {
+            let mut sample = sample(
+                "requests_total",
+                instance,
+                EVALUATION_MS - 360_000 + step * 100,
+                step as f64,
+            );
+            sample.labels.insert("job".to_string(), job.to_string());
+            samples.push(sample);
+        }
+    }
+    let answered = query_answers(&plan, &samples);
+    assert_eq!(answered[0].len(), 2, "{answered:?}");
+    for (labels, rate) in &answered[0] {
+        assert!((rate - 20.0).abs() < 0.01, "{labels:?}: {rate}");
+    }
+}
