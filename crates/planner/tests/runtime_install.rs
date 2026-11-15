@@ -96,19 +96,35 @@ impl DataStore for CountingStore {
     }
 }
 
-/// Compile `ids` of `dag` and run them in `scope` over the raw `samples`,
-/// as a runtime does with the executor: each id's output batches.
+/// One stored state of a materialized view and the `(start, end]` of the
+/// data it summarizes, e.g. a chain's 10 s window `(T - 10 s, T]`.
+type WindowState = (Batch, (i64, i64));
+
+/// Compile `ids` of `dag` and run them in `scope` over the raw `samples`
+/// and the states stored in `views` (each bound as its materialized view
+/// slot, nothing below it compiled), as a runtime does with the executor:
+/// each id's output batches.
 fn run(
     dag: &PhysicalASAPDAG,
     samples: &[RawDataSample],
+    views: &[(MaterializedView, Vec<WindowState>)],
     ids: &[u64],
     scope: Scope,
 ) -> Vec<Vec<Batch>> {
     // The executor's plan for `ids`; every `Scan` it reaches is a raw data
-    // slot.
-    let compiled = compile(dag, &[], ids).expect("the executor compiles the plan");
-    // The plan's raw samples at the `Scan`s by metric.
-    let store = time_series_tables(dag, samples);
+    // slot, every view a materialized view slot.
+    let bound: Vec<MaterializedView> = views.iter().map(|(view, _)| view.clone()).collect();
+    let compiled = compile(dag, &bound, ids).expect("the executor compiles the plan");
+    // The plan's raw samples at the `Scan`s by metric, and each view's
+    // stored states.
+    let mut store = time_series_tables(dag, samples);
+    for (view, states) in views {
+        for (batch, span) in states {
+            store
+                .append_materialized_view(view, *span, vec![batch.clone()])
+                .unwrap();
+        }
+    }
     let instance = compiled
         .instantiate(Arc::new(CountingStore(store)))
         .unwrap();
@@ -279,7 +295,7 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
     };
-    let answered = answers(&run(dag, &samples, &query_roots(&plan), query)[0]);
+    let answered = answers(&run(dag, &samples, &[], &query_roots(&plan), query)[0]);
     assert_eq!(answered.len(), 1);
     assert_eq!(answered[0].1, 110.0);
 }
@@ -497,12 +513,14 @@ fn labels_without_name(sample: &RawDataSample) -> BTreeMap<String, String> {
     labels
 }
 
-/// Each query root's answers of `plan` at [`EVALUATION_MS`] over `samples`.
+/// Each query root's answers of `plan` at [`EVALUATION_MS`] over `samples`,
+/// every node run in the query run (no materialized view bound): a
+/// tumbling-window chain is built there from the raw samples.
 fn query_answers(plan: &InstallablePlan, samples: &[RawDataSample]) -> Vec<Vec<Answer>> {
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
     };
-    run(&plan.dag, samples, &query_roots(plan), query)
+    run(&plan.dag, samples, &[], &query_roots(plan), query)
         .iter()
         .map(|batches| answers(batches))
         .collect()
@@ -604,4 +622,193 @@ async fn grouped_and_per_series_counts_over_a_shared_query_time_chain_install_an
         &exact_over_window(&samples, 0, 60_000, labels_without_name, one),
         0.05,
     );
+}
+
+// ── Counter rate and increase, per series and per group ─────────────────────
+
+/// `query` every 10 s within relative error 0.01 over 1,000 `requests_total`
+/// counter series sampled every second, planned with the built-in models
+/// on a deployment that keeps raw data or not.
+async fn plan_counter_query(query: &str, raw_data_retained: bool) -> InstallablePlan {
+    let workload: PlanningWorkload = serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
+              "query": {query:?},
+              "demand": {{"fixed_interval_at": {{"interval": 10000, "evaluation_phase": 0}}}},
+              "requirements": {{"accuracy": {{"max_error": 0.01}}}},
+              "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 1000.0}}}},
+              "sources": {{"requests_total": {{"series_count": 1000,
+                  "metric_type": "counter", "sample_interval": 1000}}}}}}}}"#
+    ))
+    .unwrap();
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained,
+        ..DeploymentCapabilities::default()
+    };
+    let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
+    plan_installable(UserInput::new(&workload, FrontendInput::Promql, models))
+        .await
+        .unwrap_or_else(|e| panic!("{query} (raw data retained: {raw_data_retained}): {e}"))
+        .0
+}
+
+/// Four `requests_total` series (instances `a`..`d`, jobs `j1` and `j2`),
+/// sampled every 15 s from 8 minutes before [`EVALUATION_MS`] through it:
+/// series `i` (0-based) counts `(i + 1) * step` at step 0..=32.
+fn counter_samples() -> Vec<RawDataSample> {
+    let series = [("a", "j1"), ("b", "j1"), ("c", "j2"), ("d", "j2")];
+    let mut samples = Vec::new();
+    for (index, (instance, job)) in series.iter().enumerate() {
+        for step in 0..=32i64 {
+            samples.push(RawDataSample {
+                labels: BTreeMap::from([
+                    ("__name__".to_string(), "requests_total".to_string()),
+                    ("instance".to_string(), instance.to_string()),
+                    ("job".to_string(), job.to_string()),
+                ]),
+                timestamp_ms: EVALUATION_MS - 480_000 + step * 15_000,
+                value: (index as f64 + 1.0) * step as f64,
+            });
+        }
+    }
+    samples
+}
+
+/// The counter queries over [`counter_samples`] and their answers at T,
+/// worked out by hand. Over `[5m]` each series has the 20 samples of steps
+/// 13..=32 (T - 285 s .. T), `(i + 1) * 19` apart; the 15 s gap to the
+/// window's start is within 1.1 sample intervals, so Prometheus
+/// extrapolates the increase to the whole 300 s: `(i + 1) * 20`, and the
+/// rate is that over 300 s. Job `j1` is series 0 and 1, `j2` series 2 and
+/// 3: increases 20 + 40 = 60 and 60 + 80 = 140, rates 0.2 and 0.4667.
+fn counter_queries() -> Vec<(&'static str, Vec<Answer>)> {
+    let series = |instance: &str, job: &str| {
+        BTreeMap::from([
+            ("instance".to_string(), instance.to_string()),
+            ("job".to_string(), job.to_string()),
+        ])
+    };
+    let job = |job: &str| BTreeMap::from([("job".to_string(), job.to_string())]);
+    let per_series = |scale: f64| {
+        [("a", "j1"), ("b", "j1"), ("c", "j2"), ("d", "j2")]
+            .iter()
+            .enumerate()
+            .map(|(i, (instance, j))| (series(instance, j), (i as f64 + 1.0) * 20.0 * scale))
+            .collect()
+    };
+    let rate = 1.0 / 300.0;
+    vec![
+        ("increase(requests_total[5m])", per_series(1.0)),
+        ("rate(requests_total[5m])", per_series(rate)),
+        (
+            "sum by (job)(increase(requests_total[5m]))",
+            vec![(job("j1"), 60.0), (job("j2"), 140.0)],
+        ),
+        (
+            "sum by (job)(rate(requests_total[5m]))",
+            vec![(job("j1"), 60.0 * rate), (job("j2"), 140.0 * rate)],
+        ),
+        (
+            "sum(increase(requests_total[5m]))",
+            vec![(BTreeMap::new(), 200.0)],
+        ),
+        (
+            "sum(rate(requests_total[5m]))",
+            vec![(BTreeMap::new(), 200.0 * rate)],
+        ),
+    ]
+}
+
+/// Each query root's answers of `plan` at [`EVALUATION_MS`] as a runtime
+/// that installed it answers: each materialized view (a tumbling-window
+/// chain) is refreshed from `samples` in one ingestion run per tumbling
+/// window its retention keeps, ending at T, and stored; the query run at
+/// T reads those views (and the raw samples the plan reads at query time).
+fn installed_answers(plan: &InstallablePlan, samples: &[RawDataSample]) -> Vec<Vec<Answer>> {
+    let dag = &plan.dag;
+    let mut views = Vec::new();
+    for view in plan.materialized_views().unwrap() {
+        let node = dag.nodes.iter().find(|n| n.id == view.node_id).unwrap();
+        let asap_types::ir::Operator::ASAP(asap_types::ir::ASAPOp::SummaryTumblingWindowChain {
+            tumbling_window_width_ms,
+            ..
+        }) = node.payload
+        else {
+            panic!("only tumbling-window chains are refreshed here: {node:?}");
+        };
+        let width_ms = tumbling_window_width_ms as i64;
+        let windows = (view.retention_ms() as i64 / width_ms).max(1);
+        // The windows oldest first, each built in its own ingestion run.
+        let states = (0..windows)
+            .rev()
+            .map(|k| {
+                let end = EVALUATION_MS - k * width_ms;
+                let ingestion = Scope::Ingestion {
+                    window_start_ms: end - width_ms,
+                    window_end_ms: end,
+                };
+                let batches = run(dag, samples, &[], &[view.node_id as u64], ingestion).remove(0);
+                let rows = batches.iter().flat_map(|batch| batch.to_rows()).collect();
+                let schema = Arc::new(node.output_schema.clone());
+                (Batch::try_new(schema, rows).unwrap(), (end - width_ms, end))
+            })
+            .collect();
+        views.push((view, states));
+    }
+    let query = Scope::Query {
+        evaluation_time_ms: EVALUATION_MS,
+    };
+    run(dag, samples, &views, &query_roots(plan), query)
+        .iter()
+        .map(|batches| answers(batches))
+        .collect()
+}
+
+/// Each counter query of [`counter_queries`], planned on a deployment that
+/// keeps raw data and on one that does not, answered by `answer` over
+/// [`counter_samples`]: the queries whose answers differ from the
+/// hand-worked ones (relative error 1e-9).
+async fn counter_query_mismatches(
+    answer: fn(&InstallablePlan, &[RawDataSample]) -> Vec<Vec<Answer>>,
+) -> Vec<String> {
+    let samples = counter_samples();
+    let mut mismatches = Vec::new();
+    for raw_data_retained in [true, false] {
+        for (query, expected) in counter_queries() {
+            let plan = plan_counter_query(query, raw_data_retained).await;
+            let answered = answer(&plan, &samples).remove(0);
+            let matches = answered.len() == expected.len()
+                && answered.iter().zip(&expected).all(|(answer, expected)| {
+                    answer.0 == expected.0 && (answer.1 - expected.1).abs() <= 1e-9 * expected.1
+                });
+            if !matches {
+                mismatches.push(format!(
+                    "{query} (raw data retained: {raw_data_retained}): {answered:?}, \
+                     expected {expected:?}"
+                ));
+            }
+        }
+    }
+    mismatches
+}
+
+/// Counter `rate` and `increase`, per series, per job and in total, answer
+/// the hand-worked values as installed: each tumbling-window chain built
+/// window by window in ingestion runs and read from its materialized view
+/// at query time.
+#[tokio::test]
+async fn counter_rates_and_increases_answer_from_views_built_at_ingestion_time() {
+    let mismatches = counter_query_mismatches(installed_answers).await;
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// Counter `rate` and `increase`, per series, per job and in total, answer
+/// the hand-worked values when the whole plan runs in the query run from
+/// the raw samples, no materialized view bound: a tumbling-window chain
+/// placed at ingestion time is then built in the query run, every window
+/// its readers read, not only the newest.
+#[tokio::test]
+async fn counter_rates_and_increases_answer_at_query_time_from_raw_samples() {
+    let mismatches = counter_query_mismatches(query_answers).await;
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
