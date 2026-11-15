@@ -44,7 +44,8 @@ pub struct ResourceUnitCost {
 
 impl ResourceUnitCost {
     /// The prices plan selection uses until a deployment is calibrated:
-    /// 1 ns of CPU per operation, 0.1 ns per scanned byte, 1 GB retained for a
+    /// 1 ns of CPU per operation (one operation is one ns of the reference
+    /// executor's work, [`ResourceSpeed::ms_per_cpu_op`]), 0.1 ns per scanned byte, 1 GB retained for a
     /// second costs 1/8 vCPU (125 CPU-ms), held or provisioned alike; one
     /// provisioned core-second is 1,000 CPU-ms. Disk is not priced (0).
     pub fn illustrative() -> Self {
@@ -117,7 +118,11 @@ impl ResourceUnitCost {
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceSpeed {
-    /// Milliseconds one CPU operation takes on one core.
+    /// Milliseconds one CPU operation takes on one core. One CPU operation
+    /// is one nanosecond of the reference executor's work
+    /// (`node::operations_per_unit`), so the default is 1e-6; for another
+    /// machine set this to 1e-6 × its time ÷ the reference time (a core
+    /// half as fast: 2e-6).
     pub ms_per_cpu_op: f64,
     /// Milliseconds scanning one byte takes on one core.
     pub ms_per_scanned_byte: f64,

@@ -768,7 +768,7 @@ they are never folded into the simple formula implicitly.
 Concrete accuracy-sized parameters determine state and work. The table counts
 each kernel's counter updates and reads; `asap-cost` charges a row, a merged
 state and a read group the executor's measured time for that unit
-(`node::operation_counts`, one operation per nanosecond at the default speed),
+(`node::operations_per_unit`, one operation per nanosecond at the default speed),
 so a DDSketch or KLL row costs what the executor measured, not one operation:
 
 | Summary | Update operations per row | Read operations | State bytes per physical instance |

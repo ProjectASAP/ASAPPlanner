@@ -52,6 +52,19 @@ impl ExactKind {
             ExactKind::Increase => AggIntent::Increase,
         }
     }
+
+    /// Whether this accumulator tracks a counter's increase (`Rate`,
+    /// `Increase`, `IRate`): besides its value it keeps the window's first
+    /// and last samples and the resets between them, so it needs its rows
+    /// in time order and does more work per row than a `Sum`. Example:
+    /// `rate(requests_total[5m])`'s accumulator does; `sum_over_time`'s
+    /// does not.
+    pub fn tracks_counter_increase(&self) -> bool {
+        match self {
+            Self::Rate | Self::Increase | Self::IRate => true,
+            Self::Sum | Self::Min | Self::Max | Self::Count => false,
+        }
+    }
 }
 
 /// Parameters for an [`ExactKind`] accumulator. All exact accumulators have
