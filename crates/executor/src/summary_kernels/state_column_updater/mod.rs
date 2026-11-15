@@ -313,14 +313,18 @@ impl StateColumnUpdater {
                 // (`factory::exact_accumulator_input`): a count counts every
                 // non-NULL value of any type, NaN included (SQL
                 // `COUNT(col)`); a sum, min or max takes any Float64, ±Inf
-                // and NaN included; a counter needs finite samples.
+                // and NaN included; neither takes a stale marker; a counter
+                // needs finite samples.
                 match (&states[index], value) {
-                    (ScalarState::Count(_), _) => states[index].update(0.0, timestamp_ms),
                     (ScalarState::Counter(_), Value::Float64(value)) => {
                         super::factory::finite_input(*value).map_err(operator_error)?;
                         states[index].update(*value, timestamp_ms);
                     }
-                    (_, Value::Float64(value)) => states[index].update(*value, timestamp_ms),
+                    (_, Value::Float64(value)) => {
+                        super::factory::not_a_stale_marker(*value).map_err(operator_error)?;
+                        states[index].update(*value, timestamp_ms);
+                    }
+                    (ScalarState::Count(_), _) => states[index].update(0.0, timestamp_ms),
                     _ => return Err(operator_error("summary update requires Float64")),
                 }
             }

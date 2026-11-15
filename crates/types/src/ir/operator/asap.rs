@@ -834,7 +834,7 @@ fn finalized_schema<J: OperatorInput>(
         let aggregate_schema = crate::ir::NonASAPOp::Aggregate {
             child: source.clone(),
             reduction: reduction.clone(),
-            measures: vec![exact_accumulator_measure(kind, column)],
+            measures: vec![exact_accumulator_measure(*kind, column)],
             output_names: vec![],
             // A filtered SUM/MIN/MAX is NULL for a
             // group without a matching row.
@@ -904,7 +904,7 @@ fn regrouped_schema(input: &Schema, keys: &[ColumnId]) -> Result<Schema, SchemaD
 /// `column` (`None`: the sample value): `ExactKind::Rate` finalizes to
 /// what `AggIntent::Rate` computes.
 pub(crate) fn exact_accumulator_measure(
-    kind: &crate::summary_type::ExactKind,
+    kind: crate::summary_type::ExactKind,
     column: Option<ColumnId>,
 ) -> crate::ir::operator::AggIntent {
     use crate::ir::operator::AggIntent;
