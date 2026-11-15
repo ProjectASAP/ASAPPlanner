@@ -156,11 +156,11 @@ pub enum CostModel {
 }
 
 impl CostModel {
-    /// The per-unit costs, which only cost model 1 prices each node's
-    /// usage with: `UsageOverTime(u)` gives `Some(&u)`; cost model 2 prices
-    /// the plan's peaks, not each node, and cost model 3 has no prices, so
-    /// both give `None`.
-    pub fn unit_costs(&self) -> Option<&ResourceUnitCost> {
+    /// The per-unit costs each node's usage is priced with. Only cost
+    /// model 1 prices per node: `UsageOverTime(u)` gives `Some(&u)`. Cost
+    /// model 2 prices the plan's peaks (in `plan_cost`), not each node, and
+    /// cost model 3 has no prices, so both give `None`.
+    pub fn per_node_unit_costs(&self) -> Option<&ResourceUnitCost> {
         match self {
             CostModel::UsageOverTime(unit_cost) => Some(unit_cost),
             CostModel::ProvisionedCapacity(_) | CostModel::ClusterCapacity(_) => None,

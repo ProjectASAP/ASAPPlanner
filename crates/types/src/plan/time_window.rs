@@ -29,7 +29,9 @@
 // `matches!` and `let ... else`, so they stay only for a check of one
 // variant's identity, where every other operator's answer is "no" by
 // definition: "is it a `Scan`" (only a raw scan's read at t needs every
-// row) and "is it a `TimeShift`" (the shifts directly below a window).
+// row), "is it a `TimeShift`" (the shifts directly below a window), and
+// the lifetime check "is it stored across evaluations" in
+// `InputTimeAccess::of` (`matches!(lifetime, Lifetime::AcrossEvaluations(_))`).
 #![warn(
     clippy::wildcard_enum_match_arm,
     clippy::match_wildcard_for_single_variants
@@ -140,6 +142,15 @@ impl InputTimeAccess {
             reads,
             shifts_back_ms: 0,
         };
+        // The window a `TimeRange` or a chain covers, read in one place
+        // ([`Operator::covered_window_ms`]); only those two arms call this.
+        let last_window = || {
+            reads(InputRows::LastWindow {
+                length_ms: operator
+                    .covered_window_ms()
+                    .expect("a TimeRange or a tumbling-window chain covers a window"),
+            })
+        };
         // Every operator is listed, so a new one fails to build here until
         // its input time access is decided.
         match operator {
@@ -155,16 +166,9 @@ impl InputTimeAccess {
                 },
                 Some(_) => reads(InputRows::AllRows),
             },
-            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => reads(InputRows::LastWindow {
-                length_ms: u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
-            }),
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }) => match timing {
-                ExecutionTiming::IngestionTime => reads(InputRows::LastWindow {
-                    length_ms: *tumbling_window_width_ms,
-                }),
+            Operator::NonASAP(NonASAPOp::TimeRange { .. }) => last_window(),
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => match timing {
+                ExecutionTiming::IngestionTime => last_window(),
                 ExecutionTiming::QueryTime => reads(InputRows::WhatItsReadersRead),
             },
             // A subquery evaluates its input at other times than its own,

@@ -5,7 +5,6 @@
 
 use super::views::ViewIndex;
 use super::{InstallableDagError, RawDataRetention};
-use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::Operator;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
@@ -117,56 +116,16 @@ impl PhysicalASAPDAGNode {
 }
 
 impl ViewIndex<'_> {
-    /// See [`PhysicalASAPDAG::check_raw_data_windows`]. Every operator is
-    /// listed: a new one fails to build here until it is decided whether
-    /// it holds a window over raw data to check.
-    #[warn(clippy::wildcard_enum_match_arm)]
+    /// See [`PhysicalASAPDAG::check_raw_data_windows`]. Only an operator
+    /// that covers a window ([`Operator::covered_window_ms`]: a `TimeRange`
+    /// or a tumbling-window chain) holds a window over raw data to check.
     pub(super) fn check_raw_data_windows(&self) -> Result<(), InstallableDagError> {
         for node in &self.dag.nodes {
             if !self.reading_raw_data.contains(&node.id) {
                 continue;
             }
-            match &node.payload {
-                Operator::NonASAP(NonASAPOp::TimeRange { .. }) => {
-                    self.check_raw_window_at(node.id)?;
-                }
-                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
-                    self.check_raw_window_below(node.id)?;
-                }
-                // No window of its own over the raw data.
-                Operator::NonASAP(
-                    NonASAPOp::Scan { .. }
-                    | NonASAPOp::Values { .. }
-                    | NonASAPOp::Filter { .. }
-                    | NonASAPOp::Project { .. }
-                    | NonASAPOp::Aggregate { .. }
-                    | NonASAPOp::Join { .. }
-                    | NonASAPOp::SetOp { .. }
-                    | NonASAPOp::Concat { .. }
-                    | NonASAPOp::Dedup { .. }
-                    | NonASAPOp::Sort { .. }
-                    | NonASAPOp::Limit { .. }
-                    | NonASAPOp::BinaryOp { .. }
-                    | NonASAPOp::SQLWindowFunc { .. }
-                    | NonASAPOp::TimeShift { .. }
-                    | NonASAPOp::PromqlVectorFromScalar(..)
-                    | NonASAPOp::PromqlRelabel { .. }
-                    | NonASAPOp::PromqlInfoEnrich { .. }
-                    | NonASAPOp::PromqlSeriesSample { .. }
-                    | NonASAPOp::PromqlSubquery { .. },
-                )
-                | Operator::ASAP(
-                    ASAPOp::SummaryAgg { .. }
-                    | ASAPOp::SummaryEstimate { .. }
-                    | ASAPOp::FinalizeExactAccumulator { .. }
-                    | ASAPOp::MaintainPopulation { .. }
-                    | ASAPOp::EvaluatePopulation { .. }
-                    | ASAPOp::SummaryMerge { .. }
-                    | ASAPOp::SummarySubtract { .. }
-                    | ASAPOp::SummaryDelete { .. }
-                    | ASAPOp::SummaryJoin { .. }
-                    | ASAPOp::Extension { .. },
-                ) => {}
+            if node.payload.covered_window_ms().is_some() {
+                self.check_raw_window_below(node.id)?;
             }
         }
         Ok(())

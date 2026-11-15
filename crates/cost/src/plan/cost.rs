@@ -97,7 +97,7 @@ pub fn plan_cost(
     let mut fit = CalibrationFit::default();
     let speed = settings.resource_speed;
     // Cost model 1 costs each node as it is measured.
-    let unit_costs = settings.cost_model.unit_costs();
+    let unit_costs = settings.cost_model.per_node_unit_costs();
     // Each node's `(multiplier, per_second)` ([`computations`]), then its
     // usage and cost ([`node_resource_usage_and_cost`]), children first.
     let multipliers = computations(dag, entries, settings.non_repeating_query_horizon_seconds)
@@ -400,7 +400,7 @@ pub fn request_overhead_cost_per_second(
     entries: &[QueryWorkloadEntry],
     settings: &CostInputs,
 ) -> Result<f64, AnalyticalCostError> {
-    let Some(unit_cost) = settings.cost_model.unit_costs() else {
+    let Some(unit_cost) = settings.cost_model.per_node_unit_costs() else {
         return Ok(0.0);
     };
     if settings.measured_operation_costs.ns_per_evaluation <= 0.0 {
@@ -422,7 +422,7 @@ pub fn request_overhead_cost_per_second(
 pub fn raw_data_disk_cost_per_second(bytes: u64, settings: &CostInputs) -> Option<f64> {
     settings
         .cost_model
-        .unit_costs()
+        .per_node_unit_costs()
         .map(|unit_cost| unit_cost.cost_per_disk_byte_second * bytes as f64)
 }
 

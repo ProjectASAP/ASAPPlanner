@@ -9,7 +9,9 @@
 // "no" by definition: "is it a `Scan`" (a scan's retained raw bytes), and
 // `raw_data_samples_non_negative`'s "is its producer a `Scan` or a
 // `TimeRange`" (raw samples; any other producer's are not, the safe
-// answer).
+// answer). The lifetime check "is it stored across evaluations"
+// (`matches!(node.lifetime, Lifetime::AcrossEvaluations(_))`) is kept the
+// same way.
 #![warn(
     clippy::wildcard_enum_match_arm,
     clippy::match_wildcard_for_single_variants
@@ -310,7 +312,7 @@ pub fn node_resource_usage_and_cost<'a>(
     let formula_scale = settings.frozen_calibration_factor.unwrap_or(1.0);
     let table = &settings.measured_operation_costs;
     let speed = settings.resource_speed;
-    let unit_costs = settings.cost_model.unit_costs();
+    let unit_costs = settings.cost_model.per_node_unit_costs();
     let sketch_size =
         |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
     let mut fit = CalibrationFit::default();
@@ -353,46 +355,15 @@ pub fn node_resource_usage_and_cost<'a>(
             .map_or(1, |producer| producer.tumbling_windows),
         _ => 1,
     };
-    let sources: BTreeSet<&str> = match &node.payload {
-        Payload::NonASAP(NonASAPOp::Scan { source, .. }) => [source_name(source)].into(),
-        Payload::NonASAP(
-            NonASAPOp::Values { .. }
-            | NonASAPOp::Filter { .. }
-            | NonASAPOp::Project { .. }
-            | NonASAPOp::Aggregate { .. }
-            | NonASAPOp::Join { .. }
-            | NonASAPOp::SetOp { .. }
-            | NonASAPOp::Concat { .. }
-            | NonASAPOp::Dedup { .. }
-            | NonASAPOp::Sort { .. }
-            | NonASAPOp::Limit { .. }
-            | NonASAPOp::BinaryOp { .. }
-            | NonASAPOp::SQLWindowFunc { .. }
-            | NonASAPOp::TimeRange { .. }
-            | NonASAPOp::TimeShift { .. }
-            | NonASAPOp::PromqlVectorFromScalar(..)
-            | NonASAPOp::PromqlRelabel { .. }
-            | NonASAPOp::PromqlInfoEnrich { .. }
-            | NonASAPOp::PromqlSeriesSample { .. }
-            | NonASAPOp::PromqlSubquery { .. },
-        )
-        | Payload::ASAP(
-            ASAPOp::SummaryAgg { .. }
-            | ASAPOp::SummaryEstimate { .. }
-            | ASAPOp::FinalizeExactAccumulator { .. }
-            | ASAPOp::MaintainPopulation { .. }
-            | ASAPOp::EvaluatePopulation { .. }
-            | ASAPOp::SummaryMerge { .. }
-            | ASAPOp::SummaryTumblingWindowChain { .. }
-            | ASAPOp::SummarySubtract { .. }
-            | ASAPOp::SummaryDelete { .. }
-            | ASAPOp::SummaryJoin { .. }
-            | ASAPOp::Extension { .. },
-        ) => producers
-            .iter()
-            .flat_map(|p| p.sources.iter().copied())
-            .collect(),
-    };
+    let sources: BTreeSet<&str> =
+        if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {
+            [source_name(source)].into()
+        } else {
+            producers
+                .iter()
+                .flat_map(|p| p.sources.iter().copied())
+                .collect()
+        };
     // The series its sources declare, when they all do.
     let series = declared_series(&sources, data);
     // The rows per ms its sources receive, which its scans and time

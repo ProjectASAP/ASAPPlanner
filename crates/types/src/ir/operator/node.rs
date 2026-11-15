@@ -10,7 +10,8 @@
 // answer instead of failing the build (under `-D warnings`). Clippy does
 // not check `if let` and `matches!`, so they stay only for a check of one
 // variant's identity, where every other operator's answer is "no" by
-// definition: "is it a `Scan`" (only a scan reads a source itself).
+// definition: "is it a `Scan`" (`scanned_sources`: only a scan reads a
+// source itself) and "is it an ASAP operator" (`is_asap`).
 #![warn(
     clippy::wildcard_enum_match_arm,
     clippy::match_wildcard_for_single_variants
@@ -125,6 +126,13 @@ impl<C> Operator<C> {
     /// `Some(60_000)`; `Filter`: `None`. A `PromqlSubquery` evaluates its
     /// input over a range, but each of its outputs is one evaluation, so it
     /// covers none here.
+    ///
+    /// A `TimeRange` longer than `u64::MAX` ms (about 584 million years)
+    /// saturates to `Some(u64::MAX)`, so `Some` always means "covers a
+    /// window"; a caller that once gave `None` for such a range
+    /// (`windows_computed_from`, and so `RefreshWindow::computed_from`) now
+    /// carries on with `u64::MAX`. PromQL planning never reaches it: costing such a range
+    /// overflows first.
     pub fn covered_window_ms(&self) -> Option<u64> {
         match self {
             // Saturates, so `Some` means exactly "a window", whatever its length.
@@ -217,13 +225,12 @@ impl<C> Operator<C> {
         }
     }
 
-    /// Whether each output row keeps its input row's time window, so the
-    /// window its input covers is also its own: `Filter` and `Project`
-    /// keep rows and times; `TimeShift` moves every row by one offset but
-    /// keeps the window's length. E.g. `Filter <- TimeRange(5m)` covers
-    /// 5 minutes, and `Project <- chain of 1-minute windows` holds
-    /// 1-minute windows; `Aggregate <- TimeRange(5m)` combines rows, so
-    /// `false`.
+    /// Whether the window its input covers is also its own, with the same
+    /// length: `Filter` and `Project` keep each row and its time;
+    /// `TimeShift` moves every row's time by one offset, so the window
+    /// moves but keeps its length. E.g. `Filter <- TimeRange(5m)` and
+    /// `TimeShift(1h) <- TimeRange(5m)` both cover 5 minutes;
+    /// `Aggregate <- TimeRange(5m)` combines rows, so `false`.
     pub fn keeps_input_window(&self) -> bool {
         match self {
             Operator::NonASAP(
@@ -634,7 +641,7 @@ mod tests {
     /// `Filter`, `Project` and `TimeShift` keep their input's time window;
     /// an operator that combines rows or covers its own window does not.
     #[test]
-    fn filters_projections_and_shifts_keep_input_time() {
+    fn filters_projections_and_shifts_keep_input_window() {
         let table = [
             (filter(), true),
             (project(), true),
