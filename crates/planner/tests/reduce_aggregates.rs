@@ -399,6 +399,59 @@ async fn promql_sum_without_instance() {
     );
 }
 
+/// `count without (instance)` counts the series of each group of every
+/// other label: job `a` has 3 series, `{job="b"}` and `{job="b", zone="z"}`
+/// one each. Dropping `zone` as well merges job `b`'s two series.
+#[tokio::test]
+async fn promql_count_without_instance() {
+    let answers = promql("count without (instance) (m)", "m", &gauge_samples()).await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "a")]), 3.0),
+            (labels(&[("job", "b")]), 1.0),
+            (labels(&[("job", "b"), ("zone", "z")]), 1.0),
+        ],
+    );
+    let answers = promql("count without (instance, zone) (m)", "m", &gauge_samples()).await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "a")]), 3.0),
+            (labels(&[("job", "b")]), 2.0),
+        ],
+    );
+}
+
+/// `group without (instance)` answers 1 per group of every other label.
+#[tokio::test]
+async fn promql_group_without_instance() {
+    let answers = promql("group without (instance) (m)", "m", &gauge_samples()).await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "a")]), 1.0),
+            (labels(&[("job", "b")]), 1.0),
+            (labels(&[("job", "b"), ("zone", "z")]), 1.0),
+        ],
+    );
+}
+
+/// `stddev without (instance)`: job `a`'s 1, 2, 4 have variance 14/9; the
+/// two single-series groups of job `b` have deviation 0.
+#[tokio::test]
+async fn promql_stddev_without_instance() {
+    let answers = promql("stddev without (instance) (m)", "m", &gauge_samples()).await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "a")]), (14.0f64 / 9.0).sqrt()),
+            (labels(&[("job", "b")]), 0.0),
+            (labels(&[("job", "b"), ("zone", "z")]), 0.0),
+        ],
+    );
+}
+
 /// An exact `topk` over a grouped sum of rates answers the 3 largest of
 /// the grouped sum's answers, with their jobs.
 #[tokio::test]

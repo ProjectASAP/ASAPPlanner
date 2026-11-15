@@ -429,8 +429,11 @@ impl Lcg {
 // (NULL, NaN, ±inf, -0), nullable text (empty, case, unicode, NUL) and maps
 // of nullable numbers (a NULL, -0 or NaN value inside), so the test of a
 // row against its group's last kept row agrees with the heap's order.
+// Every seed (each key kind) runs in every build; a debug build runs 40
+// cases per seed, a release build 400.
 #[test]
 fn sort_with_fetch_equals_sort_then_limit_over_random_rows() {
+    const CASES_PER_SEED: usize = if cfg!(debug_assertions) { 40 } else { 400 };
     let input = schema(&[
         ("g", DataType::Utf8, false),
         ("h", DataType::Int64, false),
@@ -478,7 +481,7 @@ fn sort_with_fetch_equals_sort_then_limit_over_random_rows() {
         (11, vec![6], true),
     ] {
         let mut random = Lcg(seed);
-        for case in 0..400 {
+        for case in 0..CASES_PER_SEED {
             let group_count = 1 + random.below(6);
             let distinct_values = 1 + random.below(8);
             let mut id = 0;
