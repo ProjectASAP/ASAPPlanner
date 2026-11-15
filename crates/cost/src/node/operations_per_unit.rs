@@ -26,7 +26,12 @@
 //! non-negative gauge (`ts`, `value`, the series identity) and of a counter
 //! (with a `job` label), 1 h windows at 1 Hz (3,600 rows per series,
 //! tumbling windows of 10 s) and at 10 Hz (36,000 rows per series, windows
-//! of 60 s). Each constant's own measurement is in its doc.
+//! of 60 s). Each constant's own measurement is in its doc. On a host
+//! with most cores busy, the sketch constants measure about twice as high
+//! (DDSketch update 325–403 ns per row, merge 3.4–3.9 µs per state) while
+//! the row-streaming ones (time range, hash aggregate, exact accumulators)
+//! barely move: memory and cache contention slows sketch kernels most, which
+//! only favours the exact plan further.
 //!
 //! Example: `quantile_over_time(0.99, latency[1h])` at 1 Hz reads 3.6 M
 //! rows. The exact plan keeps them (`TIME_RANGE_OPERATIONS_PER_ROW`, 12),
