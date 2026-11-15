@@ -12,21 +12,25 @@ cancellation and byte accounting. Executions use the caller's worker and
 worker-local streams, with no internal thread pool.
 
 A node runs once per evaluation time in a run (an `@` anchor evaluates the
-nodes below it at another time), as its `Lifetime` and the run's scope say:
+nodes below it at another time; a leaf read per consumer runs once per
+consumer), as its `Lifetime` and the run's scope say:
 
-- Query time, a leaf whose rows the store keeps: `None` (a raw data scan the
-  plan does not materialize, or any other leaf such as a constant) or
-  `AcrossEvaluations` (a materialized view slot, or raw data kept at
-  ingestion). Each consumer reads it from the store on its own, and
+- Query time, a leaf with `None` or `AcrossEvaluations` (rows a store or
+  the operator keeps): `None` (a raw data scan the plan does not
+  materialize, or any other leaf such as a constant, which holds its own
+  rows) or `AcrossEvaluations` (a materialized view slot, or raw data kept
+  at ingestion). Each consumer reads it on its own, and
   nothing is held. Stage 3 never gives a query-time `None` result more than
   one consumer; a view slot, or a leaf in a hand-built DAG, may have
   several. For example, an `AcrossEvaluations` scan read by two queries is
   two store reads.
-- Query time, `OneEvaluation` (a computed node or a leaf), or a computed
-  `AcrossEvaluations` node, with more than one consumer: the node runs once,
-  to the end, before any consumer reads it, and every consumer reads its
-  finished output independently, as the planner charges one run whose
-  output is held. For example, a `OneEvaluation` scan read by three queries
+- Query time, `OneEvaluation` (a computed node or a leaf) with more than
+  one consumer: the node runs once, to the end, before any consumer reads
+  it, and every consumer reads its finished output independently, as the
+  planner charges one run whose output is held. Likewise a computed
+  `AcrossEvaluations` node with more than one consumer, which only a
+  hand-built DAG has at query time (a compiled plan reads it through its
+  view slot). For example, a `OneEvaluation` scan read by three queries
   is one store read. The output is charged to the run's byte budget until
   every consumer has read it; over the budget the run fails with
   `MemoryLimit` (nothing spills). With one consumer the node streams to it,

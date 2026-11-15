@@ -38,8 +38,8 @@ pub fn set_build_parameters<'a>(
 /// not a view is marked materialized at ingestion time, and it and
 /// every node below it run at ingestion time (their outputs and
 /// outgoing edges). A `OneEvaluation` node moved there becomes
-/// `Lifetime::None`, as ingestion has no evaluation to hold it for: for
-/// example a scan five tumbling windows share streams to all five. Every
+/// `Lifetime::None`, as ingestion has no evaluation to hold it for (the
+/// DAG's validation rejects `OneEvaluation` at ingestion): for example a scan five tumbling windows share streams to all five. Every
 /// view without a retention or coverage is
 /// retained for ever with a coverage of its own. For tests that bind
 /// states at those nodes, as a deployment binds its views.

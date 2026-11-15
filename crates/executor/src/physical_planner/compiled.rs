@@ -53,9 +53,9 @@ pub(super) struct RawDataSlot {
 pub struct CompiledPhysicalDAG {
     nodes: BTreeMap<NodeId, Node>,
     roots: Vec<NodeId>,
-    /// The plan lifetime of each Planner node, which the runtime runs it by
-    /// (see `NodeRun` in the runtime). A helper node the lowering adds is
-    /// not in it and has `Lifetime::None`. Example: node 1, a stored view,
+    /// The plan lifetime of each compiled Planner node, which the runtime
+    /// runs it by (see `NodeRun` in the runtime). A helper node the lowering
+    /// adds is not in it and has `Lifetime::None`. Example: node 1, a stored view,
     /// maps to `AcrossEvaluations(Memory)`, and node 3, a query-time output
     /// two queries read, to `OneEvaluation(Memory)`.
     lifetimes: BTreeMap<NodeId, Lifetime>,
@@ -63,7 +63,10 @@ pub struct CompiledPhysicalDAG {
 
 impl CompiledPhysicalDAG {
     /// Assemble already-lowered operators; leaves read no data store (for
-    /// example [`Operator::source`] holds its rows).
+    /// example [`Operator::source`] holds its rows). Every node runs as
+    /// `Lifetime::None`, so at query time a computed node may have at most
+    /// one consumer; for a shared one, build a [`PhysicalDAG`] with
+    /// `add(…, lifetime)`.
     pub fn from_operators(
         operators: BTreeMap<NodeId, (Vec<NodeId>, Operator)>,
         roots: Vec<NodeId>,
