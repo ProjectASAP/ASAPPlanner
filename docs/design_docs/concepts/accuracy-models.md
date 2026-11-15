@@ -241,7 +241,8 @@ algorithm's list, so it never excludes a listed θ. For relative errors `x`
 and `y` with `y ≤ b`, `(1 + x)(1 + y) − 1 ≤ (1 + b)·x + y`, and a ratio of
 relative errors `a` over `b` is within `(a + b)/(1 − b)`. A relative bound
 below 1 keeps zero at zero and keeps the sign, so a zero denominator gives the
-same non-finite answer exactly and approximately. The ratio rule relies on
+same non-finite answer exactly and approximately, except the sign of a zero:
+an exact −0.0 may be read as +0.0, which flips the infinity's sign. The ratio rule relies on
 each operand's own relative guarantee (for DDSketch, its estimator contract:
 one-signed values within the mapping's range). A sum or difference of
 relative errors has no relative bound (cancellation), and a rank error (KLL)
@@ -276,15 +277,18 @@ largest error the readout's output may have for that query.
   one without keys), since a reduction such as `max` fails when any readout
   it reads does. `SELECT count(DISTINCT dst) FROM flows` at δ = 0.01 reads
   one distinct count, so its readout keeps 0.01.
-- A composed query (several readouts, such as a ratio) gives every level of
-  the error grid (10%, 5%, 2%, 1%, 0.5%, 0.2%, 0.1%) and the failure-probability
-  grid (powers of ten from 1e-2 down to 1e-5, continued down to the first
+- A composed query (several readouts whose errors reach its output, `β > 0`,
+  such as a ratio; `q and r` reads one, since `r`'s values are not read)
+  gives every level of the error grid (10%, 5%, 2%, 1%, 0.5%, 0.2%, 0.1%)
+  and the failure-probability grid (powers of ten from 1e-2 down to 1e-5, continued down to the first
   one at or below a tenth of the query's per-value failure probability) not
   looser than the cap. The logical-edge check then
   keeps the levels a producer's θ meets.
 - A readout reached by several queries gets the union of their levels.
-- A count reads no value (`β = 0`): the readouts below it get no level
-  through it.
+- A count reads no value (`β = 0`), and neither does the right input of
+  `and` and `unless`: the readouts below it get no level through it, and
+  an operator above it combines no error of them (`q / count(r)` reads
+  one readout's error).
 - A query whose target sets a failure probability with no per-value one
   (`n_q` or the readout's values per evaluation unknown) gives no level. A
   readout no query gives a level is pruned

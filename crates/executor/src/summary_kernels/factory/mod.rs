@@ -107,10 +107,11 @@ pub(crate) fn exact_accumulator_input(
 /// a series and is not a sample: the `TimeRange` a chain builds over its
 /// time series' `Scan` drops it before any accumulator sees it. One that
 /// reaches an exact sum, count, min or max means the chain read the series
-/// through another operator (a `Filter` or a `Project`), and it would turn
-/// `sum_over_time` into NaN or add one to `count_over_time` silently.
-pub(crate) fn not_a_stale_marker(value: f64) -> Result<(), String> {
-    if value.to_bits() == crate::operators::STALE_MARKER {
+/// through another operator (a `Filter` or a `Project` that copies the
+/// value), and it would turn `sum_over_time` into NaN or add one to
+/// `count_over_time` silently.
+fn not_a_stale_marker(value: f64) -> Result<(), String> {
+    if crate::values::is_stale_marker(value) {
         Err(
             "a stale marker reached an exact accumulator: its chain must read the time \
              series' Scan, whose TimeRange drops stale markers"

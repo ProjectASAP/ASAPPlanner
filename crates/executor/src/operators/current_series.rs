@@ -95,7 +95,7 @@ pub(super) fn execute<'a>(
             .groups_in_key_order()
             .into_iter()
             .filter_map(|series| latest[series as usize])
-            .filter(|&row| values.value(row as usize).to_bits() != STALE_MARKER)
+            .filter(|&row| !crate::values::is_stale_marker(values.value(row as usize)))
             .collect::<Vec<_>>();
         let selected = batch.take(&arrow::array::UInt32Array::from(rows))?;
         let stamped = std::sync::Arc::new(arrow::array::TimestampMillisecondArray::from(vec![

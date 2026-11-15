@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use crate::ir::operator::arguments::{
-    AtModifier, BinaryOpKind, Reduction, Source, SourceColumn, TimeShift,
+    AtModifier, BinaryOpKind, PromQLVectorSetOpKind, Reduction, Source, SourceColumn, TimeShift,
 };
 use crate::ir::operator::AggIntent;
 use crate::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind};
@@ -173,11 +173,25 @@ pub fn arithmetic(
     lhs: MemoGroupId,
     rhs: MemoGroupId,
 ) -> Operator<MemoGroupId> {
+    binary_op(BinaryOpKind::Arithmetic(kind), lhs, rhs)
+}
+
+/// `lhs and rhs`, `lhs or rhs` or `lhs unless rhs`, series by series,
+/// without vector matching.
+pub fn set_operator(
+    kind: PromQLVectorSetOpKind,
+    lhs: MemoGroupId,
+    rhs: MemoGroupId,
+) -> Operator<MemoGroupId> {
+    binary_op(BinaryOpKind::Set(kind), lhs, rhs)
+}
+
+fn binary_op(kind: BinaryOpKind, lhs: MemoGroupId, rhs: MemoGroupId) -> Operator<MemoGroupId> {
     Operator::NonASAP(NonASAPOp::BinaryOp {
         operator: BinaryOperator {
             checked_relative_division: false,
             checked_finite_division: false,
-            kind: BinaryOpKind::Arithmetic(kind),
+            kind,
             vector_match: None,
         },
         return_bool: false,

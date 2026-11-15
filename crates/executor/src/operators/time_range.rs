@@ -207,7 +207,7 @@ pub(super) fn execute<'a>(
                         start < t && t <= end
                     };
                     let stale = values.is_some_and(|values| {
-                        values.is_valid(row) && values.value(row).to_bits() == STALE_MARKER
+                        values.is_valid(row) && crate::values::is_stale_marker(values.value(row))
                     });
                     Some(in_window && !stale)
                 })

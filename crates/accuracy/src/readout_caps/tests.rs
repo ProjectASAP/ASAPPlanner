@@ -1,15 +1,15 @@
 use super::*;
-use asap_types::ir::operator::arguments::{BinaryOpKind, PromQLVectorSetOpKind, Reduction};
+use asap_types::ir::operator::arguments::{PromQLVectorSetOpKind, Reduction};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
-use asap_types::ir::{BinaryOperator, NonASAPOp, Operator, QueryRoot};
+use asap_types::ir::QueryRoot;
 use asap_types::stages::MemoQuery;
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
 use asap_types::test_support::memo_builders::{
     estimate, group, own_candidate, quantile_over_time, query, scan_group, sketch_state,
     with_series,
 };
-use asap_types::test_support::memo_fixtures::{aggregate, arithmetic};
+use asap_types::test_support::memo_fixtures::{aggregate, arithmetic, set_operator};
 
 /// The levels [`readout_levels`] gives the readout candidate `readout`.
 fn levels_of(memo: &Memo, readout: MemoGroupId) -> Vec<RequiredAccuracy> {
@@ -163,19 +163,6 @@ fn a_readout_of_one_value_keeps_the_whole_failure_probability() {
 /// both sides and stays composed.
 #[test]
 fn an_and_combines_no_readout_errors() {
-    let set_op = |kind, lhs, rhs| {
-        Operator::NonASAP(NonASAPOp::BinaryOp {
-            operator: BinaryOperator {
-                checked_relative_division: false,
-                checked_finite_division: false,
-                kind: BinaryOpKind::Set(kind),
-                vector_match: None,
-            },
-            return_bool: false,
-            lhs,
-            rhs,
-        })
-    };
     let target = AccuracyTarget::max_error(0.05)
         .failure_probability(0.01)
         .accuracy_metric(AccuracyMetric::Relative);
@@ -183,7 +170,7 @@ fn an_and_combines_no_readout_errors() {
         let mut memo = Memo::new(&with_series("m", 100));
         let (_, state, p90) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
         let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
-        let root = group(&mut memo, set_op(kind, p90, p50));
+        let root = group(&mut memo, set_operator(kind, p90, p50));
         memo.add_query(MemoQuery {
             root: QueryRoot::Operator(root),
             accuracy_target: Some(target.clone()),
@@ -203,4 +190,41 @@ fn an_and_combines_no_readout_errors() {
     assert_eq!(right, vec![]);
     let (left, right) = readouts_under(PromQLVectorSetOpKind::Or);
     assert!(left.len() > 1 && right.len() > 1, "{left:?}, {right:?}");
+}
+
+/// A count reads which readouts exist, not their values (β = 0), so an
+/// operator above it combines no error of them:
+/// `quantile_over_time(0.9, m[5m]) / count(quantile_over_time(0.5, m[5m]))`
+/// over 100 series at relative error 0.05 and δ = 0.01 reads one
+/// readout's error. The p90 readout gets the single level of its cap,
+/// 0.05 · (1 − 0.1) = 0.045 (the division's factor 1 / (1 − 0.1)) at
+/// 1e-4 per value, not the composed grid.
+#[test]
+fn an_operator_above_a_count_of_readouts_combines_one_readout_error() {
+    let mut memo = Memo::new(&with_series("m", 100));
+    let (_, state, p90) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
+    let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
+    let count = group(
+        &mut memo,
+        aggregate(Reduction::by(vec![]), AggIntent::Count, p50),
+    );
+    let ratio = group(&mut memo, arithmetic(ArithmeticOpKind::Div, p90, count));
+    memo.add_query(MemoQuery {
+        root: QueryRoot::Operator(ratio),
+        accuracy_target: Some(
+            AccuracyTarget::max_error(0.05)
+                .failure_probability(0.01)
+                .accuracy_metric(AccuracyMetric::Relative),
+        ),
+        number_of_values_per_query_evaluation: Some(100),
+    });
+    let levels = levels_of(&memo, p90);
+    let [required] = levels[..] else {
+        panic!("one level for the p90 readout: {levels:?}");
+    };
+    assert!((required.max_error - 0.045).abs() < 1e-12, "{required:?}");
+    assert!(
+        (required.failure_probability - 1e-4).abs() < 1e-12,
+        "{required:?}"
+    );
 }

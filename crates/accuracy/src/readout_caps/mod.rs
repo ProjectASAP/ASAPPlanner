@@ -58,8 +58,9 @@ pub struct ReadoutRequiredAccuracy {
 /// - A query whose path reads one readout group gives one level: its target
 ///   divided by the path's factor, the readout group's cap, at the target's
 ///   failure probability per readout value ([`query_levels`]).
-/// - A composed query (several readout groups, such as a ratio) gives every
-///   level of the grid [`MAX_ERROR_LEVELS`] × [`failure_probability_levels`]
+/// - A composed query (several readouts whose errors reach its output,
+///   β > 0, such as a ratio; `q and r` reads one, since `r`'s values are
+///   not read: [`composed_queries`]) gives every level of the grid [`MAX_ERROR_LEVELS`] × [`failure_probability_levels`]
 ///   not looser than the cap and the per-value failure probability (the cap
 ///   itself when no error level is), one δ level of 1 when the target sets
 ///   no failure probability.
@@ -282,11 +283,13 @@ pub(crate) fn caps(
 }
 
 /// The queries that combine several readouts: a candidate they reach has
-/// two or more inputs below which a readout group lies and whose error
-/// reaches its output ($\beta > 0$ in a metric of its error contract,
-/// [`caps`]): a ratio of two quantiles. `q and r` is not composed: its
-/// output copies `q`'s values and reads only which series `r` has
-/// ($\beta = 0$), so `q`'s readout keeps the single level of its cap.
+/// two or more inputs below which lies a readout whose error reaches its
+/// output ($\beta > 0$ in a metric of its error contract, [`caps`] — a
+/// readout reaches the input through β > 0 at every step below): a
+/// ratio of two quantiles. `q and r` is not composed: its output copies
+/// `q`'s values and reads only which series `r` has ($\beta = 0$), so
+/// `q`'s readout keeps the single level of its cap. Neither is
+/// `q / count(r)`: the count reads no value of `r`.
 /// Readouts of one value by different summary types are alternatives in
 /// one group's candidates, not a combination.
 fn composed_queries(
@@ -299,7 +302,6 @@ fn composed_queries(
     let mut composed = BTreeSet::new();
     for &group in order {
         let candidates = &memo.groups()[group.0 as usize].candidates;
-        let mut any_input_reading = false;
         let mut most_inputs_reading_with_error = 0;
         for (candidate, contract_per_metric) in
             candidates.iter().zip(&error_contract[group.0 as usize])
@@ -308,7 +310,6 @@ fn composed_queries(
             let inputs_reading: Vec<usize> = (0..children.len())
                 .filter(|&input| reads_a_readout[children[input].0 as usize])
                 .collect();
-            any_input_reading |= !inputs_reading.is_empty();
             let inputs_reading_with_error = inputs_reading
                 .into_iter()
                 .filter(|&input| {
@@ -329,7 +330,8 @@ fn composed_queries(
                     .copied(),
             );
         }
-        reads_a_readout[group.0 as usize] = readout_groups.contains(&group) || any_input_reading;
+        reads_a_readout[group.0 as usize] =
+            readout_groups.contains(&group) || most_inputs_reading_with_error > 0;
     }
     composed
 }

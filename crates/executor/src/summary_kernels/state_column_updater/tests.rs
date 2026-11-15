@@ -52,7 +52,7 @@ fn an_exact_sum_column_takes_non_finite_values() {
     let mut updater = StateColumnUpdater::new(&rate, None).unwrap();
     updater.ensure_groups(1).unwrap();
     assert!(updater.update(0, f64::NAN, 0).is_err());
-    let stale = f64::from_bits(crate::operators::STALE_MARKER);
+    let stale = f64::from_bits(crate::values::STALE_MARKER);
     let count = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
     for column in [sum, count] {
         let mut updater = StateColumnUpdater::new(&column, None).unwrap();
