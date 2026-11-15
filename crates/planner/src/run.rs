@@ -170,7 +170,7 @@ fn elapsed_ms(started: Instant) -> f64 {
 
 /// The planner pipeline behind the optimization-pass interface: the
 /// workload's roots in entry order, those of a time-series language
-/// ([`asap_types::workload::QueryLanguage::has_series_identity`]: PromQL and
+/// ([`asap_types::workload::QueryLanguage::reads_time_series`]: PromQL and
 /// MetricsQL) with each series' full identity as a column (the row
 /// representation per-series state needs at runtime; a root with no such
 /// representation is planned over its labels alone), through
@@ -186,7 +186,12 @@ impl OptimizationPass for Stage1ToStage3Pass {
 
     fn optimize(&self, input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
         let workload = input.workload;
-        let series_identity = workload.query_workload().language.has_series_identity();
+        // Time-series rows are keyed by each series' full label set: the
+        // `PROMQL_SERIES_IDENTITY` column, added to every root before Stage
+        // 0. `rate(requests_total[5m])` keeps one rate per series, each
+        // series `{"__name__":"requests_total","instance":"a","job":"j1"}`
+        // one identity. Table rows have no such identity.
+        let series_identity = workload.query_workload().language.reads_time_series();
         let mut roots: Vec<(usize, QueryRoot)> = workload
             .operator_indices()
             .iter()

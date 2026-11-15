@@ -11,17 +11,16 @@
 //! query's.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
-use asap_executor::physical_planner::compile;
-use asap_executor::runtime::{Limits, RunContext, Scope};
-use asap_executor::values::Batch;
+use asap_executor::runtime::Scope;
 use asap_planner::{
     plan_installable, FrontendInput, InstallablePlan, PlanningModels, PlanningWorkload, UserInput,
 };
-use futures::{executor::block_on, StreamExt};
 
-use crate::time_series::{answers, time_series_tables, Answer, RawDataSample};
+use crate::time_series::{
+    answers, assert_answers_near_relative, query_roots, run, sample, time_series_tables, Answer,
+    RawDataSample,
+};
 
 /// When every query is evaluated: the end of the first hour.
 const EVALUATION_MS: i64 = 3_600_000;
@@ -82,19 +81,6 @@ async fn plan_promql(query: &str) -> InstallablePlan {
     .0
 }
 
-/// One sample of `metric` for series `(instance, job)`.
-fn sample(metric: &str, instance: &str, job: &str, timestamp_ms: i64, value: f64) -> RawDataSample {
-    RawDataSample {
-        labels: BTreeMap::from([
-            ("__name__".to_string(), metric.to_string()),
-            ("instance".to_string(), instance.to_string()),
-            ("job".to_string(), job.to_string()),
-        ]),
-        timestamp_ms,
-        value,
-    }
-}
-
 /// Four series of each metric (instances `a`..`d`, jobs `j1` and `j2`),
 /// sampled every 15 s from 8 minutes before [`EVALUATION_MS`] through it:
 /// `requests_total` grows by `index + 1` per sample, and `latency` cycles
@@ -107,8 +93,9 @@ fn samples() -> Vec<RawDataSample> {
             let timestamp_ms = EVALUATION_MS - 480_000 + step * 15_000;
             let count = (index as f64 + 1.0) * step as f64;
             let latency = index as f64 * 10.0 + (step % 7) as f64;
-            samples.push(sample("requests_total", instance, job, timestamp_ms, count));
-            samples.push(sample("latency", instance, job, timestamp_ms, latency));
+            let labels = [("instance", *instance), ("job", *job)];
+            samples.push(sample("requests_total", &labels, timestamp_ms, count));
+            samples.push(sample("latency", &labels, timestamp_ms, latency));
         }
     }
     samples
@@ -118,27 +105,11 @@ fn samples() -> Vec<RawDataSample> {
 /// sorted by labels: the executor compiles the plan and runs its root at
 /// query time over the raw samples.
 fn query_answers(plan: &InstallablePlan, samples: &[RawDataSample]) -> Vec<Answer> {
-    let roots: Vec<u64> = plan.dag.roots.iter().map(|&root| root as u64).collect();
-    let compiled = compile(&plan.dag, &[], &roots).expect("the executor compiles the plan");
-    let instance = compiled
-        .instantiate(Arc::new(time_series_tables(&plan.dag, samples)))
-        .unwrap();
-    let batches: Vec<Batch> = block_on(async {
-        let scope = Scope::Query {
-            evaluation_time_ms: EVALUATION_MS,
-        };
-        let context = RunContext::new(scope, Limits::default()).unwrap();
-        let mut output = instance
-            .execute(compiled.roots(), context)
-            .unwrap()
-            .remove(0);
-        let mut batches = Vec::new();
-        while let Some(batch) = output.next().await {
-            batches.push((*batch.unwrap()).clone());
-        }
-        batches
-    });
-    answers(&batches)
+    let scope = Scope::Query {
+        evaluation_time_ms: EVALUATION_MS,
+    };
+    let store = time_series_tables(&plan.dag, samples);
+    answers(&run(&plan.dag, store, &query_roots(plan), scope)[0])
 }
 
 /// Each query written in MetricsQL plans and installs: the executor
@@ -217,17 +188,29 @@ async fn metricsql_queries_answer_as_promql_does() {
             "{query}"
         );
         let Some(expected) = expected else { continue };
-        assert_eq!(
-            metricsql_answers.len(),
-            expected.len(),
-            "{query}: {metricsql_answers:?}"
-        );
-        for (answer, expected) in metricsql_answers.iter().zip(&expected) {
-            assert_eq!(answer.0, expected.0, "{query}: {metricsql_answers:?}");
-            assert!(
-                (answer.1 - expected.1).abs() <= 1e-9 * expected.1,
-                "{query}: {metricsql_answers:?}"
-            );
-        }
+        assert_answers_near_relative(&metricsql_answers, &expected, 1e-9);
     }
+}
+
+/// `avg by (job)(latency)` in MetricsQL averages each job's series at T, as
+/// its PromQL form does: `j1` holds series `a` (latency 4 at step 32) and
+/// `b` (14), so 9; `j2` holds `c` (24) and `d` (34), so 29. A plan whose
+/// rows lack the series identity plans and runs without any error, yet
+/// answers a different average, so this checks the values, not only that
+/// the query plans.
+#[tokio::test]
+async fn metricsql_grouped_average_averages_every_series_of_each_group() {
+    let query = "avg by (job)(latency)";
+    let job = |name: &str| BTreeMap::from([("job".to_string(), name.to_string())]);
+    let expected = vec![(job("j1"), 9.0), (job("j2"), 29.0)];
+    let samples = samples();
+    let metricsql = plan_metricsql(query)
+        .await
+        .unwrap_or_else(|e| panic!("{query} as MetricsQL: {e}"));
+    let metricsql_answers = query_answers(&metricsql, &samples);
+    assert_answers_near_relative(&metricsql_answers, &expected, 1e-9);
+    assert_eq!(
+        metricsql_answers,
+        query_answers(&plan_promql(query).await, &samples)
+    );
 }
