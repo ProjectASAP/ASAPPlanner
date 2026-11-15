@@ -44,8 +44,9 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
 ///   `ASSUMED_VALUE_KEY_BYTES`;
 /// - DDSketch and KMV: the rows the state folds, at least one (any number
 ///   when unknown), each a distinct item for KMV; a DDSketch's values span
-///   `value_magnitude` when declared (its bins are `ceil(log_γ(max_abs /
-///   min_abs))` for its α; this DDSketch has no bin limit to cap them),
+///   `input_rows.value_magnitude` when declared (its bins are
+///   `ceil(log_γ(max_abs / min_abs))` for its α; this DDSketch has no bin
+///   limit to cap them),
 ///   else `DDSKETCH_ASSUMED_VALUE_RANGE`, and fill its negative store too
 ///   unless proven non-negative.
 ///
@@ -69,12 +70,9 @@ pub fn summary_shape(
     family: &FieldDataType,
     parameters: Option<&SketchParams>,
     input_rows: StateInputRows,
-    value_magnitude: Option<ValueMagnitude>,
 ) -> Result<(f64, u64), AnalyticalCostError> {
     Ok(match (family, parameters) {
-        (FieldDataType::Sketch(..), Some(parameters)) => {
-            sketch_shape(parameters, input_rows, value_magnitude)
-        }
+        (FieldDataType::Sketch(..), Some(parameters)) => sketch_shape(parameters, input_rows),
         (FieldDataType::Sketch(..), None) => return Err(AnalyticalCostError::UnsupportedCandidate),
         (FieldDataType::ExactAggregate(..), _) => (1.0, EXACT_ACCUMULATOR_STATE_BYTES),
         _ => (1.0, 8),
@@ -82,8 +80,8 @@ pub fn summary_shape(
 }
 
 /// What one summary state's bytes depend on besides its parameters (only
-/// a KLL's, a DDSketch's and a KMV's do): the input rows it folds and the
-/// sign of their values.
+/// a KLL's, a DDSketch's and a KMV's do): the input rows it folds, the
+/// sign of their values and, for a DDSketch, their magnitudes.
 /// The rows are whatever its producer emits (raw data samples, rates, sums),
 /// not a summary sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -95,6 +93,11 @@ pub struct StateInputRows {
     /// Whether every value folded is proven non-negative (raw data samples of
     /// sources declared non-negative), so a DDSketch fills no negative store.
     pub non_negative: bool,
+    /// Bounds on `|value|` of the non-zero values folded into the state;
+    /// `None` when not declared, which prices a DDSketch over the assumed
+    /// `DDSKETCH_ASSUMED_VALUE_RANGE`. E.g. `Some(ValueMagnitude { min_abs:
+    /// 0.001, max_abs: 10000.0 })` for a latency in seconds.
+    pub value_magnitude: Option<ValueMagnitude>,
 }
 
 impl StateInputRows {
@@ -102,18 +105,15 @@ impl StateInputRows {
     pub const UNKNOWN: Self = Self {
         rows_per_state: None,
         non_negative: false,
+        value_magnitude: None,
     };
 }
 
 /// [`summary_shape`] of one sketch: its update operations per row and its
-/// bytes per state. With [`StateInputRows::UNKNOWN`] and no
-/// `value_magnitude`, the bytes are also the size the measured table
-/// interpolates between (`crate::measured`).
-pub fn sketch_shape(
-    params: &SketchParams,
-    input_rows: StateInputRows,
-    value_magnitude: Option<ValueMagnitude>,
-) -> (f64, u64) {
+/// bytes per state. With [`StateInputRows::UNKNOWN`], the bytes are also the
+/// size the measured table interpolates between
+/// (`crate::measured`).
+pub fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, u64) {
     use asap_sketchlib::{
         Classic, CountMinF64, CountMinSketchWithHeap, CountSketch, CountSketchWithHeap, DataInput,
         DdSketch, HyperLogLog, Kmv, RegularPath, UnivMon, Vector2D,
@@ -123,9 +123,7 @@ pub fn sketch_shape(
         usize::try_from(rows.max(1)).unwrap_or(usize::MAX)
     });
     match params {
-        SketchParams::Hydra(hydra) => {
-            sketch_shape(&hydra.per_subpopulation(), input_rows, value_magnitude)
-        }
+        SketchParams::Hydra(hydra) => sketch_shape(&hydra.per_subpopulation(), input_rows),
         SketchParams::Cms { width, depth } => (
             f64::from(*depth),
             CountMinF64::estimated_memory_bytes(*depth as usize, *width as usize) as u64,
@@ -173,10 +171,11 @@ pub fn sketch_shape(
             (1.0, std::mem::size_of::<DdSketch>() as u64)
         }
         SketchParams::DDSketch { alpha } => {
-            let ValueMagnitude { min_abs, max_abs } = value_magnitude.unwrap_or(ValueMagnitude {
-                min_abs: 1.0,
-                max_abs: DDSKETCH_ASSUMED_VALUE_RANGE,
-            });
+            let ValueMagnitude { min_abs, max_abs } =
+                input_rows.value_magnitude.unwrap_or(ValueMagnitude {
+                    min_abs: 1.0,
+                    max_abs: DDSKETCH_ASSUMED_VALUE_RANGE,
+                });
             (
                 1.0,
                 DdSketch::estimated_memory_bytes(

@@ -564,8 +564,8 @@ fn a_ddsketch_over_a_scan_is_priced_at_its_declared_value_magnitude() {
             StateInputRows {
                 rows_per_state: Some(600),
                 non_negative: false,
+                value_magnitude: magnitude,
             },
-            magnitude,
         )
         .1
     };
