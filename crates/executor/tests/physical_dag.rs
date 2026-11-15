@@ -282,7 +282,10 @@ fn exact_integer_and_empty_extrema() {
         .add(
             1,
             vec![0],
-            Operator::aggregate(schema, vec![], vec![("min".into(), Reduction::Min(0))]).unwrap(),
+            Operator::aggregate(schema, vec![], vec![("min".into(), Reduction::Min(0))])
+                .unwrap()
+                .with_emit_empty_global(None)
+                .unwrap(),
         )
         .unwrap();
     assert!(matches!(run(&empty, 1, query())[0][0], Value::Null));
@@ -614,7 +617,8 @@ fn bind_physical_asap_dag_before_execution() {
     assert!(bind(&scanned, data(), &[1]).is_err());
 }
 
-// A completed empty population has an exact zero count, with integer output.
+// A completed empty population of a global SQL count has an exact zero
+// count, with integer output.
 #[test]
 fn empty_exact_count_is_an_integer_state_evaluation() {
     let input = schema(&[("value", DataType::Float64, false)]);
@@ -626,6 +630,8 @@ fn empty_exact_count_is_an_integer_state_evaluation() {
         None,
         vec![],
     )
+    .unwrap()
+    .with_emit_empty_global(None)
     .unwrap();
     let read = Operator::evaluation(
         build.schema(),
@@ -1251,7 +1257,12 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
         let join = if certified {
             Operator::certified_semi_join(schema.clone(), schema.clone(), vec![(0, 0)]).unwrap()
         } else {
-            compile_node(&node, &[schema.clone(), schema.clone()]).unwrap()
+            compile_node(
+                &node,
+                &[schema.clone(), schema.clone()],
+                planner_types::ir::OperatorResultKind::Relation,
+            )
+            .unwrap()
         };
         // Each side is a leaf holding its keys.
         let plan = |left: Vec<&str>, right: Vec<&str>| {
@@ -1355,7 +1366,12 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         selected_physical_candidate: None,
         view_coverage: None,
     };
-    let binary = compile_node(&node, &[input.clone(), input.clone()]).unwrap();
+    let binary = compile_node(
+        &node,
+        &[input.clone(), input.clone()],
+        planner_types::ir::OperatorResultKind::InstantVector,
+    )
+    .unwrap();
     for (right, expected) in [
         (vec![("b", 2, 3.), ("a", 1, 2.)], Some(vec![8., 17.])),
         (vec![("b", 2, 3.)], None),
