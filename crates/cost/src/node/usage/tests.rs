@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use asap_types::ir::properties::ExecutionDataState;
 use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::Field;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode;
 use asap_types::plan::time_window::{InputTimeAccess, TimeIndexedPlan};
 use asap_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
@@ -134,6 +135,51 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
     assert_eq!(
         merge_usage.cpu_ops_per_second,
         5_000.0 * crate::node::operation_counts::DDSKETCH_MERGE_OPERATIONS_PER_STATE
+    );
+}
+
+/// A merge over a time range of a Rate chain's windows reads Rate
+/// accumulator states, though the time range has no family and the merge
+/// no θ: its output's state column names the family, so each of the 5,000
+/// states read costs a counter-increase merge (350 operations), not a
+/// plain exact accumulator's (230).
+#[test]
+fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let windows = node(Payload::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_secs(300),
+        kind: TimeRangeKind::Range,
+        child: 0,
+    }));
+    let windows_output = ProducerOutput {
+        payload: &windows.payload,
+        output_schema: &windows.output_schema,
+        output: EdgeStatistics {
+            rows: 5_000,
+            bytes: 5_000 * asap_types::summary_type::EXACT_ACCUMULATOR_STATE_BYTES,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::None,
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 5,
+    };
+    let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
+        children: vec![0],
+        group_by: None,
+    }));
+    merge.output_schema = Schema::new(vec![Field::new(
+        "state",
+        FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+        false,
+    )]);
+    let merge_usage =
+        node_resource_usage_and_cost(&merge, &[windows_output], (1, 1.0), None, &data, &settings)
+            .unwrap();
+    assert_eq!(merge_usage.family, StateFamily::Exact(&ExactKind::Rate));
+    assert_eq!(
+        merge_usage.cpu_ops_per_second,
+        5_000.0 * crate::node::operation_counts::COUNTER_MERGE_OPERATIONS_PER_STATE
     );
 }
 
