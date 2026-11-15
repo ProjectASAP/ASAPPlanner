@@ -14,7 +14,7 @@ use asap_executor::runtime::{Limits, OutputStream, RunContext, Scope};
 use asap_executor::sources::{
     DataStore, InMemoryDataStore, MaterializedViewRequest, RawDataRequest,
 };
-use asap_executor::values::{Batch, Value};
+use asap_executor::values::Batch;
 use asap_executor::Error as ExecutorError;
 use asap_planner::{
     plan_installable, CostInputs, DeploymentCapabilities, FrontendInput, InstallablePlan,
@@ -26,7 +26,7 @@ use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 
 use futures::{executor::block_on, StreamExt};
 
-use time_series::{series_labels, time_series_tables, RawDataSample};
+use time_series::{answers, time_series_tables, Answer, RawDataSample};
 
 /// Example 4b's evaluation time: the end of the 60-minute window.
 const EVALUATION_MS: i64 = 3_600_000;
@@ -136,28 +136,6 @@ fn run(
         }))
         .await
     })
-}
-
-/// One answer row: its series labels and its value.
-type Answer = (BTreeMap<String, String>, f64);
-
-/// Each answer row as its series labels and value, sorted by labels.
-fn answers(batches: &[Batch]) -> Vec<Answer> {
-    let mut answers: Vec<_> = batches
-        .iter()
-        .flat_map(|batch| {
-            batch.to_rows().into_iter().map(|row| {
-                let labels = series_labels(batch.schema(), &row);
-                let value = row.iter().find_map(|v| match v {
-                    Value::Float64(v) => Some(*v),
-                    _ => None,
-                });
-                (labels, value.expect("a Float64 answer"))
-            })
-        })
-        .collect();
-    answers.sort_by(|a, b| a.0.cmp(&b.0));
-    answers
 }
 
 /// The plan for `queries` on a deployment that keeps no raw samples, and
