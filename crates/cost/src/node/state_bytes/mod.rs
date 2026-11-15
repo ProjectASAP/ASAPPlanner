@@ -6,7 +6,7 @@ use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{DataType, FieldDataType, Schema};
 use asap_types::summary_type::KLL_MAX_K;
 use asap_types::summary_type::{SketchParams, EXACT_ACCUMULATOR_STATE_BYTES};
-use asap_types::workload::ValueMagnitude;
+use asap_types::workload::ValueMagnitudeRange;
 
 /// Plain values are 8 bytes, strings 16; summary columns are sized apart.
 pub fn row_bytes(schema: &Schema) -> u64 {
@@ -44,11 +44,12 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
 ///   `ASSUMED_VALUE_KEY_BYTES`;
 /// - DDSketch and KMV: the rows the state folds, at least one (any number
 ///   when unknown), each a distinct item for KMV; a DDSketch's values span
-///   `input_rows.value_magnitude` when declared (its bins are
-///   `ceil(log_γ(max_abs / min_abs))` for its α; this DDSketch has no bin
-///   limit to cap them),
-///   else `DDSKETCH_ASSUMED_VALUE_RANGE`, and fill its negative store too
-///   unless proven non-negative.
+///   `input_rows.value_magnitude_range` when declared, else
+///   `DDSKETCH_ASSUMED_MAGNITUDE`, and fill its negative store too unless
+///   proven non-negative. Its bins are the bucket indices from
+///   ⌊log_γ min_abs⌋ to ⌊log_γ max_abs⌋, at least one, for γ = (1 + α) /
+///   (1 - α); this DDSketch has no bin limit to cap them. E.g. α = 0.01
+///   over [0.001, 10000] takes indices -346 to 460, 807 bins.
 ///
 /// KLL is priced without the library's estimate: its fixed bytes
 /// (`kll_fixed_bytes`: the struct and its level array) plus the 8-byte
@@ -90,14 +91,15 @@ pub struct StateInputRows {
     /// `None` when unknown, which sizes it for every value it can be assumed
     /// to see.
     pub rows_per_state: Option<u64>,
-    /// Whether every value folded is proven non-negative (raw data samples of
-    /// sources declared non-negative), so a DDSketch fills no negative store.
+    /// Whether every value folded is proven non-negative (a source column
+    /// passed on unchanged, which every source declares non-negative), so a
+    /// DDSketch fills no negative store.
     pub non_negative: bool,
     /// Bounds on `|value|` of the non-zero values folded into the state;
-    /// `None` when not declared, which prices a DDSketch over the assumed
-    /// `DDSKETCH_ASSUMED_VALUE_RANGE`. E.g. `Some(ValueMagnitude { min_abs:
-    /// 0.001, max_abs: 10000.0 })` for a latency in seconds.
-    pub value_magnitude: Option<ValueMagnitude>,
+    /// `None` when not declared, which costs a DDSketch over the assumed
+    /// `DDSKETCH_ASSUMED_MAGNITUDE`. E.g. `Some(ValueMagnitudeRange {
+    /// min_abs: 0.001, max_abs: 10000.0 })` for a latency in seconds.
+    pub value_magnitude_range: Option<ValueMagnitudeRange>,
 }
 
 impl StateInputRows {
@@ -105,7 +107,7 @@ impl StateInputRows {
     pub const UNKNOWN: Self = Self {
         rows_per_state: None,
         non_negative: false,
-        value_magnitude: None,
+        value_magnitude_range: None,
     };
 }
 
@@ -171,11 +173,9 @@ pub fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, 
             (1.0, std::mem::size_of::<DdSketch>() as u64)
         }
         SketchParams::DDSketch { alpha } => {
-            let ValueMagnitude { min_abs, max_abs } =
-                input_rows.value_magnitude.unwrap_or(ValueMagnitude {
-                    min_abs: 1.0,
-                    max_abs: DDSKETCH_ASSUMED_VALUE_RANGE,
-                });
+            let ValueMagnitudeRange { min_abs, max_abs } = input_rows
+                .value_magnitude_range
+                .unwrap_or(DDSKETCH_ASSUMED_MAGNITUDE);
             (
                 1.0,
                 DdSketch::estimated_memory_bytes(
@@ -287,12 +287,14 @@ fn univmon_expected_layers(layers: u8) -> f64 {
     2.0 - 2f64.powi(1 - i32::from(layers.max(1)))
 }
 
-/// Ratio of the largest to the smallest value magnitude a DDSketch is
-/// assumed to see: nine decades, e.g. latencies from 1 ns to 1 s, priced as
-/// magnitudes in `[1, 1e9]` (its bins depend on the ratio alone). An
-/// assumption, not workload evidence, for a column whose source declares
-/// no `column_magnitudes`.
-const DDSKETCH_ASSUMED_VALUE_RANGE: f64 = 1e9;
+/// The value magnitudes a DDSketch is assumed to see when its column
+/// declares no `column_magnitudes`: nine decades, e.g. latencies from 1 ns
+/// to 1 s, costed as magnitudes in `[1, 1e9]` (its bins depend on the ratio
+/// alone). An assumption, not workload evidence.
+const DDSKETCH_ASSUMED_MAGNITUDE: ValueMagnitudeRange = ValueMagnitudeRange {
+    min_abs: 1.0,
+    max_abs: 1e9,
+};
 
 #[cfg(test)]
 mod tests;

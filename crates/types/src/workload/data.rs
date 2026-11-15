@@ -85,7 +85,7 @@ pub struct DataWorkload {
     /// family name; its `metric_type`, `column_signs` and
     /// `sample_interval` apply to every series of the family
     /// ([`Self::series_facts`]). Counts, norms and bounds (`series_count`,
-    /// `stream_norms`, …) differ per series name (a `foo_bucket` has one
+    /// `stream_norms`, `column_magnitudes`, …) differ per series name (a `foo_bucket` has one
     /// series per `le`), so they are read from the series' own entry;
     /// pricing a source's own arrival rate reads its `series_count` and
     /// `sample_interval` there together. A source without an entry has no
@@ -122,13 +122,17 @@ pub struct SourceFacts {
     pub column_signs: BTreeMap<String, ValueSign>,
     /// Bounds on the magnitude of each column's non-zero values, keyed by
     /// column name (default: none declared), e.g. `{"value": {"min_abs":
-    /// 0.001, "max_abs": 10000.0}}` for a latency in seconds. A DDSketch
-    /// state built from the column unchanged is priced at the
-    /// `log_γ(max_abs / min_abs)` bins those magnitudes span instead of an
-    /// assumed range of nine decades. The deployment must ensure it.
-    /// Omitted from JSON when empty.
+    /// 0.001, "max_abs": 10000.0}}` for a latency in seconds. Read per
+    /// series name: a histogram or summary family's range does not apply to
+    /// its `_sum`, `_count` or `_bucket` series. A DDSketch state built from
+    /// the column unchanged is costed at the bins those magnitudes span (the
+    /// bucket indices from ⌊log_γ min_abs⌋ to ⌊log_γ max_abs⌋, at least one)
+    /// instead of an assumed range of nine decades. The deployment must
+    /// ensure it: a range that is too narrow can make Stage 3 pick a finer
+    /// and much larger sketch than the default range would. Omitted from
+    /// JSON when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub column_magnitudes: BTreeMap<String, ValueMagnitude>,
+    pub column_magnitudes: BTreeMap<String, ValueMagnitudeRange>,
     /// How often each series of the metric (or group of rows of a SQL
     /// table) receives a sample (default: unknown). A PromQL or MetricsQL
     /// bare instant selector over the metric reads the latest sample within it; lowering such a
@@ -205,7 +209,7 @@ pub struct SourceFacts {
 /// "max_abs": 10000.0}` for latencies from 1 ms to about 3 h in seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ValueMagnitude {
+pub struct ValueMagnitudeRange {
     /// The smallest magnitude of a non-zero value.
     pub min_abs: f64,
     /// The largest magnitude of a value.
@@ -389,13 +393,13 @@ impl DataWorkload {
                 }
             }
             for (column, magnitude) in &facts.column_magnitudes {
-                let ValueMagnitude { min_abs, max_abs } = *magnitude;
+                let ValueMagnitudeRange { min_abs, max_abs } = *magnitude;
                 if !(min_abs.is_finite()
                     && max_abs.is_finite()
                     && 0.0 < min_abs
                     && min_abs <= max_abs)
                 {
-                    return Err(WorkloadError::InvalidValueMagnitude {
+                    return Err(WorkloadError::InvalidValueMagnitudeRange {
                         source_name: source_name.clone(),
                         column: column.clone(),
                         min_abs,
@@ -548,7 +552,7 @@ mod tests {
                 SourceFacts {
                     column_magnitudes: BTreeMap::from([(
                         "value".to_string(),
-                        ValueMagnitude { min_abs, max_abs },
+                        ValueMagnitudeRange { min_abs, max_abs },
                     )]),
                     ..SourceFacts::default()
                 },
@@ -569,7 +573,7 @@ mod tests {
             assert!(
                 matches!(
                     &error,
-                    WorkloadError::InvalidValueMagnitude { source_name, column, .. }
+                    WorkloadError::InvalidValueMagnitudeRange { source_name, column, .. }
                         if source_name == "latency" && column == "value"
                 ),
                 "{min_abs}, {max_abs}: {error:?}"

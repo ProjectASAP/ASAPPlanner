@@ -140,7 +140,7 @@ pub enum WorkloadError {
         "source {source_name}: column_magnitudes for column {column} must have \
          0 < min_abs <= max_abs, both finite, got min_abs {min_abs}, max_abs {max_abs}"
     )]
-    InvalidValueMagnitude {
+    InvalidValueMagnitudeRange {
         source_name: String,
         column: String,
         min_abs: f64,
@@ -201,7 +201,7 @@ mod tests {
                         )]),
                         column_magnitudes: BTreeMap::from([(
                             "value".to_string(),
-                            ValueMagnitude {
+                            ValueMagnitudeRange {
                                 min_abs: 1.0,
                                 max_abs: 1e12,
                             },

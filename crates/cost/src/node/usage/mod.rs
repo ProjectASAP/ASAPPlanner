@@ -28,7 +28,7 @@ use asap_types::plan::physical_asap_dag::{
 use asap_types::stages::{Lifetime, StorageMedium};
 use asap_types::summary_type::{SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate};
 use asap_types::workload::bounds::{
-    declared_non_negative, declared_series, declared_value_magnitude, group_count_bound,
+    declared_non_negative, declared_series, declared_value_magnitude_range, group_count_bound,
     source_name, source_rows_per_ms, unchanged_source_columns,
 };
 use asap_types::workload::DataWorkload;
@@ -374,35 +374,32 @@ pub fn node_resource_usage_and_cost<'a>(
                 .ok_or(AnalyticalCostError::Overflow)?,
         })
     };
-    // Whether a summary built here sees raw data samples (its producer a
-    // scan or a time range) of sources all declared non-negative.
-    let raw_data_samples_non_negative = || {
-        let raw = producers.first().is_some_and(|producer| {
-            matches!(
-                producer.payload,
-                Payload::NonASAP(NonASAPOp::Scan { .. } | NonASAPOp::TimeRange { .. })
-            )
-        });
-        raw && sources
-            .iter()
-            .all(|source| declared_non_negative(data, source))
-    };
-    // The declared magnitudes of the values a summary built here folds:
-    // its `weight` column, when the producer passes it on unchanged from
-    // the sources and every one of them declares its `column_magnitudes`.
-    // E.g. a DDSketch over a scan of `latency` declaring `value` in
-    // [0.001, 10000].
-    let folded_value_magnitude = |update: &SummaryUpdate| {
+    // The source column whose values a summary built here folds: its
+    // `weight` column, when the producer passes that column on unchanged
+    // from the sources. E.g. `value` for a DDSketch over a scan of `latency`
+    // or over a filter on that scan; `None` for a computed weight such as a
+    // rate.
+    let folded_source_column = |update: &SummaryUpdate| -> Option<&str> {
         let SummaryInputExpr::Column(column) = &update.weight else {
             return None;
         };
         let producer = producers.first()?;
         let index = resolve_column_ref(column, producer.output_schema).ok()?;
         let name = producer.output_schema.fields.get(index)?.name.as_str();
-        if !producer.unchanged_columns.contains(name) {
-            return None;
-        }
-        declared_value_magnitude(data, sources.iter().copied(), name)
+        producer.unchanged_columns.contains(name).then_some(name)
+    };
+    // What the sources declare about the values a summary built here folds:
+    // whether every one is non-negative, and their magnitude range, both
+    // from the one folded source column.
+    let folded_values = |update: &SummaryUpdate| {
+        folded_source_column(update).map_or((false, None), |column| {
+            let non_negative = !sources.is_empty()
+                && sources
+                    .iter()
+                    .all(|source| declared_non_negative(data, source, column));
+            let range = declared_value_magnitude_range(data, sources.iter().copied(), column);
+            (non_negative, range)
+        })
     };
     let unary = |output| UnaryEdgeStatistics {
         input,
@@ -713,10 +710,11 @@ pub fn node_resource_usage_and_cost<'a>(
             // At query time, each state sees its group's input rows; at
             // ingestion time, the rows of a window one second of
             // arriving rows does not bound.
+            let (non_negative, value_magnitude_range) = folded_values(update);
             let input_rows = StateInputRows {
                 rows_per_state: (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
-                non_negative: raw_data_samples_non_negative(),
-                value_magnitude: folded_value_magnitude(update),
+                non_negative,
+                value_magnitude_range,
             };
             let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
@@ -760,10 +758,11 @@ pub fn node_resource_usage_and_cost<'a>(
                 .map_err(|_| AnalyticalCostError::Overflow)?,
                 false => input.rows.div_ceil(retained_output_count),
             };
+            let (non_negative, value_magnitude_range) = folded_values(update);
             let input_rows = StateInputRows {
                 rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
-                non_negative: raw_data_samples_non_negative(),
-                value_magnitude: folded_value_magnitude(update),
+                non_negative,
+                value_magnitude_range,
             };
             let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
