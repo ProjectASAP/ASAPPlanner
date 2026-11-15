@@ -173,9 +173,9 @@ fn compile_internal(
         consumers: &consumers,
         roots: &compile_roots,
     };
-    let lifetimes = nodes
+    let lifetimes = ordered
         .iter()
-        .map(|(&id, node)| (id, node.lifetime))
+        .map(|&id| (id, nodes[&id].lifetime))
         .collect();
     let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec(), lifetimes);
     for id in ordered {

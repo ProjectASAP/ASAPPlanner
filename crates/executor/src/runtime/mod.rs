@@ -90,19 +90,21 @@ type ProducerKey = (NodeId, Option<i64>);
 /// it for callers.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NodeRun {
-    /// Query time, a leaf whose rows the store keeps: `Lifetime::None` (a
-    /// raw data slot, or any other leaf such as a constant) or
+    /// Query time, a leaf with `Lifetime::None` (a raw data slot, or any
+    /// other leaf such as a constant, whose rows the operator keeps) or
     /// `AcrossEvaluations` (a materialized view slot, or raw data kept at
-    /// ingestion). Each consumer reads it on its own and nothing is held.
+    /// ingestion, whose rows a store keeps). Each consumer reads it on its own and nothing is held.
     /// Stage 3 never gives a query-time `None` result more than one
     /// consumer; a view slot, or a leaf in a hand-built DAG, may have
     /// several. Example: an `AcrossEvaluations` scan read by two queries is
     /// two store reads.
     ReadPerConsumer,
-    /// Query time, a `OneEvaluation` node (computed or a leaf), or a computed
-    /// `AcrossEvaluations` node, with more than one consumer: run to the end
-    /// once before any consumer reads it, then read by each consumer, as the
-    /// planner charges one run whose output is held. Example: a
+    /// Query time, a `OneEvaluation` node (computed or a leaf) with more
+    /// than one consumer: run to the end once before any consumer reads it,
+    /// then read by each consumer, as the planner charges one run whose
+    /// output is held. Likewise a computed `AcrossEvaluations` node with
+    /// more than one consumer, which only a hand-built DAG has at query time
+    /// (a compiled plan reads it through its view slot). Example: a
     /// `OneEvaluation` scan read by three queries is one store read whose
     /// batches every query reads.
     Held,
@@ -270,17 +272,17 @@ fn start<'r, V: 'r, S: Clone + PartialEq + Debug + 'r>(
 /// batches the others hold.
 type RunProducers<'a, V> = Rc<RefCell<Vec<Weak<RefCell<Producer<'a, V>>>>>>;
 
-/// One run of a node, read by every consumer it has in the run.
+/// One run of a node, read by its consumers in the run (one, for a leaf
+/// read per consumer).
 struct Producer<'a, V> {
     node: NodeId,
     operation: String,
     stream: Option<OutputStream<'a, V>>,
     size: Box<dyn Fn(&V) -> usize + 'a>,
     context: RunContext,
-    /// At query time, a materialized node with several consumers
-    /// ([`NodeRun::Held`]) is computed to the end before any consumer reads
-    /// it, and its batches stay charged to the run until every consumer has
-    /// read them.
+    /// At query time, a [`NodeRun::Held`] node is computed to the end before
+    /// any consumer reads it, and its batches stay charged to the run until
+    /// every consumer has read them.
     hold_until_finished: bool,
     /// How many consumers subscribe to it in the run; its stream is dropped
     /// early only once all have subscribed and all have left.
@@ -312,7 +314,10 @@ impl<V> Producer<'_, V> {
     /// not yet read are released. The stream is kept, and dropped with the
     /// node's last input: the producer that saw the cancellation may be
     /// borrowed up the poll stack, and an input inside this stream, of
-    /// another consumer of it, would borrow it again on drop.
+    /// another consumer of it, would borrow it again on drop. So state an
+    /// operator keeps inside its stream (for example an accumulator's
+    /// reserved bytes) is freed only when the caller drops the run's
+    /// inputs, as callers do after `Cancelled`.
     fn cancel(&mut self) {
         if self.failure != Some(Error::Cancelled) {
             self.end(Some(Error::Cancelled));
