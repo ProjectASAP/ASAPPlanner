@@ -156,9 +156,10 @@ The contracts are used in three places:
   and metric. A query that reads one readout gives it one level, its cap
   at the target's failure probability per value (a whole-result δ split
   over the larger of the values one evaluation returns and the readout
-  group's values per evaluation, `Memo::max_values_per_evaluation`, since a
-  `max` over many readouts fails
-  when any of them does); a count, and the right input of `and` and
+  values the query's output can depend on, summed over every readout group
+  below it, `Memo::max_values_per_evaluation` each, since a `max` over many
+  readouts fails when any of them does, and `max by (job) (q or r)` reads
+  the readouts of both sides); a count, and the right input of `and` and
   `unless`, read no value and pass no cap down; a query that combines
   several readouts whose errors reach its output (β > 0: a ratio of two
   quantiles; `q and r` reads one, since `r`'s values are not read, and so

@@ -78,10 +78,11 @@ unknown (generic HLL) serves no query with an accuracy target
 heap size and its value guarantee alone (the contracts table).
 
 Pass 2 gives each sketch readout the error and per-value failure probability
-`δ / max(V, R)` it must meet, with `R` the readout group's values per
-evaluation (the series its scans read): a `max` over 1000 readouts returns
+`δ / max(V, R)` it must meet, with `R` the readout values the query's output
+can depend on (the values per evaluation of every readout group below it,
+summed: the series their scans read): a `max` over 1000 readouts returns
 one value yet fails when any readout does, so the union bound gives δ over
-every readout read;
+every readout read, and `max by (job) (q or r)` reads those of both sides;
 Pass 1's candidate takes the first requirement level and Pass 2 adds a copy
 per further level. A readout several queries reach gets the union of their
 levels. Pass 2 sizes nothing: a state has one build per listed θ, and each
@@ -272,12 +273,17 @@ largest error the readout's output may have for that query.
 
 - A query whose path reads one readout gives one requirement level: the
   target divided by the path's factor, at the target's failure probability per
-  value: a whole-result δ split over the larger of `n_q` and the readout's
-  own values per evaluation (`Memo::max_values_per_evaluation`: at most the
-  series scanned below it, the declared distinct values of its state's keys,
-  one without keys), since a reduction such as `max` fails when any readout
-  it reads does. `SELECT count(DISTINCT dst) FROM flows` at δ = 0.01 reads
-  one distinct count, so its readout keeps 0.01.
+  value: a whole-result δ split over the larger of `n_q` and the readout
+  values the query's output can depend on, summed over every readout group
+  below it (`Memo::max_values_per_evaluation` each: at most the series
+  scanned below it, the declared distinct values of its state's keys, one
+  without keys), since a reduction such as `max` fails when any readout it
+  reads does. `SELECT count(DISTINCT dst) FROM flows` at δ = 0.01 reads
+  one distinct count, so its readout keeps 0.01. `max by (job) (q or r)`
+  with 3 series per side reads 6 readout values, so each gets δ / 6; a
+  bare `q or r` copies each output value from one readout value, but its
+  whole result still fails when any of them does, so it too splits δ over
+  the readout values of both sides.
 - A composed query (several readouts whose errors reach its output, `β > 0`,
   such as a ratio; `q and r` reads one, since `r`'s values are not read, and
   `q or r` combines none, since each output value is copied from one side
@@ -292,7 +298,8 @@ largest error the readout's output may have for that query.
   an operator above it combines no error of them (`q / count(r)` reads
   one readout's error).
 - A query whose target sets a failure probability with no per-value one
-  (`n_q` or the readout's values per evaluation unknown) gives no level. A
+  (`n_q` or the values per evaluation of a readout below it unknown) gives
+  no level. A
   readout no query gives a level is pruned
   (`RootPruneReason::ValuesPerEvaluationUnknown`); one another query gives a
   level stays, and the query reads its group only exactly.
