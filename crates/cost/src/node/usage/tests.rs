@@ -273,6 +273,58 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
     );
 }
 
+/// A query-time chain reads its scan's lookback and keeps each row in its
+/// window's range, as a `TimeRange` over the same rows does, besides
+/// updating the row's state. Example: a sum in 60 s windows over 36,000
+/// raw rows, retaining five windows of one group, costs 36,000 × (40
+/// update + 12 range) operations plus five emitted states × 2,500.
+#[test]
+fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
+    use crate::node::operations_per_unit::{
+        CHAIN_EMIT_OPERATIONS_PER_STATE, EXACT_UPDATE_OPERATIONS_PER_ROW,
+        TIME_RANGE_OPERATIONS_PER_ROW,
+    };
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let scan = node(Payload::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries {
+            metric: "latency".to_string(),
+        },
+        predicates: vec![],
+        schema: Schema::default(),
+    }));
+    let rows = ProducerOutput {
+        payload: &scan.payload,
+        output_schema: &scan.output_schema,
+        output: EdgeStatistics {
+            rows: 36_000,
+            bytes: 36_000 * 16,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::None,
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 1,
+    };
+    let chain = PhysicalASAPDAGNode {
+        retention_ms: Some(300_000),
+        ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: 0,
+            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::by(vec![]),
+            filter: None,
+            tumbling_window_width_ms: 60_000,
+        }))
+    };
+    let usage =
+        node_resource_usage_and_cost(&chain, &[rows], (1, 1.0), None, &data, &settings).unwrap();
+    assert_eq!(
+        usage.cpu_ops_per_second,
+        36_000.0 * (EXACT_UPDATE_OPERATIONS_PER_ROW + TIME_RANGE_OPERATIONS_PER_ROW)
+            + 5.0 * CHAIN_EMIT_OPERATIONS_PER_STATE
+    );
+}
+
 /// A query-time node holds its state only
 /// while it computes: bytes × its work per execution × its executions
 /// per second, with no query latency. A KLL state of 2 MB whose own
