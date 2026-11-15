@@ -553,6 +553,10 @@ impl PhysicalASAPDAG {
 /// A node referenced several times from the scalar expressions is one
 /// `ScalarRef` input, as cost lowering reads it once; ids are per node
 /// pointer, so this dedupes by pointer.
+///
+/// Every operator is listed: a new one fails to build here until its input
+/// roles are decided, rather than getting one `Input`.
+#[warn(clippy::wildcard_enum_match_arm)]
 fn edge_roles<C: Copy + PartialEq>(operator: &Operator<C>) -> Vec<(C, EdgeRole)> {
     use EdgeRole::*;
     let inputs: Vec<EdgeRole> = match operator {
@@ -564,12 +568,31 @@ fn edge_roles<C: Copy + PartialEq>(operator: &Operator<C>) -> Vec<(C, EdgeRole)>
             NonASAPOp::Scan { .. }
             | NonASAPOp::Values { .. }
             | NonASAPOp::PromqlVectorFromScalar(_) => vec![],
-            _ => vec![Input],
+            NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Aggregate { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::TimeRange { .. }
+            | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. } => vec![Input],
         },
         Operator::ASAP(op) => match op {
             ASAPOp::SummarySubtract { .. } | ASAPOp::SummaryJoin { .. } => vec![Left, Right],
             ASAPOp::SummaryMerge { children, .. } => vec![Input; children.len()],
-            _ => vec![Input],
+            ASAPOp::SummaryAgg { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. }
+            | ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummaryTumblingWindowChain { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::Extension { .. } => vec![Input],
         },
     };
     let children = operator.children();

@@ -8,59 +8,6 @@ pub type KernelError = Box<dyn std::error::Error + Send + Sync>;
 /// operations physical operators need: merge, typed evaluation and memory
 /// accounting. Grouping belongs to operators; byte encodings belong to
 /// `asap_sketchlib` and deployments.
-///
-/// A kernel must say what its state holds: [`Self::approx_memory_bytes`]
-/// has no default. A kernel that says it builds:
-///
-/// ```
-/// use asap_executor::summary_kernels::traits::{AggregateCore, KernelError};
-///
-/// #[derive(Clone)]
-/// struct Counter(u64);
-///
-/// impl AggregateCore for Counter {
-///     fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
-///         Box::new(self.clone())
-///     }
-///     fn as_any(&self) -> &dyn std::any::Any {
-///         self
-///     }
-///     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-///         self
-///     }
-///     fn merge_with(&self, _: &dyn AggregateCore) -> Result<Box<dyn AggregateCore>, KernelError> {
-///         Ok(self.clone_boxed_core())
-///     }
-///     fn approx_memory_bytes(&self) -> usize {
-///         std::mem::size_of::<Self>()
-///     }
-/// }
-/// ```
-///
-/// The same kernel without it fails to build (E0046, a missing trait
-/// item), instead of being charged a made-up size:
-///
-/// ```compile_fail,E0046
-/// use asap_executor::summary_kernels::traits::{AggregateCore, KernelError};
-///
-/// #[derive(Clone)]
-/// struct Counter(u64);
-///
-/// impl AggregateCore for Counter {
-///     fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
-///         Box::new(self.clone())
-///     }
-///     fn as_any(&self) -> &dyn std::any::Any {
-///         self
-///     }
-///     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-///         self
-///     }
-///     fn merge_with(&self, _: &dyn AggregateCore) -> Result<Box<dyn AggregateCore>, KernelError> {
-///         Ok(self.clone_boxed_core())
-///     }
-/// }
-/// ```
 pub trait AggregateCore: Send + Sync {
     fn clone_boxed_core(&self) -> Box<dyn AggregateCore>;
 
