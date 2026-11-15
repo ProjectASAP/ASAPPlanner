@@ -108,7 +108,7 @@ fn ddsketch_state_bytes_bound_the_library() {
             StateInputRows {
                 rows_per_state,
                 non_negative,
-                value_magnitude: None,
+                value_magnitude_range: None,
             },
         )
         .1
@@ -146,39 +146,39 @@ fn ddsketch_state_bytes_bound_the_library() {
     assert_eq!(priced(Some(10_000), false), priced(None, false));
 }
 
-/// A DDSketch over a column declaring its value magnitudes is priced at
+/// A DDSketch over a column declaring its value magnitudes is costed at
 /// the bins they span, not nine decades. At α = 0.01, γ = 1.01 / 0.99 and
 /// a value `v` falls in bin `floor(ln v / ln γ)`: magnitudes in
 /// [0.001, 10000] take bins -346 to 460, 807 bins, where the default
 /// [1, 1e9] takes 0 to 1036, 1,037. With three or more non-negative rows
 /// the library's bound is `2 (bins + 126)` 8-byte slots plus the struct.
 #[test]
-fn ddsketch_state_bytes_follow_the_declared_value_magnitude() {
+fn ddsketch_state_bytes_follow_the_declared_value_magnitude_range() {
     let alpha = 0.01;
-    let priced = |value_magnitude| {
+    let costed = |value_magnitude_range| {
         sketch_shape(
             &SketchParams::DDSketch { alpha },
             StateInputRows {
                 rows_per_state: Some(600),
                 non_negative: true,
-                value_magnitude,
+                value_magnitude_range,
             },
         )
         .1
     };
     let struct_bytes = std::mem::size_of::<asap_sketchlib::DdSketch>() as u64;
     let bytes_for_bins = |bins: u64| struct_bytes + 8 * 2 * (bins + 126);
-    let latency = ValueMagnitude {
+    let latency = ValueMagnitudeRange {
         min_abs: 0.001,
         max_abs: 10_000.0,
     };
-    assert_eq!(priced(Some(latency)), bytes_for_bins(807));
-    assert_eq!(priced(None), bytes_for_bins(1_037));
-    // Values a narrower range holds fit the priced bytes.
+    assert_eq!(costed(Some(latency)), bytes_for_bins(807));
+    assert_eq!(costed(None), bytes_for_bins(1_037));
+    // Values a narrower range holds fit the costed bytes.
     let values: Vec<f64> = (0..600)
         .map(|i| 10f64.powf(-3.0 + 7.0 * f64::from(i) / 599.0))
         .collect();
-    assert!(library_ddsketch_bytes(alpha, &values) <= priced(Some(latency)));
+    assert!(library_ddsketch_bytes(alpha, &values) <= costed(Some(latency)));
 }
 
 /// A KLL state is charged what `asap_sketchlib` allocates for the
@@ -204,7 +204,7 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
             StateInputRows {
                 rows_per_state,
                 non_negative: true,
-                value_magnitude: None,
+                value_magnitude_range: None,
             },
         )
         .1
@@ -234,7 +234,7 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
 /// Plan selection prices each state the executor builds per group at
 /// what the executor charges for it (#947). Each family is built
 /// through the executor's factory and fed `n` rows shaped as the
-/// pricing assumes: signed values over [`DDSKETCH_ASSUMED_VALUE_RANGE`],
+/// pricing assumes: signed values over [`DDSKETCH_ASSUMED_MAGNITUDE`],
 /// label values of [`ASSUMED_VALUE_KEY_BYTES`] keys for UnivMon, or
 /// keyed rows whose tuple keys are [`ASSUMED_HEAP_KEY_BYTES`] long. The
 /// heap families' shapes are dominated by their heaps. The charge is
@@ -403,7 +403,7 @@ fn state_bytes_bound_the_executors_charge() {
                     // scrambled order, alternating in sign.
                     Rows::Values => {
                         let at = f64::from(i * 7_919 % n) / f64::from(n);
-                        let magnitude = DDSKETCH_ASSUMED_VALUE_RANGE.powf(at);
+                        let magnitude = DDSKETCH_ASSUMED_MAGNITUDE.max_abs.powf(at);
                         let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
                         updater.update_single(sign * magnitude, 0).unwrap();
                     }
@@ -421,7 +421,7 @@ fn state_bytes_bound_the_executors_charge() {
                     StateInputRows {
                         rows_per_state: Some(u64::from(n)),
                         non_negative: false,
-                        value_magnitude: None,
+                        value_magnitude_range: None,
                     },
                 )
                 .1 as usize;
