@@ -477,3 +477,94 @@ fn compaction_latency_charges_each_merge_its_family_s_merge_time() {
         "predicted compaction {compaction_ms} ms, measured merges take at least 180 ms"
     );
 }
+
+/// Partial copies of an ingestion-time node that holds no states (raw rows
+/// a time range keeps, or the values of an exact `Aggregate`) are
+/// concatenated, not merged: the executor merges ingest shards only of
+/// summary state columns. So reading one adds no compaction latency.
+/// Example: `max_over_time(latency[5m])` over 100,000 series sampled every
+/// 1 ms (100 M rows per second, more than one core of ingestion work) with
+/// its 5m time range, and then also its per-series max, kept at ingestion
+/// time: an exact accumulator's merge (230 ns) per row of the 5m window
+/// read would predict seconds of compaction for no merge work.
+#[test]
+fn compaction_latency_is_zero_for_ingestion_time_nodes_holding_no_states() {
+    use asap_types::ir::properties::ExecutionDataState;
+    use asap_types::ir::NonASAPOp;
+    use asap_types::stages::{Lifetime, StorageMedium};
+    let query = Query {
+        promql: "max_over_time(latency[5m])",
+        accuracy_metric: "relative",
+    };
+    let mut heavy = serde_json::to_value(workload(query, TEN_HZ_EVERY_60_S)).unwrap();
+    let data = &mut heavy["data_workload"];
+    data["arrival"]["ingesting"]["rows_per_second"] = serde_json::json!(100_000_000.0);
+    data["sources"]["latency"]["series_count"] = serde_json::json!(100_000);
+    data["sources"]["latency"]["sample_interval"] = serde_json::json!(1);
+    let heavy: PlanningWorkload = serde_json::from_value(heavy).unwrap();
+    let roots = lower_promql_roots(&heavy).unwrap();
+    let (exact, _) =
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&roots)
+            .unwrap();
+    let entries: Vec<_> = heavy.query_workload.entries().collect();
+    let data = heavy.data_workload.as_ref().unwrap();
+    // Scan, then the 5m `TimeRange`, then the per-series max `Aggregate`.
+    let is_time_range = |payload: &PhysicalASAPOperatorPayload| {
+        matches!(
+            payload,
+            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::TimeRange { .. })
+        )
+    };
+    let is_aggregate = |payload: &PhysicalASAPOperatorPayload| {
+        matches!(
+            payload,
+            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate { .. })
+        )
+    };
+    let kept_at_ingestion = |up_to_aggregate: bool| {
+        let mut plan = exact.clone();
+        let ingested: Vec<_> = plan
+            .nodes
+            .iter()
+            .filter(|node| !is_aggregate(&node.payload) || up_to_aggregate)
+            .map(|node| node.id)
+            .collect();
+        for node in &mut plan.nodes {
+            if !ingested.contains(&node.id) {
+                continue;
+            }
+            node.output_state = ExecutionDataState::INGESTION_ROWS;
+            if is_time_range(&node.payload) || is_aggregate(&node.payload) {
+                node.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
+                node.retention_ms = Some(300_000);
+            }
+        }
+        for edge in &mut plan.edges {
+            if ingested.contains(&edge.producer) {
+                *edge.data_state_mut() = ExecutionDataState::INGESTION_ROWS;
+            }
+        }
+        plan
+    };
+    for (kept, plan) in [
+        ("time range", kept_at_ingestion(false)),
+        ("time range and max", kept_at_ingestion(true)),
+    ] {
+        let (cost, _) =
+            asap_cost::plan_cost(&plan, &entries, data, &CostInputs::default()).unwrap();
+        let ingest_ms_per_second: f64 = cost
+            .per_node
+            .values()
+            .filter(|node| node.timing == ExecutionTiming::IngestionTime)
+            .map(|node| node.cpu_core_seconds_per_second * 1_000.0)
+            .sum();
+        assert!(
+            ingest_ms_per_second > 1_000.0,
+            "{kept}: ingestion takes {ingest_ms_per_second} ms per second, one core"
+        );
+        assert_eq!(
+            cost.usage.latency_per_query[0].compaction_ms, 0.0,
+            "{kept} kept at ingestion time"
+        );
+    }
+}
