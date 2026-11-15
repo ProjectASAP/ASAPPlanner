@@ -86,12 +86,7 @@ fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> Operator {
         selected_physical_candidate: None,
         view_coverage: None,
     };
-    compile_node(
-        &node,
-        &[schema.clone(), schema],
-        planner_types::ir::OperatorResultKind::InstantVector,
-    )
-    .unwrap()
+    compile_node(&node, &[schema.clone(), schema], false).unwrap()
 }
 /// `binary` (node 2) over the sources `left` (node 0) and `right` (node 1),
 /// bound to a store with no data: the sources hold their rows.
