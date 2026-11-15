@@ -97,10 +97,7 @@ pub fn plan_cost(
     let mut fit = CalibrationFit::default();
     let speed = settings.resource_speed;
     // Cost model 1 costs each node as it is measured.
-    let unit_costs = match &settings.cost_model {
-        CostModel::UsageOverTime(unit_cost) => Some(unit_cost),
-        _ => None,
-    };
+    let unit_costs = settings.cost_model.unit_costs();
     // Each node's `(multiplier, per_second)` ([`computations`]), then its
     // usage and cost ([`node_resource_usage_and_cost`]), children first.
     let multipliers = computations(dag, entries, settings.non_repeating_query_horizon_seconds)
@@ -403,7 +400,7 @@ pub fn request_overhead_cost_per_second(
     entries: &[QueryWorkloadEntry],
     settings: &CostInputs,
 ) -> Result<f64, AnalyticalCostError> {
-    let CostModel::UsageOverTime(unit_cost) = &settings.cost_model else {
+    let Some(unit_cost) = settings.cost_model.unit_costs() else {
         return Ok(0.0);
     };
     if settings.measured_operation_costs.ns_per_evaluation <= 0.0 {
@@ -423,12 +420,10 @@ pub fn request_overhead_cost_per_second(
 /// `None` under cost models 2 and 3. A plan keeps each source once, for its
 /// scan that keeps the most ([`plan_cost`]).
 pub fn raw_data_disk_cost_per_second(bytes: u64, settings: &CostInputs) -> Option<f64> {
-    match &settings.cost_model {
-        CostModel::UsageOverTime(unit_cost) => {
-            Some(unit_cost.cost_per_disk_byte_second * bytes as f64)
-        }
-        _ => None,
-    }
+    settings
+        .cost_model
+        .unit_costs()
+        .map(|unit_cost| unit_cost.cost_per_disk_byte_second * bytes as f64)
 }
 
 /// The window a query-time `Scan` `node` of `dag` reads per execution: the

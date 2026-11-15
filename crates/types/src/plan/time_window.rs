@@ -23,10 +23,17 @@
 //! read through `TimeWindow { ends_before_evaluation_ms: 60_000,
 //! length_ms: 300_000 }`, `(t - 6m, t - 1m]`, reaching back 360,000 ms.
 
-// The rules here answer per operator; a wildcard arm would give a new
-// operator a default answer instead of failing the build (under
-// `-D warnings`).
-#![warn(clippy::wildcard_enum_match_arm)]
+// The rules here answer per operator, and each lists every operator: a
+// wildcard arm would give a new operator a default answer instead of
+// failing the build (under `-D warnings`). Clippy does not check
+// `matches!` and `let ... else`, so they stay only for a check of one
+// variant's identity, where every other operator's answer is "no" by
+// definition: "is it a `Scan`" (only a raw scan's read at t needs every
+// row) and "is it a `TimeShift`" (the shifts directly below a window).
+#![warn(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
 
 use serde::{Deserialize, Serialize};
 
@@ -389,50 +396,9 @@ pub fn windows_computed_from<P: TimeIndexedPlan>(
         if !seen.insert(id) {
             continue;
         }
-        let length_ms = match plan.operator_of(id) {
-            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
-                u64::try_from(range.as_millis()).ok()?
-            }
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }) => *tumbling_window_width_ms,
-            Operator::NonASAP(
-                NonASAPOp::Scan { .. }
-                | NonASAPOp::Values { .. }
-                | NonASAPOp::Filter { .. }
-                | NonASAPOp::Project { .. }
-                | NonASAPOp::Aggregate { .. }
-                | NonASAPOp::Join { .. }
-                | NonASAPOp::SetOp { .. }
-                | NonASAPOp::Concat { .. }
-                | NonASAPOp::Dedup { .. }
-                | NonASAPOp::Sort { .. }
-                | NonASAPOp::Limit { .. }
-                | NonASAPOp::BinaryOp { .. }
-                | NonASAPOp::SQLWindowFunc { .. }
-                | NonASAPOp::TimeShift { .. }
-                | NonASAPOp::PromqlVectorFromScalar(..)
-                | NonASAPOp::PromqlRelabel { .. }
-                | NonASAPOp::PromqlInfoEnrich { .. }
-                | NonASAPOp::PromqlSeriesSample { .. }
-                | NonASAPOp::PromqlSubquery { .. },
-            )
-            | Operator::ASAP(
-                ASAPOp::SummaryAgg { .. }
-                | ASAPOp::SummaryEstimate { .. }
-                | ASAPOp::FinalizeExactAccumulator { .. }
-                | ASAPOp::MaintainPopulation { .. }
-                | ASAPOp::EvaluatePopulation { .. }
-                | ASAPOp::SummaryMerge { .. }
-                | ASAPOp::SummarySubtract { .. }
-                | ASAPOp::SummaryDelete { .. }
-                | ASAPOp::SummaryJoin { .. }
-                | ASAPOp::Extension { .. },
-            ) => {
-                pending.extend(plan.inputs_of(id));
-                continue;
-            }
+        let Some(length_ms) = plan.operator_of(id).covered_window_ms() else {
+            pending.extend(plan.inputs_of(id));
+            continue;
         };
         windows.push(TimeWindow {
             ends_before_evaluation_ms: shift_back_ms_below(plan, id)?,
@@ -469,211 +435,64 @@ mod tests {
         assert_eq!(shifted.bounds_ms(1_000_000), (640_000, 940_000));
     }
 
-    /// Every operator's input time access, written out by hand: a new
-    /// operator needs a row here, as it needs an arm in
-    /// [`InputTimeAccess::of`]. E.g. `TimeShift(1h)` at query time reads
-    /// what its readers read, an hour earlier; `Aggregate` reads the rows at
-    /// t at either timing. `PromqlSubquery` keeps its current access, the
-    /// rows at t, although it evaluates its input at other times.
+    /// The operators whose input time access is a decision, not the rows
+    /// at t: `TimeShift` by timing and lifetime, `@ end`, `TimeRange` and
+    /// the chain, plus `PromqlSubquery`, which keeps reading the rows at t
+    /// although it evaluates its input at other times. Pins the operators
+    /// that exist today; a new operator fails to build in
+    /// [`InputTimeAccess::of`], and its decision gets a row here.
     #[test]
-    fn every_operator_has_its_input_time_access() {
-        use crate::ir::operator::maintained_population::{
-            CurrentSeriesInput, MaintainedPopulation, PopulationInput, PopulationStatistic,
-        };
-        use crate::ir::operator::{
-            AggIntent, AtModifier, BinaryOpKind, GroupKeys, JoinKind, Reduction,
-            RelationalSetOpKind, SampleKind, Source, TimeShift, WindowFuncKind,
-        };
-        use crate::ir::scalar::{ArithmeticOpKind, ColumnRef};
-        use crate::ir::schema::{FieldDataType, Schema};
-        use crate::ir::{BinaryOperator, Predicate, ScalarExpr, TimeRangeKind};
+    fn operators_with_a_time_access_decision() {
+        use crate::ir::operator::{AggIntent, AtModifier, Reduction, TimeShift};
+        use crate::ir::scalar::ColumnRef;
+        use crate::ir::schema::FieldDataType;
+        use crate::ir::TimeRangeKind;
         use crate::stages::StorageMedium;
-        use crate::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
+        use crate::summary_type::{SketchAlgorithm, SummaryUpdate};
         use std::time::Duration;
         use ExecutionTiming::{IngestionTime, QueryTime};
         use InputRows::*;
 
-        let column = || ScalarExpr::<u32>::Column(0);
-        let predicate = || Predicate(column());
         let non_asap = |op: NonASAPOp<u32>| Operator::NonASAP(op);
-        let asap = |op: ASAPOp<u32>| Operator::ASAP(op);
-        let kll = || FieldDataType::Sketch(SketchAlgorithm::Kll);
-        let sample_value = || SummaryUpdate::column(ColumnRef::SampleValue);
-        let one_hour = |at| TimeShift {
-            offset_ms: 3_600_000,
-            at,
-        };
         let shift = |at| {
             non_asap(NonASAPOp::TimeShift {
-                shift: one_hour(at),
+                shift: TimeShift {
+                    offset_ms: 3_600_000,
+                    at,
+                },
                 child: 0,
             })
         };
         let chain = || {
-            asap(ASAPOp::SummaryTumblingWindowChain {
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 child: 0,
-                summary_type: kll(),
-                input: sample_value(),
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::PerEntity,
                 filter: None,
                 tumbling_window_width_ms: 60_000,
             })
         };
-        // Every operator other than `TimeShift`, `TimeRange` and the chain:
-        // each reads the rows at t, at either timing.
-        let rows_at_t: Vec<Operator<u32>> = vec![
-            non_asap(NonASAPOp::Scan {
-                source: Source::TimeSeries { metric: "m".into() },
-                predicates: vec![],
-                schema: Schema::default(),
-            }),
-            non_asap(NonASAPOp::Values {
-                rows: vec![],
-                schema: Schema::default(),
-            }),
-            non_asap(NonASAPOp::Filter {
-                pred: predicate(),
-                child: 0,
-            }),
-            non_asap(NonASAPOp::Project {
-                cols: vec![],
-                child: 0,
-            }),
-            non_asap(NonASAPOp::Aggregate {
-                reduction: Reduction::PerEntity,
-                measures: vec![AggIntent::Rate],
-                output_names: vec![String::new()],
-                filters: vec![],
-                having: None,
-                child: 0,
-            }),
-            non_asap(NonASAPOp::Join {
-                kind: JoinKind::Inner,
-                pred: predicate(),
-                left: 0,
-                right: 1,
-            }),
-            non_asap(NonASAPOp::SetOp {
-                kind: RelationalSetOpKind::Union,
-                all: true,
-                left: 0,
-                right: 1,
-            }),
-            non_asap(NonASAPOp::Concat {
-                children: vec![0, 1],
-            }),
-            non_asap(NonASAPOp::Dedup {
-                cols: vec![0],
-                child: 0,
-            }),
-            non_asap(NonASAPOp::Sort {
-                keys: vec![],
-                partition_by: GroupKeys::default(),
-                child: 0,
-            }),
-            non_asap(NonASAPOp::Limit {
-                n: Some(5),
-                offset: 0,
-                partition_by: GroupKeys::default(),
-                child: 0,
-            }),
-            non_asap(NonASAPOp::BinaryOp {
-                operator: BinaryOperator {
-                    checked_relative_division: false,
-                    checked_finite_division: false,
-                    kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
-                    vector_match: None,
-                },
-                return_bool: false,
-                lhs: 0,
-                rhs: 1,
-            }),
-            non_asap(NonASAPOp::SQLWindowFunc {
-                func: WindowFuncKind::RowNumber,
-                args: vec![],
-                partition_by: GroupKeys::default(),
-                order_by: vec![],
-                frame: None,
-                output_name: "row".into(),
-                child: 0,
-            }),
-            non_asap(NonASAPOp::PromqlVectorFromScalar(column())),
-            non_asap(NonASAPOp::PromqlRelabel {
-                dst: "job".into(),
-                value: column(),
-                child: 0,
-            }),
-            non_asap(NonASAPOp::PromqlInfoEnrich {
-                selector: vec![],
-                child: 0,
-            }),
-            non_asap(NonASAPOp::PromqlSeriesSample {
-                by: GroupKeys::default(),
-                kind: SampleKind::LimitK(5),
-                child: 0,
-            }),
-            non_asap(NonASAPOp::PromqlSubquery {
-                range: Duration::from_secs(300),
-                resolution: None,
-                child: 0,
-            }),
-            asap(ASAPOp::SummaryAgg {
-                child: 0,
-                summary_type: kll(),
-                input: sample_value(),
-                reduction: Reduction::PerEntity,
-                filter: None,
-            }),
-            asap(ASAPOp::SummaryEstimate {
-                summary_input: 0,
-                query: SketchStatistic::Cardinality,
-            }),
-            asap(ASAPOp::FinalizeExactAccumulator { child: 0 }),
-            asap(ASAPOp::MaintainPopulation {
-                child: 0,
-                population: MaintainedPopulation {
-                    input: PopulationInput::CurrentSeries(CurrentSeriesInput {
-                        metric: "m".into(),
-                        matchers: vec![],
-                        grouping: vec![],
-                        without: false,
-                        lookback_ms: 300_000,
-                    }),
-                    max_k: 5,
-                    quantiles: false,
-                },
-            }),
-            asap(ASAPOp::EvaluatePopulation {
-                child: 0,
-                evaluation: PopulationStatistic::Sum,
-            }),
-            asap(ASAPOp::SummaryMerge {
-                children: vec![0, 1],
-                group_by: None,
-            }),
-            asap(ASAPOp::SummarySubtract { left: 0, right: 1 }),
-            asap(ASAPOp::SummaryDelete {
-                summary_input: 0,
-                key: 0,
-            }),
-            asap(ASAPOp::SummaryJoin {
-                outer: 0,
-                inner: 1,
-                key: 0,
-                summary_type: kll(),
-            }),
-            asap(ASAPOp::Extension {
-                child: 0,
-                name: "extension".into(),
-            }),
-        ];
+        let subquery = non_asap(NonASAPOp::PromqlSubquery {
+            range: Duration::from_secs(300),
+            resolution: None,
+            child: 0,
+        });
+        let aggregate = non_asap(NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![AggIntent::Rate],
+            output_names: vec![String::new()],
+            filters: vec![],
+            having: None,
+            child: 0,
+        });
         let stored = Lifetime::AcrossEvaluations(StorageMedium::Memory);
         let once = Lifetime::OneEvaluation(StorageMedium::Memory);
         let access = |reads, shifts_back_ms| InputTimeAccess {
             reads,
             shifts_back_ms,
         };
-        let mut table: Vec<(Operator<u32>, ExecutionTiming, Lifetime, InputTimeAccess)> = vec![
+        let table: Vec<(Operator<u32>, ExecutionTiming, Lifetime, InputTimeAccess)> = vec![
             (
                 shift(None),
                 QueryTime,
@@ -715,12 +534,9 @@ mod tests {
                 stored,
                 access(LastWindow { length_ms: 60_000 }, 0),
             ),
+            (subquery, QueryTime, once, access(CurrentTimeOnly, 0)),
+            (aggregate, IngestionTime, stored, access(CurrentTimeOnly, 0)),
         ];
-        for operator in rows_at_t {
-            for timing in [QueryTime, IngestionTime] {
-                table.push((operator.clone(), timing, stored, access(CurrentTimeOnly, 0)));
-            }
-        }
         for (operator, timing, lifetime, expected) in table {
             assert_eq!(
                 InputTimeAccess::of(&operator, timing, lifetime),
