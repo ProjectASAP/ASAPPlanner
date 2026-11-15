@@ -771,3 +771,95 @@ fn a_none_execution_its_one_evaluation_twin_dominates_is_left_out() {
     assert_eq!(dominated(&[1.0, 2.0, 1.0], true), (vec![], vec![0, 2]));
     assert_eq!(dominated(&[1.0, 1.0, 1.0], false), (vec![], vec![0, 2]));
 }
+
+/// The same query `m[5m]` every 10 s and every 20 s: two evaluation
+/// contexts with the same executions and edges, each cost in the 20 s one
+/// half the 10 s one's (half the runs). The 20 s context is a copy of the
+/// 10 s one ([`copies_in_equivalent_contexts`]): its executions, edges and
+/// query share their variables, and the optimum reads the scan's
+/// `OneEvaluation` candidate in both (1.5 + 0 against 1 + 2), costing
+/// 2.5 + 1.25. With one cost of the 20 s context not half, they are not
+/// copies.
+#[test]
+fn a_context_equivalent_to_another_shares_its_variables() {
+    let mut memo = empty_memo();
+    let m = scan(&mut memo);
+    let last_5m = range(&mut memo, 300, m);
+    query(&mut memo, last_5m, None);
+    query(&mut memo, last_5m, None);
+    let physical = physical(
+        memo,
+        &[
+            (own_candidate(m), NONE),
+            (own_candidate(m), ONE_EVALUATION),
+            (own_candidate(last_5m), NONE),
+        ],
+    );
+    let entries = [every(10_000), every(20_000)];
+    let (selectable, mut costs) =
+        selection_inputs(&physical, &entries, &[1.0, 1.5, 1.0], &[((0, 2), 2.0)], &[]);
+    let executions = selectable.executions();
+    let every_20s = |index: usize| {
+        matches!(
+            selectable.context(executions[index].context),
+            asap_types::stages::ExecutionContext::Evaluation { grid } if grid.period_ms == 20_000
+        )
+    };
+    for (index, cost) in costs.per_execution.iter_mut().enumerate() {
+        if every_20s(index) {
+            *cost = Ok(cost.clone().unwrap() / 2.0);
+        }
+    }
+    for (position, edge) in selectable.edges().iter().enumerate() {
+        if every_20s(edge.consumer) {
+            costs.per_edge[position] = costs.per_edge[position].map(|cost| cost / 2.0);
+        }
+    }
+    let kept = vec![true; executions.len()];
+    let copies = |costs: &ExecutionCosts| {
+        let inputs = SelectionInputs {
+            physical: &physical,
+            entries: &entries,
+            selectable: &selectable,
+            costs,
+        };
+        copies_in_equivalent_contexts(&inputs, &kept)
+    };
+    let (original_of_execution, original_of_edge, original_of_query) = copies(&costs);
+    for (index, &original) in original_of_execution.iter().enumerate() {
+        match every_20s(index) {
+            true => {
+                assert!(!every_20s(original));
+                assert_eq!(executions[original].candidate, executions[index].candidate);
+            }
+            false => assert_eq!(original, index),
+        }
+    }
+    for (position, &original) in original_of_edge.iter().enumerate() {
+        let edge = selectable.edges()[position];
+        assert_eq!(original != position, every_20s(edge.consumer));
+        assert_eq!(selectable.edges()[original].edge, edge.edge);
+    }
+    assert_eq!(original_of_query, vec![QueryId(0), QueryId(0)]);
+
+    let solved = solve_selection(&SelectionInputs {
+        physical: &physical,
+        entries: &entries,
+        selectable: &selectable,
+        costs: &costs,
+    })
+    .unwrap();
+    assert_eq!(candidates(&solved), vec![1, 1, 2, 2]);
+    assert!((solved.cost_per_second_without_request_overhead - 3.75).abs() < 1e-9);
+    assert_eq!(solved.variable_count, 3 + 2 + 1);
+
+    let first_of_20s = (0..executions.len())
+        .find(|&index| every_20s(index))
+        .unwrap();
+    costs.per_execution[first_of_20s] = Ok(10.0);
+    let (original_of_execution, _, _) = copies(&costs);
+    assert!(original_of_execution
+        .iter()
+        .enumerate()
+        .all(|(index, &original)| original == index));
+}
