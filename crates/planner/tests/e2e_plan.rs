@@ -370,3 +370,35 @@ async fn scalar_roots_survive_planning_in_workload_order() {
         }
     }
 }
+
+/// A PromQL root holding an operator series identity realization does not
+/// cover is planned over its label columns: `limitk(2, up)` lowers to a
+/// `PromqlSeriesSample` and `info(up)` to a `PromqlInfoEnrich`, and each
+/// plans with one root.
+#[tokio::test]
+async fn plans_a_promql_root_series_identity_does_not_cover_over_its_labels() {
+    for query in ["limitk(2, up)", "info(up)"] {
+        let workload = PlanningWorkload {
+            query_workload: QueryWorkload {
+                language: QueryLanguage::PromQL,
+                query_batch: Some(vec![batch(query)]),
+                repeating_queries: None,
+            },
+            data_workload: Some(
+                DataWorkload::sampled_every(
+                    asap_frontend_promql::promql_metric_names(query).unwrap(),
+                    DurationMs(1000),
+                )
+                .with_series_count(1_000),
+            ),
+        };
+        let output = e2e_plan(UserInput::new(
+            &workload,
+            FrontendInput::Promql,
+            PlanningModels::builtin(),
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("{query}: {error}"));
+        assert_eq!(output.plan.roots.len(), 1, "{query}");
+    }
+}

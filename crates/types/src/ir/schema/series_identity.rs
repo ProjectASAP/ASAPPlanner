@@ -20,19 +20,30 @@ use crate::ir::schema::*;
 /// bound before it, so every parent's column references are renumbered to
 /// match: `topk(1, sum without (instance) (m))` binds its sort key to
 /// `Column(0)` of `[sum]`; realization makes the aggregate's output
-/// `[$promql_series_identity, sum]` and the key `Column(1)`. A reference to
-/// a column realization does not keep fails here rather than read another
-/// column.
+/// `[$promql_series_identity, sum]` and the key `Column(1)`. An
+/// `Aggregate`'s `having` indexes the aggregate's own output, so it is
+/// renumbered by how that output moves (PromQL emits no `having`; an IR
+/// tree may).
+///
+/// Errors:
+/// - [`SeriesIdentityError::NotApplicable`]: the root holds an operator
+///   this realization does not cover, such as `limitk` or `info()`; a
+///   caller plans the root over its label columns instead.
+/// - [`SeriesIdentityError::DroppedColumn`]: a reference to a column
+///   realization does not keep. Reading another column would give a wrong
+///   answer, so a caller must not fall back.
 pub fn with_promql_series_identity(
     root: &std::rc::Rc<crate::ir::OperatorNode>,
-) -> Result<std::rc::Rc<crate::ir::OperatorNode>, String> {
+) -> Result<std::rc::Rc<crate::ir::OperatorNode>, SeriesIdentityError> {
     use crate::ir::operator::Source;
+    use crate::ir::scalar::Predicate;
     use crate::ir::{NonASAPOp, Operator, OperatorNode};
     use std::{collections::HashMap, rc::Rc};
+    use SeriesIdentityError::NotApplicable;
     fn visit(
         node: &Rc<OperatorNode>,
         cache: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-    ) -> Result<Rc<OperatorNode>, String> {
+    ) -> Result<Rc<OperatorNode>, SeriesIdentityError> {
         if let Some(found) = cache.get(&Rc::as_ptr(node)) {
             return Ok(Rc::clone(found));
         }
@@ -50,29 +61,12 @@ pub fn with_promql_series_identity(
             return Err(error);
         }
         if let (Operator::NonASAP(before), Operator::NonASAP(after)) = (&node.operator, &operator) {
-            let positions = positions_after_realization(
-                &input_scope(&before.inputs()),
-                &input_scope(&after.inputs()),
-            );
-            if positions
-                .iter()
-                .enumerate()
-                .any(|(column, position)| *position != Some(column))
-            {
-                let mut dropped = None;
-                let renumbered = after.map_input_columns(&mut |column| {
-                    positions.get(column).copied().flatten().unwrap_or_else(|| {
-                        dropped = Some(column);
-                        column
-                    })
-                });
-                if let Some(column) = dropped {
-                    return Err(format!(
-                        "series identity realization does not keep input column {column} \
-                         that {} reads",
-                        before.kind_name()
-                    ));
-                }
+            let positions =
+                positions_after_realization(&before.input_scope(), &after.input_scope());
+            if moves(&positions) {
+                let renumbered = renumber(&positions, before.kind_name(), |column| {
+                    after.map_input_columns(&mut |c| column(c))
+                })?;
                 operator = Operator::NonASAP(renumbered);
             }
         }
@@ -88,13 +82,15 @@ pub fn with_promql_series_identity(
                     .any(|field| field.name == PROMQL_SERIES_IDENTITY)
                 {
                     if !schema.has_promql_series_identity() {
-                        return Err("invalid physical series identity".into());
+                        return Err(NotApplicable("invalid physical series identity".into()));
                     }
                     cache.insert(Rc::as_ptr(node), Rc::clone(node));
                     return Ok(Rc::clone(node));
                 }
                 if schema.closed {
-                    return Err("dynamic series identity requires an open PromQL source".into());
+                    return Err(NotApplicable(
+                        "dynamic series identity requires an open PromQL source".into(),
+                    ));
                 }
                 schema.fields.push(Field::new(
                     PROMQL_SERIES_IDENTITY,
@@ -113,7 +109,9 @@ pub fn with_promql_series_identity(
             Operator::NonASAP(NonASAPOp::Sort { partition_by, .. })
                 if partition_by.is_without() =>
             {
-                return Err("dynamic without ranking requires label-set projection".into());
+                return Err(NotApplicable(
+                    "dynamic without ranking requires label-set projection".into(),
+                ));
             }
             Operator::NonASAP(
                 NonASAPOp::TimeRange { .. }
@@ -129,20 +127,45 @@ pub fn with_promql_series_identity(
                 | NonASAPOp::Aggregate { .. }
                 | NonASAPOp::Sort { .. },
             ) => {}
-            _ => return Err("operator has no dynamic series-identity realization".into()),
+            Operator::NonASAP(op) => {
+                return Err(NotApplicable(format!(
+                    "{} has no dynamic series-identity realization",
+                    op.kind_name()
+                )))
+            }
+            Operator::ASAP(_) => {
+                return Err(NotApplicable(
+                    "an ASAP operator has no dynamic series-identity realization".into(),
+                ))
+            }
         }
-        let rebuilt = Rc::new(OperatorNode::new(operator).map_err(|e| e.to_string())?);
-        // `having` indexes the aggregate's own output, which the
-        // renumbering above does not follow; PromQL emits none.
-        if matches!(
-            rebuilt.non_asap(),
-            Some(NonASAPOp::Aggregate {
-                having: Some(_),
-                ..
-            })
-        ) && rebuilt.schema.fields.len() != node.schema.fields.len()
+        let new = |operator| {
+            OperatorNode::new(operator)
+                .map(Rc::new)
+                .map_err(|e| NotApplicable(e.to_string()))
+        };
+        let mut rebuilt = new(operator)?;
+        // `having` indexes the aggregate's own output, which the input
+        // renumbering above does not follow.
+        if let Some(NonASAPOp::Aggregate {
+            having: Some(having),
+            ..
+        }) = rebuilt.non_asap()
         {
-            return Err("series identity realization moves the columns a HAVING reads".into());
+            let positions = positions_after_realization(
+                &node.schema.fields.iter().collect::<Vec<_>>(),
+                &rebuilt.schema.fields.iter().collect::<Vec<_>>(),
+            );
+            if moves(&positions) {
+                let having = renumber(&positions, "Aggregate's HAVING", |column| {
+                    Predicate(having.0.map_columns(&mut |c| column(c)))
+                })?;
+                let mut aggregate = rebuilt.non_asap().cloned().expect("an aggregate");
+                if let NonASAPOp::Aggregate { having: slot, .. } = &mut aggregate {
+                    *slot = Some(having);
+                }
+                rebuilt = new(Operator::NonASAP(aggregate))?;
+            }
         }
         cache.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
         Ok(rebuilt)
@@ -150,13 +173,56 @@ pub fn with_promql_series_identity(
     visit(root, &mut HashMap::new())
 }
 
-/// The input scope of an operator over `inputs`: their output columns, in
-/// order.
-fn input_scope<'a>(inputs: &[&'a std::rc::Rc<crate::ir::OperatorNode>]) -> Vec<&'a Field> {
-    inputs
+/// Why [`with_promql_series_identity`] gives no root carrying
+/// [`PROMQL_SERIES_IDENTITY`].
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SeriesIdentityError {
+    /// The root holds an operator this realization does not cover:
+    /// `limitk(2, m)` lowers to a `PromqlSeriesSample`, `info(m)` to a
+    /// `PromqlInfoEnrich`. The root is planned over its label columns
+    /// instead.
+    #[error("{0}")]
+    NotApplicable(String),
+    /// `operator` reads input column `column`, which realization does not
+    /// keep. Renumbering it would read another column and give a wrong
+    /// answer.
+    #[error("series identity realization does not keep column {column} that {operator} reads")]
+    DroppedColumn {
+        operator: &'static str,
+        column: ColumnId,
+    },
+}
+
+/// Whether some column of `positions` (see [`positions_after_realization`])
+/// moved or is not kept.
+fn moves(positions: &[Option<ColumnId>]) -> bool {
+    positions
         .iter()
-        .flat_map(|input| input.schema.fields.iter())
-        .collect()
+        .enumerate()
+        .any(|(column, position)| *position != Some(column))
+}
+
+/// `map` run with the renumbering `positions` gives (see
+/// [`positions_after_realization`]); [`SeriesIdentityError::DroppedColumn`]
+/// when `operator` reads a column `positions` does not keep. Over
+/// `[Some(1)]`, `Column(0)` becomes `Column(1)` and `Column(1)` is
+/// dropped.
+fn renumber<T>(
+    positions: &[Option<ColumnId>],
+    operator: &'static str,
+    map: impl FnOnce(&mut dyn FnMut(ColumnId) -> ColumnId) -> T,
+) -> Result<T, SeriesIdentityError> {
+    let mut dropped = None;
+    let mapped = map(&mut |column| {
+        positions.get(column).copied().flatten().unwrap_or_else(|| {
+            dropped = Some(column);
+            column
+        })
+    });
+    match dropped {
+        Some(column) => Err(SeriesIdentityError::DroppedColumn { operator, column }),
+        None => Ok(mapped),
+    }
 }
 
 /// Where each column of the input scope `before` realization sits in the
@@ -189,10 +255,10 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use super::with_promql_series_identity;
+    use super::{renumber, with_promql_series_identity, SeriesIdentityError};
     use crate::ir::operator::arguments::{GroupKeys, Reduction, Source};
     use crate::ir::operator::AggIntent;
-    use crate::ir::scalar::{Predicate, ScalarValue, SortKey};
+    use crate::ir::scalar::{CompareOpKind, ExprSemantics, Predicate, ScalarValue, SortKey};
     use crate::ir::schema::{DataType, Field, Schema, PROMQL_SERIES_IDENTITY};
     use crate::ir::{NonASAPOp, Operator, OperatorNode, ProjectItem, ScalarExpr, TimeRangeKind};
 
@@ -200,12 +266,9 @@ mod tests {
         OperatorNode::new_shared(Operator::NonASAP(operator)).unwrap()
     }
 
-    /// `sort_desc(sum without (instance) (m))` with a filter and a
-    /// projection above the aggregate, bound over its output `[sum]` before
-    /// realization: every reference to `sum`, `Column(0)`, reads
-    /// `Column(1)` of the realized `[$promql_series_identity, sum]`.
-    #[test]
-    fn realization_renumbers_parent_references_into_a_without_aggregate() {
+    /// `sum without (instance) (m)` over `[ts, value, instance]` with
+    /// `having`, which indexes its output: `[sum]` before realization.
+    fn sum_without_instance(having: Option<Predicate>) -> Rc<OperatorNode> {
         let scan = node(NonASAPOp::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
@@ -224,14 +287,23 @@ mod tests {
             kind: TimeRangeKind::Instant,
             child: scan,
         });
-        let sum = node(NonASAPOp::Aggregate {
+        node(NonASAPOp::Aggregate {
             reduction: Reduction::Reduce(GroupKeys::without(vec![2])),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![String::new()],
             filters: vec![None],
-            having: None,
+            having,
             child: instant,
-        });
+        })
+    }
+
+    /// `sort_desc(sum without (instance) (m))` with a filter and a
+    /// projection above the aggregate, bound over its output `[sum]` before
+    /// realization: every reference to `sum`, `Column(0)`, reads
+    /// `Column(1)` of the realized `[$promql_series_identity, sum]`.
+    #[test]
+    fn realization_renumbers_parent_references_into_a_without_aggregate() {
+        let sum = sum_without_instance(None);
         let sum_column = |node: &OperatorNode| {
             node.schema
                 .fields
@@ -278,6 +350,48 @@ mod tests {
             panic!("a projection");
         };
         assert_eq!(cols[0].expr, ScalarExpr::Column(1));
+    }
+
+    /// `sum without (instance) (m) HAVING sum > 1`: the `having` reads
+    /// `sum`, `Column(0)` of the output `[sum]`, and after realization
+    /// `Column(1)` of `[$promql_series_identity, sum]`.
+    #[test]
+    fn realization_renumbers_a_having_over_the_aggregate_output() {
+        let sum_over_one = |column| {
+            Predicate(ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(column)),
+                op: CompareOpKind::Gt,
+                right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(1.0))),
+                semantics: ExprSemantics::Promql,
+            })
+        };
+        let realized =
+            with_promql_series_identity(&sum_without_instance(Some(sum_over_one(0)))).unwrap();
+        let Some(NonASAPOp::Aggregate {
+            having: Some(having),
+            ..
+        }) = realized.non_asap()
+        else {
+            panic!("an aggregate with a having");
+        };
+        assert_eq!(realized.schema.fields[1].name, "sum");
+        assert_eq!(*having, sum_over_one(1));
+    }
+
+    /// A reference to a column realization does not keep is an error, not a
+    /// read of another column: over the positions `[Some(1)]`, `Column(0)`
+    /// moves to `Column(1)` and `Column(1)` is dropped.
+    #[test]
+    fn renumbering_a_dropped_column_is_an_error() {
+        let positions = [Some(1)];
+        assert_eq!(renumber(&positions, "Sort", |column| column(0)), Ok(1));
+        assert_eq!(
+            renumber(&positions, "Sort", |column| column(1)),
+            Err(SeriesIdentityError::DroppedColumn {
+                operator: "Sort",
+                column: 1
+            })
+        );
     }
 
     // A direct scalar literal (`vector(1)`) stays a valid vector input when

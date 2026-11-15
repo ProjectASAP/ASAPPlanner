@@ -89,6 +89,18 @@ impl<C> GroupKeys<C> {
     pub fn keys(&self) -> &[C] {
         &self.keys
     }
+    /// These keys with every key mapped by `f`, `by` or `without` kept; the
+    /// first error stops the walk. A front end resolves `by ("job")` to
+    /// `by (2)` with it.
+    pub fn try_map_keys<D, E>(
+        &self,
+        f: &mut impl FnMut(&C) -> Result<D, E>,
+    ) -> Result<GroupKeys<D>, E> {
+        Ok(GroupKeys {
+            keys: self.keys.iter().map(f).collect::<Result<_, _>>()?,
+            without: self.without,
+        })
+    }
 }
 
 impl GroupKeys {
@@ -96,10 +108,10 @@ impl GroupKeys {
     /// `without` kept: `by (1)` under a renumbering that moves column 1 to 2
     /// is `by (2)`.
     pub(crate) fn map_columns(&self, column: &mut impl FnMut(ColumnId) -> ColumnId) -> Self {
-        Self {
-            keys: self.keys.iter().map(|&key| column(key)).collect(),
-            without: self.without,
-        }
+        let mapped: Result<_, std::convert::Infallible> =
+            self.try_map_keys(&mut |&key| Ok(column(key)));
+        let Ok(mapped) = mapped;
+        mapped
     }
 }
 
@@ -510,9 +522,7 @@ impl Reduction {
             .collect::<Option<_>>()?;
         Some(Reduction::by(keys))
     }
-}
 
-impl Reduction {
     /// This reduction with every grouping key renumbered by `column`;
     /// `PerEntity` is unchanged.
     pub(crate) fn map_columns(&self, column: &mut impl FnMut(ColumnId) -> ColumnId) -> Self {
