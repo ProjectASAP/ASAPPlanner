@@ -20,6 +20,7 @@ use planner_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload,
 };
+use planner_types::plan::time_window::{InputRows, TimeIndexedPlan};
 use planner_types::plan::TimeWindow;
 use planner_types::summary_type::{
     SketchParams, SketchStatistic, SummaryInputExpr, SummaryTypeCapability,
@@ -517,8 +518,8 @@ fn compile_internal(
             // its input ending at the run's end: one row per key, stamped
             // with that `window_end`. Older windows are earlier runs', in
             // the store. Built for its readers instead (at query time, or
-            // read here without its view bound,
-            // [`CompileGraph::chain_builds_windows_readers_read`]), it
+            // not a compile root, its view not bound: it then reads what
+            // its readers read, [`CompileGraph::input_time_access`]), it
             // builds at each evaluation `T` every window
             // `(T - (k+1)c, T - kc]` its readers read, in one pass: each
             // row is grouped with its key by the end of its window, and
@@ -539,7 +540,10 @@ fn compile_internal(
                     crate::capability::validate_ingestion_time_summary(filter.as_ref())
                         .map_err(Error::Invalid)?;
                 }
-                let built_for_readers = graph.chain_builds_windows_readers_read(id);
+                let built_for_readers = !matches!(
+                    graph.input_time_access(id).reads,
+                    InputRows::LastWindow { .. }
+                );
                 let [input] = schemas.as_slice() else {
                     return Err(invalid("a tumbling-window chain reads one input"));
                 };
@@ -601,7 +605,22 @@ fn compile_internal(
                 // key's rows by window too; the sample time stays the
                 // update's time (a counter's rate needs it).
                 let windowed = window.schema();
-                let window_end = built_for_readers.then(|| windowed.fields.len() - 1);
+                // The window end's column in `schema`, when built for its
+                // readers.
+                let window_end_in = |schema: &SchemaRef| {
+                    built_for_readers
+                        .then(|| {
+                            schema
+                                .fields
+                                .iter()
+                                .position(|field| {
+                                    field.name == crate::operators::TUMBLING_WINDOW_END_COLUMN
+                                })
+                                .ok_or_else(|| invalid("a chain's build drops its window end"))
+                        })
+                        .transpose()
+                };
+                let window_end = window_end_in(&windowed)?;
                 let build = match reduction {
                     PlannerReduction::PerEntity => {
                         let SummaryInputExpr::Column(value) = &update.weight else {
@@ -637,17 +656,7 @@ fn compile_internal(
                 };
                 let compact = build.schema();
                 // The window end's column among the build's output columns.
-                let window_end = window_end
-                    .map(|_| {
-                        compact
-                            .fields
-                            .iter()
-                            .position(|field| {
-                                field.name == crate::operators::TUMBLING_WINDOW_END_COLUMN
-                            })
-                            .ok_or_else(|| invalid("a chain's build drops its window end"))
-                    })
-                    .transpose()?;
+                let window_end = window_end_in(&compact)?;
                 physical_dag.add(auxiliary, inputs, window)?;
                 physical_dag.add(helper_id(id, 1)?, vec![auxiliary], build)?;
                 physical_dag.add(

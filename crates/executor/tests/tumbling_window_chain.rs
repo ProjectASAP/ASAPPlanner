@@ -14,7 +14,6 @@ use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use planner_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, TimeRangeKind};
 use planner_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
-use planner_types::stages::Lifetime;
 use planner_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -361,70 +360,61 @@ fn a_chain_built_at_query_time_answers_queries_through_its_time_ranges() {
     );
 }
 
-// A range window with tumbling-window ends: at T = 10m, `(T - 3m, T]` in
-// windows of 1 minute keeps the rows at 7m (out), 7m + 1 ms, 8m, 9m 30 s and
-// 10m, each keeping its time and followed by its window's end: 8m, 8m, 10m
-// and 10m.
+// `sum_over_time(latency[5m] offset 1h)` over a stored chain of 1-minute
+// windows and a stored `TimeShift(1h)` above it, both views at ingestion
+// time, run in one query run with no view bound: both are computed here
+// for their readers. At T = 4h the shift reads `(T - 1h - 5m, T - 1h]` =
+// `(175m, 180m]`, so the chain builds those five windows from the raw
+// samples: `a` = 176 + 177 + 178 + 179 + 180 = 890, `b` twice that.
 #[test]
-fn a_range_window_stamps_each_row_with_its_tumbling_windows_end() {
-    use asap_executor::operators::Operator as ExecutorOperator;
-    use asap_executor::plan::PhysicalDAG;
-    let schema = Arc::new(samples_schema());
-    let times = [
-        7 * MINUTE_MS,
-        7 * MINUTE_MS + 1,
-        8 * MINUTE_MS,
-        570_000,
-        10 * MINUTE_MS,
-    ];
-    let rows = times
-        .iter()
-        .map(|&t| {
-            vec![
-                Value::Utf8("a".into()),
-                Value::Timestamp(t),
-                Value::Float64(1.0),
-            ]
-        })
-        .collect();
-    let batch = Batch::try_new(schema.clone(), rows).unwrap();
-    let mut dag = PhysicalDAG::default();
-    dag.add(
-        0,
-        vec![],
-        ExecutorOperator::source(schema.clone(), vec![batch]).unwrap(),
-        Lifetime::None,
-    )
-    .unwrap();
-    let window = ExecutorOperator::time_range(schema, 1, 0, 3 * MINUTE_MS, None, None)
-        .unwrap()
-        .with_tumbling_window_ends(MINUTE_MS)
+fn an_unbound_stored_time_shift_over_an_unbound_chain_reads_its_readers_windows() {
+    let chain = node(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+        child: scan(),
+        summary_type: sum(),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::by(vec![0]),
+        filter: None,
+        tumbling_window_width_ms: MINUTE_MS as u64,
+    }));
+    let shifted_windows = shift(HOUR_MS, None, chain.clone());
+    let shifted = finalized_sum(node(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![range(5 * MINUTE_MS, shifted_windows.clone())],
+        group_by: None,
+    })));
+    let (mut dag, nodes) =
+        planner_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&[
+            QueryRoot::Operator(shifted.clone()),
+        ])
         .unwrap();
-    dag.add(1, vec![0], window, Lifetime::None).unwrap();
+    let stored = [id_of(&nodes, &chain), id_of(&nodes, &shifted_windows)];
+    views_at(&mut dag, &stored.map(|id| id as u64)).unwrap();
+    for id in stored {
+        assert_eq!(
+            dag.nodes
+                .iter()
+                .find(|node| node.id == id)
+                .unwrap()
+                .output_state
+                .timing,
+            planner_types::ir::properties::ExecutionTiming::IngestionTime
+        );
+    }
+    let root = id_of(&nodes, &shifted) as u64;
+    let query = compile(&dag, &[], &[root]).unwrap();
     let context = RunContext::new(
         Scope::Query {
-            evaluation_time_ms: 10 * MINUTE_MS,
+            evaluation_time_ms: 4 * HOUR_MS,
         },
         Limits::default(),
     )
     .unwrap();
-    // Each kept row's own time and, appended, its window's end.
-    let times_and_ends: Vec<(i64, i64)> = run(&dag, &[1], context)
-        .remove(0)
-        .into_iter()
-        .map(|row| match (&row[1], &row[3]) {
-            (Value::Timestamp(time), Value::Timestamp(end)) => (*time, *end),
-            other => panic!("{other:?}"),
-        })
-        .collect();
+    let answers = {
+        let query = query.instantiate(Arc::new(store_with_samples())).unwrap();
+        run(&query, &[root], context)
+    };
     assert_eq!(
-        times_and_ends,
-        [
-            (7 * MINUTE_MS + 1, 8 * MINUTE_MS),
-            (8 * MINUTE_MS, 8 * MINUTE_MS),
-            (570_000, 10 * MINUTE_MS),
-            (10 * MINUTE_MS, 10 * MINUTE_MS),
-        ]
+        sums_of(answers[0].clone()),
+        BTreeMap::from([("a".to_string(), 890.0), ("b".to_string(), 1780.0)])
     );
 }
 
