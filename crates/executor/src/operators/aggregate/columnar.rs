@@ -5,10 +5,11 @@
 use super::{kahan_inc, percentile_cont, quantile, Reduction};
 use crate::operators::common::{row_chunks, Workspace};
 use crate::operators::group_table::GroupTable;
+use crate::operators::{Kind, Operator};
 use crate::runtime::{Cooperative, Input, RunContext};
 use crate::values::arrow_columns::{self, ColumnDepth};
 use crate::values::{Batch, SchemaRef, Value};
-use crate::{expressions::Expression, Error};
+use crate::Error;
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use arrow::array::{Array, ArrayRef, BooleanArray, Float64Array, Int64Array};
 use futures::StreamExt;
@@ -491,7 +492,6 @@ fn finish_measure(
     states: MeasureStates,
     measure: &Reduction,
     dtype: &DataType,
-    promql: bool,
     order: &[u32],
 ) -> Result<ArrayRef, Error> {
     let values: Vec<Value> = match states {
@@ -503,7 +503,7 @@ fn finish_measure(
             .iter()
             .map(|&g| {
                 let (sum, c, seen) = sums[g as usize];
-                if !seen && !promql {
+                if !seen {
                     Value::Null
                 } else if sum.is_infinite() {
                     Value::Float64(sum)
@@ -516,7 +516,7 @@ fn finish_measure(
             .iter()
             .map(|&g| {
                 let average = averages[g as usize];
-                if average.count == 0 && !promql {
+                if average.count == 0 {
                     Value::Null
                 } else {
                     Value::Float64(average.value())
@@ -527,7 +527,7 @@ fn finish_measure(
             .iter()
             .map(|&g| {
                 let (sum, count) = sums[g as usize];
-                if count == 0 && !promql {
+                if count == 0 {
                     Ok(Value::Null)
                 } else if matches!(measure, Reduction::Avg(_)) {
                     Ok(Value::Float64(sum as f64 / count as f64))
@@ -639,18 +639,25 @@ fn finish_measure(
     )
 }
 
-/// The exact `Aggregate`: the groups of `groups` in key order, each with
-/// its `measures` (each over the rows its filter keeps).
+/// The exact `Aggregate` `operator`: the groups of its `groups` in key
+/// order, each with its `measures` (each over the rows its filter keeps).
+/// With `emit_empty_global` and no groups, an empty input still has the
+/// global group (SQL).
 pub(super) async fn aggregate(
     mut input: Input<'_, Batch>,
-    groups: &[usize],
-    measures: &[Reduction],
-    filters: &[Option<Expression>],
-    input_schema: &SchemaRef,
-    output: &SchemaRef,
+    operator: &Operator,
     context: &RunContext,
 ) -> Result<Batch, Error> {
-    let promql = input_schema.has_promql_series_identity();
+    let Kind::Aggregate {
+        groups,
+        measures,
+        filters,
+        emit_empty_global,
+    } = &operator.kind
+    else {
+        unreachable!("an aggregate's run")
+    };
+    let (input_schema, output) = (&operator.inputs[0], &operator.output);
     // `now()` in a filter is this run's evaluation time.
     let filters: Vec<Option<_>> = filters
         .iter()
@@ -715,8 +722,9 @@ pub(super) async fn aggregate(
             workspace.set_bytes(workspace_bytes + table.memory_bytes())?;
         }
     }
-    // PromQL sums over an empty vector emit no sample.
-    if table.len() == 0 && groups.is_empty() && !promql {
+    // A global SQL aggregate has one row over no input rows; a PromQL
+    // aggregate over an empty vector emits no sample.
+    if table.len() == 0 && groups.is_empty() && *emit_empty_global {
         table.add_empty_group()?;
         for state in &mut states {
             state.ensure_groups(1);
@@ -732,7 +740,7 @@ pub(super) async fn aggregate(
         let FieldDataType::Plain(dtype) = &field.dtype else {
             return Err(invalid("aggregate measures are plain"));
         };
-        arrays.push(finish_measure(state, measure, dtype, promql, &order)?);
+        arrays.push(finish_measure(state, measure, dtype, &order)?);
     }
     Batch::from_parts(
         output.clone(),

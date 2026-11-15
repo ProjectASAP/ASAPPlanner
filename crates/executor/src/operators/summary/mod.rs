@@ -277,6 +277,7 @@ impl Operator {
                 time,
                 groups,
                 filter: None,
+                emit_empty_global: false,
             },
             inputs: vec![input],
             output: schema(fields),
@@ -307,36 +308,6 @@ impl Operator {
             inputs: vec![input],
             output: schema(fields),
         })
-    }
-    /// A merge into no groups that outputs one empty state when it has no
-    /// input state: the global SQL aggregate a rollup of a relation's
-    /// grouped states to no keys stands for, whose one row is NULL over no
-    /// input rows. `parameters` is the merged states' θ, which the empty
-    /// state takes: the exported build node's `parameters` (`None` for an
-    /// exact family).
-    pub fn with_emit_empty_global(
-        mut self,
-        parameters: Option<SketchParams>,
-    ) -> Result<Self, Error> {
-        match &mut self.kind {
-            Kind::SummaryMerge {
-                state,
-                groups,
-                emit_empty_global,
-                parameters: slot,
-            } if groups.is_empty() => {
-                // An empty state of this family and θ can be built.
-                StateColumnUpdater::new(&self.inputs[0].fields[*state].dtype, parameters.as_ref())?;
-                *emit_empty_global = true;
-                *slot = parameters;
-            }
-            _ => {
-                return Err(invalid(
-                    "an empty global state needs a merge into no groups",
-                ))
-            }
-        }
-        Ok(self)
     }
     pub fn evaluation(
         input: SchemaRef,
@@ -459,6 +430,7 @@ pub(super) fn execute<'a>(
             time,
             groups,
             filter,
+            emit_empty_global,
         } => Ok(futures::stream::once(async move {
             build_per_group_summary(
                 input,
@@ -469,7 +441,7 @@ pub(super) fn execute<'a>(
                     time: *time,
                     groups,
                     filter: filter.as_deref(),
-                    emit_empty_global: !input_schema.has_promql_series_identity(),
+                    emit_empty_global: *emit_empty_global,
                 },
                 &input_schema,
                 &output,
@@ -613,7 +585,8 @@ struct PerGroupBuild<'a> {
     time: Option<usize>,
     groups: &'a [usize],
     filter: Option<&'a Expression>,
-    /// Whether an empty input still has the global group (SQL; not PromQL).
+    /// Whether an empty input still has the global group (SQL; not PromQL):
+    /// the kind's `emit_empty_global`.
     emit_empty_global: bool,
 }
 
@@ -634,7 +607,8 @@ async fn build_per_group_summary(
     let mut updater = StateColumnUpdater::new(build.family, build.parameters)?;
     let mut work = Cooperative::new(context);
     let mut workspace = Workspace::new(context)?;
-    // PromQL aggregation of an empty vector produces no sample.
+    // A global SQL aggregate has one row over no input rows; a PromQL
+    // aggregation of an empty vector produces no sample.
     if build.groups.is_empty() && build.emit_empty_global {
         table.add_empty_group()?;
         updater.add_group()?;

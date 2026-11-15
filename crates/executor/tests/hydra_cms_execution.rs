@@ -168,7 +168,12 @@ fn try_run(
     batches: Vec<Batch>,
 ) -> Result<BTreeMap<String, f64>, String> {
     let input = input_schema();
-    let build = compile_node(&summary_agg(update, filter), std::slice::from_ref(&input)).unwrap();
+    let build = compile_node(
+        &summary_agg(update, filter),
+        std::slice::from_ref(&input),
+        planner_types::ir::OperatorResultKind::Relation,
+    )
+    .unwrap();
     let state = build.schema();
     let mut operators = BTreeMap::new();
     let mut states = vec![];
@@ -199,6 +204,7 @@ fn try_run(
                 (*state).clone(),
             ),
             std::slice::from_ref(&state),
+            planner_types::ir::OperatorResultKind::Relation,
         )
         .unwrap();
         operators.insert(201, (vec![200], merge));
@@ -207,6 +213,7 @@ fn try_run(
     let read = compile_node(
         &estimate(3, point("checkout"), DataType::Float64),
         std::slice::from_ref(&state),
+        planner_types::ir::OperatorResultKind::Relation,
     )
     .unwrap();
     operators.insert(300, (vec![merged], read));
@@ -327,9 +334,13 @@ fn positive_constant_weight_adds_the_constant_per_row() {
         assert_eq!(doubled[job], 2.0 * unit[job], "{job}");
     }
     for weight in [0.0, -2.0, 2.5, f64::INFINITY] {
-        let error = compile_node(&summary_agg(constant(weight), None), &[input_schema()])
-            .err()
-            .unwrap_or_else(|| panic!("constant weight {weight} accepted"));
+        let error = compile_node(
+            &summary_agg(constant(weight), None),
+            &[input_schema()],
+            planner_types::ir::OperatorResultKind::Relation,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("constant weight {weight} accepted"));
         assert!(error.to_string().contains("HydraCms"), "{weight}: {error}");
     }
 }
@@ -349,7 +360,12 @@ fn row_weight_serializes_as_one_field_and_rejects_constants_above_i32() {
         (constant, serde_json::json!({"Constant": 2})),
         (column, serde_json::json!({"Column": 2})),
     ] {
-        let build = compile_node(&summary_agg(update, None), &[input_schema()]).unwrap();
+        let build = compile_node(
+            &summary_agg(update, None),
+            &[input_schema()],
+            planner_types::ir::OperatorResultKind::Relation,
+        )
+        .unwrap();
         let wire = serde_json::to_value(&build).unwrap();
         let fields = &wire["kind"]["AllGroupsSummaryBuild"];
         assert_eq!(fields["row_weight"], expected, "{wire}");
@@ -399,9 +415,13 @@ fn constant_weight_above_i32_is_refused_at_validation() {
         error.contains("HydraCms") && error.contains("i32::MAX"),
         "{error}"
     );
-    let error = compile_node(&summary_agg(update, None), &[input_schema()])
-        .err()
-        .expect("constant above i32::MAX compiled");
+    let error = compile_node(
+        &summary_agg(update, None),
+        &[input_schema()],
+        planner_types::ir::OperatorResultKind::Relation,
+    )
+    .err()
+    .expect("constant above i32::MAX compiled");
     assert!(
         error.to_string().contains("HydraCms") && error.to_string().contains("i32::MAX"),
         "{error}"
@@ -431,16 +451,24 @@ fn invalid_weight_values_fail_the_build() {
 // rather than computed from sketchlib internals.
 #[test]
 fn group_total_is_rejected_until_sketchlib_offers_it() {
-    let state = compile_node(&summary_agg(unit_count(), None), &[input_schema()])
-        .unwrap()
-        .schema();
+    let state = compile_node(
+        &summary_agg(unit_count(), None),
+        &[input_schema()],
+        planner_types::ir::OperatorResultKind::Relation,
+    )
+    .unwrap()
+    .schema();
     let total = SketchStatistic::PointCount {
         key: ColumnRef::SampleValue,
         value: None,
     };
-    let error = compile_node(&estimate(3, total, DataType::Int64), &[state])
-        .err()
-        .expect("group total");
+    let error = compile_node(
+        &estimate(3, total, DataType::Int64),
+        &[state],
+        planner_types::ir::OperatorResultKind::Relation,
+    )
+    .err()
+    .expect("group total");
     assert!(
         error
             .to_string()

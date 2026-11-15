@@ -152,13 +152,20 @@ impl TryFrom<UncheckedOperator> for Operator {
                 groups,
                 measures,
                 filters,
+                emit_empty_global,
             } => {
                 if groups.len() + measures.len() != output.fields.len() {
                     return Err(invalid("aggregate width mismatch"));
                 }
                 let names = output.fields[groups.len()..].iter().map(|f| f.name.clone());
-                Operator::aggregate(input(0)?, groups, names.zip(measures).collect())?
-                    .with_measure_filters(filters)?
+                let aggregate =
+                    Operator::aggregate(input(0)?, groups, names.zip(measures).collect())?
+                        .with_measure_filters(filters)?;
+                if emit_empty_global {
+                    aggregate.with_emit_empty_global(None)?
+                } else {
+                    aggregate
+                }
             }
             Kind::SemiJoin {
                 keys,
@@ -190,17 +197,25 @@ impl TryFrom<UncheckedOperator> for Operator {
                 time,
                 groups,
                 filter,
-            } => with_filter(
-                Operator::per_group_summary_build(
-                    input(0)?,
-                    family,
-                    parameters,
-                    value,
-                    time,
-                    groups,
-                )?,
-                filter,
-            )?,
+                emit_empty_global,
+            } => {
+                let build = with_filter(
+                    Operator::per_group_summary_build(
+                        input(0)?,
+                        family,
+                        parameters,
+                        value,
+                        time,
+                        groups,
+                    )?,
+                    filter,
+                )?;
+                if emit_empty_global {
+                    build.with_emit_empty_global(None)?
+                } else {
+                    build
+                }
+            }
             Kind::PerGroupKeyedSummaryBuild {
                 family,
                 parameters,
