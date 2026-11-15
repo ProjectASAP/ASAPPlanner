@@ -9,3 +9,6 @@ pub mod forwarders;
 pub mod memo_builders;
 /// Operator expressions the memo builders and tests share.
 pub mod memo_fixtures;
+/// Every plan over Stage 2's physical candidates, for the exhaustive
+/// oracle.
+pub mod physical_plan_enumeration;
