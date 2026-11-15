@@ -151,16 +151,7 @@ impl Operator {
             if filter.dtype(&self.inputs[0])?.0 != DataType::Bool {
                 return Err(invalid("measure filter must be boolean"));
             }
-            if matches!(
-                measures[index],
-                Reduction::Sum(_)
-                    | Reduction::Avg(_)
-                    | Reduction::Min(_)
-                    | Reduction::Max(_)
-                    | Reduction::Percentile { .. }
-                    | Reduction::StdDev { .. }
-                    | Reduction::Variance { .. }
-            ) {
+            if measures[index].is_null_without_values() {
                 output.fields[groups.len() + index].nullable = true;
             }
         }
@@ -292,6 +283,22 @@ pub enum Reduction {
     },
     /// PromQL `group`: 1 for every group.
     Group,
+}
+impl Reduction {
+    /// Whether the measure is NULL for a group with no (matching) value, as
+    /// SQL `SELECT sum(x) FROM t WHERE false` is NULL while `count(*)` is 0.
+    pub(super) fn is_null_without_values(&self) -> bool {
+        matches!(
+            self,
+            Reduction::Sum(_)
+                | Reduction::Avg(_)
+                | Reduction::Min(_)
+                | Reduction::Max(_)
+                | Reduction::Percentile { .. }
+                | Reduction::StdDev { .. }
+                | Reduction::Variance { .. }
+        )
+    }
 }
 pub(super) fn execute<'a>(
     operator: &'a Operator,

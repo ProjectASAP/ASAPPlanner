@@ -961,6 +961,19 @@ pub fn summary_type_of_operator<I>(operator: &Operator<I>) -> Option<&FieldDataT
     }
 }
 
+/// The category of the rows `node` stands for once evaluated: its own result
+/// kind, or, for summary states, the kind of the rows they were built from
+/// ([`source_kind`]). Sum states built over a SQL table `t` and then
+/// subtracted or merged stand for a `Relation`, so a global rollup of them
+/// has SQL's one row over no input rows; built over a PromQL series `m` they
+/// stand for an `InstantVector`, so it has no sample over an empty vector.
+pub fn evaluated_rows_kind<I: OperatorInput>(node: &I) -> OperatorResultKind {
+    match node.result_kind() {
+        OperatorResultKind::State => source_kind(node),
+        kind => kind,
+    }
+}
+
 /// The category of the values a evaluation of `state` produces: the category
 /// of the relational input the state was built from.
 fn source_kind<I: OperatorInput>(node: &I) -> OperatorResultKind {
