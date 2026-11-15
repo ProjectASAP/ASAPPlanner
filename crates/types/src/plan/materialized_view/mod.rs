@@ -321,5 +321,21 @@ pub enum InstallableDagError {
     ScanRetentionTooShort { node_id: PhysicalASAPNodeId },
 }
 
+impl InstallableDagError {
+    /// The node whose subtree the refused rule is about, when the rule
+    /// depends only on that subtree (`UnsupportedRawDataWindow`'s
+    /// `TimeRange`, `ViewReadsUnwindowedSource`,
+    /// `IngestionBuildReadsWindowsOfDifferentOffsets`,
+    /// `ViewWithoutCoverage`): Stage 3 selects again without that node's
+    /// candidate. `None` for a rule that depends on the node's readers (a
+    /// retention, which Stage 3 sets from them) or on the whole DAG.
+    ///
+    /// Example: `ViewReadsUnwindowedSource { node_id: 2 }` is `Some(2)`;
+    /// `ViewRetentionTooShort { node_id: 2 }` is `None`.
+    pub fn node_id(&self) -> Option<PhysicalASAPNodeId> {
+        todo!("installable selection: implement after the tests are reviewed")
+    }
+}
+
 mod raw_data;
 mod views;

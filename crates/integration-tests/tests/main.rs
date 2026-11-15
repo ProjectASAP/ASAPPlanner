@@ -3,6 +3,7 @@
 //! One file: `cargo test -p asap-integration-tests --test integration <file>::`.
 
 mod physical_common;
+mod plan_enumeration;
 mod planner_layering_common;
 mod planning_common;
 
@@ -32,5 +33,6 @@ mod schema;
 mod sql_cardinality;
 mod sql_frequency;
 mod sql_to_post_asap;
+mod stage3_installable_optimal_selection;
 mod stage3_objective;
 mod time_range;
