@@ -6,6 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
+use asap_types::ir::operator::arguments::BinaryOpKind;
+use asap_types::ir::{BinaryOperator, NonASAPOp, Operator};
 use asap_types::stages::{CandidateForMemoGroupId, Memo, MemoGroupId, RequiredAccuracy};
 
 use crate::metric_rule::{query_roots_with_target, ErrorContractPerMetric};
@@ -59,11 +61,12 @@ pub struct ReadoutRequiredAccuracy {
 ///   divided by the path's factor, the readout group's cap, at the target's
 ///   failure probability per readout value ([`query_levels`]).
 /// - A composed query (several readouts whose errors reach its output,
-///   β > 0, such as a ratio; `q and r` reads one, since `r`'s values are
-///   not read: [`composed_queries`]) gives every level of the grid [`MAX_ERROR_LEVELS`] × [`failure_probability_levels`]
-///   not looser than the cap and the per-value failure probability (the cap
-///   itself when no error level is), one δ level of 1 when the target sets
-///   no failure probability.
+///   β > 0, such as a ratio; `q and r` and `q or r` combine none:
+///   [`composed_queries`]) gives every level of the grid
+///   [`MAX_ERROR_LEVELS`] × [`failure_probability_levels`] not looser than
+///   the cap and the per-value failure probability (the cap itself when no
+///   error level is), one δ level of 1 when the target sets no failure
+///   probability.
 /// - A readout group reached by several queries gets the union of their
 ///   levels, in query order; one no query with a target reaches in the
 ///   readout's metric gets none. Readouts of one group in one metric get
@@ -289,7 +292,10 @@ pub(crate) fn caps(
 /// ratio of two quantiles. `q and r` is not composed: its output copies
 /// `q`'s values and reads only which series `r` has ($\beta = 0$), so
 /// `q`'s readout keeps the single level of its cap. Neither is
-/// `q / count(r)`: the count reads no value of `r`.
+/// `q / count(r)`: the count reads no value of `r`. Nor is `q or r`: each
+/// output value is copied from `q` or from `r`, so its error is the larger
+/// of their errors, not their sum ([`takes_each_value_from_one_input`]),
+/// and each readout keeps the single level of its cap.
 /// Readouts of one value by different summary types are alternatives in
 /// one group's candidates, not a combination.
 fn composed_queries(
@@ -298,7 +304,7 @@ fn composed_queries(
     order: &[MemoGroupId],
     readout_groups: &BTreeSet<MemoGroupId>,
 ) -> BTreeSet<usize> {
-    let mut reads_a_readout = vec![false; memo.groups().len()];
+    let mut carries_a_readout_error = vec![false; memo.groups().len()];
     let mut composed = BTreeSet::new();
     for &group in order {
         let candidates = &memo.groups()[group.0 as usize].candidates;
@@ -306,12 +312,10 @@ fn composed_queries(
         for (candidate, contract_per_metric) in
             candidates.iter().zip(&error_contract[group.0 as usize])
         {
-            let children = candidate.expression.operator.children();
-            let inputs_reading: Vec<usize> = (0..children.len())
-                .filter(|&input| reads_a_readout[children[input].0 as usize])
-                .collect();
-            let inputs_reading_with_error = inputs_reading
-                .into_iter()
+            let operator = &candidate.expression.operator;
+            let children = operator.children();
+            let inputs_reading_with_error = (0..children.len())
+                .filter(|&input| carries_a_readout_error[children[input].0 as usize])
                 .filter(|&input| {
                     contract_per_metric
                         .iter()
@@ -319,8 +323,14 @@ fn composed_queries(
                         .any(|contract| contract.error_factor_per_input[input] > 0.0)
                 })
                 .count();
-            most_inputs_reading_with_error =
-                most_inputs_reading_with_error.max(inputs_reading_with_error);
+            // Each output value comes from one input, so the output's error
+            // is one input's, never a sum of several.
+            let inputs_combined = if takes_each_value_from_one_input(operator) {
+                inputs_reading_with_error.min(1)
+            } else {
+                inputs_reading_with_error
+            };
+            most_inputs_reading_with_error = most_inputs_reading_with_error.max(inputs_combined);
         }
         if most_inputs_reading_with_error > 1 {
             composed.extend(
@@ -330,10 +340,27 @@ fn composed_queries(
                     .copied(),
             );
         }
-        reads_a_readout[group.0 as usize] =
+        carries_a_readout_error[group.0 as usize] =
             readout_groups.contains(&group) || most_inputs_reading_with_error > 0;
     }
     composed
+}
+
+/// Whether `operator` copies each output value from exactly one of its
+/// inputs: a PromQL set operator (`q or r` takes a series' value from `q`
+/// when `q` has the series, else from `r`; `and` and `unless` only from
+/// the left).
+fn takes_each_value_from_one_input(operator: &Operator<MemoGroupId>) -> bool {
+    matches!(
+        operator,
+        Operator::NonASAP(NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                kind: BinaryOpKind::Set(_),
+                ..
+            },
+            ..
+        })
+    )
 }
 
 /// Keeps the larger of `cap` and the known cap of `query` in `metric`.

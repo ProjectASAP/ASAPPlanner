@@ -5,6 +5,7 @@ use crate::summary_kernels::{
     CountMinSketchAccumulator, DDSketchAccumulator, DatasketchesKLLAccumulator, HydraCms,
     HydraKllSketchAccumulator,
 };
+use crate::values::is_stale_marker;
 use crate::AggregateCore;
 use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
 use planner_types::summary_type::{SketchAlgorithm, SketchParams};
@@ -111,7 +112,7 @@ pub(crate) fn exact_accumulator_input(
 /// value), and it would turn `sum_over_time` into NaN or add one to
 /// `count_over_time` silently.
 fn not_a_stale_marker(value: f64) -> Result<(), String> {
-    if crate::values::is_stale_marker(value) {
+    if is_stale_marker(value) {
         Err(
             "a stale marker reached an exact accumulator: its chain must read the time \
              series' Scan, whose TimeRange drops stale markers"
