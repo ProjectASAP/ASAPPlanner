@@ -3,6 +3,7 @@
 //! One file: `cargo test -p asap-types --test types <file>::`.
 
 mod column_lineage;
+mod installable_dag_error;
 mod memo_aggregate_coverage;
 mod memo_group_properties;
 mod physical_asap_dag;

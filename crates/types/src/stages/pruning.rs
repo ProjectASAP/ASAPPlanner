@@ -141,4 +141,13 @@ pub enum PruneReason {
     /// Stage 3: `asap-cost` could not cost it, so the selection MILP leaves
     /// it out.
     UsageNotCostable,
+    /// Stage 3: a selected plan with it was refused by a planner-owned
+    /// install rule over its subtree (`PhysicalASAPDAG::materialized_views`);
+    /// the MILP was solved again without it.
+    ///
+    /// Example: `SELECT approx_percentile_cont(bytes, 0.9) FROM flows` every
+    /// 10 s, `flows` declaring its `rows_held`: the ingestion-time stored
+    /// `Project` over the whole table fails `ViewReadsUnwindowedSource`; the
+    /// re-solve picks a query-time plan.
+    NotInstallable,
 }
