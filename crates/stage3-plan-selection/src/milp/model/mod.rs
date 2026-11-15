@@ -28,7 +28,7 @@ use asap_types::ir::operator::Source;
 use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId};
 use asap_types::workload::QueryWorkloadEntry;
 
-use super::dominance::dominated_by_one_evaluation_twin;
+use super::dominance::{copies_in_equivalent_contexts, dominated_by_one_evaluation_twin};
 use super::exact_only::{exact_only_constraints, exact_only_variables};
 use super::graph::Components;
 use super::retention::{least_retention_ms, retention_constraints, retention_variables};
@@ -79,7 +79,10 @@ pub(crate) struct SelectionVariables {
 
 /// $x$, $y$, $z$, $t$, $h$ and $r$ over `inputs`, added to `problem`: $x$
 /// fixed at 0 for an execution that is not `kept` (not costed, or dearer
-/// than a feasible plan), and no $y$ on an edge of one.
+/// than a feasible plan), and no $y$ on an edge of one. The executions,
+/// edges and queries of a copy of an equivalent evaluation context take the
+/// original's $x$, $y$ and $z$ ([`copies_in_equivalent_contexts`]), so
+/// their costs add up on one variable.
 fn selection_variables(
     inputs: &SelectionInputs<'_>,
     kept: &[bool],
@@ -87,26 +90,40 @@ fn selection_variables(
     problem: &mut ProblemVariables,
 ) -> SelectionVariables {
     let selectable = inputs.selectable;
-    let x = kept
-        .iter()
-        .map(|&kept| match kept {
-            true => problem.add(variable().binary()),
-            false => problem.add(variable().min(0).max(0)),
-        })
-        .collect();
-    let y = selectable
+    let (original_of_execution, original_of_edge, original_of_query) =
+        copies_in_equivalent_contexts(inputs, kept);
+    let mut x: Vec<Variable> = Vec::with_capacity(kept.len());
+    for (index, &kept) in kept.iter().enumerate() {
+        let variable = match (original_of_execution[index], kept) {
+            (original, _) if original != index => x[original],
+            (_, true) => problem.add(variable().binary()),
+            (_, false) => problem.add(variable().min(0).max(0)),
+        };
+        x.push(variable);
+    }
+    let mut y: BTreeMap<usize, Variable> = BTreeMap::new();
+    for (position, (edge, cost)) in selectable
         .edges()
         .iter()
         .zip(&inputs.costs.per_edge)
         .enumerate()
-        .filter(|(_, (edge, cost))| cost.is_some() && kept[edge.consumer] && kept[edge.producer])
-        .map(|(position, _)| (position, problem.add(variable().binary())))
-        .collect();
+    {
+        if cost.is_some() && kept[edge.consumer] && kept[edge.producer] {
+            let variable = match original_of_edge[position] {
+                original if original != position => y[&original],
+                _ => problem.add(variable().binary()),
+            };
+            y.insert(position, variable);
+        }
+    }
     let mut z = BTreeMap::new();
     for (query, executions) in selectable.answering() {
         for &execution in executions {
-            z.entry((*query, execution))
+            let original = (original_of_query[query.0], original_of_execution[execution]);
+            let variable = *z
+                .entry(original)
                 .or_insert_with(|| problem.add(variable().binary()));
+            z.insert((*query, execution), variable);
         }
     }
     // t only inside a strongly connected component of the selectable
@@ -356,7 +373,9 @@ pub(crate) enum SelectionMilpError {
 /// [`raw_data_disk_rows`], (R) and (X), with HiGHS at gap 0 on one
 /// thread. The executions dearer than a feasible plan
 /// ([`dearer_than_a_feasible_plan`]) or dominated by their `OneEvaluation`
-/// twin ([`dominated_by_one_evaluation_twin`]) are left out first, with
+/// twin ([`dominated_by_one_evaluation_twin`]) are left out first (and a
+/// copy of an equivalent context shares its original's variables,
+/// [`copies_in_equivalent_contexts`]), with
 /// the $h_v$ of a candidate whose
 /// executions are all left out, then the coefficients kept are scaled so
 /// the largest is 1,000 (HiGHS's tolerances are absolute).
