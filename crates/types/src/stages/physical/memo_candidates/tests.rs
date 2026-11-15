@@ -150,6 +150,19 @@ fn candidate(
     }
 }
 
+/// [`PhysicalASAPMemoCandidates::delivers_on`] of `producer`, added as the
+/// last candidate of `candidates`.
+fn delivers_on(
+    candidates: &PhysicalASAPMemoCandidates,
+    producer: &PhysicalCandidate,
+    context: &ExecutionContext,
+) -> bool {
+    let mut with_producer = candidates.clone();
+    with_producer.physical_candidates.push(*producer);
+    let v = PhysicalCandidateId(with_producer.physical_candidates.len() - 1);
+    with_producer.delivers_on(v, context)
+}
+
 fn evaluation(period_ms: u64, phase_ms: u64) -> ExecutionContext {
     ExecutionContext::Evaluation {
         grid: EvaluationGrid {
@@ -183,7 +196,7 @@ fn delivers_on_by_lifetime_without_windows() {
         (&one_evaluation, materialized, false),
     ] {
         assert_eq!(
-            producer.delivers_on(&candidates, &context),
+            delivers_on(&candidates, producer, &context),
             delivers,
             "{:?} in {context:?}",
             producer.physical_properties
@@ -219,7 +232,7 @@ fn delivers_on_a_chain_when_its_width_divides_the_context_times() {
         (&ingestion_10s, ingestion(5_000, 0), false),
     ] {
         assert_eq!(
-            producer.delivers_on(&candidates, &context),
+            delivers_on(&candidates, producer, &context),
             delivers,
             "{:?} {:?} in {context:?}",
             producer.logical_candidate_id,
@@ -251,7 +264,11 @@ fn delivers_on_a_stored_result_on_its_group_grid() {
         (&on_grid, ingestion(60_000, 0), true),
         (&without_grid, evaluation(60_000, 0), false),
     ] {
-        assert_eq!(x.delivers_on(candidates, &context), delivers, "{context:?}");
+        assert_eq!(
+            delivers_on(candidates, &x, &context),
+            delivers,
+            "{context:?}"
+        );
     }
 }
 
@@ -377,8 +394,8 @@ fn delivers_on_grid_and_off_it(
 ) -> (bool, bool) {
     let stored = candidate(producer, timing, Lifetime::AcrossEvaluations(MEMORY));
     (
-        stored.delivers_on(&examples.candidates, &evaluation(60_000, 0)),
-        stored.delivers_on(&examples.candidates, &evaluation(30_000, 0)),
+        delivers_on(&examples.candidates, &stored, &evaluation(60_000, 0)),
+        delivers_on(&examples.candidates, &stored, &evaluation(30_000, 0)),
     )
 }
 
@@ -433,7 +450,7 @@ fn an_ingestion_time_view_without_a_window_delivers_on_every_context() {
             ingestion(60_000, 30_000),
         ] {
             assert!(
-                stored.delivers_on(&examples.candidates, &context),
+                delivers_on(&examples.candidates, &stored, &context),
                 "{arrival:?} {context:?}"
             );
         }
@@ -558,7 +575,7 @@ fn delivers_on_the_own_times_of_a_materialized_computation() {
         ),
     ] {
         assert_eq!(
-            producer.delivers_on(&candidates, &context),
+            delivers_on(&candidates, producer, &context),
             delivers,
             "{:?} in {context:?}",
             producer.logical_candidate_id
@@ -699,5 +716,112 @@ fn new_indexes_only_admissible_edges() {
         assert!(candidates
             .admissible_edges_out_of(PhysicalCandidateId(producer))
             .is_empty());
+    }
+}
+
+/// Stored at ingestion time, a result is stored at the ends of the refresh
+/// windows the installed plan refreshes it on
+/// ([`RefreshWindow::computed_from`]), not on its group's evaluation grid:
+/// `sum(TimeRange(5m))` read every 60 s is refreshed every 5 min, so it
+/// delivers on a 5 min grid but not on the 60 s one; a chain of 60 s
+/// windows over `TimeShift(30s)` is refreshed at phase 30 s.
+#[test]
+fn an_ingestion_time_result_is_stored_on_its_refresh_window() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let mut add = |operator: Operator<MemoGroupId>, parameters| {
+        let group = memo.find_or_add_group(operator.clone()).unwrap();
+        let candidate = CandidateForMemoGroup::new(
+            operator,
+            parameters,
+            OriginOfCandidateForMemoGroup::Pass1,
+            vec![],
+        );
+        memo.add_candidate(group, candidate).unwrap();
+        CandidateForMemoGroupId {
+            group,
+            index_in_group: 0,
+        }
+    };
+    let series = add(scan("latency", &[], vec![]), None);
+    let last_5m = add(range(300_000, series.group), None);
+    let sum = add(
+        aggregate(
+            Reduction::PerEntity,
+            AggIntent::Sum { col: Some(1) },
+            last_5m.group,
+        ),
+        None,
+    );
+    let shifted = add(shift(30_000, None, series.group), None);
+    let chain = add(
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: shifted.group,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+            tumbling_window_width_ms: 60_000,
+        }),
+        Some(SketchParams::Kll { k: 269 }),
+    );
+    let grid_60s = Some(EvaluationGrid {
+        period_ms: 60_000,
+        phase_ms: 0,
+    });
+    let group_count = memo.groups().len();
+    let stored = Lifetime::AcrossEvaluations(MEMORY);
+    let candidates = PhysicalASAPMemoCandidates::new(
+        LogicalASAPMemoCandidates {
+            memo,
+            edges: vec![],
+            pruned: vec![],
+            evaluation_grid_of_group: vec![grid_60s; group_count],
+            exact_only_groups_of_query: vec![],
+        },
+        vec![
+            candidate(series, IngestionTime, Lifetime::None),
+            candidate(last_5m, IngestionTime, Lifetime::None),
+            candidate(sum, IngestionTime, stored),
+            candidate(shifted, IngestionTime, Lifetime::None),
+            candidate(chain, IngestionTime, stored),
+        ],
+        vec![
+            physical_edge(0, 1, true, true),
+            physical_edge(1, 2, true, true),
+            physical_edge(0, 3, true, true),
+            physical_edge(3, 4, true, true),
+        ],
+        vec![],
+    );
+    let (sum, chain) = (PhysicalCandidateId(2), PhysicalCandidateId(4));
+    assert_eq!(
+        RefreshWindow::computed_from(&candidates, sum),
+        Some(RefreshWindow {
+            width_ms: 300_000,
+            phase_ms: 0
+        })
+    );
+    assert_eq!(
+        RefreshWindow::computed_from(&candidates, chain),
+        Some(RefreshWindow {
+            width_ms: 60_000,
+            phase_ms: 30_000
+        })
+    );
+    for (producer, context, delivers) in [
+        (sum, evaluation(60_000, 0), false),
+        (sum, evaluation(300_000, 0), true),
+        (sum, evaluation(600_000, 300_000), true),
+        (sum, ingestion(300_000, 0), true),
+        (chain, evaluation(60_000, 0), false),
+        (chain, evaluation(60_000, 30_000), true),
+        (chain, evaluation(120_000, 90_000), true),
+        (chain, ingestion(60_000, 0), false),
+    ] {
+        assert_eq!(
+            candidates.delivers_on(producer, &context),
+            delivers,
+            "{producer:?} in {context:?}"
+        );
     }
 }

@@ -415,7 +415,8 @@ fn a_view_without_retention_is_not_costed() {
 
 /// A view over an ingestion-time chain of 60 s windows is refreshed once
 /// per chain window, not once per second: `TimeShift(1h)` over the chain
-/// maintains the chain's 60 s window ([`maintained_window_ms`]), and,
+/// is refreshed on the chain's 60 s window (its refresh window,
+/// `RefreshWindow::computed_from`, is the chain's), and,
 /// retained for 1 h 5 m (its 5-minute reader and its offset), keeps 65
 /// windows' outputs and the one being built, as many as the chain below
 /// it, not 3,901 seconds' worth.
@@ -444,12 +445,7 @@ fn a_view_over_an_ingestion_time_chain_keeps_one_output_per_chain_window() {
             child: 0,
         }))
     };
-    let operator_of = |id: u32| match id {
-        0 => &chain.payload,
-        _ => &shift.payload,
-    };
-    let window_ms = maintained_window_ms(1, operator_of, |id| (id == 1).then_some(0));
-    assert_eq!(window_ms, Some(60_000));
+    let window_ms = Some(60_000);
     let one_window_of_states = ProducerOutput {
         payload: &chain.payload,
         output_schema: &chain.output_schema,

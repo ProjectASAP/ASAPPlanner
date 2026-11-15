@@ -223,47 +223,6 @@ pub fn reads_one_batch_of<C>(
 /// refreshed once per second.
 const ONE_SECOND_MS: u64 = 1_000;
 
-/// The window an ingestion-time grouping `node` maintains, in ms: a
-/// tumbling-window chain's tumbling window, a `TimeRange`'s range, or the
-/// first `TimeRange` or chain below it through filters, projections and
-/// time shifts (a view over an ingestion-time chain is refreshed once per
-/// chain window; `input_of` gives a node's first input, `operator_of` its
-/// operator). `None` when there is none. Over plan nodes ([`plan_cost`])
-/// or memo groups (Stage 3, before any plan exists).
-///
-/// Example: `Aggregate(Sum) <- Filter <- TimeRange(1m) <- Scan`: 60,000;
-/// `TimeShift(1h) <- SummaryTumblingWindowChain(1m)`: 60,000.
-///
-/// [`plan_cost`]: crate::plan_cost
-pub fn maintained_window_ms<'o, N: Copy + Ord, C: 'o>(
-    node: N,
-    operator_of: impl Fn(N) -> &'o Operator<C>,
-    input_of: impl Fn(N) -> Option<N>,
-) -> Option<u64> {
-    let range_ms = |range: &std::time::Duration| u64::try_from(range.as_millis()).ok();
-    if let Some(width_ms) = operator_of(node).chain_tumbling_window_width_ms() {
-        return Some(width_ms);
-    }
-    if let Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) = operator_of(node) {
-        return range_ms(range);
-    }
-    let mut seen = BTreeSet::new();
-    let mut below = input_of(node)?;
-    while seen.insert(below) {
-        if let Some(width_ms) = operator_of(below).chain_tumbling_window_width_ms() {
-            return Some(width_ms);
-        }
-        match operator_of(below) {
-            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => return range_ms(range),
-            Operator::NonASAP(
-                NonASAPOp::Filter { .. } | NonASAPOp::Project { .. } | NonASAPOp::TimeShift { .. },
-            ) => below = input_of(below)?,
-            _ => return None,
-        }
-    }
-    None
-}
-
 /// The time between two outputs of a node running `payload` that keeps
 /// rows, which its retention is divided by: a chain's tumbling window,
 /// else `window_ms` (the window it maintains), else one second of
@@ -280,8 +239,9 @@ pub fn output_interval_ms<C>(payload: &Operator<C>, window_ms: Option<u64>) -> u
 /// [`plan_cost`]; Stage 3 calls it per candidate): `producers` are its
 /// producers in edge order, `rate` its `(multiplier, per_second)`
 /// ([`computations`], [`executions_per_second`]), and `window_ms` the time
-/// window one execution covers: the window an ingestion-time node
-/// maintains ([`maintained_window_ms`]), or a query-time `Scan`'s read, the
+/// window one execution covers: an ingestion-time node's refresh window
+/// width (`RefreshWindow::computed_from`, the rule the installed plan
+/// refreshes it on), or a query-time `Scan`'s read, the
 /// most offset + range its consumers read ([`read_back_ms`] without a span;
 /// `None`: it reads what it retains). A materialized node keeps what its
 /// `retention_ms` ($h_v$) covers: a tumbling-window chain its windows in

@@ -285,30 +285,47 @@ pub fn windows_readers_need<P: TimeIndexedPlan>(
     Some(windows)
 }
 
-/// The sum of the offsets of the `TimeShift`s directly below `node` (each
-/// the only input of the node above it). `None` when one has an `@`
-/// anchor, or the sum is negative or overflows.
+/// The sum of the offsets of the `TimeShift`s directly below `node`, each
+/// the input of the node above it. Over a plan each of these nodes has one
+/// input; over Stage 3's candidates its inputs are the alternative
+/// producers of its one input, and every path down must give the same
+/// sum. `None` when one has an `@` anchor, the paths disagree, or the sum
+/// is negative or overflows.
 ///
 /// Example: `TimeRange(5m)` over `TimeShift(1m)` over `TimeShift(1h)`:
 /// 3,660,000.
 pub fn shift_back_ms_below<P: TimeIndexedPlan>(plan: &P, node: P::Node) -> Option<u64> {
-    let only_input = |node| match plan.inputs_of(node).as_slice() {
-        [input] => Some(*input),
-        _ => None,
-    };
-    let mut shift_back_ms = 0i64;
-    let mut current = node;
-    while let Some(input) = only_input(current) {
-        let Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) = plan.operator_of(input) else {
-            break;
-        };
-        if shift.at.is_some() {
-            return None;
+    let mut shift_back_ms: Option<i64> = None;
+    let mut seen = std::collections::BTreeSet::new();
+    // (a node, the offsets of the shifts walked through to it)
+    let mut pending = vec![(node, 0i64)];
+    while let Some((current, walked_ms)) = pending.pop() {
+        if !seen.insert((current, walked_ms)) {
+            continue;
         }
-        shift_back_ms = shift_back_ms.checked_add(shift.offset_ms)?;
-        current = input;
+        let inputs = plan.inputs_of(current);
+        // A path ends at a node with no input, or at an input that is not a
+        // shift.
+        let mut path_ends = inputs.is_empty();
+        for input in inputs {
+            match plan.operator_of(input) {
+                Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
+                    if shift.at.is_some() {
+                        return None;
+                    }
+                    pending.push((input, walked_ms.checked_add(shift.offset_ms)?));
+                }
+                _ => path_ends = true,
+            }
+        }
+        if path_ends {
+            if shift_back_ms.is_some_and(|sum| sum != walked_ms) {
+                return None;
+            }
+            shift_back_ms = Some(walked_ms);
+        }
     }
-    u64::try_from(shift_back_ms).ok()
+    u64::try_from(shift_back_ms?).ok()
 }
 
 /// Down: the windows of input rows that `node`'s result is computed from:

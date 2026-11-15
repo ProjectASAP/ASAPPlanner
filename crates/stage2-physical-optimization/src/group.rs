@@ -64,7 +64,7 @@ pub(super) fn ingestion_time_offered_per_group(
 /// `AcrossEvaluations`. It does for a chain, for a group evaluated on a
 /// known grid (`evaluation_grid_of_group`) and for a time-independent
 /// group (its stored result is read wherever it is final,
-/// `PhysicalCandidate::delivers_on`), unless
+/// `PhysicalASAPMemoCandidates::delivers_on`), unless
 /// the group is read under an absolute `@ T`
 /// ([`read_at_absolute_time_per_group`]).
 pub(super) fn across_evaluations_offered_per_group(

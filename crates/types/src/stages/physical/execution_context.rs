@@ -1,6 +1,6 @@
 //! $\kappa$: a class of executions that happen at the same times (concepts
 //! doc, section 5). Stage 3 indexes $x_{\kappa,v}$ and $y_{\kappa,u,c,i}$ by
-//! it; [`super::PhysicalCandidate::delivers_on`] reads it, so it lives with
+//! it; [`super::PhysicalASAPMemoCandidates::delivers_on`] reads it, so it lives with
 //! the physical candidates.
 
 use super::candidate::PhysicalCandidateId;

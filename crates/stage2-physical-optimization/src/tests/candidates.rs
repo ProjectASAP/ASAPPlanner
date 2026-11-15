@@ -31,7 +31,7 @@ use crate::test_fixtures::{
 /// materialized across evaluations. The scan and the chain are
 /// time-independent, so ingestion time is offered too, and so is
 /// `AcrossEvaluations` without a grid: kept up to date at ingestion time,
-/// their result is final at any time (`PhysicalCandidate::delivers_on`). A
+/// their result is final at any time (`PhysicalASAPMemoCandidates::delivers_on`). A
 /// summary build is not offered (IT, None): fed at ingestion time
 /// it keeps its state, so the chain is offered (IT, AcrossEvaluations)
 /// only; the scan's (IT, None) feeds the chain built at ingestion time.

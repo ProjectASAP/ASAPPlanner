@@ -27,7 +27,7 @@
 //!   (`asap_types::stages::anchor_is_evaluation_time`).
 //! - An input of a consumer in $\kappa$ reads a producer, over an admissible
 //!   edge, only where the producer delivers on $\kappa$
-//!   (`PhysicalCandidate::delivers_on`).
+//!   (`PhysicalASAPMemoCandidates::delivers_on`).
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -255,7 +255,7 @@ impl SelectableExecutions {
         u: PhysicalCandidateId,
     ) -> Option<Execution> {
         let producer = &physical.physical_candidates[u.0];
-        if !producer.delivers_on(physical, &self.contexts[context.0]) {
+        if !physical.delivers_on(u, &self.contexts[context.0]) {
             return None;
         }
         let properties = producer.physical_properties;
@@ -274,7 +274,9 @@ impl SelectableExecutions {
 
     /// The context the inputs of `consumer` run in: an `AcrossEvaluations`
     /// candidate's at ingestion time, the ingestion pipeline of its refresh
-    /// window (`LogicalASAPMemoCandidates::own_schedule`); a `TimeShift` anchored at
+    /// window, the one the installed plan refreshes it on
+    /// (`RefreshWindow::computed_from` over the candidates: `sum(TimeRange(5m))`
+    /// every 5 min, a 60 s chain over `TimeShift(30s)` at phase 30 s); a `TimeShift` anchored at
     /// `@ end()` or `@ start()` in an evaluation context, a context of its
     /// own per anchor, on the grid of its queries' request end (start)
     /// times: a request's start and end, and an evaluation, are different
@@ -292,17 +294,8 @@ impl SelectableExecutions {
         if properties.timing() == ExecutionTiming::IngestionTime
             && properties.is_across_evaluations()
         {
-            return match physical
-                .logical_candidates
-                .own_schedule(candidate.logical_candidate_id)
-            {
-                Some(grid) => self.context_id(
-                    ExecutionContext::IngestionPipeline(RefreshWindow {
-                        width_ms: grid.period_ms,
-                        phase_ms: grid.phase_ms,
-                    }),
-                    None,
-                ),
+            return match RefreshWindow::computed_from(physical, consumer.candidate) {
+                Some(window) => self.context_id(ExecutionContext::IngestionPipeline(window), None),
                 None => consumer.context,
             };
         }

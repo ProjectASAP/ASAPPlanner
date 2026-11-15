@@ -8,7 +8,7 @@
 //! (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
 //! section 5, "Cost and retention").
 
-use asap_types::ir::{NonASAPOp, Operator};
+use asap_types::ir::Operator;
 use asap_types::plan::time_window::{InputTimeAccess, TimeIndexedPlan};
 use asap_types::stages::{
     MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdge, PhysicalEdgeId,
@@ -102,11 +102,9 @@ fn read_back(
 }
 
 /// Stage 3's candidates as the time walks see them above `edge`: its
-/// producer read by its consumer only, any other candidate by every
-/// candidate that may read it (its admissible edges out); each candidate's
-/// admissible producers as its inputs, its operator at its timing and
-/// lifetime ([`InputTimeAccess::of`]), and a current-time read of a
-/// `Scan` (raw data) needing every row.
+/// producer read by its consumer only, any other candidate as
+/// `PhysicalASAPMemoCandidates` sees it (`TimeIndexedPlan`: by every
+/// candidate that may read it, over its admissible edges out).
 struct Candidates<'a> {
     physical: &'a PhysicalASAPMemoCandidates,
     edge: &'a PhysicalEdge,
@@ -119,36 +117,20 @@ impl TimeIndexedPlan for Candidates<'_> {
     fn readers_of(&self, v: PhysicalCandidateId) -> Vec<PhysicalCandidateId> {
         match v == self.edge.producer_candidate_id {
             true => vec![self.edge.consumer_candidate_id],
-            false => self
-                .physical
-                .admissible_edges_out_of(v)
-                .iter()
-                .map(|&out| self.physical.edge(out).consumer_candidate_id)
-                .collect(),
+            false => self.physical.readers_of(v),
         }
     }
 
     fn inputs_of(&self, v: PhysicalCandidateId) -> Vec<PhysicalCandidateId> {
-        (0..self.physical.input_count(v))
-            .flat_map(|input| self.physical.admissible_edges_into(v, input))
-            .map(|&edge| self.physical.edge(edge).producer_candidate_id)
-            .collect()
+        self.physical.inputs_of(v)
     }
 
     fn input_time_access(&self, v: PhysicalCandidateId) -> InputTimeAccess {
-        let properties = self.physical.physical_candidates[v.0].physical_properties;
-        InputTimeAccess::of(
-            self.operator_of(v),
-            properties.timing(),
-            properties.lifetime(),
-        )
+        self.physical.input_time_access(v)
     }
 
     fn current_time_read_needs_every_row(&self, v: PhysicalCandidateId) -> bool {
-        matches!(
-            self.operator_of(v),
-            Operator::NonASAP(NonASAPOp::Scan { .. })
-        )
+        self.physical.current_time_read_needs_every_row(v)
     }
 
     fn operator_of(&self, v: PhysicalCandidateId) -> &Operator<MemoGroupId> {
