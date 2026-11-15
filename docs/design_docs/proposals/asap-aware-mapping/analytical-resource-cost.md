@@ -765,7 +765,11 @@ scan_bytes = source_read_bytes for the build
 Merge, subtract, and delete add their own invocation counts;
 they are never folded into the simple formula implicitly.
 
-Concrete accuracy-sized parameters determine state and work:
+Concrete accuracy-sized parameters determine state and work. The table counts
+each kernel's counter updates and reads; `asap-cost` charges a row, a merged
+state and a read group the executor's measured time for that unit
+(`node::operation_counts`, one operation per nanosecond at the default speed),
+so a DDSketch or KLL row costs what the executor measured, not one operation:
 
 | Summary | Update operations per row | Read operations | State bytes per physical instance |
 |---|---:|---:|---:|
@@ -785,7 +789,7 @@ from logical group count alone.
 
 Summary merge, subtract, delete, and readout are separate physical operators.
 Their CPU and memory use the concrete summary state size and number of input
-states. A merge costs one operation per input state, and outputs one state per
+states. A merge costs its family's measured operations per input state, and outputs one state per
 group: the input's groups, or for a rollup (`group_by`) the groups of its
 keys, estimated like any `by (keys)` and at most the input's groups. A plan
 using one of these operations is unavailable until the corresponding formula

@@ -94,6 +94,49 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
     );
 }
 
+/// A merge over a time range of a DDSketch chain's windows reads DDSketch
+/// states, though the time range itself has no family: the merge's θ names
+/// it, so each of the 5,000 states read costs a DDSketch merge (2,500
+/// operations), not an exact accumulator's (230).
+#[test]
+fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let windows = node(Payload::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_secs(300),
+        kind: TimeRangeKind::Range,
+        child: 0,
+    }));
+    let windows_output = ProducerOutput {
+        payload: &windows.payload,
+        output_schema: &windows.output_schema,
+        output: EdgeStatistics {
+            rows: 5_000,
+            bytes: 5_000 * 4_096,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::None,
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 5,
+    };
+    let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
+        children: vec![0],
+        group_by: None,
+    }));
+    merge.parameters = Some(SketchParams::DDSketch { alpha: 0.01 });
+    let merge_usage =
+        node_resource_usage_and_cost(&merge, &[windows_output], (1, 1.0), None, &data, &settings)
+            .unwrap();
+    assert!(matches!(
+        merge_usage.family,
+        StateFamily::Sketch(SketchParams::DDSketch { .. })
+    ));
+    assert_eq!(
+        merge_usage.cpu_ops_per_second,
+        5_000.0 * crate::node::operation_counts::DDSKETCH_MERGE_OPERATIONS_PER_STATE
+    );
+}
+
 /// A query-time node holds its state only
 /// while it computes: bytes × its work per execution × its executions
 /// per second, with no query latency. A KLL state of 2 MB whose own

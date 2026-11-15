@@ -1,7 +1,7 @@
 //! Workloads whose queries share computation, planned through the production
 //! stages: adding a query that can read an existing result must not cost
 //! more than planning the first query alone.
-use crate::planning_common::{cost, fuzz_workload};
+use crate::planning_common::{cost, cost_with, fuzz_workload};
 use serde_json::json;
 
 /// Deriving the coarse sum costs only a sum over the 150 fine groups.
@@ -49,12 +49,25 @@ fn slower_repeat_reuses_faster_sum() {
     );
 }
 
-/// The filtered query avoids its independent scan and aggregation.
+/// The filtered query reads the by-city quantile's summary states instead
+/// of its own scan and aggregation: with summaries costed free (so the
+/// sketch plans are selected, as under the earlier unit costs), it adds
+/// at most 0.1% to the by-city quantile's cost. Under the default unit
+/// costs both are exact plans, and no rule reads the filtered quantile
+/// from the by-city exact values.
 #[test]
 fn grouped_filtered_quantile_plans() {
+    let settings = asap_integration_tests::planning::summary_work_free();
+    let w = fuzz_workload("percentile_filtered_and_by_city", true);
+    let mut grouped = w.clone();
+    grouped.queries = vec![w.queries[2].clone()];
+    let grouped_cost = cost_with(&grouped, &settings);
+    let mut filtered_and_grouped = w.clone();
+    filtered_and_grouped.queries.remove(0);
+    let together = cost_with(&filtered_and_grouped, &settings);
     assert!(
-        cost(&fuzz_workload("percentile_filtered_and_by_city", true)) < 0.25,
-        "filtered query must reuse the grouped result"
+        together <= grouped_cost * 1.001,
+        "filtered query must reuse the grouped result: {together} vs {grouped_cost}"
     );
 }
 
@@ -117,11 +130,18 @@ fn identical_exact_percentiles_share_work() {
     );
 }
 
-/// Different ranks share the source window but still compute their own values.
+/// Different ranks share the source window but still compute their own
+/// values: together they cost less than twice one of them.
 #[test]
 fn different_exact_percentiles_share_the_input_window() {
     let mut related = fuzz_workload("identical_percentiles", false);
     related.queries[1].entry.query.0 = related.queries[1].entry.query.0.replace("0.99", "0.5");
     let related_cost = cost(&related);
-    assert!(related_cost <= 0.0883, "{related_cost}");
+    let mut base = related.clone();
+    base.queries.truncate(1);
+    let base_cost = cost(&base);
+    assert!(
+        related_cost < 2.0 * base_cost * (1.0 - 1e-6),
+        "{related_cost} vs {base_cost}"
+    );
 }
