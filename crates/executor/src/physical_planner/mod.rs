@@ -27,7 +27,9 @@ use planner_types::summary_type::{
 // `promql_rows` reads `OperatorNode` through `super::*` only in its
 // test-support helpers.
 #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_imports))]
-use planner_types::ir::{ASAPOp, NonASAPOp, OperatorNode, ScalarExpr, TimeRangeKind};
+use planner_types::ir::{
+    ASAPOp, NonASAPOp, OperatorNode, OperatorResultKind, ScalarExpr, TimeRangeKind,
+};
 mod logical;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -255,6 +257,8 @@ fn compile_internal(
                 .iter()
                 .map(|id| Arc::new(nodes[id].output_schema.clone()))
                 .collect::<Vec<_>>();
+            let input_rows = input_rows_kind(&restored[&id]);
+            let over_relation = input_rows == OperatorResultKind::Relation;
             if matches!(node.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. }))
                 && inputs.len() > 1
             {
@@ -624,6 +628,7 @@ fn compile_internal(
                         update,
                         reduction,
                         window_end,
+                        over_relation,
                     )?,
                 };
                 let build = match filter {
@@ -781,7 +786,7 @@ fn compile_internal(
             }
             if let Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) = &node.payload {
                 // Exact counts evaluate to Int64; PromQL declares a Float64 sample.
-                let evaluation = bind_operation(node, &schemas)
+                let evaluation = bind_operation(node, &schemas, over_relation)
                     .map_err(|error| invalid(format!("node {id}: {error}")))?;
                 let actual = evaluation.schema();
                 let converted = actual.fields.iter().zip(&output.fields).position(|(a, d)| {
@@ -830,7 +835,7 @@ fn compile_internal(
                     // state covers this evaluation's window, so merge by
                     // series identity and attach the run scope's timestamp,
                     // as a per-series `SummaryAgg` does.
-                    let merged = bind_operation(node, &schemas)?;
+                    let merged = bind_operation(node, &schemas, over_relation)?;
                     let compact = merged.schema();
                     physical_dag.add(helper_id(id, 1)?, inputs, merged)?;
                     physical_dag.add(
@@ -838,23 +843,6 @@ fn compile_internal(
                         vec![helper_id(id, 1)?],
                         Operator::scope_timestamp(compact, output)?,
                     )?;
-                    continue;
-                }
-            }
-            // A rollup of a relation's states to no keys is a global SQL
-            // aggregate: one row, an empty state, over no input rows.
-            if let Payload::ASAP(ASAPOp::SummaryMerge {
-                group_by: Some(keys),
-                ..
-            }) = &node.payload
-            {
-                if keys.is_empty() && built_from_relation(&restored[&id]) {
-                    // The merge carries the θ of the states it reads.
-                    let parameters = node.parameters.clone();
-                    let operator = compile_node(node, &schemas)
-                        .and_then(|merge| merge.with_emit_empty_global(parameters))
-                        .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                    physical_dag.add(id, inputs, operator)?;
                     continue;
                 }
             }
@@ -866,7 +854,7 @@ fn compile_internal(
                 physical_dag.add(id, inputs, operator.with_output_schema(output)?)?;
                 continue;
             }
-            let mut operator = compile_node(node, &schemas)
+            let mut operator = compile_node(node, &schemas, input_rows)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
             if operator.is_counter_evaluation() {
                 if let Some((offset, lookback)) = counter_window(id, &nodes, &dependencies)? {
@@ -885,18 +873,37 @@ fn compile_internal(
     Ok(physical_dag)
 }
 
-/// Whether every summary state `state` merges was built from a relation's
-/// rows (a SQL table's), where a global aggregate has a row over no input
-/// row; not from a PromQL vector's, where it has none.
-fn built_from_relation(state: &std::rc::Rc<OperatorNode>) -> bool {
-    match state.asap() {
-        Some(ASAPOp::SummaryMerge { children, .. }) => children.iter().all(built_from_relation),
+/// The result kind of the rows `node` reads: its (first) input's, or, when
+/// that input is summary states, the kind of the rows they were built from.
+/// It decides an aggregate's rule for an empty input: a global aggregate
+/// over a SQL table's `Relation` has one row over no input rows
+/// (`SELECT count(*) FROM t WHERE false` is 0), over a PromQL vector it has
+/// none (`count(sum by (job) (m >= 1000))` is empty when no value reaches
+/// 1000), whether or not its input still has a series identity column.
+fn input_rows_kind(node: &OperatorNode) -> OperatorResultKind {
+    node.operator
+        .children()
+        .first()
+        .map_or(node.result_kind, |input| rows_kind(input))
+}
+
+/// The result kind of `node`'s rows, or, for summary states, of the rows
+/// they were built from (`State` when that is not known).
+fn rows_kind(node: &std::rc::Rc<OperatorNode>) -> OperatorResultKind {
+    if node.result_kind != OperatorResultKind::State {
+        return node.result_kind;
+    }
+    match node.asap() {
         Some(
             ASAPOp::SummaryAgg { child, .. } | ASAPOp::SummaryTumblingWindowChain { child, .. },
-        ) => child.result_kind == planner_types::ir::OperatorResultKind::Relation,
+        ) => rows_kind(child),
+        // The states of one memo group are built from rows of one kind.
+        Some(ASAPOp::SummaryMerge { children, .. }) => {
+            children.first().map_or(node.result_kind, rows_kind)
+        }
         // A filter keeping whole states reads them from their build.
-        _ => planner_types::ir::operator::asap::selected_from(state)
-            .is_some_and(|states| built_from_relation(&states)),
+        _ => planner_types::ir::operator::asap::selected_from(node)
+            .map_or(node.result_kind, |states| rows_kind(&states)),
     }
 }
 
@@ -942,14 +949,34 @@ pub(crate) fn require_sound_merge(input: &SchemaRef) -> Result<(), Error> {
 /// that lowers to one operator. A node that lowers to several (an exact
 /// top-k, `count_values`, or a `without` grouping over a series identity)
 /// is lowered only by [`compile`]; here it is refused.
-pub fn compile_node(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Operator, Error> {
+/// `input_rows_kind` is the result kind of the rows the node reads (for
+/// summary states, of the rows they were built from): an aggregate, build
+/// or merge into no groups over a `Relation` has SQL's one row over no
+/// input rows, and its quantile is SQL's percentile; over a PromQL vector
+/// it has no row and PromQL's quantile.
+pub fn compile_node(
+    node: &PhysicalASAPDAGNode,
+    inputs: &[SchemaRef],
+    input_rows_kind: OperatorResultKind,
+) -> Result<Operator, Error> {
     for schema in inputs {
         crate::values::validate_schema(schema)?;
     }
-    bind_operation(node, inputs)?.with_output_schema(Arc::new(node.output_schema.clone()))
+    bind_operation(
+        node,
+        inputs,
+        input_rows_kind == OperatorResultKind::Relation,
+    )?
+    .with_output_schema(Arc::new(node.output_schema.clone()))
 }
 
-fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Operator, Error> {
+/// `over_relation`: whether the node reads a SQL relation's rows (or
+/// states built from them), not a PromQL vector's.
+fn bind_operation(
+    node: &PhysicalASAPDAGNode,
+    inputs: &[SchemaRef],
+    over_relation: bool,
+) -> Result<Operator, Error> {
     if let Payload::NonASAP(NonASAPOp::BinaryOp {
         operator,
         return_bool,
@@ -1228,7 +1255,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                             // declares it NULL for a group with no matching
                             // row, where Prometheus gives NaN.
                             AggIntent::Quantile { col, q, .. }
-                                if input.has_promql_series_identity()
+                                if !over_relation
                                     && filters.get(index).is_none_or(Option::is_none) =>
                             {
                                 Reduction::Quantile {
@@ -1239,9 +1266,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                             // A SQL percentile (`approx_percentile_cont`)
                             // exactly: `percentile_cont`, NULL for a group
                             // with no (matching) value.
-                            AggIntent::Quantile { col, q, .. }
-                                if !input.has_promql_series_identity() =>
-                            {
+                            AggIntent::Quantile { col, q, .. } if over_relation => {
                                 Reduction::Percentile {
                                     column: column(*col)?,
                                     q: *q,
@@ -1256,13 +1281,20 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                         Ok((name.clone(), m))
                     })
                     .collect::<Result<_, Error>>()?;
-                Operator::aggregate(input.clone(), groups(input, keys)?, measures)?
+                let groups = groups(input, keys)?;
+                let global = groups.is_empty();
+                let aggregate = Operator::aggregate(input.clone(), groups, measures)?
                     .with_measure_filters(
                         filters
                             .iter()
                             .map(|f| f.as_ref().map(|f| expression(&f.0, input)).transpose())
                             .collect::<Result<_, Error>>()?,
-                    )
+                    )?;
+                if global && over_relation {
+                    aggregate.with_emit_empty_global(None)
+                } else {
+                    Ok(aggregate)
+                }
             }
             _ => Err(invalid("value operation has no native implementation")),
         },
@@ -1286,6 +1318,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                 update,
                 reduction,
                 None,
+                over_relation,
             )?;
             match filter {
                 Some(filter) => build.with_row_filter(expression(&filter.0, input)?),
@@ -1312,7 +1345,16 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                     .filter(|&i| i != state && Some(i) != input.time_index)
                     .collect(),
             };
-            Operator::summary_merge(input.clone(), state, groups)
+            // A rollup of a relation's states to no keys is a global SQL
+            // aggregate: one row, an empty state of the θ the merge
+            // carries (the states'), over no input rows.
+            let global = groups.is_empty() && group_by.is_some();
+            let merge = Operator::summary_merge(input.clone(), state, groups)?;
+            if global && over_relation {
+                merge.with_emit_empty_global(node.parameters.clone())
+            } else {
+                Ok(merge)
+            }
         }
         Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
             if let SketchStatistic::TopK { k } = query {
@@ -1350,7 +1392,9 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
 /// The build for a `SummaryAgg` before its row filter: all groups sharing
 /// one state (Hydra), a keyed state per group, or a state per group over
 /// one value column. With `window_end`, a column grouped by after the
-/// reduction's keys: a query-time chain's window ends.
+/// reduction's keys: a query-time chain's window ends. A state per group
+/// into no groups over a relation's rows (`over_relation`) has an empty
+/// state over no input rows, as a global SQL aggregate has one row.
 fn summary_agg_build(
     input: &SchemaRef,
     family: &FieldDataType,
@@ -1358,11 +1402,29 @@ fn summary_agg_build(
     update: &planner_types::summary_type::SummaryUpdate,
     reduction: &PlannerReduction,
     window_end: Option<usize>,
+    over_relation: bool,
 ) -> Result<Operator, Error> {
     let groups = |input: &SchemaRef, keys: &GroupKeys| -> Result<Vec<usize>, Error> {
         let mut columns = groups(input, keys)?;
         columns.extend(window_end);
         Ok(columns)
+    };
+    // A state per group of `groups` over `value`.
+    let per_group = |value: usize, groups: Vec<usize>| -> Result<Operator, Error> {
+        let global = groups.is_empty();
+        let build = Operator::per_group_summary_build(
+            input.clone(),
+            family.clone(),
+            parameters.cloned(),
+            value,
+            input.time_index,
+            groups,
+        )?;
+        if global && over_relation {
+            build.with_emit_empty_global(None)
+        } else {
+            Ok(build)
+        }
     };
     if matches!(
         family,
@@ -1400,14 +1462,7 @@ fn summary_agg_build(
                 "summary construction requires explicit grouping columns",
             ));
         };
-        return Operator::per_group_summary_build(
-            input.clone(),
-            family.clone(),
-            parameters.cloned(),
-            named_column(input, item)?,
-            input.time_index,
-            groups(input, keys)?,
-        );
+        return per_group(named_column(input, item)?, groups(input, keys)?);
     }
     if let Some(item) = &update.item {
         let PlannerReduction::Reduce(keys) = reduction else {
@@ -1452,14 +1507,7 @@ fn summary_agg_build(
             "summary construction requires explicit grouping columns",
         ));
     };
-    Operator::per_group_summary_build(
-        input.clone(),
-        family.clone(),
-        parameters.cloned(),
-        named_column(input, column)?,
-        input.time_index,
-        groups(input, keys)?,
-    )
+    per_group(named_column(input, column)?, groups(input, keys)?)
 }
 /// What each row adds in a keyed build: a projected weight column, or a
 /// positive integer constant (1 for a row count) read without a column.
