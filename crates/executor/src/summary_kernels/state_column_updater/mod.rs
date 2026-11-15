@@ -309,19 +309,16 @@ impl StateColumnUpdater {
         }
         match &mut self.states {
             GroupStates::Exact { states, .. } => {
-                // The exact kernel's input contract
-                // (`factory::exact_accumulator_input`): a count counts every
-                // non-NULL value of any type, NaN included (SQL
-                // `COUNT(col)`); a sum, min or max takes any Float64, ±Inf
-                // and NaN included; neither takes a stale marker; a counter
-                // needs finite samples.
+                // The exact kernel's input rule
+                // (`factory::exact_accumulator_input`); a count also counts
+                // a non-NULL value of any other type (SQL `COUNT(col)`).
+                let FieldDataType::ExactAggregate(kind, _) = &self.family else {
+                    unreachable!("exact states belong to an exact family")
+                };
                 match (&states[index], value) {
-                    (ScalarState::Counter(_), Value::Float64(value)) => {
-                        super::factory::finite_input(*value).map_err(operator_error)?;
-                        states[index].update(*value, timestamp_ms);
-                    }
                     (_, Value::Float64(value)) => {
-                        super::factory::not_a_stale_marker(*value).map_err(operator_error)?;
+                        super::factory::exact_accumulator_input(*kind, *value)
+                            .map_err(operator_error)?;
                         states[index].update(*value, timestamp_ms);
                     }
                     (ScalarState::Count(_), _) => states[index].update(0.0, timestamp_ms),

@@ -5,7 +5,9 @@ use asap_types::ir::schema::{DataType, PROMQL_SERIES_IDENTITY};
 use asap_types::ir::{ExprSemantics, Predicate, ProjectItem};
 use asap_types::stages::ValueSign;
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
-use asap_types::test_support::memo_fixtures::{aggregate, arithmetic, compare, readout, scan};
+use asap_types::test_support::memo_fixtures::{
+    aggregate, arithmetic, compare, readout, scan, set_operator,
+};
 use asap_types::workload::{DataWorkload, SourceFacts};
 use std::collections::BTreeMap;
 
@@ -424,19 +426,6 @@ fn set_operators_and_relabels_copy_their_inputs_error() {
             .expect("the readout has a label and an estimate")
     };
     let (job, estimate) = (column_where(true), column_where(false));
-    let set_op = |kind| {
-        Operator::NonASAP(NonASAPOp::BinaryOp {
-            operator: BinaryOperator {
-                checked_relative_division: false,
-                checked_finite_division: false,
-                kind: BinaryOpKind::Set(kind),
-                vector_match: None,
-            },
-            return_bool: false,
-            lhs: readout,
-            rhs: readout,
-        })
-    };
     let relabel = |source_column| {
         Operator::NonASAP(NonASAPOp::PromqlRelabel {
             dst: "x".into(),
@@ -457,13 +446,16 @@ fn set_operators_and_relabels_copy_their_inputs_error() {
     for metric in AccuracyMetric::ALL {
         for kind in [PromQLVectorSetOpKind::And, PromQLVectorSetOpKind::Unless] {
             assert_eq!(
-                factors(&set_op(kind.clone()), metric),
+                factors(&set_operator(kind.clone(), readout, readout), metric),
                 Some(vec![1.0, 0.0]),
                 "{kind:?}, {metric:?}"
             );
         }
         assert_eq!(
-            factors(&set_op(PromQLVectorSetOpKind::Or), metric),
+            factors(
+                &set_operator(PromQLVectorSetOpKind::Or, readout, readout),
+                metric
+            ),
             Some(vec![1.0, 1.0]),
             "or, {metric:?}"
         );

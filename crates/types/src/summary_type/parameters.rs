@@ -32,6 +32,28 @@ pub enum ExactKind {
     IRate,
 }
 
+impl ExactKind {
+    /// The aggregate an exact accumulator of this kind computes, of input
+    /// column `column` (`None`: the sample value): `ExactKind::Rate`
+    /// finalizes to what `AggIntent::Rate` computes, and
+    /// `ExactKind::Sum.measure(Some(2))` to `AggIntent::Sum { col: Some(2) }`.
+    pub(crate) fn measure(
+        self,
+        column: Option<crate::ir::schema::ColumnId>,
+    ) -> crate::ir::operator::AggIntent {
+        use crate::ir::operator::AggIntent;
+        match self {
+            ExactKind::Sum => AggIntent::Sum { col: column },
+            ExactKind::Min => AggIntent::Min { col: column },
+            ExactKind::Max => AggIntent::Max { col: column },
+            ExactKind::Count => AggIntent::Count,
+            ExactKind::Rate => AggIntent::Rate,
+            ExactKind::IRate => AggIntent::IRate,
+            ExactKind::Increase => AggIntent::Increase,
+        }
+    }
+}
+
 /// Parameters for an [`ExactKind`] accumulator. All exact accumulators have
 /// fixed semantics — no tuning parameters — so each variant carries none;
 /// kept as a per-kind enum (mirroring [`SketchParams`]) so a mismatched

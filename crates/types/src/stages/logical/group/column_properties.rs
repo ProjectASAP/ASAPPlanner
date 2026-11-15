@@ -14,7 +14,7 @@ use super::{MemoGroupAsInput, MemoGroupId};
 use crate::ir::operator::arguments::{
     BinaryOpKind, GroupSide, JoinKind, PromQLVectorSetOpKind, Reduction, Source, SourceColumn,
 };
-use crate::ir::operator::asap::{exact_accumulator_measure, summary_agg_layout, summary_build};
+use crate::ir::operator::asap::{summary_agg_layout, summary_build};
 use crate::ir::operator::input::OperatorInput;
 use crate::ir::operator::AggIntent;
 use crate::ir::scalar::expr_ir::{ArithmeticOpKind, ScalarValue};
@@ -469,10 +469,12 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
         // has none, a count is non-negative and a sum keeps its sign.
         FinalizeExactAccumulator { child } => {
             readout_columns(child, output, |state, summary_type| match summary_type {
-                FieldDataType::ExactAggregate(kind, _) => {
-                    measure_sign(&exact_accumulator_measure(*kind, None), state)
-                }
-                _ => Unknown,
+                FieldDataType::ExactAggregate(kind, _) => measure_sign(&kind.measure(None), state),
+                FieldDataType::Plain(_)
+                | FieldDataType::Sketch(_)
+                | FieldDataType::SummarySample(..)
+                | FieldDataType::Wavelet(..)
+                | FieldDataType::StatModel(..) => Unknown,
             })
         }
         MaintainPopulation { child, .. } => columns_of(child),

@@ -484,7 +484,8 @@ fn compile_internal(
                 // `TimeRange` drops them only when the chain reads the
                 // series' `Scan` (through shifts). Over a `Filter` or a
                 // `Project` it keeps them, and an exact accumulator then
-                // rejects one (`factory::not_a_stale_marker`).
+                // rejects one that a `Filter` or a `Project` that copies
+                // the value passed on (`factory::not_a_stale_marker`).
                 let below =
                     node_below_shifts(first_input(id, &dependencies), &nodes, &dependencies);
                 let sample_value = match below.map(|below| &nodes[&below].payload) {

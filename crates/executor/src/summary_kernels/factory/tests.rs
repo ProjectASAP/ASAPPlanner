@@ -149,7 +149,7 @@ fn exact_accumulators_take_non_finite_values_as_promql_does() {
     for kind in [ExactKind::Rate, ExactKind::Increase] {
         assert!(finalized(kind, &[1.0, nan]).is_err(), "{kind:?}");
     }
-    let stale = f64::from_bits(crate::operators::STALE_MARKER);
+    let stale = f64::from_bits(crate::values::STALE_MARKER);
     for kind in [
         ExactKind::Sum,
         ExactKind::Count,
