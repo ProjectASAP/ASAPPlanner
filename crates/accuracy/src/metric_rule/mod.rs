@@ -126,6 +126,28 @@ impl ErrorMetricsOfMemo {
             .collect()
     }
 
+    /// The metrics in which no error of `consumer`'s input `input` reaches
+    /// its output (error factor 0): the input may be off in them whatever
+    /// its output allows.
+    ///
+    /// Example: `count` (an exact `Count` accumulator) outputs the number of
+    /// values it reads, whatever their error: every metric.
+    fn error_metrics_ignored_on_input(
+        &self,
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+    ) -> Vec<AccuracyMetric> {
+        AccuracyMetric::ALL
+            .into_iter()
+            .filter(|&metric| {
+                self.error_contract(consumer, metric)
+                    .is_some_and(|contract| {
+                        contract.error_factor_per_input.get(input) == Some(&0.0)
+                    })
+            })
+            .collect()
+    }
+
     /// The metrics `consumer` allows an input's error in, the metric rule
     /// on its input edges: those its group's output allows that its error
     /// contract passes to its inputs (a readout's contract passes every
@@ -144,13 +166,16 @@ impl ErrorMetricsOfMemo {
     /// down the live candidates (not in `dead`) from each root with a
     /// target, which allows its target's metrics
     /// ([`query_roots_with_target`]; an exact target none), a candidate passes to its inputs the
-    /// metrics its error contract passes; a group keeps, per query, the
+    /// metrics its error contract passes, and every metric in which an
+    /// input's error does not reach its output (factor 0: a `count`'s input
+    /// is never read exactly for its sake); a group keeps, per query, the
     /// metrics every path to it passes. A group is exact-only for a query
     /// when no metric reaches it (one path through a consumer without a
     /// contract, a comparison or a sum, suffices) or when it holds a sketch
     /// readout whose error metric is not among them (`quantile_over_time`
     /// at a relative target reads no KLL readout, whose error is a rank
-    /// one); and so is every group below one.
+    /// one); and so is every group below one, except through an input whose
+    /// error reaches its consumer's output in no metric.
     /// `exact_only_readout_groups_of_query` adds, per query, the readout
     /// groups the readout requirements list (a readout whose level another
     /// query gave, for a query whose failure probability has no per-value
@@ -213,31 +238,43 @@ impl ErrorMetricsOfMemo {
                     }
                 }
                 let passed = self.error_metrics_passed_to_inputs(consumer, &AccuracyMetric::ALL);
-                for &child in memo.candidate(consumer).expression.operator.children() {
+                for (input, &child) in memo
+                    .candidate(consumer)
+                    .expression
+                    .operator
+                    .children()
+                    .into_iter()
+                    .enumerate()
+                {
+                    let ignored = self.error_metrics_ignored_on_input(consumer, input);
                     for (&query, metrics) in &allowed_here {
-                        let passed_here = metrics
-                            .iter()
-                            .copied()
-                            .filter(|metric| passed.contains(metric))
+                        let passed_here = AccuracyMetric::ALL
+                            .into_iter()
+                            .filter(|metric| {
+                                ignored.contains(metric)
+                                    || (metrics.contains(metric) && passed.contains(metric))
+                            })
                             .collect();
                         keep_common(&mut allowed, child, query, passed_here);
                     }
                 }
             }
         }
-        // Every group below an exact-only group is read exactly too.
+        // Every group below an exact-only group is read exactly too, except
+        // through an input whose error reaches the output in no metric (a
+        // `count`'s).
         for &group in order.iter().rev() {
             for groups in &mut exact_only {
                 if groups.contains(&group) {
                     for consumer in live_candidates(group) {
-                        groups.extend(
-                            memo.candidate(consumer)
-                                .expression
-                                .operator
-                                .children()
-                                .into_iter()
-                                .copied(),
-                        );
+                        let children = memo.candidate(consumer).expression.operator.children();
+                        groups.extend(children.into_iter().enumerate().filter_map(
+                            |(input, &child)| {
+                                (self.error_metrics_ignored_on_input(consumer, input).len()
+                                    < METRIC_COUNT)
+                                    .then_some(child)
+                            },
+                        ));
                     }
                 }
             }

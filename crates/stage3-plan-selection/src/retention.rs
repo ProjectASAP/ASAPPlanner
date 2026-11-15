@@ -8,6 +8,8 @@
 //! (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
 //! section 5, "Cost and retention").
 
+use std::collections::HashMap;
+
 use asap_types::ir::Operator;
 use asap_types::plan::time_window::{InputTimeAccess, TimeIndexedPlan};
 use asap_types::stages::{
@@ -56,13 +58,16 @@ pub(crate) fn edge_scan_read_ms(
 /// The least need, in ms, over each execution's costed reads
 /// (`SelectableExecutions::reads_back`: an edge out of it `per_edge` costs, or a query output
 /// it may answer), by position in [`SelectableExecutions::executions`];
-/// `None` without a bounded one. (F) gives a selected execution a use and
-/// (R) then retains at least that: the greedy bound charges it, and the
-/// MILP has $h_v \ge$ it $\cdot x$.
+/// `None` without a bounded one; at least its candidate's
+/// `newest_output_retention_ms` (Δ, the newest output a store always
+/// keeps). (F) gives a selected execution a use and (R) then retains at
+/// least that: the greedy bound charges it, and the MILP has $h_v \ge$ it
+/// $\cdot x$.
 pub(crate) fn least_need_ms_per_execution(
     selectable: &SelectableExecutions,
     per_edge: &[Option<f64>],
     need_ms_per_edge: &[Option<u64>],
+    newest_output_retention_ms: &HashMap<PhysicalCandidateId, u64>,
     entries: &[QueryWorkloadEntry],
 ) -> Vec<Option<u64>> {
     let mut least_need_ms = vec![None; selectable.executions().len()];
@@ -74,6 +79,14 @@ pub(crate) fn least_need_ms_per_execution(
         if let (true, Some(need_ms)) = (costed, need_ms) {
             let least: &mut Option<u64> = &mut least_need_ms[index];
             *least = Some(least.map_or(need_ms, |least| least.min(need_ms)));
+        }
+    }
+    for (least, execution) in least_need_ms.iter_mut().zip(selectable.executions()) {
+        if let (Some(least), Some(&newest_ms)) = (
+            least.as_mut(),
+            newest_output_retention_ms.get(&execution.candidate),
+        ) {
+            *least = (*least).max(newest_ms);
         }
     }
     least_need_ms

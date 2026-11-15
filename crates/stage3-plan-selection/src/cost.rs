@@ -99,8 +99,16 @@ pub(crate) struct ExecutionCosts {
     /// `None` when its producer retains no rows or the edge reads it
     /// unbounded.
     pub(crate) retention_need_ms_per_edge: Vec<Option<u64>>,
+    /// Per candidate with a retention cost, its output interval Δ in ms
+    /// (`asap_cost::output_interval_ms`): a store always keeps a stored
+    /// result's newest output whatever its retention, so a selected one
+    /// retains at least Δ, as `plan_cost` charges at least one retained
+    /// output. Example: an ingestion-time chain of 60 s windows read only
+    /// at its newest window retains 60 s, not 0.
+    pub(crate) newest_output_retention_ms: HashMap<PhysicalCandidateId, u64>,
     /// The least need, in ms, over each execution's costed reads, by
-    /// position in `SelectableExecutions::executions`
+    /// position in `SelectableExecutions::executions`, at least
+    /// [`Self::newest_output_retention_ms`]
     /// ([`least_need_ms_per_execution`]).
     pub(crate) least_need_ms_per_execution: Vec<Option<u64>>,
     /// The source of each query-time `Scan`: its retention is raw data on
@@ -346,9 +354,13 @@ pub(crate) fn execution_costs(
     // whole own cost when it is materialized, its raw data on disk for a
     // query-time scan (each of its runs reads what it reads at that
     // retention, ρ_κ c_{κ,v}).
+    // The retention is at least Δ: the newest output is always kept, so a
+    // retention under Δ costs what Δ does (`plan_cost` charges at least
+    // one retained output).
     let mut retention_cost_per_retained_second = HashMap::new();
+    let mut newest_output_retention_ms = HashMap::new();
     for (&v, &most_read_ms) in &most_read_ms {
-        let Some(retention_ms) = most_read_ms else {
+        let Some(most_read_ms) = most_read_ms else {
             continue;
         };
         let window_ms = match nodes[v.0].output_state.timing {
@@ -356,6 +368,7 @@ pub(crate) fn execution_costs(
             ExecutionTiming::QueryTime => None,
         };
         let delta_ms = output_interval_ms(&nodes[v.0].payload, window_ms);
+        let retention_ms = most_read_ms.max(delta_ms);
         let longer = node_retaining(v, Some(retention_ms + delta_ms));
         let delta_seconds = ms_to_seconds(delta_ms);
         let per_retained_second = match physical.physical_candidates[v.0]
@@ -380,6 +393,7 @@ pub(crate) fn execution_costs(
         };
         if let Some(per_retained_second) = per_retained_second {
             retention_cost_per_retained_second.insert(v, per_retained_second.max(0.0));
+            newest_output_retention_ms.insert(v, delta_ms);
         }
     }
     // Each query-time scan's source and, without $h_v$, the raw data it
@@ -422,7 +436,11 @@ pub(crate) fn execution_costs(
                     .physical_properties
                     .is_across_evaluations(),
             ) {
-                let retention_seconds = ms_to_seconds(most_read_ms[&v].unwrap_or(0));
+                let retention_seconds = ms_to_seconds(
+                    most_read_ms[&v]
+                        .unwrap_or(0)
+                        .max(newest_output_retention_ms[&v]),
+                );
                 own + raw_data - per_retained_second * retention_seconds
             } else {
                 own + raw_data
@@ -466,13 +484,19 @@ pub(crate) fn execution_costs(
             Some(with_u_own + with_u_raw_data - own - raw_data + scan_read)
         })
         .collect();
-    let least_need_ms_per_execution =
-        least_need_ms_per_execution(selectable, &per_edge, &retention_need_ms_per_edge, entries);
+    let least_need_ms_per_execution = least_need_ms_per_execution(
+        selectable,
+        &per_edge,
+        &retention_need_ms_per_edge,
+        &newest_output_retention_ms,
+        entries,
+    );
     ExecutionCosts {
         per_execution,
         per_edge,
         retention_cost_per_retained_second,
         retention_need_ms_per_edge,
+        newest_output_retention_ms,
         least_need_ms_per_execution,
         raw_data_source,
         unbounded_raw_data_on_disk_cost_per_second,
