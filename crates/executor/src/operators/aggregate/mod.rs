@@ -35,8 +35,10 @@ impl Operator {
                     }
                     (DataType::Float64, false)
                 }
+                // NULL for a group of NULLs, as SQL `SUM` (and for a
+                // global one over no row: `with_emit_empty_global`).
                 Reduction::Sum(i) | Reduction::Avg(i) => {
-                    let (t, _) = plain(&input, *i)?;
+                    let (t, nullable) = plain(&input, *i)?;
                     if !matches!(t, DataType::Int64 | DataType::Float64) {
                         return Err(invalid("numeric aggregate input required"));
                     }
@@ -46,8 +48,7 @@ impl Operator {
                         } else {
                             t.clone()
                         },
-                        !input.has_promql_series_identity()
-                            && (groups.is_empty() || plain(&input, *i)?.1),
+                        nullable,
                     )
                 }
                 Reduction::Quantile { column, .. } => {
@@ -63,19 +64,16 @@ impl Operator {
                             "a percentile requires Float64 input and a fraction in [0, 1]",
                         ));
                     }
-                    // NULL for a group with no value, as SQL `SUM`: a global
-                    // one over no row, or a group of NULLs.
-                    (
-                        DataType::Float64,
-                        groups.is_empty() || plain(&input, *column)?.1,
-                    )
+                    // NULL for a group of NULLs, as SQL `SUM` (and for a
+                    // global one over no row: `with_emit_empty_global`).
+                    (DataType::Float64, plain(&input, *column)?.1)
                 }
                 Reduction::Min(i) | Reduction::Max(i) => {
                     let (t, nullable) = plain(&input, *i)?;
                     if !ordered(t) {
                         return Err(invalid("ordered aggregate input required"));
                     }
-                    (t.clone(), nullable || groups.is_empty())
+                    (t.clone(), nullable)
                 }
             };
             fields.push(result_field(name, t, n));
@@ -85,6 +83,7 @@ impl Operator {
                 groups,
                 measures: measures.into_iter().map(|(_, r)| r).collect(),
                 filters: vec![],
+                emit_empty_global: false,
             },
             inputs: vec![input],
             output: schema(fields),
@@ -100,6 +99,7 @@ impl Operator {
             filters: slot,
             measures,
             groups,
+            ..
         } = &mut self.kind
         else {
             return Err(invalid("measure filters need an aggregate"));
@@ -278,22 +278,7 @@ pub(super) fn execute<'a>(
                     results.len(),
                 )
             }
-            Kind::Aggregate {
-                groups,
-                measures,
-                filters,
-            } => {
-                columnar::aggregate(
-                    input,
-                    groups,
-                    measures,
-                    filters,
-                    &operator.inputs[0],
-                    &output,
-                    &context,
-                )
-                .await
-            }
+            Kind::Aggregate { .. } => columnar::aggregate(input, operator, &context).await,
             _ => unreachable!(),
         }
     })

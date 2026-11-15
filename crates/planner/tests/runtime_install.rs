@@ -605,3 +605,47 @@ async fn grouped_and_per_series_counts_over_a_shared_query_time_chain_install_an
         0.05,
     );
 }
+
+// ── Global aggregates over an aggregate's output ─────────────────────────────
+
+/// A PromQL aggregate with no grouping keys over another aggregate's output
+/// is still a PromQL aggregate: over an empty vector it answers no sample,
+/// as Prometheus does, not the one row (0) a SQL `SELECT count(*)` has over
+/// no rows. Every value of `m` lies above 0 and below 1,000 ([`m_samples`]),
+/// so `count(sum by (job) (m >= 1000))` counts an empty vector while
+/// `count(sum by (job) (m >= 0))` counts the 2 jobs, and
+/// `count(count by (x) (m))` counts one group, as no series has `x`. With
+/// no sample at all every query is empty. Each query is planned on its
+/// own, exactly.
+#[tokio::test]
+async fn a_global_promql_count_over_an_empty_aggregate_answers_no_sample() {
+    // The query's answer values over `samples` (an answer row has no labels).
+    let values = |plan: &InstallablePlan, samples: &[RawDataSample]| -> Vec<f64> {
+        let query_time = Scope::Query {
+            evaluation_time_ms: EVALUATION_MS,
+        };
+        run(&plan.dag, samples, &query_roots(plan), query_time)
+            .concat()
+            .iter()
+            .flat_map(Batch::to_rows)
+            .map(|row| match row.as_slice() {
+                [Value::Int64(count)] => *count as f64,
+                [Value::Float64(value)] => *value,
+                other => panic!("an answer row {other:?}"),
+            })
+            .collect()
+    };
+    for (query, with_samples) in [
+        ("count(sum by (job) (m >= 1000))", vec![]),
+        ("count(count by (x) (m))", vec![1.0]),
+        ("count(sum by (job) (m >= 0))", vec![2.0]),
+    ] {
+        let plan = plan_every_minute(&[(query, "")]).await;
+        assert_eq!(
+            values(&plan, &[]),
+            Vec::<f64>::new(),
+            "{query} with no sample"
+        );
+        assert_eq!(values(&plan, &m_samples()), with_samples, "{query}");
+    }
+}

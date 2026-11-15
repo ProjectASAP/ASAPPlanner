@@ -147,6 +147,7 @@ fn shown(value: &Value) -> String {
     match value {
         Value::Int64(n) => format!("Int64({n})"),
         Value::Float64(x) => format!("Float64({x})"),
+        Value::Null => "NULL".to_string(),
         other => format!("{other:?}"),
     }
 }
@@ -431,4 +432,40 @@ async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_ro
         .map(|s| (format!("s{s}"), shown(&Value::Int64(100))))
         .collect();
     assert_eq!(by_key(run_data_plane(&plan).remove(0)), expected);
+}
+
+/// A global SQL aggregate has one row even over no input row, as SQL
+/// requires: over the last 5 minutes with `WHERE false`, `COUNT(*)` is 0
+/// and `SUM` is NULL. Over the last 5 minutes of [`rows`] (`latency` =
+/// 900, 901, …, 1199) they are 300 and 314,850.
+#[tokio::test]
+async fn a_global_sql_aggregate_over_no_row_answers_one_row() {
+    let last_5_minutes = "FROM http WHERE ts >= now() - INTERVAL '5 minutes'";
+    let queries = [
+        format!("SELECT count(*) {last_5_minutes} AND false"),
+        format!("SELECT sum(latency) {last_5_minutes} AND false"),
+        format!("SELECT count(*) {last_5_minutes}"),
+        format!("SELECT sum(latency) {last_5_minutes}"),
+    ];
+    let queries = queries.each_ref().map(String::as_str);
+    let plan = plan_for(
+        &queries,
+        EXACT,
+        MINUTE_MS as u64,
+        &DeploymentCapabilities::default(),
+    )
+    .await;
+    let answers: Vec<Vec<Vec<String>>> = run_data_plane(&plan)
+        .into_iter()
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| row.iter().map(shown).collect())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        answers,
+        ["Int64(0)", "NULL", "Int64(300)", "Float64(314850)",]
+            .map(|value| vec![vec![value.to_string()]])
+    );
 }

@@ -152,6 +152,12 @@ enum Kind {
         /// Per-measure row filters (SQL `FILTER (WHERE …)`); empty when none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         filters: Vec<Option<Expression>>,
+        /// Whether an empty input still has the global group, as a SQL
+        /// `SELECT count(*) FROM t WHERE false` has one row (0); a PromQL
+        /// `count(v)` over an empty vector has no sample. Only an aggregate
+        /// with no groups; `false` (no output row) by default.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        emit_empty_global: bool,
     },
     SemiJoin {
         keys: Vec<(usize, usize)>,
@@ -175,6 +181,11 @@ enum Kind {
         /// Rows for which this is not true update no state; their group is kept.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<Box<Expression>>,
+        /// Whether an empty input still has the global group, with an empty
+        /// state, as a global SQL aggregate has one row over no input rows.
+        /// Only a build with no groups; `false` (no output row) by default.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        emit_empty_global: bool,
     },
     /// One keyed state per group whose items take a row weight, e.g. a CMS
     /// with heap (built by [`Operator::per_group_keyed_summary_build`]).
@@ -347,6 +358,73 @@ impl Operator {
     }
     pub fn schema(&self) -> SchemaRef {
         self.output.clone()
+    }
+
+    /// Give an aggregate with no groups SQL's rule for an empty input: its
+    /// one global group still has a row, as `SELECT count(*) FROM t WHERE
+    /// false` answers 0 and `SELECT sum(x) FROM t WHERE false` NULL. Without
+    /// it (the default) an empty input has no row, as a PromQL `count(v)`
+    /// over an empty vector has no sample.
+    ///
+    /// An `Aggregate`'s SUM, AVG, MIN, MAX and percentile measures become
+    /// nullable (NULL over no row). A `PerGroupSummaryBuild` outputs an empty
+    /// state of its own θ, and a `SummaryMerge` one of `parameters`: the θ
+    /// of the states it merges (the exported build node's `parameters`),
+    /// `None` for an exact family and for the other two.
+    pub fn with_emit_empty_global(
+        mut self,
+        parameters: Option<SketchParams>,
+    ) -> Result<Self, Error> {
+        match &mut self.kind {
+            Kind::Aggregate {
+                groups,
+                measures,
+                emit_empty_global,
+                ..
+            } if groups.is_empty() && parameters.is_none() => {
+                let mut output = (*self.output).clone();
+                for (field, measure) in output.fields.iter_mut().zip(measures.iter()) {
+                    if matches!(
+                        measure,
+                        Reduction::Sum(_)
+                            | Reduction::Avg(_)
+                            | Reduction::Min(_)
+                            | Reduction::Max(_)
+                            | Reduction::Percentile { .. }
+                    ) {
+                        field.nullable = true;
+                    }
+                }
+                *emit_empty_global = true;
+                self.output = Arc::new(output);
+            }
+            Kind::PerGroupSummaryBuild {
+                groups,
+                emit_empty_global,
+                ..
+            } if groups.is_empty() && parameters.is_none() => *emit_empty_global = true,
+            Kind::SummaryMerge {
+                state,
+                groups,
+                emit_empty_global,
+                parameters: slot,
+            } if groups.is_empty() => {
+                // An empty state of this family and θ can be built.
+                crate::StateColumnUpdater::new(
+                    &self.inputs[0].fields[*state].dtype,
+                    parameters.as_ref(),
+                )?;
+                *emit_empty_global = true;
+                *slot = parameters;
+            }
+            _ => {
+                return Err(invalid(
+                    "an empty global row needs an aggregate, build or merge into no groups \
+                     (only a merge takes the θ of its empty state)",
+                ))
+            }
+        }
+        Ok(self)
     }
 }
 impl PhysicalOperator<Batch, SchemaRef> for Operator {
