@@ -4,28 +4,19 @@
 //! the compiler checks that no internal is used (CI runs
 //! `cargo check -p asap-planner --tests --locked` on its own for that).
 
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use crate::time_series;
-use asap_executor::physical_planner::compile;
-use asap_executor::runtime::{Limits, OutputStream, RunContext, Scope};
-use asap_executor::sources::{
-    DataStore, InMemoryDataStore, MaterializedViewRequest, RawDataRequest,
-};
-use asap_executor::values::Batch;
-use asap_executor::Error as ExecutorError;
+use asap_executor::runtime::Scope;
 use asap_planner::{
     plan_installable, CostInputs, DeploymentCapabilities, FrontendInput, InstallablePlan,
-    MaterializedView, OperatorKind, PhysicalASAPDAG, PlanningModels, PlanningWorkload,
-    SelectedPlanReport, UserInput,
+    OperatorKind, PlanningModels, PlanningWorkload, SelectedPlanReport, UserInput,
 };
-use asap_types::ir::operator::Source;
 
-use futures::{executor::block_on, StreamExt};
-
-use time_series::{answers, time_series_tables, Answer, RawDataSample};
+use time_series::{
+    answers, assert_answers_near, query_roots, run, sample, time_series_tables, Answer,
+    RawDataSample,
+};
 
 /// Example 4b's evaluation time: the end of the 60-minute window.
 const EVALUATION_MS: i64 = 3_600_000;
@@ -53,80 +44,6 @@ fn workload(queries: &[&str]) -> PlanningWorkload {
         entries.join(",")
     ))
     .unwrap()
-}
-
-/// One sample of `metric` for series `instance`.
-fn sample(metric: &str, instance: &str, timestamp_ms: i64, value: f64) -> RawDataSample {
-    RawDataSample {
-        labels: BTreeMap::from([
-            ("__name__".to_string(), metric.to_string()),
-            ("instance".to_string(), instance.to_string()),
-        ]),
-        timestamp_ms,
-        value,
-    }
-}
-
-thread_local! {
-    /// How many `read_raw_data` calls the runs on this thread made.
-    static RAW_DATA_READS: Cell<usize> = const { Cell::new(0) };
-}
-
-/// A store counting its `read_raw_data` calls in [`RAW_DATA_READS`].
-struct CountingStore(InMemoryDataStore);
-
-impl DataStore for CountingStore {
-    fn read_raw_data(
-        &self,
-        source: &Source,
-        request: &RawDataRequest,
-        context: RunContext,
-    ) -> Result<OutputStream<'_, Batch>, ExecutorError> {
-        RAW_DATA_READS.with(|reads| reads.set(reads.get() + 1));
-        self.0.read_raw_data(source, request, context)
-    }
-
-    fn read_materialized_view(
-        &self,
-        view: &MaterializedView,
-        request: &MaterializedViewRequest,
-        context: RunContext,
-    ) -> Result<OutputStream<'_, Batch>, ExecutorError> {
-        self.0.read_materialized_view(view, request, context)
-    }
-}
-
-/// Compile `ids` of `dag` and run them in `scope` over the raw `samples`,
-/// as a runtime does with the executor: each id's output batches.
-fn run(
-    dag: &PhysicalASAPDAG,
-    samples: &[RawDataSample],
-    ids: &[u64],
-    scope: Scope,
-) -> Vec<Vec<Batch>> {
-    // The executor's plan for `ids`; every `Scan` it reaches is a raw data
-    // slot.
-    let compiled = compile(dag, &[], ids).expect("the executor compiles the plan");
-    // The plan's raw samples at the `Scan`s by metric.
-    let store = time_series_tables(dag, samples);
-    let instance = compiled
-        .instantiate(Arc::new(CountingStore(store)))
-        .unwrap();
-    block_on(async {
-        // The run's scope (ingestion window or query time) and limits.
-        let context = RunContext::new(scope, Limits::default()).unwrap();
-        // One output stream per id.
-        let outputs = instance.execute(compiled.roots(), context).unwrap();
-        futures::future::join_all(outputs.into_iter().map(|mut output| async move {
-            // Its batches, collected.
-            let mut batches = Vec::new();
-            while let Some(batch) = output.next().await {
-                batches.push((*batch.unwrap()).clone());
-            }
-            batches
-        }))
-        .await
-    })
 }
 
 /// The plan for `queries` on a deployment that keeps no raw samples, and
@@ -164,11 +81,6 @@ async fn plan_with_report_for(
     plan_installable(UserInput::new(&workload, FrontendInput::Promql, models))
         .await
         .unwrap()
-}
-
-/// The node that answers each query of `plan`, in workload order.
-fn query_roots(plan: &InstallablePlan) -> Vec<u64> {
-    plan.dag.roots.iter().map(|&root| root as u64).collect()
 }
 
 /// The plan file carries Stage 3's predicted usage of the selected plan, so
@@ -250,14 +162,25 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
         });
     assert_eq!(retention.lookback_ms(), Some(1_000));
     let samples = [
-        sample("latency_ms", "a", EVALUATION_MS - 900, 1.0),
-        sample("latency_ms", "a", EVALUATION_MS - 100, 10.0),
-        sample("latency_ms", "b", EVALUATION_MS - 200, 100.0),
+        sample("latency_ms", &[("instance", "a")], EVALUATION_MS - 900, 1.0),
+        sample(
+            "latency_ms",
+            &[("instance", "a")],
+            EVALUATION_MS - 100,
+            10.0,
+        ),
+        sample(
+            "latency_ms",
+            &[("instance", "b")],
+            EVALUATION_MS - 200,
+            100.0,
+        ),
     ];
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
     };
-    let answered = answers(&run(dag, &samples, &query_roots(&plan), query)[0]);
+    let store = time_series_tables(dag, &samples);
+    let answered = answers(&run(dag, store, &query_roots(&plan), query)[0]);
     assert_eq!(answered.len(), 1);
     assert_eq!(answered[0].1, 110.0);
 }
@@ -418,19 +341,6 @@ async fn plan_every_minute(queries: &[(&str, &str)]) -> InstallablePlan {
     planned.unwrap().0
 }
 
-/// One sample of `m` for series `(instance, job)`.
-fn m_sample(instance: &str, job: &str, timestamp_ms: i64, value: f64) -> RawDataSample {
-    RawDataSample {
-        labels: BTreeMap::from([
-            ("__name__".to_string(), "m".to_string()),
-            ("instance".to_string(), instance.to_string()),
-            ("job".to_string(), job.to_string()),
-        ]),
-        timestamp_ms,
-        value,
-    }
-}
-
 /// Samples of `m` for four series (instances `a`..`d`, jobs `x` and `y`)
 /// every 15 s from 8 minutes before [`EVALUATION_MS`] through it, so some
 /// lie exactly on the minute boundaries that tumbling windows end at.
@@ -441,7 +351,12 @@ fn m_samples() -> Vec<RawDataSample> {
         for step in 0..=32i64 {
             let timestamp_ms = EVALUATION_MS - 480_000 + step * 15_000;
             let value = (index as f64 + 1.0) * 10.0 + step as f64;
-            samples.push(m_sample(instance, job, timestamp_ms, value));
+            samples.push(sample(
+                "m",
+                &[("instance", instance), ("job", job)],
+                timestamp_ms,
+                value,
+            ));
         }
     }
     samples
@@ -480,27 +395,15 @@ fn query_answers(plan: &InstallablePlan, samples: &[RawDataSample]) -> Vec<Vec<A
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
     };
-    run(&plan.dag, samples, &query_roots(plan), query)
-        .iter()
-        .map(|batches| answers(batches))
-        .collect()
-}
-
-/// Whether `answered` matches `expected`, label set for label set, each
-/// value within `tolerance`.
-fn assert_answers_near(answered: &[Answer], expected: &[Answer], tolerance: f64) {
-    assert_eq!(
-        answered.len(),
-        expected.len(),
-        "{answered:?} vs {expected:?}"
-    );
-    for (answer, expected) in answered.iter().zip(expected) {
-        assert_eq!(answer.0, expected.0, "{answered:?} vs {expected:?}");
-        assert!(
-            (answer.1 - expected.1).abs() <= tolerance,
-            "{answered:?} vs {expected:?}"
-        );
-    }
+    run(
+        &plan.dag,
+        time_series_tables(&plan.dag, samples),
+        &query_roots(plan),
+        query,
+    )
+    .iter()
+    .map(|batches| answers(batches))
+    .collect()
 }
 
 /// `sum_over_time(m[5m] offset 1m)` and `sum_over_time(m[5m])`, every

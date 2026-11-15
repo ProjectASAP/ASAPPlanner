@@ -56,14 +56,12 @@ pub enum QueryLanguage {
 }
 
 impl QueryLanguage {
-    /// Whether this language's queries read time series, whose rows the
-    /// planner keys by each series' full label set: the
-    /// [`PROMQL_SERIES_IDENTITY`](crate::ir::schema::PROMQL_SERIES_IDENTITY)
-    /// column, added to every root before Stage 0. PromQL and MetricsQL
-    /// do: `rate(requests_total[5m])` keeps one rate per series, each
-    /// series `{"__name__":"requests_total","instance":"a","job":"j1"}`
-    /// as one identity. SQL reads tables, whose rows have no such identity.
-    pub fn has_series_identity(&self) -> bool {
+    /// Whether this language's queries read time series rather than
+    /// tables. PromQL and MetricsQL read time series:
+    /// `rate(requests_total[5m])` reads each `requests_total` series, such
+    /// as `{instance="a", job="j1"}`. SQL, DataFusion and ElasticDSL read
+    /// tables.
+    pub fn reads_time_series(&self) -> bool {
         matches!(self, Self::PromQL | Self::MetricsQL)
     }
 }
@@ -853,10 +851,10 @@ mod tests {
         }
     }
 
-    /// The two time-series languages carry the series identity; the table
-    /// languages do not.
+    /// PromQL and MetricsQL read time series; the other languages read
+    /// tables.
     #[test]
-    fn only_time_series_languages_have_series_identity() {
+    fn only_promql_and_metricsql_read_time_series() {
         let cases = [
             (QueryLanguage::PromQL, true),
             (QueryLanguage::MetricsQL, true),
@@ -865,7 +863,7 @@ mod tests {
             (QueryLanguage::ElasticDSL, false),
         ];
         for (language, expected) in cases {
-            assert_eq!(language.has_series_identity(), expected, "{language:?}");
+            assert_eq!(language.reads_time_series(), expected, "{language:?}");
         }
     }
 
