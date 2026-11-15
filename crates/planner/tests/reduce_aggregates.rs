@@ -267,6 +267,79 @@ async fn promql_count_values_without_overwrites_a_kept_label() {
     );
 }
 
+/// A `count_values` label that is also excluded is set and then removed,
+/// as Prometheus's `without` deletes it after overwriting: the values do not
+/// split the groups, so `count_values("zone", h) without (instance, zone)`
+/// counts job `a`'s four series in one group, and `count_values("instance",
+/// m) without (instance)` outputs no `instance` label.
+#[tokio::test]
+async fn promql_count_values_label_excluded_by_without_is_dropped() {
+    let at = EVALUATION_MS - 5_000;
+    let zones = vec![
+        sample(
+            "h",
+            &[("job", "a"), ("instance", "1"), ("zone", "z")],
+            at,
+            2.0,
+        ),
+        sample("h", &[("job", "a"), ("instance", "2")], at, 2.0),
+        sample(
+            "h",
+            &[("job", "a"), ("instance", "3"), ("zone", "y")],
+            at,
+            2.0,
+        ),
+        sample(
+            "h",
+            &[("job", "a"), ("instance", "4"), ("zone", "z")],
+            at,
+            5.0,
+        ),
+    ];
+    let answers = promql(
+        r#"count_values("zone", h) without (instance, zone)"#,
+        "h",
+        &zones,
+    )
+    .await;
+    assert_close(&answers, &[(labels(&[("job", "a")]), 4.0)]);
+    let answers = promql(
+        r#"count_values("instance", m) without (instance)"#,
+        "m",
+        &count_values_samples(),
+    )
+    .await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "a")]), 2.0),
+            (labels(&[("job", "b")]), 1.0),
+            (labels(&[("job", "b"), ("zone", "z")]), 1.0),
+        ],
+    );
+}
+
+/// A `count_values` label named like a kept label column (here `job`,
+/// a column since the selector names it) replaces that column with the
+/// value text: job `b`'s series both read `job="2"`, apart by `zone`.
+#[tokio::test]
+async fn promql_count_values_without_replaces_a_kept_label_column() {
+    let answers = promql(
+        r#"count_values("job", m{job=~"a|b"}) without (instance)"#,
+        "m",
+        &count_values_samples(),
+    )
+    .await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "1")]), 2.0),
+            (labels(&[("job", "2")]), 1.0),
+            (labels(&[("job", "2"), ("zone", "z")]), 1.0),
+        ],
+    );
+}
+
 /// `sum without (instance)` groups by every other label, `__name__`
 /// dropped: `{job="b"}` and `{job="b", zone="z"}` are different groups.
 #[tokio::test]

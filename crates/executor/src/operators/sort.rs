@@ -1,4 +1,6 @@
 use super::*;
+use arrow::array::{Array, ArrayRef};
+use std::cmp::Ordering;
 impl Operator {
     /// Sort `input`'s rows by `keys` within each group of the `groups`
     /// columns, groups in key order. `fetch` keeps only the first `fetch`
@@ -133,51 +135,210 @@ fn compare_rows<'v>(
         .unwrap_or(std::cmp::Ordering::Equal)
 }
 
+/// The sort order of two rows, given the order of their key values: ties
+/// by input position, as the stable sort keeps input order. A row that
+/// sorts later is greater.
+fn sort_order(key_order: Ordering, a_position: u64, b_position: u64) -> Ordering {
+    key_order.then(a_position.cmp(&b_position))
+}
+
 /// One row a sort with `fetch` holds: its key values, its position in the
-/// input (which breaks ties, as the stable sort keeps input order) and
-/// where its row is held: a chunk of held rows, and the row of the input
-/// batch that chunk was taken from.
-struct HeldRow<'k> {
-    keys: Vec<Value>,
+/// input (which breaks ties) and where its row is held: row `row` of chunk
+/// `chunk`, or, while `chunk` is [`READING`], row `row` of the batch being
+/// read.
+struct HeldRow {
+    keys: Box<[Value]>,
     input_position: u64,
     chunk: u32,
     row: u32,
-    sort: &'k [SortKey],
 }
 
-impl PartialEq for HeldRow<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other).is_eq()
-    }
-}
-impl Eq for HeldRow<'_> {}
-impl PartialOrd for HeldRow<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-/// Sort order: a row that sorts later is greater, so a group's max-heap
-/// has its last kept row on top.
-impl Ord for HeldRow<'_> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        compare_rows(self.sort, self.keys.iter(), other.keys.iter())
-            .then(self.input_position.cmp(&other.input_position))
+/// The chunk of a held row from the batch being read, until that batch's
+/// kept rows are taken into a chunk.
+const READING: u32 = u32::MAX;
+
+/// Add `row` to `heap`, a max-heap in a `Vec` by `order` (the row that sorts
+/// last on top).
+fn heap_push(
+    heap: &mut Vec<HeldRow>,
+    row: HeldRow,
+    order: &impl Fn(&HeldRow, &HeldRow) -> Ordering,
+) {
+    heap.push(row);
+    let mut child = heap.len() - 1;
+    while child > 0 {
+        let parent = (child - 1) / 2;
+        if order(&heap[child], &heap[parent]).is_le() {
+            break;
+        }
+        heap.swap(child, parent);
+        child = parent;
     }
 }
 
-/// Rows a sort with `fetch` holds, taken from one input batch: `rows` are
-/// that batch's rows `input_rows` (ascending). A row a later batch
-/// displaces stays until [`compact`] rewrites the kept rows into one chunk.
-struct HeldChunk {
-    rows: Batch,
-    input_rows: Vec<u32>,
+/// Restore `heap` (see [`heap_push`]) after its top row was overwritten in
+/// place by a row that sorts earlier: one sift down, where a push then a pop
+/// reorder twice and allocate a new row.
+fn heap_sift_down_top(heap: &mut [HeldRow], order: &impl Fn(&HeldRow, &HeldRow) -> Ordering) {
+    let mut parent = 0;
+    loop {
+        let (left, right) = (2 * parent + 1, 2 * parent + 2);
+        let mut largest = parent;
+        if left < heap.len() && order(&heap[left], &heap[largest]).is_gt() {
+            largest = left;
+        }
+        if right < heap.len() && order(&heap[right], &heap[largest]).is_gt() {
+            largest = right;
+        }
+        if largest == parent {
+            return;
+        }
+        heap.swap(parent, largest);
+        parent = largest;
+    }
+}
+
+/// Row `i` of `left` against row `j` of `right` by one sort key, both arrays
+/// of the key's column, in [`compare_key`]'s order read straight from the
+/// arrays: NULLs first or last, NaN after every number in either direction,
+/// `-0` equal to `0`. A type Arrow cannot compare (a map) is decoded and
+/// compared by value.
+fn key_comparator(
+    left: &ArrayRef,
+    right: &ArrayRef,
+    dtype: &DataType,
+    key: &SortKey,
+) -> Result<arrow::array::DynComparator, Error> {
+    use arrow::array::{AsArray, DynComparator};
+    use arrow::datatypes::Float64Type;
+    let Ok(values) = arrow::array::make_comparator(left, right, Default::default()) else {
+        let depth = crate::values::arrow_columns::ColumnDepth::BatchColumn;
+        let left = crate::values::arrow_columns::decode(left.as_ref(), dtype, depth);
+        let right = crate::values::arrow_columns::decode(right.as_ref(), dtype, depth);
+        let key = key.clone();
+        return Ok(Box::new(move |i, j| compare_key(&left[i], &right[j], &key)));
+    };
+    let (left_nulls, right_nulls) = (left.logical_nulls(), right.logical_nulls());
+    let floats = left
+        .as_primitive_opt::<Float64Type>()
+        .cloned()
+        .zip(right.as_primitive_opt::<Float64Type>().cloned());
+    let SortKey {
+        descending,
+        nulls_first,
+        ..
+    } = *key;
+    let compare: DynComparator = Box::new(move |i, j| {
+        let left_null = left_nulls.as_ref().is_some_and(|nulls| nulls.is_null(i));
+        let right_null = right_nulls.as_ref().is_some_and(|nulls| nulls.is_null(j));
+        match (left_null, right_null) {
+            (true, true) => return Ordering::Equal,
+            (true, false) => {
+                return if nulls_first {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (false, true) => {
+                return if nulls_first {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            (false, false) => {}
+        }
+        let order = match &floats {
+            Some((left, right)) => {
+                let (a, b) = (left.value(i), right.value(j));
+                if a.is_nan() || b.is_nan() {
+                    return a.is_nan().cmp(&b.is_nan());
+                }
+                a.partial_cmp(&b).expect("neither is NaN")
+            }
+            None => values(i, j),
+        };
+        if descending {
+            order.reverse()
+        } else {
+            order
+        }
+    });
+    Ok(compare)
+}
+
+/// The sort-key values of the rows of one batch a sort with `fetch` keeps,
+/// decoded only for those rows: a number, time, date or bool key reads its
+/// cell, another type decodes its column once, at the first kept row. An
+/// error for a NaN inside a collection key, which has no order.
+struct KeptKeyValues<'b> {
+    batch: &'b Batch,
+    keys: &'b [SortKey],
+    decoded: Vec<Option<Vec<Value>>>,
+}
+
+impl<'b> KeptKeyValues<'b> {
+    fn new(batch: &'b Batch, keys: &'b [SortKey]) -> Self {
+        Self {
+            batch,
+            keys,
+            decoded: vec![None; keys.len()],
+        }
+    }
+
+    /// Row `row`'s key values, in a new allocation.
+    fn row(&mut self, row: usize) -> Result<Box<[Value]>, Error> {
+        let mut values = vec![Value::Null; self.keys.len()].into_boxed_slice();
+        self.write(row, &mut values)?;
+        Ok(values)
+    }
+
+    /// Write row `row`'s key values over `values`, one per key: a held row
+    /// that is displaced passes its own, so a full group allocates nothing.
+    fn write(&mut self, row: usize, values: &mut [Value]) -> Result<(), Error> {
+        use arrow::array::AsArray;
+        use arrow::datatypes::{Date32Type, Float64Type, Int64Type, TimestampMillisecondType};
+        for ((index, key), slot) in self.keys.iter().enumerate().zip(values) {
+            let array = self.batch.column(key.column);
+            let value = if array.is_null(row) {
+                Value::Null
+            } else {
+                match plain(self.batch.schema(), key.column)?.0 {
+                    DataType::Float64 => {
+                        Value::Float64(array.as_primitive::<Float64Type>().value(row))
+                    }
+                    DataType::Int64 => Value::Int64(array.as_primitive::<Int64Type>().value(row)),
+                    DataType::Timestamp => Value::Timestamp(
+                        array.as_primitive::<TimestampMillisecondType>().value(row),
+                    ),
+                    DataType::Date => Value::Date(array.as_primitive::<Date32Type>().value(row)),
+                    DataType::Bool => Value::Bool(array.as_boolean().value(row)),
+                    _ => {
+                        let column = match &mut self.decoded[index] {
+                            Some(column) => column,
+                            empty => empty.insert(decoded(self.batch, key.column)?),
+                        };
+                        column[row].clone()
+                    }
+                }
+            };
+            if matches!(value, Value::Map(_)) && nested_nan(&value) {
+                return Err(invalid("NaN in collection sort key"));
+            }
+            *slot = value;
+        }
+        Ok(())
+    }
 }
 
 /// The first `fetch` rows of each group of `input` by `keys`, groups in key
 /// order, ties in input order, as a full sort and a per-group limit give
 /// them. Each group keeps a heap of at most `fetch` rows, read a batch at a
 /// time, so it holds `groups × fetch` rows (plus displaced rows, until they
-/// are compacted away) instead of its whole input.
+/// are compacted away) instead of its whole input. A row is tested against
+/// its group's last kept row straight from the Arrow arrays; only a row
+/// that is kept has its key values decoded.
 async fn sort_with_fetch(
     mut input: Input<'_, Batch>,
     schema: &SchemaRef,
@@ -186,23 +347,31 @@ async fn sort_with_fetch(
     fetch: u64,
     context: RunContext,
 ) -> Result<Batch, Error> {
-    use std::collections::BinaryHeap;
     let mut table = super::group_table::GroupTable::new(groups.to_vec());
-    let mut heaps: Vec<BinaryHeap<HeldRow>> = Vec::new();
-    let mut chunks: Vec<HeldChunk> = Vec::new();
+    let mut heaps: Vec<Vec<HeldRow>> = Vec::new();
+    // The batches of held rows; row `r` of chunk `c` is `chunks[c]`'s row `r`.
+    let mut chunks: Vec<Batch> = Vec::new();
     let mut workspace = Workspace::new(&context)?;
     let mut work = Cooperative::new(&context);
     let mut input_position = 0u64;
     let mut kept_rows = 0usize;
     let mut key_bytes = 0usize;
-    let held_bytes = |chunks: &[HeldChunk], key_bytes: usize, kept_rows: usize| {
-        chunks
-            .iter()
-            .map(|chunk| chunk.rows.memory_bytes() + 4 * chunk.input_rows.len())
-            .sum::<usize>()
+    let held_bytes = |chunks: &[Batch], key_bytes: usize, kept_rows: usize| {
+        chunks.iter().map(Batch::memory_bytes).sum::<usize>()
             + key_bytes
             + kept_rows * std::mem::size_of::<HeldRow>()
     };
+    let order = |a: &HeldRow, b: &HeldRow| {
+        sort_order(
+            compare_rows(keys, a.keys.iter(), b.keys.iter()),
+            a.input_position,
+            b.input_position,
+        )
+    };
+    let dtypes = keys
+        .iter()
+        .map(|key| plain(schema, key.column).map(|(dtype, _)| dtype.clone()))
+        .collect::<Result<Vec<_>, _>>()?;
     let fetch = usize::try_from(fetch).unwrap_or(usize::MAX);
     while let Some(batch) = input.next().await {
         let batch = batch?;
@@ -212,126 +381,137 @@ async fn sort_with_fetch(
         }
         let held = held_bytes(&chunks, key_bytes, kept_rows);
         let ids = chunked_group_ids(&mut table, &batch, &mut workspace, held, &mut work).await?;
-        heaps.resize_with(table.len(), BinaryHeap::new);
-        let key_values = sort_key_values(&batch, keys)?;
-        let chunk = chunks.len() as u32;
-        // Whether each row of `batch` is still kept.
+        heaps.resize_with(table.len(), Vec::new);
+        let mut kept_keys = KeptKeyValues::new(&batch, keys);
+        // Per held chunk, then the batch being read (last), the key
+        // comparators of this batch's rows against its rows, built when a
+        // heap's last row first lies there.
+        let mut comparators: Vec<Option<Vec<arrow::array::DynComparator>>> =
+            (0..=chunks.len()).map(|_| None).collect();
+        // Whether each row of `batch` is still kept, and the groups it went to.
         let mut kept = vec![false; batch.num_rows()];
+        let mut touched: Vec<u32> = Vec::new();
         for (row, &group) in ids.iter().enumerate() {
             let heap = &mut heaps[group as usize];
             let position = input_position + row as u64;
-            let sorts_before = |last: &HeldRow| {
-                compare_rows(
-                    keys,
-                    key_values.iter().map(|values| &values[row]),
-                    last.keys.iter(),
-                )
-                .then(position.cmp(&last.input_position))
-                .is_lt()
-            };
-            if heap.len() >= fetch && !heap.peek().is_some_and(sorts_before) {
-                continue;
-            }
-            let held = HeldRow {
-                keys: key_values
+            let full = heap.len() >= fetch;
+            if full {
+                let last = &heap[0];
+                let slot = if last.chunk == READING {
+                    chunks.len()
+                } else {
+                    last.chunk as usize
+                };
+                let compare = match &mut comparators[slot] {
+                    Some(compare) => compare,
+                    empty => {
+                        let held = chunks.get(slot).unwrap_or(&batch);
+                        empty.insert(
+                            keys.iter()
+                                .zip(&dtypes)
+                                .map(|(key, dtype)| {
+                                    key_comparator(
+                                        batch.column(key.column),
+                                        held.column(key.column),
+                                        dtype,
+                                        key,
+                                    )
+                                })
+                                .collect::<Result<_, _>>()?,
+                        )
+                    }
+                };
+                let key_order = compare
                     .iter()
-                    .map(|values| values[row].clone())
-                    .collect(),
-                input_position: position,
-                chunk,
-                row: row as u32,
-                sort: keys,
-            };
-            key_bytes += held.keys.iter().map(Value::bytes).sum::<usize>();
-            heap.push(held);
-            kept[row] = true;
-            kept_rows += 1;
-            if heap.len() > fetch {
-                let displaced = heap.pop().expect("a full heap");
-                key_bytes -= displaced.keys.iter().map(Value::bytes).sum::<usize>();
-                kept_rows -= 1;
-                if displaced.chunk == chunk {
-                    kept[displaced.row as usize] = false;
+                    .map(|compare| compare(row, last.row as usize))
+                    .find(|order| order.is_ne())
+                    .unwrap_or(Ordering::Equal);
+                if !sort_order(key_order, position, last.input_position).is_lt() {
+                    continue;
                 }
+            }
+            kept[row] = true;
+            touched.push(group);
+            if full {
+                // The row displaces the group's last kept row: overwrite
+                // that row in place, its key allocation reused.
+                let last = &mut heap[0];
+                key_bytes -= last.keys.iter().map(Value::bytes).sum::<usize>();
+                if last.chunk == READING {
+                    kept[last.row as usize] = false;
+                }
+                kept_keys.write(row, &mut last.keys)?;
+                key_bytes += last.keys.iter().map(Value::bytes).sum::<usize>();
+                (last.input_position, last.chunk, last.row) = (position, READING, row as u32);
+                heap_sift_down_top(heap, &order);
+            } else {
+                let held = HeldRow {
+                    keys: kept_keys.row(row)?,
+                    input_position: position,
+                    chunk: READING,
+                    row: row as u32,
+                };
+                key_bytes += held.keys.iter().map(Value::bytes).sum::<usize>();
+                heap_push(heap, held, &order);
+                kept_rows += 1;
             }
         }
         input_position += batch.num_rows() as u64;
-        let input_rows: Vec<u32> = (0..batch.num_rows() as u32)
-            .filter(|&row| kept[row as usize])
-            .collect();
-        if !input_rows.is_empty() {
-            chunks.push(HeldChunk {
-                rows: batch.take(&arrow::array::UInt32Array::from(input_rows.clone()))?,
-                input_rows,
-            });
+        // Take the batch's kept rows into a chunk, and point their held rows
+        // there.
+        let mut chunk_rows = vec![0u32; batch.num_rows()];
+        let mut taken = Vec::new();
+        for (row, _) in kept.iter().enumerate().filter(|(_, &kept)| kept) {
+            chunk_rows[row] = taken.len() as u32;
+            taken.push(row as u32);
         }
-        let chunk_rows = chunks.iter().map(|c| c.input_rows.len()).sum::<usize>();
-        if chunk_rows > 2 * kept_rows.max(1) {
+        if !taken.is_empty() {
+            let chunk = chunks.len() as u32;
+            for &group in &touched {
+                for held in heaps[group as usize].iter_mut() {
+                    if held.chunk == READING {
+                        held.chunk = chunk;
+                        held.row = chunk_rows[held.row as usize];
+                    }
+                }
+            }
+            chunks.push(batch.take(&arrow::array::UInt32Array::from(taken))?);
+        }
+        let held_rows = chunks.iter().map(Batch::num_rows).sum::<usize>();
+        if held_rows > 2 * kept_rows.max(1) {
             compact(schema, &mut chunks, &mut heaps)?;
         }
         workspace.set_bytes(table.memory_bytes() + held_bytes(&chunks, key_bytes, kept_rows))?;
     }
-    compact(schema, &mut chunks, &mut heaps)?;
-    // Groups in key order, each group's rows in sort order.
-    let mut order = Vec::with_capacity(kept_rows);
+    // Groups in key order, each group's rows in sort order, gathered from
+    // the chunks in one copy.
+    let mut rows = Vec::with_capacity(kept_rows);
     for group in table.groups_in_key_order() {
         if let Some(heap) = heaps.get_mut(group as usize) {
-            order.extend(
-                std::mem::take(heap)
-                    .into_sorted_vec()
-                    .iter()
-                    .map(|held| held.row),
+            heap.sort_unstable_by(order);
+            rows.extend(
+                heap.iter()
+                    .map(|held| (held.chunk as usize, held.row as usize)),
             );
         }
     }
-    match chunks.pop() {
-        Some(kept) => kept.rows.take(&arrow::array::UInt32Array::from(order)),
-        None => Batch::try_new(schema.clone(), Vec::new()),
-    }
+    Batch::interleave(schema, &chunks, &rows)
 }
 
-/// Rewrite the rows `heaps` keep into one chunk, in heap order, dropping
+/// Gather the rows `heaps` keep into one chunk, in one copy, dropping
 /// displaced rows, and point each kept row at its row there.
 fn compact(
     schema: &SchemaRef,
-    chunks: &mut Vec<HeldChunk>,
-    heaps: &mut [std::collections::BinaryHeap<HeldRow>],
+    chunks: &mut Vec<Batch>,
+    heaps: &mut [Vec<HeldRow>],
 ) -> Result<(), Error> {
-    if chunks.is_empty() {
-        return Ok(());
-    }
-    let mut offsets = Vec::with_capacity(chunks.len());
-    let mut total = 0u32;
-    for chunk in chunks.iter() {
-        offsets.push(total);
-        total += chunk.input_rows.len() as u32;
-    }
     let mut rows = Vec::new();
-    for heap in heaps.iter_mut() {
-        let mut held = std::mem::take(heap).into_vec();
-        for row in &mut held {
-            let chunk = &chunks[row.chunk as usize];
-            let index = chunk
-                .input_rows
-                .binary_search(&row.row)
-                .expect("a kept row is in its chunk");
-            rows.push(offsets[row.chunk as usize] + index as u32);
-            row.chunk = 0;
-            row.row = rows.len() as u32 - 1;
-        }
-        *heap = std::collections::BinaryHeap::from(held);
+    for held in heaps.iter_mut().flatten() {
+        rows.push((held.chunk as usize, held.row as usize));
+        held.chunk = 0;
+        held.row = rows.len() as u32 - 1;
     }
-    let all = Batch::concat(
-        schema,
-        &chunks
-            .iter()
-            .map(|chunk| chunk.rows.clone())
-            .collect::<Vec<_>>(),
-    )?;
-    *chunks = vec![HeldChunk {
-        rows: all.take(&arrow::array::UInt32Array::from(rows.clone()))?,
-        input_rows: (0..rows.len() as u32).collect(),
-    }];
+    *chunks = vec![Batch::interleave(schema, chunks, &rows)?];
     Ok(())
 }
 

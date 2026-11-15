@@ -104,23 +104,6 @@ pub enum Expression {
     Not(Box<Expression>),
     IsNull(Box<Expression>),
 }
-/// The series identity `identity` (`promql_rows::encode_series_identity`'s
-/// JSON of every label) less the labels `excluding`, encoded the same way:
-/// `{"__name__":"m","instance":"1","job":"a"}` less `instance` and
-/// `__name__` is `{"job":"a"}`. The labels are borrowed from `identity`
-/// (copied only when JSON escapes them), and `identity` is not checked to be
-/// canonical: the executor wrote it.
-fn identity_less(identity: &str, excluding: &[String]) -> Result<String, Error> {
-    use std::borrow::Cow;
-    /// One label name or value, borrowed unless JSON escapes it.
-    #[derive(serde::Deserialize, serde::Serialize, PartialEq, Eq, PartialOrd, Ord)]
-    struct Text<'a>(#[serde(borrow)] Cow<'a, str>);
-    let mut labels: std::collections::BTreeMap<Text, Text> =
-        serde_json::from_str(identity).map_err(|error| invalid(&error.to_string()))?;
-    labels.retain(|name, _| !excluding.iter().any(|label| label.as_str() == name.0));
-    serde_json::to_string(&labels).map_err(|error| invalid(&error.to_string()))
-}
-
 impl Expression {
     pub fn planner(expression: CompiledExpression) -> Self {
         Self::Planner(Box::new(expression))
@@ -465,7 +448,12 @@ impl Expression {
                 let mut labels = std::collections::BTreeMap::new();
                 match &row[*column] {
                     Value::Utf8(identity) => {
-                        return Ok(Value::Utf8(identity_less(identity, excluding)?.into()));
+                        return Ok(Value::Utf8(
+                            crate::physical_planner::promql_rows::series_identity_without(
+                                identity, excluding,
+                            )?
+                            .into(),
+                        ));
                     }
                     Value::Map(entries) => {
                         for (key, value) in entries.iter() {

@@ -283,22 +283,48 @@ fn compile_internal(
                 }
                 None => node,
             };
+            // An exact top-k or `count_values` lowers to a helper operator
+            // (none for a `count_values` whose label `without` removes) and
+            // the node's own.
             if let Payload::NonASAP(NonASAPOp::Aggregate {
-                reduction: PlannerReduction::Reduce(_),
+                reduction: PlannerReduction::Reduce(keys),
                 measures,
+                filters,
                 having: None,
                 ..
             }) = &node.payload
             {
-                if let [AggIntent::TopK { .. }] = measures.as_slice() {
-                    let Some(NonASAPOp::Aggregate { child, .. }) = restored[&id].non_asap() else {
-                        unreachable!("an aggregate restores as an aggregate")
+                if let [measure @ (AggIntent::TopK { .. } | AggIntent::CountValues { .. })] =
+                    measures.as_slice()
+                {
+                    let [input] = schemas.as_slice() else {
+                        return Err(invalid(format!("node {id}: an aggregate reads one input")));
                     };
-                    lower_exact_topk(&mut physical_dag, node, child, inputs, &schemas, &output)?;
-                    continue;
-                }
-                if let [AggIntent::CountValues { .. }] = measures.as_slice() {
-                    lower_count_values(&mut physical_dag, node, inputs, &schemas, &output)?;
+                    if filters.iter().any(Option::is_some) {
+                        return Err(invalid(format!(
+                            "node {id}: a filtered top-k or count_values"
+                        )));
+                    }
+                    let (helper_operator, operator) = match measure {
+                        AggIntent::TopK { k, .. } => {
+                            let Some(NonASAPOp::Aggregate { child, .. }) = restored[&id].non_asap()
+                            else {
+                                unreachable!("an aggregate restores as an aggregate")
+                            };
+                            lower_exact_topk(child, keys, *k as u64, input, &output)
+                        }
+                        AggIntent::CountValues { label } => {
+                            lower_count_values(keys, label, input, &output)
+                        }
+                        _ => unreachable!("matched a top-k or count_values"),
+                    }
+                    .map_err(|error| invalid(format!("node {id}: {error}")))?;
+                    if let Some(helper_operator) = helper_operator {
+                        let helper = helper_id(id, 0)?;
+                        physical_dag.add(helper, inputs, helper_operator)?;
+                        inputs = vec![helper];
+                    }
+                    physical_dag.add(id, inputs, operator)?;
                     continue;
                 }
             }
@@ -1506,39 +1532,19 @@ fn top_k_sort(
     )
 }
 
-/// Lower `node`, an exact top-k `Aggregate{Reduce(keys), [TopK{k}]}` over
-/// `child` (PromQL `topk`, SQL's heavy hitter), into `physical_dag`: the
-/// first `k` rows of its input per `keys` partition by the ranked value
-/// ([`top_k_sort`]), then its ranked rows' columns. `topk(2, sum by (job)
+/// An exact top-k `Aggregate{Reduce(keys), [TopK{k}]}` over `child` (PromQL
+/// `topk`, SQL's heavy hitter) reading `input`, lowered: the first `k` rows
+/// of its input per `keys` partition by the ranked value ([`top_k_sort`]),
+/// then a projection of its ranked rows' columns. `topk(2, sum by (job)
 /// (x))` over job sums `a=7, b=10, c=3` answers `b=10` and `a=7`.
 fn lower_exact_topk(
-    physical_dag: &mut CompiledPhysicalDAG,
-    node: &PhysicalASAPDAGNode,
     child: &std::rc::Rc<OperatorNode>,
-    inputs: Vec<NodeId>,
-    schemas: &[SchemaRef],
+    keys: &GroupKeys,
+    k: u64,
+    input: &SchemaRef,
     output: &SchemaRef,
-) -> Result<(), Error> {
-    let id = node.id as NodeId;
-    let Payload::NonASAP(NonASAPOp::Aggregate {
-        reduction: PlannerReduction::Reduce(keys),
-        measures,
-        filters,
-        ..
-    }) = &node.payload
-    else {
-        return Err(invalid(format!("node {id}: a top-k is an aggregate")));
-    };
-    let [AggIntent::TopK { k, .. }] = measures.as_slice() else {
-        return Err(invalid(format!("node {id}: a top-k has one measure")));
-    };
-    let [input] = schemas else {
-        return Err(invalid(format!("node {id}: an aggregate reads one input")));
-    };
-    if filters.iter().any(Option::is_some) {
-        return Err(invalid(format!("node {id}: a filtered top-k")));
-    }
-    let ranked = |error: String| invalid(format!("node {id}: top-k: {error}"));
+) -> Result<(Option<Operator>, Operator), Error> {
+    let ranked = |error: String| invalid(format!("top-k: {error}"));
     let value = planner_types::ir::schema::topk::ranked_column(child)
         .map_err(|error| ranked(error.to_string()))?;
     let columns = planner_types::ir::schema::topk::ranked_row_projection(
@@ -1555,50 +1561,34 @@ fn lower_exact_topk(
         _ => Err(ranked("a ranked row projects columns".into())),
     })
     .collect::<Result<_, _>>()?;
-    let sort = helper_id(id, 0)?;
-    physical_dag.add(
-        sort,
-        inputs,
-        top_k_sort(input, value, groups(input, keys)?, *k as u64)?,
-    )?;
-    physical_dag.add(
-        id,
-        vec![sort],
+    Ok((
+        Some(top_k_sort(input, value, groups(input, keys)?, k)?),
         Operator::project(input.clone(), columns)?.with_output_schema(output.clone())?,
-    )
+    ))
 }
 
-/// Lower `node`, PromQL `count_values("l", v)` as
-/// `Aggregate{Reduce(keys), [CountValues{l}]}`, into `physical_dag`: a
-/// projection adding the value as text in the label `l`
-/// ([`Expression::FloatText`]), then a count per group and value text. `l`
-/// replaces a grouping label of that name: `count_values by (job) ("job",
-/// v)` over `{job=a} 2` and `{job=b} 2` answers `{job="2"} 2`.
+/// PromQL `count_values("l", v)` as `Aggregate{Reduce(keys),
+/// [CountValues{l}]}` reading `input`, lowered: a projection adding the
+/// value as text in the label `l` ([`Expression::FloatText`]), then a count
+/// per group and value text. `l` replaces a grouping label of that name:
+/// `count_values by (job) ("job", v)` over `{job=a} 2` and `{job=b} 2`
+/// answers `{job="2"} 2`. A `without` grouping that excludes `l` removes it
+/// again (the IR's `output` has no `l`), so the count is per group only:
+/// `count_values("zone", v) without (instance, zone)` adds no projection.
 fn lower_count_values(
-    physical_dag: &mut CompiledPhysicalDAG,
-    node: &PhysicalASAPDAGNode,
-    inputs: Vec<NodeId>,
-    schemas: &[SchemaRef],
+    keys: &GroupKeys,
+    label: &str,
+    input: &SchemaRef,
     output: &SchemaRef,
-) -> Result<(), Error> {
-    let id = node.id as NodeId;
-    let Payload::NonASAP(NonASAPOp::Aggregate {
-        reduction: PlannerReduction::Reduce(keys),
-        measures,
-        filters,
-        ..
-    }) = &node.payload
-    else {
-        return Err(invalid(format!("node {id}: count_values is an aggregate")));
-    };
-    let [AggIntent::CountValues { label }] = measures.as_slice() else {
-        return Err(invalid(format!("node {id}: count_values has one measure")));
-    };
-    let [input] = schemas else {
-        return Err(invalid(format!("node {id}: an aggregate reads one input")));
-    };
-    if filters.iter().any(Option::is_some) {
-        return Err(invalid(format!("node {id}: a filtered count_values")));
+) -> Result<(Option<Operator>, Operator), Error> {
+    if !output.fields.iter().any(|field| field.name == label) {
+        let count = Operator::aggregate(
+            input.clone(),
+            groups(input, keys)?,
+            vec![(String::new(), Reduction::Count)],
+        )?
+        .with_output_schema(output.clone())?;
+        return Ok((None, count));
     }
     let value = named_column(input, &ColumnRef::SampleValue)?;
     let mut columns: Vec<_> = input
@@ -1607,12 +1597,12 @@ fn lower_count_values(
         .enumerate()
         .map(|(i, field)| (field.name.clone(), Expression::Column(i)))
         .collect();
-    columns.push((label.clone(), Expression::FloatText(value)));
+    columns.push((label.to_string(), Expression::FloatText(value)));
     let text = input.fields.len();
     let mut partitions = groups(input, keys)?;
     match partitions
         .iter()
-        .position(|&key| input.fields[key].name == *label)
+        .position(|&key| input.fields[key].name == label)
     {
         Some(key) => partitions[key] = text,
         None => partitions.push(text),
@@ -1624,9 +1614,7 @@ fn lower_count_values(
         vec![(String::new(), Reduction::Count)],
     )?
     .with_output_schema(output.clone())?;
-    let projection = helper_id(id, 0)?;
-    physical_dag.add(projection, inputs, project)?;
-    physical_dag.add(id, vec![projection], aggregate)
+    Ok((Some(project), aggregate))
 }
 
 /// `node` with its `without` grouping (PromQL `sum without (instance) (m)`)
@@ -1681,10 +1669,10 @@ fn resolve_without(
     // `count_values("zone", v)`'s label replaces a kept label `zone`, as
     // Prometheus overwrites it before grouping: the kept label set drops it
     // too, so `{job=b, zone=z}` and `{job=b}` with the value 2 are one group
-    // `{job=b, zone="2"}`.
+    // `{job=b, zone="2"}`. An excluded label is removed already.
     let replaced = match &node.payload {
         Payload::NonASAP(NonASAPOp::Aggregate { measures, .. }) => match measures.as_slice() {
-            [AggIntent::CountValues { label }] => Some(label.clone()),
+            [AggIntent::CountValues { label }] if !excluded.contains(label) => Some(label.clone()),
             _ => None,
         },
         _ => None,
@@ -1696,29 +1684,27 @@ fn resolve_without(
     let columns = (0..input.fields.len())
         .map(|i| {
             let field = &input.fields[i];
-            let label_map = matches!(field.dtype, FieldDataType::Plain(DataType::Map { .. }));
-            let expression = if !kept.contains(&i) {
-                Expression::Column(i)
-            } else if field.name == promql_rows::SERIES_IDENTITY_COLUMN {
-                rewrites = true;
-                Expression::LabelIdentity {
-                    column: i,
-                    excluding: removed
-                        .iter()
-                        .cloned()
-                        .chain(["__name__".to_string()])
-                        .collect(),
-                }
-            } else if label_map {
-                rewrites = true;
-                Expression::LabelSet {
-                    column: i,
-                    labels: removed.clone(),
-                    without: true,
-                }
-            } else {
-                Expression::Column(i)
-            };
+            let expression =
+                if !kept.contains(&i) || !planner_types::ir::schema::is_label_set_column(field) {
+                    Expression::Column(i)
+                } else if field.name == promql_rows::SERIES_IDENTITY_COLUMN {
+                    rewrites = true;
+                    Expression::LabelIdentity {
+                        column: i,
+                        excluding: removed
+                            .iter()
+                            .cloned()
+                            .chain(["__name__".to_string()])
+                            .collect(),
+                    }
+                } else {
+                    rewrites = true;
+                    Expression::LabelSet {
+                        column: i,
+                        labels: removed.clone(),
+                        without: true,
+                    }
+                };
             (field.name.clone(), expression)
         })
         .collect();
