@@ -442,3 +442,38 @@ fn predicted_cpu_orders_exact_and_alternative_plans_as_measured() {
     }
     assert!(wrong.is_empty(), "misranked:\n{}", wrong.join("\n"));
 }
+
+/// A query reading stored windows waits for the newest window's
+/// compaction: each ingest worker beyond the first builds its own partial
+/// copy of that window, merged at query time, one merge per state per extra
+/// worker. Example: the stored DDSketch windows of the quantile over
+/// 100,000 series sampled every 10 ms (10 M rows per second, at 210 ns per
+/// row more than one core of ingestion work) merge at least one extra copy
+/// of each of the window's 100,000 states, and a DDSketch merge measures
+/// 1.8–2.5 µs: at least 180 ms. One operation (1 ns) per merge would
+/// predict 0.2 ms.
+#[test]
+fn compaction_latency_charges_each_merge_its_family_s_merge_time() {
+    let (plan, _) = selected(&workload(QUANTILE, TEN_HZ_EVERY_60_S), false);
+    assert_eq!(plan_kind(&plan), PlanKind::StoredStates);
+    assert!(has_sketch(&plan));
+    let mut heavy = serde_json::to_value(workload(QUANTILE, TEN_HZ_EVERY_60_S)).unwrap();
+    let data = &mut heavy["data_workload"];
+    data["arrival"]["ingesting"]["rows_per_second"] = serde_json::json!(10_000_000.0);
+    data["sources"]["latency"]["series_count"] = serde_json::json!(100_000);
+    data["sources"]["latency"]["sample_interval"] = serde_json::json!(10);
+    let heavy: PlanningWorkload = serde_json::from_value(heavy).unwrap();
+    let entries: Vec<_> = heavy.query_workload.entries().collect();
+    let (cost, _) = asap_cost::plan_cost(
+        &plan,
+        &entries,
+        heavy.data_workload.as_ref().unwrap(),
+        &CostInputs::default(),
+    )
+    .unwrap();
+    let compaction_ms = cost.usage.latency_per_query[0].compaction_ms;
+    assert!(
+        compaction_ms >= 100_000.0 * 1.8e-3,
+        "predicted compaction {compaction_ms} ms, measured merges take at least 180 ms"
+    );
+}
