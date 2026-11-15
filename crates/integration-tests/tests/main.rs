@@ -9,6 +9,7 @@ mod planning_common;
 mod aggregate;
 mod binary_op;
 mod crate_graph;
+mod default_cost_plan_ranking;
 mod filtered_aggregates;
 mod finer_aggregate_reuse;
 mod frontend_timestamps;
