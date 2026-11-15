@@ -1,7 +1,7 @@
 //! Costing a physical plan DAG node by node: each node's resource usage
 //! ([`node_resource_usage_and_cost`]), then the plan's usage, latency and
 //! cost ([`plan_cost`]). Stage 3 costs its candidates with the same
-//! function and rules (`executions_per_second`, `maintained_window_ms`,
+//! function and rules (`executions_per_second`, `RefreshWindow::computed_from`,
 //! `read_back_ms`, [`raw_data_disk_cost_per_second`],
 //! [`request_overhead_cost_per_second`]), so its objective is the
 //! `plan_cost` of the plan it selects.
@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::node::analytical::AnalyticalCostError;
 use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_shape, StateInputRows};
-use crate::node::usage::{cost_source, maintained_window_ms, reads_one_batch_of};
+use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
 use crate::plan::read_back::read_back_ms;
 use crate::{lookup, StateFamily};
@@ -143,11 +143,9 @@ pub fn plan_cost(
             })
             .collect();
         let window_ms = match node.output_state.timing {
-            ExecutionTiming::IngestionTime => maintained_window_ms(
-                node.id,
-                |id| &nodes[&id].payload,
-                |id| producers_of.get(&id)?.first().copied(),
-            ),
+            ExecutionTiming::IngestionTime => {
+                dag.refresh_window(node.id).map(|window| window.width_ms)
+            }
             ExecutionTiming::QueryTime => scan_read_ms(dag, node),
         };
         let node_costed = node_resource_usage_and_cost(

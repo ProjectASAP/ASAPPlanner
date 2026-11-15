@@ -90,7 +90,7 @@ pub struct GroupProperties {
     /// says nothing about whether rows keep arriving: a result that does
     /// not depend on the evaluation time is final, the same at every
     /// evaluation, only once its rows no longer change
-    /// ([`PhysicalCandidate::delivers_on`](crate::stages::PhysicalCandidate::delivers_on)).
+    /// ([`PhysicalASAPMemoCandidates::delivers_on`](crate::stages::PhysicalASAPMemoCandidates::delivers_on)).
     pub depends_on_evaluation_time: bool,
     /// What an aggregate group covers: a summary state, a chain, a
     /// `TimeRange`/`TimeShift` over a chain or a merge over one, or an exact
@@ -189,7 +189,7 @@ pub(super) fn derive_group_properties(
 /// ([`reads_time_not_pinned_by_at`]) still depends on it. Any other
 /// operator depends on it when an input group does. A `Scan` reads no time:
 /// whether its rows keep arriving is
-/// [`PhysicalCandidate::delivers_on`](crate::stages::PhysicalCandidate::delivers_on)'s
+/// [`PhysicalASAPMemoCandidates::delivers_on`](crate::stages::PhysicalASAPMemoCandidates::delivers_on)'s
 /// check.
 fn depends_on_evaluation_time(operator: &Operator<MemoGroupAsInput<'_>>) -> bool {
     match operator {

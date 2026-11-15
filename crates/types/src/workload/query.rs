@@ -223,7 +223,7 @@ impl QueryRecurrence {
     /// known: an estimated rate, a one-off query without a time, an unknown
     /// recurrence, or a zero interval. Pass 2's chain widths and the evaluation grids of
     /// Stage 3's contexts, which
-    /// [`PhysicalCandidate::delivers_on`](crate::stages::PhysicalCandidate::delivers_on)
+    /// [`PhysicalASAPMemoCandidates::delivers_on`](crate::stages::PhysicalASAPMemoCandidates::delivers_on)
     /// reads, both come from it.
     pub fn evaluation_grid_ms(&self, range_evaluation: Option<RangeEvaluation>) -> Option<u64> {
         let times_grid_ms = match self {

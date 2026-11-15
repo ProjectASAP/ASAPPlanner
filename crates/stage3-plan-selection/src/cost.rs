@@ -55,12 +55,13 @@ use asap_cost::plan::execution_demand::{
     context_executions_per_second, executions_per_second as rate_of_materialized,
 };
 use asap_cost::{
-    maintained_window_ms, node_resource_usage_and_cost, output_interval_ms,
-    raw_data_disk_cost_per_second, CostInputs, NodeResourceUsageAndCost, ProducerOutput,
+    node_resource_usage_and_cost, output_interval_ms, raw_data_disk_cost_per_second, CostInputs,
+    NodeResourceUsageAndCost, ProducerOutput,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{NonASAPOp, Operator};
+use asap_types::plan::materialized_view::RefreshWindow;
 use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload,
 };
@@ -644,8 +645,8 @@ fn logical_output<'a: 'b, 'b>(
 }
 
 /// Candidate `v`'s usage as `node` over `inputs`, computed `per_second`
-/// times per second, over the window an ingestion-time grouping maintains
-/// ([`asap_cost::maintained_window_ms`], over the memo's groups) or, for a
+/// times per second, over its refresh window at ingestion time
+/// ([`ingestion_window_ms`]) or, for a
 /// query-time `Scan`, `scan_read_ms` per execution.
 #[allow(clippy::too_many_arguments)]
 fn cost_node<'a>(
@@ -666,32 +667,16 @@ fn cost_node<'a>(
         .map_err(|error| error.to_string())
 }
 
-/// The window ingestion-time candidate `v` maintains, the time between
-/// two of its outputs: a chain its own window, any other grouping the
-/// first range or chain below its group ([`asap_cost::maintained_window_ms`],
-/// over the memo's groups); `None` without one (one output per second).
+/// The time between two outputs of ingestion-time candidate `v`: the
+/// width of its refresh window, by the rule the installed plan refreshes
+/// it on (`RefreshWindow::computed_from` over the candidates, so
+/// `plan_cost` charges the same); `None` without one (one output per
+/// second).
 fn ingestion_window_ms(
     physical: &PhysicalASAPMemoCandidates,
     v: PhysicalCandidateId,
 ) -> Option<u64> {
-    let memo = &physical.logical_candidates.memo;
-    let group = physical.physical_candidates[v.0].logical_candidate_id.group;
-    physical
-        .operator(v)
-        .chain_tumbling_window_width_ms()
-        .or_else(|| {
-            maintained_window_ms(
-                group,
-                |group: MemoGroupId| &memo.groups()[group.0 as usize].expression,
-                |group| {
-                    memo.groups()[group.0 as usize]
-                        .expression
-                        .children()
-                        .first()
-                        .map(|g| **g)
-                },
-            )
-        })
+    RefreshWindow::computed_from(physical, v).map(|window| window.width_ms)
 }
 
 /// A candidate's cost per second from its usage under cost model 1: its

@@ -6,11 +6,15 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{Operator, QueryRoot};
+use crate::ir::properties::ExecutionTiming;
+use crate::ir::{NonASAPOp, Operator, QueryRoot};
+use crate::plan::materialized_view::RefreshWindow;
+use crate::plan::time_window::{InputTimeAccess, TimeIndexedPlan};
 use crate::stages::{
-    LogicalASAPMemoCandidates, MemoGroupId, PhysicalCandidate, PhysicalCandidateId, PhysicalEdge,
-    PhysicalEdgeId, PrunedCandidate,
+    EvaluationGrid, ExecutionContext, Lifetime, LogicalASAPMemoCandidates, MemoGroupId,
+    PhysicalCandidate, PhysicalCandidateId, PhysicalEdge, PhysicalEdgeId, PrunedCandidate,
 };
+use crate::workload::DataArrival;
 
 /// Stage 2's output, which Stage 3 selects from.
 #[derive(Debug, Clone)]
@@ -110,6 +114,137 @@ impl PhysicalASAPMemoCandidates {
     /// The admissible edges out of `producer`: every consumer that may share it.
     pub fn admissible_edges_out_of(&self, producer: PhysicalCandidateId) -> &[PhysicalEdgeId] {
         &self.admissible_edges_out_of_candidate[producer.0]
+    }
+
+    /// The times candidate `v`, materialized across evaluations, has a
+    /// stored result for, as a grid: at ingestion time the end of every
+    /// refresh window, by the rule the installed plan refreshes it on
+    /// ([`RefreshWindow::computed_from`] over these candidates, width as the
+    /// period); at query time its own schedule
+    /// ([`LogicalASAPMemoCandidates::own_schedule`]). `None` when not known.
+    ///
+    /// Example: `sum(TimeRange(5m))` kept at ingestion time is stored every
+    /// 5 min at phase 0, even when its group is read every 60 s; a chain of
+    /// 60 s windows over `TimeShift(30s)` every 60 s at phase 30 s.
+    pub fn stored_times(&self, v: PhysicalCandidateId) -> Option<EvaluationGrid> {
+        let candidate = &self.physical_candidates[v.0];
+        match candidate.physical_properties.timing() {
+            ExecutionTiming::IngestionTime => {
+                RefreshWindow::computed_from(self, v).map(|window| EvaluationGrid {
+                    period_ms: window.width_ms,
+                    phase_ms: window.phase_ms,
+                })
+            }
+            ExecutionTiming::QueryTime => self
+                .logical_candidates
+                .own_schedule(candidate.logical_candidate_id),
+        }
+    }
+
+    /// Whether a consumer running in `context` can read producer `v` (the
+    /// concepts doc's alignment table, section 2): true for $\ell$ = None,
+    /// which runs in the consumer's own context; for `OneEvaluation` only in
+    /// an `Evaluation` context, the one evaluation its result belongs to.
+    /// With $\ell$ = `AcrossEvaluations`, every execution time of the
+    /// context must be a time the producer has a stored result for
+    /// ([`Self::stored_times`]): its period divides the context's period (or
+    /// refresh-window width) and the phases agree modulo it, unless the
+    /// result is final: the same at every time it is read.
+    ///
+    /// Finality assumes no row arrives out of order: at evaluation time t,
+    /// every row with `ts <= t` has arrived and never changes (#1298 adds
+    /// a declared lateness). A stored result that is not a chain is final
+    /// when its group does not depend on the evaluation time
+    /// ([`GroupProperties::depends_on_evaluation_time`](crate::stages::GroupProperties::depends_on_evaluation_time))
+    /// and the rows it read never change after it is computed:
+    ///
+    /// | Result | Delivers on |
+    /// |---|---|
+    /// | kept up to date at ingestion time (`IngestionTime`) | every context |
+    /// | over data at rest (`DataArrival::AtRest`) or reading no source | every context |
+    /// | at query time, reading a time relative to its evaluation (`rate(x[5m])`, `@ end()`, `now()`) | its own grid |
+    /// | at query time over arriving rows, no time bound (SQL `count(*)`) | its own grid: never final |
+    /// | at query time over arriving rows, a window ending at E (`sum_over_time(x[5m] @ T)`, `ts BETWEEN a AND b`) | its own grid: final only from E on, and a context carries no absolute time to compare with E |
+    ///
+    /// `DataArrival::Unknown` counts as arriving. The times of a
+    /// `Materialized(u)` context are $u$'s stored times; when they are not
+    /// known, no non-final producer delivers on it.
+    ///
+    /// Example: `sum(TimeRange(5m))` kept at ingestion time delivers on an
+    /// evaluation grid every 5 min, not on one every 60 s.
+    pub fn delivers_on(&self, v: PhysicalCandidateId, context: &ExecutionContext) -> bool {
+        let producer = &self.physical_candidates[v.0];
+        match producer.physical_properties.lifetime() {
+            Lifetime::None => true,
+            Lifetime::OneEvaluation(_) => matches!(context, ExecutionContext::Evaluation { .. }),
+            Lifetime::AcrossEvaluations(_) => {
+                let memo = &self.logical_candidates.memo;
+                let group_properties =
+                    &memo.groups()[producer.logical_candidate_id.group.0 as usize].group_properties;
+                let final_at_every_time = !group_properties.depends_on_evaluation_time
+                    && (producer.physical_properties.timing() == ExecutionTiming::IngestionTime
+                        || memo.data_arrival() == DataArrival::AtRest
+                        || group_properties.scanned_sources.is_empty());
+                if self.operator(v).chain_tumbling_window_width_ms().is_none()
+                    && final_at_every_time
+                {
+                    return true;
+                }
+                let (period_ms, phase_ms) = match context {
+                    ExecutionContext::Evaluation { grid } => (grid.period_ms, grid.phase_ms),
+                    ExecutionContext::IngestionPipeline(window) => {
+                        (window.width_ms, window.phase_ms)
+                    }
+                    ExecutionContext::Materialized(u) => match self.stored_times(*u) {
+                        Some(grid) => (grid.period_ms, grid.phase_ms),
+                        None => return false,
+                    },
+                };
+                self.stored_times(v).is_some_and(|stored| {
+                    stored.period_ms > 0
+                        && period_ms.is_multiple_of(stored.period_ms)
+                        && phase_ms % stored.period_ms == stored.phase_ms % stored.period_ms
+                })
+            }
+        }
+    }
+}
+
+/// The candidates as the time walks see them: each candidate's admissible
+/// producers as its inputs and admissible consumers as its readers, its
+/// operator at its timing and lifetime ([`InputTimeAccess::of`]), and a
+/// current-time read of a `Scan` (raw data) needing every row. The
+/// producers of one input are alternatives, so a walk down over them
+/// covers every plan that may select them.
+impl TimeIndexedPlan for PhysicalASAPMemoCandidates {
+    type Node = PhysicalCandidateId;
+    type Child = MemoGroupId;
+
+    fn readers_of(&self, v: PhysicalCandidateId) -> Vec<PhysicalCandidateId> {
+        self.admissible_edges_out_of(v)
+            .iter()
+            .map(|&out| self.edge(out).consumer_candidate_id)
+            .collect()
+    }
+
+    fn inputs_of(&self, v: PhysicalCandidateId) -> Vec<PhysicalCandidateId> {
+        (0..self.input_count(v))
+            .flat_map(|input| self.admissible_edges_into(v, input))
+            .map(|&edge| self.edge(edge).producer_candidate_id)
+            .collect()
+    }
+
+    fn input_time_access(&self, v: PhysicalCandidateId) -> InputTimeAccess {
+        let properties = self.physical_candidates[v.0].physical_properties;
+        InputTimeAccess::of(self.operator(v), properties.timing(), properties.lifetime())
+    }
+
+    fn current_time_read_needs_every_row(&self, v: PhysicalCandidateId) -> bool {
+        matches!(self.operator(v), Operator::NonASAP(NonASAPOp::Scan { .. }))
+    }
+
+    fn operator_of(&self, v: PhysicalCandidateId) -> &Operator<MemoGroupId> {
+        self.operator(v)
     }
 }
 

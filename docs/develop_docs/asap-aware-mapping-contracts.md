@@ -127,7 +127,7 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 - `Selection.plan` is the selected candidate's roots with the weight
   requirements Stage 3 confirmed from the data facts.
 - A producer feeds a consumer only in a context it delivers on
-  (`PhysicalCandidate::delivers_on`). A result stored across evaluations
+  (`PhysicalASAPMemoCandidates::delivers_on`). A result stored across evaluations
   delivers on every context only when it is final, the same at every time
   it is read. This assumes no row arrives out of order: at evaluation time
   t, every row with `ts <= t` has arrived and never changes. A result is

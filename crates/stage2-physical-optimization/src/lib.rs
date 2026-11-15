@@ -44,7 +44,7 @@ use candidate::{offered_physical_properties, OfferedPhysicalProperties};
 /// outside a dimension's declared value set (`AcrossEvaluations` on a
 /// candidate of a time-dependent group with no known grid) is not offered
 /// and not recorded. Costs nothing, and cannot fail; alignment with each
-/// execution context is Stage 3's check (`PhysicalCandidate::delivers_on`).
+/// execution context is Stage 3's check (`PhysicalASAPMemoCandidates::delivers_on`).
 pub fn generate_physical_asap_memo_candidates(
     logical: &LogicalASAPMemoCandidates,
     data: &DataWorkload,
