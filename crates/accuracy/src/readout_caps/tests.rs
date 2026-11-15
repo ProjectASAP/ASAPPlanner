@@ -1,8 +1,8 @@
 use super::*;
-use asap_types::ir::operator::arguments::Reduction;
+use asap_types::ir::operator::arguments::{BinaryOpKind, PromQLVectorSetOpKind, Reduction};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
-use asap_types::ir::QueryRoot;
+use asap_types::ir::{BinaryOperator, NonASAPOp, Operator, QueryRoot};
 use asap_types::stages::MemoQuery;
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
 use asap_types::test_support::memo_builders::{
@@ -153,4 +153,54 @@ fn a_readout_of_one_value_keeps_the_whole_failure_probability() {
         (required.failure_probability - 0.01).abs() < 1e-12,
         "{required:?}"
     );
+}
+
+/// `quantile_over_time(0.9, m[5m]) and quantile_over_time(0.5, m[5m])`
+/// copies the left values and reads only which series the right has
+/// (β = 0), so it combines no errors: the left readout gets the single
+/// level of its cap, 0.05 at δ = 0.01 over 100 series (1e-4), not the
+/// composed grid, and the right one gets none. `or` copies values from
+/// both sides and stays composed.
+#[test]
+fn an_and_combines_no_readout_errors() {
+    let set_op = |kind, lhs, rhs| {
+        Operator::NonASAP(NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                checked_relative_division: false,
+                checked_finite_division: false,
+                kind: BinaryOpKind::Set(kind),
+                vector_match: None,
+            },
+            return_bool: false,
+            lhs,
+            rhs,
+        })
+    };
+    let target = AccuracyTarget::max_error(0.05)
+        .failure_probability(0.01)
+        .accuracy_metric(AccuracyMetric::Relative);
+    let readouts_under = |kind| {
+        let mut memo = Memo::new(&with_series("m", 100));
+        let (_, state, p90) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
+        let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
+        let root = group(&mut memo, set_op(kind, p90, p50));
+        memo.add_query(MemoQuery {
+            root: QueryRoot::Operator(root),
+            accuracy_target: Some(target.clone()),
+            number_of_values_per_query_evaluation: Some(100),
+        });
+        (levels_of(&memo, p90), levels_of(&memo, p50))
+    };
+    let (left, right) = readouts_under(PromQLVectorSetOpKind::And);
+    let [required] = left[..] else {
+        panic!("one level for the left readout: {left:?}");
+    };
+    assert!((required.max_error - 0.05).abs() < 1e-12, "{required:?}");
+    assert!(
+        (required.failure_probability - 1e-4).abs() < 1e-12,
+        "{required:?}"
+    );
+    assert_eq!(right, vec![]);
+    let (left, right) = readouts_under(PromQLVectorSetOpKind::Or);
+    assert!(left.len() > 1 && right.len() > 1, "{left:?}, {right:?}");
 }

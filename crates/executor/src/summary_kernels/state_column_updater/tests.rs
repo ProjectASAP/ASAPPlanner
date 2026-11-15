@@ -27,7 +27,8 @@ fn exact_memory_is_the_buffer_capacity() {
 
 // A state column of exact sums takes +Inf and NaN, as the exact kernel
 // does (`AccumulatorUpdater`): PromQL's `sum` over `q / 0` is +Inf, over
-// `0 / 0` NaN. A rate column still refuses a non-finite sample.
+// `0 / 0` NaN. A rate column still refuses a non-finite sample, and a
+// sum or count column a stale marker, which is not a sample.
 #[test]
 fn an_exact_sum_column_takes_non_finite_values() {
     let sum = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
@@ -51,4 +52,11 @@ fn an_exact_sum_column_takes_non_finite_values() {
     let mut updater = StateColumnUpdater::new(&rate, None).unwrap();
     updater.ensure_groups(1).unwrap();
     assert!(updater.update(0, f64::NAN, 0).is_err());
+    let stale = f64::from_bits(crate::operators::STALE_MARKER);
+    let count = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
+    for column in [sum, count] {
+        let mut updater = StateColumnUpdater::new(&column, None).unwrap();
+        updater.ensure_groups(1).unwrap();
+        assert!(updater.update(0, stale, 0).is_err(), "{column:?}");
+    }
 }

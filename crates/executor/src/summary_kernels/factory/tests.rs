@@ -112,6 +112,8 @@ fn an_hll_takes_int64_and_utf8_items() {
 /// `0 / 0` NaN): a sum that sees +Inf is +Inf, then NaN once it also sees
 /// -Inf or NaN; a count counts it; min and max skip NaN unless every
 /// value is NaN. A counter's rate or increase still needs finite samples.
+/// A stale marker is not a value: one that reaches the accumulator (its
+/// `TimeRange` did not drop it) is an error, not a NaN summed or counted.
 #[test]
 fn exact_accumulators_take_non_finite_values_as_promql_does() {
     use crate::values::Value;
@@ -146,5 +148,14 @@ fn exact_accumulators_take_non_finite_values_as_promql_does() {
     assert!(finalized(ExactKind::Max, &[nan]).unwrap().unwrap().is_nan());
     for kind in [ExactKind::Rate, ExactKind::Increase] {
         assert!(finalized(kind, &[1.0, nan]).is_err(), "{kind:?}");
+    }
+    let stale = f64::from_bits(crate::operators::STALE_MARKER);
+    for kind in [
+        ExactKind::Sum,
+        ExactKind::Count,
+        ExactKind::Min,
+        ExactKind::Max,
+    ] {
+        assert!(finalized(kind, &[1.0, stale]).is_err(), "{kind:?}");
     }
 }
