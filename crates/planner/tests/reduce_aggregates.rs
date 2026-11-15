@@ -8,8 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use asap_executor::physical_planner::compile;
-use asap_executor::runtime::{Limits, RunContext, Scope};
+use asap_executor::runtime::Scope;
 use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use asap_planner::{
@@ -20,9 +19,8 @@ use asap_types::ir::operator::Source;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::NonASAPOp;
 use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
-use futures::{executor::block_on, StreamExt};
 
-use crate::time_series::{series_labels, time_series_tables, RawDataSample};
+use crate::time_series::{labels, run, sample, series_labels, time_series_tables, RawDataSample};
 
 /// The evaluation time of every run.
 const EVALUATION_MS: i64 = 1_800_000_000_000;
@@ -47,54 +45,26 @@ fn workload(language: &str, query: &str, source: &str, arrival: &str) -> Plannin
     .unwrap()
 }
 
-fn query_scope() -> RunContext {
-    RunContext::new(
-        Scope::Query {
-            evaluation_time_ms: EVALUATION_MS,
-        },
-        Limits::default(),
-    )
-    .unwrap()
-}
-
-/// The batches of `plan`'s one query, run at query time over `store`: the
-/// whole DAG computed from raw data, no materialized view read as stored.
-fn run(
+/// The batches of `plan`'s one query, run at query time over the store
+/// `store` builds for its DAG: the whole DAG computed from raw data, no
+/// materialized view read as stored.
+fn run_query(
     plan: &InstallablePlan,
     store: impl FnOnce(&asap_planner::PhysicalASAPDAG) -> InMemoryDataStore,
 ) -> Vec<Batch> {
-    let dag = &plan.dag;
-    let roots = [dag.roots[0] as u64];
-    let compiled = compile(dag, &[], &roots).expect("the executor compiles the plan");
-    let instance = compiled.instantiate(Arc::new(store(dag))).unwrap();
-    block_on(async {
-        let mut output = instance
-            .execute(compiled.roots(), query_scope())
-            .unwrap()
-            .remove(0);
-        let mut batches = Vec::new();
-        while let Some(batch) = output.next().await {
-            batches.push((*batch.expect("the query runs")).clone());
-        }
-        batches
-    })
+    let scope = Scope::Query {
+        evaluation_time_ms: EVALUATION_MS,
+    };
+    run(
+        &plan.dag,
+        store(&plan.dag),
+        &[plan.dag.roots[0] as u64],
+        scope,
+    )
+    .remove(0)
 }
 
 // ── PromQL ───────────────────────────────────────────────────────────────
-
-/// One sample of `metric` with `labels` at `timestamp_ms`.
-fn sample(metric: &str, labels: &[(&str, &str)], timestamp_ms: i64, value: f64) -> RawDataSample {
-    let mut all: BTreeMap<String, String> = labels
-        .iter()
-        .map(|(name, value)| (name.to_string(), value.to_string()))
-        .collect();
-    all.insert("__name__".into(), metric.into());
-    RawDataSample {
-        labels: all,
-        timestamp_ms,
-        value,
-    }
-}
 
 /// The gauge `m`, one sample per series 5 s before the evaluation: job
 /// `a` holds 1, 2 and 4, job `b` holds 2 and (with a `zone` label) 2.5.
@@ -157,7 +127,7 @@ async fn promql(
     samples: &[RawDataSample],
 ) -> Vec<(BTreeMap<String, String>, f64)> {
     let plan = plan_promql(query, metric).await;
-    let mut answers: Vec<_> = run(&plan, |dag| time_series_tables(dag, samples))
+    let mut answers: Vec<_> = run_query(&plan, |dag| time_series_tables(dag, samples))
         .iter()
         .flat_map(|batch| {
             batch.to_rows().into_iter().map(|row| {
@@ -176,13 +146,6 @@ async fn promql(
         .collect();
     answers.sort_by(|a, b| a.0.cmp(&b.0));
     answers
-}
-
-fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-    pairs
-        .iter()
-        .map(|(name, value)| (name.to_string(), value.to_string()))
-        .collect()
 }
 
 fn assert_close(
@@ -243,6 +206,63 @@ async fn promql_count_values() {
             (labels(&[("v", "2")]), 2.0),
             (labels(&[("v", "2.5")]), 1.0),
             (labels(&[("v", "4")]), 1.0),
+        ],
+    );
+}
+
+/// The gauge `m` for `count_values ... without (instance)`: job `a` holds
+/// 1 twice, job `b` holds 2 twice, once with a `zone` label.
+fn count_values_samples() -> Vec<RawDataSample> {
+    let at = EVALUATION_MS - 5_000;
+    vec![
+        sample("m", &[("job", "a"), ("instance", "1")], at, 1.0),
+        sample("m", &[("job", "a"), ("instance", "2")], at, 1.0),
+        sample("m", &[("job", "b"), ("instance", "1")], at, 2.0),
+        sample(
+            "m",
+            &[("job", "b"), ("instance", "2"), ("zone", "z")],
+            at,
+            2.0,
+        ),
+    ]
+}
+
+/// `count_values ... without (instance)` groups by every other label and
+/// the value label: `{job="b"}` and `{job="b", zone="z"}` stay apart.
+#[tokio::test]
+async fn promql_count_values_without_instance() {
+    let answers = promql(
+        r#"count_values("v", m) without (instance)"#,
+        "m",
+        &count_values_samples(),
+    )
+    .await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "a"), ("v", "1")]), 2.0),
+            (labels(&[("job", "b"), ("v", "2")]), 1.0),
+            (labels(&[("job", "b"), ("v", "2"), ("zone", "z")]), 1.0),
+        ],
+    );
+}
+
+/// A `count_values` label named like a kept label overwrites it before
+/// grouping, as in Prometheus: `zone="z"` becomes `zone="2"`, so both of
+/// job `b`'s series count in one group.
+#[tokio::test]
+async fn promql_count_values_without_overwrites_a_kept_label() {
+    let answers = promql(
+        r#"count_values("zone", m) without (instance)"#,
+        "m",
+        &count_values_samples(),
+    )
+    .await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "a"), ("zone", "1")]), 2.0),
+            (labels(&[("job", "b"), ("zone", "2")]), 2.0),
         ],
     );
 }
@@ -347,7 +367,8 @@ fn table_rows() -> Vec<TableRow> {
 }
 
 /// Each answer row of the SQL `query` over [`table_rows`], a table at
-/// rest (an ingesting table hits #1320).
+/// rest: over an ingesting table, Stage 3 may select an ingestion-time
+/// view over the whole table, which installation refuses.
 async fn sql(query: &str) -> Vec<Vec<Value>> {
     let catalog = SqlCatalog::new().with_table("t", table_schema());
     let plan = plan_installable(UserInput::new(
@@ -358,7 +379,7 @@ async fn sql(query: &str) -> Vec<Vec<Value>> {
     .await
     .unwrap_or_else(|error| panic!("{query}: {error}"))
     .0;
-    let mut rows: Vec<_> = run(&plan, |dag| {
+    let mut rows: Vec<_> = run_query(&plan, |dag| {
         let schema = dag
             .nodes
             .iter()

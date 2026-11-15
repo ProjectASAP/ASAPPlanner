@@ -355,8 +355,10 @@ fn population_fixture_compiles_with_dynamic_identity() {
     let physical = compile(&logical, &[], &[logical.roots[0] as u64]).unwrap();
     let bytes = String::from_utf8(serde_json::to_vec(&physical).unwrap()).unwrap();
     assert!(bytes.contains("CurrentSeries"));
+    // The top-1 per job is one sort keeping each job's first row.
     assert!(bytes.contains("Sort"));
-    assert!(bytes.contains("Limit"));
+    assert!(bytes.contains(r#""fetch":1"#), "{bytes}");
+    assert!(!bytes.contains("Limit"));
     let rows = [("a", 10_000, 100.), ("a", 50_000, 1.), ("b", 50_000, 20.)]
         .into_iter()
         .map(|(member, at, value)| {
