@@ -87,16 +87,37 @@ pub(crate) fn finite_input(value: f64) -> Result<(), String> {
 /// or max takes any value with PromQL's semantics, since a division by
 /// zero upstream gives one (`q / 0` is +Inf, `0 / 0` NaN): a sum that sees
 /// NaN, or +Inf and -Inf, is NaN; a count counts the value; min and max
-/// skip NaN unless every value is NaN. A counter's rate or increase needs
-/// finite samples ([`finite_input`]).
+/// skip NaN unless every value is NaN. A stale marker is not a value
+/// ([`not_a_stale_marker`]). A counter's rate or increase needs finite
+/// samples ([`finite_input`]).
 pub(crate) fn exact_accumulator_input(
     kind: planner_types::summary_type::ExactKind,
     value: f64,
 ) -> Result<(), String> {
     use planner_types::summary_type::ExactKind;
     match kind {
-        ExactKind::Sum | ExactKind::Count | ExactKind::Min | ExactKind::Max => Ok(()),
+        ExactKind::Sum | ExactKind::Count | ExactKind::Min | ExactKind::Max => {
+            not_a_stale_marker(value)
+        }
         ExactKind::Increase | ExactKind::Rate | ExactKind::IRate => finite_input(value),
+    }
+}
+
+/// An error when `value` is a Prometheus stale marker. A stale marker ends
+/// a series and is not a sample: the `TimeRange` a chain builds over its
+/// time series' `Scan` drops it before any accumulator sees it. One that
+/// reaches an exact sum, count, min or max means the chain read the series
+/// through another operator (a `Filter` or a `Project`), and it would turn
+/// `sum_over_time` into NaN or add one to `count_over_time` silently.
+pub(crate) fn not_a_stale_marker(value: f64) -> Result<(), String> {
+    if value.to_bits() == crate::operators::STALE_MARKER {
+        Err(
+            "a stale marker reached an exact accumulator: its chain must read the time \
+             series' Scan, whose TimeRange drops stale markers"
+                .to_string(),
+        )
+    } else {
+        Ok(())
     }
 }
 

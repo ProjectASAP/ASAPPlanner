@@ -113,7 +113,7 @@ keeps the metric: an input's error and the output's are in the same one.
 | --- | --- | --- | --- |
 | `Sort`, `TimeRange`, `TimeShift`, `Concat`, a readout, a finalize, `SummaryMerge` | any | 1 | none |
 | `Filter` whose predicate reads only columns copied from a source (labels, keys) | any | 1 | none |
-| PromQL `and`, `unless` | any | 1 on the left, 0 on the right | none |
+| PromQL `and`, `unless` (the right side's series are exact: no operator with a contract drops a row by its value) | any | 1 on the left, 0 on the right | none |
 | PromQL `or` | any | 1 on both | none |
 | `PromqlRelabel` (`label_replace`, `label_join`) whose new label reads no computed value | any | 1 | none |
 | `Project` whose items reading a computed value (not a copied label, the time or the series identity) are copies | any | 1 | none |

@@ -82,17 +82,6 @@ pub(crate) fn error_contract(
             NonASAPOp::PromqlRelabel { value, child, .. } => {
                 (!reads_an_estimate(memo, *child, value)).then(|| uniform(1.0))
             }
-            NonASAPOp::BinaryOp {
-                operator:
-                    BinaryOperator {
-                        kind: BinaryOpKind::Set(kind),
-                        ..
-                    },
-                ..
-            } => Some(ErrorContract {
-                error_factor_per_input: set_operator_error_factors(kind).to_vec(),
-                linear_bound_holds_up_to_per_input: vec![None; 2],
-            }),
             NonASAPOp::Filter { pred, child } => (pred.0.operator_refs().is_empty()
                 && copied_from_a_source(memo, *child, pred.0.columns_referenced()))
             .then(|| uniform(1.0)),
@@ -134,6 +123,17 @@ pub(crate) fn error_contract(
                 }
                 Some(uniform(factor))
             }
+            NonASAPOp::BinaryOp {
+                operator:
+                    BinaryOperator {
+                        kind: BinaryOpKind::Set(kind),
+                        ..
+                    },
+                ..
+            } => Some(ErrorContract {
+                error_factor_per_input: set_operator_error_factors(kind).to_vec(),
+                linear_bound_holds_up_to_per_input: vec![None; 2],
+            }),
             NonASAPOp::BinaryOp {
                 operator:
                     BinaryOperator {
@@ -298,7 +298,8 @@ fn keeps_error<C>(expr: &ScalarExpr<C>, metric: AccuracyMetric) -> bool {
 /// `promql_abs`, …) of a column with literal bounds, or a column's
 /// negation (1-Lipschitz).
 fn one_lipschitz<C>(expr: &ScalarExpr<C>) -> bool {
-    negation_or_abs(expr) || column_function_of_literals(expr, &["clamp", "clamp_min", "clamp_max"])
+    negation_or_abs(expr)
+        || function_of_a_column_and_literals(expr, &["clamp", "clamp_min", "clamp_max"])
 }
 
 /// Whether `expr` is a column's negation or `abs` (`promql_abs`). Each
@@ -312,14 +313,14 @@ fn one_lipschitz<C>(expr: &ScalarExpr<C>) -> bool {
 fn negation_or_abs<C>(expr: &ScalarExpr<C>) -> bool {
     match expr {
         ScalarExpr::Negative { expr, .. } => matches!(**expr, ScalarExpr::Column(_)),
-        _ => column_function_of_literals(expr, &["abs"]),
+        _ => function_of_a_column_and_literals(expr, &["abs"]),
     }
 }
 
 /// Whether `expr` calls one of `functions` (or the PromQL frontend's
 /// `promql_` function of that name), any case, on a column and then
 /// literals only: `promql_clamp(value, 0, 100)`.
-fn column_function_of_literals<C>(expr: &ScalarExpr<C>, functions: &[&str]) -> bool {
+fn function_of_a_column_and_literals<C>(expr: &ScalarExpr<C>, functions: &[&str]) -> bool {
     let ScalarExpr::FunctionCall { name, args } = expr else {
         return false;
     };
@@ -338,6 +339,16 @@ fn column_function_of_literals<C>(expr: &ScalarExpr<C>, functions: &[&str]) -> b
 /// and the right's values are never read, $(1, 0)$; `lhs or rhs` copies
 /// each value from one of them, $(1, 1)$. With q̂ = 10.5 for q = 10 on the
 /// left, `q unless r` outputs 10.5 or nothing, whatever `r`'s values.
+///
+/// This assumes that which series each side has is exact: a row's presence
+/// never depends on an estimate, since no operator with a contract drops
+/// rows by value (a `Filter` on a computed value, `HAVING`, a ranking,
+/// `count_values` and `absent` have none) and a readout emits the series
+/// the exact evaluation does. So `q unless r` drops the series of `q` that
+/// `r` has whether `r` is read from a sketch or exactly; were
+/// `r = quantile_over_time(0.9, m[5m]) > 100` allowed, an estimate of 99
+/// for 101 would drop the series from `r` and wrongly keep it in the
+/// output.
 fn set_operator_error_factors(kind: &PromQLVectorSetOpKind) -> [f64; 2] {
     match kind {
         PromQLVectorSetOpKind::And | PromQLVectorSetOpKind::Unless => [1.0, 0.0],

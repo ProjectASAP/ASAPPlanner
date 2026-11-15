@@ -6,7 +6,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
-use asap_types::ir::Operator;
 use asap_types::stages::{CandidateForMemoGroupId, Memo, MemoGroupId, RequiredAccuracy};
 
 use crate::metric_rule::{query_roots_with_target, ErrorContractPerMetric};
@@ -100,7 +99,7 @@ pub fn readout_levels(
     }
     let readout_groups: BTreeSet<MemoGroupId> =
         readouts.iter().map(|(readout, _)| readout.group).collect();
-    let composed = composed_queries(memo, order, &readout_groups);
+    let composed = composed_queries(memo, &error_metrics.error_contract, order, &readout_groups);
     let mut levels_of_group: HashMap<(MemoGroupId, AccuracyMetric), ReadoutRequiredAccuracy> =
         HashMap::new();
     readouts
@@ -283,11 +282,16 @@ pub(crate) fn caps(
 }
 
 /// The queries that combine several readouts: a candidate they reach has
-/// two or more inputs below which a readout group lies (a ratio of two
-/// quantiles). Readouts of one value by different summary types are
-/// alternatives in one group's candidates, not a combination.
+/// two or more inputs below which a readout group lies and whose error
+/// reaches its output ($\beta > 0$ in a metric of its error contract,
+/// [`caps`]): a ratio of two quantiles. `q and r` is not composed: its
+/// output copies `q`'s values and reads only which series `r` has
+/// ($\beta = 0$), so `q`'s readout keeps the single level of its cap.
+/// Readouts of one value by different summary types are alternatives in
+/// one group's candidates, not a combination.
 fn composed_queries(
     memo: &Memo,
+    error_contract: &[Vec<ErrorContractPerMetric>],
     order: &[MemoGroupId],
     readout_groups: &BTreeSet<MemoGroupId>,
 ) -> BTreeSet<usize> {
@@ -295,19 +299,29 @@ fn composed_queries(
     let mut composed = BTreeSet::new();
     for &group in order {
         let candidates = &memo.groups()[group.0 as usize].candidates;
-        let inputs_reading = |operator: &Operator<MemoGroupId>| {
-            operator
-                .children()
+        let mut any_input_reading = false;
+        let mut most_inputs_reading_with_error = 0;
+        for (candidate, contract_per_metric) in
+            candidates.iter().zip(&error_contract[group.0 as usize])
+        {
+            let children = candidate.expression.operator.children();
+            let inputs_reading: Vec<usize> = (0..children.len())
+                .filter(|&input| reads_a_readout[children[input].0 as usize])
+                .collect();
+            any_input_reading |= !inputs_reading.is_empty();
+            let inputs_reading_with_error = inputs_reading
                 .into_iter()
-                .filter(|child| reads_a_readout[child.0 as usize])
-                .count()
-        };
-        let most_inputs_reading = candidates
-            .iter()
-            .map(|candidate| inputs_reading(&candidate.expression.operator))
-            .max()
-            .unwrap_or(0);
-        if most_inputs_reading > 1 {
+                .filter(|&input| {
+                    contract_per_metric
+                        .iter()
+                        .flatten()
+                        .any(|contract| contract.error_factor_per_input[input] > 0.0)
+                })
+                .count();
+            most_inputs_reading_with_error =
+                most_inputs_reading_with_error.max(inputs_reading_with_error);
+        }
+        if most_inputs_reading_with_error > 1 {
             composed.extend(
                 memo.groups()[group.0 as usize]
                     .reached_by_queries()
@@ -315,8 +329,7 @@ fn composed_queries(
                     .copied(),
             );
         }
-        reads_a_readout[group.0 as usize] =
-            readout_groups.contains(&group) || most_inputs_reading > 0;
+        reads_a_readout[group.0 as usize] = readout_groups.contains(&group) || any_input_reading;
     }
     composed
 }

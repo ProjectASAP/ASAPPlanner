@@ -470,7 +470,7 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
         FinalizeExactAccumulator { child } => {
             readout_columns(child, output, |state, summary_type| match summary_type {
                 FieldDataType::ExactAggregate(kind, _) => {
-                    measure_sign(&exact_accumulator_measure(kind, None), state)
+                    measure_sign(&exact_accumulator_measure(*kind, None), state)
                 }
                 _ => Unknown,
             })
