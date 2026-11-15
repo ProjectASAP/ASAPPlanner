@@ -232,6 +232,7 @@ fn compile_internal(
                     schema: output,
                     predicates,
                     read_window,
+                    lifetime: node.lifetime,
                 },
             )?;
         } else {
