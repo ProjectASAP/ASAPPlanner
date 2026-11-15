@@ -108,3 +108,25 @@ pub fn series_labels(schema: &Schema, row: &[Value]) -> BTreeMap<String, String>
     }
     labels
 }
+
+/// One answer row: its series labels and its value.
+pub type Answer = (BTreeMap<String, String>, f64);
+
+/// Each answer row as its series labels and value, sorted by labels.
+pub fn answers(batches: &[Batch]) -> Vec<Answer> {
+    let mut answers: Vec<_> = batches
+        .iter()
+        .flat_map(|batch| {
+            batch.to_rows().into_iter().map(|row| {
+                let labels = series_labels(batch.schema(), &row);
+                let value = row.iter().find_map(|v| match v {
+                    Value::Float64(v) => Some(*v),
+                    _ => None,
+                });
+                (labels, value.expect("a Float64 answer"))
+            })
+        })
+        .collect();
+    answers.sort_by(|a, b| a.0.cmp(&b.0));
+    answers
+}
