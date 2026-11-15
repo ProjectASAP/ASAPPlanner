@@ -22,6 +22,12 @@
 //! covering every operator kind the plans use makes the choice the
 //! measured one (plan selection's module doc, "Measured operation costs").
 //!
+//! Without a table, the formulas are not unit-free guesses: they carry the
+//! reference executor's measured time per unit of work
+//! (`node::operations_per_unit`), the built-in fallback. A table measured
+//! on the deployment's own machine (by a calibration run of its executor)
+//! overrides them node by node.
+//!
 //! A measured time enters [`ResourceUsage`] as CPU operations: `t` ns is
 //! `t · 10⁻⁶ / ms_per_cpu_op` operations of [`ResourceSpeed`], so latency
 //! (operations × `ms_per_cpu_op`) is the measured time, and every cost model

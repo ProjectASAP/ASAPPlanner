@@ -246,7 +246,7 @@ pub mod planning {
     /// output has no guarantee that meets `accuracy` (e.g. a value filter
     /// over an estimate), not of accuracy acceptance.
     ///
-    /// Summaries are costed free ([`summary_work_free`]), so the plan reads
+    /// Summaries' CPU is costed free ([`summary_cpu_free`]), so the plan reads
     /// the summary candidate wherever Stage 1 offers one, whether or not the
     /// default unit costs make it cheaper than the exact plan on these
     /// tests' small data.
@@ -254,20 +254,24 @@ pub mod planning {
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
-        let settings = summary_work_free();
+        let settings = summary_cpu_free();
         let models = asap_planner::PlanningModels::builtin()
             .with_ignore_accuracy_guarantees(true)
             .with_cost_inputs(&settings);
         selected_operator_roots(&run_all_stages_with(root, accuracy, models))
     }
 
-    /// Default cost inputs with a measured table that prices every summary
-    /// operator (build, chain, merge, estimate, finalize) of every sketch
-    /// and exact accumulator at 0 ns: for tests of a summary plan's shape,
+    /// Default cost inputs with a measured table that prices the CPU of
+    /// every summary operator (build, chain, merge, estimate, finalize) of
+    /// every sketch family, every exact accumulator and no family at 0 ns;
+    /// memory is still charged. For tests of a summary plan's shape,
     /// execution or reuse, which need Stage 3 to select the summary.
-    pub fn summary_work_free() -> asap_cost::CostInputs {
+    pub fn summary_cpu_free() -> asap_cost::CostInputs {
         use asap_cost::{OperatorCost, OperatorKind};
-        use asap_types::summary_type::{ExactKind, SketchParams};
+        use asap_types::summary_type::{ExactKind, HydraParams, SketchParams};
+        // One instance of each sketch family: the table matches an entry by
+        // family. The match below lists every family, so adding one fails
+        // to compile until it is listed here too.
         let sketches = [
             SketchParams::Kll { k: 200 },
             SketchParams::DDSketch { alpha: 0.01 },
@@ -297,7 +301,27 @@ pub mod planning {
                 sketch_cols: 1024,
                 layers: 8,
             },
+            SketchParams::Hydra(HydraParams::HydraCms {
+                width: 1024,
+                depth: 3,
+                shared_rows: 3,
+                shared_columns: 1024,
+            }),
         ];
+        for sketch in &sketches {
+            match sketch {
+                SketchParams::Kll { .. }
+                | SketchParams::DDSketch { .. }
+                | SketchParams::Cms { .. }
+                | SketchParams::CmsWithHeap { .. }
+                | SketchParams::CountSketch { .. }
+                | SketchParams::CountSketchWithHeap { .. }
+                | SketchParams::Hll { .. }
+                | SketchParams::Kmv { .. }
+                | SketchParams::UnivMon { .. }
+                | SketchParams::Hydra(_) => {}
+            }
+        }
         let exact = [
             ExactKind::Sum,
             ExactKind::Count,
@@ -307,10 +331,23 @@ pub mod planning {
             ExactKind::Rate,
             ExactKind::IRate,
         ];
+        for kind in &exact {
+            match kind {
+                ExactKind::Sum
+                | ExactKind::Count
+                | ExactKind::Min
+                | ExactKind::Max
+                | ExactKind::Increase
+                | ExactKind::Rate
+                | ExactKind::IRate => {}
+            }
+        }
+        // Every family, and no family (`sketch` and `exact` both `None`).
         let families = sketches
             .into_iter()
             .map(|sketch| (Some(sketch), None))
-            .chain(exact.into_iter().map(|kind| (None, Some(kind))));
+            .chain(exact.into_iter().map(|kind| (None, Some(kind))))
+            .chain([(None, None)]);
         let mut settings = asap_cost::CostInputs::default();
         settings.measured_operation_costs.operators = families
             .flat_map(|(sketch, exact)| {

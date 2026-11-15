@@ -22,15 +22,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::node::analytical::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
 };
-use crate::node::operation_counts::{
-    aggregate_measure_operations_per_row, estimate_operations_per_group,
-    merge_operations_per_state, update_operations_per_row, CHAIN_EMIT_OPERATIONS_PER_STATE,
+use crate::node::operations_per_unit::{
+    estimate_operations_per_group, hash_aggregate_operations_per_row, merge_operations_per_state,
+    update_operations_per_row, CHAIN_EMIT_OPERATIONS_PER_STATE,
 };
 use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
 use crate::node::state_bytes::{
-    keeps_every_value, row_bytes, sketch_shape, summary_shape, StateInputRows,
+    keeps_every_value, row_bytes, sketch_state_bytes, summary_state_bytes, StateInputRows,
 };
 use crate::{aggregate_lookup, lookup, StateFamily};
 use crate::{
@@ -362,7 +362,7 @@ pub fn node_resource_usage_and_cost<'a>(
     let speed = settings.resource_speed;
     let unit_costs = settings.cost_model.per_node_unit_costs();
     let sketch_size =
-        |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
+        |params: &SketchParams| sketch_state_bytes(params, StateInputRows::UNKNOWN) as f64;
     let mut fit = CalibrationFit::default();
     // Query-time memory held while the node computes.
     let mut held_bytes = None;
@@ -668,16 +668,11 @@ pub fn node_resource_usage_and_cost<'a>(
                 };
                 let out = edge(group_count)?;
                 let held = input.rows.div_ceil(group_count.max(1));
-                // Its measures' work per row, by kind (an exact quantile
-                // also sorts its group of `held` rows); at least one.
-                let measure_ops: f64 = measures
-                    .iter()
-                    .map(|measure| aggregate_measure_operations_per_row(measure, held))
-                    .sum();
+                let operations_per_row = hash_aggregate_operations_per_row(keys, measures, held);
                 let estimate = estimate_operator(
                     PhysicalOperator::HashAggregate {
                         grouping_key_count: keys,
-                        accumulator_operations_per_row: (measure_ops.ceil() as u64).max(1),
+                        operations_per_row: operations_per_row.ceil() as u64,
                     },
                     OperatorStatistics::HashAggregate {
                         edges: unary(out),
@@ -702,8 +697,8 @@ pub fn node_resource_usage_and_cost<'a>(
                     out,
                     estimate,
                     format!(
-                        "hash aggregate {} rows into {group_count} groups: {measure_ops:.0} \
-                         measure ops per row",
+                        "hash aggregate {} rows into {group_count} groups: {operations_per_row:.0} \
+                         ops per row",
                         input.rows
                     ),
                 )
@@ -880,11 +875,12 @@ pub fn node_resource_usage_and_cost<'a>(
                 non_negative,
                 value_magnitude_range,
             };
-            let (counter_updates, state_bytes) =
-                summary_shape(family, node.parameters.as_ref(), input_rows)?;
-            let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
-            let update_ops =
-                update_operations_per_row(family, node.parameters.as_ref(), counter_updates);
+            let state_bytes = measured_state_bytes.unwrap_or(summary_state_bytes(
+                family,
+                node.parameters.as_ref(),
+                input_rows,
+            )?);
+            let update_ops = update_operations_per_row(family, node.parameters.as_ref());
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
@@ -931,11 +927,12 @@ pub fn node_resource_usage_and_cost<'a>(
                 non_negative,
                 value_magnitude_range,
             };
-            let (counter_updates, state_bytes) =
-                summary_shape(family, node.parameters.as_ref(), input_rows)?;
-            let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
-            let update_ops =
-                update_operations_per_row(family, node.parameters.as_ref(), counter_updates);
+            let state_bytes = measured_state_bytes.unwrap_or(summary_state_bytes(
+                family,
+                node.parameters.as_ref(),
+                input_rows,
+            )?);
+            let update_ops = update_operations_per_row(family, node.parameters.as_ref());
             // The states it completes in one execution: at ingestion time
             // one second's share of each group's window (a 10 s window: a
             // tenth of a state per group); at query time every retained
@@ -970,7 +967,8 @@ pub fn node_resource_usage_and_cost<'a>(
             )
         }
         Payload::ASAP(ASAPOp::SummaryMerge { group_by, .. }) => {
-            // One operation per input state read; one state per group
+            // Each input state read is merged into its group's (by the
+            // states' family, `merge_ops` below); one state per group
             // out: an input's groups are its states of one window (all
             // its states unless it selects a chain's windows). A
             // rollup's groups are those of its keys, at most its input

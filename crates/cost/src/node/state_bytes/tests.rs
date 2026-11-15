@@ -13,12 +13,12 @@ fn exact_state_is_priced_at_the_executors_state_size() {
         (ExactKind::Rate, ExactParams::Rate),
     ] {
         assert_eq!(
-            summary_shape(
+            summary_state_bytes(
                 &FieldDataType::ExactAggregate(kind, params),
                 None,
                 StateInputRows::UNKNOWN
             ),
-            Ok((1.0, 56))
+            Ok(56)
         );
     }
     assert_eq!(asap_types::summary_type::EXACT_ACCUMULATOR_STATE_BYTES, 56);
@@ -103,7 +103,7 @@ fn library_ddsketch_bytes(alpha: f64, values: &[f64]) -> u64 {
 fn ddsketch_state_bytes_bound_the_library() {
     let alpha = 0.05;
     let priced = |rows_per_state, non_negative| {
-        sketch_shape(
+        sketch_state_bytes(
             &SketchParams::DDSketch { alpha },
             StateInputRows {
                 rows_per_state,
@@ -111,7 +111,6 @@ fn ddsketch_state_bytes_bound_the_library() {
                 value_magnitude_range: None,
             },
         )
-        .1
     };
     // Ten Pareto(2) samples (scale 1), one 1 s tumbling window of a 10 Hz series.
     let pareto: Vec<f64> = (0..10)
@@ -199,7 +198,7 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
         sketch.memory_bytes() as u64
     };
     let model_bytes = |rows_per_state| {
-        sketch_shape(
+        sketch_state_bytes(
             &SketchParams::Kll { k },
             StateInputRows {
                 rows_per_state,
@@ -207,7 +206,6 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
                 value_magnitude_range: None,
             },
         )
-        .1
     };
     // An empty sketch holds its fixed bytes; one sample adds 16 items.
     assert_eq!(library_bytes(0), kll_fixed_bytes());
@@ -416,15 +414,14 @@ fn state_bytes_bound_the_executors_charge() {
             let state = updater.into_accumulator();
             let charged = state.approx_memory_bytes();
             let priced = fields
-                + sketch_shape(
+                + sketch_state_bytes(
                     params,
                     StateInputRows {
                         rows_per_state: Some(u64::from(n)),
                         non_negative: false,
                         value_magnitude_range: None,
                     },
-                )
-                .1 as usize;
+                ) as usize;
             let context = format!("{algorithm:?} after {n} rows: {priced} priced");
             match priced_as {
                 Priced::Exact => assert_eq!(charged, priced, "{context}"),
