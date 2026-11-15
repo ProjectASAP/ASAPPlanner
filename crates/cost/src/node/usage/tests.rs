@@ -594,3 +594,43 @@ fn a_ddsketch_over_a_filter_on_a_non_negative_scan_keeps_one_store() {
         ddsketch_costed_bytes(false, None)
     );
 }
+
+/// A counter's `value` is non-negative unless the source declares another
+/// sign for it: a counter `requests_total` declaring `{"value": "unknown"}`
+/// keeps both stores, the sign the memo gives its `Scan` too. Without the
+/// declaration it keeps one store.
+#[test]
+fn a_ddsketch_over_a_counter_declaring_its_value_unknown_keeps_both_stores() {
+    use asap_types::stages::ValueSign;
+    use asap_types::workload::{PrometheusMetricType, SourceFacts};
+    let counter = |column_signs| {
+        declaring(
+            "requests_total",
+            SourceFacts {
+                metric_type: Some(PrometheusMetricType::Counter),
+                column_signs,
+                ..SourceFacts::default()
+            },
+        )
+    };
+    let state_bytes = |data: &DataWorkload| {
+        ddsketch_state_bytes(
+            data,
+            metric_scan("requests_total"),
+            "requests_total",
+            "value",
+            BTreeSet::from(["ts", "value"]),
+        )
+    };
+    assert_eq!(
+        state_bytes(&counter(BTreeMap::from([(
+            "value".to_string(),
+            ValueSign::Unknown
+        )]))),
+        ddsketch_costed_bytes(false, None)
+    );
+    assert_eq!(
+        state_bytes(&counter(BTreeMap::new())),
+        ddsketch_costed_bytes(true, None)
+    );
+}

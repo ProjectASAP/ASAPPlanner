@@ -85,11 +85,11 @@ pub struct DataWorkload {
     /// family name; its `metric_type`, `column_signs` and
     /// `sample_interval` apply to every series of the family
     /// ([`Self::series_facts`]). Counts, norms and bounds (`series_count`,
-    /// `stream_norms`, `column_magnitudes`, …) differ per series name (a `foo_bucket` has one
-    /// series per `le`), so they are read from the series' own entry;
-    /// pricing a source's own arrival rate reads its `series_count` and
-    /// `sample_interval` there together. A source without an entry has no
-    /// known facts.
+    /// `stream_norms`, `column_magnitudes`, …) differ per series name (a
+    /// `foo_bucket` has one series per `le`), so they are read from the
+    /// series' own entry; pricing a source's own arrival rate reads its
+    /// `series_count` and `sample_interval` there together. A source
+    /// without an entry has no known facts.
     #[serde(default)]
     pub sources: BTreeMap<String, SourceFacts>,
 }
@@ -114,9 +114,13 @@ pub struct SourceFacts {
     pub metric_type: Option<PrometheusMetricType>,
     /// The declared sign of each column's values, keyed by column name
     /// (default: none declared), e.g. `{"value": "non_negative"}` for a
-    /// latency gauge. A `Scan`'s `column_signs` reads it; an undeclared
-    /// column is `Unknown`, except a PromQL counter's value, which is
-    /// non-negative without a declaration. The deployment must ensure it.
+    /// latency gauge. A `Scan`'s `column_signs` reads it, and so does
+    /// DDSketch costing, which gives a state over a non-negative column one
+    /// store instead of two (both by
+    /// [`declared_sign`](crate::workload::bounds::declared_sign)); an
+    /// undeclared column is `Unknown`, except a PromQL counter's value,
+    /// which is non-negative without a declaration. The deployment must
+    /// ensure it.
     /// Omitted from JSON when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub column_signs: BTreeMap<String, ValueSign>,

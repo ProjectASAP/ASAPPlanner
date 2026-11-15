@@ -28,6 +28,7 @@ use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
 use asap_types::test_support::memo_fixtures::{
     aggregate, filter, range, readout, scan, shift, state,
 };
+use asap_types::workload::bounds::declared_sign;
 use asap_types::workload::{DataWorkload, PrometheusMetricType, SourceFacts};
 
 use ValueSign::{NonNegative, NonPositive, Unknown};
@@ -202,6 +203,45 @@ fn scans_read_declared_signs_and_row_operators_keep_or_set_them() {
         (g10, Unknown),
     ] {
         assert_eq!(signs(&memo, group), [Unknown, value, Unknown], "{group:?}");
+    }
+}
+
+/// A `Scan`'s signs are the ones `declared_sign` gives, the rule DDSketch
+/// costing reads too: a counter's `value` is non-negative, unless the
+/// counter declares another sign for it. Here `requests_total` is a counter
+/// with nothing declared and `errors_total` a counter declaring
+/// `{"value": "unknown"}`.
+#[test]
+fn a_scan_signs_its_columns_by_the_declared_sign() {
+    let data = DataWorkload {
+        sources: BTreeMap::from([
+            (
+                "requests_total".to_string(),
+                SourceFacts {
+                    metric_type: Some(PrometheusMetricType::Counter),
+                    ..SourceFacts::default()
+                },
+            ),
+            (
+                "errors_total".to_string(),
+                SourceFacts {
+                    metric_type: Some(PrometheusMetricType::Counter),
+                    column_signs: BTreeMap::from([("value".to_string(), Unknown)]),
+                    ..SourceFacts::default()
+                },
+            ),
+        ]),
+        ..DataWorkload::default()
+    };
+    let mut memo = Memo::new(&data);
+    for (metric, value) in [("requests_total", NonNegative), ("errors_total", Unknown)] {
+        let group = add(&mut memo, series(metric));
+        assert_eq!(signs(&memo, group), [Unknown, value, Unknown], "{metric}");
+        let declared: Vec<_> = ["ts", "value", "host"]
+            .into_iter()
+            .map(|column| declared_sign(&data, metric, column))
+            .collect();
+        assert_eq!(signs(&memo, group), declared, "{metric}");
     }
 }
 

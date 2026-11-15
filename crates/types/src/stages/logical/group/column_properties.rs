@@ -26,8 +26,8 @@ use crate::ir::{ASAPOp, NonASAPOp, Operator};
 use crate::summary_type::{
     ExactKind, SketchStatistic, SummaryInputExpr, SummaryTypeCapability, SummaryUpdate,
 };
-use crate::workload::bounds::source_name;
-use crate::workload::{series_facts, PrometheusMetricType, SourceFacts};
+use crate::workload::bounds::{declared_column_sign, source_name};
+use crate::workload::{series_facts, SourceFacts};
 
 /// The sign of one column's values, a group property derived from the
 /// input groups like lineage (concepts doc, section 3, "Value sign"); a
@@ -201,26 +201,15 @@ fn non_asap_columns(
     use NonASAPOp::*;
     match op {
         // Each column copied from its source, with the sign its source's
-        // facts declare (a histogram's or summary's series reads its
-        // family's); a counter's `value` is non-negative without a
-        // declaration.
+        // facts declare (`declared_sign`): e.g. a counter's `value` is
+        // non-negative unless it declares another sign.
         Scan { source, schema, .. } => {
             let facts = series_facts(source_facts, source_name(source));
             schema
                 .fields
                 .iter()
                 .map(|field| ColumnProperties {
-                    sign: match facts {
-                        Some((facts, series_type)) => facts
-                            .column_signs
-                            .get(&field.name)
-                            .copied()
-                            .or((field.name == "value"
-                                && series_type == Some(PrometheusMetricType::Counter))
-                            .then_some(NonNegative))
-                            .unwrap_or(Unknown),
-                        None => Unknown,
-                    },
+                    sign: declared_column_sign(facts, &field.name),
                     lineage: Some(ColumnLineage::SourceColumn(SourceColumn {
                         source: source.clone(),
                         scan_ordinal: 0,
