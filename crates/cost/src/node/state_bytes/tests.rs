@@ -498,6 +498,10 @@ fn priced_bytes_agree_with_the_executor() {
     };
     // (family, its parameters, the rows it is fed, its known gap).
     let families = [
+        // The rows are seeded, but the executor builds KLL unseeded
+        // (`Kll::with_k`, no seed through its factory), so its compaction
+        // coin differs per run: the charge varies by about 0.2% (e.g.
+        // 10,376 or 10,392 bytes), well inside `BYTES_AGREEMENT_FACTOR`.
         (
             sketch(A::Kll),
             Some(SketchParams::Kll { k: 269 }),
