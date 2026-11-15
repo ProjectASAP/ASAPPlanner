@@ -38,24 +38,32 @@ impl TimeIndexedPlan for CompileGraph<'_> {
         self.dependencies.get(&node).cloned().unwrap_or_default()
     }
 
+    /// A node placed at ingestion time that is not a compile root reads as
+    /// if placed at query time. The walks ask this only of compiled nodes
+    /// (every reader is one), and a compiled ingestion-time node that is
+    /// not a root is a view this compile does not bind: it is computed
+    /// here for the compiled nodes reading it. Example: the
+    /// plan of `sum by (job)(rate(c[5m]))` compiled with no view bound, a
+    /// 10 s chain at ingestion time under `TimeRange(5m)`: the chain reads
+    /// what its readers read, `(T - 5m, T]`, not only its newest window
+    /// `(T - 10s, T]`; a stored `TimeShift(1h)` reads its readers' windows
+    /// 1 h back, not only the current time. A planned per-edge read window
+    /// replaces this override: such a node then reads the union of its
+    /// outgoing edges' windows.
     fn input_time_access(&self, node: NodeId) -> InputTimeAccess {
+        use planner_types::ir::properties::ExecutionTiming;
         let compiled = self.nodes[&node];
-        let access = InputTimeAccess::of(
-            &compiled.payload,
-            compiled.output_state.timing,
-            compiled.lifetime,
-        );
+        let root = self.roots.contains(&node);
+        let timing = match compiled.output_state.timing {
+            ExecutionTiming::IngestionTime if !root => ExecutionTiming::QueryTime,
+            timing => timing,
+        };
+        let access = InputTimeAccess::of(&compiled.payload, timing, compiled.lifetime);
         match access.reads {
-            InputRows::WhatItsReadersRead if self.roots.contains(&node) => InputTimeAccess {
+            InputRows::WhatItsReadersRead if root => InputTimeAccess {
                 reads: InputRows::AllRows,
                 shifts_back_ms: 0,
             },
-            InputRows::LastWindow { .. } if self.chain_builds_windows_readers_read(node) => {
-                InputTimeAccess {
-                    reads: InputRows::WhatItsReadersRead,
-                    ..access
-                }
-            }
             _ => access,
         }
     }
@@ -66,27 +74,6 @@ impl TimeIndexedPlan for CompileGraph<'_> {
 
     fn operator_of(&self, node: NodeId) -> &Payload {
         &self.nodes[&node].payload
-    }
-}
-
-impl CompileGraph<'_> {
-    /// Whether the tumbling-window chain `node` is built in this compile
-    /// for the compiled nodes reading it, every window they read, rather
-    /// than refreshed as a compile root (its newest window, ending at an
-    /// ingestion run's end). A chain placed at query time always is; one
-    /// placed at ingestion time is when its materialized view is not bound
-    /// (a bound view is not compiled) and it is not a root. Example: the
-    /// plan of `sum by (job)(rate(c[5m]))` compiled with no view bound, a
-    /// 10 s chain at ingestion time under `TimeRange(5m)`: the query run
-    /// builds the chain's 30 windows `(T - 5m, T]`, not only `(T - 10s, T]`.
-    pub(super) fn chain_builds_windows_readers_read(&self, node: NodeId) -> bool {
-        let compiled = self.nodes[&node];
-        matches!(
-            compiled.payload,
-            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
-        ) && (compiled.output_state.timing
-            == planner_types::ir::properties::ExecutionTiming::QueryTime
-            || !self.roots.contains(&node))
     }
 }
 
@@ -223,17 +210,19 @@ pub(super) fn time_range_window(id: NodeId, graph: &CompileGraph<'_>) -> Option<
 /// The window back from the evaluation time that the compiled consumers of
 /// `id` read ([`windows_readers_need`]): through the
 /// `TimeShift`s (without an `@` anchor) above it, a `TimeRange(w)` or a
-/// chain of width `w` built at ingestion time (its window ending at the
-/// evaluation time) over shifts summing to `s` reads `{s, w}`; several read
-/// the smallest window holding all of theirs. A chain built at query time
-/// builds the windows its own readers read, so the walk passes up through
-/// it. `None` when `id` or a shift above it is a compile root, another
+/// chain of width `w` refreshed as a compile root (its window ending at
+/// the evaluation time) over shifts summing to `s` reads `{s, w}`; several
+/// read the smallest window holding all of theirs. A chain built for its
+/// readers (at query time, or not a root,
+/// [`CompileGraph::input_time_access`]) builds the windows they read, so
+/// the walk passes up through it. `None` when `id` or a shift above it is a compile root, another
 /// consumer reads it outside a window, or nothing reads it.
 ///
-/// A `TimeShift` materialized at ingestion time reads its input at its
-/// evaluation time, which this walk reads unbounded (every consumer
-/// outside a window is): its refresh over a chain slot is refused ("read
-/// unbounded"), and over a raw `Scan` it compiles and reads every row.
+/// A `TimeShift` materialized at ingestion time and refreshed as a compile
+/// root reads its input at its evaluation time, which this walk reads
+/// unbounded (every consumer outside a window is): its refresh over a
+/// chain slot is refused ("read unbounded"), and over a raw `Scan` it
+/// compiles and reads every row.
 ///
 /// Example: a `Scan` read by a query-time chain of 1-minute windows, which
 /// `TimeRange(5m)` and `TimeShift(1m) -> TimeRange(5m)` read, is read for

@@ -630,15 +630,35 @@ async fn grouped_and_per_series_counts_over_a_shared_query_time_chain_install_an
 /// counter series sampled every second, planned with the built-in models
 /// on a deployment that keeps raw data or not.
 async fn plan_counter_query(query: &str, raw_data_retained: bool) -> InstallablePlan {
+    plan_counter_queries(&[query], 10_000, raw_data_retained).await
+}
+
+/// `queries`, each every `interval_ms` within relative error 0.01, over
+/// 1,000 `requests_total` counter series sampled every second, planned
+/// together with the built-in models on a deployment that keeps raw data
+/// or not.
+async fn plan_counter_queries(
+    queries: &[&str],
+    interval_ms: u64,
+    raw_data_retained: bool,
+) -> InstallablePlan {
+    let entries: Vec<String> = queries
+        .iter()
+        .map(|query| {
+            format!(
+                r#"{{"query": {query:?},
+                  "demand": {{"fixed_interval_at": {{"interval": {interval_ms}, "evaluation_phase": 0}}}},
+                  "requirements": {{"accuracy": {{"max_error": 0.01}}}},
+                  "predictability": {{"predictable": {{"known_at": null}}}}}}"#
+            )
+        })
+        .collect();
     let workload: PlanningWorkload = serde_json::from_str(&format!(
-        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
-              "query": {query:?},
-              "demand": {{"fixed_interval_at": {{"interval": 10000, "evaluation_phase": 0}}}},
-              "requirements": {{"accuracy": {{"max_error": 0.01}}}},
-              "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}]}},
             "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 1000.0}}}},
               "sources": {{"requests_total": {{"series_count": 1000,
-                  "metric_type": "counter", "sample_interval": 1000}}}}}}}}"#
+                  "metric_type": "counter", "sample_interval": 1000}}}}}}}}"#,
+        entries.join(",")
     ))
     .unwrap();
     let capabilities = DeploymentCapabilities {
@@ -648,7 +668,7 @@ async fn plan_counter_query(query: &str, raw_data_retained: bool) -> Installable
     let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
     plan_installable(UserInput::new(&workload, FrontendInput::Promql, models))
         .await
-        .unwrap_or_else(|e| panic!("{query} (raw data retained: {raw_data_retained}): {e}"))
+        .unwrap_or_else(|e| panic!("{queries:?} (raw data retained: {raw_data_retained}): {e}"))
         .0
 }
 
@@ -811,4 +831,43 @@ async fn counter_rates_and_increases_answer_from_views_built_at_ingestion_time()
 async fn counter_rates_and_increases_answer_at_query_time_from_raw_samples() {
     let mismatches = counter_query_mismatches(query_answers).await;
     assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// `rate(requests_total[5m] offset 1m)` and `rate(requests_total[5m])`,
+/// each every minute, share a tumbling-window chain of 1-minute windows
+/// that the plan builds at query time. Installed, the query run builds it
+/// from the raw samples, each update at its sample's own time: over
+/// [`counter_samples`] (four samples per window) both queries answer the
+/// hand-worked rates `(i + 1) * 20 / 300` per series. `(T - 6m, T - 1m]`
+/// holds steps 9..=28, 20 samples as `(T - 5m, T]` does.
+#[tokio::test]
+async fn counter_rates_over_a_shared_query_time_chain_answer_as_installed() {
+    let plan = plan_counter_queries(
+        &[
+            "rate(requests_total[5m] offset 1m)",
+            "rate(requests_total[5m])",
+        ],
+        60_000,
+        true,
+    )
+    .await;
+    assert!(
+        plan.dag.nodes.iter().any(|node| matches!(
+            node.payload,
+            asap_types::ir::Operator::ASAP(
+                asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. }
+            )
+        ) && node.output_state.timing
+            == asap_types::ir::properties::ExecutionTiming::QueryTime),
+        "the plan builds a chain at query time: {:#?}",
+        plan.dag.nodes
+    );
+    let rates: Vec<f64> = (1..=4).map(|i| i as f64 * 20.0 / 300.0).collect();
+    for answered in installed_answers(&plan, &counter_samples()) {
+        let values: Vec<f64> = answered.iter().map(|(_, value)| *value).collect();
+        assert_eq!(values.len(), rates.len(), "{answered:?}");
+        for (value, rate) in values.iter().zip(&rates) {
+            assert!((value - rate).abs() <= 1e-9 * rate, "{answered:?}");
+        }
+    }
 }
