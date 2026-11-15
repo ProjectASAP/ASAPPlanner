@@ -190,7 +190,7 @@ pub fn plan_cost(
     // finalizations over it.
     let mut family_of: HashMap<PhysicalASAPNodeId, StateFamily<'_>> = HashMap::new();
     let sketch_size =
-        |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN, None).1 as f64;
+        |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
     for node in &dag.nodes {
         let node_costed = &costed[&node.id];
         usage.cpu_ops_per_second += node_costed.cpu_ops_per_second;

@@ -16,8 +16,7 @@ fn exact_state_is_priced_at_the_executors_state_size() {
             summary_shape(
                 &FieldDataType::ExactAggregate(kind, params),
                 None,
-                StateInputRows::UNKNOWN,
-                None
+                StateInputRows::UNKNOWN
             ),
             Ok((1.0, 56))
         );
@@ -109,8 +108,8 @@ fn ddsketch_state_bytes_bound_the_library() {
             StateInputRows {
                 rows_per_state,
                 non_negative,
+                value_magnitude: None,
             },
-            None,
         )
         .1
     };
@@ -162,8 +161,8 @@ fn ddsketch_state_bytes_follow_the_declared_value_magnitude() {
             StateInputRows {
                 rows_per_state: Some(600),
                 non_negative: true,
+                value_magnitude,
             },
-            value_magnitude,
         )
         .1
     };
@@ -205,8 +204,8 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
             StateInputRows {
                 rows_per_state,
                 non_negative: true,
+                value_magnitude: None,
             },
-            None,
         )
         .1
     };
@@ -422,8 +421,8 @@ fn state_bytes_bound_the_executors_charge() {
                     StateInputRows {
                         rows_per_state: Some(u64::from(n)),
                         non_negative: false,
+                        value_magnitude: None,
                     },
-                    None,
                 )
                 .1 as usize;
             let context = format!("{algorithm:?} after {n} rows: {priced} priced");

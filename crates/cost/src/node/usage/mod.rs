@@ -315,7 +315,7 @@ pub fn node_resource_usage_and_cost<'a>(
     let speed = settings.resource_speed;
     let unit_costs = settings.cost_model.per_node_unit_costs();
     let sketch_size =
-        |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN, None).1 as f64;
+        |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
     let mut fit = CalibrationFit::default();
     // Query-time memory held while the node computes.
     let mut held_bytes = None;
@@ -836,13 +836,9 @@ pub fn node_resource_usage_and_cost<'a>(
             let input_rows = StateInputRows {
                 rows_per_state: (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
                 non_negative: raw_data_samples_non_negative(),
+                value_magnitude: folded_value_magnitude(update),
             };
-            let (depth, state_bytes) = summary_shape(
-                family,
-                node.parameters.as_ref(),
-                input_rows,
-                folded_value_magnitude(update),
-            )?;
+            let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
             let out = EdgeStatistics {
                 rows: group_count,
@@ -887,13 +883,9 @@ pub fn node_resource_usage_and_cost<'a>(
             let input_rows = StateInputRows {
                 rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
                 non_negative: raw_data_samples_non_negative(),
+                value_magnitude: folded_value_magnitude(update),
             };
-            let (depth, state_bytes) = summary_shape(
-                family,
-                node.parameters.as_ref(),
-                input_rows,
-                folded_value_magnitude(update),
-            )?;
+            let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
             let out = EdgeStatistics {
                 rows: group_count,
