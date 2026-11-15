@@ -17,7 +17,6 @@ use planner_types::plan::physical_asap_dag::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
     PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
 };
-use planner_types::stages::Lifetime;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 fn schema() -> SchemaRef {
@@ -96,9 +95,9 @@ fn over_sources(binary: Operator, left: Batch, right: Batch) -> Arc<CompiledPhys
     Arc::new(
         CompiledPhysicalDAG::from_operators(
             BTreeMap::from([
-                (0, (vec![], source(left), Lifetime::None)),
-                (1, (vec![], source(right), Lifetime::None)),
-                (2, (vec![0, 1], binary, Lifetime::None)),
+                (0, (vec![], source(left))),
+                (1, (vec![], source(right))),
+                (2, (vec![0, 1], binary)),
             ]),
             vec![2],
         )

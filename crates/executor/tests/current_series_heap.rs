@@ -14,7 +14,6 @@ use futures::{executor::block_on, StreamExt};
 use planner_types::accuracy::AccuracyTarget;
 use planner_types::ir::schema::{DataType, *};
 use planner_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
-use planner_types::stages::Lifetime;
 use planner_types::summary_type::*;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -90,13 +89,12 @@ fn input(samples: &[(&str, i64, f64)]) -> Batch {
 fn snapshot_plan(data: Batch) -> CompiledPhysicalDAG {
     CompiledPhysicalDAG::from_operators(
         BTreeMap::from([
-            (0, (vec![], source(data), Lifetime::None)),
+            (0, (vec![], source(data))),
             (
                 1,
                 (
                     vec![0],
                     Operator::current_series(schema(), 3, 0, 1, 60_000).unwrap(),
-                    Lifetime::None,
                 ),
             ),
         ]),
@@ -198,17 +196,16 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
         let plan = |data: Batch| {
             CompiledPhysicalDAG::from_operators(
                 BTreeMap::from([
-                    (0, (vec![], source(data), Lifetime::None)),
+                    (0, (vec![], source(data))),
                     (
                         1,
                         (
                             vec![0],
                             Operator::current_series(schema(), 3, 0, 1, 60_000).unwrap(),
-                            Lifetime::None,
                         ),
                     ),
-                    (2, (vec![1], build.clone(), Lifetime::None)),
-                    (3, (vec![2], read.clone(), Lifetime::None)),
+                    (2, (vec![1], build.clone())),
+                    (3, (vec![2], read.clone())),
                 ]),
                 vec![3],
             )

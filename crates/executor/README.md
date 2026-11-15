@@ -14,19 +14,23 @@ worker-local streams, with no internal thread pool.
 A node runs once per evaluation time in a run (an `@` anchor evaluates the
 nodes below it at another time), as its `Lifetime` and the run's scope say:
 
-- Query time, `OneEvaluation` or `AcrossEvaluations`, with more than one
-  consumer (a computed node or a raw data scan): the node runs once, to the
-  end, before any consumer reads it, and every consumer reads its finished
-  output independently, as the planner charges one run whose output is held.
-  For example, a `OneEvaluation` scan read by three queries is one store
-  read. The output is charged to the run's byte budget until every consumer
-  has read it; over the budget the run fails with `MemoryLimit` (nothing
-  spills). With one consumer the node streams to it, since no sibling can
-  wait on that consumer.
-- Query time, `None` leaf (a raw data scan the plan does not materialize, or
-  a materialized view slot, whose states the store keeps): each consumer
-  reads the store on its own, as the planner charges a not-materialized read
-  once per consumer.
+- Query time, a leaf whose rows the store keeps: `None` (a raw data scan the
+  plan does not materialize, or any other leaf such as a constant) or
+  `AcrossEvaluations` (a materialized view slot, or raw data kept at
+  ingestion). Each consumer reads it from the store on its own, and
+  nothing is held. Stage 3 never gives a query-time `None` result more than
+  one consumer; a view slot, or a leaf in a hand-built DAG, may have
+  several. For example, an `AcrossEvaluations` scan read by two queries is
+  two store reads.
+- Query time, `OneEvaluation` (a computed node or a leaf), or a computed
+  `AcrossEvaluations` node, with more than one consumer: the node runs once,
+  to the end, before any consumer reads it, and every consumer reads its
+  finished output independently, as the planner charges one run whose
+  output is held. For example, a `OneEvaluation` scan read by three queries
+  is one store read. The output is charged to the run's byte budget until
+  every consumer has read it; over the budget the run fails with
+  `MemoryLimit` (nothing spills). With one consumer the node streams to it,
+  since no sibling can wait on that consumer.
 - Query time, `None` computed node: streamed to its one consumer. More than
   one consumer is a planner bug; `execute` returns an error naming the node
   before any operator starts.

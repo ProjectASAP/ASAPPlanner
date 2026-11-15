@@ -675,12 +675,14 @@ impl PhysicalASAPDAG {
 
 /// Test-only: `roots` exported as one DAG with every node at query time, and
 /// no θ (every `parameters` is `None`), with each exported node's operator
-/// node by node id. A computed node with more than one consumer (edges and
-/// root positions) is held for one evaluation, as Stage 3 selects for a
-/// shared query-time output; every other node is not materialized. Consumers
-/// are counted per node, not per evaluation time, so a node read at two
-/// times under an `@` anchor is conservatively held too. Executor tests
-/// hand-build DAGs this way; planning builds the plan in Stage 3.
+/// node by node id. A node with more than one consumer (edges and root
+/// positions), a leaf included, is held for one evaluation
+/// (`OneEvaluation(Memory)`), as Stage 3 selects for a shared query-time
+/// output; every other node is not materialized. Example: a scan read by two
+/// queries is `OneEvaluation`, read once and held for both. Consumers are
+/// counted per node, not per evaluation time, so a node read at two times
+/// under an `@` anchor is conservatively held too. Executor tests hand-build
+/// DAGs this way; planning builds the plan in Stage 3.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
     roots: &[crate::ir::QueryRoot],
@@ -722,10 +724,6 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
         .collect();
     let mut dag = PhysicalASAPDAG::new(nodes, roots, scalar_roots)?;
     let mut consumers = vec![0usize; dag.nodes.len()];
-    let mut computed = vec![false; dag.nodes.len()];
-    for edge in &dag.edges {
-        computed[edge.consumer] = true;
-    }
     for producer in dag
         .edges
         .iter()
@@ -735,7 +733,7 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
         consumers[producer] += 1;
     }
     for node in &mut dag.nodes {
-        if consumers[node.id] > 1 && computed[node.id] {
+        if consumers[node.id] > 1 {
             node.lifetime = Lifetime::OneEvaluation(StorageMedium::Memory);
         }
     }

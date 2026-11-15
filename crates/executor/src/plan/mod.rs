@@ -49,7 +49,8 @@ pub(crate) struct Node<'a, V, S> {
     pub(crate) inputs: Vec<NodeId>,
     pub(crate) operator: Box<dyn PhysicalOperator<V, S> + 'a>,
     /// How long its output is kept, from the plan: what the runtime runs it
-    /// by (see the crate README).
+    /// by (see the crate README). Example: `OneEvaluation`, computed once
+    /// and held for its consumers at query time.
     pub(crate) lifetime: Lifetime,
 }
 pub struct PhysicalDAG<'a, V, S> {
@@ -190,7 +191,7 @@ impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> PhysicalDAG<'a, V, S> {
         &'r self,
         roots: &[NodeId],
         context: RunContext,
-    ) -> Result<impl std::future::Future<Output = IngestionOutputs<V>> + 'r, Error>
+    ) -> Result<impl std::future::Future<Output = Result<IngestionOutputs<V>, Error>> + 'r, Error>
     where
         'a: 'r,
     {
