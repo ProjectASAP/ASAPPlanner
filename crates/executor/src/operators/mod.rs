@@ -39,6 +39,7 @@ pub use series_window::SubquerySteps;
 pub(crate) use series_window::STALE_MARKER;
 pub use sort::SortKey;
 pub use summary::{RowWeight, SummaryEvaluation};
+pub use time_range::TUMBLING_WINDOW_END_COLUMN;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum Kind {
     #[serde(skip)]

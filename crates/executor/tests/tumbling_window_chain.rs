@@ -376,7 +376,8 @@ fn a_chain_built_at_query_time_answers_queries_through_its_time_ranges() {
 
 // A range window with tumbling-window ends: at T = 10m, `(T - 3m, T]` in
 // windows of 1 minute keeps the rows at 7m (out), 7m + 1 ms, 8m, 9m 30 s and
-// 10m, their times replaced by their windows' ends 8m, 8m, 10m and 10m.
+// 10m, each keeping its time and followed by its window's end: 8m, 8m, 10m
+// and 10m.
 #[test]
 fn a_range_window_stamps_each_row_with_its_tumbling_windows_end() {
     use asap_executor::operators::Operator as ExecutorOperator;
@@ -419,15 +420,24 @@ fn a_range_window_stamps_each_row_with_its_tumbling_windows_end() {
         Limits::default(),
     )
     .unwrap();
-    let ends: Vec<i64> = run(&dag, &[1], context)
+    // Each kept row's own time and, appended, its window's end.
+    let times_and_ends: Vec<(i64, i64)> = run(&dag, &[1], context)
         .remove(0)
         .into_iter()
-        .map(|row| match row[1] {
-            Value::Timestamp(t) => t,
-            ref other => panic!("{other:?}"),
+        .map(|row| match (&row[1], &row[3]) {
+            (Value::Timestamp(time), Value::Timestamp(end)) => (*time, *end),
+            other => panic!("{other:?}"),
         })
         .collect();
-    assert_eq!(ends, [8, 8, 10, 10].map(|minutes| minutes * MINUTE_MS));
+    assert_eq!(
+        times_and_ends,
+        [
+            (7 * MINUTE_MS + 1, 8 * MINUTE_MS),
+            (8 * MINUTE_MS, 8 * MINUTE_MS),
+            (570_000, 10 * MINUTE_MS),
+            (10 * MINUTE_MS, 10 * MINUTE_MS),
+        ]
+    );
 }
 
 // `sum_over_time(latency[5m] @ end())` in a range request over (1h, 3h]:
