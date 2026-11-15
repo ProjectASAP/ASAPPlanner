@@ -154,14 +154,9 @@ impl TryFrom<UncheckedOperator> for Operator {
                     return Err(invalid("aggregate width mismatch"));
                 }
                 let names = output.fields[groups.len()..].iter().map(|f| f.name.clone());
-                let aggregate =
-                    Operator::aggregate(input(0)?, groups, names.zip(measures).collect())?
-                        .with_measure_filters(filters)?;
-                if emit_empty_global {
-                    aggregate.with_emit_empty_global(None)?
-                } else {
-                    aggregate
-                }
+                Operator::aggregate(input(0)?, groups, names.zip(measures).collect())?
+                    .with_measure_filters(filters)?
+                    .with_emit_empty_global(emit_empty_global, None)?
             }
             Kind::SemiJoin {
                 keys,
@@ -194,24 +189,18 @@ impl TryFrom<UncheckedOperator> for Operator {
                 groups,
                 filter,
                 emit_empty_global,
-            } => {
-                let build = with_filter(
-                    Operator::per_group_summary_build(
-                        input(0)?,
-                        family,
-                        parameters,
-                        value,
-                        time,
-                        groups,
-                    )?,
-                    filter,
-                )?;
-                if emit_empty_global {
-                    build.with_emit_empty_global(None)?
-                } else {
-                    build
-                }
-            }
+            } => with_filter(
+                Operator::per_group_summary_build(
+                    input(0)?,
+                    family,
+                    parameters,
+                    value,
+                    time,
+                    groups,
+                )?,
+                filter,
+            )?
+            .with_emit_empty_global(emit_empty_global, None)?,
             Kind::PerGroupKeyedSummaryBuild {
                 family,
                 parameters,
@@ -257,16 +246,13 @@ impl TryFrom<UncheckedOperator> for Operator {
                 emit_empty_global,
                 parameters,
             } => {
-                let merge = Operator::summary_merge(input(0)?, state, groups)?;
-                if emit_empty_global {
-                    merge.with_emit_empty_global(parameters)?
-                } else if parameters.is_some() {
+                if !emit_empty_global && parameters.is_some() {
                     return Err(invalid(
                         "only a merge that outputs an empty global state takes parameters θ",
                     ));
-                } else {
-                    merge
                 }
+                Operator::summary_merge(input(0)?, state, groups)?
+                    .with_emit_empty_global(emit_empty_global, parameters)?
             }
             Kind::Evaluation { state, query } => Operator::evaluation(input(0)?, state, query)?,
         }

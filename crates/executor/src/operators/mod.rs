@@ -360,11 +360,12 @@ impl Operator {
         self.output.clone()
     }
 
-    /// Give an aggregate with no groups SQL's rule for an empty input: its
-    /// one global group still has a row, as `SELECT count(*) FROM t WHERE
-    /// false` answers 0 and `SELECT sum(x) FROM t WHERE false` NULL. Without
-    /// it (the default) an empty input has no row, as a PromQL `count(v)`
-    /// over an empty vector has no sample.
+    /// An aggregate, per-group build or merge into no groups follows SQL's
+    /// rule for an empty input when `emit_empty_global`: its one global
+    /// group still has a row, as `SELECT count(*) FROM t WHERE false`
+    /// answers 0 and `SELECT sum(x) FROM t WHERE false` NULL. Otherwise (the
+    /// default; `false` leaves the operator as it is) an empty input has no
+    /// row, as a PromQL `count(v)` over an empty vector has no sample.
     ///
     /// An `Aggregate`'s SUM, AVG, MIN, MAX and percentile measures become
     /// nullable (NULL over no row). A `PerGroupSummaryBuild` outputs an empty
@@ -373,8 +374,12 @@ impl Operator {
     /// `None` for an exact family and for the other two.
     pub fn with_emit_empty_global(
         mut self,
+        emit_empty_global: bool,
         parameters: Option<SketchParams>,
     ) -> Result<Self, Error> {
+        if !emit_empty_global {
+            return Ok(self);
+        }
         match &mut self.kind {
             Kind::Aggregate {
                 groups,
@@ -384,14 +389,7 @@ impl Operator {
             } if groups.is_empty() && parameters.is_none() => {
                 let mut output = (*self.output).clone();
                 for (field, measure) in output.fields.iter_mut().zip(measures.iter()) {
-                    if matches!(
-                        measure,
-                        Reduction::Sum(_)
-                            | Reduction::Avg(_)
-                            | Reduction::Min(_)
-                            | Reduction::Max(_)
-                            | Reduction::Percentile { .. }
-                    ) {
+                    if measure.is_null_without_values() {
                         field.nullable = true;
                     }
                 }
