@@ -38,6 +38,20 @@ impl ExecutionContext {
         width_ms: ONE_SECOND_MS,
         phase_ms: 0,
     });
+
+    /// Whether this context runs outside every evaluation context, so
+    /// every evaluation context reading its executions shares them: the
+    /// ingestion pipeline and a candidate's own materialized computation.
+    ///
+    /// Example: a chain materialized at ingestion time, read by queries
+    /// every 60 s and every 300 s: its `IngestionPipeline` execution is one
+    /// for both, true; an `Evaluation` context: false.
+    pub fn is_outside_evaluations(&self) -> bool {
+        match self {
+            Self::Evaluation { .. } => false,
+            Self::IngestionPipeline(_) | Self::Materialized(_) => true,
+        }
+    }
 }
 
 /// Whether a `TimeShift` anchored with `at`, read by `queries` (those on

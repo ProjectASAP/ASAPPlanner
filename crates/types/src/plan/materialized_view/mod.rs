@@ -77,6 +77,7 @@ use thiserror::Error;
 use super::physical_asap_dag::{PhysicalASAPDAGValidationError, PhysicalASAPNodeId, ViewCoverage};
 use super::time_window::{self, TimeIndexedPlan, TimeWindow};
 use crate::ir::operator::arguments::Source;
+use crate::stages::EvaluationGrid;
 
 /// One materialized view of a DAG: what its stored state is, what it is
 /// refreshed from, when, and for how long it is retained.
@@ -192,6 +193,19 @@ impl RefreshWindow {
             .into_iter()
             .reduce(TimeWindow::union)
             .and_then(Self::of_window)
+    }
+}
+
+/// The times a refresh window ends at: every `width_ms`, at `phase_ms`.
+///
+/// Example: `RefreshWindow { width_ms: 300_000, phase_ms: 0 }`, the
+/// refresh of `sum(TimeRange(5m))`, ends every 5 min at phase 0.
+impl From<RefreshWindow> for EvaluationGrid {
+    fn from(window: RefreshWindow) -> Self {
+        EvaluationGrid {
+            period_ms: window.width_ms,
+            phase_ms: window.phase_ms,
+        }
     }
 }
 

@@ -34,6 +34,7 @@ pub(crate) fn dominated_by_one_evaluation_twin(inputs: &SelectionInputs<'_>) -> 
     let executions = selectable.executions();
     let edges = selectable.edges();
     let count = executions.len();
+    // No more, to rounding (to 1e-24/s when `than` is 0).
     let no_more =
         |cost: f64, than: f64| cost <= than + COST_RELATIVE_TOLERANCE * than.abs().max(1e-12);
     let mut answers: Vec<BTreeSet<QueryId>> = vec![BTreeSet::new(); count];

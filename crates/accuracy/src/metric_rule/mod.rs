@@ -46,7 +46,12 @@ impl ErrorMetricsOfMemo {
     /// input those its output allows that its error contract passes to it;
     /// a group the union over its consumers. These are the metrics of the
     /// readout caps' walk (`readout_caps`), which also reaches a group
-    /// through inputs the output does not depend on.
+    /// through inputs the output does not depend on. A metric only such an
+    /// input would allow is not added here: a readout's edge into such a
+    /// consumer is admitted by [`Self::error_metrics_allowed_on_input`],
+    /// and widening a whole group for it would admit every alternative
+    /// readout of the group (`avg` of a relative quantile: 62 → 455
+    /// MILP variables, the same plan).
     pub fn of(memo: &Memo, order: &[MemoGroupId]) -> Self {
         let error_contract: Vec<Vec<ErrorContractPerMetric>> = memo
             .groups()
@@ -111,71 +116,63 @@ impl ErrorMetricsOfMemo {
         self.readout_error_metric[candidate.group.0 as usize][candidate.index_in_group]
     }
 
-    /// The metrics among `metrics` that `consumer`'s error contract passes
-    /// to its inputs: those an input of it may be off in when its output
-    /// may be off in `metrics`.
-    fn error_metrics_passed_to_inputs(
-        &self,
-        consumer: CandidateForMemoGroupId,
-        metrics: &[AccuracyMetric],
-    ) -> Vec<AccuracyMetric> {
-        metrics
-            .iter()
-            .copied()
-            .filter(|&metric| self.error_contract(consumer, metric).is_some())
-            .collect()
-    }
-
-    /// The metrics in which no error of `consumer`'s input `input` reaches
-    /// its output (error factor 0): the input may be off in them whatever
-    /// its output allows.
+    /// The metrics `consumer`'s input `input` may be off in when its
+    /// output may be off in `output_allowed`, the metric rule: those of
+    /// `output_allowed` its error contract passes to its inputs, and every
+    /// metric in which the input's error does not reach the output
+    /// ([`ErrorContract::input_error_reaches_output`]). In
+    /// `AccuracyMetric::ALL` order.
     ///
-    /// Example: `count` (an exact `Count` accumulator) outputs the number of
-    /// values it reads, whatever their error: every metric.
-    fn error_metrics_ignored_on_input(
+    /// Example: a readout's contract passes every metric, so a readout
+    /// allows its output's; `count` (error factor 0) allows every metric,
+    /// even under an exact target; a sum of values of unknown sign under a
+    /// relative target allows none.
+    pub(crate) fn error_metrics_allowed_on_input(
         &self,
         consumer: CandidateForMemoGroupId,
         input: usize,
+        output_allowed: &[AccuracyMetric],
     ) -> Vec<AccuracyMetric> {
         AccuracyMetric::ALL
             .into_iter()
             .filter(|&metric| {
                 self.error_contract(consumer, metric)
                     .is_some_and(|contract| {
-                        contract.error_factor_per_input.get(input) == Some(&0.0)
+                        output_allowed.contains(&metric)
+                            || !contract.input_error_reaches_output(input)
                     })
             })
             .collect()
     }
 
-    /// The metrics `consumer` allows an input's error in, the metric rule
-    /// on its input edges: those its group's output allows that its error
-    /// contract passes to its inputs (a readout's contract passes every
-    /// metric, so a readout allows its output's). `None` where no query
-    /// with a target reaches the consumer.
-    pub(crate) fn error_metrics_allowed_on_inputs(
+    /// [`Self::error_metrics_allowed_on_input`] at what `consumer`'s group's
+    /// output allows, the metric rule on its input edges; `None` where no
+    /// query with a target reaches the consumer.
+    pub(crate) fn error_metrics_allowed_on_input_edge(
         &self,
         consumer: CandidateForMemoGroupId,
+        input: usize,
     ) -> Option<Vec<AccuracyMetric>> {
         let allowed = self.error_metrics_allowed_at_output[consumer.group.0 as usize].as_ref()?;
-        Some(self.error_metrics_passed_to_inputs(consumer, allowed))
+        Some(self.error_metrics_allowed_on_input(consumer, input, allowed))
     }
 
     /// Per query: the groups below its root it may read only exactly, the
     /// metric rule per query where the edges apply it per group. Walking
     /// down the live candidates (not in `dead`) from each root with a
     /// target, which allows its target's metrics
-    /// ([`query_roots_with_target`]; an exact target none), a candidate passes to its inputs the
-    /// metrics its error contract passes, and every metric in which an
-    /// input's error does not reach its output (factor 0: a `count`'s input
-    /// is never read exactly for its sake); a group keeps, per query, the
+    /// ([`query_roots_with_target`]; an exact target none), a candidate
+    /// passes to each input [`Self::error_metrics_allowed_on_input`] (a
+    /// `count`'s input is never read exactly for its sake); a group keeps,
+    /// per query, the
     /// metrics every path to it passes. A group is exact-only for a query
     /// when no metric reaches it (one path through a consumer without a
     /// contract, a comparison or a sum, suffices) or when it holds a sketch
     /// readout whose error metric is not among them (`quantile_over_time`
     /// at a relative target reads no KLL readout, whose error is a rank
-    /// one); and so is every group below one, except through an input whose
-    /// error reaches its consumer's output in no metric.
+    /// one); and so is every group below one, except through an input
+    /// that may be off in some metric under an output allowing none (a
+    /// `count`'s).
     /// `exact_only_readout_groups_of_query` adds, per query, the readout
     /// groups the readout requirements list (a readout whose level another
     /// query gave, for a query whose failure probability has no per-value
@@ -237,7 +234,6 @@ impl ErrorMetricsOfMemo {
                         }
                     }
                 }
-                let passed = self.error_metrics_passed_to_inputs(consumer, &AccuracyMetric::ALL);
                 for (input, &child) in memo
                     .candidate(consumer)
                     .expression
@@ -246,23 +242,16 @@ impl ErrorMetricsOfMemo {
                     .into_iter()
                     .enumerate()
                 {
-                    let ignored = self.error_metrics_ignored_on_input(consumer, input);
                     for (&query, metrics) in &allowed_here {
-                        let passed_here = AccuracyMetric::ALL
-                            .into_iter()
-                            .filter(|metric| {
-                                ignored.contains(metric)
-                                    || (metrics.contains(metric) && passed.contains(metric))
-                            })
-                            .collect();
-                        keep_common(&mut allowed, child, query, passed_here);
+                        let passed = self.error_metrics_allowed_on_input(consumer, input, metrics);
+                        keep_common(&mut allowed, child, query, passed);
                     }
                 }
             }
         }
         // Every group below an exact-only group is read exactly too, except
-        // through an input whose error reaches the output in no metric (a
-        // `count`'s).
+        // through an input that may be off in some metric under an output
+        // allowing none (a `count`'s).
         for &group in order.iter().rev() {
             for groups in &mut exact_only {
                 if groups.contains(&group) {
@@ -270,8 +259,8 @@ impl ErrorMetricsOfMemo {
                         let children = memo.candidate(consumer).expression.operator.children();
                         groups.extend(children.into_iter().enumerate().filter_map(
                             |(input, &child)| {
-                                (self.error_metrics_ignored_on_input(consumer, input).len()
-                                    < METRIC_COUNT)
+                                self.error_metrics_allowed_on_input(consumer, input, &[])
+                                    .is_empty()
                                     .then_some(child)
                             },
                         ));

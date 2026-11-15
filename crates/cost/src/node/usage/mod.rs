@@ -236,8 +236,9 @@ pub fn output_interval_ms<C>(payload: &Operator<C>, window_ms: Option<u64>) -> u
 
 /// Measure and cost one node of a physical DAG (one step of
 /// [`plan_cost`]; Stage 3 calls it per candidate): `producers` are its
-/// producers in edge order, `rate` its `(multiplier, per_second)`
-/// ([`computations`], [`executions_per_second`]), and `window_ms` the time
+/// producers in its payload's input order (`Operator::children`), `rate`
+/// its `(multiplier, per_second)` ([`computations`],
+/// [`executions_per_second`]), and `window_ms` the time
 /// window one execution covers: an ingestion-time node's refresh window
 /// width (`RefreshWindow::computed_from`, the rule the installed plan
 /// refreshes it on), or a query-time `Scan`'s read, the

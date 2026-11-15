@@ -99,17 +99,18 @@ pub(crate) struct ExecutionCosts {
     /// `None` when its producer retains no rows or the edge reads it
     /// unbounded.
     pub(crate) retention_need_ms_per_edge: Vec<Option<u64>>,
-    /// Per candidate with a retention cost, its output interval Δ in ms
-    /// (`asap_cost::output_interval_ms`): a store always keeps a stored
-    /// result's newest output whatever its retention, so a selected one
-    /// retains at least Δ, as `plan_cost` charges at least one retained
-    /// output. Example: an ingestion-time chain of 60 s windows read only
-    /// at its newest window retains 60 s, not 0.
+    /// Per candidate that retains rows, its output interval Δ in ms
+    /// (`asap_cost::output_interval_ms`; a chain's window, the window an
+    /// ingestion-time view maintains, else a second): a store always keeps a
+    /// stored result's newest output whatever its retention, so a selected
+    /// one retains at least Δ, as `plan_cost` charges at least one retained
+    /// output ([`Self::retention_ms_for_need`]). Example: an ingestion-time
+    /// chain of 60 s windows read only at its newest window retains 60 s,
+    /// not 0.
     pub(crate) newest_output_retention_ms: HashMap<PhysicalCandidateId, u64>,
-    /// The least need, in ms, over each execution's costed reads, by
-    /// position in `SelectableExecutions::executions`, at least
-    /// [`Self::newest_output_retention_ms`]
-    /// ([`least_need_ms_per_execution`]).
+    /// The least retention, in ms, over each execution's costed reads
+    /// ([`Self::retention_ms_for_need`] of each), by position in
+    /// `SelectableExecutions::executions` ([`least_need_ms_per_execution`]).
     pub(crate) least_need_ms_per_execution: Vec<Option<u64>>,
     /// The source of each query-time `Scan`: its retention is raw data on
     /// disk, which a plan keeps once per source for the selected scan that
@@ -121,6 +122,18 @@ pub(crate) struct ExecutionCosts {
 }
 
 impl ExecutionCosts {
+    /// What candidate `v` retains, in ms, for a read needing `need_ms`: at
+    /// least its newest output ([`Self::newest_output_retention_ms`]),
+    /// which a store always keeps.
+    ///
+    /// Example: a chain of 60 s windows read at its newest window (need 0)
+    /// retains 60,000 ms; read over the last 5 minutes, 300,000 ms.
+    pub(crate) fn retention_ms_for_need(&self, v: PhysicalCandidateId, need_ms: u64) -> u64 {
+        self.newest_output_retention_ms
+            .get(&v)
+            .map_or(need_ms, |&newest_ms| need_ms.max(newest_ms))
+    }
+
     /// $\pi_v h_v$ of candidate `v` retaining `retention_ms`, per second; 0
     /// for a candidate with no retention cost.
     pub(crate) fn retention_cost_per_second(
@@ -182,19 +195,31 @@ pub(crate) fn execution_costs(
                 .or_insert_with(|| edge_retention_need_ms(physical, entries, edge))
         })
         .collect();
-    // The most any consumer of each candidate that retains rows reads back
-    // ($h_v$ at its largest): `None` when one reads it unbounded.
-    let mut most_read_ms: HashMap<PhysicalCandidateId, Option<u64>> = (0..count)
+    // Δ of each candidate that retains rows, the newest output a store
+    // always keeps (`ExecutionCosts::newest_output_retention_ms`).
+    let newest_output_retention_ms: HashMap<PhysicalCandidateId, u64> = (0..count)
         .filter(|&v| retains_rows[v])
-        .map(|v| (PhysicalCandidateId(v), Some(0)))
+        .map(PhysicalCandidateId)
+        .map(|v| {
+            let node = node_retaining(v, None);
+            let window_ms = match node.output_state.timing {
+                ExecutionTiming::IngestionTime => ingestion_window_ms(physical, v),
+                ExecutionTiming::QueryTime => None,
+            };
+            (v, output_interval_ms(&node.payload, window_ms))
+        })
         .collect();
-    let mut read = |v: PhysicalCandidateId, need_ms: Option<u64>| {
-        if let Some(most) = most_read_ms.get_mut(&v) {
+    // The most any consumer of each candidate that retains rows reads back
+    // ($h_v$ at its largest), at least its newest output: `None` when one
+    // reads it unbounded.
+    let mut most_read_ms: HashMap<PhysicalCandidateId, Option<u64>> = newest_output_retention_ms
+        .iter()
+        .map(|(&v, &newest_ms)| (v, Some(newest_ms)))
+        .collect();
+    for (index, _, need_ms) in selectable.reads_back(&retention_need_ms_per_edge, entries) {
+        if let Some(most) = most_read_ms.get_mut(&executions[index].candidate) {
             *most = most.zip(need_ms).map(|(most, need)| most.max(need));
         }
-    };
-    for (index, _, need_ms) in selectable.reads_back(&retention_need_ms_per_edge, entries) {
-        read(executions[index].candidate, need_ms);
     }
     // How far back a query-time `Scan` reads for the consumer of each edge
     // out of it, in one run (`None`: read whole), once per memo edge.
@@ -347,29 +372,18 @@ pub(crate) fn execution_costs(
         .map(|(index, execution)| (execution.candidate, index))
         .collect();
     // π_v of a candidate retaining rows every consumer reads within a bound:
-    // what one more Δ ms of retention costs, per second retained (Δ the
-    // time between two of its outputs: a chain's window, the window an
-    // ingestion-time view maintains, else a second; a retention is a whole
-    // number of outputs), at its retention's largest; its
-    // whole own cost when it is materialized, its raw data on disk for a
-    // query-time scan (each of its runs reads what it reads at that
-    // retention, ρ_κ c_{κ,v}).
-    // The retention is at least Δ: the newest output is always kept, so a
-    // retention under Δ costs what Δ does (`plan_cost` charges at least
-    // one retained output).
+    // what one more Δ ms of retention (one more output; a retention is a
+    // whole number of outputs) costs, per second retained, at its
+    // retention's largest; its whole own cost when it is materialized, its
+    // raw data on disk for a query-time scan (each of its runs reads what
+    // it reads at that retention, ρ_κ c_{κ,v}).
     let mut retention_cost_per_retained_second = HashMap::new();
-    let mut newest_output_retention_ms = HashMap::new();
     for (&v, &most_read_ms) in &most_read_ms {
         let Some(most_read_ms) = most_read_ms else {
             continue;
         };
-        let window_ms = match nodes[v.0].output_state.timing {
-            ExecutionTiming::IngestionTime => ingestion_window_ms(physical, v),
-            ExecutionTiming::QueryTime => None,
-        };
-        let delta_ms = output_interval_ms(&nodes[v.0].payload, window_ms);
-        let retention_ms = most_read_ms.max(delta_ms);
-        let longer = node_retaining(v, Some(retention_ms + delta_ms));
+        let delta_ms = newest_output_retention_ms[&v];
+        let longer = node_retaining(v, Some(most_read_ms + delta_ms));
         let delta_seconds = ms_to_seconds(delta_ms);
         let per_retained_second = match physical.physical_candidates[v.0]
             .physical_properties
@@ -393,7 +407,6 @@ pub(crate) fn execution_costs(
         };
         if let Some(per_retained_second) = per_retained_second {
             retention_cost_per_retained_second.insert(v, per_retained_second.max(0.0));
-            newest_output_retention_ms.insert(v, delta_ms);
         }
     }
     // Each query-time scan's source and, without $h_v$, the raw data it
@@ -436,12 +449,9 @@ pub(crate) fn execution_costs(
                     .physical_properties
                     .is_across_evaluations(),
             ) {
-                let retention_seconds = ms_to_seconds(
-                    most_read_ms[&v]
-                        .unwrap_or(0)
-                        .max(newest_output_retention_ms[&v]),
-                );
-                own + raw_data - per_retained_second * retention_seconds
+                let retention_ms =
+                    most_read_ms[&v].expect("a candidate with π_v is read within a bound");
+                own + raw_data - per_retained_second * ms_to_seconds(retention_ms)
             } else {
                 own + raw_data
             })
@@ -484,23 +494,18 @@ pub(crate) fn execution_costs(
             Some(with_u_own + with_u_raw_data - own - raw_data + scan_read)
         })
         .collect();
-    let least_need_ms_per_execution = least_need_ms_per_execution(
-        selectable,
-        &per_edge,
-        &retention_need_ms_per_edge,
-        &newest_output_retention_ms,
-        entries,
-    );
-    ExecutionCosts {
+    let mut costs = ExecutionCosts {
         per_execution,
         per_edge,
         retention_cost_per_retained_second,
         retention_need_ms_per_edge,
         newest_output_retention_ms,
-        least_need_ms_per_execution,
+        least_need_ms_per_execution: Vec::new(),
         raw_data_source,
         unbounded_raw_data_on_disk_cost_per_second,
-    }
+    };
+    costs.least_need_ms_per_execution = least_need_ms_per_execution(selectable, &costs, entries);
+    costs
 }
 
 /// $\rho$ of `execution`'s context, how often it runs, from the queries it

@@ -73,7 +73,7 @@ impl ErrorMetricsOfMemo {
             let Some(producer_metric) = self.readout_error_metric(producer) else {
                 return Ok(());
             };
-            return match self.error_metrics_allowed_on_inputs(consumer) {
+            return match self.error_metrics_allowed_on_input_edge(consumer, input) {
                 Some(allowed) => metric_rule(producer_metric, &allowed),
                 None => Ok(()),
             };
@@ -100,7 +100,7 @@ impl ErrorMetricsOfMemo {
         let failure_probability = required.map_or(1.0, |required| required.failure_probability);
         let measured =
             evidence.measured_guarantee(summary_type, parameters, statistic, failure_probability);
-        let allowed = self.error_metrics_allowed_on_inputs(consumer);
+        let allowed = self.error_metrics_allowed_on_input_edge(consumer, input);
         // The theoretical guarantee before its failure-probability check,
         // computed once for both checks below.
         let theoretical = (measured.is_none() && (allowed.is_some() || required.is_some()))

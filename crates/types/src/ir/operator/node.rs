@@ -45,6 +45,7 @@ impl<C> Operator<C> {
         }
     }
 
+    /// `self` with `f` applied to each child, in [`Self::children`] order.
     /// `f` may change the reference type, e.g. from `Rc<OperatorNode>` to a
     /// node id.
     pub fn map_children<D>(&self, f: impl FnMut(&C) -> D) -> Operator<D> {

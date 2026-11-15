@@ -604,3 +604,33 @@ fn the_objective_is_the_plan_cost_when_two_queries_read_one_anchored_group() {
         selected_plan_objective_and_plan_cost_with(&w, models, &CostInputs::default()).1,
     );
 }
+
+/// `q + scalar(count(q))` with `q` = `quantile_over_time(0.99, m[5m])`,
+/// exact, raw data kept: the `+`'s `Project` reads `q` as its child and
+/// the count through `scalar()`. The plan's `Project` keeps `q` as its
+/// child (building it handed the count in as the child, as
+/// `Operator::map_children` mapped the scalar reference first), and
+/// `plan_cost` sizes it by its child, `q`'s 1,000 rows, as the MILP does,
+/// not by the count's one row, whatever order the plan lists its edges in.
+#[test]
+fn the_objective_is_the_plan_cost_on_a_scalar_operand() {
+    let w = workload(&[(
+        "quantile_over_time(0.99, m[5m]) + scalar(count(quantile_over_time(0.99, m[5m])))",
+        60_000,
+        "",
+    )]);
+    let settings = CostInputs::default();
+    let (plan, costs) = selected_plan_objective_and_plan_cost(&w, &settings, true);
+    assert_equal("scalar operand", costs);
+    let entries: Vec<_> = w.query_workload.entries().collect();
+    let data = w.data_workload.clone().unwrap();
+    let mut edges_reversed = plan.clone();
+    edges_reversed.edges.reverse();
+    let cost_of = |plan| {
+        asap_cost::plan_cost(plan, &entries, &data, &settings)
+            .unwrap()
+            .0
+            .cost_per_second
+    };
+    assert_eq!(cost_of(&edges_reversed), cost_of(&plan));
+}

@@ -395,10 +395,12 @@ pub fn context_executions_per_second<'e>(
         // Requests of one span need the input at one start time each;
         // different spans need it at different times of one request.
         Some(AtModifier::Start) => {
-            let mut by_span: BTreeMap<Option<u64>, Vec<&QueryRecurrence>> = BTreeMap::new();
+            // An instant query anchors `@ start()` where a span-0 range
+            // query does.
+            let mut by_span: BTreeMap<u64, Vec<&QueryRecurrence>> = BTreeMap::new();
             for entry in queries {
                 by_span
-                    .entry(entry.range_evaluation.map(|range| range.span_ms))
+                    .entry(entry.range_span_ms())
                     .or_default()
                     .push(&entry.recurrence);
             }

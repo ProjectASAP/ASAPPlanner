@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use super::model::{has_one_reader, selection_cost_per_second, SelectionInputs};
+use super::COST_RELATIVE_TOLERANCE;
 use crate::selectable::QueryId;
 
 /// How many times the greedy plan is rebuilt without an execution that
@@ -52,6 +53,11 @@ pub(crate) fn dearer_than_a_feasible_plan(inputs: &SelectionInputs<'_>) -> Vec<b
             _ => 0.0,
         }
     };
+    // Looser than `COST_RELATIVE_TOLERANCE` on purpose: the bound and each
+    // execution's least cost are sums over many executions, and leaving
+    // out an execution the optimum needs cannot be undone, so an execution
+    // is left out only when it is clearly dearer (by 1e-9 of the bound;
+    // 1e-21/s when the bound is 0).
     let tolerance = 1e-9 * bound.abs().max(1e-12);
     (0..count)
         .map(|index| {
@@ -180,7 +186,9 @@ fn cheapest_trees(inputs: &SelectionInputs<'_>, excluded: &[bool]) -> (Vec<f64>,
                     }
                 }
             }
-            if cost < tree_cost[v] - 1e-12 * cost.abs().max(1e-300) {
+            // Cheaper by more than rounding (the smallest positive
+            // magnitude when the cost is 0).
+            if cost < tree_cost[v] - COST_RELATIVE_TOLERANCE * cost.abs().max(1e-300) {
                 tree_cost[v] = cost;
                 chosen[v] = reads;
                 changed = true;

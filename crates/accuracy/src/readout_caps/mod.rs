@@ -265,10 +265,10 @@ pub(crate) fn caps(
                 for (input, &child) in children.iter().enumerate() {
                     let child_caps = caps[child.0 as usize].get_or_insert_with(HashMap::new);
                     child_caps.entry(metric).or_default();
-                    let factor = contract.error_factor_per_input[input];
                     // An input the output does not depend on (a count's,
                     // β = 0) gets no cap from it.
-                    if factor > 0.0 {
+                    if contract.input_error_reaches_output(input) {
+                        let factor = contract.error_factor_per_input[input];
                         let holds_up_to = contract.linear_bound_holds_up_to_per_input[input]
                             .unwrap_or(f64::INFINITY);
                         for (&query, &cap) in caps_per_query {

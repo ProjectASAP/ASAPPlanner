@@ -2,6 +2,7 @@
 
 use crate::accuracy::AccuracyTarget;
 use crate::ir::operator::AtModifier;
+use crate::stages::EvaluationGrid;
 use serde::{Deserialize, Serialize};
 
 use super::data::validate_rate;
@@ -425,6 +426,17 @@ impl QueryWorkloadEntry {
         self.recurrence
             .evaluation_grid_ms(self.range_evaluation)
             .unwrap_or(1)
+    }
+
+    /// The evaluation grid of the query's evaluation context: every
+    /// [`Self::evaluation_grid_ms`], anchored at the epoch (phase 0).
+    ///
+    /// Example: every 20 s at phase 5 s: `{ period_ms: 5_000, phase_ms: 0 }`.
+    pub fn evaluation_grid(&self) -> EvaluationGrid {
+        EvaluationGrid {
+            period_ms: self.evaluation_grid_ms(),
+            phase_ms: 0,
+        }
     }
 
     /// How far back from a request's end its evaluations reach, in ms: its

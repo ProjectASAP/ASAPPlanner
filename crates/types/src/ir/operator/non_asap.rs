@@ -251,9 +251,13 @@ impl<C> NonASAPOp<C> {
     }
 
     /// Rebuild this operator with `f` applied to every child, including the
-    /// operator nodes referenced from scalar expressions. Every other field
-    /// is cloned. `f` may change the reference type, e.g. from
-    /// `Rc<OperatorNode>` to a node id.
+    /// operator nodes referenced from scalar expressions, in
+    /// [`Self::children`] order (direct inputs first), so a caller may hand
+    /// out replacements by position. Every other field is cloned. `f` may
+    /// change the reference type, e.g. from `Rc<OperatorNode>` to a node id.
+    ///
+    /// Example: `Project { child: q, cols: [q.value + scalar(c)] }` calls `f`
+    /// on `q`, then on `c`.
     pub(crate) fn map_children<D>(&self, mut f: impl FnMut(&C) -> D) -> NonASAPOp<D> {
         use NonASAPOp::*;
         fn map_pred<C, D>(p: &Predicate<C>, f: &mut impl FnMut(&C) -> D) -> Predicate<D> {
@@ -287,13 +291,14 @@ impl<C> NonASAPOp<C> {
             },
             PromqlVectorFromScalar(e) => PromqlVectorFromScalar(e.map_operator_refs(&mut f)),
             Filter { pred, child } => {
-                let pred = map_pred(pred, &mut f);
+                let child = f(child);
                 Filter {
-                    pred,
-                    child: f(child),
+                    pred: map_pred(pred, &mut f),
+                    child,
                 }
             }
             Project { cols, child } => {
+                let child = f(child);
                 let cols = cols
                     .iter()
                     .map(|c| ProjectItem {
@@ -301,10 +306,7 @@ impl<C> NonASAPOp<C> {
                         expr: c.expr.map_operator_refs(&mut f),
                     })
                     .collect();
-                Project {
-                    cols,
-                    child: f(child),
-                }
+                Project { cols, child }
             }
             Aggregate {
                 reduction,
@@ -314,6 +316,7 @@ impl<C> NonASAPOp<C> {
                 having,
                 child,
             } => {
+                let child = f(child);
                 let filters = filters
                     .iter()
                     .map(|p| p.as_ref().map(|p| map_pred(p, &mut f)))
@@ -325,7 +328,7 @@ impl<C> NonASAPOp<C> {
                     output_names: output_names.clone(),
                     filters,
                     having,
-                    child: f(child),
+                    child,
                 }
             }
             Join {
@@ -334,12 +337,12 @@ impl<C> NonASAPOp<C> {
                 left,
                 right,
             } => {
-                let pred = map_pred(pred, &mut f);
+                let (left, right) = (f(left), f(right));
                 Join {
                     kind: kind.clone(),
-                    pred,
-                    left: f(left),
-                    right: f(right),
+                    pred: map_pred(pred, &mut f),
+                    left,
+                    right,
                 }
             }
             SetOp {
@@ -365,11 +368,11 @@ impl<C> NonASAPOp<C> {
                 partition_by,
                 child,
             } => {
-                let keys = map_keys(keys, &mut f);
+                let child = f(child);
                 Sort {
-                    keys,
+                    keys: map_keys(keys, &mut f),
                     partition_by: partition_by.clone(),
-                    child: f(child),
+                    child,
                 }
             }
             Limit {
@@ -403,6 +406,7 @@ impl<C> NonASAPOp<C> {
                 output_name,
                 child,
             } => {
+                let child = f(child);
                 let args = args.iter().map(|e| e.map_operator_refs(&mut f)).collect();
                 let order_by = map_keys(order_by, &mut f);
                 SQLWindowFunc {
@@ -412,7 +416,7 @@ impl<C> NonASAPOp<C> {
                     order_by,
                     frame: frame.clone(),
                     output_name: output_name.clone(),
-                    child: f(child),
+                    child,
                 }
             }
             TimeRange { range, kind, child } => TimeRange {
@@ -425,11 +429,11 @@ impl<C> NonASAPOp<C> {
                 child: f(child),
             },
             PromqlRelabel { dst, value, child } => {
-                let value = value.map_operator_refs(&mut f);
+                let child = f(child);
                 PromqlRelabel {
                     dst: dst.clone(),
-                    value,
-                    child: f(child),
+                    value: value.map_operator_refs(&mut f),
+                    child,
                 }
             }
             PromqlInfoEnrich { selector, child } => PromqlInfoEnrich {

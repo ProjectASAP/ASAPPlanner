@@ -8,8 +8,6 @@
 //! (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
 //! section 5, "Cost and retention").
 
-use std::collections::HashMap;
-
 use asap_types::ir::Operator;
 use asap_types::plan::time_window::{InputTimeAccess, TimeIndexedPlan};
 use asap_types::stages::{
@@ -17,6 +15,7 @@ use asap_types::stages::{
 };
 use asap_types::workload::QueryWorkloadEntry;
 
+use crate::cost::ExecutionCosts;
 use crate::selectable::{Reader, SelectableExecutions};
 
 /// $\operatorname{need}_{\kappa,u,c,i}$: how far back from the evaluation
@@ -55,38 +54,32 @@ pub(crate) fn edge_scan_read_ms(
     read_back(physical, edge, |_| 0)
 }
 
-/// The least need, in ms, over each execution's costed reads
-/// (`SelectableExecutions::reads_back`: an edge out of it `per_edge` costs, or a query output
-/// it may answer), by position in [`SelectableExecutions::executions`];
-/// `None` without a bounded one; at least its candidate's
-/// `newest_output_retention_ms` (Δ, the newest output a store always
-/// keeps). (F) gives a selected execution a use and (R) then retains at
-/// least that: the greedy bound charges it, and the MILP has $h_v \ge$ it
-/// $\cdot x$.
+/// The least retention, in ms, over each execution's costed reads
+/// (`SelectableExecutions::reads_back`: an edge out of it `costs.per_edge`
+/// costs, or a query output it may answer), each read's need at least its
+/// candidate's newest output (`ExecutionCosts::retention_ms_for_need`), by
+/// position in [`SelectableExecutions::executions`]; `None` without a
+/// bounded one. (F) gives a selected execution a use and (R) then retains
+/// at least that: the greedy bound charges it, and the MILP has
+/// $h_v \ge$ it $\cdot x$.
 pub(crate) fn least_need_ms_per_execution(
     selectable: &SelectableExecutions,
-    per_edge: &[Option<f64>],
-    need_ms_per_edge: &[Option<u64>],
-    newest_output_retention_ms: &HashMap<PhysicalCandidateId, u64>,
+    costs: &ExecutionCosts,
     entries: &[QueryWorkloadEntry],
 ) -> Vec<Option<u64>> {
     let mut least_need_ms = vec![None; selectable.executions().len()];
-    for (index, reader, need_ms) in selectable.reads_back(need_ms_per_edge, entries) {
+    for (index, reader, need_ms) in
+        selectable.reads_back(&costs.retention_need_ms_per_edge, entries)
+    {
         let costed = match reader {
-            Reader::Edge(position) => per_edge[position].is_some(),
+            Reader::Edge(position) => costs.per_edge[position].is_some(),
             Reader::Output(_) => true,
         };
         if let (true, Some(need_ms)) = (costed, need_ms) {
+            let need_ms =
+                costs.retention_ms_for_need(selectable.executions()[index].candidate, need_ms);
             let least: &mut Option<u64> = &mut least_need_ms[index];
             *least = Some(least.map_or(need_ms, |least| least.min(need_ms)));
-        }
-    }
-    for (least, execution) in least_need_ms.iter_mut().zip(selectable.executions()) {
-        if let (Some(least), Some(&newest_ms)) = (
-            least.as_mut(),
-            newest_output_retention_ms.get(&execution.candidate),
-        ) {
-            *least = (*least).max(newest_ms);
         }
     }
     least_need_ms

@@ -196,13 +196,7 @@ fn selection_inputs(
         raw_data_source: HashMap::new(),
         unbounded_raw_data_on_disk_cost_per_second: HashMap::new(),
     };
-    costs.least_need_ms_per_execution = least_need_ms_per_execution(
-        &selectable,
-        &costs.per_edge,
-        &costs.retention_need_ms_per_edge,
-        &costs.newest_output_retention_ms,
-        entries,
-    );
+    costs.least_need_ms_per_execution = least_need_ms_per_execution(&selectable, &costs, entries);
     (selectable, costs)
 }
 
@@ -475,13 +469,8 @@ fn a_stored_result_read_at_its_newest_output_retains_one_output() {
             costs
                 .newest_output_retention_ms
                 .insert(PhysicalCandidateId(1), newest_output_ms);
-            costs.least_need_ms_per_execution = least_need_ms_per_execution(
-                &selectable,
-                &costs.per_edge,
-                &costs.retention_need_ms_per_edge,
-                &costs.newest_output_retention_ms,
-                &entries,
-            );
+            costs.least_need_ms_per_execution =
+                least_need_ms_per_execution(&selectable, &costs, &entries);
         }
         solve_selection(&SelectionInputs {
             physical: &physical,
@@ -1083,4 +1072,66 @@ fn a_context_equivalent_to_another_shares_its_variables() {
         .iter()
         .enumerate()
         .all(|(index, &original)| original == index));
+}
+
+/// The same query `m[5m]` every 60 s and every 300 s, each cost in the
+/// 300 s context a fifth of the 60 s one's, except the scan-to-range
+/// edge: a difference of the range's cost through the scan and its own,
+/// as RollupHeavy-8users' flows component computes it,
+/// 2.811002367077395e-9 − 2.8110047226529567e-9 (−2.3556e-15) in the 60 s
+/// context and 5.622004734154791e-10 − 5.622009445305915e-10 (−4.7112e-16)
+/// in the 300 s one. The two differences are in the ratio 0.200000000026,
+/// off by more than 1e-12 of themselves but not of the contexts' costs,
+/// so the contexts are copies.
+#[test]
+fn contexts_whose_small_edge_costs_differ_by_rounding_are_copies() {
+    let mut memo = empty_memo();
+    let m = scan(&mut memo);
+    let last_5m = range(&mut memo, 300, m);
+    query(&mut memo, last_5m, None);
+    query(&mut memo, last_5m, None);
+    let physical = physical(
+        memo,
+        &[
+            (own_candidate(m), NONE),
+            (own_candidate(m), ONE_EVALUATION),
+            (own_candidate(last_5m), NONE),
+        ],
+    );
+    let entries = [every(60_000), every(300_000)];
+    let (selectable, mut costs) = selection_inputs(&physical, &entries, &[1.0, 1.5, 1.0], &[], &[]);
+    let executions = selectable.executions();
+    let every_300s = |index: usize| {
+        matches!(
+            selectable.context(executions[index].context),
+            asap_types::stages::ExecutionContext::Evaluation { grid } if grid.period_ms == 300_000
+        )
+    };
+    for (index, cost) in costs.per_execution.iter_mut().enumerate() {
+        if every_300s(index) {
+            *cost = Ok(cost.clone().unwrap() / 5.0);
+        }
+    }
+    let scan_to_range = edge(&physical, 0, 2);
+    for (position, selectable_edge) in selectable.edges().iter().enumerate() {
+        if selectable_edge.edge == scan_to_range {
+            costs.per_edge[position] = Some(match every_300s(selectable_edge.consumer) {
+                true => 5.622004734154791e-10 - 5.622009445305915e-10,
+                false => 2.811002367077395e-9 - 2.8110047226529567e-9,
+            });
+        }
+    }
+    let shared = copies_in_equivalent_contexts(
+        &SelectionInputs {
+            physical: &physical,
+            entries: &entries,
+            selectable: &selectable,
+            costs: &costs,
+        },
+        &vec![true; executions.len()],
+    );
+    assert_eq!(shared.original_of_query, vec![QueryId(0), QueryId(0)]);
+    for (index, &original) in shared.original_of_execution.iter().enumerate() {
+        assert_eq!(original != index, every_300s(index));
+    }
 }

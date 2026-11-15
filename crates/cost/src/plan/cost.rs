@@ -105,9 +105,18 @@ pub fn plan_cost(
     // usage and cost ([`node_resource_usage_and_cost`]), children first.
     let multipliers = computations(dag, entries, settings.non_repeating_query_horizon_seconds)
         .map_err(|error| (first, error))?;
+    // Each node's producers in its payload's input order (its children,
+    // then the nodes its scalar expressions refer to), whatever order the
+    // DAG lists its edges in: its first producer is its child. Example:
+    // `q + scalar(count(q))` as a `Project` over `q` reads `q` first, even
+    // when the edge from the count is listed first.
     let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
     for e in &dag.edges {
         producers_of.entry(e.consumer).or_default().push(e.producer);
+    }
+    for (id, producers) in &mut producers_of {
+        let inputs = nodes[id].payload.children();
+        producers.sort_by_key(|producer| inputs.iter().position(|&input| input == producer));
     }
     let first_input_of = |id: PhysicalASAPNodeId| {
         let input = producers_of.get(&id)?.first()?;

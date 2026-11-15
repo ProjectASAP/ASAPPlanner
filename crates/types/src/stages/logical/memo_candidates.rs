@@ -4,8 +4,6 @@
 
 use std::collections::BTreeSet;
 
-use crate::plan::materialized_view::RefreshWindow;
-
 use crate::stages::{
     CandidateForMemoGroupId, LogicalEdge, Memo, MemoGroupId, PrunedLogicalCandidate,
 };
@@ -21,19 +19,6 @@ use crate::stages::{
 pub struct EvaluationGrid {
     pub period_ms: u64,
     pub phase_ms: u64,
-}
-
-/// The times a refresh window ends at: every `width_ms`, at `phase_ms`.
-///
-/// Example: `RefreshWindow { width_ms: 300_000, phase_ms: 0 }`, the
-/// refresh of `sum(TimeRange(5m))`, ends every 5 min at phase 0.
-impl From<RefreshWindow> for EvaluationGrid {
-    fn from(window: RefreshWindow) -> Self {
-        EvaluationGrid {
-            period_ms: window.width_ms,
-            phase_ms: window.phase_ms,
-        }
-    }
 }
 
 /// Stage 1, Pass 2's output.
@@ -60,7 +45,9 @@ pub struct LogicalASAPMemoCandidates {
     /// Q0 = `quantile_over_time(0.9, m[5m]) / quantile_over_time(0.5,
     /// m[5m])` and Q1 = the same ratio `> 1`, both relative 0.05: Q0 may
     /// read the DDSketch readouts, while Q1's comparison has no contract,
-    /// so its set holds the ratio group and every group below it. (Both
+    /// so its set holds the ratio group and every group below it, except
+    /// below an input whose error does not reach its consumer's output (a
+    /// `count`'s input: an exact `count(q)` lists the count, not `q`). (Both
     /// list the rows below a sketch build, which has no contract.) A query
     /// whose whole-result failure probability has no per-value one ($n_q$
     /// unknown) also lists each readout group another query gave a level,
@@ -77,7 +64,9 @@ impl LogicalASAPMemoCandidates {
     /// (it has sketch parameters θ) and its group is one the query may read
     /// only exactly ([`Self::exact_only_groups_of_query`]). A readout's own
     /// candidate has no θ, but the sketch states it reads are in the same
-    /// list, as every group below a listed one is.
+    /// list, as every group below a listed one is, except below an input
+    /// whose error does not reach its consumer's output (a `count`'s; a
+    /// readout's state input is not one).
     ///
     /// Example: `quantile_over_time(0.9, m[5m])` at a relative target lists
     /// the quantile and every group below it; its KLL state builds (θ) are

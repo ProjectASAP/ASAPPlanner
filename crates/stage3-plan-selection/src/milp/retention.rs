@@ -96,9 +96,9 @@ pub(crate) fn retention_constraints(
 /// The least $h_v$ (R) allows for a selection, in ms, of each candidate
 /// with a retention cost that `edges` (selected, by position in
 /// `SelectableExecutions::edges`) or `outputs` (the query outputs and the
-/// executions answering them, by position) read, at least its newest
-/// output (`ExecutionCosts::newest_output_retention_ms`): what the MILP's optimum
-/// retains when $\pi_v > 0$, and what the plan retains.
+/// executions answering them, by position) read, each read's need at
+/// least its newest output (`ExecutionCosts::retention_ms_for_need`): what
+/// the MILP's optimum retains when $\pi_v > 0$, and what the plan retains.
 pub(crate) fn least_retention_ms(
     inputs: &SelectionInputs<'_>,
     edges: impl IntoIterator<Item = usize>,
@@ -119,14 +119,9 @@ pub(crate) fn least_retention_ms(
         };
         let v = executions[index].candidate;
         if let (true, Some(need_ms), true) = (selected, need_ms, retaining.contains_key(&v)) {
+            let need_ms = inputs.costs.retention_ms_for_need(v, need_ms);
             let most = retention_ms.entry(v).or_default();
             *most = (*most).max(need_ms);
-        }
-    }
-    // At least the newest output, which a store always keeps.
-    for (v, most) in &mut retention_ms {
-        if let Some(&newest_ms) = inputs.costs.newest_output_retention_ms.get(v) {
-            *most = (*most).max(newest_ms);
         }
     }
     retention_ms

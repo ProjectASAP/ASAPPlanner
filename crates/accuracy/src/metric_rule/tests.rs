@@ -25,12 +25,13 @@ fn allowed_at_output(memo: &Memo, group: MemoGroupId) -> Option<Vec<AccuracyMetr
     error_metrics(memo).error_metrics_allowed_at_output[group.0 as usize].clone()
 }
 
-/// The metrics `consumer` allows on its inputs.
-fn allowed_on_inputs(
+/// The metrics `consumer` allows on its input `input`.
+fn allowed_on_input(
     memo: &Memo,
     consumer: CandidateForMemoGroupId,
+    input: usize,
 ) -> Option<Vec<AccuracyMetric>> {
-    error_metrics(memo).error_metrics_allowed_on_inputs(consumer)
+    error_metrics(memo).error_metrics_allowed_on_input_edge(consumer, input)
 }
 
 /// $\alpha^{\log}$ of the edge from `producer` into input `input` of
@@ -93,7 +94,7 @@ fn a_ratio_reads_no_rank_error() {
     query(&mut memo, ratio, Some(target));
     let relative = Some(vec![AccuracyMetric::Relative]);
     assert_eq!(allowed_at_output(&memo, p99), relative);
-    assert_eq!(allowed_on_inputs(&memo, own_candidate(ratio)), relative);
+    assert_eq!(allowed_on_input(&memo, own_candidate(ratio), 0), relative);
     assert!(matches!(
         edge(&memo, own_candidate(p99), own_candidate(ratio), 0),
         Err(RootPruneReason::MetricRule {
@@ -143,7 +144,7 @@ fn the_metric_rule_cuts_the_readout_edges_and_keeps_the_exact_division() {
     let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::ABSOLUTE);
     query(&mut memo, avg, Some(target));
     let division = own_candidate(ratio);
-    assert_eq!(allowed_on_inputs(&memo, division), Some(vec![]));
+    assert_eq!(allowed_on_input(&memo, division, 0), Some(vec![]));
     let result = edge(&memo, division, own_candidate(sum), 0);
     assert!(result.is_ok(), "{result:?}");
     for input in 0..2 {
@@ -195,7 +196,7 @@ fn a_key_only_filter_keeps_the_ddsketch_readout_admissible() {
     let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
     query(&mut memo, filtered, Some(target));
     assert_eq!(
-        allowed_on_inputs(&memo, own_candidate(filtered)),
+        allowed_on_input(&memo, own_candidate(filtered), 0),
         Some(vec![AccuracyMetric::Relative])
     );
     let result = readout_edge(&memo, &p99.by_algorithm[0], own_candidate(filtered), 0);
@@ -376,4 +377,31 @@ fn a_count_reads_its_input_in_any_metric() {
         assert!(!exact_only.contains(&group), "{group:?} in {exact_only:?}");
     }
     assert_eq!(exact_only.len(), 3, "{exact_only:?}");
+}
+
+/// A `count`'s output does not depend on its input's error (error factor
+/// 0 in every metric), so the metric rule lets its input be off in any
+/// metric, on its edges as in `exact_only_groups_of_query`.
+/// `count(quantile_over_time(0.99, m[5m]))` with a relative target, the
+/// count reading the KLL readout directly: the readout's rank error is not
+/// one the output allows, but its edge into the `count` holds.
+#[test]
+fn a_counts_input_edge_from_a_readout_holds_in_a_metric_its_output_does_not_allow() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let (_, _, p99) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.99, 300);
+    let count = group(
+        &mut memo,
+        Operator::NonASAP(NonASAPOp::Aggregate {
+            child: p99,
+            reduction: Reduction::by(vec![]),
+            measures: vec![AggIntent::Count],
+            output_names: vec!["count".into()],
+            filters: vec![None],
+            having: None,
+        }),
+    );
+    let relative = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
+    query(&mut memo, count, Some(relative));
+    let result = edge(&memo, own_candidate(p99), own_candidate(count), 0);
+    assert!(result.is_ok(), "{result:?}");
 }

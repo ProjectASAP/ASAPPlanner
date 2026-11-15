@@ -336,5 +336,20 @@ pub struct ErrorContract {
     pub linear_bound_holds_up_to_per_input: Vec<Option<f64>>,
 }
 
+impl ErrorContract {
+    /// Whether any of input `input`'s error reaches the output
+    /// ($\beta_{c,i} > 0$). Where it does not, the input may be off in the
+    /// contract's metric whatever the output allows.
+    ///
+    /// Example: `count` outputs how many values it reads, whatever their
+    /// error ($\beta = 0$): false; `sum` passes its input's relative error
+    /// on ($\beta = 1$): true.
+    pub fn input_error_reaches_output(&self, input: usize) -> bool {
+        self.error_factor_per_input
+            .get(input)
+            .is_none_or(|&factor| factor > 0.0)
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -6,9 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use asap_types::accuracy::AccuracyTarget;
-use asap_types::stages::{
-    ExecutionContext, ExecutionContextId, MemoGroupId, PhysicalCandidateId, PhysicalEdgeId,
-};
+use asap_types::stages::{ExecutionContextId, MemoGroupId, PhysicalCandidateId, PhysicalEdgeId};
 
 use super::model::SelectionInputs;
 use super::COST_RELATIVE_TOLERANCE;
@@ -63,16 +61,19 @@ struct ExecutionKey {
     inputs: Vec<Vec<(PhysicalEdgeId, ExecutionInContext, bool)>>,
 }
 
-/// A query's part of a [`ContextKey`]: the executions that may answer each
-/// of its outputs, its exact-only groups, its range-evaluation span and
-/// its accuracy target (by index among the workload's distinct targets,
-/// [`AccuracyTarget`] holding floats: metric, ε, δ and scope all equal).
-type QuerySignature<'a> = (
-    Vec<Vec<ExecutionInContext>>,
-    Option<&'a BTreeSet<MemoGroupId>>,
-    u64,
-    usize,
-);
+/// A query's part of a [`ContextKey`].
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct QuerySignature<'a> {
+    /// Per output, the executions that may answer it.
+    answering_executions_per_output: Vec<Vec<ExecutionInContext>>,
+    /// The groups it may read only exactly.
+    exact_only_groups: Option<&'a BTreeSet<MemoGroupId>>,
+    /// Its range-evaluation span (`QueryWorkloadEntry::range_span_ms`).
+    range_span_ms: u64,
+    /// Its accuracy target, by index among the workload's distinct targets
+    /// ([`AccuracyTarget`] holds floats: metric, ε, δ and scope all equal).
+    accuracy_target_index: usize,
+}
 
 /// Which executions, edges and queries share variables
 /// ([`SharedVariables`]): a root evaluation context (no request anchor)
@@ -84,10 +85,11 @@ type QuerySignature<'a> = (
 /// up with the same output executions, exact-only groups, span and
 /// accuracy target, so the accuracy constraint holds alike in both) and
 /// every cost in one is the same multiple $\alpha$ of the other's, to
-/// [`COST_RELATIVE_TOLERANCE`]. Each query belongs to its own evaluation
-/// context (`SelectableExecutions::evaluation_context`), wherever its
-/// answering executions run. Contexts are bucketed by key, so only the
-/// cost check compares two contexts.
+/// [`COST_RELATIVE_TOLERANCE`] of the copy's largest cost. Each query
+/// belongs to its own evaluation context
+/// (`SelectableExecutions::evaluation_context`), wherever its answering
+/// executions run. Contexts are bucketed by key, so only the cost check
+/// compares two contexts.
 ///
 /// Exact: from an optimal plan, give both contexts the selection of the
 /// one whose own cost $A$ or $B$ is lower, say $A$. The copied context
@@ -95,7 +97,9 @@ type QuerySignature<'a> = (
 /// $r_s$ (each the most of their readers' needs, equal in both copies) do
 /// not grow, and an execution outside them that only the other selection
 /// read is left out at no cost; with $B \le A$ symmetrically. So some
-/// optimum selects alike in both, and sharing their variables keeps it.
+/// optimum selects alike in both, and sharing their variables keeps it,
+/// to the tolerance the costs are compared to (each copied cost within
+/// 1e-12 of the context's largest cost of $\alpha$ times its original).
 ///
 /// Example: the same queries every 60 s and every 300 s (one user each):
 /// the 300 s context's executions cost 1/5 of the 60 s ones' and share
@@ -128,8 +132,10 @@ pub(crate) fn copies_in_equivalent_contexts(
     for (query, answering) in selectable.answering() {
         outputs_of.entry(*query).or_default().push(answering);
     }
+    // Each evaluation context's queries; a query without an output has
+    // none.
     let mut queries_of: BTreeMap<ExecutionContextId, Vec<QueryId>> = BTreeMap::new();
-    for &query in outputs_of.keys() {
+    for query in (0..inputs.entries.len()).map(QueryId) {
         if let Some(context) = selectable.evaluation_context(query) {
             queries_of.entry(context).or_default().push(query);
         }
@@ -138,14 +144,13 @@ pub(crate) fn copies_in_equivalent_contexts(
     // context (a request context), which no copy shares.
     let in_context = |context: ExecutionContextId, index: usize| {
         let execution_context = executions[index].context;
-        match selectable.context(execution_context) {
-            _ if execution_context == context => {
-                position_in_context[index].map(ExecutionInContext::Own)
-            }
-            ExecutionContext::Evaluation { .. } => None,
-            ExecutionContext::IngestionPipeline(_) | ExecutionContext::Materialized(_) => {
-                Some(ExecutionInContext::Shared(index))
-            }
+        if execution_context == context {
+            position_in_context[index].map(ExecutionInContext::Own)
+        } else {
+            selectable
+                .context(execution_context)
+                .is_outside_evaluations()
+                .then_some(ExecutionInContext::Shared(index))
         }
     };
     // Each query's accuracy target, as an index among the distinct ones.
@@ -165,8 +170,10 @@ pub(crate) fn copies_in_equivalent_contexts(
         })
         .collect();
     let signature = |context: ExecutionContextId, query: QueryId| -> Option<QuerySignature<'_>> {
-        let outputs = outputs_of[&query]
-            .iter()
+        let outputs = outputs_of
+            .get(&query)
+            .into_iter()
+            .flatten()
             .map(|answering| {
                 answering
                     .iter()
@@ -174,18 +181,20 @@ pub(crate) fn copies_in_equivalent_contexts(
                     .collect::<Option<Vec<_>>>()
             })
             .collect::<Option<Vec<_>>>()?;
-        Some((
-            outputs,
-            inputs
+        Some(QuerySignature {
+            answering_executions_per_output: outputs,
+            exact_only_groups: inputs
                 .physical
                 .logical_candidates
                 .exact_only_groups_of_query
                 .get(query.0),
-            inputs.entries[query.0].range_span_ms(),
-            target_of_query[query.0],
-        ))
+            range_span_ms: inputs.entries[query.0].range_span_ms(),
+            accuracy_target_index: target_of_query[query.0],
+        })
     };
-    let key_of = |context: ExecutionContextId| -> Option<ContextKey<'_>> {
+    // `context`'s key, and its queries in the order of their signatures in
+    // it.
+    let key_of = |context: ExecutionContextId| -> Option<(ContextKey<'_>, Vec<QueryId>)> {
         let executions = executions_of[&context]
             .iter()
             .map(|&index| {
@@ -218,61 +227,77 @@ pub(crate) fn copies_in_equivalent_contexts(
             .get(&context)
             .into_iter()
             .flatten()
-            .map(|&query| signature(context, query))
+            .map(|&query| Some((signature(context, query)?, query)))
             .collect::<Option<Vec<_>>>()?;
         queries.sort();
-        Some(ContextKey {
-            executions,
-            queries,
-        })
+        let (queries, in_signature_order) = queries.into_iter().unzip();
+        Some((
+            ContextKey {
+                executions,
+                queries,
+            },
+            in_signature_order,
+        ))
     };
-    // Whether every cost of `copy` is the same multiple of `original`'s,
-    // their executions and edges paired in order (equal keys).
+    // Whether every cost of `copy` is the same multiple α of `original`'s,
+    // their executions and edges paired in order (equal keys), to
+    // `COST_RELATIVE_TOLERANCE` of the copy's largest cost, α taken from
+    // that pair. An edge cost is the consumer's cost through one producer
+    // less its own, a small difference of large costs that keeps their
+    // rounding: 2.8110024e-9 − 2.8110047e-9 in a 60 s context and the same
+    // over 5 in a 300 s one are −2.3556e-15 and −4.7112e-16, a ratio of
+    // 0.200000000026, off by far more than 1e-12 of themselves but not of
+    // the context's costs.
     let proportional_costs = |original: ExecutionContextId, copy: ExecutionContextId| {
-        let mut alpha: Option<f64> = None;
-        let mut proportional = |a: f64, b: f64| match (a == 0.0, b == 0.0) {
-            (true, true) => true,
-            (false, false) => {
-                let ratio = *alpha.get_or_insert(b / a);
-                (b - ratio * a).abs() <= COST_RELATIVE_TOLERANCE * b.abs()
+        let mut pairs: Vec<(f64, f64)> = Vec::new();
+        for (&a, &b) in executions_of[&original].iter().zip(&executions_of[&copy]) {
+            if let (Ok(cost_a), Ok(cost_b)) = (&costs.per_execution[a], &costs.per_execution[b]) {
+                pairs.push((*cost_a, *cost_b));
             }
-            _ => false,
+            for input in 0..selectable.input_count(a) {
+                for (&edge_a, &edge_b) in selectable
+                    .edges_into(a, input)
+                    .iter()
+                    .zip(selectable.edges_into(b, input))
+                {
+                    if let (Some(cost_a), Some(cost_b)) =
+                        (costs.per_edge[edge_a], costs.per_edge[edge_b])
+                    {
+                        pairs.push((cost_a, cost_b));
+                    }
+                }
+            }
+        }
+        let Some(&(largest_a, largest_b)) =
+            pairs.iter().max_by(|x, y| x.1.abs().total_cmp(&y.1.abs()))
+        else {
+            return true;
         };
-        executions_of[&original]
+        if largest_a == 0.0 || largest_b == 0.0 {
+            return pairs.iter().all(|&(a, b)| a == 0.0 && b == 0.0);
+        }
+        let alpha = largest_b / largest_a;
+        let tolerance = COST_RELATIVE_TOLERANCE * largest_b.abs();
+        pairs
             .iter()
-            .zip(&executions_of[&copy])
-            .all(|(&a, &b)| {
-                let own = match (&costs.per_execution[a], &costs.per_execution[b]) {
-                    (Ok(cost_a), Ok(cost_b)) => proportional(*cost_a, *cost_b),
-                    _ => true,
-                };
-                own && (0..selectable.input_count(a)).all(|input| {
-                    selectable
-                        .edges_into(a, input)
-                        .iter()
-                        .zip(selectable.edges_into(b, input))
-                        .all(|(&edge_a, &edge_b)| {
-                            match (costs.per_edge[edge_a], costs.per_edge[edge_b]) {
-                                (Some(cost_a), Some(cost_b)) => proportional(cost_a, cost_b),
-                                _ => true,
-                            }
-                        })
-                })
-            })
+            .all(|&(a, b)| (b - alpha * a).abs() <= tolerance)
     };
-    let mut originals_of_key: HashMap<ContextKey<'_>, Vec<ExecutionContextId>> = HashMap::new();
+    // Per key, the originals, each with its queries in signature order.
+    let mut originals_of_key: HashMap<ContextKey<'_>, Vec<(ExecutionContextId, Vec<QueryId>)>> =
+        HashMap::new();
     for &copy in executions_of.keys() {
-        let Some(key) = key_of(copy) else {
+        let Some((key, copy_queries)) = key_of(copy) else {
             continue;
         };
         let originals = originals_of_key.entry(key).or_default();
-        let Some(&original) = originals
+        let Some((original, original_queries)) = originals
             .iter()
-            .find(|&&original| proportional_costs(original, copy))
+            .find(|(original, _)| proportional_costs(*original, copy))
         else {
-            originals.push(copy);
+            originals.push((copy, copy_queries));
             continue;
         };
+        let original = *original;
         for (&a, &b) in executions_of[&original].iter().zip(&executions_of[&copy]) {
             shared.original_of_execution[b] = a;
             for input in 0..selectable.input_count(b) {
@@ -293,17 +318,7 @@ pub(crate) fn copies_in_equivalent_contexts(
             );
         }
         // Equal keys: the queries pair up in signature order.
-        let by_signature = |context: ExecutionContextId| {
-            let mut queries: Vec<(QuerySignature<'_>, QueryId)> = queries_of
-                .get(&context)
-                .into_iter()
-                .flatten()
-                .map(|&query| (signature(context, query).expect("keyed"), query))
-                .collect();
-            queries.sort();
-            queries
-        };
-        for ((_, a), (_, b)) in by_signature(original).into_iter().zip(by_signature(copy)) {
+        for (&a, b) in original_queries.iter().zip(copy_queries) {
             shared.original_of_query[b.0] = a;
         }
     }

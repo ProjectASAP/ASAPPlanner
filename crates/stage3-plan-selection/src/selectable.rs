@@ -6,7 +6,7 @@
 //! output the executions that may answer it ([`SelectableExecutions::new`]).
 //!
 //! - A query is evaluated in the evaluation context of its grid
-//!   ([`evaluation_grid`]); queries on one grid share it, a range query's
+//!   (`QueryWorkloadEntry::evaluation_grid`); queries on one grid share it, a range query's
 //!   steps included.
 //! - A candidate with $\ell$ = None or `OneEvaluation` runs once per context
 //!   that selects it ($x_{\kappa,v}$), the context of its consumer; at
@@ -114,7 +114,7 @@ pub(crate) struct SelectableExecutions {
     /// answer it: $z_{q,v}$ exists only for them.
     answering: Vec<(QueryId, Vec<usize>)>,
     /// Per query, by [`QueryId`], the evaluation context it is evaluated
-    /// in: `Evaluation { grid: evaluation_grid(entry) }`, no request
+    /// in: `Evaluation { grid: entry.evaluation_grid() }`, no request
     /// anchor; `None` for a query with no output reference. Its answering
     /// executions may run elsewhere (an `AcrossEvaluations` one in its own
     /// `Materialized(v)`), so this is not read off them.
@@ -155,7 +155,7 @@ impl SelectableExecutions {
         for &(query, group) in outputs {
             let context = selectable.context_id(
                 ExecutionContext::Evaluation {
-                    grid: evaluation_grid(&entries[query.0]),
+                    grid: entries[query.0].evaluation_grid(),
                 },
                 None,
             );
@@ -493,13 +493,4 @@ fn reads_of_groups(
         |_| false,
         entries,
     )
-}
-
-/// The evaluation grid of `entry`'s query, the grid of its context
-/// (`QueryWorkloadEntry::evaluation_grid_ms`), anchored at the epoch.
-pub(crate) fn evaluation_grid(entry: &QueryWorkloadEntry) -> EvaluationGrid {
-    EvaluationGrid {
-        period_ms: entry.evaluation_grid_ms(),
-        phase_ms: 0,
-    }
 }
