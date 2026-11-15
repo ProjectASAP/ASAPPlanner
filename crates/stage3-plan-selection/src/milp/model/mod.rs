@@ -28,7 +28,8 @@ use asap_types::ir::operator::Source;
 use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId};
 use asap_types::workload::QueryWorkloadEntry;
 
-use super::dominance::{copies_in_equivalent_contexts, dominated_by_one_evaluation_twin};
+use super::dominance::dominated_by_one_evaluation_twin;
+use super::equivalent_contexts::{copies_in_equivalent_contexts, SharedVariables};
 use super::exact_only::{exact_only_constraints, exact_only_variables};
 use super::graph::Components;
 use super::retention::{least_retention_ms, retention_constraints, retention_variables};
@@ -90,8 +91,11 @@ fn selection_variables(
     problem: &mut ProblemVariables,
 ) -> SelectionVariables {
     let selectable = inputs.selectable;
-    let (original_of_execution, original_of_edge, original_of_query) =
-        copies_in_equivalent_contexts(inputs, kept);
+    let SharedVariables {
+        original_of_execution,
+        original_of_edge,
+        original_of_query,
+    } = copies_in_equivalent_contexts(inputs, kept);
     let mut x: Vec<Variable> = Vec::with_capacity(kept.len());
     for (index, &kept) in kept.iter().enumerate() {
         let variable = match (original_of_execution[index], kept) {
@@ -117,9 +121,25 @@ fn selection_variables(
         }
     }
     let mut z = BTreeMap::new();
+    #[cfg(debug_assertions)]
+    let answering_pairs: std::collections::BTreeSet<(QueryId, usize)> = selectable
+        .answering()
+        .iter()
+        .flat_map(|(query, executions)| {
+            executions.iter().map(move |&execution| (*query, execution))
+        })
+        .collect();
     for (query, executions) in selectable.answering() {
         for &execution in executions {
             let original = (original_of_query[query.0], original_of_execution[execution]);
+            // A shared z is that of a real (query, answering execution)
+            // pair: a copy's query pairs with an original query of the
+            // same output executions.
+            #[cfg(debug_assertions)]
+            debug_assert!(
+                answering_pairs.contains(&original),
+                "z of {query:?} at execution {execution} shares {original:?}, not an answering pair"
+            );
             let variable = *z
                 .entry(original)
                 .or_insert_with(|| problem.add(variable().binary()));

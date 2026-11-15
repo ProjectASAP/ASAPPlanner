@@ -97,12 +97,15 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
 
 /// o11y q21's shape, `sum(rate(m[5m] offset 1h))` over a chain of 60 s
 /// windows: a `TimeShift` by 1 h between the chain and the 5m
-/// `TimeRange`, or above the `TimeRange`, changes nothing. The range
-/// selects five windows of 1000 states, and the merge over them reads
-/// 5000 states into 1000, as with no shift (it read 1000, one window).
+/// `TimeRange`, or above the `TimeRange`, changes nothing; nor does a
+/// `Filter` or a `Project`, which keep each row's window
+/// (`Operator::keeps_input_window`). The range selects five windows of
+/// 1000 states, and the merge over them reads 5000 states into 1000, as
+/// with nothing between (it read 1000, one window).
 #[test]
-fn a_time_shift_over_a_chain_or_its_windows_selects_what_the_range_does() {
+fn an_operator_keeping_its_input_window_over_a_chain_or_its_windows_selects_what_the_range_does() {
     use asap_types::ir::operator::TimeShift;
+    use asap_types::ir::scalar::{Predicate, ProjectItem, ScalarExpr, ScalarValue};
     let settings = CostInputs::default();
     let data = DataWorkload::default();
     let chain = node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -118,6 +121,17 @@ fn a_time_shift_over_a_chain_or_its_windows_selects_what_the_range_does() {
             offset_ms: 3_600_000,
             at: None,
         },
+        child: 0,
+    }));
+    let filter = node(Payload::NonASAP(NonASAPOp::Filter {
+        pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
+        child: 0,
+    }));
+    let project = node(Payload::NonASAP(NonASAPOp::Project {
+        cols: vec![ProjectItem {
+            alias: None,
+            expr: ScalarExpr::Column(0),
+        }],
         child: 0,
     }));
     let range = node(Payload::NonASAP(NonASAPOp::TimeRange {
@@ -162,8 +176,10 @@ fn a_time_shift_over_a_chain_or_its_windows_selects_what_the_range_does() {
         "{}",
         direct.0
     );
-    for path in [[&shift, &range], [&range, &shift]] {
-        assert_eq!(merge_over(&path), direct);
+    for keeping in [&shift, &filter, &project] {
+        for path in [[keeping, &range], [&range, keeping]] {
+            assert_eq!(merge_over(&path), direct, "{:?}", keeping.payload);
+        }
     }
 }
 

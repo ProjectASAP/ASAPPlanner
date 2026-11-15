@@ -22,10 +22,10 @@ pub use logical::{
     ValueSign,
 };
 pub use physical::{
-    anchor_is_evaluation_time, output_references, producer_satisfies_physical_requirements,
-    queries_of_context, query_reads, ExecutionContext, ExecutionContextId, Lifetime,
-    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalEdge,
-    PhysicalEdgeId, PhysicalProperties, PhysicalPropertiesError, StorageMedium,
+    anchor_is_evaluation_time, producer_satisfies_physical_requirements, queries_of_context,
+    query_reads, ExecutionContext, ExecutionContextId, Lifetime, PhysicalASAPMemoCandidates,
+    PhysicalCandidate, PhysicalCandidateId, PhysicalEdge, PhysicalEdgeId, PhysicalProperties,
+    PhysicalPropertiesError, StorageMedium,
 };
 pub use pruning::{
     PruneCause, PruneReason, PrunedCandidate, PrunedLogicalCandidate, RootPruneReason,

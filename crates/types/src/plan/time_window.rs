@@ -7,8 +7,8 @@
 //! 2. [`InputTimeAccess`]: how one node reads its time-indexed input,
 //!    which rows ([`InputRows`]) and how much earlier its output rows are
 //!    than those ([`InputTimeAccess::shifts_back_ms`]).
-//! 3. [`TimeIndexedPlan`]: a plan the walks run over (plan nodes, Stage 3
-//!    candidates or executor nodes): each node's readers, inputs, input
+//! 3. [`TimeIndexedPlan`]: a plan the walks run over (plan nodes, Stage 2's
+//!    output `PhysicalASAPMemoCandidates` or executor nodes): each node's readers, inputs, input
 //!    time access and operator, and which nodes are raw data.
 //! 4. The walks: up from a time-indexed producer (raw data, a chain,
 //!    results stored per evaluation time) through its readers, the window
@@ -158,8 +158,8 @@ impl InputTimeAccess {
     }
 }
 
-/// A plan the time walks run over: plan nodes, Stage 3 candidates or
-/// executor nodes.
+/// A plan the time walks run over: plan nodes, Stage 2's output
+/// (`PhysicalASAPMemoCandidates`) or executor nodes.
 pub trait TimeIndexedPlan {
     type Node: Copy + Ord;
     /// The child type of the operators it holds.
@@ -287,9 +287,9 @@ pub fn windows_readers_need<P: TimeIndexedPlan>(
 
 /// The sum of the offsets of the `TimeShift`s directly below `node`, each
 /// the input of the node above it. Over a plan each of these nodes has one
-/// input; over Stage 3's candidates its inputs are the alternative
-/// producers of its one input, and every path down must give the same
-/// sum. `None` when one has an `@` anchor, the paths disagree, or the sum
+/// input; over Stage 2's output (`PhysicalASAPMemoCandidates`) its inputs
+/// are the alternative producers of its one input, and every path down
+/// must give the same sum. `None` when one has an `@` anchor, the paths disagree, or the sum
 /// is negative or overflows.
 ///
 /// Example: `TimeRange(5m)` over `TimeShift(1m)` over `TimeShift(1h)`:

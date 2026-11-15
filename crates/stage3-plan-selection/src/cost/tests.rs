@@ -5,7 +5,7 @@ use std::time::Duration;
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::{ASAPOp, TimeRangeKind};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::stages::{
     CandidateForMemoGroupId, LogicalASAPMemoCandidates, PhysicalCandidate, PhysicalEdge,
     PhysicalProperties, StorageMedium,

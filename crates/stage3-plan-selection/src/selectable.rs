@@ -45,12 +45,6 @@ use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct QueryId(pub usize);
 
-/// How far back a query reads the output it reads directly: its
-/// range-evaluation span (0 without one).
-fn output_retention_need_ms(entry: &QueryWorkloadEntry) -> u64 {
-    entry.range_evaluation.map_or(0, |range| range.span_ms)
-}
-
 /// What reads an execution's rows back ([`SelectableExecutions::reads_back`]): a selectable edge
 /// out of it, by position in [`SelectableExecutions::edges`], or a query
 /// output it may answer.
@@ -119,6 +113,15 @@ pub(crate) struct SelectableExecutions {
     /// `Memo::output_groups` order, with the executions, by position, that may
     /// answer it: $z_{q,v}$ exists only for them.
     answering: Vec<(QueryId, Vec<usize>)>,
+    /// Per query, by [`QueryId`], the evaluation context it is evaluated
+    /// in: `Evaluation { grid: evaluation_grid(entry) }`, no request
+    /// anchor; `None` for a query with no output reference. Its answering
+    /// executions may run elsewhere (an `AcrossEvaluations` one in its own
+    /// `Materialized(v)`), so this is not read off them.
+    ///
+    /// Example: a query every 60 s is evaluated in the context of grid
+    /// 60 s at phase 0.
+    evaluation_context_of_query: Vec<Option<ExecutionContextId>>,
 }
 
 impl SelectableExecutions {
@@ -144,6 +147,7 @@ impl SelectableExecutions {
             edges_into: Vec::new(),
             edges_out_of: Vec::new(),
             answering: Vec::new(),
+            evaluation_context_of_query: vec![None; entries.len()],
         };
         let mut reached: BTreeSet<Execution> = BTreeSet::new();
         let mut pending: Vec<Execution> = Vec::new();
@@ -155,6 +159,7 @@ impl SelectableExecutions {
                 },
                 None,
             );
+            selectable.evaluation_context_of_query[query.0] = Some(context);
             let mut executions = Vec::new();
             for (v, candidate) in physical.physical_candidates.iter().enumerate() {
                 if candidate.logical_candidate_id.group != group
@@ -359,6 +364,24 @@ impl SelectableExecutions {
         }
     }
 
+    /// The evaluation context query `query` is evaluated in
+    /// ([`Self::evaluation_context_of_query`]); `None` for a query with no
+    /// output reference.
+    pub(crate) fn evaluation_context(&self, query: QueryId) -> Option<ExecutionContextId> {
+        self.evaluation_context_of_query
+            .get(query.0)
+            .copied()
+            .flatten()
+    }
+
+    /// Whether the context with id `id` is a root evaluation context: a
+    /// query's own (`Evaluation`, no request anchor), not a request
+    /// context, `Materialized(v)` or an ingestion pipeline.
+    pub(crate) fn is_root_evaluation_context(&self, id: ExecutionContextId) -> bool {
+        matches!(self.contexts[id.0], ExecutionContext::Evaluation { .. })
+            && self.request_anchor_of_context[id.0].is_none()
+    }
+
     /// The context with id `id`.
     pub(crate) fn context(&self, id: ExecutionContextId) -> ExecutionContext {
         self.contexts[id.0]
@@ -416,7 +439,7 @@ impl SelectableExecutions {
                 |(position, (edge, &need_ms))| (edge.producer, Reader::Edge(position), need_ms),
             );
         let outputs = self.answering().iter().flat_map(move |(query, answering)| {
-            let need_ms = output_retention_need_ms(&entries[query.0]);
+            let need_ms = entries[query.0].range_span_ms();
             answering
                 .iter()
                 .map(move |&index| (index, Reader::Output(*query), Some(need_ms)))

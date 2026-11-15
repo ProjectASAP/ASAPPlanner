@@ -4,15 +4,36 @@
 
 use std::collections::BTreeSet;
 
+use crate::plan::materialized_view::RefreshWindow;
+
 use crate::stages::{
     CandidateForMemoGroupId, LogicalEdge, Memo, MemoGroupId, PrunedLogicalCandidate,
 };
 
-/// The evaluation times `phase_ms + k · period_ms`.
+/// The times `phase_ms + k · period_ms`: the evaluation times of a
+/// context, or the times a result materialized across evaluations is
+/// stored at (`PhysicalASAPMemoCandidates::stored_times`).
+///
+/// Example: a query every 60 s is evaluated on `{ period_ms: 60_000,
+/// phase_ms: 0 }`; a chain of 60 s windows over `TimeShift(30s)` is stored
+/// on `{ period_ms: 60_000, phase_ms: 30_000 }`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EvaluationGrid {
     pub period_ms: u64,
     pub phase_ms: u64,
+}
+
+/// The times a refresh window ends at: every `width_ms`, at `phase_ms`.
+///
+/// Example: `RefreshWindow { width_ms: 300_000, phase_ms: 0 }`, the
+/// refresh of `sum(TimeRange(5m))`, ends every 5 min at phase 0.
+impl From<RefreshWindow> for EvaluationGrid {
+    fn from(window: RefreshWindow) -> Self {
+        EvaluationGrid {
+            period_ms: window.width_ms,
+            phase_ms: window.phase_ms,
+        }
+    }
 }
 
 /// Stage 1, Pass 2's output.
@@ -71,25 +92,5 @@ impl LogicalASAPMemoCandidates {
                 .logical_properties
                 .parameters()
                 .is_some()
-    }
-
-    /// The times `candidate` is stored at when materialized across
-    /// evaluations, on its own schedule: every window end of a chain (its
-    /// width at phase 0), else its group's evaluation grid
-    /// ([`Self::evaluation_grid_of_group`]); `None` when neither is known.
-    pub fn own_schedule(&self, candidate: CandidateForMemoGroupId) -> Option<EvaluationGrid> {
-        match self
-            .memo
-            .candidate(candidate)
-            .expression
-            .operator
-            .chain_tumbling_window_width_ms()
-        {
-            Some(width_ms) => Some(EvaluationGrid {
-                period_ms: width_ms,
-                phase_ms: 0,
-            }),
-            None => self.evaluation_grid_of_group[candidate.group.0 as usize],
-        }
     }
 }

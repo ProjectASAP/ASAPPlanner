@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{DurationMs, WorkloadError};
 
+/// One second, in ms: the unit of every per-second rate
+/// ([`DataArrival::rows_per_second`]). An ingestion-time node runs over
+/// the rows arriving in one second, and an ingestion-time view that
+/// maintains no window is refreshed once per second.
+pub const ONE_SECOND_MS: u64 = 1_000;
+
 /// How the queried data arrives: already stored, still arriving, or both.
 /// This is independent of whether queries repeat.
 ///
