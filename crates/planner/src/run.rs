@@ -17,7 +17,7 @@ use asap_types::ir::schema::series_identity::with_promql_series_identity;
 use asap_types::ir::QueryRoot;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::{LogicalASAPMemoCandidates, Memo, PhysicalASAPMemoCandidates};
-use asap_types::workload::{DataWorkload, QueryLanguage, QueryWorkloadEntry};
+use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::models::PlanningModels;
 use crate::pass::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput};
@@ -169,12 +169,13 @@ fn elapsed_ms(started: Instant) -> f64 {
 }
 
 /// The planner pipeline behind the optimization-pass interface: the
-/// workload's roots in entry order, PromQL roots with each series' full
-/// identity as a column (the row representation per-series state needs at
-/// runtime; a root with no such representation is planned over its labels
-/// alone), through [`run_planning`] with every entry's accuracy target. The
-/// output is the plan Stage 3 built; its `Selection` report is
-/// [`run_planning`]'s.
+/// workload's roots in entry order, those of a time-series language
+/// ([`asap_types::workload::QueryLanguage::has_series_identity`]: PromQL and
+/// MetricsQL) with each series' full identity as a column (the row
+/// representation per-series state needs at runtime; a root with no such
+/// representation is planned over its labels alone), through
+/// [`run_planning`] with every entry's accuracy target. The output is the
+/// plan Stage 3 built; its `Selection` report is [`run_planning`]'s.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Stage1ToStage3Pass;
 
@@ -185,13 +186,13 @@ impl OptimizationPass for Stage1ToStage3Pass {
 
     fn optimize(&self, input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
         let workload = input.workload;
-        let promql = workload.query_workload().language == QueryLanguage::PromQL;
+        let series_identity = workload.query_workload().language.has_series_identity();
         let mut roots: Vec<(usize, QueryRoot)> = workload
             .operator_indices()
             .iter()
             .zip(workload.exprs())
             .map(|(&index, node)| {
-                let node = match promql {
+                let node = match series_identity {
                     true => with_promql_series_identity(node).unwrap_or_else(|_| Rc::clone(node)),
                     false => Rc::clone(node),
                 };
