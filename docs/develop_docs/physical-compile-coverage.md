@@ -113,14 +113,16 @@ Totals after this change: 19 Supported, 5 Partial, 5 Missing, 2 Backend.
 
 | Row | Change |
 |---|---|
-| 1 | Vector-vector arithmetic with one-to-one matching, `on`, and `ignoring`. Each side is reduced to its matching labels, then matched on equal label sets. A duplicate match group is an error, as in Prometheus. The result drops `__name__`. `without` aggregation. `irate`, `idelta`, `changes`, `resets`, `last_over_time`, and exact `quantile_over_time`. `@ <timestamp>` on selectors. Still Partial. |
+| 1 | Vector-vector arithmetic with one-to-one matching, `on`, and `ignoring`. Each side is reduced to its matching labels, then matched on equal label sets. A duplicate match group is an error, as in Prometheus. The result drops `__name__`. `irate`, `idelta`, `changes`, `resets`, `last_over_time`, and exact `quantile_over_time`. `@ <timestamp>` on selectors. Still Partial. |
 | 11 | The range functions above, over raw selector rows. |
 | 12 | `@ <timestamp>` on subqueries anchors the step grid. An inner selector's `@` pins every step. Still Partial. |
 
 `@` fixes the instant a window ends at, before `offset`; the output keeps the
 query's evaluation time. The raw rows must cover the window at that instant.
-Vector matching and `without` rewrite the series identity, so their results
-already lack `__name__`. Other results keep it; the query adapter still drops
+Vector matching rewrites the series identity, so its results already lack
+`__name__`. (This section once listed `without` aggregation too, but
+`compile` refused it with "grouping without requires resolved label
+columns"; it is covered in the reduce aggregates section below.) Other results keep it; the query adapter still drops
 it. (Range functions drop it too since the comparison change below.)
 
 Totals are unchanged: 19 Supported, 5 Partial, 5 Missing, 2 Backend.
@@ -201,6 +203,16 @@ the outer aggregate looks for a value column named `value`, while the
 quantile's is named `histogram_quantile`. Both are tracked in issue #911.
 
 Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
+
+## Covered by exact reduce aggregates
+
+| Row | Change |
+|---|---|
+| 1 | PromQL `stddev`, `stdvar`, `group` and `count_values`, with `by` or `without`. `stddev`/`stdvar` use Welford's update, as Prometheus does: `stddev by (job) (m)` over job `a`'s 1, 2 and 4 is the square root of 14/9. `group` is 1 per group. `count_values("v", m)` writes each value as Go's `FormatFloat(v, 'f', -1, 64)` does (`0.30000000000000004`, `1000000000000000000000`, `NaN`, `+Inf`), and its label replaces a grouping or kept label of that name, as in Prometheus. Still Partial. |
+| 2 | `without` grouping over the series identity: `sum without (instance) (m)` groups by every label but `instance` and `__name__`, so `{job=a, instance=1, zone=z}` answers as `{job=a, zone=z}`. The IR marks that kept identity as computed, not copied. A ranking (`topk`, `Sort`, `Limit`) partitioned `without` over the identity is refused, since it keeps each row's labels. SQL `STDDEV`, `STDDEV_SAMP`, `STDDEV_POP`, `VAR_SAMP`, `VAR_POP` and `corr` over Float64 or Int64 columns: NULL for fewer than two values (sample forms) or none (population forms), `corr` NULL for a constant input. |
+| 3 | An exact `topk`, `Aggregate{Reduce, [TopK]}`, lowers to a `Sort` that keeps the first k rows per partition (value descending, NULLs and NaN last; `fetch: Some(k)`, a bounded heap of k rows per partition) and a `Project` of the ranked rows. The current-series top-k (row 21) lowers to the same sort. `topk(2, sum by (job) (rate(c[5m])))` answers the two largest job sums with their jobs; `topk by (job) (1, m)` keeps each series' full labels, `__name__` included. |
+
+Totals are unchanged: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 
 ## Remaining
 

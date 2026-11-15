@@ -190,6 +190,7 @@ fn sort_direction_null_placement_and_ties() {
                 nulls_first,
             }],
             vec![],
+            None,
         )
         .unwrap();
         let result = unary(
@@ -205,6 +206,108 @@ fn sort_direction_null_placement_and_ties() {
             })
             .collect::<Vec<_>>();
         assert_eq!(ids, expected);
+    }
+}
+
+// A sort that keeps the first `fetch` rows of each group answers the same
+// rows, in the same order, as a full sort and a per-group limit: ties in
+// input order, NaN after every number, NULLs where the key puts them, also
+// across batches and with fewer rows than `fetch` in a group.
+#[test]
+fn sort_with_fetch_equals_sort_then_limit() {
+    let input = schema(&[
+        ("g", DataType::Int64, false),
+        ("v", DataType::Float64, true),
+        ("id", DataType::Int64, false),
+    ]);
+    let values = [
+        Some(3.),
+        Some(f64::NAN),
+        None,
+        Some(3.),
+        Some(1.),
+        Some(f64::INFINITY),
+        Some(3.),
+        Some(-0.),
+        Some(0.),
+        Some(f64::NAN),
+        Some(2.),
+        None,
+        Some(3.),
+        Some(-1.),
+    ];
+    // Groups 0 and 1 hold six or seven rows; group 2 holds one.
+    let rows: Vec<Vec<Value>> = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let group = if i == 13 { 2 } else { i as i64 % 2 };
+            vec![
+                Value::Int64(group),
+                v.map_or(Value::Null, Value::Float64),
+                Value::Int64(i as i64),
+            ]
+        })
+        .collect();
+    let batches = || {
+        vec![
+            rows[..5].to_vec(),
+            vec![],
+            rows[5..9].to_vec(),
+            rows[9..].to_vec(),
+        ]
+    };
+    let ids = |rows: Vec<Vec<Value>>| -> Vec<i64> {
+        rows.iter()
+            .map(|row| match row[2] {
+                Value::Int64(id) => id,
+                _ => unreachable!(),
+            })
+            .collect()
+    };
+    for groups in [vec![], vec![0]] {
+        for (descending, nulls_first) in
+            [(true, false), (true, true), (false, false), (false, true)]
+        {
+            let key = vec![SortKey {
+                column: 1,
+                descending,
+                nulls_first,
+            }];
+            for fetch in [0, 1, 2, 3, 8] {
+                let fetched = unary(
+                    input.clone(),
+                    batches(),
+                    Operator::sort(input.clone(), key.clone(), groups.clone(), Some(fetch))
+                        .unwrap(),
+                );
+                let mut dag = PhysicalDAG::default();
+                let source = batches()
+                    .into_iter()
+                    .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
+                    .collect();
+                dag.add(0, vec![], Operator::source(input.clone(), source).unwrap())
+                    .unwrap();
+                dag.add(
+                    1,
+                    vec![0],
+                    Operator::sort(input.clone(), key.clone(), groups.clone(), None).unwrap(),
+                )
+                .unwrap();
+                dag.add(
+                    2,
+                    vec![1],
+                    Operator::limit(input.clone(), fetch, 0, groups.clone()).unwrap(),
+                )
+                .unwrap();
+                let limited = collect(&dag, 2);
+                assert_eq!(
+                    ids(fetched),
+                    ids(limited),
+                    "groups {groups:?}, descending {descending}, nulls first {nulls_first}, fetch {fetch}"
+                );
+            }
+        }
     }
 }
 

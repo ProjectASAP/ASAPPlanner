@@ -194,7 +194,7 @@ fn sorting_then_limiting_stored_tumbling_windows_does_not_charge_their_sketches(
     dag.add(
         1,
         vec![0],
-        Operator::sort(schema.clone(), vec![key], vec![]).unwrap(),
+        Operator::sort(schema.clone(), vec![key], vec![], None).unwrap(),
     )
     .unwrap();
     dag.add(2, vec![1], Operator::limit(schema, 980, 0, vec![]).unwrap())

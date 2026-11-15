@@ -120,3 +120,67 @@ pub fn raw_data_store(
     }
     store
 }
+
+/// One raw data sample: every label of its series (`__name__` included),
+/// its time and value.
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct RawDataSample {
+    pub labels: std::collections::BTreeMap<String, String>,
+    pub timestamp_ms: i64,
+    pub value: f64,
+}
+
+/// `pairs` as a label set: `labels(&[("job", "a")])` is `{job="a"}`.
+#[allow(dead_code)]
+pub fn labels(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
+/// Run `root`, lowered with its series identity
+/// (`promql_rows::with_series_identity`), at query time
+/// `evaluation_time_ms` over `samples`, bound at each of its `Scan`s as a
+/// runtime binds them: the root's batches.
+#[allow(dead_code)]
+pub fn execute_series(
+    root: &std::rc::Rc<asap_types::ir::OperatorNode>,
+    samples: &[RawDataSample],
+    evaluation_time_ms: i64,
+) -> Vec<Batch> {
+    use asap_executor::physical_planner::{compile, promql_rows};
+    let dag = asap_types::test_support::forwarders::physical_asap_dag_at_query_time(root).unwrap();
+    let store = raw_data_store(&dag, |_, schema| {
+        samples
+            .iter()
+            .map(|s| promql_rows::series_row(schema, &s.labels, s.timestamp_ms, s.value).unwrap())
+            .collect()
+    });
+    let roots = [dag.roots[0] as u64];
+    let plan = compile(&dag, &[], &roots).unwrap_or_else(|error| panic!("compile: {error}"));
+    execute(&plan, store, Scope::Query { evaluation_time_ms }).remove(0)
+}
+
+/// The labels of an answer row, from `schema`'s label columns: its series
+/// identity's labels and every other non-empty text column (a label the
+/// query grouped by or added).
+#[allow(dead_code)]
+pub fn series_labels(
+    schema: &asap_types::ir::schema::Schema,
+    row: &[asap_executor::values::Value],
+) -> std::collections::BTreeMap<String, String> {
+    use asap_executor::physical_planner::promql_rows;
+    use asap_executor::values::Value;
+    let mut labels = std::collections::BTreeMap::new();
+    for (field, cell) in schema.fields.iter().zip(row) {
+        let Value::Utf8(text) = cell else { continue };
+        if field.name == asap_types::ir::schema::PROMQL_SERIES_IDENTITY {
+            labels.extend(promql_rows::decode_series_identity(text).unwrap());
+        } else if !text.is_empty() {
+            labels.insert(field.name.clone(), text.to_string());
+        }
+    }
+    labels
+}

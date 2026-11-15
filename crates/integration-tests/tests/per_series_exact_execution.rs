@@ -5,27 +5,15 @@
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::Arc;
 
-use asap_executor::physical_planner::{compile, promql_rows};
-use asap_executor::runtime::{Limits, RunContext, Scope};
-use asap_executor::sources::InMemoryDataStore;
-use asap_executor::values::{Batch, Value};
+use asap_executor::physical_planner::promql_rows;
+use asap_executor::values::Value;
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::accuracy::AccuracyTarget;
-use asap_types::ir::operator::{Reduction, Source};
-use asap_types::ir::schema::{Schema, PROMQL_SERIES_IDENTITY};
+use asap_types::ir::operator::Reduction;
 use asap_types::ir::{NonASAPOp, OperatorNode};
-use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
-use futures::{executor::block_on, StreamExt};
 
-/// One raw data sample: every label of its series, its time and value.
-#[derive(Clone)]
-struct RawDataSample {
-    labels: BTreeMap<String, String>,
-    timestamp_ms: i64,
-    value: f64,
-}
+use crate::physical_common::{execute_series, series_labels, RawDataSample};
 
 /// Evaluation time; every query's window is `(240 s, 300 s]`.
 const EVALUATION_MS: i64 = 300_000;
@@ -74,77 +62,10 @@ fn series(instance: &str, values: &[f64]) -> Vec<RawDataSample> {
         .collect()
 }
 
-/// The labels of an answer row, from the output schema's label columns:
-/// its series identity's labels and every other non-empty text column.
-fn series_labels(schema: &Schema, row: &[Value]) -> BTreeMap<String, String> {
-    let mut labels = BTreeMap::new();
-    for (field, cell) in schema.fields.iter().zip(row) {
-        let Value::Utf8(text) = cell else { continue };
-        if field.name == PROMQL_SERIES_IDENTITY {
-            labels.extend(promql_rows::decode_series_identity(text).unwrap());
-        } else if !text.is_empty() {
-            labels.insert(field.name.clone(), text.to_string());
-        }
-    }
-    labels
-}
-
 /// Run `query`'s exact per-entity plan at query time over `samples`, bound
 /// at its `Scan` of `x`: each answered series' `instance` and value.
 fn execute(query: &str, samples: &[RawDataSample]) -> Vec<(String, f64)> {
-    let plan = per_entity_plan(query);
-    let dag = asap_types::test_support::forwarders::physical_asap_dag_at_query_time(&plan).unwrap();
-    let node = |matches: fn(&PhysicalASAPOperatorPayload) -> bool| {
-        let found: Vec<_> = dag
-            .nodes
-            .iter()
-            .filter(|node| matches(&node.payload))
-            .collect();
-        let [node] = found[..] else {
-            panic!("{query}: one node expected, found {}", found.len());
-        };
-        node
-    };
-    let scan = node(|payload| {
-        matches!(
-            payload,
-            PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
-        )
-    });
-    // The runtime's `x` provider over every sample it received.
-    let schema = Arc::new(scan.output_schema.clone());
-    let rows = samples
-        .iter()
-        .map(|s| promql_rows::series_row(&schema, &s.labels, s.timestamp_ms, s.value).unwrap())
-        .collect();
-    let batch = Batch::try_new(schema.clone(), rows).unwrap();
-    let store = InMemoryDataStore::default()
-        .with_raw_data(
-            Source::TimeSeries { metric: "x".into() },
-            schema,
-            vec![batch],
-        )
-        .unwrap();
-    let roots = [dag.roots[0] as u64];
-    let bound = compile(&dag, &[], &roots)
-        .unwrap()
-        .instantiate(Arc::new(store))
-        .unwrap();
-    let context = RunContext::new(
-        Scope::Query {
-            evaluation_time_ms: EVALUATION_MS,
-        },
-        Limits::default(),
-    )
-    .unwrap();
-    let batches: Vec<Batch> = block_on(async {
-        let mut output = bound.execute(&roots, context).unwrap().remove(0);
-        let mut batches = Vec::new();
-        while let Some(batch) = output.next().await {
-            batches.push((*batch.unwrap()).clone());
-        }
-        batches
-    });
+    let batches = execute_series(&per_entity_plan(query), samples, EVALUATION_MS);
     let mut answers: Vec<(String, f64)> = batches
         .iter()
         .flat_map(|batch| {

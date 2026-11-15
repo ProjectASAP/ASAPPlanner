@@ -5,10 +5,16 @@ use crate::ir::schema::*;
 /// column contains every dynamic source label. It does not assert that the
 /// query's projected labels are the full label set.
 ///
-/// This realization supports explicit `by` grouping and per-series computation.
-/// Operators that rewrite or implicitly match dynamic label sets require their
-/// own realization; they must not accidentally treat the opaque identity as a
-/// user label or silently discard it.
+/// This realization supports explicit `by` grouping, `without` grouping and
+/// per-series computation. A `without` grouping keeps the identity with its
+/// excluded labels and `__name__` removed, computed when the plan is
+/// compiled: `sum without (instance) (m)` turns `{__name__=m, job=a,
+/// instance=1, zone=z}` into `{job=a, zone=z}`, and the aggregate's output
+/// schema marks that column as computed, not copied
+/// (`aggregate_schema::without_output_schema`). Operators that rewrite or
+/// implicitly match dynamic label sets require their own realization; they
+/// must not accidentally treat the opaque identity as a user label or
+/// silently discard it.
 pub fn with_promql_series_identity(
     root: &std::rc::Rc<crate::ir::OperatorNode>,
 ) -> Result<std::rc::Rc<crate::ir::OperatorNode>, String> {

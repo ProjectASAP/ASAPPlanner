@@ -84,7 +84,9 @@ impl Operator {
                         return Err(invalid("numeric aggregate input required"));
                     }
                     // SQL: NULL for fewer than two values (sample) or none
-                    // (population); a PromQL group always has a value.
+                    // (population); a PromQL group always has a value. The
+                    // IR's aggregate schema defines this nullability; this
+                    // derives it again to check the declared output.
                     (
                         DataType::Float64,
                         !input.has_promql_series_identity()
@@ -275,7 +277,8 @@ pub enum Reduction {
     /// update as Prometheus `stdvar` and DataFusion `var_pop`/`var_samp`
     /// compute it: the squared deviations' sum over n (population) or
     /// n - 1 (sample); NaN once a value is NaN or infinite. SQL gives NULL
-    /// for no value, or one value of a sample; PromQL NaN.
+    /// for no value, or one value of a sample; PromQL NaN. The values 1, 2
+    /// and 4 have mean 7/3: population variance 14/9, sample variance 7/3.
     Variance {
         column: usize,
         population: bool,

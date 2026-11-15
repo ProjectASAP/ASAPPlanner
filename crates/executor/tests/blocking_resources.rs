@@ -118,6 +118,7 @@ fn blocking_reductions_yield_and_release_memory_on_cancellation() {
                 nulls_first: false,
             }],
             vec![],
+            None,
         )
         .unwrap(),
         Operator::aggregate(schema(1), vec![], vec![("sum".into(), Reduction::Sum(0))]).unwrap(),
@@ -136,6 +137,76 @@ fn blocking_reductions_yield_and_release_memory_on_cancellation() {
         drop(output);
         assert_eq!(run.retained_bytes(), 0);
     }
+}
+
+// A sort that keeps the first `fetch` rows of each group holds those rows,
+// not its input: 4 groups of 2 rows out of 262,144 rows run in a memory
+// limit the full sort's gathered input exceeds.
+#[test]
+fn sort_with_fetch_holds_groups_times_fetch_rows() {
+    use asap_executor::operators::SortKey;
+    let input = schema(2);
+    let run = |fetch: Option<u64>| {
+        let batches = (0..64)
+            .map(|batch| {
+                let rows = (0..4096)
+                    .map(|row| {
+                        let i = batch * 4096 + row;
+                        vec![Value::Int64(i % 4), Value::Int64(i)]
+                    })
+                    .collect();
+                Batch::try_new(input.clone(), rows).unwrap()
+            })
+            .collect();
+        let mut dag = PhysicalDAG::default();
+        dag.add(0, vec![], Operator::source(input.clone(), batches).unwrap())
+            .unwrap();
+        let key = SortKey {
+            column: 1,
+            descending: true,
+            nulls_first: false,
+        };
+        dag.add(
+            1,
+            vec![0],
+            Operator::sort(input.clone(), vec![key], vec![0], fetch).unwrap(),
+        )
+        .unwrap();
+        let context = context(1024 * 1024);
+        let rows = block_on(async {
+            let mut output = dag.execute(&[1], context.clone()).unwrap().remove(0);
+            let mut rows = Vec::new();
+            while let Some(batch) = output.next().await {
+                rows.extend(batch?.to_rows());
+            }
+            Ok::<_, Error>(rows)
+        });
+        assert_eq!(context.retained_bytes(), 0);
+        rows
+    };
+    assert!(matches!(run(None), Err(Error::MemoryLimit)));
+    let top: Vec<i64> = run(Some(2))
+        .unwrap()
+        .iter()
+        .map(|row| match row[1] {
+            Value::Int64(i) => i,
+            _ => unreachable!(),
+        })
+        .collect();
+    let last = 64 * 4096 - 1;
+    assert_eq!(
+        top,
+        [
+            last - 3,
+            last - 7,
+            last - 2,
+            last - 6,
+            last - 1,
+            last - 5,
+            last,
+            last - 4
+        ]
+    );
 }
 
 // Merge-sort rounds preserve input order for tied keys across chunk boundaries.
@@ -164,6 +235,7 @@ fn cooperative_sort_preserves_ties_across_chunks() {
                 nulls_first: false,
             }],
             vec![],
+            None,
         )
         .unwrap(),
     )

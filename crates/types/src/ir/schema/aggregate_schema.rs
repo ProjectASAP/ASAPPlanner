@@ -14,7 +14,9 @@ use crate::ir::SchemaDerivationError;
 /// Where one output column of an aggregate comes from: an input column it
 /// keeps, a measure's value (with the input column the schema types it by,
 /// the measure's own or the probe value column), or a label column the
-/// measure adds (`count_values`' and `absent`'s). `sum by (job) (x)` →
+/// aggregate computes (`count_values`' and `absent`'s, and a series identity
+/// a `without` grouping keeps, its labels less the excluded ones and
+/// `__name__`). `sum by (job) (x)` →
 /// `[InputColumn(job), Measure { index: 0, input_column: Some(value) }]`. The one layout the output schema
 /// ([`aggregate_output_schema`]) and the group properties read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,7 +254,9 @@ fn measure_input_column(in_schema: &Schema, intent: &AggIntent) -> Option<Column
 
 /// The columns of `in_schema` a `without(excluded)` grouping keeps, in
 /// order: every column but the time axis, the sample value and the
-/// `excluded` positions. The executor groups by these.
+/// `excluded` positions. `[t, value, job, instance, $promql_series_identity]`
+/// under `without (instance)` keeps `[job, $promql_series_identity]`; the
+/// groups are the distinct values of those columns.
 pub fn without_kept_columns(in_schema: &Schema, excluded: &[ColumnId]) -> Vec<ColumnId> {
     let value = crate::ir::scalar::column_resolution::resolve_column_ref(
         &ColumnRef::SampleValue,
@@ -266,7 +270,15 @@ pub fn without_kept_columns(in_schema: &Schema, excluded: &[ColumnId]) -> Vec<Co
 
 /// Output schema of a `without(excluded)` aggregate: the kept labels (every
 /// input label column except the `excluded` positions, the time axis, and the
-/// sample-value column) followed by the aggregate output column(s). Unlike the
+/// sample-value column) followed by the aggregate output column(s), a
+/// `count_values` label before its count as on the `by` path.
+///
+/// A kept series identity or label map is not copied: its labels less the
+/// excluded ones and `__name__` are computed, so its source is
+/// [`OutputColumnSource::AddedLabel`]. Under `without (instance)` the
+/// identity `{__name__=m, job=a, instance=1, zone=z}` becomes
+/// `{job=a, zone=z}`. A `count_values("zone", v)` label also replaces the
+/// identity's `zone`, as Prometheus overwrites it before grouping. Unlike the
 /// `by` path this stays **open** — the excluded set is enumerable but the kept
 /// set is not (the runtime carries labels the usage-derived schema never saw),
 /// so the schema can't freeze to closed and claims no unique key (issue #39).
@@ -288,7 +300,16 @@ fn without_output_schema(
     let mut out_cols: Vec<Field> = kept.iter().map(|&i| in_schema.fields[i].clone()).collect();
     let mut sources: Vec<OutputColumnSource> = kept
         .into_iter()
-        .map(OutputColumnSource::InputColumn)
+        .map(|i| {
+            let field = &in_schema.fields[i];
+            let label_set = field.name == super::PROMQL_SERIES_IDENTITY
+                || matches!(field.dtype, FieldDataType::Plain(DataType::Map { .. }));
+            if label_set {
+                OutputColumnSource::AddedLabel
+            } else {
+                OutputColumnSource::InputColumn(i)
+            }
+        })
         .collect();
     let probe = in_schema
         .column_id("value")
@@ -296,6 +317,14 @@ fn without_output_schema(
         .cloned()
         .unwrap_or_else(|| Field::plain("value", DataType::Float64, false));
     for (i, intent) in measures.iter().enumerate() {
+        // `count_values("l", v)`'s label `l`, unless a kept column of that
+        // name is replaced by it, as on the `by` path.
+        if let AggIntent::CountValues { label } = intent {
+            if !out_cols.iter().any(|c| c.name == *label) {
+                out_cols.push(Field::plain(label.clone(), DataType::Utf8, false));
+                sources.push(OutputColumnSource::AddedLabel);
+            }
+        }
         // Only the output *type* is read from here, so the leading column is
         // enough for the multi-column intents: `Cardinality` and `PearsonCorr`
         // both have a fixed output type that ignores it.
@@ -392,10 +421,10 @@ mod tests {
         );
     }
 
-    /// `count_values by (job) ("version", v)` adds the `version` label before
-    /// the count; `count_values without (host)` adds none, like its schema.
+    /// `count_values by (job) ("version", v)` and `count_values without
+    /// (host) ("version", v)` both add the `version` label before the count.
     #[test]
-    fn count_values_adds_its_label_only_by_keys() {
+    fn count_values_adds_its_label_by_and_without_keys() {
         use OutputColumnSource::*;
         let count_values = AggIntent::CountValues {
             label: "version".into(),
@@ -418,6 +447,43 @@ mod tests {
             ),
             vec![
                 InputColumn(2),
+                AddedLabel,
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                }
+            ]
+        );
+    }
+
+    /// `sum without (host)` over `[ts, value, job, host, identity]` computes
+    /// the kept series identity (its labels less `host` and `__name__`), so
+    /// its source is an added label, not the input identity.
+    #[test]
+    fn a_without_aggregate_computes_its_kept_series_identity() {
+        use OutputColumnSource::*;
+        let mut input = series();
+        input.fields.push(col(
+            crate::ir::schema::PROMQL_SERIES_IDENTITY,
+            DataType::Utf8,
+            false,
+        ));
+        let (schema, sources) = aggregate_output(
+            &input,
+            &Reduction::Reduce(GroupKeys::without(vec![3])),
+            &[AggIntent::Sum { col: None }],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            schema.fields[1].name,
+            crate::ir::schema::PROMQL_SERIES_IDENTITY
+        );
+        assert_eq!(
+            sources,
+            vec![
+                InputColumn(2),
+                AddedLabel,
                 Measure {
                     index: 0,
                     input_column: Some(1)
