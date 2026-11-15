@@ -4,7 +4,7 @@
 //! The expectations are the executor's measured total CPU (query plus
 //! ingestion) per second of wall time, for each plan kind of each workload
 //! below: measured on one core of an idle server, in a release build,
-//! serially, with the in-repository executor over the synthetic data the
+//! serially, with the executor at commit 59365ce80 over the synthetic data the
 //! workloads declare (`latency` a non-negative gauge, `requests_total` a
 //! counter, 10 jobs), every accuracy target 1% relative at δ = 0.01.
 //!
