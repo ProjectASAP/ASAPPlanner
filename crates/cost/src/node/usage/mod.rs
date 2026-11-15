@@ -8,7 +8,7 @@ use crate::node::analytical::{
 };
 use crate::node::operations_per_unit::{
     estimate_operations_per_group, hash_aggregate_operations_per_row, merge_operations_per_state,
-    update_operations_per_row, CHAIN_EMIT_OPERATIONS_PER_STATE,
+    update_operations_per_row, CHAIN_EMIT_OPERATIONS_PER_STATE, TIME_RANGE_OPERATIONS_PER_ROW,
 };
 use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
@@ -792,6 +792,14 @@ pub fn node_resource_usage_and_cost<'a>(
                 }
                 false => group_count as f64 * retained_output_count as f64,
             };
+            // At query time it reads the scan's lookback and keeps each
+            // row in its window's range, the work a `TimeRange` over the
+            // same rows does (12 per row); at ingestion time each row
+            // arrives once, in its own window.
+            let range_ops = match ingestion {
+                true => 0.0,
+                false => input.rows as f64 * TIME_RANGE_OPERATIONS_PER_ROW,
+            };
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
@@ -802,6 +810,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 out,
                 Ok(ResourceEstimate::new(
                     input.rows as f64 * update_ops
+                        + range_ops
                         + emitted_states * CHAIN_EMIT_OPERATIONS_PER_STATE,
                     out.bytes,
                     0,
