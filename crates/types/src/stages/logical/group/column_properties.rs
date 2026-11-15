@@ -74,6 +74,15 @@ pub enum ColumnLineage {
     },
 }
 
+impl ValueSign {
+    /// Whether every non-NaN value has one sign bit: `NonNegative` or
+    /// `NonPositive`. Then a relative error ε on each value is at most ε on
+    /// their sum. `NonPositive.is_one_sign()` → true; `Unknown` → false.
+    pub fn is_one_sign(self) -> bool {
+        todo!("sign derivation by construction: ValueSign::is_one_sign")
+    }
+}
+
 use ValueSign::{NonNegative, NonPositive, Unknown};
 
 type Input<'m> = MemoGroupAsInput<'m>;

@@ -206,3 +206,33 @@ fn declared_histogram_family() {
     assert!(declared_non_negative(&data, "foo_sum"));
     assert!(declared_non_negative(&data, "foo_count"));
 }
+
+/// The `Scan` signs of a declared histogram family `foo` whose `value`
+/// is not declared (sign test plan T6, replacing the cost's
+/// `declared_non_negative` asserts above): `foo_count` counts
+/// observations, a counter, so its values are ≥ +0 (`NonNegative`);
+/// `foo_sum` adds the observations, which may be negative (a histogram
+/// of temperature deltas), so it may fall and have either sign
+/// (`Unknown`). Today `foo_sum` reads as a counter, `NonNegative`.
+#[test]
+#[ignore = "PR S2: PhysicalASAPDAGNode.column_signs"]
+fn histogram_metadata() {
+    use asap_types::ir::schema::DataType;
+    use asap_types::stages::{Memo, ValueSign};
+    use asap_types::test_support::memo_fixtures::scan;
+    // provisional answer Q8: only a declaration on the family's `value`
+    // gives `_sum` a sign; the Scan rule, not `series_facts`, changes.
+    let data = over_family("", "foo", Histogram).data_workload.unwrap();
+    let mut memo = Memo::new(&data);
+    for (series, expected) in [
+        ("foo_sum", ValueSign::Unknown),
+        ("foo_count", ValueSign::NonNegative),
+    ] {
+        let group = memo
+            .find_or_add_group(scan(series, &[("job", DataType::Utf8)], vec![]))
+            .unwrap();
+        let properties = &memo.groups()[group.0 as usize].group_properties;
+        let value = properties.schema.column_id("value").unwrap();
+        assert_eq!(properties.column_signs[value], expected, "{series}");
+    }
+}

@@ -11,4 +11,6 @@ mod schema_rebuilding;
 mod structure_contract;
 mod summary_merge_structure;
 mod tumbling_window_chain;
+mod value_sign_derivation_sites;
+mod value_sign_rules;
 mod workload_compatibility;
