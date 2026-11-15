@@ -14,7 +14,7 @@ use asap_types::stages::{
     CandidateForMemoGroupId, Lifetime, Memo, MemoGroupId, PhysicalProperties, PruneReason,
     StorageMedium, ValueSign,
 };
-use asap_types::summary_type::{ExactKind, SketchAlgorithm};
+use asap_types::summary_type::SketchAlgorithm;
 use asap_types::workload::{DataArrival, DataWorkload};
 
 /// Level 3's values, $\tau$.
@@ -153,7 +153,7 @@ fn counter_state_rows_ordered(
 ) -> bool {
     let counter_state = matches!(
         summary_type,
-        FieldDataType::ExactAggregate(ExactKind::Rate | ExactKind::Increase | ExactKind::IRate, _)
+        FieldDataType::ExactAggregate(kind, _) if kind.tracks_counter_increase()
     );
     let out_of_order_bound_known = matches!(
         data.arrival,

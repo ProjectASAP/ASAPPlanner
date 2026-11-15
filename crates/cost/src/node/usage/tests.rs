@@ -224,7 +224,7 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
     ));
     assert_eq!(
         merge_usage.cpu_ops_per_second,
-        5_000.0 * crate::node::operation_counts::DDSKETCH_MERGE_OPERATIONS_PER_STATE
+        5_000.0 * crate::node::operations_per_unit::DDSKETCH_MERGE_OPERATIONS_PER_STATE
     );
 }
 
@@ -269,7 +269,7 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
     assert_eq!(merge_usage.family, StateFamily::Exact(&ExactKind::Rate));
     assert_eq!(
         merge_usage.cpu_ops_per_second,
-        5_000.0 * crate::node::operation_counts::COUNTER_MERGE_OPERATIONS_PER_STATE
+        5_000.0 * crate::node::operations_per_unit::COUNTER_MERGE_OPERATIONS_PER_STATE
     );
 }
 
