@@ -454,8 +454,8 @@ fn compile_internal(
             // its input ending at the run's end: one row per key, stamped
             // with that `window_end`. Older windows are earlier runs', in
             // the store. Built for its readers instead (at query time, or
-            // not a compile root, its view not bound: it then reads what
-            // its readers read, [`CompileGraph::input_time_access`]), it
+            // an unbound view: it then reads what its readers read,
+            // [`CompileGraph::input_time_access`]), it
             // builds at each evaluation `T` every window
             // `(T - (k+1)c, T - kc]` its readers read, in one pass: each
             // row is grouped with its key by the end of its window, and
@@ -476,10 +476,6 @@ fn compile_internal(
                     crate::capability::validate_ingestion_time_summary(filter.as_ref())
                         .map_err(Error::Invalid)?;
                 }
-                let built_for_readers = !matches!(
-                    graph.input_time_access(id).reads,
-                    InputRows::LastWindow { .. }
-                );
                 let [input] = schemas.as_slice() else {
                     return Err(invalid("a tumbling-window chain reads one input"));
                 };
@@ -498,38 +494,53 @@ fn compile_internal(
                     })) => Some(named_column(input, &ColumnRef::SampleValue)?),
                     _ => None,
                 };
-                let window = if built_for_readers {
+                let millis = |ms: u64| {
+                    i64::try_from(ms).map_err(|_| invalid("a chain's read overflows Int64"))
+                };
+                let (window, built_for_readers) = match graph.input_time_access(id).reads {
+                    // Refreshed: its newest window, `(T - length_ms, T]`.
+                    InputRows::LastWindow { length_ms } => (
+                        Operator::time_range(
+                            input.clone(),
+                            time,
+                            0,
+                            millis(length_ms)?,
+                            sample_value,
+                            None,
+                        )?,
+                        false,
+                    ),
                     // The windows its readers read, whole tumbling windows.
-                    let read = window_read_above(id, &graph).ok_or_else(|| {
-                        invalid(format!(
-                            "node {id}: a tumbling-window chain built for its readers is \
+                    _ => {
+                        let read = window_read_above(id, &graph).ok_or_else(|| {
+                            invalid(format!(
+                                "node {id}: a tumbling-window chain built for its readers is \
                                  read outside the time ranges above it"
-                        ))
-                    })?;
-                    let millis = |ms: u64| {
-                        i64::try_from(ms).map_err(|_| invalid("a chain's read overflows Int64"))
-                    };
-                    let (end_offset_ms, read_width_ms) = (
-                        millis(read.ends_before_evaluation_ms)?,
-                        millis(read.length_ms)?,
-                    );
-                    if end_offset_ms % width_ms != 0 || read_width_ms % width_ms != 0 {
-                        return Err(invalid(format!(
-                            "node {id}: a window ({end_offset_ms} ms back, {read_width_ms} ms \
-                             wide) is not whole tumbling windows of {width_ms} ms"
-                        )));
+                            ))
+                        })?;
+                        let (end_offset_ms, read_width_ms) = (
+                            millis(read.ends_before_evaluation_ms)?,
+                            millis(read.length_ms)?,
+                        );
+                        if end_offset_ms % width_ms != 0 || read_width_ms % width_ms != 0 {
+                            return Err(invalid(format!(
+                                "node {id}: a window ({end_offset_ms} ms back, {read_width_ms} ms \
+                                 wide) is not whole tumbling windows of {width_ms} ms"
+                            )));
+                        }
+                        (
+                            Operator::time_range(
+                                input.clone(),
+                                time,
+                                end_offset_ms,
+                                read_width_ms,
+                                sample_value,
+                                None,
+                            )?
+                            .with_tumbling_window_ends(width_ms)?,
+                            true,
+                        )
                     }
-                    Operator::time_range(
-                        input.clone(),
-                        time,
-                        end_offset_ms,
-                        read_width_ms,
-                        sample_value,
-                        None,
-                    )?
-                    .with_tumbling_window_ends(width_ms)?
-                } else {
-                    Operator::time_range(input.clone(), time, 0, width_ms, sample_value, None)?
                 };
                 // The rows the build reads: built for its readers, each
                 // followed by its tumbling window's end, which groups each
@@ -547,7 +558,11 @@ fn compile_internal(
                                 .position(|field| {
                                     field.name == crate::operators::TUMBLING_WINDOW_END_COLUMN
                                 })
-                                .ok_or_else(|| invalid("a chain's build drops its window end"))
+                                .ok_or_else(|| {
+                                    invalid(
+                                        "a chain built for its readers has no window-end column",
+                                    )
+                                })
                         })
                         .transpose()
                 };
