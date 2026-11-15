@@ -57,6 +57,19 @@ pub enum QueryLanguage {
     ElasticDSL,
 }
 
+impl QueryLanguage {
+    /// Whether this language's queries read time series, whose rows the
+    /// planner keys by each series' full label set: the
+    /// [`PROMQL_SERIES_IDENTITY`](crate::ir::schema::PROMQL_SERIES_IDENTITY)
+    /// column, added to every root before Stage 0. PromQL and MetricsQL
+    /// do: `rate(requests_total[5m])` keeps one rate per series, each
+    /// series `{"__name__":"requests_total","instance":"a","job":"j1"}`
+    /// as one identity. SQL reads tables, whose rows have no such identity.
+    pub fn has_series_identity(&self) -> bool {
+        matches!(self, Self::PromQL | Self::MetricsQL)
+    }
+}
+
 /// Independent accuracy and response-latency constraints attached to one
 /// query in the workload.
 ///
@@ -886,6 +899,22 @@ mod tests {
         ];
         for (language, expected) in cases {
             assert_eq!(serde_json::to_value(language).unwrap(), expected);
+        }
+    }
+
+    /// The two time-series languages carry the series identity; the table
+    /// languages do not.
+    #[test]
+    fn only_time_series_languages_have_series_identity() {
+        let cases = [
+            (QueryLanguage::PromQL, true),
+            (QueryLanguage::MetricsQL, true),
+            (QueryLanguage::SQL(SqlDialect::DataFusionSQL), false),
+            (QueryLanguage::DataFusion, false),
+            (QueryLanguage::ElasticDSL, false),
+        ];
+        for (language, expected) in cases {
+            assert_eq!(language.has_series_identity(), expected, "{language:?}");
         }
     }
 
