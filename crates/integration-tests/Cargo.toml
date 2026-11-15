@@ -31,6 +31,10 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 
 asap-executor = { path = "../executor", features = ["test-support"] }
+# The sign tests enumerate PromQL's function names from the parser, a list
+# independent of the planner's own name tables.
+metricsql_parser = { path = "../metricsql-parser-vendored" }
+strum = "0.26"
 futures = "0.3"
 
 [[test]]

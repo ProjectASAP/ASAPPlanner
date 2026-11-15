@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use crate::ir::operator::arguments::{
     AtModifier, BinaryOpKind, PromQLVectorSetOpKind, Reduction, Source, SourceColumn, TimeShift,
+    VectorMatch,
 };
 use crate::ir::operator::AggIntent;
 use crate::ir::scalar::expr_ir::{ArithmeticOpKind, CompareOpKind};
@@ -173,7 +174,7 @@ pub fn arithmetic(
     lhs: MemoGroupId,
     rhs: MemoGroupId,
 ) -> Operator<MemoGroupId> {
-    binary_op(BinaryOpKind::Arithmetic(kind), lhs, rhs)
+    binary_op(BinaryOpKind::Arithmetic(kind), None, false, lhs, rhs)
 }
 
 /// `lhs and rhs`, `lhs or rhs` or `lhs unless rhs`, series by series,
@@ -183,18 +184,28 @@ pub fn set_operator(
     lhs: MemoGroupId,
     rhs: MemoGroupId,
 ) -> Operator<MemoGroupId> {
-    binary_op(BinaryOpKind::Set(kind), lhs, rhs)
+    binary_op(BinaryOpKind::Set(kind), None, false, lhs, rhs)
 }
 
-fn binary_op(kind: BinaryOpKind, lhs: MemoGroupId, rhs: MemoGroupId) -> Operator<MemoGroupId> {
+/// `lhs <kind> rhs` with an optional vector matching and PromQL's `bool`
+/// modifier. For example, `neg > bool neg` is
+/// `binary_op(BinaryOpKind::Compare(CompareOpKind::Gt), None, true, neg, neg)`,
+/// whose values are 0 or 1 whatever the sign of `neg`.
+pub fn binary_op(
+    kind: BinaryOpKind,
+    vector_match: Option<VectorMatch>,
+    return_bool: bool,
+    lhs: MemoGroupId,
+    rhs: MemoGroupId,
+) -> Operator<MemoGroupId> {
     Operator::NonASAP(NonASAPOp::BinaryOp {
         operator: BinaryOperator {
             checked_relative_division: false,
             checked_finite_division: false,
             kind,
-            vector_match: None,
+            vector_match,
         },
-        return_bool: false,
+        return_bool,
         lhs,
         rhs,
     })
