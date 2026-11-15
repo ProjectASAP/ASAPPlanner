@@ -372,6 +372,42 @@ pub enum MathFunc {
 // `asap_frontend_promql::promql::reduction_for`) — so they stay generic
 // alongside `input_col`, in one `impl<C>` block.
 impl AggIntent<ColumnId> {
+    /// This intent with every input column renumbered by `column`: the
+    /// value columns of [`input_cols`](AggIntent::input_cols) and
+    /// `histogram_quantile`'s `le`. `Sum { col: Some(1) }` under a renumbering
+    /// that moves column 1 to 2 is `Sum { col: Some(2) }`. An `Extension`
+    /// names its columns, so it is unchanged.
+    pub(crate) fn map_columns(&self, column: &mut impl FnMut(ColumnId) -> ColumnId) -> Self {
+        let mut intent = self.clone();
+        match &mut intent {
+            AggIntent::Sum { col }
+            | AggIntent::Min { col }
+            | AggIntent::Max { col }
+            | AggIntent::Avg { col }
+            | AggIntent::Quantile { col, .. }
+            | AggIntent::FrequencyL2 { col }
+            | AggIntent::FrequencyEntropy { col }
+            | AggIntent::StdDev { col, .. }
+            | AggIntent::Variance { col, .. } => {
+                if let Some(col) = col {
+                    *col = column(*col);
+                }
+            }
+            AggIntent::Cardinality { cols } => {
+                for col in cols {
+                    *col = column(*col);
+                }
+            }
+            AggIntent::PearsonCorr { left, right } => {
+                *left = column(*left);
+                *right = column(*right);
+            }
+            AggIntent::HistogramQuantile { le, .. } => *le = column(*le),
+            _ => {}
+        }
+        intent
+    }
+
     /// Resolve the existing SQL arg-selector extension using its child schema.
     /// The tuple is (selected value column, ordering column).
     /// Unknown extensions remain owned by their deployment model. Recognized

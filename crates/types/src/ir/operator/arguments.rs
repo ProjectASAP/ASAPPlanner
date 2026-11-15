@@ -91,6 +91,18 @@ impl<C> GroupKeys<C> {
     }
 }
 
+impl GroupKeys {
+    /// These keys with every column renumbered by `column`, `by` or
+    /// `without` kept: `by (1)` under a renumbering that moves column 1 to 2
+    /// is `by (2)`.
+    pub(crate) fn map_columns(&self, column: &mut impl FnMut(ColumnId) -> ColumnId) -> Self {
+        Self {
+            keys: self.keys.iter().map(|&key| column(key)).collect(),
+            without: self.without,
+        }
+    }
+}
+
 impl<C> std::ops::Deref for GroupKeys<C> {
     type Target = [C];
     fn deref(&self) -> &Self::Target {
@@ -497,6 +509,17 @@ impl Reduction {
             })
             .collect::<Option<_>>()?;
         Some(Reduction::by(keys))
+    }
+}
+
+impl Reduction {
+    /// This reduction with every grouping key renumbered by `column`;
+    /// `PerEntity` is unchanged.
+    pub(crate) fn map_columns(&self, column: &mut impl FnMut(ColumnId) -> ColumnId) -> Self {
+        match self {
+            Self::Reduce(keys) => Self::Reduce(keys.map_columns(column)),
+            Self::PerEntity => Self::PerEntity,
+        }
     }
 }
 

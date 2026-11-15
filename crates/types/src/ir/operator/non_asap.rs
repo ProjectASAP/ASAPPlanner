@@ -185,11 +185,23 @@ pub enum NonASAPOp<C = Rc<OperatorNode>> {
 }
 
 impl<C> NonASAPOp<C> {
-    /// The direct operator inputs, in field order, followed by the operator
-    /// nodes referenced from this operator's scalar expressions.
+    /// The direct operator inputs, followed by the operator nodes referenced
+    /// from this operator's scalar expressions.
     pub(crate) fn children(&self) -> Vec<&C> {
+        let mut out = self.inputs();
+        for expr in self.scalar_exprs() {
+            out.extend(expr.operator_refs());
+        }
+        out
+    }
+
+    /// The direct operator inputs, in field order: a `Join`'s left then
+    /// right. Their output columns, in this order, are the operator's input
+    /// scope, which its column references index (see
+    /// [`NonASAPOp::map_input_columns`]).
+    pub(crate) fn inputs(&self) -> Vec<&C> {
         use NonASAPOp::*;
-        let mut out: Vec<&C> = match self {
+        match self {
             Scan { .. } | Values { .. } | PromqlVectorFromScalar(_) => vec![],
             Filter { child, .. }
             | Project { child, .. }
@@ -207,11 +219,7 @@ impl<C> NonASAPOp<C> {
             Join { left, right, .. } | SetOp { left, right, .. } => vec![left, right],
             BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
             Concat { children, .. } => children.iter().collect(),
-        };
-        for expr in self.scalar_exprs() {
-            out.extend(expr.operator_refs());
         }
-        out
     }
 
     /// Every scalar expression this operator owns.
@@ -455,6 +463,97 @@ impl<C> NonASAPOp<C> {
                 child: f(child),
             },
         }
+    }
+
+    /// This operator with every column reference into its input scope
+    /// renumbered by `column`: the columns of its direct inputs, in
+    /// [`inputs`](NonASAPOp::inputs) order. A `Sort` by `Column(0)` over
+    /// `[sum]` whose input becomes `[$promql_series_identity, sum]` must sort
+    /// by `Column(1)`; the renumbering `0 → 1` gives that. Two references are
+    /// in another scope and kept: a `Scan`'s predicates index its own
+    /// schema, and an `Aggregate`'s `having` indexes its output. Operator
+    /// nodes read from scalar expressions keep their own scope.
+    pub(crate) fn map_input_columns(&self, column: &mut impl FnMut(ColumnId) -> ColumnId) -> Self
+    where
+        C: Clone,
+    {
+        use NonASAPOp::*;
+        let pred = |p: &Predicate<C>, column: &mut dyn FnMut(ColumnId) -> ColumnId| {
+            Predicate(p.0.map_columns(&mut |c| column(c)))
+        };
+        let keys = |keys: &[SortKey<C>], column: &mut dyn FnMut(ColumnId) -> ColumnId| {
+            keys.iter()
+                .map(|k| SortKey {
+                    expr: k.expr.map_columns(&mut |c| column(c)),
+                    ascending: k.ascending,
+                    nulls_first: k.nulls_first,
+                })
+                .collect()
+        };
+        let mut op = self.clone();
+        match &mut op {
+            Scan { .. }
+            | Values { .. }
+            | PromqlVectorFromScalar(_)
+            | SetOp { .. }
+            | Concat { .. }
+            | BinaryOp { .. }
+            | TimeRange { .. }
+            | TimeShift { .. }
+            | PromqlInfoEnrich { .. }
+            | PromqlSubquery { .. } => {}
+            Filter { pred: p, .. } | Join { pred: p, .. } => *p = pred(p, column),
+            Project { cols, .. } => {
+                for item in cols {
+                    item.expr = item.expr.map_columns(column);
+                }
+            }
+            Aggregate {
+                reduction,
+                measures,
+                filters,
+                ..
+            } => {
+                *reduction = reduction.map_columns(column);
+                for measure in measures {
+                    *measure = measure.map_columns(column);
+                }
+                for filter in filters.iter_mut().flatten() {
+                    *filter = pred(filter, column);
+                }
+            }
+            Dedup { cols, .. } => {
+                for col in cols {
+                    *col = column(*col);
+                }
+            }
+            Sort {
+                keys: k,
+                partition_by,
+                ..
+            } => {
+                *k = keys(k, column);
+                *partition_by = partition_by.map_columns(column);
+            }
+            Limit { partition_by, .. }
+            | PromqlSeriesSample {
+                by: partition_by, ..
+            } => *partition_by = partition_by.map_columns(column),
+            SQLWindowFunc {
+                args,
+                partition_by,
+                order_by,
+                ..
+            } => {
+                for arg in args {
+                    *arg = arg.map_columns(column);
+                }
+                *partition_by = partition_by.map_columns(column);
+                *order_by = keys(order_by, column);
+            }
+            PromqlRelabel { value, .. } => *value = value.map_columns(column),
+        }
+        op
     }
 
     /// The variant name, for diagnostics and export.

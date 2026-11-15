@@ -119,15 +119,28 @@ async fn plan_promql(query: &str, metric: &str) -> InstallablePlan {
     .0
 }
 
-/// Each answer of the PromQL `query` over `samples`: its labels (the
-/// series identity's and each non-empty label column's) and its value.
+/// Each answer of the PromQL `query` over `samples`, sorted by labels: its
+/// labels (the series identity's and each non-empty label column's) and
+/// its value.
 async fn promql(
     query: &str,
     metric: &str,
     samples: &[RawDataSample],
 ) -> Vec<(BTreeMap<String, String>, f64)> {
+    let mut answers = promql_in_output_order(query, metric, samples).await;
+    answers.sort_by(|a, b| a.0.cmp(&b.0));
+    answers
+}
+
+/// Each answer of the PromQL `query` over `samples`, in the order the
+/// query outputs them (`sort` and `sort_desc` order their answers).
+async fn promql_in_output_order(
+    query: &str,
+    metric: &str,
+    samples: &[RawDataSample],
+) -> Vec<(BTreeMap<String, String>, f64)> {
     let plan = plan_promql(query, metric).await;
-    let mut answers: Vec<_> = run_query(&plan, |dag| time_series_tables(dag, samples))
+    run_query(&plan, |dag| time_series_tables(dag, samples))
         .iter()
         .flat_map(|batch| {
             batch.to_rows().into_iter().map(|row| {
@@ -143,9 +156,7 @@ async fn promql(
                 (series_labels(batch.schema(), &row), value)
             })
         })
-        .collect();
-    answers.sort_by(|a, b| a.0.cmp(&b.0));
-    answers
+        .collect()
 }
 
 fn assert_close(
@@ -448,6 +459,106 @@ async fn promql_stddev_without_instance() {
             (labels(&[("job", "a")]), (14.0f64 / 9.0).sqrt()),
             (labels(&[("job", "b")]), 0.0),
             (labels(&[("job", "b"), ("zone", "z")]), 0.0),
+        ],
+    );
+}
+
+/// `topk`, `bottomk`, `sort` and `sort_desc` over a `without` aggregate
+/// rank by the aggregate's value, not by its series identity: `sum without
+/// (instance) (m)` answers `{job="a"}` 7, `{job="b"}` 2 and `{job="b",
+/// zone="z"}` 2.5, so the largest is job `a`'s 7 and the smallest job `b`'s
+/// 2.
+#[tokio::test]
+async fn promql_rankings_over_sum_without_rank_by_value() {
+    let samples = gauge_samples();
+    let a = || labels(&[("job", "a")]);
+    let b = || labels(&[("job", "b")]);
+    let bz = || labels(&[("job", "b"), ("zone", "z")]);
+    let top = promql("topk(1, sum without (instance) (m))", "m", &samples).await;
+    assert_close(&top, &[(a(), 7.0)]);
+    let bottom = promql("bottomk(1, sum without (instance) (m))", "m", &samples).await;
+    assert_close(&bottom, &[(b(), 2.0)]);
+    let top_two = promql("topk(2, sum without (instance) (m))", "m", &samples).await;
+    assert_close(&top_two, &[(a(), 7.0), (bz(), 2.5)]);
+    // A matcher on `job` binds `job` before realization: the aggregate's
+    // output starts `[job, sum]`, and the ranking reads the value there.
+    let top = promql(
+        r#"topk(1, sum without (instance) (m{job=~"a|b"}))"#,
+        "m",
+        &samples,
+    )
+    .await;
+    assert_close(&top, &[(a(), 7.0)]);
+    let sorted = promql_in_output_order("sort(sum without (instance) (m))", "m", &samples).await;
+    assert_close(&sorted, &[(b(), 2.0), (bz(), 2.5), (a(), 7.0)]);
+    let sorted_desc =
+        promql_in_output_order("sort_desc(sum without (instance) (m))", "m", &samples).await;
+    assert_close(&sorted_desc, &[(a(), 7.0), (bz(), 2.5), (b(), 2.0)]);
+}
+
+/// The same over `count without (instance) (m)`: job `a` counts 3 series,
+/// `{job="b"}` and `{job="b", zone="z"}` one each. The two 1s tie, so the
+/// sorted answers are checked as values in order and labels as a set.
+#[tokio::test]
+async fn promql_rankings_over_count_without_rank_by_value() {
+    let samples = gauge_samples();
+    let a = || labels(&[("job", "a")]);
+    let b = || labels(&[("job", "b")]);
+    let bz = || labels(&[("job", "b"), ("zone", "z")]);
+    let top = promql("topk(1, count without (instance) (m))", "m", &samples).await;
+    assert_close(&top, &[(a(), 3.0)]);
+    let bottom = promql("bottomk(2, count without (instance) (m))", "m", &samples).await;
+    assert_close(&bottom, &[(b(), 1.0), (bz(), 1.0)]);
+    let values = |answers: &[(BTreeMap<String, String>, f64)]| -> Vec<f64> {
+        answers.iter().map(|(_, value)| *value).collect()
+    };
+    let sorted = promql_in_output_order("sort(count without (instance) (m))", "m", &samples).await;
+    assert_eq!(values(&sorted), [1.0, 1.0, 3.0], "{sorted:?}");
+    assert_eq!(sorted[2].0, a(), "{sorted:?}");
+    let sorted_desc =
+        promql_in_output_order("sort_desc(count without (instance) (m))", "m", &samples).await;
+    assert_eq!(values(&sorted_desc), [3.0, 1.0, 1.0], "{sorted_desc:?}");
+    assert_eq!(sorted_desc[0].0, a(), "{sorted_desc:?}");
+}
+
+/// Control: a grouped `topk by (job)` ranks within each job, over the raw
+/// series and over a `without` aggregate. Job `a`'s largest series is
+/// instance 3's 4 and its only `without` group sums to 7; job `b`'s are
+/// `{instance="2", zone="z"}`'s 2.5 and the `{job="b", zone="z"}` group's
+/// 2.5.
+#[tokio::test]
+async fn promql_topk_by_job_ranks_within_each_job() {
+    let samples = gauge_samples();
+    let top = promql("topk by (job) (1, m)", "m", &samples).await;
+    assert_close(
+        &top,
+        &[
+            (
+                labels(&[
+                    ("__name__", "m"),
+                    ("instance", "2"),
+                    ("job", "b"),
+                    ("zone", "z"),
+                ]),
+                2.5,
+            ),
+            (
+                labels(&[("__name__", "m"), ("instance", "3"), ("job", "a")]),
+                4.0,
+            ),
+        ],
+    );
+    let top = promql(
+        "topk by (job) (1, sum without (instance) (m))",
+        "m",
+        &samples,
+    )
+    .await;
+    assert_close(
+        &top,
+        &[
+            (labels(&[("job", "a")]), 7.0),
+            (labels(&[("job", "b"), ("zone", "z")]), 2.5),
         ],
     );
 }
