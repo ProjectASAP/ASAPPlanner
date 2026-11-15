@@ -21,7 +21,6 @@ use planner_types::plan::physical_asap_dag::{
     PhysicalASAPOperatorPayload as Payload,
 };
 use planner_types::plan::TimeWindow;
-use planner_types::stages::Lifetime;
 use planner_types::summary_type::{
     SketchParams, SketchStatistic, SummaryInputExpr, SummaryTypeCapability,
 };
@@ -174,7 +173,11 @@ fn compile_internal(
         consumers: &consumers,
         roots: &compile_roots,
     };
-    let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec());
+    let lifetimes = nodes
+        .iter()
+        .map(|(&id, node)| (id, node.lifetime))
+        .collect();
+    let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec(), lifetimes);
     for id in ordered {
         let node = nodes[&id];
         let auxiliary = helper_id(id, 0)?;
@@ -232,7 +235,6 @@ fn compile_internal(
                     schema: output,
                     predicates,
                     read_window,
-                    lifetime: node.lifetime,
                 },
             )?;
         } else {
@@ -253,7 +255,6 @@ fn compile_internal(
                     auxiliary,
                     inputs,
                     Operator::union(schemas[0].clone(), schemas.len())?,
-                    Lifetime::None,
                 )?;
                 inputs = vec![auxiliary];
                 schemas.truncate(1);
@@ -288,7 +289,6 @@ fn compile_internal(
                     inputs,
                     Operator::current_series(input.clone(), identity, coordinate, value, lookback)?
                         .with_output_schema(output)?,
-                    node.lifetime,
                 )?;
                 continue;
             }
@@ -322,15 +322,10 @@ fn compile_internal(
                     let mut inputs = inputs;
                     for (index, operator) in chain.into_iter().enumerate() {
                         let helper = helper_id(id, index as u64)?;
-                        physical_dag.add(helper, inputs, operator, Lifetime::None)?;
+                        physical_dag.add(helper, inputs, operator)?;
                         inputs = vec![helper];
                     }
-                    physical_dag.add(
-                        id,
-                        inputs,
-                        last.with_output_schema(output)?,
-                        node.lifetime,
-                    )?;
+                    physical_dag.add(id, inputs, last.with_output_schema(output)?)?;
                     continue;
                 };
                 let groups = spec
@@ -351,13 +346,11 @@ fn compile_internal(
                         }],
                         groups.clone(),
                     )?,
-                    Lifetime::None,
                 )?;
                 physical_dag.add(
                     id,
                     vec![auxiliary],
                     Operator::limit(input, *k as u64, 0, groups)?.with_output_schema(output)?,
-                    node.lifetime,
                 )?;
                 continue;
             }
@@ -439,8 +432,8 @@ fn compile_internal(
                         .collect(),
                 )?;
                 let projected = project.schema();
-                physical_dag.add(auxiliary, inputs, aggregate, Lifetime::None)?;
-                physical_dag.add(helper_id(id, 1)?, vec![auxiliary], project, Lifetime::None)?;
+                physical_dag.add(auxiliary, inputs, aggregate)?;
+                physical_dag.add(helper_id(id, 1)?, vec![auxiliary], project)?;
                 let stamped = Operator::scope_timestamp(projected, output.clone())?;
                 if output
                     .fields
@@ -449,20 +442,14 @@ fn compile_internal(
                 {
                     // Range functions drop the metric name, as their
                     // summary evaluations do.
-                    physical_dag.add(
-                        helper_id(id, 2)?,
-                        vec![helper_id(id, 1)?],
-                        stamped,
-                        Lifetime::None,
-                    )?;
+                    physical_dag.add(helper_id(id, 2)?, vec![helper_id(id, 1)?], stamped)?;
                     physical_dag.add(
                         id,
                         vec![helper_id(id, 2)?],
                         Operator::series_without_name(output)?,
-                        node.lifetime,
                     )?;
                 } else {
-                    physical_dag.add(id, vec![helper_id(id, 1)?], stamped, node.lifetime)?;
+                    physical_dag.add(id, vec![helper_id(id, 1)?], stamped)?;
                 }
                 continue;
             }
@@ -589,13 +576,12 @@ fn compile_internal(
                             .ok_or_else(|| invalid("a chain's build drops its window end"))
                     })
                     .transpose()?;
-                physical_dag.add(auxiliary, inputs, window, Lifetime::None)?;
-                physical_dag.add(helper_id(id, 1)?, vec![auxiliary], build, Lifetime::None)?;
+                physical_dag.add(auxiliary, inputs, window)?;
+                physical_dag.add(helper_id(id, 1)?, vec![auxiliary], build)?;
                 physical_dag.add(
                     id,
                     vec![helper_id(id, 1)?],
                     Operator::window_end_timestamp(compact, output, window_end)?,
-                    node.lifetime,
                 )?;
                 continue;
             }
@@ -618,7 +604,6 @@ fn compile_internal(
                     inputs,
                     Operator::evaluate_at(input.clone(), *at, *offset_ms)?
                         .with_output_schema(output)?,
-                    node.lifetime,
                 )?;
                 continue;
             }
@@ -687,12 +672,11 @@ fn compile_internal(
                     groups,
                 )?;
                 let compact = build.schema();
-                physical_dag.add(auxiliary, inputs, build, Lifetime::None)?;
+                physical_dag.add(auxiliary, inputs, build)?;
                 physical_dag.add(
                     id,
                     vec![auxiliary],
                     Operator::scope_timestamp(compact, output)?,
-                    node.lifetime,
                 )?;
                 continue;
             }
@@ -725,12 +709,7 @@ fn compile_internal(
                             [false, false],
                         )
                         .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                        physical_dag.add(
-                            id,
-                            inputs,
-                            binary.with_output_schema(output)?,
-                            node.lifetime,
-                        )?;
+                        physical_dag.add(id, inputs, binary.with_output_schema(output)?)?;
                         continue;
                     }
                 }
@@ -762,22 +741,16 @@ fn compile_internal(
                         .collect();
                     let project =
                         Operator::project(actual, columns)?.with_output_schema(output.clone())?;
-                    physical_dag.add(auxiliary, inputs, evaluation, Lifetime::None)?;
+                    physical_dag.add(auxiliary, inputs, evaluation)?;
                     if temporal_evaluation_drops_name(node) {
-                        physical_dag.add(
-                            auxiliary - 1,
-                            vec![auxiliary],
-                            project,
-                            Lifetime::None,
-                        )?;
+                        physical_dag.add(auxiliary - 1, vec![auxiliary], project)?;
                         physical_dag.add(
                             id,
                             vec![auxiliary - 1],
                             Operator::series_without_name(output)?,
-                            node.lifetime,
                         )?;
                     } else {
-                        physical_dag.add(id, vec![auxiliary], project, node.lifetime)?;
+                        physical_dag.add(id, vec![auxiliary], project)?;
                     }
                     continue;
                 }
@@ -794,12 +767,11 @@ fn compile_internal(
                     // as a per-series `SummaryAgg` does.
                     let merged = bind_operation(node, &schemas)?;
                     let compact = merged.schema();
-                    physical_dag.add(helper_id(id, 1)?, inputs, merged, Lifetime::None)?;
+                    physical_dag.add(helper_id(id, 1)?, inputs, merged)?;
                     physical_dag.add(
                         id,
                         vec![helper_id(id, 1)?],
                         Operator::scope_timestamp(compact, output)?,
-                        node.lifetime,
                     )?;
                     continue;
                 }
@@ -817,7 +789,7 @@ fn compile_internal(
                     let operator = compile_node(node, &schemas)
                         .and_then(|merge| merge.with_emit_empty_global(parameters))
                         .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                    physical_dag.add(id, inputs, operator, node.lifetime)?;
+                    physical_dag.add(id, inputs, operator)?;
                     continue;
                 }
             }
@@ -826,12 +798,7 @@ fn compile_internal(
             if let Some(operator) = time_window_operator(id, &graph, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?
             {
-                physical_dag.add(
-                    id,
-                    inputs,
-                    operator.with_output_schema(output)?,
-                    node.lifetime,
-                )?;
+                physical_dag.add(id, inputs, operator.with_output_schema(output)?)?;
                 continue;
             }
             let mut operator = compile_node(node, &schemas)
@@ -842,15 +809,10 @@ fn compile_internal(
                 }
             }
             if temporal_evaluation_drops_name(node) {
-                physical_dag.add(auxiliary, inputs, operator, Lifetime::None)?;
-                physical_dag.add(
-                    id,
-                    vec![auxiliary],
-                    Operator::series_without_name(output)?,
-                    node.lifetime,
-                )?;
+                physical_dag.add(auxiliary, inputs, operator)?;
+                physical_dag.add(id, vec![auxiliary], Operator::series_without_name(output)?)?;
             } else {
-                physical_dag.add(id, inputs, operator, node.lifetime)?;
+                physical_dag.add(id, inputs, operator)?;
             }
         }
     }

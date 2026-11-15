@@ -15,7 +15,6 @@ enum Node {
     Operator {
         inputs: Vec<NodeId>,
         operator: Operator,
-        lifetime: Lifetime,
     },
 }
 
@@ -44,10 +43,6 @@ pub(super) struct RawDataSlot {
     /// The rows its consumers read, back from the evaluation time; `None`
     /// when one reads every row.
     pub(super) read_window: Option<TimeWindow>,
-    /// The `Scan` node's plan lifetime, which the runtime runs the leaf by:
-    /// at query time `OneEvaluation` is one read held for every consumer,
-    /// `None` one read per consumer.
-    pub(super) lifetime: Lifetime,
 }
 
 /// Selected native operators and input slots. Rebinding never repeats lowering.
@@ -58,26 +53,33 @@ pub(super) struct RawDataSlot {
 pub struct CompiledPhysicalDAG {
     nodes: BTreeMap<NodeId, Node>,
     roots: Vec<NodeId>,
+    /// The plan lifetime of each Planner node, which the runtime runs it by
+    /// (see `NodeRun` in the runtime). A helper node the lowering adds is
+    /// not in it and has `Lifetime::None`. Example: node 1, a stored view,
+    /// maps to `AcrossEvaluations(Memory)`, and node 3, a query-time output
+    /// two queries read, to `OneEvaluation(Memory)`.
+    lifetimes: BTreeMap<NodeId, Lifetime>,
 }
 
 impl CompiledPhysicalDAG {
     /// Assemble already-lowered operators; leaves read no data store (for
     /// example [`Operator::source`] holds its rows).
     pub fn from_operators(
-        operators: BTreeMap<NodeId, (Vec<NodeId>, Operator, Lifetime)>,
+        operators: BTreeMap<NodeId, (Vec<NodeId>, Operator)>,
         roots: Vec<NodeId>,
     ) -> Result<Self, Error> {
-        let mut result = Self::new(roots);
-        for (id, (inputs, operator, lifetime)) in operators {
-            result.add(id, inputs, operator, lifetime)?;
+        let mut result = Self::new(roots, BTreeMap::new());
+        for (id, (inputs, operator)) in operators {
+            result.add(id, inputs, operator)?;
         }
         result.validate()?;
         Ok(result)
     }
-    pub(super) fn new(roots: Vec<NodeId>) -> Self {
+    pub(super) fn new(roots: Vec<NodeId>, lifetimes: BTreeMap<NodeId, Lifetime>) -> Self {
         Self {
             nodes: BTreeMap::new(),
             roots,
+            lifetimes,
         }
     }
     pub(super) fn add_materialized_view(
@@ -95,16 +97,8 @@ impl CompiledPhysicalDAG {
         id: NodeId,
         inputs: Vec<NodeId>,
         operator: Operator,
-        lifetime: Lifetime,
     ) -> Result<(), Error> {
-        self.insert(
-            id,
-            Node::Operator {
-                inputs,
-                operator,
-                lifetime,
-            },
-        )
+        self.insert(id, Node::Operator { inputs, operator })
     }
     fn insert(&mut self, id: NodeId, node: Node) -> Result<(), Error> {
         if self.nodes.insert(id, node).is_some() {
@@ -117,9 +111,7 @@ impl CompiledPhysicalDAG {
     pub fn row_source(&self, id: NodeId) -> Option<NodeId> {
         match self.nodes.get(&id)? {
             Node::MaterializedView(_) | Node::RawData(_) => Some(id),
-            Node::Operator {
-                inputs, operator, ..
-            } => {
+            Node::Operator { inputs, operator } => {
                 let index = operator.row_preserving_input()?;
                 self.row_source(*inputs.get(index)?)
             }
@@ -173,18 +165,15 @@ impl CompiledPhysicalDAG {
     fn unbound(&self) -> Result<PhysicalDAG<'_, Batch, SchemaRef>, Error> {
         let mut dag = PhysicalDAG::default();
         for (&id, node) in &self.nodes {
+            let lifetime = self.lifetime(id);
             match node {
-                Node::MaterializedView(MaterializedViewSlot { schema, .. }) => {
-                    dag.add(id, vec![], UnboundInput(schema.clone()), VIEW_SLOT_LIFETIME)?
+                Node::MaterializedView(MaterializedViewSlot { schema, .. })
+                | Node::RawData(RawDataSlot { schema, .. }) => {
+                    dag.add(id, vec![], UnboundInput(schema.clone()), lifetime)?
                 }
-                Node::RawData(RawDataSlot {
-                    schema, lifetime, ..
-                }) => dag.add(id, vec![], UnboundInput(schema.clone()), *lifetime)?,
-                Node::Operator {
-                    inputs,
-                    operator,
-                    lifetime,
-                } => dag.add(id, inputs.clone(), operator.clone(), *lifetime)?,
+                Node::Operator { inputs, operator } => {
+                    dag.add(id, inputs.clone(), operator.clone(), lifetime)?
+                }
             }
         }
         dag.validate(&self.roots)?;
@@ -200,6 +189,7 @@ impl CompiledPhysicalDAG {
     ) -> Result<PhysicalDAG<'static, Batch, SchemaRef>, Error> {
         let mut dag = PhysicalDAG::default();
         for (&id, node) in &self.nodes {
+            let lifetime = self.lifetime(id);
             match node {
                 Node::MaterializedView(slot) => {
                     let scan = Scan::materialized_view(
@@ -208,7 +198,7 @@ impl CompiledPhysicalDAG {
                         slot.schema.clone(),
                         slot.read_window,
                     );
-                    dag.add(id, vec![], scan, VIEW_SLOT_LIFETIME)?;
+                    dag.add(id, vec![], scan, lifetime)?;
                 }
                 Node::RawData(slot) => {
                     let scan = Scan::raw_data(
@@ -218,25 +208,20 @@ impl CompiledPhysicalDAG {
                         slot.predicates.clone(),
                         slot.read_window,
                     );
-                    dag.add(id, vec![], scan, slot.lifetime)?;
+                    dag.add(id, vec![], scan, lifetime)?;
                 }
-                Node::Operator {
-                    inputs,
-                    operator,
-                    lifetime,
-                } => dag.add(id, inputs.clone(), operator.clone(), *lifetime)?,
+                Node::Operator { inputs, operator } => {
+                    dag.add(id, inputs.clone(), operator.clone(), lifetime)?
+                }
             }
         }
         dag.validate(&self.roots)?;
         Ok(dag)
     }
+    fn lifetime(&self, id: NodeId) -> Lifetime {
+        self.lifetimes.get(&id).copied().unwrap_or_default()
+    }
 }
-/// A materialized view slot's lifetime in the runtime DAG. The store keeps
-/// the view's states across evaluations, so the slot is a not-materialized
-/// read of them: at query time each consumer reads the store, at ingestion
-/// time one read reaches every consumer.
-const VIEW_SLOT_LIFETIME: Lifetime = Lifetime::None;
-
 /// Stands in for an input slot when validating or deriving properties.
 struct UnboundInput(SchemaRef);
 impl PhysicalOperator<Batch, SchemaRef> for UnboundInput {

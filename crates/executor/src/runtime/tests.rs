@@ -93,7 +93,7 @@ const ONE_EVALUATION: Lifetime = Lifetime::OneEvaluation(StorageMedium::Memory);
 // `Lifetime::None` leaf) reads it on its own, so one consumer never waits for
 // another.
 #[test]
-fn query_time_leaves_are_read_per_consumer() {
+fn not_materialized_leaf_is_read_per_consumer() {
     let (source, starts, polls) = source(false);
     let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], source, Lifetime::None).unwrap();
@@ -110,6 +110,42 @@ fn query_time_leaves_are_read_per_consumer() {
     assert!(block_on(first.next()).is_none());
     assert_eq!(polls.get(), 4);
     drop(first);
+    assert_eq!(context.retained_bytes(), 0);
+}
+
+// A leaf whose rows the store keeps across evaluations (an
+// `AcrossEvaluations` raw data scan) is read from the store by each
+// consumer on its own: nothing is held in the run. Example: two queries over
+// one retained scan are two store reads, and the first query's first batch
+// is the only one charged while it reads it.
+#[test]
+fn stored_leaf_is_read_per_consumer() {
+    let (source, starts, polls) = source(false);
+    let mut dag = PhysicalDAG::default();
+    dag.add(
+        0,
+        vec![],
+        source,
+        Lifetime::AcrossEvaluations(StorageMedium::Memory),
+    )
+    .unwrap();
+    let context = query_context(1024);
+    let mut readers = dag.execute(&[0, 0], context.clone()).unwrap();
+    let second = readers.pop().unwrap();
+    let mut first = readers.pop().unwrap();
+    let batch = block_on(first.next()).unwrap().unwrap();
+    assert_eq!(*batch, 0);
+    assert_eq!(context.retained_bytes(), 8);
+    drop(batch);
+    assert_eq!(
+        values(block_on(first.collect::<Vec<_>>())),
+        vec![Ok(1), Ok(2), Ok(3)]
+    );
+    assert_eq!(
+        values(block_on(second.collect::<Vec<_>>())),
+        vec![Ok(0), Ok(1), Ok(2), Ok(3)]
+    );
+    assert_eq!((starts.get(), polls.get()), (2, 8));
     assert_eq!(context.retained_bytes(), 0);
 }
 
@@ -344,13 +380,18 @@ fn all_batches() -> Vec<Result<u64, Error>> {
     (0..MANY_BATCHES).map(Ok).collect()
 }
 
-// Two queries read one stored view (y16): draining their roots one after
-// another gives the same answers as polling them together. A `None` leaf is
-// read once per consumer (2 reads per run); a `OneEvaluation` leaf is read
-// once and held for both (1 read per run).
+// Two roots reading one leaf: draining them one after another gives the
+// same answers as polling them together. A leaf whose rows the store keeps
+// (`None` or `AcrossEvaluations`) is read once per consumer (2 reads per
+// run); a `OneEvaluation` leaf is read once and held for both (1 read per
+// run).
 #[test]
 fn roots_reading_one_leaf_drain_in_order() {
-    for (leaf, reads_per_run) in [(Lifetime::None, 2), (ONE_EVALUATION, 1)] {
+    for (leaf, reads_per_run) in [
+        (Lifetime::None, 2),
+        (Lifetime::AcrossEvaluations(StorageMedium::Memory), 2),
+        (ONE_EVALUATION, 1),
+    ] {
         let reads = within_timeout(move || {
             let mut dag = PhysicalDAG::default();
             let starts = two_readers_of_one_leaf(&mut dag, leaf);
@@ -376,8 +417,8 @@ fn roots_reading_one_leaf_drain_in_order() {
     }
 }
 
-// One query whose two branches read one stored view (b17, g10), combined by
-// an operator that reads its left branch to the end first.
+// One root with two branches over one leaf, combined by an operator that
+// reads its left branch to the end first.
 #[test]
 fn one_root_with_two_branches_over_one_leaf() {
     for (leaf, reads) in [(Lifetime::None, 2), (ONE_EVALUATION, 1)] {
@@ -576,4 +617,83 @@ fn cancellation_releases_held_batches_of_unpolled_roots() {
         block_on(outputs[1].next()),
         Some(Err(Error::Cancelled))
     ));
+}
+
+/// Passes its input through and cancels the run from inside its own poll
+/// once it has passed `after` batches, as an operator that hits a run-wide
+/// stop condition would.
+struct CancelsAfter {
+    after: usize,
+}
+impl PhysicalOperator<u64, ()> for CancelsAfter {
+    fn name(&self) -> &str {
+        "CancelsAfter"
+    }
+    fn input_schemas(&self) -> Vec<()> {
+        vec![()]
+    }
+    fn output_schema(&self) {}
+    fn output_bytes(&self, _: &u64) -> usize {
+        8
+    }
+    fn start<'a>(
+        &'a self,
+        mut inputs: Vec<Input<'a, u64>>,
+        context: RunContext,
+    ) -> Result<OutputStream<'a, u64>, Error> {
+        let mut passed = 0;
+        Ok(inputs
+            .remove(0)
+            .map(move |value| {
+                passed += 1;
+                if passed == self.after {
+                    context.cancel();
+                }
+                value.map(|value| *value)
+            })
+            .boxed_local())
+    }
+}
+/// A source, node 1 (`CancelsAfter` 3 batches, with lifetime `shared`) and
+/// two `Identity` roots 2 and 3 over node 1.
+fn cancelled_inside_a_shared_node(shared: Lifetime) -> PhysicalDAG<'static, u64, ()> {
+    let (mut source, _, _) = source(false);
+    source.end = MANY_BATCHES;
+    let mut dag = PhysicalDAG::default();
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    dag.add(1, vec![0], CancelsAfter { after: 3 }, shared)
+        .unwrap();
+    dag.add(2, vec![1], Identity, Lifetime::None).unwrap();
+    dag.add(3, vec![1], Identity, Lifetime::None).unwrap();
+    dag
+}
+
+// An operator that cancels the run inside its own poll, while another
+// consumer of its node is not being polled, ends every root with
+// `Cancelled`: stopping the other producers does not drop their streams,
+// whose inputs would borrow the producer being polled.
+#[test]
+fn cancel_inside_a_held_node_ends_every_root() {
+    let dag = cancelled_inside_a_shared_node(ONE_EVALUATION);
+    let run = query_context(1 << 20);
+    let outputs = dag.execute(&[2, 3], run.clone()).unwrap();
+    let drained: Vec<_> = outputs
+        .into_iter()
+        .map(|output| values(block_on(output.collect::<Vec<_>>())))
+        .collect();
+    assert_eq!(
+        drained,
+        vec![vec![Err(Error::Cancelled)], vec![Err(Error::Cancelled)]]
+    );
+    assert_eq!(run.retained_bytes(), 0);
+}
+
+// The same at ingestion time, over a streamed fan-out node.
+#[test]
+fn cancel_inside_an_ingestion_fan_out_ends_the_run() {
+    let dag = cancelled_inside_a_shared_node(Lifetime::None);
+    let run = ingestion_context(1 << 20);
+    let outputs = block_on(dag.execute_ingestion(&[2, 3], run.clone()).unwrap());
+    assert!(matches!(outputs, Err(Error::Cancelled)));
+    assert_eq!(run.retained_bytes(), 0);
 }

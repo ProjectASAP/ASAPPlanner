@@ -18,7 +18,7 @@ mod context;
 pub use context::{Limits, Reservation, RunContext, Scope};
 pub type OutputStream<'a, V> = LocalBoxStream<'a, Result<V, Error>>;
 /// Every root's batches of an ingestion run, in the order of its roots.
-pub type IngestionOutputs<V> = Result<Vec<Vec<SharedValue<V>>>, Error>;
+pub type IngestionOutputs<V> = Vec<Vec<SharedValue<V>>>;
 /// An output owns its memory reservation even after it leaves the DAG's queue.
 pub struct SharedValue<V> {
     value: Arc<V>,
@@ -68,7 +68,7 @@ pub(crate) fn execute_ingestion<'r, V: 'r, S: Clone + PartialEq + Debug + 'r>(
     dag: &'r PhysicalDAG<'_, V, S>,
     roots: &[NodeId],
     context: RunContext,
-) -> Result<impl std::future::Future<Output = IngestionOutputs<V>> + 'r, Error> {
+) -> Result<impl std::future::Future<Output = Result<IngestionOutputs<V>, Error>> + 'r, Error> {
     if context.evaluation_time_ms().is_some() {
         return Err(Error::Invalid(
             "`execute_ingestion` takes an ingestion scope; run a query scope with `execute`".into(),
@@ -86,29 +86,34 @@ type ProducerKey = (NodeId, Option<i64>);
 
 /// How a node runs in a run, from the run's scope, its plan `Lifetime`,
 /// whether it is a leaf and how many consumers it has at its evaluation
-/// time (see the crate README).
+/// time. This is the one statement of the rule; the crate README describes
+/// it for callers.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NodeRun {
-    /// Query time, a not-materialized leaf (a raw data or materialized view
-    /// slot): each consumer reads the store on its own, as the planner
-    /// charges a `Lifetime::None` read once per consumer. Example: a
-    /// `Lifetime::None` scan read by two queries is two store reads.
+    /// Query time, a leaf whose rows the store keeps: `Lifetime::None` (a
+    /// raw data slot, or any other leaf such as a constant) or
+    /// `AcrossEvaluations` (a materialized view slot, or raw data kept at
+    /// ingestion). Each consumer reads it on its own and nothing is held.
+    /// Stage 3 never gives a query-time `None` result more than one
+    /// consumer; a view slot, or a leaf in a hand-built DAG, may have
+    /// several. Example: an `AcrossEvaluations` scan read by two queries is
+    /// two store reads.
     ReadPerConsumer,
-    /// Query time, a materialized node (computed or a leaf) with more than
-    /// one consumer: run to the end once before any consumer reads it, then
-    /// read by each consumer, as the planner charges one run whose output is
-    /// held. Example: a `OneEvaluation` scan read by three queries is one
-    /// store read whose batches every query reads.
+    /// Query time, a `OneEvaluation` node (computed or a leaf), or a computed
+    /// `AcrossEvaluations` node, with more than one consumer: run to the end
+    /// once before any consumer reads it, then read by each consumer, as the
+    /// planner charges one run whose output is held. Example: a
+    /// `OneEvaluation` scan read by three queries is one store read whose
+    /// batches every query reads.
     Held,
     /// Every other node: one run whose batches reach each consumer as they
-    /// come. At query time it has a single consumer, or it is a computed
-    /// `Lifetime::None` node with several, which `start` rejects.
+    /// come. At query time it has one consumer (a computed `None` node with
+    /// several is a planner bug, which `start` rejects).
     Streamed,
 }
-fn run_as<V, S>(node: &Node<'_, V, S>, context: &RunContext, consumers: usize) -> NodeRun {
-    let query = context.evaluation_time_ms().is_some();
+fn run_as<V, S>(node: &Node<'_, V, S>, query: bool, consumers: usize) -> NodeRun {
     match (query, node.lifetime, node.inputs.is_empty()) {
-        (true, Lifetime::None, true) => NodeRun::ReadPerConsumer,
+        (true, Lifetime::None | Lifetime::AcrossEvaluations(_), true) => NodeRun::ReadPerConsumer,
         (true, Lifetime::OneEvaluation(_) | Lifetime::AcrossEvaluations(_), _) if consumers > 1 => {
             NodeRun::Held
         }
@@ -116,9 +121,15 @@ fn run_as<V, S>(node: &Node<'_, V, S>, context: &RunContext, consumers: usize) -
     }
 }
 
-/// Each (node, evaluation time) a run reaches: its consumer count and the
-/// context its inputs run in.
-type Reached = BTreeMap<ProducerKey, (usize, RunContext)>;
+/// A (node, evaluation time) a run reaches. Example: a scan read by both
+/// sides of a division at time T has `consumers: 2`, and `input_context` is
+/// T's context (another time's under an `@` anchor).
+struct ReachedNode {
+    consumers: usize,
+    /// The run context its inputs run in.
+    input_context: RunContext,
+}
+type Reached = BTreeMap<ProducerKey, ReachedNode>;
 
 /// Visit `id` once per evaluation time, before any operator starts:
 /// validate its run context, count its consumers and record its inputs'
@@ -130,8 +141,8 @@ fn reach<V, S>(
     reached: &mut Reached,
 ) -> Result<(), Error> {
     let key = (id, context.evaluation_time_ms());
-    if let Some((count, _)) = reached.get_mut(&key) {
-        *count += 1;
+    if let Some(reached) = reached.get_mut(&key) {
+        reached.consumers += 1;
         return Ok(());
     }
     let node = &dag.nodes[&id];
@@ -147,7 +158,13 @@ fn reach<V, S>(
     for &child in &node.inputs {
         reach(dag, child, &input_context, reached)?;
     }
-    reached.insert(key, (1, input_context));
+    reached.insert(
+        key,
+        ReachedNode {
+            consumers: 1,
+            input_context,
+        },
+    );
     Ok(())
 }
 
@@ -161,13 +178,14 @@ fn build<'r, V: 'r, S: 'r>(
 ) -> Result<Rc<RefCell<Producer<'r, V>>>, Error> {
     let key = (id, context.evaluation_time_ms());
     let node = &dag.nodes[&id];
-    let run = run_as(node, context, reached[&key].0);
+    let reached_node = &reached[&key];
+    let run = run_as(node, key.1.is_some(), reached_node.consumers);
     if run != NodeRun::ReadPerConsumer {
         if let Some(state) = states.get(&key) {
             return Ok(Rc::clone(state));
         }
     }
-    let input_context = &reached[&key].1;
+    let input_context = &reached_node.input_context;
     let mut inputs = Vec::new();
     for &child in &node.inputs {
         inputs.push(Input::subscribe(build(
@@ -195,9 +213,9 @@ fn build<'r, V: 'r, S: 'r>(
         size: Box::new(move |value| op.output_bytes(value)),
         context: context.clone(),
         hold_until_finished: run == NodeRun::Held,
-        expected_readers: match run {
+        consumers: match run {
             NodeRun::ReadPerConsumer => 1,
-            NodeRun::Held | NodeRun::Streamed => reached[&key].0,
+            NodeRun::Held | NodeRun::Streamed => reached_node.consumers,
         },
         run_producers: Rc::clone(run_producers),
         unread: BTreeMap::new(),
@@ -227,12 +245,13 @@ fn start<'r, V: 'r, S: Clone + PartialEq + Debug + 'r>(
     for &root in roots {
         reach(dag, root, &context, &mut reached)?;
     }
-    for (&(id, time), (count, _)) in &reached {
+    for (&(id, time), ReachedNode { consumers, .. }) in &reached {
         let node = &dag.nodes[&id];
-        if let (Some(time), NodeRun::Streamed, 2..) = (time, run_as(node, &context, *count), *count)
+        if let (Some(time), Lifetime::None, false, 2..) =
+            (time, node.lifetime, node.inputs.is_empty(), *consumers)
         {
             return Err(Error::Invalid(format!(
-                "node {id} ({}) at evaluation time {time} has {count} consumers but \
+                "node {id} ({}) at evaluation time {time} has {consumers} consumers but \
                  Lifetime::None; a shared query-time output must be OneEvaluation (planner bug)",
                 node.operator.name()
             )));
@@ -265,7 +284,7 @@ struct Producer<'a, V> {
     hold_until_finished: bool,
     /// How many consumers subscribe to it in the run; its stream is dropped
     /// early only once all have subscribed and all have left.
-    expected_readers: usize,
+    consumers: usize,
     /// The run's producers, this one included.
     run_producers: RunProducers<'a, V>,
     /// The batches each reader has not read yet, by reader.
@@ -283,24 +302,32 @@ impl<V> Producer<'_, V> {
             waker.wake();
         }
     }
-    /// The end of the node's output. A failed held output is not read in
-    /// part: every consumer gets only the error.
+    /// The end of the node's output, seen while polling its stream, which
+    /// is dropped.
     fn finish(&mut self, failure: Option<Error>) {
-        if failure.is_some() && self.hold_until_finished {
+        self.end(failure);
+        self.stream = None;
+    }
+    /// Stop the run: every consumer gets `Cancelled` next, and the batches
+    /// not yet read are released. The stream is kept, and dropped with the
+    /// node's last input: the producer that saw the cancellation may be
+    /// borrowed up the poll stack, and an input inside this stream, of
+    /// another consumer of it, would borrow it again on drop.
+    fn cancel(&mut self) {
+        if self.failure != Some(Error::Cancelled) {
+            self.end(Some(Error::Cancelled));
+        }
+    }
+    /// Every consumer gets `failure`, or the end, next. A failed held output
+    /// is not read in part: every consumer gets only the error. A cancelled
+    /// output, held or not, releases every batch not yet read.
+    fn end(&mut self, failure: Option<Error>) {
+        if (failure.is_some() && self.hold_until_finished) || failure == Some(Error::Cancelled) {
             self.unread.values_mut().for_each(VecDeque::clear);
         }
         self.failure = failure;
         self.finished = true;
-        self.stream = None;
         self.wake_all();
-    }
-    /// Stop the run: every consumer gets `Cancelled` next, and the batches
-    /// not yet read are released.
-    fn cancel(&mut self) {
-        if self.failure != Some(Error::Cancelled) {
-            self.finish(Some(Error::Cancelled));
-            self.unread.values_mut().for_each(VecDeque::clear);
-        }
     }
 }
 pub struct Input<'a, V> {
@@ -331,7 +358,7 @@ impl<V> Drop for Input<'_, V> {
         state.waiters.remove(&self.reader);
         // A consumer may drop its input in `start`, before a later consumer
         // subscribes; the stream is kept for that one.
-        if state.unread.is_empty() && state.next_reader as usize >= state.expected_readers {
+        if state.unread.is_empty() && state.next_reader as usize >= state.consumers {
             state.stream = None;
         }
     }

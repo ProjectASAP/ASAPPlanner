@@ -1315,9 +1315,9 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             };
             CompiledPhysicalDAG::from_operators(
                 [
-                    (0, (vec![], source(left), Lifetime::None)),
-                    (1, (vec![], source(right), Lifetime::None)),
-                    (2, (vec![0, 1], join.clone(), Lifetime::None)),
+                    (0, (vec![], source(left))),
+                    (1, (vec![], source(right))),
+                    (2, (vec![0, 1], join.clone())),
                 ]
                 .into(),
                 vec![2],
@@ -1437,14 +1437,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         operators.insert(2, (vec![0, 1], binary.clone()));
-        let program = CompiledPhysicalDAG::from_operators(
-            operators
-                .into_iter()
-                .map(|(id, (inputs, operator))| (id, (inputs, operator, Lifetime::None)))
-                .collect(),
-            vec![2],
-        )
-        .unwrap();
+        let program = CompiledPhysicalDAG::from_operators(operators, vec![2]).unwrap();
         let dag = program
             .instantiate(Arc::new(InMemoryDataStore::default()))
             .unwrap();

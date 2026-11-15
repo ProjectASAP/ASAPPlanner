@@ -33,8 +33,10 @@ pub fn matches_node(input: &CurrentSeriesInput, node: &Rc<OperatorNode>) -> bool
 }
 
 /// `physical_asap_dag::physical_asap_dag_at_query_time_with_node_ids`: `roots`
-/// exported with every node at query time, not materialized and without θ,
-/// with each exported node's operator node by node id.
+/// exported as one DAG with every node at query time and without θ, with
+/// each exported node's operator node by node id. A node with more than one
+/// consumer, a leaf included, is `OneEvaluation`, as Stage 3 selects for a
+/// shared query-time output; every other node is not materialized.
 pub fn physical_asap_dag_at_query_time_with_node_ids(
     roots: &[crate::ir::QueryRoot],
 ) -> Result<
