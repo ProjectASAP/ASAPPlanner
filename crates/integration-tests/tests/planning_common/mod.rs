@@ -48,13 +48,17 @@ pub fn with_queries(mut w: FuzzWorkload, queries: &[String]) -> FuzzWorkload {
 
 /// The selected plan's cost per second for `w`.
 pub fn cost(w: &FuzzWorkload) -> f64 {
+    cost_with(w, &CostInputs::default())
+}
+
+/// [`cost`] under `settings`.
+pub fn cost_with(w: &FuzzWorkload, settings: &CostInputs) -> f64 {
     let roots = Planner::new(FuzzSettings::default()).lower(w).unwrap();
     let planning = w.planning_workload();
     let entries: Vec<_> = planning.query_workload.entries().collect();
-    let settings = CostInputs::default();
     let deployment = w.deployment();
     let models = PlanningModels::builtin()
-        .with_cost_inputs(&settings)
+        .with_cost_inputs(settings)
         .with_deployment_capabilities(&deployment);
     let run = run_search_over(
         roots,
@@ -66,7 +70,7 @@ pub fn cost(w: &FuzzWorkload) -> f64 {
     .unwrap();
     let (plan, _) = run.run.selection.as_ref().unwrap();
     let value =
-        asap_integration_tests::planning::plan_cost_per_second(plan, &entries, &w.data, &settings);
+        asap_integration_tests::planning::plan_cost_per_second(plan, &entries, &w.data, settings);
     println!("cost={value}");
     value
 }
