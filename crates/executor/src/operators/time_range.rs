@@ -54,13 +54,15 @@ impl Operator {
         })
     }
 
-    /// This range window (not an instant window), each kept row's time
-    /// replaced by the end of the tumbling window of `width_ms` it lies in,
-    /// the windows counted back from the range's end `E`: `(E - (k+1) ·
-    /// width_ms, E - k · width_ms]` ends at `E - k · width_ms`. A
-    /// tumbling-window chain built at query time groups its rows by that
-    /// end. Example: with `E` = 600,000 and windows of 60,000 ms, rows at
-    /// 540,001 and 600,000 end at 600,000, a row at 540,000 at 540,000.
+    /// This range window (not an instant window), each kept row followed
+    /// by the end of the tumbling window of `width_ms` its time lies in, in
+    /// a trailing [`TUMBLING_WINDOW_END_COLUMN`]; the row's own time is
+    /// kept, as a counter's samples need it. The windows count back from
+    /// the range's end `E`: `(E - (k+1) · width_ms, E - k · width_ms]` ends
+    /// at `E - k · width_ms`. A tumbling-window chain built for its readers
+    /// groups its rows by that end. Example: with `E` = 600,000 and windows
+    /// of 60,000 ms, rows at 540,001 and 600,000 end at 600,000, a row at
+    /// 540,000 at 540,000.
     pub fn with_tumbling_window_ends(mut self, width_ms: i64) -> Result<Self, Error> {
         let Kind::TimeRange {
             latest_per_series: None,
@@ -73,10 +75,29 @@ impl Operator {
         if width_ms <= 0 {
             return Err(invalid("a tumbling window has a positive width"));
         }
+        if self
+            .output
+            .fields
+            .iter()
+            .any(|field| field.name == TUMBLING_WINDOW_END_COLUMN)
+        {
+            return Err(invalid("a range window's input already has a window end"));
+        }
         *slot = Some(width_ms);
+        let mut output = (*self.output).clone();
+        output.fields.push(result_field(
+            TUMBLING_WINDOW_END_COLUMN,
+            DataType::Timestamp,
+            false,
+        ));
+        self.output = Arc::new(output);
         Ok(self)
     }
 }
+
+/// The column [`Operator::with_tumbling_window_ends`] appends: each row's
+/// tumbling window end.
+pub const TUMBLING_WINDOW_END_COLUMN: &str = "$tumbling_window_end";
 
 impl Operator {
     /// A `TimeShift { offset_ms, at }`: its rows are its input's, which a
@@ -228,7 +249,7 @@ pub(super) fn execute<'a>(
                     batch.filter(&keep)?
                 };
                 match tumbling_window_width_ms {
-                    Some(width_ms) => window_ends(batch, time, end, width_ms),
+                    Some(width_ms) => window_ends(batch, &operator.output, time, end, width_ms),
                     None => Ok(batch),
                 }
             })
@@ -274,10 +295,16 @@ pub(super) fn execute<'a>(
     .boxed_local())
 }
 
-/// `batch` (its rows in `(.., end]`) with each row's `time` replaced by the
-/// end of its tumbling window of `width_ms` counted back from `end`
-/// ([`Operator::with_tumbling_window_ends`]).
-fn window_ends(batch: Batch, time: usize, end: i64, width_ms: i64) -> Result<Batch, Error> {
+/// `batch` (its rows in `(.., end]`) as `output`: each row followed by the
+/// end of its `time`'s tumbling window of `width_ms` counted back from
+/// `end` ([`Operator::with_tumbling_window_ends`]).
+fn window_ends(
+    batch: Batch,
+    output: &SchemaRef,
+    time: usize,
+    end: i64,
+    width_ms: i64,
+) -> Result<Batch, Error> {
     let times = batch
         .column(time)
         .as_any()
@@ -290,16 +317,11 @@ fn window_ends(batch: Batch, time: usize, end: i64, width_ms: i64) -> Result<Bat
         .map(|t| t.map(|t| end - (end - t) / width_ms * width_ms))
         .collect();
     let rows = batch.num_rows();
-    let mut arrays = Vec::with_capacity(batch.schema().fields.len());
-    let mut states = Vec::with_capacity(arrays.capacity());
-    for column in 0..batch.schema().fields.len() {
-        if column == time {
-            arrays.push(std::sync::Arc::new(ends.clone()) as arrow::array::ArrayRef);
-            states.push(None);
-        } else {
-            arrays.push(batch.column(column).clone());
-            states.push(batch.state_column(column).cloned());
-        }
-    }
-    Batch::from_parts(batch.schema().clone(), arrays, states, rows)
+    let mut arrays = batch.record_batch().columns().to_vec();
+    let mut states: Vec<_> = (0..arrays.len())
+        .map(|column| batch.state_column(column).cloned())
+        .collect();
+    arrays.push(std::sync::Arc::new(ends) as arrow::array::ArrayRef);
+    states.push(None);
+    Batch::from_parts(output.clone(), arrays, states, rows)
 }

@@ -50,6 +50,12 @@ impl TimeIndexedPlan for CompileGraph<'_> {
                 reads: InputRows::AllRows,
                 shifts_back_ms: 0,
             },
+            InputRows::LastWindow { .. } if self.chain_builds_windows_readers_read(node) => {
+                InputTimeAccess {
+                    reads: InputRows::WhatItsReadersRead,
+                    ..access
+                }
+            }
             _ => access,
         }
     }
@@ -60,6 +66,27 @@ impl TimeIndexedPlan for CompileGraph<'_> {
 
     fn operator_of(&self, node: NodeId) -> &Payload {
         &self.nodes[&node].payload
+    }
+}
+
+impl CompileGraph<'_> {
+    /// Whether the tumbling-window chain `node` is built in this compile
+    /// for the compiled nodes reading it, every window they read, rather
+    /// than refreshed as a compile root (its newest window, ending at an
+    /// ingestion run's end). A chain placed at query time always is; one
+    /// placed at ingestion time is when its materialized view is not bound
+    /// (a bound view is not compiled) and it is not a root. Example: the
+    /// plan of `sum by (job)(rate(c[5m]))` compiled with no view bound, a
+    /// 10 s chain at ingestion time under `TimeRange(5m)`: the query run
+    /// builds the chain's 30 windows `(T - 5m, T]`, not only `(T - 10s, T]`.
+    pub(super) fn chain_builds_windows_readers_read(&self, node: NodeId) -> bool {
+        let compiled = self.nodes[&node];
+        matches!(
+            compiled.payload,
+            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+        ) && (compiled.output_state.timing
+            == planner_types::ir::properties::ExecutionTiming::QueryTime
+            || !self.roots.contains(&node))
     }
 }
 
