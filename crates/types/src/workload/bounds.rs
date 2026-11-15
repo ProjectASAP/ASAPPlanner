@@ -12,7 +12,7 @@ use crate::ir::{
 };
 use crate::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
 use crate::summary_type::SketchStatistic;
-use crate::workload::{DataWorkload, PrometheusMetricType};
+use crate::workload::{DataWorkload, PrometheusMetricType, ValueMagnitude};
 
 /// A scan source's name: its PromQL metric or SQL table.
 pub fn source_name(source: &Source) -> &str {
@@ -415,6 +415,32 @@ pub fn declared_non_negative(data: &DataWorkload, metric: &str) -> bool {
         })
 }
 
+/// The magnitudes of `column`'s non-zero values over every source in
+/// `sources`, from each one's declared `column_magnitudes`
+/// ([`SourceFacts::column_magnitudes`](crate::workload::SourceFacts::column_magnitudes)):
+/// the smallest `min_abs` and the largest `max_abs` among them. `None` when
+/// `sources` is empty or some source declares none for `column`. E.g.
+/// sources declaring `[0.001, 10]` and `[0.01, 100]` give `[0.001, 100]`.
+pub fn declared_value_magnitude<'a>(
+    data: &DataWorkload,
+    sources: impl IntoIterator<Item = &'a str>,
+    column: &str,
+) -> Option<ValueMagnitude> {
+    sources
+        .into_iter()
+        .try_fold(None, |union: Option<ValueMagnitude>, source| {
+            let (facts, _) = data.series_facts(source)?;
+            let declared = *facts.column_magnitudes.get(column)?;
+            Some(Some(match union {
+                None => declared,
+                Some(union) => ValueMagnitude {
+                    min_abs: union.min_abs.min(declared.min_abs),
+                    max_abs: union.max_abs.max(declared.max_abs),
+                },
+            }))
+        })?
+}
+
 /// Whether `data` declares `metric` a counter, itself or as the `_sum` or
 /// `_count` series of a declared histogram or summary
 /// ([`DataWorkload::series_facts`]). A declared type does not expire, so its
@@ -678,6 +704,40 @@ pub fn declared_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> Option<
 mod tests {
     use super::*;
     use crate::workload::{DataArrival, DurationMs, SourceFacts};
+
+    /// The magnitudes over several sources span all of theirs, and are
+    /// unknown when any of them declares none for the column.
+    #[test]
+    fn declared_value_magnitudes_are_the_union_over_the_sources() {
+        let facts = |min_abs, max_abs| SourceFacts {
+            column_magnitudes: BTreeMap::from([(
+                "value".to_string(),
+                ValueMagnitude { min_abs, max_abs },
+            )]),
+            ..SourceFacts::default()
+        };
+        let data = DataWorkload {
+            sources: BTreeMap::from([
+                ("a".to_string(), facts(0.001, 10.0)),
+                ("b".to_string(), facts(0.01, 100.0)),
+                ("c".to_string(), SourceFacts::default()),
+            ]),
+            ..DataWorkload::default()
+        };
+        let magnitude = |sources: &[&str], column| {
+            declared_value_magnitude(&data, sources.iter().copied(), column)
+        };
+        assert_eq!(
+            magnitude(&["a", "b"], "value"),
+            Some(ValueMagnitude {
+                min_abs: 0.001,
+                max_abs: 100.0
+            })
+        );
+        assert_eq!(magnitude(&["a", "c"], "value"), None);
+        assert_eq!(magnitude(&["a"], "latency"), None);
+        assert_eq!(magnitude(&[], "value"), None);
+    }
 
     /// A source's rows per ms: its series over its sample interval when it
     /// declares both, else its series share of the workload's rate.
