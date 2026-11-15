@@ -270,8 +270,8 @@ pub mod planning {
         use asap_cost::{OperatorCost, OperatorKind};
         use asap_types::summary_type::{ExactKind, HydraParams, SketchParams};
         // One instance of each sketch family: the table matches an entry by
-        // family. The match below lists every family, so adding one fails
-        // to compile until it is listed here too.
+        // family. A new family fails to compile in the exhaustive match
+        // below; add an instance of it to this array too.
         let sketches = [
             SketchParams::Kll { k: 200 },
             SketchParams::DDSketch { alpha: 0.01 },
@@ -322,6 +322,8 @@ pub mod planning {
                 | SketchParams::Hydra(_) => {}
             }
         }
+        // Every exact accumulator; as above, a new kind fails to compile in
+        // the match below, and needs adding to this array too.
         let exact = [
             ExactKind::Sum,
             ExactKind::Count,

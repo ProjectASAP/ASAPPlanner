@@ -18,6 +18,12 @@ impl EdgeStatistics {
     pub(crate) fn is_consistent(self) -> bool {
         matches!((self.rows, self.bytes), (0, 0) | (1.., 1..))
     }
+
+    /// The bytes of one row, rounded up: one state's bytes on an edge of
+    /// states (1,000 states of 16,000 bytes: 16), 0 on an empty edge.
+    pub(crate) fn bytes_per_row(self) -> u64 {
+        self.bytes.div_ceil(self.rows.max(1))
+    }
 }
 
 /// Input and output evidence for a unary physical operator.
