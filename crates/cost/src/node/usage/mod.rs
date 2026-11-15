@@ -183,6 +183,22 @@ pub struct ProducerOutput<'a> {
     pub chain_tumbling_window_width_ms: Option<u64>,
 }
 
+impl ProducerOutput<'_> {
+    /// The source column `weight` reads, when this producer passes that
+    /// column on unchanged from the sources: the column whose values a
+    /// summary built over this producer folds. E.g. `value` for a DDSketch
+    /// over a scan of `latency` or over a filter on that scan; `None` for a
+    /// computed weight such as a rate.
+    pub(crate) fn unchanged_column(&self, weight: &SummaryInputExpr) -> Option<&str> {
+        let SummaryInputExpr::Column(column) = weight else {
+            return None;
+        };
+        let index = resolve_column_ref(column, self.output_schema).ok()?;
+        let name = self.output_schema.fields.get(index)?.name.as_str();
+        self.unchanged_columns.contains(name).then_some(name)
+    }
+}
+
 /// What one node uses and outputs ([`node_resource_usage_and_cost`]): its
 /// output statistics, sources and state family for its consumers; its work
 /// for one computation (one execution) in ms on one core; its usage per
@@ -482,32 +498,22 @@ pub fn node_resource_usage_and_cost<'a>(
                 .ok_or(AnalyticalCostError::Overflow)?,
         })
     };
-    // The source column whose values a summary built here folds: its
-    // `weight` column, when the producer passes that column on unchanged
-    // from the sources. E.g. `value` for a DDSketch over a scan of `latency`
-    // or over a filter on that scan; `None` for a computed weight such as a
-    // rate.
-    let folded_source_column = |update: &SummaryUpdate| -> Option<&str> {
-        let SummaryInputExpr::Column(column) = &update.weight else {
-            return None;
-        };
-        let producer = producers.first()?;
-        let index = resolve_column_ref(column, producer.output_schema).ok()?;
-        let name = producer.output_schema.fields.get(index)?.name.as_str();
-        producer.unchanged_columns.contains(name).then_some(name)
-    };
     // What the sources declare about the values a summary built here folds:
     // whether every one is non-negative, and their magnitude range, both
-    // from the one folded source column.
+    // from the one source column it folds
+    // (`ProducerOutput::unchanged_column`).
     let folded_values = |update: &SummaryUpdate| {
-        folded_source_column(update).map_or((false, None), |column| {
-            let non_negative = !sources.is_empty()
-                && sources
-                    .iter()
-                    .all(|source| declared_non_negative(data, source, column));
-            let range = declared_value_magnitude_range(data, sources.iter().copied(), column);
-            (non_negative, range)
-        })
+        producers
+            .first()
+            .and_then(|producer| producer.unchanged_column(&update.weight))
+            .map_or((false, None), |column| {
+                let non_negative = !sources.is_empty()
+                    && sources
+                        .iter()
+                        .all(|source| declared_non_negative(data, source, column));
+                let range = declared_value_magnitude_range(data, sources.iter().copied(), column);
+                (non_negative, range)
+            })
     };
     let unary = |output| UnaryEdgeStatistics {
         input,
