@@ -41,7 +41,7 @@ enum ExecutionInContext {
 
 /// What two equivalent contexts have alike, up to their costs' common
 /// multiple $\alpha$: per execution (ascending, so by candidate) its
-/// candidate, whether it is kept and costed, its least retention need, and
+/// candidate, whether it is kept and costed, its least retention, and
 /// per input the memo edges into it from each producer, costed or not; and
 /// the sorted signatures of its queries ([`QuerySignature`]).
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -56,7 +56,7 @@ struct ExecutionKey {
     candidate: PhysicalCandidateId,
     kept: bool,
     costed: bool,
-    least_need_ms: Option<u64>,
+    least_retention_ms: Option<u64>,
     /// Per input, each edge into it: (memo edge, producer, costed).
     inputs: Vec<Vec<(PhysicalEdgeId, ExecutionInContext, bool)>>,
 }
@@ -84,22 +84,25 @@ struct QuerySignature<'a> {
 /// same execution outside every evaluation context, and queries that pair
 /// up with the same output executions, exact-only groups, span and
 /// accuracy target, so the accuracy constraint holds alike in both) and
-/// every cost in one is the same multiple $\alpha$ of the other's, to
-/// [`COST_RELATIVE_TOLERANCE`] of the copy's largest cost. Each query
-/// belongs to its own evaluation context
+/// every cost the MILP reads in one (of a kept execution, or of an edge
+/// between two kept ones) is the same multiple $\alpha > 0$ of the
+/// other's, to [`COST_RELATIVE_TOLERANCE`] of the copy's largest such
+/// cost. Each query belongs to its own evaluation context
 /// (`SelectableExecutions::evaluation_context`), wherever its answering
 /// executions run. Contexts are bucketed by key, so only the cost check
 /// compares two contexts.
 ///
-/// Exact: from an optimal plan, give both contexts the selection of the
-/// one whose own cost $A$ or $B$ is lower, say $A$. The copied context
-/// then costs $\alpha A \le \alpha B$, the retention $h_v$ and raw data
-/// $r_s$ (each the most of their readers' needs, equal in both copies) do
-/// not grow, and an execution outside them that only the other selection
-/// read is left out at no cost; with $B \le A$ symmetrically. So some
-/// optimum selects alike in both, and sharing their variables keeps it,
-/// to the tolerance the costs are compared to (each copied cost within
-/// 1e-12 of the context's largest cost of $\alpha$ times its original).
+/// Why some optimum survives: from an optimal plan, give both contexts the
+/// selection of the one whose own cost $A$ or $B$ is lower, say $A$. The
+/// copied context then costs $\alpha A \le \alpha B$, the retention $h_v$
+/// and raw data $r_s$ (each the most of their readers' needs, equal in both
+/// copies) do not grow, and an execution outside them that only the other
+/// selection read is left out at no cost; with $B \le A$ symmetrically. So
+/// some optimum selects alike in both, and sharing their variables keeps
+/// it, to the tolerance the costs are compared to: each copied cost the
+/// MILP reads (of a kept execution, or of an edge between two kept ones)
+/// within 1e-12 of the largest of them of $\alpha$ times its original. The
+/// exchange needs $\alpha > 0$.
 ///
 /// Example: the same queries every 60 s and every 300 s (one user each):
 /// the 300 s context's executions cost 1/5 of the 60 s ones' and share
@@ -170,10 +173,9 @@ pub(crate) fn copies_in_equivalent_contexts(
         })
         .collect();
     let signature = |context: ExecutionContextId, query: QueryId| -> Option<QuerySignature<'_>> {
-        let outputs = outputs_of
-            .get(&query)
-            .into_iter()
-            .flatten()
+        // A query has an evaluation context exactly when it has an output reference.
+        let outputs = outputs_of[&query]
+            .iter()
             .map(|answering| {
                 answering
                     .iter()
@@ -218,7 +220,7 @@ pub(crate) fn copies_in_equivalent_contexts(
                     candidate: executions[index].candidate,
                     kept: kept[index],
                     costed: costs.per_execution[index].is_ok(),
-                    least_need_ms: costs.least_need_ms_per_execution[index],
+                    least_retention_ms: costs.least_retention_ms_per_execution[index],
                     inputs,
                 })
             })
@@ -239,10 +241,13 @@ pub(crate) fn copies_in_equivalent_contexts(
             in_signature_order,
         ))
     };
-    // Whether every cost of `copy` is the same multiple α of `original`'s,
-    // their executions and edges paired in order (equal keys), to
-    // `COST_RELATIVE_TOLERANCE` of the copy's largest cost, α taken from
-    // that pair. An edge cost is the consumer's cost through one producer
+    // Whether every cost of `copy` the MILP reads is the same multiple
+    // α > 0 of `original`'s, their executions and edges paired in order
+    // (equal keys), to `COST_RELATIVE_TOLERANCE` of the copy's largest such
+    // cost, α taken from that pair. Only kept executions and edges between
+    // two kept ones count (equal keys keep them alike in both): a left-out
+    // execution has no cost in the MILP, and one costing 1e12 would
+    // otherwise allow each kept cost an error of 1. An edge cost is the consumer's cost through one producer
     // less its own, a small difference of large costs that keeps their
     // rounding: 2.8110024e-9 − 2.8110047e-9 in a 60 s context and the same
     // over 5 in a 300 s one are −2.3556e-15 and −4.7112e-16, a ratio of
@@ -251,6 +256,9 @@ pub(crate) fn copies_in_equivalent_contexts(
     let proportional_costs = |original: ExecutionContextId, copy: ExecutionContextId| {
         let mut pairs: Vec<(f64, f64)> = Vec::new();
         for (&a, &b) in executions_of[&original].iter().zip(&executions_of[&copy]) {
+            if !kept[a] {
+                continue;
+            }
             if let (Ok(cost_a), Ok(cost_b)) = (&costs.per_execution[a], &costs.per_execution[b]) {
                 pairs.push((*cost_a, *cost_b));
             }
@@ -260,6 +268,9 @@ pub(crate) fn copies_in_equivalent_contexts(
                     .iter()
                     .zip(selectable.edges_into(b, input))
                 {
+                    if !kept[edges[edge_a].producer] {
+                        continue;
+                    }
                     if let (Some(cost_a), Some(cost_b)) =
                         (costs.per_edge[edge_a], costs.per_edge[edge_b])
                     {
@@ -277,6 +288,9 @@ pub(crate) fn copies_in_equivalent_contexts(
             return pairs.iter().all(|&(a, b)| a == 0.0 && b == 0.0);
         }
         let alpha = largest_b / largest_a;
+        if alpha <= 0.0 {
+            return false;
+        }
         let tolerance = COST_RELATIVE_TOLERANCE * largest_b.abs();
         pairs
             .iter()

@@ -344,10 +344,8 @@ impl ErrorContract {
     /// Example: `count` outputs how many values it reads, whatever their
     /// error ($\beta = 0$): false; `sum` passes its input's relative error
     /// on ($\beta = 1$): true.
-    pub fn input_error_reaches_output(&self, input: usize) -> bool {
-        self.error_factor_per_input
-            .get(input)
-            .is_none_or(|&factor| factor > 0.0)
+    pub(crate) fn input_error_reaches_output(&self, input: usize) -> bool {
+        self.error_factor_per_input[input] > 0.0
     }
 }
 

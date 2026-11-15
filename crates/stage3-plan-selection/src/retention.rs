@@ -62,12 +62,12 @@ pub(crate) fn edge_scan_read_ms(
 /// bounded one. (F) gives a selected execution a use and (R) then retains
 /// at least that: the greedy bound charges it, and the MILP has
 /// $h_v \ge$ it $\cdot x$.
-pub(crate) fn least_need_ms_per_execution(
+pub(crate) fn least_retention_ms_per_execution(
     selectable: &SelectableExecutions,
     costs: &ExecutionCosts,
     entries: &[QueryWorkloadEntry],
 ) -> Vec<Option<u64>> {
-    let mut least_need_ms = vec![None; selectable.executions().len()];
+    let mut least_retention_ms = vec![None; selectable.executions().len()];
     for (index, reader, need_ms) in
         selectable.reads_back(&costs.retention_need_ms_per_edge, entries)
     {
@@ -76,13 +76,13 @@ pub(crate) fn least_need_ms_per_execution(
             Reader::Output(_) => true,
         };
         if let (true, Some(need_ms)) = (costed, need_ms) {
-            let need_ms =
+            let retention_ms =
                 costs.retention_ms_for_need(selectable.executions()[index].candidate, need_ms);
-            let least: &mut Option<u64> = &mut least_need_ms[index];
-            *least = Some(least.map_or(need_ms, |least| least.min(need_ms)));
+            let least: &mut Option<u64> = &mut least_retention_ms[index];
+            *least = Some(least.map_or(retention_ms, |least| least.min(retention_ms)));
         }
     }
-    least_need_ms
+    least_retention_ms
 }
 
 /// `ms` in seconds, the unit of $h_v$ in the MILP and of the costs per

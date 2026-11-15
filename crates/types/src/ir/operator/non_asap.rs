@@ -1933,4 +1933,111 @@ mod tests {
         };
         assert_eq!(operator.vector_match.as_ref(), Some(&vm));
     }
+
+    /// For every operator whose scalar expressions read operator nodes,
+    /// `map_children` calls `f` in [`NonASAPOp::children`] order (direct
+    /// inputs, then each node its scalar expressions read, as
+    /// `ScalarExpr::operator_refs` lists them), so a caller may hand out
+    /// replacements by position. Example: `Filter` over node 1 with
+    /// predicate `s(11) IN (SELECT … node 12) AND s(13)` sees 1, 12, 11,
+    /// 13: an `IN` lists its subquery before the nodes its left side reads.
+    #[test]
+    fn map_children_calls_f_in_children_order() {
+        let read = |id: u32| ScalarExpr::ScalarSubquery(id);
+        let in_and = |a: u32, b: u32, c: u32| {
+            ScalarExpr::BoolAnd(vec![
+                ScalarExpr::InSubquery {
+                    expr: Box::new(read(a)),
+                    subquery: b,
+                    negated: false,
+                },
+                read(c),
+            ])
+        };
+        let key = |id: u32| SortKey {
+            expr: in_and(id, id + 1, id + 2),
+            ascending: true,
+            nulls_first: false,
+        };
+        let empty_schema = Schema {
+            fields: vec![],
+            time_index: None,
+            unique_keys: vec![],
+            closed: true,
+        };
+        let operators: Vec<NonASAPOp<u32>> = vec![
+            NonASAPOp::Scan {
+                source: Source::Table {
+                    table_ref: "t".into(),
+                },
+                predicates: vec![Predicate(in_and(11, 12, 13)), Predicate(read(14))],
+                schema: empty_schema.clone(),
+            },
+            NonASAPOp::Values {
+                rows: vec![vec![in_and(11, 12, 13)], vec![read(14)]],
+                schema: empty_schema,
+            },
+            NonASAPOp::Filter {
+                pred: Predicate(in_and(11, 12, 13)),
+                child: 1,
+            },
+            NonASAPOp::Project {
+                cols: vec![
+                    ProjectItem {
+                        alias: None,
+                        expr: in_and(11, 12, 13),
+                    },
+                    ProjectItem {
+                        alias: None,
+                        expr: read(14),
+                    },
+                ],
+                child: 1,
+            },
+            NonASAPOp::Aggregate {
+                reduction: Reduction::PerEntity,
+                measures: vec![],
+                output_names: vec![],
+                filters: vec![Some(Predicate(in_and(11, 12, 13))), None],
+                having: Some(Predicate(read(14))),
+                child: 1,
+            },
+            NonASAPOp::Join {
+                kind: JoinKind::Inner,
+                pred: Predicate(in_and(11, 12, 13)),
+                left: 1,
+                right: 2,
+            },
+            NonASAPOp::Sort {
+                keys: vec![key(11), key(14)],
+                partition_by: GroupKeys::by(vec![]),
+                child: 1,
+            },
+            NonASAPOp::SQLWindowFunc {
+                func: WindowFuncKind::RowNumber,
+                args: vec![in_and(11, 12, 13)],
+                partition_by: GroupKeys::by(vec![]),
+                order_by: vec![key(14)],
+                frame: None,
+                output_name: "w".into(),
+                child: 1,
+            },
+            NonASAPOp::PromqlVectorFromScalar(in_and(11, 12, 13)),
+            NonASAPOp::PromqlRelabel {
+                dst: "d".into(),
+                value: in_and(11, 12, 13),
+                child: 1,
+            },
+        ];
+        for operator in &operators {
+            let mut seen = Vec::new();
+            operator.map_children(|&id| {
+                seen.push(id);
+                id
+            });
+            let children: Vec<u32> = operator.children().into_iter().copied().collect();
+            assert_eq!(seen, children, "{operator:?}");
+        }
+        assert_eq!(operators[2].children(), vec![&1, &12, &11, &13]);
+    }
 }

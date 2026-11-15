@@ -46,7 +46,7 @@ pub(crate) fn dearer_than_a_feasible_plan(inputs: &SelectionInputs<'_>) -> Vec<b
     // scan's retention is its source's $r_s$, left out.
     let least_retention_cost = |index: usize| {
         let v = executions[index].candidate;
-        match costs.least_need_ms_per_execution[index] {
+        match costs.least_retention_ms_per_execution[index] {
             Some(need_ms) if !costs.raw_data_source.contains_key(&v) => {
                 costs.retention_cost_per_second(v, need_ms)
             }

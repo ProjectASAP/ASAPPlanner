@@ -263,11 +263,15 @@ impl<C> ScalarExpr<C> {
                 expr,
                 subquery,
                 negated,
-            } => ScalarExpr::InSubquery {
-                expr: map_box(expr, column, f),
-                subquery: f(subquery),
-                negated: *negated,
-            },
+            } => {
+                // The subquery first, as `operator_refs` lists it.
+                let subquery = f(subquery);
+                ScalarExpr::InSubquery {
+                    expr: map_box(expr, column, f),
+                    subquery,
+                    negated: *negated,
+                }
+            }
             ScalarExpr::Negative { expr, semantics } => ScalarExpr::Negative {
                 expr: map_box(expr, column, f),
                 semantics: *semantics,

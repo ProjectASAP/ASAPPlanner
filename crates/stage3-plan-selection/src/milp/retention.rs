@@ -54,7 +54,7 @@ pub(crate) fn retention_variables(
 ///
 /// With them, per execution $u$ of such a $v$, $h_v \ge
 /// \min_{\text{uses}} \operatorname{need} \cdot x_u$ over its costed
-/// reads (`ExecutionCosts::least_need_ms_per_execution`): (F) gives a
+/// reads (`ExecutionCosts::least_retention_ms_per_execution`): (F) gives a
 /// selected execution a use, and (R) then retains at least the least
 /// need. It is implied for integer $x$, $y$,
 /// $z$, but tightens the relaxation where fractional $y$ leave $h_v$ low.
@@ -83,7 +83,12 @@ pub(crate) fn retention_constraints(
             constraints.push(constraint!(h >= ms_to_seconds(need_ms) * read));
         }
     }
-    for (index, need_ms) in inputs.costs.least_need_ms_per_execution.iter().enumerate() {
+    for (index, need_ms) in inputs
+        .costs
+        .least_retention_ms_per_execution
+        .iter()
+        .enumerate()
+    {
         if let (Some(&h), Some(need_ms)) = (h.get(&executions[index].candidate), *need_ms) {
             if need_ms > 0 {
                 constraints.push(constraint!(h >= ms_to_seconds(need_ms) * x[index]));

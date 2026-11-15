@@ -72,7 +72,7 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::plan::candidate_node;
 use crate::retention::{
-    edge_retention_need_ms, edge_scan_read_ms, least_need_ms_per_execution, ms_to_seconds,
+    edge_retention_need_ms, edge_scan_read_ms, least_retention_ms_per_execution, ms_to_seconds,
 };
 use crate::selectable::{Execution, SelectableExecutions};
 
@@ -110,8 +110,8 @@ pub(crate) struct ExecutionCosts {
     pub(crate) newest_output_retention_ms: HashMap<PhysicalCandidateId, u64>,
     /// The least retention, in ms, over each execution's costed reads
     /// ([`Self::retention_ms_for_need`] of each), by position in
-    /// `SelectableExecutions::executions` ([`least_need_ms_per_execution`]).
-    pub(crate) least_need_ms_per_execution: Vec<Option<u64>>,
+    /// `SelectableExecutions::executions` ([`least_retention_ms_per_execution`]).
+    pub(crate) least_retention_ms_per_execution: Vec<Option<u64>>,
     /// The source of each query-time `Scan`: its retention is raw data on
     /// disk, which a plan keeps once per source for the selected scan that
     /// keeps the most, as `plan_cost` charges it ($r_s$).
@@ -171,8 +171,12 @@ pub(crate) fn execution_costs(
         node.retention_ms = retention_ms;
         node
     };
-    let retains_rows: Vec<bool> = (0..count)
-        .map(|v| node_retaining(PhysicalCandidateId(v), None).retains_rows())
+    let unretained_nodes: Vec<PhysicalASAPDAGNode> = (0..count)
+        .map(|v| node_retaining(PhysicalCandidateId(v), None))
+        .collect();
+    let retains_rows: Vec<bool> = unretained_nodes
+        .iter()
+        .map(PhysicalASAPDAGNode::retains_rows)
         .collect();
     let query_time_scan: Vec<bool> = (0..count)
         .map(|v| physical.is_query_time_scan(PhysicalCandidateId(v)))
@@ -201,7 +205,7 @@ pub(crate) fn execution_costs(
         .filter(|&v| retains_rows[v])
         .map(PhysicalCandidateId)
         .map(|v| {
-            let node = node_retaining(v, None);
+            let node = &unretained_nodes[v.0];
             let window_ms = match node.output_state.timing {
                 ExecutionTiming::IngestionTime => ingestion_window_ms(physical, v),
                 ExecutionTiming::QueryTime => None,
@@ -268,9 +272,13 @@ pub(crate) fn execution_costs(
     }
     let baseline_scan_read_of =
         |v: PhysicalCandidateId| baseline_scan_read_ms.get(&v).copied().flatten();
-    let nodes: Vec<PhysicalASAPDAGNode> = (0..count)
-        .map(PhysicalCandidateId)
-        .map(|v| node_retaining(v, most_read_ms.get(&v).copied().flatten()))
+    let nodes: Vec<PhysicalASAPDAGNode> = unretained_nodes
+        .into_iter()
+        .enumerate()
+        .map(|(v, mut node)| {
+            node.retention_ms = most_read_ms.get(&PhysicalCandidateId(v)).copied().flatten();
+            node
+        })
         .collect();
     // Each group's expression as a payload, for its logical output.
     let group_payloads: Vec<PhysicalASAPOperatorPayload> = memo
@@ -500,11 +508,12 @@ pub(crate) fn execution_costs(
         retention_cost_per_retained_second,
         retention_need_ms_per_edge,
         newest_output_retention_ms,
-        least_need_ms_per_execution: Vec::new(),
+        least_retention_ms_per_execution: Vec::new(),
         raw_data_source,
         unbounded_raw_data_on_disk_cost_per_second,
     };
-    costs.least_need_ms_per_execution = least_need_ms_per_execution(selectable, &costs, entries);
+    costs.least_retention_ms_per_execution =
+        least_retention_ms_per_execution(selectable, &costs, entries);
     costs
 }
 

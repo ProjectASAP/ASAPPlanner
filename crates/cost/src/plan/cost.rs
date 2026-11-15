@@ -105,21 +105,16 @@ pub fn plan_cost(
     // usage and cost ([`node_resource_usage_and_cost`]), children first.
     let multipliers = computations(dag, entries, settings.non_repeating_query_horizon_seconds)
         .map_err(|error| (first, error))?;
-    // Each node's producers in its payload's input order (its children,
-    // then the nodes its scalar expressions refer to), whatever order the
-    // DAG lists its edges in: its first producer is its child. Example:
-    // `q + scalar(count(q))` as a `Project` over `q` reads `q` first, even
-    // when the edge from the count is listed first.
-    let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
-    for e in &dag.edges {
-        producers_of.entry(e.consumer).or_default().push(e.producer);
-    }
-    for (id, producers) in &mut producers_of {
-        let inputs = nodes[id].payload.children();
-        producers.sort_by_key(|producer| inputs.iter().position(|&input| input == producer));
-    }
+    // Each node's producers in its payload's input order, whatever order
+    // the DAG lists its edges in (`PhysicalASAPDAGNode::producers`): its
+    // first producer is its child.
+    let producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = dag
+        .nodes
+        .iter()
+        .map(|node| (node.id, node.producers()))
+        .collect();
     let first_input_of = |id: PhysicalASAPNodeId| {
-        let input = producers_of.get(&id)?.first()?;
+        let input = producers_of[&id].first()?;
         Some(&nodes[input].payload)
     };
     // Each node keeping raw rows at ingestion, not stored: what an
@@ -139,9 +134,7 @@ pub fn plan_cost(
     let mut costed: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'_>> = HashMap::new();
     let mut one_batch: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'_>> = HashMap::new();
     for node in &dag.nodes {
-        let views: Vec<ProducerOutput<'_>> = producers_of
-            .get(&node.id)
-            .map_or(&[][..], Vec::as_slice)
+        let views: Vec<ProducerOutput<'_>> = producers_of[&node.id]
             .iter()
             .map(|p| {
                 let read = match reads_one_batch_of(node, nodes[p], first_input_of(*p)) {

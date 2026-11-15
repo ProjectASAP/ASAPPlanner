@@ -30,7 +30,7 @@ use asap_types::workload::{
 use super::*;
 use crate::cost::ExecutionCosts;
 use crate::plan::plan_of;
-use crate::retention::{edge_retention_need_ms, least_need_ms_per_execution};
+use crate::retention::{edge_retention_need_ms, least_retention_ms_per_execution};
 use crate::selectable::{QueryId, SelectableEdge};
 
 const NONE: Lifetime = Lifetime::None;
@@ -192,11 +192,12 @@ fn selection_inputs(
             .collect(),
         retention_cost_per_retained_second,
         newest_output_retention_ms: HashMap::new(),
-        least_need_ms_per_execution: Vec::new(),
+        least_retention_ms_per_execution: Vec::new(),
         raw_data_source: HashMap::new(),
         unbounded_raw_data_on_disk_cost_per_second: HashMap::new(),
     };
-    costs.least_need_ms_per_execution = least_need_ms_per_execution(&selectable, &costs, entries);
+    costs.least_retention_ms_per_execution =
+        least_retention_ms_per_execution(&selectable, &costs, entries);
     (selectable, costs)
 }
 
@@ -469,8 +470,8 @@ fn a_stored_result_read_at_its_newest_output_retains_one_output() {
             costs
                 .newest_output_retention_ms
                 .insert(PhysicalCandidateId(1), newest_output_ms);
-            costs.least_need_ms_per_execution =
-                least_need_ms_per_execution(&selectable, &costs, &entries);
+            costs.least_retention_ms_per_execution =
+                least_retention_ms_per_execution(&selectable, &costs, &entries);
         }
         solve_selection(&SelectionInputs {
             physical: &physical,
@@ -1134,4 +1135,66 @@ fn contexts_whose_small_edge_costs_differ_by_rounding_are_copies() {
     for (index, &original) in shared.original_of_execution.iter().enumerate() {
         assert_eq!(original != index, every_300s(index));
     }
+}
+
+/// The same query `m[5m]` every 60 s and every 300 s over a scan with
+/// ℓ = None (s0) or `OneEvaluation` (s1), read by the range (r) or by a
+/// `OneEvaluation` range costing 1e12 (2e11 every 300 s), which the bound
+/// leaves out. Every 60 s, r, s0 and s1 cost 1, 1 and 1.1; every 300 s
+/// 0.2, 0.3 and 0.22, and the edge s1 → r 1e-3 (so s1 does not dominate
+/// s0). The 300 s costs are not one multiple of the 60 s ones (s0 would
+/// be 0.2), so the contexts are not copies, and the optimum reads s0
+/// every 60 s and s1 every 300 s: 2 + 0.421 = 2.421. Compared by every
+/// cost, the left-out range's 2e11 sets the tolerance to 0.2, the
+/// contexts share their variables, and the optimum is 2.5.
+#[test]
+fn a_left_out_execution_does_not_set_the_tolerance_of_context_copies() {
+    let mut memo = empty_memo();
+    let m = scan(&mut memo);
+    let last_5m = range(&mut memo, 300, m);
+    query(&mut memo, last_5m, None);
+    query(&mut memo, last_5m, None);
+    let physical = physical(
+        memo,
+        &[
+            (own_candidate(m), NONE),
+            (own_candidate(m), ONE_EVALUATION),
+            (own_candidate(last_5m), NONE),
+            (own_candidate(last_5m), ONE_EVALUATION),
+        ],
+    );
+    let entries = [every(60_000), every(300_000)];
+    let (selectable, mut costs) =
+        selection_inputs(&physical, &entries, &[1.0, 1.1, 1.0, 1e12], &[], &[]);
+    let executions = selectable.executions();
+    let every_300s = |index: usize| {
+        matches!(
+            selectable.context(executions[index].context),
+            asap_types::stages::ExecutionContext::Evaluation { grid } if grid.period_ms == 300_000
+        )
+    };
+    for (index, cost) in costs.per_execution.iter_mut().enumerate() {
+        if every_300s(index) {
+            *cost = Ok([0.3, 0.22, 0.2, 2e11][executions[index].candidate.0]);
+        }
+    }
+    let s1_to_range = edge(&physical, 1, 2);
+    for (position, selectable_edge) in selectable.edges().iter().enumerate() {
+        if selectable_edge.edge == s1_to_range && every_300s(selectable_edge.consumer) {
+            costs.per_edge[position] = Some(1e-3);
+        }
+    }
+    let solved = solve_selection(&SelectionInputs {
+        physical: &physical,
+        entries: &entries,
+        selectable: &selectable,
+        costs: &costs,
+    })
+    .unwrap();
+    assert!(
+        (solved.cost_per_second_without_request_overhead - 2.421).abs() < 1e-9,
+        "{}",
+        solved.cost_per_second_without_request_overhead
+    );
+    assert_eq!(candidates(&solved), vec![0, 1, 2, 2]);
 }
