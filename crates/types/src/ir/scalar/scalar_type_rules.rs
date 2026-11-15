@@ -138,6 +138,25 @@ pub fn promql_function_arity(name: &str) -> Option<usize> {
     })
 }
 
+/// The math function a call computes: PromQL's `promql_<f>(value,
+/// numeric literal…)` and SQL's `abs(x)`; `None` for any other call or a
+/// non-literal bound. `promql_clamp_min(value, 0)` →
+/// `Some(MathFunc::ClampMin { min: 0.0 })`.
+pub fn math_function_of_call<C>(
+    name: &str,
+    args: &[crate::ir::scalar::ScalarExpr<C>],
+) -> Option<crate::ir::operator::MathFunc> {
+    let _ = (name, args);
+    todo!("sign derivation by construction: math_function_of_call")
+}
+
+/// The date function a call computes: `promql_hour(value)` →
+/// `Some(TimeFunc::Hour)`; `None` for any other call.
+pub fn time_function_of_call(name: &str) -> Option<crate::ir::operator::TimeFunc> {
+    let _ = name;
+    todo!("sign derivation by construction: time_function_of_call")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
