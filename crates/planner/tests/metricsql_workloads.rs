@@ -109,7 +109,7 @@ fn query_answers(plan: &InstallablePlan, samples: &[RawDataSample]) -> Vec<Answe
         evaluation_time_ms: EVALUATION_MS,
     };
     let store = time_series_tables(&plan.dag, samples);
-    answers(&run(&plan.dag, store, &query_roots(plan), scope)[0])
+    answers(&run(&plan.dag, store, &[], &query_roots(plan), scope)[0])
 }
 
 /// Each query written in MetricsQL plans and installs: the executor
