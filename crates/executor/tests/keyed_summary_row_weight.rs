@@ -175,12 +175,7 @@ fn query_time_count_heap_binds_a_constant_row_weight() {
         selected_physical_candidate: None,
         view_coverage: None,
     };
-    let build = compile_node(
-        &node,
-        std::slice::from_ref(&input),
-        planner_types::ir::OperatorResultKind::Relation,
-    )
-    .unwrap();
+    let build = compile_node(&node, std::slice::from_ref(&input), true).unwrap();
     let wire = serde_json::to_value(&build).unwrap();
     assert_eq!(
         wire["kind"]["PerGroupKeyedSummaryBuild"]["row_weight"],

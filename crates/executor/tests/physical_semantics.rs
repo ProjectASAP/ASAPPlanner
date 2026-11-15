@@ -750,7 +750,7 @@ fn aggregate_empty_and_all_null_follow_asap_contract() {
             ],
         )
         .unwrap()
-        .with_emit_empty_global(None)
+        .with_emit_empty_global(true, None)
         .unwrap();
         let result = unary(input.clone(), batches, op);
         assert_eq!(result.len(), 1);
@@ -826,12 +826,8 @@ fn global_extrema_bind_with_planner_derived_schema() {
             selected_physical_candidate: None,
             view_coverage: None,
         };
-        let operator = compile_node(
-            &node,
-            std::slice::from_ref(&input),
-            planner_types::ir::OperatorResultKind::Relation,
-        )
-        .expect("global extremum should bind to its Planner schema");
+        let operator = compile_node(&node, std::slice::from_ref(&input), true)
+            .expect("global extremum should bind to its Planner schema");
         assert!(operator.schema().fields[0].nullable);
         let empty = unary(input.clone(), vec![], operator.clone());
         assert!(matches!(empty[0][0], Value::Null));
@@ -1328,7 +1324,7 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
             vec![],
         )
         .unwrap()
-        .with_emit_empty_global(None)
+        .with_emit_empty_global(true, None)
         .unwrap();
         let state = build.schema();
         let mut dag = PhysicalDAG::default();
@@ -1475,14 +1471,7 @@ fn measure_filters_keep_groups_without_matching_rows() {
             ("all", plain(DataType::Int64), false),
         ],
     );
-    let operator = round_trip(
-        compile_node(
-            &node,
-            std::slice::from_ref(&input),
-            planner_types::ir::OperatorResultKind::Relation,
-        )
-        .unwrap(),
-    );
+    let operator = round_trip(compile_node(&node, std::slice::from_ref(&input), true).unwrap());
     assert_eq!(
         printed(&unary(input, vec![rows], operator)),
         ["a 1 1.0 2", "b 0 NULL 1", "c 1 4.0 1"]
@@ -1510,12 +1499,7 @@ fn filtered_sum_declared_non_null_is_rejected() {
             ("s", FieldDataType::Plain(DataType::Float64), false),
         ],
     );
-    assert!(compile_node(
-        &node,
-        &[input],
-        planner_types::ir::OperatorResultKind::Relation
-    )
-    .is_err());
+    assert!(compile_node(&node, &[input], true).is_err());
 }
 
 /// A filtered `SummaryAgg` updates its state only from kept rows but keeps
@@ -1566,14 +1550,7 @@ fn filtered_summary_build_keeps_empty_groups() {
             ],
         );
         asap_executor::physical_planner::test_support::set_build_parameters([&mut build], None);
-        let build = round_trip(
-            compile_node(
-                &build,
-                std::slice::from_ref(&input),
-                planner_types::ir::OperatorResultKind::Relation,
-            )
-            .unwrap(),
-        );
+        let build = round_trip(compile_node(&build, std::slice::from_ref(&input), true).unwrap());
         let read = planner_node(
             PhysicalASAPOperatorPayload::ASAP(read),
             &[
@@ -1581,12 +1558,7 @@ fn filtered_summary_build_keeps_empty_groups() {
                 ("value", FieldDataType::Plain(result), nullable),
             ],
         );
-        let read = compile_node(
-            &read,
-            &[build.schema()],
-            planner_types::ir::OperatorResultKind::Relation,
-        )
-        .unwrap();
+        let read = compile_node(&read, &[build.schema()], true).unwrap();
         let mut dag = PhysicalDAG::default();
         dag.add(
             0,
@@ -1632,11 +1604,7 @@ fn filtered_summary_build_is_rejected_at_ingestion_time() {
             ],
         );
         node.output_state = ExecutionDataState::INGESTION_SUMMARY;
-        compile_node(
-            &node,
-            std::slice::from_ref(&input),
-            planner_types::ir::OperatorResultKind::Relation,
-        )
+        compile_node(&node, std::slice::from_ref(&input), true)
     };
     assert!(build(None).is_ok());
     let error = build(keep()).err().expect("filtered ingestion-time build");
@@ -1714,7 +1682,6 @@ fn exact_aggregate_node(
 fn a_global_aggregate_follows_its_input_rows_kind() {
     use asap_executor::physical_planner::compile_node;
     use planner_types::ir::operator::AggIntent;
-    use planner_types::ir::OperatorResultKind;
 
     let input = schema(&[
         ("job", DataType::Utf8, false),
@@ -1739,12 +1706,8 @@ fn a_global_aggregate_follows_its_input_rows_kind() {
     ] {
         let mut node = exact_aggregate_node(measure.clone(), "value", DataType::Float64);
         // A PromQL vector: non-null, no sample over an empty vector.
-        let promql = compile_node(
-            &node,
-            std::slice::from_ref(&input),
-            OperatorResultKind::InstantVector,
-        )
-        .unwrap_or_else(|error| panic!("{measure:?}: {error}"));
+        let promql = compile_node(&node, std::slice::from_ref(&input), false)
+            .unwrap_or_else(|error| panic!("{measure:?}: {error}"));
         assert!(
             unary(input.clone(), vec![], promql.clone()).is_empty(),
             "{measure:?}"
@@ -1755,21 +1718,12 @@ fn a_global_aggregate_follows_its_input_rows_kind() {
             "{measure:?}: {answer:?}"
         );
         // A SQL relation: NULL over no row, so a non-null output is refused.
-        assert!(compile_node(
-            &node,
-            std::slice::from_ref(&input),
-            OperatorResultKind::Relation
-        )
-        .is_err());
+        assert!(compile_node(&node, std::slice::from_ref(&input), true).is_err());
         node.output_schema.fields[0].nullable = true;
         // The rule survives serialization.
         let sql = round_trip(
-            compile_node(
-                &node,
-                std::slice::from_ref(&input),
-                OperatorResultKind::Relation,
-            )
-            .unwrap_or_else(|error| panic!("{measure:?}: {error}")),
+            compile_node(&node, std::slice::from_ref(&input), true)
+                .unwrap_or_else(|error| panic!("{measure:?}: {error}")),
         );
         let empty = unary(input.clone(), vec![], sql.clone());
         assert!(
@@ -1823,12 +1777,8 @@ fn exact_frequency_intents_execute_typed_keys_and_empty_input() {
             ),
         ] {
             let node = exact_aggregate_node(measure, name, DataType::Float64);
-            let operator = compile_node(
-                &node,
-                std::slice::from_ref(&input),
-                planner_types::ir::OperatorResultKind::Relation,
-            )
-            .expect("exact frequency intent binds");
+            let operator = compile_node(&node, std::slice::from_ref(&input), true)
+                .expect("exact frequency intent binds");
             let rows = values
                 .iter()
                 .flat_map(|v| [vec![v.clone()], vec![v.clone()]])
@@ -1932,12 +1882,8 @@ fn exact_cardinality_binds_and_executes_typed_tuples() {
     for (cols, expected) in [(vec![0], 2), (vec![0, 1], 3)] {
         let node =
             exact_aggregate_node(AggIntent::Cardinality { cols }, "distinct", DataType::Int64);
-        let operator = compile_node(
-            &node,
-            std::slice::from_ref(&input),
-            planner_types::ir::OperatorResultKind::Relation,
-        )
-        .expect("exact distinct intent binds");
+        let operator = compile_node(&node, std::slice::from_ref(&input), true)
+            .expect("exact distinct intent binds");
         let rows = vec![
             vec![Value::Int64(9_007_199_254_740_992), Value::Utf8("a".into())],
             vec![Value::Int64(9_007_199_254_740_992), Value::Utf8("a".into())],

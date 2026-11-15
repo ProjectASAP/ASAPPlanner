@@ -75,3 +75,70 @@ fn a_stored_time_shift_over_a_chain_reads_the_chain_unbounded() {
         assert_eq!(window_read_above(0, &graph), None);
     }
 }
+
+/// A global merge (`group_by: Some([])`) of summary states built from a SQL
+/// table's rows reads a `Relation`, so it keeps SQL's one row over no input
+/// rows, also when another summary operator sits between the build and the
+/// merge: `SummaryMerge([]) ← SummarySubtract ← SummaryAgg ← Scan(t)` and
+/// the same with `SummaryJoin`. Over a PromQL series scan the same tree
+/// reads an instant vector (no row over an empty vector).
+#[test]
+fn a_global_merge_reads_the_rows_its_states_were_built_from() {
+    use planner_types::ir::operator::arguments::Source;
+    use planner_types::ir::operator::Reduction as IrReduction;
+    use planner_types::ir::schema::Schema;
+    use planner_types::ir::Operator as IrOperator;
+    use planner_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
+    use std::rc::Rc;
+    let node = |operator| Rc::new(OperatorNode::with_schema(operator, Schema::default()));
+    for (source, expected) in [
+        (
+            Source::Table {
+                table_ref: "t".into(),
+            },
+            OperatorResultKind::Relation,
+        ),
+        (
+            Source::TimeSeries { metric: "m".into() },
+            OperatorResultKind::InstantVector,
+        ),
+    ] {
+        let scan = node(IrOperator::NonASAP(NonASAPOp::Scan {
+            source,
+            predicates: vec![],
+            schema: Schema::default(),
+        }));
+        let build = node(IrOperator::ASAP(ASAPOp::SummaryAgg {
+            child: scan,
+            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: IrReduction::PerEntity,
+            filter: None,
+        }));
+        let subtract = node(IrOperator::ASAP(ASAPOp::SummarySubtract {
+            left: build.clone(),
+            right: build.clone(),
+        }));
+        let join = node(IrOperator::ASAP(ASAPOp::SummaryJoin {
+            outer: build.clone(),
+            inner: build.clone(),
+            key: 0,
+            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+        }));
+        for states in [subtract, join] {
+            let merge = OperatorNode::with_schema(
+                IrOperator::ASAP(ASAPOp::SummaryMerge {
+                    children: vec![states.clone()],
+                    group_by: Some(vec![]),
+                }),
+                Schema::default(),
+            );
+            assert_eq!(
+                input_rows_kind(&merge),
+                expected,
+                "{}",
+                states.operator.kind_name()
+            );
+        }
+    }
+}
