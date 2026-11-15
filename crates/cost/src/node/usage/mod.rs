@@ -870,8 +870,8 @@ pub fn node_resource_usage_and_cost<'a>(
             let merge_ops: f64 = producers
                 .iter()
                 .map(|producer| {
-                    let state_bytes = producer.output.bytes.div_ceil(producer.output.rows.max(1));
-                    producer.output.rows as f64 * merge_operations_per_state(family, state_bytes)
+                    producer.output.rows as f64
+                        * merge_operations_per_state(family, producer.output.bytes_per_row())
                 })
                 .sum();
             if let Some(keys) = group_by {
@@ -880,8 +880,7 @@ pub fn node_resource_usage_and_cost<'a>(
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: input
-                    .bytes
-                    .div_ceil(input.rows.max(1))
+                    .bytes_per_row()
                     .checked_mul(group_count)
                     .ok_or(AnalyticalCostError::Overflow)?,
             };

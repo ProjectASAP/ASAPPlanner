@@ -789,7 +789,8 @@ from logical group count alone.
 
 Summary merge, subtract, delete, and readout are separate physical operators.
 Their CPU and memory use the concrete summary state size and number of input
-states. A merge costs its family's measured operations per input state, and outputs one state per
+states. A merge costs its family's operations per input state (per byte for unmeasured
+sketches), and outputs one state per
 group: the input's groups, or for a rollup (`group_by`) the groups of its
 keys, estimated like any `by (keys)` and at most the input's groups. A plan
 using one of these operations is unavailable until the corresponding formula

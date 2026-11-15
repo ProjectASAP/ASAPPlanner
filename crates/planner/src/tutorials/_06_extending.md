@@ -11,8 +11,9 @@ recipes in [extend ASAP-aware mapping](https://github.com/ProjectASAP/ASAPPlanne
     `parameter_list`) and its capability row
     (`SketchAlgorithm::capability`, read by `SummaryTypeCapability`);
   - offering it in Pass 1 (`ALGORITHM_PREFERENCE`, `summary_candidates`);
-  - its error model (`theoretical_guarantee`) and its cost
-    (`sketch_shape`);
+  - its error model (`theoretical_guarantee`), its state bytes
+    (`sketch_state_bytes`, `crates/cost/src/node/state_bytes/mod.rs`) and
+    its per-row and per-merge CPU (`crates/cost/src/node/operations_per_unit.rs`);
   - its executor kernel (`summary_kernels`, `EVALUATED_READOUTS`).
 - Adding a reuse rule: a memo rule under Pass 2's `rules` that adds groups
   (`Memo::find_or_add_group`) or candidates (`Memo::add_candidate`), called
