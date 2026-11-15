@@ -550,13 +550,6 @@ async fn grouped_and_per_series_counts_over_a_shared_query_time_chain_install_an
 
 // ── Counter rate and increase, per series and per group ─────────────────────
 
-/// `query` every 10 s within relative error 0.01 over 1,000 `requests_total`
-/// counter series sampled every second, planned with the built-in models
-/// on a deployment that keeps raw data or not.
-async fn plan_counter_query(query: &str, raw_data_retained: bool) -> InstallablePlan {
-    plan_counter_queries(&[query], 10_000, raw_data_retained).await
-}
-
 /// `queries`, each every `interval_ms` within relative error 0.01, over
 /// 1,000 `requests_total` counter series sampled every second, planned
 /// together with the built-in models on a deployment that keeps raw data
@@ -719,7 +712,7 @@ async fn counter_query_mismatches(
     let mut mismatches = Vec::new();
     for raw_data_retained in [true, false] {
         for (query, expected) in counter_queries() {
-            let plan = plan_counter_query(query, raw_data_retained).await;
+            let plan = plan_counter_queries(&[query], 10_000, raw_data_retained).await;
             let answered = answer(&plan, &samples).remove(0);
             let matches = answered.len() == expected.len()
                 && answered.iter().zip(&expected).all(|(answer, expected)| {
