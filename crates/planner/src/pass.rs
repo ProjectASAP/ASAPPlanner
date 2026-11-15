@@ -79,7 +79,8 @@ pub enum OptimizeError {
     #[error("plan selection: {0}")]
     Selection(#[from] SelectionError),
     /// Series identity realization would make an operator read a column it
-    /// does not keep: a defect in the realization, not in the query.
+    /// does not keep, or rebuilt an operator whose schema no longer derives:
+    /// a defect in the realization, not in the query.
     #[error("PromQL series identity realization: {0}")]
     SeriesIdentity(SeriesIdentityError),
     /// The pass returned something the downstream contract forbids. This is a

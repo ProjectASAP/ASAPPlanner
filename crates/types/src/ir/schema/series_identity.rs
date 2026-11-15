@@ -1,4 +1,5 @@
 //! Series-identity realization for the unified dag.
+use crate::ir::schema::error::SchemaDerivationError;
 use crate::ir::schema::*;
 /// Resolve a PromQL root to rows carrying [`PROMQL_SERIES_IDENTITY`] before
 /// candidate search. `closed` describes physical columns here: the final
@@ -32,6 +33,9 @@ use crate::ir::schema::*;
 /// - [`SeriesIdentityError::DroppedColumn`]: a reference to a column
 ///   realization does not keep. Reading another column would give a wrong
 ///   answer, so a caller must not fall back.
+/// - [`SeriesIdentityError::InvalidRealizedOperator`]: a renumbered
+///   operator's schema no longer derives. Its input was valid, so this is
+///   a defect in realization and a caller must not fall back either.
 pub fn with_promql_series_identity(
     root: &std::rc::Rc<crate::ir::OperatorNode>,
 ) -> Result<std::rc::Rc<crate::ir::OperatorNode>, SeriesIdentityError> {
@@ -142,7 +146,7 @@ pub fn with_promql_series_identity(
         let new = |operator| {
             OperatorNode::new(operator)
                 .map(Rc::new)
-                .map_err(|e| NotApplicable(e.to_string()))
+                .map_err(SeriesIdentityError::InvalidRealizedOperator)
         };
         let mut rebuilt = new(operator)?;
         // `having` indexes the aggregate's own output, which the input
@@ -177,10 +181,11 @@ pub fn with_promql_series_identity(
 /// [`PROMQL_SERIES_IDENTITY`].
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SeriesIdentityError {
-    /// The root holds an operator this realization does not cover:
-    /// `limitk(2, m)` lowers to a `PromqlSeriesSample`, `info(m)` to a
-    /// `PromqlInfoEnrich`. The root is planned over its label columns
-    /// instead.
+    /// The root holds an operator this realization does not cover, or a
+    /// source that is not an open PromQL source: `limitk(2, m)` lowers to
+    /// a `PromqlSeriesSample`, `info(m)` to a `PromqlInfoEnrich`, and a
+    /// closed scan has no dynamic labels to carry. The root is planned
+    /// over its label columns instead.
     #[error("{0}")]
     NotApplicable(String),
     /// `operator` reads input column `column`, which realization does not
@@ -191,6 +196,15 @@ pub enum SeriesIdentityError {
         operator: &'static str,
         column: ColumnId,
     },
+    /// An operator rebuilt over its realized children, with its column
+    /// references renumbered, has a schema that no longer derives. Its
+    /// unrealized form derived, and renumbering moves `Column(0)` of
+    /// `[sum]` to the same `sum` at `Column(1)` of
+    /// `[$promql_series_identity, sum]`, so this is a defect in
+    /// realization, not in the query. Planning the unrealized root would
+    /// hide it.
+    #[error("series identity realization built an invalid operator: {0}")]
+    InvalidRealizedOperator(SchemaDerivationError),
 }
 
 /// Whether some column of `positions` (see [`positions_after_realization`])
