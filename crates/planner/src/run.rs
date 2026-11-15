@@ -225,8 +225,10 @@ impl OptimizationPass for Stage1ToStage3Pass {
 /// realization (`with_promql_series_identity`), or `node` itself, over its
 /// label columns, when the realization does not apply to one of its
 /// operators (`limitk(2, m)`'s `PromqlSeriesSample`, `info(m)`'s
-/// `PromqlInfoEnrich`). A realization that drops a column an operator
-/// reads is a planning error: falling back would hide it.
+/// `PromqlInfoEnrich`). A realization defect is a planning error, since
+/// falling back would hide it: one that drops a column an operator reads
+/// (`DroppedColumn`) or rebuilds an operator whose schema no longer derives
+/// (`InvalidRealizedOperator`).
 fn promql_root(
     node: &Rc<OperatorNode>,
     realized: Result<Rc<OperatorNode>, SeriesIdentityError>,
@@ -272,6 +274,19 @@ mod tests {
         assert!(matches!(
             promql_root(&vector_one(), Err(error.clone())),
             Err(OptimizeError::SeriesIdentity(dropped)) if dropped == error
+        ));
+    }
+
+    /// A realization that rebuilds an operator whose schema no longer
+    /// derives fails planning rather than plan the unrealized root.
+    #[test]
+    fn a_realization_that_builds_an_invalid_operator_fails_planning() {
+        let error = SeriesIdentityError::InvalidRealizedOperator(
+            asap_types::ir::schema::error::SchemaDerivationError::EmptyConcat,
+        );
+        assert!(matches!(
+            promql_root(&vector_one(), Err(error.clone())),
+            Err(OptimizeError::SeriesIdentity(invalid)) if invalid == error
         ));
     }
 }
