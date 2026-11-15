@@ -172,7 +172,7 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
 /// Plan selection prices each state the executor builds per group at
 /// what the executor charges for it (#947). Each family is built
 /// through the executor's factory and fed `n` rows shaped as the
-/// pricing assumes: signed values over [`DDSKETCH_ASSUMED_MAGNITUDE`],
+/// pricing assumes: signed values over [`DDSKETCH_ASSUMED_MAGNITUDE_RANGE`],
 /// label values of [`ASSUMED_VALUE_KEY_BYTES`] keys for UnivMon, or
 /// keyed rows whose tuple keys are [`ASSUMED_HEAP_KEY_BYTES`] long. The
 /// heap families' shapes are dominated by their heaps. The charge is
@@ -374,7 +374,7 @@ fn state_bytes_bound_the_executors_charge() {
                     // scrambled order, alternating in sign.
                     Rows::Values => {
                         let at = f64::from(i * 7_919 % n) / f64::from(n);
-                        let magnitude = DDSKETCH_ASSUMED_MAGNITUDE.max_abs.powf(at);
+                        let magnitude = DDSKETCH_ASSUMED_MAGNITUDE_RANGE.max_abs.powf(at);
                         let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
                         updater.update_single(sign * magnitude, 0).unwrap();
                     }
