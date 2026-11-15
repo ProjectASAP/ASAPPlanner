@@ -463,6 +463,86 @@ async fn promql_stddev_without_instance() {
     );
 }
 
+/// An aggregate over a `without` aggregate reads its value: `sum without
+/// (instance) (m)` answers `{job="a"}` 7, `{job="b"}` 2 and `{job="b",
+/// zone="z"}` 2.5, so summing that by `job` gives job `a` 7 and job `b`
+/// 4.5, as `sum by (job) (m)` does.
+#[tokio::test]
+async fn promql_aggregate_over_sum_without() {
+    let samples = gauge_samples();
+    let answers = promql("sum by (job) (sum without (instance) (m))", "m", &samples).await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "a")]), 7.0),
+            (labels(&[("job", "b")]), 4.5),
+        ],
+    );
+    let answers = promql(
+        "max without (zone) (sum without (instance) (m))",
+        "m",
+        &samples,
+    )
+    .await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "a")]), 7.0),
+            (labels(&[("job", "b")]), 2.5),
+        ],
+    );
+}
+
+/// `avg without` two labels averages each group of the labels left: job
+/// `a`'s 1, 2 and 4 average 7/3, job `b`'s 2 and 2.5 average 2.25.
+#[tokio::test]
+async fn promql_avg_without_two_labels() {
+    let answers = promql("avg without (instance, zone) (m)", "m", &gauge_samples()).await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "a")]), 7.0 / 3.0),
+            (labels(&[("job", "b")]), 2.25),
+        ],
+    );
+}
+
+/// A label an inner `without` removed is absent, as in Prometheus: the
+/// outer `without (instance)` has no `instance` left to drop, so the query
+/// answers as `sum without (instance) (m)`; `by (instance, job)` groups
+/// by `job` alone (job `b`: 2 + 2.5).
+#[tokio::test]
+async fn promql_without_an_absent_label_is_a_no_op() {
+    let answers = promql(
+        "sum without (instance) (sum without (instance) (m))",
+        "m",
+        &gauge_samples(),
+    )
+    .await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "a")]), 7.0),
+            (labels(&[("job", "b")]), 2.0),
+            (labels(&[("job", "b"), ("zone", "z")]), 2.5),
+        ],
+    );
+    // As a `by` key the removed label is the empty label.
+    let answers = promql(
+        "sum by (instance, job) (sum without (instance) (m) > 1)",
+        "m",
+        &gauge_samples(),
+    )
+    .await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "a")]), 7.0),
+            (labels(&[("job", "b")]), 4.5),
+        ],
+    );
+}
+
 /// `topk`, `bottomk`, `sort` and `sort_desc` over a `without` aggregate
 /// rank by the aggregate's value, not by its series identity: `sum without
 /// (instance) (m)` answers `{job="a"}` 7, `{job="b"}` 2 and `{job="b",

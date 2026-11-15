@@ -109,7 +109,8 @@ pub fn series_identity_without(identity: &str, excluding: &[String]) -> Result<S
 /// Resolve the row representation before candidate search; see
 /// [`planner_types::ir::schema::series_identity::with_promql_series_identity`].
 pub fn with_series_identity(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, Error> {
-    planner_types::ir::schema::series_identity::with_promql_series_identity(root).map_err(invalid)
+    planner_types::ir::schema::series_identity::with_promql_series_identity(root)
+        .map_err(|error| invalid(error.to_string()))
 }
 
 /// Construct source rows only from full identities. The named label columns

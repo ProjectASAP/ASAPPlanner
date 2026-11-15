@@ -1487,29 +1487,14 @@ fn summary_column(input: &SchemaRef) -> Result<usize, Error> {
         _ => Err(invalid("one summary state column required")),
     }
 }
+/// The column of `input` that `column` names, resolved as the planner
+/// resolves it (`resolve_column_ref`): a name must be unique, and the
+/// sample value is the `value` column or, after an aggregate renamed it, the
+/// one numeric column. An outer `sum by (job)` over `sum without (instance)
+/// (m)` updates on `sum` of `[job, $promql_series_identity, sum]`.
 fn named_column(input: &SchemaRef, column: &ColumnRef) -> Result<usize, Error> {
-    let name = match column {
-        // This summary-update lookup matches column names without qualifiers.
-        // Reject ambiguous names rather than guessing a join side.
-        ColumnRef::Named(name) | ColumnRef::Qualified { name, .. } => name.as_str(),
-        ColumnRef::SampleValue => "value",
-        _ => {
-            return Err(invalid(
-                "summary update requires an unambiguous bound column",
-            ))
-        }
-    };
-    let matches = input
-        .fields
-        .iter()
-        .enumerate()
-        .filter(|(_, field)| field.name == name)
-        .map(|(i, _)| i)
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [column] => Ok(*column),
-        _ => Err(invalid("summary update column missing or ambiguous")),
-    }
+    planner_types::ir::scalar::resolve_column_ref(column, input)
+        .map_err(|error| invalid(format!("summary update column: {error}")))
 }
 /// The `Sort` an exact top-k lowers to: the first `k` rows of each
 /// `partitions` group by the column `value`, largest first, NULL and NaN

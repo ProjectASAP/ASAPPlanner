@@ -13,8 +13,8 @@ use asap_stage1_pass2_reuse_candidates::generate_logical_asap_memo_candidates;
 use asap_stage2_physical_optimization::generate_physical_asap_memo_candidates;
 use asap_stage3_plan_selection::{select_plan, ErrorSelectingPlan, Selection};
 use asap_types::deployment_capabilities::DeploymentCapabilitiesError;
-use asap_types::ir::schema::series_identity::with_promql_series_identity;
-use asap_types::ir::QueryRoot;
+use asap_types::ir::schema::series_identity::{with_promql_series_identity, SeriesIdentityError};
+use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::{LogicalASAPMemoCandidates, Memo, PhysicalASAPMemoCandidates};
 use asap_types::workload::{DataWorkload, QueryLanguage, QueryWorkloadEntry};
@@ -192,18 +192,18 @@ impl OptimizationPass for Stage1ToStage3Pass {
             .zip(workload.exprs())
             .map(|(&index, node)| {
                 let node = match promql {
-                    true => with_promql_series_identity(node).unwrap_or_else(|_| Rc::clone(node)),
+                    true => promql_root(node, with_promql_series_identity(node))?,
                     false => Rc::clone(node),
                 };
-                (index, QueryRoot::Operator(node))
+                Ok((index, QueryRoot::Operator(node)))
             })
-            .chain(
-                workload
-                    .scalar_roots()
-                    .iter()
-                    .map(|(index, expr)| (*index, QueryRoot::Scalar(expr.clone()))),
-            )
-            .collect();
+            .collect::<Result<_, OptimizeError>>()?;
+        roots.extend(
+            workload
+                .scalar_roots()
+                .iter()
+                .map(|(index, expr)| (*index, QueryRoot::Scalar(expr.clone()))),
+        );
         roots.sort_by_key(|(index, _)| *index);
         let roots = roots.into_iter().map(|(_, root)| root).collect();
         let entries: Vec<_> = workload.query_workload().entries().collect();
@@ -218,5 +218,60 @@ impl OptimizationPass for Stage1ToStage3Pass {
         let (plan, _selection) = run.selection?;
         let output = PlanOutput::new(plan);
         Ok(output)
+    }
+}
+
+/// The PromQL root `node` planned: `realized`, its series identity
+/// realization (`with_promql_series_identity`), or `node` itself, over its
+/// label columns, when the realization does not apply to one of its
+/// operators (`limitk(2, m)`'s `PromqlSeriesSample`, `info(m)`'s
+/// `PromqlInfoEnrich`). A realization that drops a column an operator
+/// reads is a planning error: falling back would hide it.
+fn promql_root(
+    node: &Rc<OperatorNode>,
+    realized: Result<Rc<OperatorNode>, SeriesIdentityError>,
+) -> Result<Rc<OperatorNode>, OptimizeError> {
+    match realized {
+        Ok(realized) => Ok(realized),
+        Err(SeriesIdentityError::NotApplicable(_)) => Ok(Rc::clone(node)),
+        Err(error) => Err(OptimizeError::SeriesIdentity(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asap_types::ir::scalar::ScalarExpr;
+    use asap_types::ir::{NonASAPOp, Operator};
+
+    fn vector_one() -> Rc<OperatorNode> {
+        OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::PromqlVectorFromScalar(
+            ScalarExpr::Literal(asap_types::ir::scalar::ScalarValue::Float64(1.0)),
+        )))
+        .unwrap()
+    }
+
+    /// A realization that does not apply plans the root as it is.
+    #[test]
+    fn a_promql_root_realization_does_not_apply_to_is_planned_as_is() {
+        let node = vector_one();
+        let realized = Err(SeriesIdentityError::NotApplicable(
+            "PromqlSeriesSample has no dynamic series-identity realization".into(),
+        ));
+        assert!(Rc::ptr_eq(&promql_root(&node, realized).unwrap(), &node));
+    }
+
+    /// A realization that drops a column an operator reads fails planning
+    /// rather than plan the unrealized root.
+    #[test]
+    fn a_realization_that_drops_a_read_column_fails_planning() {
+        let error = SeriesIdentityError::DroppedColumn {
+            operator: "Sort",
+            column: 1,
+        };
+        assert!(matches!(
+            promql_root(&vector_one(), Err(error.clone())),
+            Err(OptimizeError::SeriesIdentity(dropped)) if dropped == error
+        ));
     }
 }

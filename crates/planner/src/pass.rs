@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use asap_types::ir::schema::series_identity::SeriesIdentityError;
 use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
@@ -77,6 +78,10 @@ pub enum OptimizeError {
     PerComputationCandidates(#[from] PerComputationCandidateError),
     #[error("plan selection: {0}")]
     Selection(#[from] SelectionError),
+    /// Series identity realization would make an operator read a column it
+    /// does not keep: a defect in the realization, not in the query.
+    #[error("PromQL series identity realization: {0}")]
+    SeriesIdentity(SeriesIdentityError),
     /// The pass returned something the downstream contract forbids. This is a
     /// defect in the pass, not in its input.
     #[error("pass `{pass}` violated the output contract: {detail}")]
