@@ -245,12 +245,95 @@ pub mod planning {
     /// For tests of a rewrite's structure or execution over a summary whose
     /// output has no guarantee that meets `accuracy` (e.g. a value filter
     /// over an estimate), not of accuracy acceptance.
+    ///
+    /// Summaries are costed free ([`summary_work_free`]), so the plan reads
+    /// the summary candidate wherever Stage 1 offers one, whether or not the
+    /// default unit costs make it cheaper than the exact plan on these
+    /// tests' small data.
     pub fn logical_candidates_ignoring_guarantees(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
-        let models = asap_planner::PlanningModels::builtin().with_ignore_accuracy_guarantees(true);
+        let settings = summary_work_free();
+        let models = asap_planner::PlanningModels::builtin()
+            .with_ignore_accuracy_guarantees(true)
+            .with_cost_inputs(&settings);
         selected_operator_roots(&run_all_stages_with(root, accuracy, models))
+    }
+
+    /// Default cost inputs with a measured table that prices every summary
+    /// operator (build, chain, merge, estimate, finalize) of every sketch
+    /// and exact accumulator at 0 ns: for tests of a summary plan's shape,
+    /// execution or reuse, which need Stage 3 to select the summary.
+    pub fn summary_work_free() -> asap_cost::CostInputs {
+        use asap_cost::{OperatorCost, OperatorKind};
+        use asap_types::summary_type::{ExactKind, SketchParams};
+        let sketches = [
+            SketchParams::Kll { k: 200 },
+            SketchParams::DDSketch { alpha: 0.01 },
+            SketchParams::Cms {
+                width: 1024,
+                depth: 3,
+            },
+            SketchParams::CmsWithHeap {
+                width: 1024,
+                depth: 3,
+                heap_size: 32,
+            },
+            SketchParams::CountSketch {
+                width: 1024,
+                depth: 3,
+            },
+            SketchParams::CountSketchWithHeap {
+                width: 1024,
+                depth: 3,
+                heap_size: 32,
+            },
+            SketchParams::Hll { precision: 12 },
+            SketchParams::Kmv { k: 1024 },
+            SketchParams::UnivMon {
+                heap_size: 32,
+                sketch_rows: 3,
+                sketch_cols: 1024,
+                layers: 8,
+            },
+        ];
+        let exact = [
+            ExactKind::Sum,
+            ExactKind::Count,
+            ExactKind::Min,
+            ExactKind::Max,
+            ExactKind::Increase,
+            ExactKind::Rate,
+            ExactKind::IRate,
+        ];
+        let families = sketches
+            .into_iter()
+            .map(|sketch| (Some(sketch), None))
+            .chain(exact.into_iter().map(|kind| (None, Some(kind))));
+        let mut settings = asap_cost::CostInputs::default();
+        settings.measured_operation_costs.operators = families
+            .flat_map(|(sketch, exact)| {
+                [
+                    OperatorKind::SummaryAgg,
+                    OperatorKind::SummaryTumblingWindowChain,
+                    OperatorKind::SummaryMerge,
+                    OperatorKind::SummaryEstimate,
+                    OperatorKind::FinalizeExactAccumulator,
+                ]
+                .map(|operator| OperatorCost {
+                    operator,
+                    phase: None,
+                    sketch: sketch.clone(),
+                    exact,
+                    measure: None,
+                    ns_per_unit: 0.0,
+                    ns_per_invocation: 0.0,
+                    memory_bytes_per_state: None,
+                })
+            })
+            .collect();
+        settings
     }
 
     /// Whether `node` builds a summary.
