@@ -585,7 +585,7 @@ fn columns_from_sources(
                 index,
                 input_column,
             } => ColumnProperties::computed(measure(*index, column_at(*input_column).sign)),
-            OutputColumnSource::AddedLabel => ColumnProperties::default(),
+            OutputColumnSource::ComputedLabel => ColumnProperties::default(),
         })
         .collect()
 }

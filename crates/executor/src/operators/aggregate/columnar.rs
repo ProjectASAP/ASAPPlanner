@@ -284,17 +284,16 @@ fn update_measure(
     // A numeric column's values as Float64, Int64 converted: the
     // variance and correlation kernels read both.
     let float64_values = |column: usize| -> Result<Float64Array, Error> {
-        let array = batch.column(column);
-        if let Some(floats) = array.as_any().downcast_ref::<Float64Array>() {
-            return Ok(floats.clone());
-        }
-        let integers = array
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| invalid("numeric aggregate value required"))?;
-        Ok(arrow::compute::kernels::arity::unary(integers, |v| {
-            v as f64
-        }))
+        floats(column).or_else(|_| {
+            let integers = batch
+                .column(column)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| invalid("numeric aggregate value required"))?;
+            Ok(arrow::compute::kernels::arity::unary(integers, |v| {
+                v as f64
+            }))
+        })
     };
     match (states, measure) {
         (MeasureStates::Count(counts), _) => {
@@ -749,7 +748,9 @@ mod tests {
 
     /// The correlation state as two [`Moments`] beside its own count and
     /// means, the layout [`CoMoments`] replaced: the reference its result
-    /// must equal bit for bit.
+    /// must equal bit for bit. A one-time proof that flattening the state
+    /// changed no result; the lasting checks are the documented examples
+    /// in `physical_semantics::correlation_follows_datafusion`.
     #[derive(Default)]
     struct TwoMoments {
         count: u64,

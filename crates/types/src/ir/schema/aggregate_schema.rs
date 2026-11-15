@@ -26,7 +26,7 @@ pub(crate) enum OutputColumnSource {
         index: usize,
         input_column: Option<ColumnId>,
     },
-    AddedLabel,
+    ComputedLabel,
 }
 /// Output schema of a *per-series* window/range reduction (`rate`/`increase`,
 /// or an `*_over_time` reducer under a time `Window`). Such a reduction emits
@@ -161,14 +161,9 @@ pub(crate) fn aggregate_output(
     for (i, intent) in measures.iter().enumerate() {
         // `count_values("l", v)` emits TWO columns: the synthesized `Utf8` label
         // `l` (the stringified sample value it groups by) and the per-value
-        // count. If `l` collides with a group-by key of the same name, PromQL's
-        // synthesized label takes precedence — emit a single column, never a
-        // duplicate.
+        // count.
         if let AggIntent::CountValues { label } = intent {
-            if !out_cols.iter().any(|c| c.name == *label) {
-                out_cols.push(Field::plain(label.clone(), DataType::Utf8, false));
-                sources.push(OutputColumnSource::AddedLabel);
-            }
+            push_count_values_label(&mut out_cols, &mut sources, label);
             let mut cnt = intent.output_column(&probe);
             if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
                 cnt.name = name.clone();
@@ -188,7 +183,7 @@ pub(crate) fn aggregate_output(
                     .keys()
                     .map(|name| Field::plain(name.clone(), DataType::Utf8, false)),
             );
-            sources.extend(labels.keys().map(|_| OutputColumnSource::AddedLabel));
+            sources.extend(labels.keys().map(|_| OutputColumnSource::ComputedLabel));
         }
         // Only the output *type* is read from here, so the leading column is
         // enough for the multi-column intents: `Cardinality` and `PearsonCorr`
@@ -241,6 +236,29 @@ pub(crate) fn aggregate_output(
     ))
 }
 
+/// Add `count_values("l", v)`'s label column `l`, the value text it groups
+/// by, to an aggregate's output columns so far. A kept or `by` column named
+/// `l` is replaced by it, as Prometheus overwrites that label: `count_values
+/// by (job) ("job", v)` outputs one `job` column, holding the value text, a
+/// label the aggregate computes.
+fn push_count_values_label(
+    out_cols: &mut Vec<Field>,
+    sources: &mut Vec<OutputColumnSource>,
+    label: &str,
+) {
+    let field = Field::plain(label, DataType::Utf8, false);
+    match out_cols.iter().position(|column| column.name == label) {
+        Some(position) => {
+            out_cols[position] = field;
+            sources[position] = OutputColumnSource::ComputedLabel;
+        }
+        None => {
+            out_cols.push(field);
+            sources.push(OutputColumnSource::ComputedLabel);
+        }
+    }
+}
+
 /// The input column a measure's output is typed by when it names one: its
 /// leading input column (the multi-column intents' output type ignores the
 /// rest).
@@ -256,7 +274,8 @@ fn measure_input_column(in_schema: &Schema, intent: &AggIntent) -> Option<Column
 /// order: every column but the time axis, the sample value and the
 /// `excluded` positions. `[t, value, job, instance, $promql_series_identity]`
 /// under `without (instance)` keeps `[job, $promql_series_identity]`; the
-/// groups are the distinct values of those columns.
+/// groups are the distinct values of those columns (the identity less the
+/// excluded labels, see [`super::is_label_set_column`]).
 pub fn without_kept_columns(in_schema: &Schema, excluded: &[ColumnId]) -> Vec<ColumnId> {
     let value = crate::ir::scalar::column_resolution::resolve_column_ref(
         &ColumnRef::SampleValue,
@@ -275,10 +294,11 @@ pub fn without_kept_columns(in_schema: &Schema, excluded: &[ColumnId]) -> Vec<Co
 ///
 /// A kept series identity or label map is not copied: its labels less the
 /// excluded ones and `__name__` are computed, so its source is
-/// [`OutputColumnSource::AddedLabel`]. Under `without (instance)` the
+/// [`OutputColumnSource::ComputedLabel`]. Under `without (instance)` the
 /// identity `{__name__=m, job=a, instance=1, zone=z}` becomes
 /// `{job=a, zone=z}`. A `count_values("zone", v)` label also replaces the
-/// identity's `zone`, as Prometheus overwrites it before grouping. Unlike the
+/// identity's `zone`, as Prometheus overwrites it before grouping, unless
+/// `zone` is excluded: then it is removed with the excluded labels. Unlike the
 /// `by` path this stays **open** — the excluded set is enumerable but the kept
 /// set is not (the runtime carries labels the usage-derived schema never saw),
 /// so the schema can't freeze to closed and claims no unique key (issue #39).
@@ -301,11 +321,8 @@ fn without_output_schema(
     let mut sources: Vec<OutputColumnSource> = kept
         .into_iter()
         .map(|i| {
-            let field = &in_schema.fields[i];
-            let label_set = field.name == super::PROMQL_SERIES_IDENTITY
-                || matches!(field.dtype, FieldDataType::Plain(DataType::Map { .. }));
-            if label_set {
-                OutputColumnSource::AddedLabel
+            if super::is_label_set_column(&in_schema.fields[i]) {
+                OutputColumnSource::ComputedLabel
             } else {
                 OutputColumnSource::InputColumn(i)
             }
@@ -317,12 +334,15 @@ fn without_output_schema(
         .cloned()
         .unwrap_or_else(|| Field::plain("value", DataType::Float64, false));
     for (i, intent) in measures.iter().enumerate() {
-        // `count_values("l", v)`'s label `l`, unless a kept column of that
-        // name is replaced by it, as on the `by` path.
+        // A label the grouping also excludes is set and then removed, as in
+        // Prometheus: `count_values("zone", v) without (instance, zone)`
+        // counts per kept group, with no `zone` label.
         if let AggIntent::CountValues { label } = intent {
-            if !out_cols.iter().any(|c| c.name == *label) {
-                out_cols.push(Field::plain(label.clone(), DataType::Utf8, false));
-                sources.push(OutputColumnSource::AddedLabel);
+            if !excluded
+                .iter()
+                .any(|&id| in_schema.fields[id].name == *label)
+            {
+                push_count_values_label(&mut out_cols, &mut sources, label);
             }
         }
         // Only the output *type* is read from here, so the leading column is
@@ -433,7 +453,7 @@ mod tests {
             columns(Reduction::by(vec![2]), std::slice::from_ref(&count_values)),
             vec![
                 InputColumn(2),
-                AddedLabel,
+                ComputedLabel,
                 Measure {
                     index: 0,
                     input_column: Some(1)
@@ -447,7 +467,64 @@ mod tests {
             ),
             vec![
                 InputColumn(2),
-                AddedLabel,
+                ComputedLabel,
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                }
+            ]
+        );
+    }
+
+    /// `count_values("job", v)` by `job` and `without (host)`: the label
+    /// replaces the kept `job` column with the value text it computes, so
+    /// that position is an added `Utf8` label, not a copy of the input `job`
+    /// (here nullable; the value text never is).
+    #[test]
+    fn a_count_values_label_replaces_a_kept_column_of_its_name() {
+        use OutputColumnSource::*;
+        let mut input = series();
+        input.fields[2].nullable = true;
+        let count_values = AggIntent::CountValues {
+            label: "job".into(),
+        };
+        for reduction in [
+            Reduction::by(vec![2]),
+            Reduction::Reduce(GroupKeys::without(vec![3])),
+        ] {
+            let (schema, sources) =
+                aggregate_output(&input, &reduction, std::slice::from_ref(&count_values), &[])
+                    .unwrap();
+            assert_eq!(
+                sources,
+                vec![
+                    ComputedLabel,
+                    Measure {
+                        index: 0,
+                        input_column: Some(1)
+                    }
+                ],
+                "{reduction:?}"
+            );
+            assert_eq!(schema.fields[0], col("job", DataType::Utf8, false));
+        }
+    }
+
+    /// `count_values("host", v) without (host)`: Prometheus sets the label
+    /// and then removes it with the excluded ones, so no label is added and
+    /// the count is per kept group.
+    #[test]
+    fn a_count_values_label_excluded_by_without_is_not_added() {
+        use OutputColumnSource::*;
+        assert_eq!(
+            columns(
+                Reduction::Reduce(GroupKeys::without(vec![3])),
+                &[AggIntent::CountValues {
+                    label: "host".into()
+                }]
+            ),
+            vec![
+                InputColumn(2),
                 Measure {
                     index: 0,
                     input_column: Some(1)
@@ -483,7 +560,7 @@ mod tests {
             sources,
             vec![
                 InputColumn(2),
-                AddedLabel,
+                ComputedLabel,
                 Measure {
                     index: 0,
                     input_column: Some(1)
@@ -506,8 +583,8 @@ mod tests {
         assert_eq!(
             columns(Reduction::by(vec![]), &[absent]),
             vec![
-                AddedLabel,
-                AddedLabel,
+                ComputedLabel,
+                ComputedLabel,
                 Measure {
                     index: 0,
                     input_column: Some(1)

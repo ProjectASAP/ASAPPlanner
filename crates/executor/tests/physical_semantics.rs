@@ -209,6 +209,79 @@ fn sort_direction_null_placement_and_ties() {
     }
 }
 
+// Over ascending input, where every row displaces its group's last kept
+// row, and with a text key before the number (`ORDER BY label, v`), a sort
+// that keeps the first `fetch` rows of each group answers the same rows, in
+// the same order, as a full sort and a per-group limit.
+#[test]
+fn sort_with_fetch_over_ascending_input_equals_sort_then_limit() {
+    let input = schema(&[
+        ("g", DataType::Int64, false),
+        ("label", DataType::Utf8, true),
+        ("v", DataType::Float64, false),
+    ]);
+    let rows: Vec<Vec<Value>> = (0..300i64)
+        .map(|i| {
+            let label = match i % 5 {
+                0 => Value::Null,
+                k => Value::Utf8(format!("l{}", k % 2).into()),
+            };
+            vec![Value::Int64(i % 4), label, Value::Float64(i as f64 / 3.)]
+        })
+        .collect();
+    let batches = || rows.chunks(17).map(<[_]>::to_vec).collect::<Vec<_>>();
+    for groups in [vec![], vec![0]] {
+        for (label_descending, value_descending) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let key = vec![
+                SortKey {
+                    column: 1,
+                    descending: label_descending,
+                    nulls_first: label_descending,
+                },
+                SortKey {
+                    column: 2,
+                    descending: value_descending,
+                    nulls_first: false,
+                },
+            ];
+            for fetch in [1, 3, 7, 1000] {
+                let fetched = unary(
+                    input.clone(),
+                    batches(),
+                    Operator::sort(input.clone(), key.clone(), groups.clone(), Some(fetch))
+                        .unwrap(),
+                );
+                let mut dag = PhysicalDAG::default();
+                let source = batches()
+                    .into_iter()
+                    .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
+                    .collect();
+                dag.add(0, vec![], Operator::source(input.clone(), source).unwrap())
+                    .unwrap();
+                dag.add(
+                    1,
+                    vec![0],
+                    Operator::sort(input.clone(), key.clone(), groups.clone(), None).unwrap(),
+                )
+                .unwrap();
+                dag.add(
+                    2,
+                    vec![1],
+                    Operator::limit(input.clone(), fetch, 0, groups.clone()).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    format!("{fetched:?}"),
+                    format!("{:?}", collect(&dag, 2)),
+                    "groups {groups:?}, descending {label_descending}/{value_descending}, fetch {fetch}"
+                );
+            }
+        }
+    }
+}
+
 // A sort that keeps the first `fetch` rows of each group answers the same
 // rows, in the same order, as a full sort and a per-group limit: ties in
 // input order, NaN after every number, NULLs where the key puts them, also

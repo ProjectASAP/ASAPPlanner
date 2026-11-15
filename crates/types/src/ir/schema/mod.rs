@@ -278,6 +278,16 @@ pub struct Schema {
 /// label map. `$` cannot occur in a user PromQL label name.
 pub const PROMQL_SERIES_IDENTITY: &str = "$promql_series_identity";
 
+/// Whether `field` holds a whole label set: the series identity or a label
+/// map. A `without` grouping computes such a kept column, its labels less
+/// the excluded ones and `__name__`, instead of copying it: under
+/// `without (instance)` the identity `{__name__=m, job=a, instance=1}`
+/// becomes `{job=a}`, while a kept `job` column is copied.
+pub fn is_label_set_column(field: &Field) -> bool {
+    field.name == PROMQL_SERIES_IDENTITY
+        || matches!(field.dtype, FieldDataType::Plain(DataType::Map { .. }))
+}
+
 impl Schema {
     pub fn has_promql_series_identity(&self) -> bool {
         self.closed

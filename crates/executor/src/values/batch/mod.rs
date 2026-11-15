@@ -510,6 +510,59 @@ impl Batch {
         Self::from_parts(schema.clone(), arrays, states, rows)
     }
 
+    /// The rows `indices` of `batches` (all in `schema`), each a (batch,
+    /// row) pair, in that order: one copy of each row, where [`Self::concat`]
+    /// then [`Self::take`] copy it twice. `[(1, 0), (0, 2)]` is the first row
+    /// of `batches[1]`, then the third of `batches[0]`. A state column the
+    /// batches do not share is joined as `concat` joins it.
+    pub(crate) fn interleave(
+        schema: &SchemaRef,
+        batches: &[Self],
+        indices: &[(usize, usize)],
+    ) -> Result<Self, Error> {
+        let Some(first) = batches.first() else {
+            return Self::try_new(schema.clone(), Vec::new());
+        };
+        let shared_states = (0..schema.fields.len()).all(|column| {
+            batches.iter().all(|batch| {
+                match (batch.state_column(column), first.state_column(column)) {
+                    (None, None) => true,
+                    (Some(states), Some(first)) => Arc::ptr_eq(states, first),
+                    _ => false,
+                }
+            })
+        });
+        if !shared_states {
+            let mut offsets = Vec::with_capacity(batches.len());
+            let mut rows = 0u32;
+            for batch in batches {
+                offsets.push(rows);
+                rows += batch.num_rows() as u32;
+            }
+            return Self::concat(schema, batches)?.take(&UInt32Array::from_iter_values(
+                indices
+                    .iter()
+                    .map(|&(batch, row)| offsets[batch] + row as u32),
+            ));
+        }
+        let arrays = (0..schema.fields.len())
+            .map(|column| {
+                let pieces = batches
+                    .iter()
+                    .map(|batch| batch.column(column).as_ref())
+                    .collect::<Vec<_>>();
+                arrow::compute::interleave(&pieces, indices)
+                    .map_err(|error| Error::Invalid(format!("columnar interleave: {error}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_parts(
+            schema.clone(),
+            arrays,
+            first.state_columns.to_vec(),
+            indices.len(),
+        )
+    }
+
     /// The Planner schema of the columns.
     pub fn schema(&self) -> &SchemaRef {
         &self.schema

@@ -7,8 +7,8 @@ use crate::ir::schema::*;
 ///
 /// This realization supports explicit `by` grouping, `without` grouping and
 /// per-series computation. A `without` grouping keeps the identity with its
-/// excluded labels and `__name__` removed, computed when the plan is
-/// compiled: `sum without (instance) (m)` turns `{__name__=m, job=a,
+/// excluded labels and `__name__` removed, computed by the aggregate:
+/// `sum without (instance) (m)` turns `{__name__=m, job=a,
 /// instance=1, zone=z}` into `{job=a, zone=z}`, and the aggregate's output
 /// schema marks that column as computed, not copied
 /// (`aggregate_schema::without_output_schema`). Operators that rewrite or
