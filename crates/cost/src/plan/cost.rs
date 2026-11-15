@@ -58,7 +58,8 @@ pub struct PlanCost {
 pub struct QueryLatency {
     /// Milliseconds to merge the ingest workers' partial copies of the
     /// newest window of the largest ingestion-time state the query reads;
-    /// 0 when ingestion fits on one core or the query reads none.
+    /// 0 when ingestion fits on one core or the query reads no state (only
+    /// raw rows or an exact `Aggregate`'s values kept at ingestion time).
     pub compaction_ms: f64,
     /// Milliseconds of the query-time work the query reaches, each node
     /// once.
@@ -295,38 +296,35 @@ pub fn plan_cost(
         measured.detail +=
             &format!("; {copies} partial copies of its newest window, {bytes} bytes");
     }
-    // Milliseconds of one merge of each node's state, for the newest
-    // window's compaction: its measured query-time merge entry (ns · 10⁻⁶)
-    // when the table has one, else the merge formula of its family and
-    // bytes per state, as a `SummaryMerge` over it is costed (a DDSketch
-    // state: 2,500 operations).
-    let merge_ms: HashMap<PhysicalASAPNodeId, f64> = dag
-        .nodes
-        .iter()
-        .map(|node| {
-            let family = family_of
-                .get(&node.id)
-                .copied()
-                .unwrap_or(StateFamily::None);
-            let measured = lookup(
-                table,
-                OperatorKind::SummaryMerge,
-                ExecutionTiming::QueryTime,
-                family,
-                sketch_size,
-            )
-            .map(|unit| (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6);
-            let per_merge_ms = measured.unwrap_or_else(|| {
-                let states = &output[&node.id];
-                let state_bytes = states.bytes.div_ceil(states.rows.max(1));
-                merge_operations_per_state(family, state_bytes)
+    // Milliseconds of one merge of a node's state when the newest window's
+    // partial copies are compacted: its measured query-time merge entry
+    // (ns · 10⁻⁶) when the table has one, else the merge formula of its
+    // family and bytes per state, as a `SummaryMerge` over it is costed (a
+    // DDSketch state: 2,500 operations). 0 for a node holding no states,
+    // such as the raw rows a `Filter` or `TimeRange` keeps or an exact
+    // `Aggregate`'s values: the executor merges ingest shards only of
+    // summary state columns, and partial copies of rows are concatenated.
+    let merge_ms = |id: PhysicalASAPNodeId| {
+        let Some(&family) = family_of.get(&id) else {
+            return 0.0;
+        };
+        lookup(
+            table,
+            OperatorKind::SummaryMerge,
+            ExecutionTiming::QueryTime,
+            family,
+            sketch_size,
+        )
+        .map_or_else(
+            || {
+                merge_operations_per_state(family, output[&id].bytes_per_row())
                     * speed.ms_per_cpu_op
                     * formula_scale
-            });
-            (node.id, per_merge_ms)
-        })
-        .collect();
-    let mut latency = query_latencies(dag, nodes, &output, &work_ms, &merge_ms);
+            },
+            |unit| (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6,
+        )
+    };
+    let mut latency = query_latencies(dag, nodes, &output, &work_ms, merge_ms);
     for (latency, evaluation_ms) in latency.iter_mut().zip(evaluation_ms_per_query) {
         latency.query_ms += evaluation_ms;
     }
@@ -482,14 +480,14 @@ fn peak_cpu_cores(
 /// state's newest window merges, for each of its `I` states per window,
 /// the `k` ingest workers' partial copies, `(k − 1)·I` merges, where `k`
 /// is the cores its ingestion work takes, at least one. Each merge takes
-/// the state's merge time (`merge_ms`: measured, or its family's merge
-/// formula).
+/// `merge_ms` of the state: measured, or its family's merge formula, 0 for
+/// a node holding no states (its partial copies are concatenated).
 fn query_latencies(
     dag: &PhysicalASAPDAG,
     nodes: &HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode>,
     output: &HashMap<PhysicalASAPNodeId, EdgeStatistics>,
     work_ms: &HashMap<PhysicalASAPNodeId, f64>,
-    merge_ms: &HashMap<PhysicalASAPNodeId, f64>,
+    merge_ms: impl Fn(PhysicalASAPNodeId) -> f64,
 ) -> Vec<QueryLatency> {
     let inputs = |id: PhysicalASAPNodeId| {
         dag.edges
@@ -502,7 +500,7 @@ fn query_latencies(
     let compaction_ms = |state: PhysicalASAPNodeId| {
         let workers = ingest_workers(dag, work_ms, state) as f64;
         let states = output[&state].rows as f64;
-        (workers - 1.0) * states * merge_ms[&state]
+        (workers - 1.0) * states * merge_ms(state)
     };
     query_starts(dag)
         .into_iter()

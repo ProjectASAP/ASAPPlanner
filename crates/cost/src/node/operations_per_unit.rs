@@ -50,7 +50,9 @@ use crate::StateFamily;
 
 /// A row kept by a time range over raw rows, or a state read by a time
 /// range over a chain's tumbling windows: 11–12 ns per row over 3.6 M and
-/// 36 M rows, 8–18 ns per state over 360,000 states.
+/// 36 M rows, 8–18 ns per state over 360,000 states. A query-time tumbling
+/// window chain pays it too, per raw row it reads: it keeps each row of
+/// its scan's lookback in its window's range, as a time range does.
 pub(crate) const TIME_RANGE_OPERATIONS_PER_ROW: f64 = 12.0;
 
 /// Per input row, for each grouping key of a hash aggregate: hashing the
@@ -94,7 +96,7 @@ pub(crate) const COUNTER_UPDATE_OPERATIONS_PER_ROW: f64 = 84.0;
 /// to its group's state. Not measured on the executor: `asap_sketchlib`'s
 /// own Count-Min Sketch of depth 3 with a top-k heap updates in about
 /// 72 ns, 18 ns per counter.
-pub(crate) const SKETCH_COUNTER_UPDATE_OPERATIONS: f64 = 18.0;
+pub(crate) const SKETCH_UPDATE_OPERATIONS_PER_COUNTER: f64 = 18.0;
 
 /// One exact accumulator state merged into its group's (sum, count, min,
 /// max): 128–265 ns per state over 360,000 states.
@@ -158,10 +160,10 @@ pub(crate) fn update_operations_per_row(
         (_, Some(SketchParams::Kll { .. })) => KLL_UPDATE_OPERATIONS_PER_ROW,
         (_, Some(parameters)) => {
             EXACT_UPDATE_OPERATIONS_PER_ROW
-                + SKETCH_COUNTER_UPDATE_OPERATIONS * counters_updated_per_row(parameters)
+                + SKETCH_UPDATE_OPERATIONS_PER_COUNTER * counters_updated_per_row(parameters)
         }
         // A summary without sketch parameters (a sample): one counter.
-        (_, None) => EXACT_UPDATE_OPERATIONS_PER_ROW + SKETCH_COUNTER_UPDATE_OPERATIONS,
+        (_, None) => EXACT_UPDATE_OPERATIONS_PER_ROW + SKETCH_UPDATE_OPERATIONS_PER_COUNTER,
     }
 }
 
