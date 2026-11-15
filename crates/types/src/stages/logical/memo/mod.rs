@@ -181,13 +181,16 @@ impl Memo {
     /// operator root, or one operator of its scalar root, reads),
     /// deduplicated, ascending.
     pub fn output_groups(&self) -> Vec<(usize, MemoGroupId)> {
-        let roots: Vec<QueryRoot<MemoGroupId>> = self
-            .queries
+        self.queries
             .iter()
-            .map(|query| query.root.clone())
-            .collect();
-        crate::stages::output_references(&roots)
-            .into_iter()
+            .enumerate()
+            .flat_map(|(index, query)| {
+                query
+                    .root
+                    .operator_refs()
+                    .into_iter()
+                    .map(move |&group| (index, group))
+            })
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect()

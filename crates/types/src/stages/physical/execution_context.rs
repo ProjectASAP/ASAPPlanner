@@ -7,7 +7,7 @@ use super::candidate::PhysicalCandidateId;
 use crate::ir::operator::AtModifier;
 use crate::plan::materialized_view::RefreshWindow;
 use crate::stages::EvaluationGrid;
-use crate::workload::QueryWorkloadEntry;
+use crate::workload::{QueryWorkloadEntry, ONE_SECOND_MS};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Index of an [`ExecutionContext`] in the workload's list of distinct
@@ -35,7 +35,7 @@ impl ExecutionContext {
     /// materialized: each second of arriving rows, which it computes once
     /// for every ingestion-time view of every refresh window that reads it.
     pub const EVERY_ARRIVING_ROW: Self = Self::IngestionPipeline(RefreshWindow {
-        width_ms: 1_000,
+        width_ms: ONE_SECOND_MS,
         phase_ms: 0,
     });
 }
@@ -48,8 +48,9 @@ impl ExecutionContext {
 /// every evaluation of the grid serves the range queries' request ends
 /// too). Otherwise it runs once per request, in a context of its own.
 ///
-/// `@ start()` of an instant query is its evaluation time too; it keeps
-/// its request context here, as the user decided for `@ end()` only.
+/// `@ start()` of an instant query is its evaluation time too, but it
+/// keeps a request context of its own: only `@ end()` is taken as the
+/// evaluation time.
 ///
 /// Example: `sum_over_time(m[5m] @ end())` and `sum_over_time(m[5m])`,
 /// both instant every 60 s: true, so `m[5m]` is computed once per minute

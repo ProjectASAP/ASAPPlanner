@@ -30,7 +30,7 @@ use asap_types::workload::bounds::{
     declared_non_negative, declared_series, group_count_bound, source_name, source_rows_per_ms,
     unchanged_source_columns,
 };
-use asap_types::workload::DataWorkload;
+use asap_types::workload::{DataWorkload, ONE_SECOND_MS};
 
 /// One node's cost per second of wall time, with how it was measured. A
 /// node is one operator node of the candidate's physical plan DAG
@@ -123,12 +123,14 @@ pub struct ProducerOutput<'a> {
     /// column) values unchanged ([`unchanged_source_columns`]).
     pub unchanged_columns: BTreeSet<&'a str>,
     /// The tumbling windows its rows span: those a `TimeRange` selects
-    /// from a chain (through `TimeShift`s), 1 for any other node.
+    /// from a chain (through the operators that keep each row's window),
+    /// 1 for any other node.
     pub tumbling_windows: u64,
     /// The tumbling-window width of the chain whose states its rows are
-    /// read from: a chain's own, kept through the `TimeShift`s over it,
-    /// so a `TimeRange` over them selects windows; `None` for any other
-    /// node.
+    /// read from: a chain's own, kept through the operators over it that
+    /// keep each row's window (`Operator::keeps_input_window`: `TimeShift`,
+    /// `Filter`, `Project`), so a `TimeRange` over them selects windows;
+    /// `None` for any other node.
     pub chain_tumbling_window_width_ms: Option<u64>,
 }
 
@@ -151,12 +153,14 @@ pub struct NodeResourceUsageAndCost<'a> {
     /// column) values unchanged ([`unchanged_source_columns`]).
     pub unchanged_columns: BTreeSet<&'a str>,
     /// The tumbling windows its rows span: those a `TimeRange` selects
-    /// from a chain (through `TimeShift`s), 1 for any other node.
+    /// from a chain (through the operators that keep each row's window),
+    /// 1 for any other node.
     pub tumbling_windows: u64,
     /// The tumbling-window width of the chain whose states its rows are
-    /// read from: a chain's own, kept through the `TimeShift`s over it,
-    /// so a `TimeRange` over them selects windows; `None` for any other
-    /// node.
+    /// read from: a chain's own, kept through the operators over it that
+    /// keep each row's window (`Operator::keeps_input_window`: `TimeShift`,
+    /// `Filter`, `Project`), so a `TimeRange` over them selects windows;
+    /// `None` for any other node.
     pub chain_tumbling_window_width_ms: Option<u64>,
     /// Work of one execution, in ms on one core.
     pub work_ms_per_execution: f64,
@@ -217,11 +221,6 @@ pub fn reads_one_batch_of<C>(
     consumer.output_state.timing == ExecutionTiming::IngestionTime
         && producer.keeps_raw_rows_at_ingestion(producer_input)
 }
-
-/// One second, in ms: an ingestion-time node runs over the rows arriving
-/// in one second, and an ingestion-time view that maintains no window is
-/// refreshed once per second.
-const ONE_SECOND_MS: u64 = 1_000;
 
 /// The time between two outputs of a node running `payload` that keeps
 /// rows, which its retention is divided by: a chain's tumbling window,
@@ -297,14 +296,15 @@ pub fn node_resource_usage_and_cost<'a>(
         .max(1);
     let inputs: Vec<EdgeStatistics> = producers.iter().map(|p| p.output).collect();
     // The tumbling windows its rows span: those a `TimeRange` selects from
-    // a chain (through `TimeShift`s, which pass them on), 1 otherwise.
+    // a chain (through the operators that keep each row's window, which
+    // pass them on: `Operator::keeps_input_window`), 1 otherwise.
     let tumbling_windows = match &node.payload {
         Payload::NonASAP(NonASAPOp::TimeRange { range, .. })
             if chain_tumbling_window_width_ms(producers).is_some() =>
         {
             selected_tumbling_windows(range, producers)?
         }
-        Payload::NonASAP(NonASAPOp::TimeShift { .. }) => producers
+        payload if payload.keeps_input_window() => producers
             .first()
             .map_or(1, |producer| producer.tumbling_windows),
         _ => 1,
@@ -1023,7 +1023,8 @@ pub fn node_resource_usage_and_cost<'a>(
     }
     let chain_tumbling_window_width_ms =
         node.payload.chain_tumbling_window_width_ms().or_else(|| {
-            matches!(node.payload, Payload::NonASAP(NonASAPOp::TimeShift { .. }))
+            node.payload
+                .keeps_input_window()
                 .then(|| chain_tumbling_window_width_ms(producers))
                 .flatten()
         });

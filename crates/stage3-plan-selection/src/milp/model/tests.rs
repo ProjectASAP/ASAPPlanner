@@ -551,25 +551,7 @@ fn a_query_reads_its_exact_only_groups_through_exact_candidates_only() {
     let state = quantile.by_algorithm[0].state;
     query(&mut memo, quantile.result, None);
     query(&mut memo, quantile.result, None);
-    // Every candidate, one θ of the state's.
-    let logical_candidates: Vec<(CandidateForMemoGroupId, Lifetime)> = (0..memo.groups().len())
-        .map(|group| MemoGroupId(group as u32))
-        .flat_map(|group| {
-            let count = match group == state {
-                true => 1,
-                false => memo.groups()[group.0 as usize].candidates.len(),
-            };
-            (0..count).map(move |index_in_group| {
-                (
-                    CandidateForMemoGroupId {
-                        group,
-                        index_in_group,
-                    },
-                    ONE_EVALUATION,
-                )
-            })
-        })
-        .collect();
+    let logical_candidates = every_candidate_one_theta_of(&memo, state);
     let exact_quantile = logical_candidates
         .iter()
         .position(|&(candidate, _)| candidate == own_candidate(quantile.result))
@@ -606,23 +588,13 @@ fn a_query_reads_its_exact_only_groups_through_exact_candidates_only() {
     }
 }
 
-/// x07's shape: `quantile_over_time(0.9, m[5m])` read by Q0 every 10 s,
-/// whose only paths read the KLL state (its exact quantile cannot be
-/// costed), and by Q1 every 30 s, which may read every group only exactly.
-/// The greedy bound leaves out of each query's trees only what that query
-/// must not read, so it finds a plan (Q0 through the state, Q1 through the
-/// exact quantile) and leaves out an unused scan costing 1e6/s; leaving
-/// out of every query's trees what some query must not read found none.
-#[test]
-fn the_bound_leaves_out_of_each_query_only_what_it_must_not_read() {
-    let mut memo = empty_memo();
-    let m = scan(&mut memo);
-    let window = range(&mut memo, 300, m);
-    let quantile = quantile_over_time_readouts(&mut memo, window, 0.9, &[SketchAlgorithm::Kll]);
-    let state = quantile.by_algorithm[0].state;
-    query(&mut memo, quantile.result, None);
-    query(&mut memo, quantile.result, None);
-    let mut candidates: Vec<(CandidateForMemoGroupId, Lifetime)> = (0..memo.groups().len())
+/// Every candidate of `memo`'s groups, `OneEvaluation`, with one θ of
+/// `state`'s (its first candidate only).
+fn every_candidate_one_theta_of(
+    memo: &Memo,
+    state: MemoGroupId,
+) -> Vec<(CandidateForMemoGroupId, Lifetime)> {
+    (0..memo.groups().len())
         .map(|group| MemoGroupId(group as u32))
         .flat_map(|group| {
             let count = match group == state {
@@ -639,7 +611,157 @@ fn the_bound_leaves_out_of_each_query_only_what_it_must_not_read() {
                 )
             })
         })
+        .collect()
+}
+
+/// The shape of [`a_query_reads_its_exact_only_groups_through_exact_candidates_only`]
+/// with Q0 every 10 s, which may read every group, and Q1 every 20 s,
+/// which must not read the KLL state; the exact quantile's candidate costs
+/// `exact_quantile_cost`, every other 1, and every cost in the 20 s
+/// context is half the 10 s one's. The quantile's own candidate is also offered
+/// `AcrossEvaluations` at `materialized_cost` (stored on its group's 10 s
+/// grid, so it delivers on both; its inputs deliver on no `Materialized`
+/// context, so it is never selected), listed first: each query's first
+/// answering execution runs in `Materialized(v)`, not in the query's
+/// evaluation context. Returns the candidates, the queries, the selection's
+/// inputs and the exact quantile's `OneEvaluation` candidate.
+fn queries_differing_in_exact_only_groups_with_a_materialized_answer(
+    materialized_cost: f64,
+    exact_quantile_cost: f64,
+) -> (
+    PhysicalASAPMemoCandidates,
+    [QueryWorkloadEntry; 2],
+    SelectableExecutions,
+    ExecutionCosts,
+    usize,
+) {
+    let mut memo = empty_memo();
+    let m = scan(&mut memo);
+    let window = range(&mut memo, 300, m);
+    let quantile = quantile_over_time_readouts(&mut memo, window, 0.9, &[SketchAlgorithm::Kll]);
+    let state = quantile.by_algorithm[0].state;
+    query(&mut memo, quantile.result, None);
+    query(&mut memo, quantile.result, None);
+    let mut candidates = vec![(own_candidate(quantile.result), ACROSS_EVALUATIONS)];
+    candidates.extend(every_candidate_one_theta_of(&memo, state));
+    let exact_quantile = candidates
+        .iter()
+        .position(|&candidate| candidate == (own_candidate(quantile.result), ONE_EVALUATION))
+        .unwrap();
+    let w: Vec<f64> = (0..candidates.len())
+        .map(|v| match v {
+            0 => materialized_cost,
+            _ if v == exact_quantile => exact_quantile_cost,
+            _ => 1.0,
+        })
         .collect();
+    let mut physical = physical(memo, &candidates);
+    physical.logical_candidates.evaluation_grid_of_group[quantile.result.0 as usize] =
+        Some(asap_types::stages::EvaluationGrid {
+            period_ms: 10_000,
+            phase_ms: 0,
+        });
+    physical.logical_candidates.exact_only_groups_of_query =
+        vec![BTreeSet::new(), BTreeSet::from([state])];
+    let entries = [every(10_000), every(20_000)];
+    let (selectable, mut costs) = selection_inputs(&physical, &entries, &w, &[], &[]);
+    let every_20s = |index: usize| {
+        matches!(
+            selectable.context(selectable.executions()[index].context),
+            asap_types::stages::ExecutionContext::Evaluation { grid } if grid.period_ms == 20_000
+        )
+    };
+    for (index, cost) in costs.per_execution.iter_mut().enumerate() {
+        if every_20s(index) {
+            *cost = Ok(cost.clone().unwrap() / 2.0);
+        }
+    }
+    for (position, edge) in selectable.edges().iter().enumerate() {
+        if every_20s(edge.consumer) {
+            costs.per_edge[position] = costs.per_edge[position].map(|cost| cost / 2.0);
+        }
+    }
+    (physical, entries, selectable, costs, exact_quantile)
+}
+
+/// [`queries_differing_in_exact_only_groups_with_a_materialized_answer`]:
+/// the two evaluation contexts have the same executions at half the cost,
+/// but their queries read different groups, so they are not copies
+/// ([`copies_in_equivalent_contexts`]): each query is in its own
+/// evaluation context (`SelectableExecutions::evaluation_context`), not
+/// in that of its first answering execution, `Materialized(v)`.
+#[test]
+fn contexts_whose_queries_read_different_groups_are_not_copies() {
+    let (physical, entries, selectable, costs, _) =
+        queries_differing_in_exact_only_groups_with_a_materialized_answer(1.0, 100.0);
+    let first_answering = selectable.executions()[selectable.answering()[0].1[0]];
+    assert!(matches!(
+        selectable.context(first_answering.context),
+        asap_types::stages::ExecutionContext::Materialized(_)
+    ));
+    let inputs = SelectionInputs {
+        physical: &physical,
+        entries: &entries,
+        selectable: &selectable,
+        costs: &costs,
+    };
+    let shared = copies_in_equivalent_contexts(&inputs, &vec![true; selectable.executions().len()]);
+    assert!(shared
+        .original_of_execution
+        .iter()
+        .enumerate()
+        .all(|(index, &original)| original == index));
+    assert_eq!(shared.original_of_query, vec![QueryId(0), QueryId(1)]);
+}
+
+/// [`queries_differing_in_exact_only_groups_with_a_materialized_answer`]
+/// with the exact quantile costing 4 (2 in the 20 s context), every other
+/// candidate 1: the optimum reads the KLL readout for Q0 (its five
+/// candidates, 5) and the exact quantile for Q1 (0.5 + 0.5 + 2), 8.
+/// Sharing the two contexts' variables would make Q0 read the exact
+/// quantile too, at 9.
+#[test]
+fn queries_reading_different_groups_select_differently_in_contexts_alike() {
+    let (physical, entries, selectable, costs, exact_quantile) =
+        queries_differing_in_exact_only_groups_with_a_materialized_answer(1.0, 4.0);
+    let solved = solve_selection(&SelectionInputs {
+        physical: &physical,
+        entries: &entries,
+        selectable: &selectable,
+        costs: &costs,
+    })
+    .unwrap();
+    let outputs: Vec<usize> = solved
+        .outputs
+        .iter()
+        .map(|execution| execution.candidate.0)
+        .collect();
+    assert_ne!(outputs[0], exact_quantile, "{outputs:?}");
+    assert_eq!(outputs[1], exact_quantile, "{outputs:?}");
+    assert!(
+        (solved.cost_per_second_without_request_overhead - 8.0).abs() < 1e-9,
+        "{}",
+        solved.cost_per_second_without_request_overhead
+    );
+}
+
+/// x07's shape: `quantile_over_time(0.9, m[5m])` read by Q0 every 10 s,
+/// whose only paths read the KLL state (its exact quantile cannot be
+/// costed), and by Q1 every 30 s, which may read every group only exactly.
+/// The greedy bound leaves out of each query's trees only what that query
+/// must not read, so it finds a plan (Q0 through the state, Q1 through the
+/// exact quantile) and leaves out an unused scan costing 1e6/s; leaving
+/// out of every query's trees what some query must not read found none.
+#[test]
+fn the_bound_leaves_out_of_each_query_only_what_it_must_not_read() {
+    let mut memo = empty_memo();
+    let m = scan(&mut memo);
+    let window = range(&mut memo, 300, m);
+    let quantile = quantile_over_time_readouts(&mut memo, window, 0.9, &[SketchAlgorithm::Kll]);
+    let state = quantile.by_algorithm[0].state;
+    query(&mut memo, quantile.result, None);
+    query(&mut memo, quantile.result, None);
+    let mut candidates = every_candidate_one_theta_of(&memo, state);
     let exact_quantile = candidates
         .iter()
         .position(|&(candidate, _)| candidate == own_candidate(quantile.result))
@@ -825,7 +947,11 @@ fn a_context_equivalent_to_another_shares_its_variables() {
         };
         copies_in_equivalent_contexts(&inputs, &kept)
     };
-    let (original_of_execution, original_of_edge, original_of_query) = copies(&costs);
+    let SharedVariables {
+        original_of_execution,
+        original_of_edge,
+        original_of_query,
+    } = copies(&costs);
     for (index, &original) in original_of_execution.iter().enumerate() {
         match every_20s(index) {
             true => {
@@ -857,8 +983,8 @@ fn a_context_equivalent_to_another_shares_its_variables() {
         .find(|&index| every_20s(index))
         .unwrap();
     costs.per_execution[first_of_20s] = Ok(10.0);
-    let (original_of_execution, _, _) = copies(&costs);
-    assert!(original_of_execution
+    assert!(copies(&costs)
+        .original_of_execution
         .iter()
         .enumerate()
         .all(|(index, &original)| original == index));

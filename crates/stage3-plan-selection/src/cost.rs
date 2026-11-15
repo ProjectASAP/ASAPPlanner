@@ -60,7 +60,6 @@ use asap_cost::{
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::plan::materialized_view::RefreshWindow;
 use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload,
@@ -155,7 +154,7 @@ pub(crate) fn execution_costs(
         .map(|v| node_retaining(PhysicalCandidateId(v), None).retains_rows())
         .collect();
     let query_time_scan: Vec<bool> = (0..count)
-        .map(|v| is_query_time_scan(physical, PhysicalCandidateId(v)))
+        .map(|v| physical.is_query_time_scan(PhysicalCandidateId(v)))
         .collect();
     let producer_of = |position: usize| {
         let edge = selectable.edges()[position];
@@ -478,19 +477,6 @@ pub(crate) fn execution_costs(
         raw_data_source,
         unbounded_raw_data_on_disk_cost_per_second,
     }
-}
-
-/// Whether candidate `v` is a `Scan` at query time, which reads raw data
-/// in each execution.
-fn is_query_time_scan(physical: &PhysicalASAPMemoCandidates, v: PhysicalCandidateId) -> bool {
-    physical.physical_candidates[v.0]
-        .physical_properties
-        .timing()
-        == ExecutionTiming::QueryTime
-        && matches!(
-            physical.operator(v),
-            Operator::NonASAP(NonASAPOp::Scan { .. })
-        )
 }
 
 /// $\rho$ of `execution`'s context, how often it runs, from the queries it

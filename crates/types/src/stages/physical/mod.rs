@@ -22,5 +22,5 @@ pub use execution_context::{
     anchor_is_evaluation_time, queries_of_context, query_reads, ExecutionContext,
     ExecutionContextId,
 };
-pub use memo_candidates::{output_references, PhysicalASAPMemoCandidates};
+pub use memo_candidates::PhysicalASAPMemoCandidates;
 pub use properties::{Lifetime, PhysicalProperties, PhysicalPropertiesError, StorageMedium};

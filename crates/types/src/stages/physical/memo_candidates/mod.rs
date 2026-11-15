@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use crate::ir::properties::ExecutionTiming;
-use crate::ir::{NonASAPOp, Operator, QueryRoot};
+use crate::ir::{NonASAPOp, Operator};
 use crate::plan::materialized_view::RefreshWindow;
 use crate::plan::time_window::{InputTimeAccess, TimeIndexedPlan};
 use crate::stages::{
@@ -116,28 +116,42 @@ impl PhysicalASAPMemoCandidates {
         &self.admissible_edges_out_of_candidate[producer.0]
     }
 
+    /// Whether candidate `v` is a `Scan` run at query time, which reads raw
+    /// data in each execution (a current-time read of it needs every row,
+    /// [`TimeIndexedPlan::current_time_read_needs_every_row`]).
+    ///
+    /// Example: a query-time `Scan` of `latency`: true; the same scan kept
+    /// at ingestion time, or a `TimeRange(5m)` over it: false.
+    pub fn is_query_time_scan(&self, v: PhysicalCandidateId) -> bool {
+        self.physical_candidates[v.0].physical_properties.timing() == ExecutionTiming::QueryTime
+            && self.current_time_read_needs_every_row(v)
+    }
+
     /// The times candidate `v`, materialized across evaluations, has a
-    /// stored result for, as a grid: at ingestion time the end of every
+    /// stored result for, as a grid. A chain, at either timing, and any
+    /// result kept at ingestion time are stored at the end of every
     /// refresh window, by the rule the installed plan refreshes it on
     /// ([`RefreshWindow::computed_from`] over these candidates, width as the
-    /// period); at query time its own schedule
-    /// ([`LogicalASAPMemoCandidates::own_schedule`]). `None` when not known.
+    /// period); any other result computed at query time on its group's
+    /// evaluation grid
+    /// ([`LogicalASAPMemoCandidates::evaluation_grid_of_group`]). `None`
+    /// when not known.
     ///
     /// Example: `sum(TimeRange(5m))` kept at ingestion time is stored every
-    /// 5 min at phase 0, even when its group is read every 60 s; a chain of
-    /// 60 s windows over `TimeShift(30s)` every 60 s at phase 30 s.
+    /// 5 min at phase 0, even when its group is read every 60 s; computed
+    /// at query time and read every 60 s, every 60 s. A chain of 60 s
+    /// windows over `TimeShift(30s)` every 60 s at phase 30 s.
     pub fn stored_times(&self, v: PhysicalCandidateId) -> Option<EvaluationGrid> {
         let candidate = &self.physical_candidates[v.0];
+        let is_chain = self.operator(v).chain_tumbling_window_width_ms().is_some();
         match candidate.physical_properties.timing() {
-            ExecutionTiming::IngestionTime => {
-                RefreshWindow::computed_from(self, v).map(|window| EvaluationGrid {
-                    period_ms: window.width_ms,
-                    phase_ms: window.phase_ms,
-                })
+            ExecutionTiming::QueryTime if !is_chain => {
+                self.logical_candidates.evaluation_grid_of_group
+                    [candidate.logical_candidate_id.group.0 as usize]
             }
-            ExecutionTiming::QueryTime => self
-                .logical_candidates
-                .own_schedule(candidate.logical_candidate_id),
+            ExecutionTiming::QueryTime | ExecutionTiming::IngestionTime => {
+                RefreshWindow::computed_from(self, v).map(EvaluationGrid::from)
+            }
         }
     }
 
@@ -152,8 +166,7 @@ impl PhysicalASAPMemoCandidates {
     /// result is final: the same at every time it is read.
     ///
     /// Finality assumes no row arrives out of order: at evaluation time t,
-    /// every row with `ts <= t` has arrived and never changes (#1298 adds
-    /// a declared lateness). A stored result that is not a chain is final
+    /// every row with `ts <= t` has arrived and never changes. A stored result that is not a chain is final
     /// when its group does not depend on the evaluation time
     /// ([`GroupProperties::depends_on_evaluation_time`](crate::stages::GroupProperties::depends_on_evaluation_time))
     /// and the rows it read never change after it is computed:
@@ -190,20 +203,18 @@ impl PhysicalASAPMemoCandidates {
                 {
                     return true;
                 }
-                let (period_ms, phase_ms) = match context {
-                    ExecutionContext::Evaluation { grid } => (grid.period_ms, grid.phase_ms),
-                    ExecutionContext::IngestionPipeline(window) => {
-                        (window.width_ms, window.phase_ms)
-                    }
-                    ExecutionContext::Materialized(u) => match self.stored_times(*u) {
-                        Some(grid) => (grid.period_ms, grid.phase_ms),
+                let times = match *context {
+                    ExecutionContext::Evaluation { grid } => grid,
+                    ExecutionContext::IngestionPipeline(window) => EvaluationGrid::from(window),
+                    ExecutionContext::Materialized(u) => match self.stored_times(u) {
+                        Some(grid) => grid,
                         None => return false,
                     },
                 };
                 self.stored_times(v).is_some_and(|stored| {
                     stored.period_ms > 0
-                        && period_ms.is_multiple_of(stored.period_ms)
-                        && phase_ms % stored.period_ms == stored.phase_ms % stored.period_ms
+                        && times.period_ms.is_multiple_of(stored.period_ms)
+                        && times.phase_ms % stored.period_ms == stored.phase_ms % stored.period_ms
                 })
             }
         }
@@ -246,24 +257,6 @@ impl TimeIndexedPlan for PhysicalASAPMemoCandidates {
     fn operator_of(&self, v: PhysicalCandidateId) -> &Operator<MemoGroupId> {
         self.operator(v)
     }
-}
-
-/// The output references of `query_roots`: each operator reference, in
-/// order (a scalar root's in `map_operator_refs` order), with the index of
-/// the query whose root it is.
-pub fn output_references<C: Clone>(query_roots: &[QueryRoot<C>]) -> Vec<(usize, C)> {
-    let mut references = Vec::new();
-    for (query, root) in query_roots.iter().enumerate() {
-        match root {
-            QueryRoot::Operator(reference) => references.push((query, reference.clone())),
-            QueryRoot::Scalar(expression) => {
-                expression.map_operator_refs(&mut |reference| {
-                    references.push((query, reference.clone()))
-                });
-            }
-        }
-    }
-    references
 }
 
 #[cfg(test)]

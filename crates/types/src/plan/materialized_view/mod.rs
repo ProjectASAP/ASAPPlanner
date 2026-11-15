@@ -181,8 +181,9 @@ impl RefreshWindow {
     /// below it (each `TimeRange`'s, and each chain's reached without
     /// passing one). `None` when that window is unbounded (none below it,
     /// or an `@` anchor below a window) or empty. One rule for the
-    /// installed plan ([`PhysicalASAPDAG::refresh_window`]), Stage 3's
-    /// candidates and the cost model.
+    /// installed plan ([`PhysicalASAPDAG::refresh_window`]), Stage 2's
+    /// output (`PhysicalASAPMemoCandidates`, which Stage 3 selects from)
+    /// and the cost model.
     ///
     /// Example: `sum(TimeRange(5m))` is `(5m, 0)` whatever grid reads it; a
     /// chain of 60 s windows over `TimeShift(30s)` is `(60s, 30s)`.

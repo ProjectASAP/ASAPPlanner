@@ -427,6 +427,16 @@ impl QueryWorkloadEntry {
             .unwrap_or(1)
     }
 
+    /// How far back from a request's end its evaluations reach, in ms: its
+    /// range-evaluation span, 0 for one evaluation per run. The output it
+    /// reads directly is read back that far.
+    ///
+    /// Example: a range request over the last hour at 60 s steps:
+    /// 3,600,000 ms; an instant query: 0.
+    pub fn range_span_ms(&self) -> u64 {
+        self.range_evaluation.map_or(0, |range| range.span_ms)
+    }
+
     /// The grid, in ms, of the times its requests anchor `@ end()` or
     /// `@ start()` (`at`) at: its request end times, shifted back by its
     /// range-evaluation span for `@ start()`; 1 ms when not known.

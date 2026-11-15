@@ -36,8 +36,8 @@ pub(crate) fn edge_retention_need_ms(
         memo.groups()[group.0 as usize]
             .reached_by_queries()
             .iter()
-            .filter_map(|&query| entries.get(query)?.range_evaluation)
-            .map(|range| range.span_ms)
+            .filter_map(|&query| entries.get(query))
+            .map(QueryWorkloadEntry::range_span_ms)
             .max()
             .unwrap_or(0)
     })

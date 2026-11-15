@@ -61,14 +61,49 @@ impl<C> Operator<C> {
         }
     }
 
-    /// Its tumbling-window width when it is a `SummaryTumblingWindowChain`.
+    /// Its tumbling-window width when it is a `SummaryTumblingWindowChain`,
+    /// in ms; `None` for every other operator. E.g. a chain of 1-minute
+    /// windows: `Some(60_000)`; `TimeRange(5m)`: `None`.
     pub fn chain_tumbling_window_width_ms(&self) -> Option<u64> {
         match self {
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms,
                 ..
             }) => Some(*tumbling_window_width_ms),
-            _ => None,
+            Operator::NonASAP(
+                NonASAPOp::Scan { .. }
+                | NonASAPOp::Values { .. }
+                | NonASAPOp::Filter { .. }
+                | NonASAPOp::Project { .. }
+                | NonASAPOp::Aggregate { .. }
+                | NonASAPOp::Join { .. }
+                | NonASAPOp::SetOp { .. }
+                | NonASAPOp::Concat { .. }
+                | NonASAPOp::Dedup { .. }
+                | NonASAPOp::Sort { .. }
+                | NonASAPOp::Limit { .. }
+                | NonASAPOp::BinaryOp { .. }
+                | NonASAPOp::SQLWindowFunc { .. }
+                | NonASAPOp::TimeRange { .. }
+                | NonASAPOp::TimeShift { .. }
+                | NonASAPOp::PromqlVectorFromScalar(..)
+                | NonASAPOp::PromqlRelabel { .. }
+                | NonASAPOp::PromqlInfoEnrich { .. }
+                | NonASAPOp::PromqlSeriesSample { .. }
+                | NonASAPOp::PromqlSubquery { .. },
+            )
+            | Operator::ASAP(
+                ASAPOp::SummaryAgg { .. }
+                | ASAPOp::SummaryEstimate { .. }
+                | ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. }
+                | ASAPOp::SummaryMerge { .. }
+                | ASAPOp::SummarySubtract { .. }
+                | ASAPOp::SummaryDelete { .. }
+                | ASAPOp::SummaryJoin { .. }
+                | ASAPOp::Extension { .. },
+            ) => None,
         }
     }
 
@@ -79,9 +114,89 @@ impl<C> Operator<C> {
         match self {
             Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => match shift.at {
                 Some(at @ (AtModifier::End | AtModifier::Start)) => Some(at),
-                _ => None,
+                Some(AtModifier::Timestamp(_)) | None => None,
             },
-            _ => None,
+            Operator::NonASAP(
+                NonASAPOp::Scan { .. }
+                | NonASAPOp::Values { .. }
+                | NonASAPOp::Filter { .. }
+                | NonASAPOp::Project { .. }
+                | NonASAPOp::Aggregate { .. }
+                | NonASAPOp::Join { .. }
+                | NonASAPOp::SetOp { .. }
+                | NonASAPOp::Concat { .. }
+                | NonASAPOp::Dedup { .. }
+                | NonASAPOp::Sort { .. }
+                | NonASAPOp::Limit { .. }
+                | NonASAPOp::BinaryOp { .. }
+                | NonASAPOp::SQLWindowFunc { .. }
+                | NonASAPOp::TimeRange { .. }
+                | NonASAPOp::PromqlVectorFromScalar(..)
+                | NonASAPOp::PromqlRelabel { .. }
+                | NonASAPOp::PromqlInfoEnrich { .. }
+                | NonASAPOp::PromqlSeriesSample { .. }
+                | NonASAPOp::PromqlSubquery { .. },
+            )
+            | Operator::ASAP(
+                ASAPOp::SummaryTumblingWindowChain { .. }
+                | ASAPOp::SummaryAgg { .. }
+                | ASAPOp::SummaryEstimate { .. }
+                | ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. }
+                | ASAPOp::SummaryMerge { .. }
+                | ASAPOp::SummarySubtract { .. }
+                | ASAPOp::SummaryDelete { .. }
+                | ASAPOp::SummaryJoin { .. }
+                | ASAPOp::Extension { .. },
+            ) => None,
+        }
+    }
+
+    /// Whether each output row keeps its input row's time window, so the
+    /// window its input covers is also its own: `Filter` and `Project`
+    /// keep rows and times; `TimeShift` moves every row by one offset but
+    /// keeps the window's length. E.g. `Filter <- TimeRange(5m)` covers
+    /// 5 minutes, and `Project <- chain of 1-minute windows` holds
+    /// 1-minute windows; `Aggregate <- TimeRange(5m)` combines rows, so
+    /// `false`.
+    pub fn keeps_input_window(&self) -> bool {
+        match self {
+            Operator::NonASAP(
+                NonASAPOp::Filter { .. } | NonASAPOp::Project { .. } | NonASAPOp::TimeShift { .. },
+            ) => true,
+            Operator::NonASAP(
+                NonASAPOp::Scan { .. }
+                | NonASAPOp::Values { .. }
+                | NonASAPOp::Aggregate { .. }
+                | NonASAPOp::Join { .. }
+                | NonASAPOp::SetOp { .. }
+                | NonASAPOp::Concat { .. }
+                | NonASAPOp::Dedup { .. }
+                | NonASAPOp::Sort { .. }
+                | NonASAPOp::Limit { .. }
+                | NonASAPOp::BinaryOp { .. }
+                | NonASAPOp::SQLWindowFunc { .. }
+                | NonASAPOp::TimeRange { .. }
+                | NonASAPOp::PromqlVectorFromScalar(..)
+                | NonASAPOp::PromqlRelabel { .. }
+                | NonASAPOp::PromqlInfoEnrich { .. }
+                | NonASAPOp::PromqlSeriesSample { .. }
+                | NonASAPOp::PromqlSubquery { .. },
+            )
+            | Operator::ASAP(
+                ASAPOp::SummaryAgg { .. }
+                | ASAPOp::SummaryEstimate { .. }
+                | ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. }
+                | ASAPOp::SummaryMerge { .. }
+                | ASAPOp::SummaryTumblingWindowChain { .. }
+                | ASAPOp::SummarySubtract { .. }
+                | ASAPOp::SummaryDelete { .. }
+                | ASAPOp::SummaryJoin { .. }
+                | ASAPOp::Extension { .. },
+            ) => false,
         }
     }
 }
