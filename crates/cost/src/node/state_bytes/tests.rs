@@ -16,7 +16,8 @@ fn exact_state_is_priced_at_the_executors_state_size() {
             summary_shape(
                 &FieldDataType::ExactAggregate(kind, params),
                 None,
-                StateInputRows::UNKNOWN
+                StateInputRows::UNKNOWN,
+                None
             ),
             Ok((1.0, 56))
         );
@@ -47,6 +48,7 @@ fn ddsketch_state_bytes_bound_the_library() {
                 rows_per_state,
                 non_negative,
             },
+            None,
         )
         .1
     };
@@ -83,6 +85,41 @@ fn ddsketch_state_bytes_bound_the_library() {
     assert_eq!(priced(Some(10_000), false), priced(None, false));
 }
 
+/// A DDSketch over a column declaring its value magnitudes is priced at
+/// the bins they span, not nine decades. At α = 0.01, γ = 1.01 / 0.99 and
+/// a value `v` falls in bin `floor(ln v / ln γ)`: magnitudes in
+/// [0.001, 10000] take bins -346 to 460, 807 bins, where the default
+/// [1, 1e9] takes 0 to 1036, 1,037. With three or more non-negative rows
+/// the library's bound is `2 (bins + 126)` 8-byte slots plus the struct.
+#[test]
+fn ddsketch_state_bytes_follow_the_declared_value_magnitude() {
+    let alpha = 0.01;
+    let priced = |value_magnitude| {
+        sketch_shape(
+            &SketchParams::DDSketch { alpha },
+            StateInputRows {
+                rows_per_state: Some(600),
+                non_negative: true,
+            },
+            value_magnitude,
+        )
+        .1
+    };
+    let struct_bytes = std::mem::size_of::<asap_sketchlib::DdSketch>() as u64;
+    let bytes_for_bins = |bins: u64| struct_bytes + 8 * 2 * (bins + 126);
+    let latency = ValueMagnitude {
+        min_abs: 0.001,
+        max_abs: 10_000.0,
+    };
+    assert_eq!(priced(Some(latency)), bytes_for_bins(807));
+    assert_eq!(priced(None), bytes_for_bins(1_037));
+    // Values a narrower range holds fit the priced bytes.
+    let values: Vec<f64> = (0..600)
+        .map(|i| 10f64.powf(-3.0 + 7.0 * f64::from(i) / 599.0))
+        .collect();
+    assert!(library_ddsketch_bytes(alpha, &values) <= priced(Some(latency)));
+}
+
 /// A KLL state is charged what `asap_sketchlib` allocates for the
 /// samples it sees, not its full capacity: its fixed struct and level
 /// array, plus the item array the library starts empty and doubles from
@@ -107,6 +144,7 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
                 rows_per_state,
                 non_negative: true,
             },
+            None,
         )
         .1
     };
@@ -356,6 +394,7 @@ fn state_bytes_bound_the_executors_charge() {
                         rows_per_state: Some(u64::from(n)),
                         non_negative: false,
                     },
+                    None,
                 )
                 .1 as usize;
             let context = format!("{algorithm:?} after {n} rows: {priced} priced");

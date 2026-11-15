@@ -19,16 +19,17 @@ use crate::{
 };
 use asap_types::ir::operator::{GroupKeys, Reduction, Source};
 use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::scalar::resolve_column_ref;
 use asap_types::ir::schema::{FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
 use asap_types::stages::{Lifetime, StorageMedium};
-use asap_types::summary_type::{SketchParams, SketchStatistic};
+use asap_types::summary_type::{SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate};
 use asap_types::workload::bounds::{
-    declared_non_negative, declared_series, group_count_bound, source_name, source_rows_per_ms,
-    unchanged_source_columns,
+    declared_non_negative, declared_series, declared_value_magnitude, group_count_bound,
+    source_name, source_rows_per_ms, unchanged_source_columns,
 };
 use asap_types::workload::{DataWorkload, ONE_SECOND_MS};
 
@@ -269,7 +270,7 @@ pub fn node_resource_usage_and_cost<'a>(
         _ => None,
     };
     let sketch_size =
-        |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
+        |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN, None).1 as f64;
     let mut fit = CalibrationFit::default();
     // Query-time memory held while the node computes.
     let mut held_bytes = None;
@@ -411,6 +412,23 @@ pub fn node_resource_usage_and_cost<'a>(
         raw && sources
             .iter()
             .all(|source| declared_non_negative(data, source))
+    };
+    // The declared magnitudes of the values a summary built here folds:
+    // its `weight` column, when the producer passes it on unchanged from
+    // the sources and every one of them declares its `column_magnitudes`.
+    // E.g. a DDSketch over a scan of `latency` declaring `value` in
+    // [0.001, 10000].
+    let folded_value_magnitude = |update: &SummaryUpdate| {
+        let SummaryInputExpr::Column(column) = &update.weight else {
+            return None;
+        };
+        let producer = producers.first()?;
+        let index = resolve_column_ref(column, producer.output_schema).ok()?;
+        let name = producer.output_schema.fields.get(index)?.name.as_str();
+        if !producer.unchanged_columns.contains(name) {
+            return None;
+        }
+        declared_value_magnitude(data, sources.iter().copied(), name)
     };
     let unary = |output| UnaryEdgeStatistics {
         input,
@@ -712,6 +730,7 @@ pub fn node_resource_usage_and_cost<'a>(
         },
         Payload::ASAP(ASAPOp::SummaryAgg {
             summary_type: family,
+            input: update,
             reduction,
             ..
         }) => {
@@ -723,7 +742,12 @@ pub fn node_resource_usage_and_cost<'a>(
                 rows_per_state: (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
                 non_negative: raw_data_samples_non_negative(),
             };
-            let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
+            let (depth, state_bytes) = summary_shape(
+                family,
+                node.parameters.as_ref(),
+                input_rows,
+                folded_value_magnitude(update),
+            )?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
             let out = EdgeStatistics {
                 rows: group_count,
@@ -747,6 +771,7 @@ pub fn node_resource_usage_and_cost<'a>(
         }
         Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
             summary_type: family,
+            input: update,
             reduction,
             tumbling_window_width_ms,
             ..
@@ -768,7 +793,12 @@ pub fn node_resource_usage_and_cost<'a>(
                 rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
                 non_negative: raw_data_samples_non_negative(),
             };
-            let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
+            let (depth, state_bytes) = summary_shape(
+                family,
+                node.parameters.as_ref(),
+                input_rows,
+                folded_value_magnitude(update),
+            )?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
             let out = EdgeStatistics {
                 rows: group_count,
