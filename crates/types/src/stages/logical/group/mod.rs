@@ -105,6 +105,14 @@ pub struct GroupProperties {
 }
 
 impl GroupProperties {
+    /// The sign of a state group's state column, its first non-plain field:
+    /// the sign of the values its states are updated with. A DDSketch build
+    /// over a latency declared non-negative → `Some(NonNegative)`; a `Scan`
+    /// group, which has no state column → `None`.
+    pub fn state_column_sign(&self) -> Option<ValueSign> {
+        todo!("sign derivation by construction: GroupProperties::state_column_sign")
+    }
+
     /// The sketch algorithm of the state the group outputs; `None` for
     /// rows, values and exact states.
     pub fn sketch_algorithm_of_state(&self) -> Option<SketchAlgorithm> {

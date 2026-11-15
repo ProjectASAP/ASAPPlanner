@@ -471,3 +471,395 @@ fn set_operators_and_relabels_copy_their_inputs_error() {
         );
     }
 }
+
+/// The consumers of `column_signs` in the error contract (sign test plan
+/// T5.1 and T5.4): a relative contract of a `sum` or `avg` reads whether
+/// its input's values have one sign, and a `Project` of a math function
+/// keeps an error by the function's typed key, the one the sign
+/// derivation also reads.
+mod sign_consumers {
+    use super::*;
+    use asap_types::ir::operator::MathFunc;
+    use asap_types::ir::scalar::scalar_type_rules::math_function_of_call;
+    use asap_types::test_support::memo_fixtures::range;
+
+    const FIVE_MINUTES_MS: i64 = 300_000;
+
+    /// Sources `pos` (`value` declared non-negative), `neg` (declared
+    /// non-positive), `mixed` (nothing declared) and `c_total` (a counter,
+    /// its value non-negative without a declaration).
+    fn signed_sources() -> DataWorkload {
+        let declared = |sign| SourceFacts {
+            column_signs: BTreeMap::from([("value".to_string(), sign)]),
+            ..SourceFacts::default()
+        };
+        DataWorkload {
+            sources: BTreeMap::from([
+                ("pos".to_string(), declared(ValueSign::NonNegative)),
+                ("neg".to_string(), declared(ValueSign::NonPositive)),
+                ("mixed".to_string(), SourceFacts::default()),
+                (
+                    "c_total".to_string(),
+                    SourceFacts {
+                        metric_type: Some(asap_types::workload::PrometheusMetricType::Counter),
+                        ..SourceFacts::default()
+                    },
+                ),
+            ]),
+            ..DataWorkload::default()
+        }
+    }
+
+    /// The sample-value column of `group`'s output.
+    fn value_column(memo: &Memo, group: MemoGroupId) -> usize {
+        resolve_column_ref(
+            &ColumnRef::SampleValue,
+            &memo.groups()[group.0 as usize].group_properties.schema,
+        )
+        .expect("the group has a sample value")
+    }
+
+    /// `quantile_over_time(0.9, metric[5m])` per series, computed exactly.
+    fn quantile_over_time(memo: &mut Memo, metric: &str) -> MemoGroupId {
+        let input = memo
+            .find_or_add_group(scan(metric, &[("job", DataType::Utf8)], vec![]))
+            .unwrap();
+        let window = memo
+            .find_or_add_group(range(FIVE_MINUTES_MS, input))
+            .unwrap();
+        memo.find_or_add_group(aggregate(
+            Reduction::PerEntity,
+            AggIntent::Quantile { col: None, q: 0.9 },
+            window,
+        ))
+        .unwrap()
+    }
+
+    /// `-child`: every column of `child` copied, its sample value negated.
+    fn negated(memo: &mut Memo, child: MemoGroupId) -> MemoGroupId {
+        let value = value_column(memo, child);
+        let fields = memo.groups()[child.0 as usize]
+            .group_properties
+            .schema
+            .fields
+            .clone();
+        let project = Operator::NonASAP(NonASAPOp::Project {
+            cols: fields
+                .iter()
+                .enumerate()
+                .map(|(column, field)| ProjectItem {
+                    alias: Some(field.name.clone()),
+                    expr: if column == value {
+                        ScalarExpr::Negative {
+                            expr: Box::new(ScalarExpr::Column(column)),
+                            semantics: ExprSemantics::Promql,
+                        }
+                    } else {
+                        ScalarExpr::Column(column)
+                    },
+                })
+                .collect(),
+            child,
+        });
+        memo.find_or_add_group(project).unwrap()
+    }
+
+    /// A relative error ε on each input of a `sum` or `avg` is at most ε
+    /// on the result exactly when the inputs' exact values have one sign
+    /// (`|Σ(x̂ - x)| ≤ ε Σ|x| = ε |Σx|`): β = 1 for a child whose value
+    /// column is `NonNegative` or `NonPositive`, no contract for
+    /// `Unknown`, whose values may cancel (1 + (-1) = 0, while 1.05 +
+    /// (-0.95) = 0.1). In absolute error an `avg` keeps the error (β = 1)
+    /// whatever the sign, a `sum` adds the errors up (no contract).
+    ///
+    /// The children's signs are declared (a `Scan`'s `SourceFacts`) or
+    /// derived, each hand-derived under IEEE 754 with its sign bit:
+    ///
+    /// | Child | Sign | Why |
+    /// |---|---|---|
+    /// | `pos` | N | declared |
+    /// | `neg` | P | declared |
+    /// | `mixed` | U | undeclared |
+    /// | `rate(c_total[5m])` | N | a counter's rate is ≥ +0 |
+    /// | `-quantile_over_time(0.9, pos[5m])` | P | a quantile of N values is one of them or between two, `-x` flips the sign bit |
+    /// | `q(pos) - q(neg)` | N | `x - y = x + (-y)`, N + N = N, and `+0 - (-0) = +0` |
+    ///
+    /// Every mismatch is listed, then the test fails once with all of
+    /// them. Today the last row fails: `-` has no sign rule (B6).
+    #[test]
+    fn relative_sum_and_avg_contracts_need_one_signed_inputs() {
+        use ValueSign::{NonNegative, NonPositive, Unknown};
+        let mut memo = Memo::new(&signed_sources());
+        let declared = |memo: &mut Memo, metric: &str| {
+            memo.find_or_add_group(scan(metric, &[("job", DataType::Utf8)], vec![]))
+                .unwrap()
+        };
+        let pos = declared(&mut memo, "pos");
+        let neg = declared(&mut memo, "neg");
+        let mixed = declared(&mut memo, "mixed");
+        let rate_of_counter = {
+            let input = declared(&mut memo, "c_total");
+            let window = memo
+                .find_or_add_group(range(FIVE_MINUTES_MS, input))
+                .unwrap();
+            memo.find_or_add_group(aggregate(Reduction::PerEntity, AggIntent::Rate, window))
+                .unwrap()
+        };
+        let quantile_of_pos = quantile_over_time(&mut memo, "pos");
+        let quantile_of_neg = quantile_over_time(&mut memo, "neg");
+        let negated_quantile = negated(&mut memo, quantile_of_pos);
+        let difference = memo
+            .find_or_add_group(arithmetic(
+                ArithmeticOpKind::Sub,
+                quantile_of_pos,
+                quantile_of_neg,
+            ))
+            .unwrap();
+        let children = [
+            ("pos", pos, NonNegative),
+            ("neg", neg, NonPositive),
+            ("mixed", mixed, Unknown),
+            ("rate(c_total[5m])", rate_of_counter, NonNegative),
+            ("-q(pos)", negated_quantile, NonPositive),
+            ("q(pos) - q(neg)", difference, NonNegative),
+        ];
+        let mut mismatches = Vec::new();
+        for (name, child, sign) in children {
+            let derived = memo.groups()[child.0 as usize]
+                .group_properties
+                .column_signs[value_column(&memo, child)];
+            if derived != sign {
+                mismatches.push(format!(
+                    "{name}: value sign {derived:?}, hand-derived {sign:?}"
+                ));
+            }
+            // Over all rows (`sum(x)`), so no grouping key reads an
+            // estimate.
+            let total = || Reduction::by(vec![]);
+            let sum = aggregate(total(), AggIntent::Sum { col: None }, child);
+            let avg = aggregate(total(), AggIntent::Avg { col: None }, child);
+            let exact_sum = Operator::ASAP(ASAPOp::SummaryAgg {
+                child,
+                summary_type: FieldDataType::exact(ExactKind::Sum),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: total(),
+                filter: None,
+            });
+            let one_sign = matches!(sign, NonNegative | NonPositive);
+            for (consumer_name, consumer, absolute) in [
+                ("sum", &sum, None),
+                ("avg", &avg, Some(vec![1.0])),
+                ("exact sum", &exact_sum, None),
+            ] {
+                for (metric, expected) in [
+                    (AccuracyMetric::Relative, one_sign.then(|| vec![1.0])),
+                    (AccuracyMetric::ABSOLUTE, absolute.clone()),
+                ] {
+                    let factors = error_contract(&memo, consumer, metric)
+                        .map(|contract| contract.error_factor_per_input);
+                    if factors != expected {
+                        mismatches.push(format!(
+                            "{consumer_name}({name}), {metric:?}: {factors:?}, expected {expected:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    /// Every `MathFunc` variant, each with representative literal
+    /// arguments. The `match` in [`promql_call`] lists every variant with
+    /// no wildcard, so a new variant fails to compile until it is added
+    /// there and here.
+    fn all_math_funcs() -> Vec<MathFunc> {
+        vec![
+            MathFunc::Abs,
+            MathFunc::Ceil,
+            MathFunc::Floor,
+            MathFunc::Exp,
+            MathFunc::Ln,
+            MathFunc::Log2,
+            MathFunc::Log10,
+            MathFunc::Sqrt,
+            MathFunc::Sgn,
+            MathFunc::Sin,
+            MathFunc::Cos,
+            MathFunc::Tan,
+            MathFunc::Asin,
+            MathFunc::Acos,
+            MathFunc::Atan,
+            MathFunc::Sinh,
+            MathFunc::Cosh,
+            MathFunc::Tanh,
+            MathFunc::Asinh,
+            MathFunc::Acosh,
+            MathFunc::Atanh,
+            MathFunc::Deg,
+            MathFunc::Rad,
+            MathFunc::Round { to_nearest: 1.0 },
+            MathFunc::Clamp {
+                min: 0.0,
+                max: 100.0,
+            },
+            MathFunc::ClampMin { min: 0.0 },
+            MathFunc::ClampMax { max: 5.0 },
+        ]
+    }
+
+    /// The PromQL frontend's call of `f` on `value`: its name and its
+    /// literal arguments after the value (`clamp_min(v, 0)` →
+    /// `promql_clamp_min`, `[0]`), and whether it keeps an error with
+    /// β = 1 in absolute and in relative error. A function moving a value
+    /// by at most its error is 1-Lipschitz: `|f(x̂) - f(x)| ≤ |x̂ - x|`
+    /// (abs, clamp, clamp_min, clamp_max). Only `abs` also keeps the
+    /// magnitude, `||x̂| - |x|| ≤ |x̂ - x|` with `||x|| = |x|`, so a
+    /// relative error ε on x is at most ε on |x|; `clamp_min(x, 0)` of
+    /// x = -10 and x̂ = -9.5 is 0 for both, but of x = 0.1, x̂ = -0.1 it
+    /// is 0 against 0.1: not relative.
+    fn promql_call(f: &MathFunc) -> (&'static str, Vec<f64>, bool, bool) {
+        match f {
+            MathFunc::Abs => ("promql_abs", vec![], true, true),
+            MathFunc::Ceil => ("promql_ceil", vec![], false, false),
+            MathFunc::Floor => ("promql_floor", vec![], false, false),
+            MathFunc::Exp => ("promql_exp", vec![], false, false),
+            MathFunc::Ln => ("promql_ln", vec![], false, false),
+            MathFunc::Log2 => ("promql_log2", vec![], false, false),
+            MathFunc::Log10 => ("promql_log10", vec![], false, false),
+            MathFunc::Sqrt => ("promql_sqrt", vec![], false, false),
+            MathFunc::Sgn => ("promql_sgn", vec![], false, false),
+            MathFunc::Sin => ("promql_sin", vec![], false, false),
+            MathFunc::Cos => ("promql_cos", vec![], false, false),
+            MathFunc::Tan => ("promql_tan", vec![], false, false),
+            MathFunc::Asin => ("promql_asin", vec![], false, false),
+            MathFunc::Acos => ("promql_acos", vec![], false, false),
+            MathFunc::Atan => ("promql_atan", vec![], false, false),
+            MathFunc::Sinh => ("promql_sinh", vec![], false, false),
+            MathFunc::Cosh => ("promql_cosh", vec![], false, false),
+            MathFunc::Tanh => ("promql_tanh", vec![], false, false),
+            MathFunc::Asinh => ("promql_asinh", vec![], false, false),
+            MathFunc::Acosh => ("promql_acosh", vec![], false, false),
+            MathFunc::Atanh => ("promql_atanh", vec![], false, false),
+            MathFunc::Deg => ("promql_deg", vec![], false, false),
+            MathFunc::Rad => ("promql_rad", vec![], false, false),
+            MathFunc::Round { to_nearest } => ("promql_round", vec![*to_nearest], false, false),
+            MathFunc::Clamp { min, max } => ("promql_clamp", vec![*min, *max], true, false),
+            MathFunc::ClampMin { min } => ("promql_clamp_min", vec![*min], true, false),
+            MathFunc::ClampMax { max } => ("promql_clamp_max", vec![*max], true, false),
+        }
+    }
+
+    /// The error contract and the sign derivation recognize a function by
+    /// one typed key, [`math_function_of_call`], not by two string lists
+    /// that can drift apart (B10). For every `MathFunc`, a `Project` over
+    /// a KLL quantile readout replacing the estimate with
+    /// `promql_<f>(value, literals…)`:
+    /// - keeps the absolute error iff f ∈ {Abs, Clamp, ClampMin, ClampMax};
+    /// - keeps the relative error iff f = Abs;
+    /// - and `math_function_of_call` returns f for that call.
+    ///
+    /// SQL's `abs` and `ABS` are the same key as `promql_abs`; a clamp
+    /// whose bound is a column, not a literal, has no key and no contract.
+    #[test]
+    fn error_contract_and_sign_read_one_function_key() {
+        let mut memo = Memo::new(&DataWorkload::default());
+        let input = memo
+            .find_or_add_group(scan("latency", &[("job", DataType::Utf8)], vec![]))
+            .unwrap();
+        let state = memo
+            .find_or_add_group(Operator::ASAP(ASAPOp::SummaryAgg {
+                child: input,
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::by(vec![2]),
+                filter: None,
+            }))
+            .unwrap();
+        let readout = memo
+            .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.9 }, state))
+            .unwrap();
+        let estimate = value_column(&memo, readout);
+        let fields = memo.groups()[readout.0 as usize]
+            .group_properties
+            .schema
+            .fields
+            .clone();
+        let project_value = |expr: ScalarExpr<MemoGroupId>| {
+            Operator::NonASAP(NonASAPOp::Project {
+                cols: fields
+                    .iter()
+                    .enumerate()
+                    .map(|(column, field)| ProjectItem {
+                        alias: Some(field.name.clone()),
+                        expr: if column == estimate {
+                            expr.clone()
+                        } else {
+                            ScalarExpr::Column(column)
+                        },
+                    })
+                    .collect(),
+                child: readout,
+            })
+        };
+        let call = |name: &str, literals: &[f64]| ScalarExpr::FunctionCall {
+            name: name.to_string(),
+            args: std::iter::once(ScalarExpr::Column(estimate))
+                .chain(
+                    literals
+                        .iter()
+                        .map(|x| ScalarExpr::Literal(ScalarValue::Float64(*x))),
+                )
+                .collect(),
+        };
+        let keeps = |expr: &ScalarExpr<MemoGroupId>, metric| {
+            error_contract(&memo, &project_value(expr.clone()), metric)
+                .map(|contract| contract.error_factor_per_input)
+                == Some(vec![1.0])
+        };
+        // The contracts, first: they hold today through the string list.
+        let mut calls = Vec::new();
+        for f in all_math_funcs() {
+            let (name, literals, absolute, relative) = promql_call(&f);
+            let expr = call(name, &literals);
+            assert_eq!(
+                keeps(&expr, AccuracyMetric::ABSOLUTE),
+                absolute,
+                "{name}: absolute"
+            );
+            assert_eq!(
+                keeps(&expr, AccuracyMetric::Relative),
+                relative,
+                "{name}: relative"
+            );
+            calls.push((f, name, expr));
+        }
+        for name in ["abs", "ABS"] {
+            let expr = call(name, &[]);
+            assert!(keeps(&expr, AccuracyMetric::ABSOLUTE), "{name}");
+            assert!(keeps(&expr, AccuracyMetric::Relative), "{name}");
+        }
+        let bound_by_a_column = ScalarExpr::FunctionCall {
+            name: "promql_clamp_min".to_string(),
+            args: vec![ScalarExpr::Column(estimate), ScalarExpr::Column(estimate)],
+        };
+        assert!(!keeps(&bound_by_a_column, AccuracyMetric::ABSOLUTE));
+        // The key both read: one parse function for every spelling.
+        for (f, name, expr) in &calls {
+            let ScalarExpr::FunctionCall { args, .. } = expr else {
+                unreachable!("built as a call")
+            };
+            assert_eq!(math_function_of_call(name, args), Some(f.clone()), "{name}");
+        }
+        for name in ["abs", "ABS"] {
+            assert_eq!(
+                math_function_of_call(name, &[ScalarExpr::<MemoGroupId>::Column(estimate)]),
+                Some(MathFunc::Abs),
+                "{name}"
+            );
+        }
+        let ScalarExpr::FunctionCall { name, args } = &bound_by_a_column else {
+            unreachable!("built as a call")
+        };
+        assert_eq!(math_function_of_call(name, args), None);
+    }
+}
