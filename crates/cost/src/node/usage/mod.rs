@@ -22,6 +22,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::node::analytical::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
 };
+use crate::node::operation_counts::{
+    aggregate_measure_operations_per_row, estimate_operations_per_group,
+    merge_operations_per_state, update_operations_per_row, CHAIN_EMIT_OPERATIONS_PER_STATE,
+};
 use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
@@ -115,11 +119,16 @@ fn state_family<'a>(
             | FieldDataType::Wavelet(..)
             | FieldDataType::StatModel(..) => StateFamily::None,
         },
-        Payload::ASAP(
-            ASAPOp::SummaryMerge { .. }
-            | ASAPOp::SummaryEstimate { .. }
-            | ASAPOp::FinalizeExactAccumulator { .. },
-        ) => producer_family.unwrap_or(StateFamily::None),
+        // A merge over a time range of a chain's windows reads states whose
+        // producer (the time range) has no family: they are its own θ's, or
+        // the exact accumulator its output column holds.
+        Payload::ASAP(ASAPOp::SummaryMerge { .. }) => match producer_family {
+            None | Some(StateFamily::None) => merged_state_family(node),
+            Some(family) => family,
+        },
+        Payload::ASAP(ASAPOp::SummaryEstimate { .. } | ASAPOp::FinalizeExactAccumulator { .. }) => {
+            producer_family.unwrap_or(StateFamily::None)
+        }
         Payload::NonASAP(
             NonASAPOp::Scan { .. }
             | NonASAPOp::Values { .. }
@@ -151,6 +160,28 @@ fn state_family<'a>(
             | ASAPOp::Extension { .. },
         ) => StateFamily::None,
     })
+}
+
+/// The family of the states merge `node` outputs: its θ for a sketch, else
+/// the exact accumulator of its output's state column, else none.
+fn merged_state_family(
+    node: &asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode,
+) -> StateFamily<'_> {
+    if let Some(parameters) = &node.parameters {
+        return StateFamily::Sketch(parameters);
+    }
+    node.output_schema
+        .fields
+        .iter()
+        .find_map(|field| match &field.dtype {
+            FieldDataType::ExactAggregate(kind, _) => Some(StateFamily::Exact(kind)),
+            FieldDataType::Plain(_)
+            | FieldDataType::Sketch(..)
+            | FieldDataType::SummarySample(..)
+            | FieldDataType::Wavelet(..)
+            | FieldDataType::StatModel(..) => None,
+        })
+        .unwrap_or(StateFamily::None)
 }
 
 /// One producer of a node being costed ([`node_resource_usage_and_cost`]): its payload and
@@ -637,10 +668,16 @@ pub fn node_resource_usage_and_cost<'a>(
                 };
                 let out = edge(group_count)?;
                 let held = input.rows.div_ceil(group_count.max(1));
+                // Its measures' work per row, by kind (an exact quantile
+                // also sorts its group of `held` rows); at least one.
+                let measure_ops: f64 = measures
+                    .iter()
+                    .map(|measure| aggregate_measure_operations_per_row(measure, held))
+                    .sum();
                 let estimate = estimate_operator(
                     PhysicalOperator::HashAggregate {
                         grouping_key_count: keys,
-                        accumulator_count: measures.len().max(1) as u64,
+                        accumulator_operations_per_row: (measure_ops.ceil() as u64).max(1),
                     },
                     OperatorStatistics::HashAggregate {
                         edges: unary(out),
@@ -665,7 +702,8 @@ pub fn node_resource_usage_and_cost<'a>(
                     out,
                     estimate,
                     format!(
-                        "hash aggregate {} rows into {group_count} groups",
+                        "hash aggregate {} rows into {group_count} groups: {measure_ops:.0} \
+                         measure ops per row",
                         input.rows
                     ),
                 )
@@ -842,8 +880,11 @@ pub fn node_resource_usage_and_cost<'a>(
                 non_negative,
                 value_magnitude_range,
             };
-            let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
+            let (counter_updates, state_bytes) =
+                summary_shape(family, node.parameters.as_ref(), input_rows)?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
+            let update_ops =
+                update_operations_per_row(family, node.parameters.as_ref(), counter_updates);
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
@@ -853,12 +894,12 @@ pub fn node_resource_usage_and_cost<'a>(
             (
                 out,
                 Ok(ResourceEstimate::new(
-                    input.rows as f64 * depth,
+                    input.rows as f64 * update_ops,
                     out.bytes,
                     0,
                 )),
                 format!(
-                    "build {} into {group_count} states: {} rows x depth {depth}",
+                    "build {} into {group_count} states: {} rows x {update_ops} ops",
                     summary_type_name(family),
                     input.rows
                 ),
@@ -890,8 +931,21 @@ pub fn node_resource_usage_and_cost<'a>(
                 non_negative,
                 value_magnitude_range,
             };
-            let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
+            let (counter_updates, state_bytes) =
+                summary_shape(family, node.parameters.as_ref(), input_rows)?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
+            let update_ops =
+                update_operations_per_row(family, node.parameters.as_ref(), counter_updates);
+            // The states it completes in one execution: at ingestion time
+            // one second's share of each group's window (a 10 s window: a
+            // tenth of a state per group); at query time every retained
+            // window's.
+            let emitted_states = match ingestion {
+                true => {
+                    group_count as f64 * ONE_SECOND_MS as f64 / *tumbling_window_width_ms as f64
+                }
+                false => group_count as f64 * retained_output_count as f64,
+            };
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
@@ -901,13 +955,15 @@ pub fn node_resource_usage_and_cost<'a>(
             (
                 out,
                 Ok(ResourceEstimate::new(
-                    input.rows as f64 * (depth + 1.0),
+                    input.rows as f64 * update_ops
+                        + emitted_states * CHAIN_EMIT_OPERATIONS_PER_STATE,
                     out.bytes,
                     0,
                 )),
                 format!(
                     "build {} in tumbling windows of {tumbling_window_width_ms} ms for \
-                     {group_count} groups: {} rows x (1 + depth {depth})",
+                     {group_count} groups: {} rows x {update_ops} ops, {emitted_states:.1} \
+                     states emitted",
                     summary_type_name(family),
                     input.rows
                 ),
@@ -929,6 +985,14 @@ pub fn node_resource_usage_and_cost<'a>(
                 );
             }
             let states = merged_states(producers)?;
+            // Each input state's merge, by the states' family and bytes.
+            let merge_ops: f64 = producers
+                .iter()
+                .map(|producer| {
+                    let state_bytes = producer.output.bytes.div_ceil(producer.output.rows.max(1));
+                    producer.output.rows as f64 * merge_operations_per_state(family, state_bytes)
+                })
+                .sum();
             if let Some(keys) = group_by {
                 group_count = group_count.min(groups(&Reduction::by(keys.clone()))?);
             }
@@ -942,7 +1006,7 @@ pub fn node_resource_usage_and_cost<'a>(
             };
             (
                 out,
-                Ok(ResourceEstimate::new(states as f64, out.bytes, 0)),
+                Ok(ResourceEstimate::new(merge_ops, out.bytes, 0)),
                 format!("merge {states} states into {group_count}"),
             )
         }
@@ -963,13 +1027,21 @@ pub fn node_resource_usage_and_cost<'a>(
             )?;
             (
                 out,
-                Ok(ResourceEstimate::new(out.rows as f64, 0, 0)),
+                Ok(ResourceEstimate::new(
+                    input.rows as f64 * estimate_operations_per_group(family),
+                    0,
+                    0,
+                )),
                 format!("estimate {} groups x {per_group}", input.rows),
             )
         }
         Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => (
             edge(input.rows)?,
-            Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
+            Ok(ResourceEstimate::new(
+                input.rows as f64 * estimate_operations_per_group(family),
+                0,
+                0,
+            )),
             format!("finalize {} accumulators", input.rows),
         ),
         Payload::ASAP(

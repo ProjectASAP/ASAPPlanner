@@ -468,17 +468,29 @@ fn query_answers(plan: &InstallablePlan, samples: &[RawDataSample]) -> Vec<Vec<A
 }
 
 /// `sum_over_time(m[5m] offset 1m)` and `sum_over_time(m[5m])`, every
-/// minute, may share one tumbling-window chain of `m` built at query time:
-/// the plan installs, a query-time `Scan` read through such a chain keeps
-/// the 6 minutes its readers read back (5 m + 1 m offset, not one
-/// window), and both queries answer the exact sums of their windows.
+/// minute over `m` at rest (8 minutes of rows held, so no view is kept at
+/// ingestion time), may share one tumbling-window chain of `m` built at
+/// query time: the plan installs, a query-time `Scan` read through such a
+/// chain keeps the 6 minutes its readers read back (5 m + 1 m offset, not
+/// one window), and both queries answer the exact sums of their windows.
+/// (With `m` arriving, stored windows are cheaper and selected.)
 #[tokio::test]
 async fn shifted_and_unshifted_sums_over_a_shared_query_time_chain_install_and_answer_exactly() {
-    let plan = plan_every_minute(&[
+    let mut workload = every_minute_workload(&[
         ("sum_over_time(m[5m] offset 1m)", ""),
         ("sum_over_time(m[5m])", ""),
-    ])
-    .await;
+    ]);
+    let data = workload.data_workload.as_mut().unwrap();
+    data.arrival = asap_types::workload::DataArrival::AtRest;
+    data.sources.get_mut("m").unwrap().rows_held = Some(480_000);
+    let plan = plan_installable(UserInput::new(
+        &workload,
+        FrontendInput::Promql,
+        PlanningModels::builtin(),
+    ))
+    .await
+    .unwrap()
+    .0;
     let query_time_chain = plan.dag.nodes.iter().any(|node| {
         matches!(
             node.payload,
