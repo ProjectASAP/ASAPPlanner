@@ -82,7 +82,8 @@ pub enum NonASAPOp<C = Rc<OperatorNode>> {
         measures: Vec<AggIntent>,
         /// Output column names, exactly one entry per measure; an empty
         /// string means the default name (the intent's synthetic name).
-        #[serde(default)]
+        /// Required when deserialized: a missing list would not match the
+        /// measures.
         output_names: Vec<String>,
         #[serde(default)]
         filters: Vec<Option<Predicate<C>>>,
@@ -1440,6 +1441,34 @@ mod tests {
             having: None,
             child: node(child),
         }
+    }
+
+    /// An `Aggregate` read without `output_names` is rejected instead of
+    /// getting an empty list that matches none of its measures; with its
+    /// names it round-trips. E.g. `{"Aggregate": {"measures": ["Rate"],
+    /// ...}}` with no `"output_names"` fails with a missing field.
+    #[test]
+    fn aggregate_output_names_are_required_when_deserialized() {
+        let aggregate = rate_over(scan(
+            vec![col("value", DataType::Float64, false)],
+            None,
+            vec![],
+        ));
+        let json = serde_json::to_value(&aggregate).unwrap();
+        let read_back: NonASAPOp = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(read_back, aggregate);
+
+        let mut without_names = json;
+        without_names["Aggregate"]
+            .as_object_mut()
+            .unwrap()
+            .remove("output_names")
+            .unwrap();
+        let error = serde_json::from_value::<NonASAPOp>(without_names).unwrap_err();
+        assert!(
+            error.to_string().contains("missing field `output_names`"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -24,6 +24,32 @@ fn exact_state_is_priced_at_the_executors_state_size() {
     assert_eq!(asap_types::summary_type::EXACT_ACCUMULATOR_STATE_BYTES, 56);
 }
 
+/// The rows a family is fed.
+enum Rows {
+    /// One sample value a row.
+    Values,
+    /// One label value a row, as Pass 1 feeds UnivMon a column.
+    Labels,
+    /// A label set and a weight a row.
+    Keyed,
+}
+
+/// A 16-byte label value, `i` zero-padded: its key has
+/// [`ASSUMED_VALUE_KEY_BYTES`].
+fn label(i: u32) -> String {
+    format!("{i:016}")
+}
+
+/// Three 16-byte labels, the first [`label`]`(i)`: a tuple key of
+/// [`ASSUMED_HEAP_KEY_BYTES`].
+fn labels(i: u32) -> [String; 3] {
+    [
+        label(i),
+        "service-frontend".to_string(),
+        "region-us-east-1".to_string(),
+    ]
+}
+
 /// The bytes `asap_sketchlib`'s DDSketch holds after adding `values`.
 fn library_ddsketch_bytes(alpha: f64, values: &[f64]) -> u64 {
     let mut sketch = asap_sketchlib::sketches::DdSketch::new(alpha);
@@ -174,15 +200,6 @@ fn state_bytes_bound_the_executors_charge() {
         /// At least, and at most 1.5 times once the state is full.
         Bound,
     }
-    /// The rows a family is fed.
-    enum Rows {
-        /// Signed values over the assumed range.
-        Values,
-        /// One label value a row, as Pass 1 feeds UnivMon a column.
-        Labels,
-        /// A label set and a weight a row.
-        Keyed,
-    }
     // (family, parameters, rows fed, how it is priced, the
     // accumulator's own fields, rows at which the state is full: four
     // times the heap for the heap sketches, so each heap churns).
@@ -301,20 +318,10 @@ fn state_bytes_bound_the_executors_charge() {
         item,
         weight: SummaryInputExpr::Constant(1.0),
     };
-    // A 16-byte label value: its key has the assumed size.
-    let label = |i: u32| format!("{i:016}");
     assert_eq!(
         Value::Utf8(label(0).into()).key().unwrap().len(),
         ASSUMED_VALUE_KEY_BYTES
     );
-    // Three 16-byte labels: a tuple key of the assumed size.
-    let labels = |i: u32| {
-        [
-            label(i),
-            "service-frontend".to_string(),
-            "region-us-east-1".to_string(),
-        ]
-    };
     let key = asap_sketchlib::TupleKey::new(
         labels(0)
             .into_iter()
@@ -393,4 +400,256 @@ fn state_bytes_bound_the_executors_charge() {
             }
         }
     }
+}
+
+/// How far plan selection's bytes for a state may be from what the
+/// executor charges for it in [`priced_bytes_agree_with_the_executor`]:
+/// priced ÷ charged in `[1 / 1.5, 1.5]`.
+const BYTES_AGREEMENT_FACTOR: f64 = 1.5;
+
+/// The families whose priced bytes are known to disagree with the
+/// executor's beyond [`BYTES_AGREEMENT_FACTOR`]: (family, the issue that
+/// fixes it, priced ÷ charged as measured by
+/// [`priced_bytes_agree_with_the_executor`]). A family leaves the list
+/// when its issue is fixed: the test fails while it is listed but agrees,
+/// or when its ratio moves off the one listed.
+const KNOWN_BYTES_GAPS: &[(&str, u32, f64)] = &[
+    // Priced for values over nine decades (`DDSKETCH_ASSUMED_VALUE_RANGE`);
+    // these span three.
+    ("DDSketch", 1313, 2.982),
+    // Priced as one element of the executor's state column (56 bytes);
+    // a boxed accumulator charges its whole struct (136 bytes).
+    ("exact Sum accumulator", 1301, 0.412),
+    ("exact Count accumulator", 1301, 0.412),
+    ("exact Min accumulator", 1301, 0.412),
+    ("exact Max accumulator", 1301, 0.412),
+    ("exact Increase accumulator", 1301, 0.412),
+    ("exact Rate accumulator", 1301, 0.412),
+    // Priced as one Count-Min per group; the executor keeps one grid for
+    // all of them, here 3 × 64 cells over 10 groups.
+    ("HydraCms", 947, 0.104),
+];
+
+/// The next value of the seeded stream `state` (splitmix64), uniform in
+/// `[0, 1)`, so the rows every family is fed are fixed.
+fn next_unit(state: &mut u64) -> f64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// Plan selection prices each state at what the executor charges for it
+/// on data shaped like a workload's, not only on the worst case
+/// [`state_bytes_bound_the_executors_charge`] feeds. Every family the
+/// executor builds from a plan, at Pass 1's parameters for a 1% error, is
+/// built through the executor and fed 10,000 seeded rows: latencies
+/// log-uniform over 1 ms to 1 s (declared non-negative), or 1,000
+/// distinct label values or label sets. Its charge
+/// (`approx_memory_bytes`; for HydraCms its shared grid over its 10
+/// groups) is compared with `summary_shape` for the same rows. Priced ÷
+/// charged lies within [`BYTES_AGREEMENT_FACTOR`], or the family is in
+/// [`KNOWN_BYTES_GAPS`] with its issue and measured ratio.
+///
+/// HydraKll is left out: no plan builds it (it has no parameter list,
+/// and the executor's factory refuses it).
+#[test]
+fn priced_bytes_agree_with_the_executor() {
+    use asap_executor::factory::{create_hydra_cms, create_planner_accumulator};
+    use asap_executor::values::Value;
+    use asap_types::ir::scalar::expr_ir::ColumnRef;
+    use asap_types::summary_type::{
+        ExactKind, ExactParams, HydraParams, SummaryInputExpr, SummaryUpdate,
+    };
+    use SketchAlgorithm as A;
+    const ROWS: u32 = 10_000;
+    const DISTINCT_KEYS: u32 = 1_000;
+    const HYDRA_GROUPS: u32 = 10;
+    let input_rows = |rows_per_state: u32| StateInputRows {
+        rows_per_state: Some(u64::from(rows_per_state)),
+        non_negative: true,
+    };
+    let sketch = FieldDataType::Sketch;
+    let exact = |kind, params| {
+        (
+            FieldDataType::ExactAggregate(kind, params),
+            None,
+            Rows::Values,
+        )
+    };
+    // (family, its parameters, the rows it is fed).
+    let families = [
+        (
+            sketch(A::Kll),
+            Some(SketchParams::Kll { k: 269 }),
+            Rows::Values,
+        ),
+        (
+            sketch(A::DDSketch),
+            Some(SketchParams::DDSketch { alpha: 0.01 }),
+            Rows::Values,
+        ),
+        (
+            sketch(A::Hll),
+            Some(SketchParams::Hll { precision: 18 }),
+            Rows::Values,
+        ),
+        (
+            sketch(A::Kmv),
+            Some(SketchParams::Kmv { k: 106_263 }),
+            Rows::Values,
+        ),
+        (
+            sketch(A::Cms),
+            Some(SketchParams::Cms {
+                width: 272,
+                depth: 5,
+            }),
+            Rows::Keyed,
+        ),
+        (
+            sketch(A::CountSketch),
+            Some(SketchParams::CountSketch {
+                width: 30_000,
+                depth: 47,
+            }),
+            Rows::Keyed,
+        ),
+        (
+            sketch(A::CmsWithHeap),
+            Some(SketchParams::CmsWithHeap {
+                width: 272,
+                depth: 5,
+                heap_size: 10,
+            }),
+            Rows::Keyed,
+        ),
+        (
+            sketch(A::CountSketchWithHeap),
+            Some(SketchParams::CountSketchWithHeap {
+                width: 30_000,
+                depth: 47,
+                heap_size: 10,
+            }),
+            Rows::Keyed,
+        ),
+        (
+            sketch(A::UnivMon),
+            Some(SketchParams::UnivMon {
+                heap_size: 256,
+                sketch_rows: 5,
+                sketch_cols: 1_024,
+                layers: 16,
+            }),
+            Rows::Labels,
+        ),
+        exact(ExactKind::Sum, ExactParams::Sum),
+        exact(ExactKind::Count, ExactParams::Count),
+        exact(ExactKind::Min, ExactParams::Min),
+        exact(ExactKind::Max, ExactParams::Max),
+        exact(ExactKind::Increase, ExactParams::Increase),
+        exact(ExactKind::Rate, ExactParams::Rate),
+    ];
+    // Every family the executor declares is checked.
+    for supported in asap_executor::supported_summary_families() {
+        assert!(
+            families
+                .iter()
+                .any(|(family, ..)| *family == sketch(supported.summary_type)),
+            "{:?} is built by the executor but not checked here",
+            supported.summary_type
+        );
+    }
+    let value = SummaryUpdate::column(ColumnRef::SampleValue);
+    let item = Some(SummaryInputExpr::Column(ColumnRef::Named("item".into())));
+    let keyed = SummaryUpdate {
+        item: item.clone(),
+        ..value.clone()
+    };
+    let labeled = SummaryUpdate {
+        item,
+        weight: SummaryInputExpr::Constant(1.0),
+    };
+    // (family name, priced bytes, charged bytes).
+    let mut measured: Vec<(String, u64, u64)> = Vec::new();
+    for (family, params, rows) in &families {
+        let input = match rows {
+            Rows::Values => &value,
+            Rows::Labels => &labeled,
+            Rows::Keyed => &keyed,
+        };
+        let mut updater = create_planner_accumulator(family, params.as_ref(), input).unwrap();
+        let mut seed = 0x5EED_u64;
+        for i in 0..ROWS {
+            let key = (next_unit(&mut seed) * f64::from(DISTINCT_KEYS)) as u32;
+            match rows {
+                // One sample a second, its latency log-uniform over 1 ms to 1 s.
+                Rows::Values => {
+                    let latency_ms = 1_000f64.powf(next_unit(&mut seed));
+                    updater
+                        .update_single(latency_ms, i64::from(i) * 1_000)
+                        .unwrap();
+                }
+                Rows::Labels => updater
+                    .update_value(&Value::Utf8(label(key).into()), 0)
+                    .unwrap(),
+                Rows::Keyed => updater.update_keyed(&labels(key), 1.0, 0).unwrap(),
+            }
+        }
+        let charged = updater.into_accumulator().approx_memory_bytes() as u64;
+        let priced = summary_shape(family, params.as_ref(), input_rows(ROWS))
+            .unwrap()
+            .1;
+        let name = crate::node::usage::summary_type_name(family);
+        measured.push((name, priced, charged));
+    }
+    // HydraCms: one grid for every group, priced as one Count-Min per group.
+    let hydra = SketchParams::Hydra(HydraParams::HydraCms {
+        width: 272,
+        depth: 5,
+        shared_rows: 3,
+        shared_columns: 64,
+    });
+    let hydra_family = sketch(A::HydraCms);
+    let mut grid = create_hydra_cms(&hydra_family, Some(&hydra)).unwrap();
+    let mut seed = 0x5EED_u64;
+    for _ in 0..ROWS {
+        let group = (next_unit(&mut seed) * f64::from(HYDRA_GROUPS)) as u32;
+        let item = (next_unit(&mut seed) * f64::from(DISTINCT_KEYS)) as u32;
+        grid.count(&label(group), &label(item), 1).unwrap();
+    }
+    measured.push((
+        crate::node::usage::summary_type_name(&hydra_family),
+        sketch_shape(&hydra, input_rows(ROWS / HYDRA_GROUPS)).1,
+        (grid.approx_memory_bytes() / HYDRA_GROUPS as usize) as u64,
+    ));
+
+    let mut failures = Vec::new();
+    for (name, priced, charged) in &measured {
+        let ratio = *priced as f64 / *charged as f64;
+        let agrees = (1.0 / BYTES_AGREEMENT_FACTOR..=BYTES_AGREEMENT_FACTOR).contains(&ratio);
+        let line = format!("{name}: {priced} priced, {charged} charged, ratio {ratio:.3}");
+        match KNOWN_BYTES_GAPS.iter().find(|(gap, ..)| gap == name) {
+            Some((_, issue, _)) if agrees => failures.push(format!(
+                "{line}: agrees now; remove it from KNOWN_BYTES_GAPS (#{issue})"
+            )),
+            Some((_, issue, listed)) if (ratio / listed - 1.0).abs() > 0.05 => failures.push(
+                format!("{line}: listed at {listed} in KNOWN_BYTES_GAPS (#{issue}); update it"),
+            ),
+            Some(_) => {}
+            None if !agrees => failures.push(format!(
+                "{line}: outside {BYTES_AGREEMENT_FACTOR}x; fix it or list it in KNOWN_BYTES_GAPS with its issue"
+            )),
+            None => {}
+        }
+    }
+    for (gap, issue, _) in KNOWN_BYTES_GAPS {
+        if !measured.iter().any(|(name, ..)| name == gap) {
+            failures.push(format!(
+                "KNOWN_BYTES_GAPS lists {gap} (#{issue}), which is not measured"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

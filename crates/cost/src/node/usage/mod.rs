@@ -1,6 +1,11 @@
 //! One node of a physical plan DAG: its resource usage and cost
 //! ([`node_resource_usage_and_cost`], [`NodeCost`]).
 
+// The rules here answer per operator; a wildcard arm would give a new
+// operator a default answer instead of failing the build (under
+// `-D warnings`).
+#![warn(clippy::wildcard_enum_match_arm)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::node::analytical::{
@@ -93,14 +98,46 @@ fn state_family<'a>(
                 .map(StateFamily::Sketch)
                 .ok_or(AnalyticalCostError::UnsupportedCandidate)?,
             FieldDataType::ExactAggregate(kind, _) => StateFamily::Exact(kind),
-            _ => StateFamily::None,
+            FieldDataType::Plain(_)
+            | FieldDataType::SummarySample(..)
+            | FieldDataType::Wavelet(..)
+            | FieldDataType::StatModel(..) => StateFamily::None,
         },
         Payload::ASAP(
             ASAPOp::SummaryMerge { .. }
             | ASAPOp::SummaryEstimate { .. }
             | ASAPOp::FinalizeExactAccumulator { .. },
         ) => producer_family.unwrap_or(StateFamily::None),
-        _ => StateFamily::None,
+        Payload::NonASAP(
+            NonASAPOp::Scan { .. }
+            | NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Aggregate { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::TimeRange { .. }
+            | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::PromqlVectorFromScalar(..)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. },
+        )
+        | Payload::ASAP(
+            ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. },
+        ) => StateFamily::None,
     })
 }
 
@@ -220,7 +257,39 @@ pub fn maintained_window_ms<'o, N: Copy + Ord, C: 'o>(
             ..
         }) => return Some(*tumbling_window_width_ms),
         Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => return range_ms(range),
-        _ => {}
+        Operator::NonASAP(
+            NonASAPOp::Scan { .. }
+            | NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Aggregate { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::PromqlVectorFromScalar(..)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. },
+        )
+        | Operator::ASAP(
+            ASAPOp::SummaryAgg { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. }
+            | ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummaryMerge { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. },
+        ) => {}
     }
     let mut seen = BTreeSet::new();
     let mut below = input_of(node)?;
@@ -234,7 +303,36 @@ pub fn maintained_window_ms<'o, N: Copy + Ord, C: 'o>(
             Operator::NonASAP(
                 NonASAPOp::Filter { .. } | NonASAPOp::Project { .. } | NonASAPOp::TimeShift { .. },
             ) => below = input_of(below)?,
-            _ => return None,
+            Operator::NonASAP(
+                NonASAPOp::Scan { .. }
+                | NonASAPOp::Values { .. }
+                | NonASAPOp::Aggregate { .. }
+                | NonASAPOp::Join { .. }
+                | NonASAPOp::SetOp { .. }
+                | NonASAPOp::Concat { .. }
+                | NonASAPOp::Dedup { .. }
+                | NonASAPOp::Sort { .. }
+                | NonASAPOp::Limit { .. }
+                | NonASAPOp::BinaryOp { .. }
+                | NonASAPOp::SQLWindowFunc { .. }
+                | NonASAPOp::PromqlVectorFromScalar(..)
+                | NonASAPOp::PromqlRelabel { .. }
+                | NonASAPOp::PromqlInfoEnrich { .. }
+                | NonASAPOp::PromqlSeriesSample { .. }
+                | NonASAPOp::PromqlSubquery { .. },
+            )
+            | Operator::ASAP(
+                ASAPOp::SummaryAgg { .. }
+                | ASAPOp::SummaryEstimate { .. }
+                | ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. }
+                | ASAPOp::SummaryMerge { .. }
+                | ASAPOp::SummarySubtract { .. }
+                | ASAPOp::SummaryDelete { .. }
+                | ASAPOp::SummaryJoin { .. }
+                | ASAPOp::Extension { .. },
+            ) => return None,
         }
     }
     None
@@ -269,7 +367,7 @@ pub fn node_resource_usage_and_cost<'a>(
     let speed = settings.resource_speed;
     let unit_costs = match &settings.cost_model {
         CostModel::UsageOverTime(unit_cost) => Some(unit_cost),
-        _ => None,
+        CostModel::ProvisionedCapacity(_) | CostModel::ClusterCapacity(_) => None,
     };
     let sketch_size =
         |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
@@ -291,7 +389,40 @@ pub fn node_resource_usage_and_cost<'a>(
             tumbling_window_width_ms,
             ..
         }) => *tumbling_window_width_ms,
-        _ => window_ms.unwrap_or(ONE_SECOND_MS),
+        Payload::NonASAP(
+            NonASAPOp::Scan { .. }
+            | NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Aggregate { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::TimeRange { .. }
+            | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::PromqlVectorFromScalar(..)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. },
+        )
+        | Payload::ASAP(
+            ASAPOp::SummaryAgg { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. }
+            | ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummaryMerge { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. },
+        ) => window_ms.unwrap_or(ONE_SECOND_MS),
     }
     .max(1);
     // A view materialized across evaluations keeps what its retention
@@ -314,11 +445,78 @@ pub fn node_resource_usage_and_cost<'a>(
         {
             selected_tumbling_windows(range, producers)?
         }
-        _ => 1,
+        Payload::NonASAP(
+            NonASAPOp::Scan { .. }
+            | NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Aggregate { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::TimeRange { .. }
+            | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::PromqlVectorFromScalar(..)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. },
+        )
+        | Payload::ASAP(
+            ASAPOp::SummaryAgg { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. }
+            | ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummaryMerge { .. }
+            | ASAPOp::SummaryTumblingWindowChain { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. },
+        ) => 1,
     };
     let sources: BTreeSet<&str> = match &node.payload {
         Payload::NonASAP(NonASAPOp::Scan { source, .. }) => [source_name(source)].into(),
-        _ => producers
+        Payload::NonASAP(
+            NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Aggregate { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::TimeRange { .. }
+            | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::PromqlVectorFromScalar(..)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. },
+        )
+        | Payload::ASAP(
+            ASAPOp::SummaryAgg { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. }
+            | ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummaryMerge { .. }
+            | ASAPOp::SummaryTumblingWindowChain { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. },
+        ) => producers
             .iter()
             .flat_map(|p| p.sources.iter().copied())
             .collect(),
@@ -347,7 +545,40 @@ pub fn node_resource_usage_and_cost<'a>(
         Payload::NonASAP(NonASAPOp::Aggregate { measures, .. }) => {
             aggregate_lookup(table, node.output_state.timing, measures)
         }
-        _ => lookup(
+        Payload::NonASAP(
+            NonASAPOp::Scan { .. }
+            | NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::TimeRange { .. }
+            | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::PromqlVectorFromScalar(..)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. },
+        )
+        | Payload::ASAP(
+            ASAPOp::SummaryAgg { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. }
+            | ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummaryMerge { .. }
+            | ASAPOp::SummaryTumblingWindowChain { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. },
+        ) => lookup(
             table,
             operator,
             node.output_state.timing,
@@ -671,7 +902,20 @@ pub fn node_resource_usage_and_cost<'a>(
                     ),
                 )
             }
-            _ => {
+            NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::PromqlVectorFromScalar(..)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. } => {
                 let estimate = estimate_operator(
                     PhysicalOperator::PassThrough,
                     OperatorStatistics::PassThrough {
@@ -802,7 +1046,11 @@ pub fn node_resource_usage_and_cost<'a>(
         Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
             let per_group = match query {
                 SketchStatistic::TopK { k } => *k as u64,
-                _ => 1,
+                SketchStatistic::FrequencyL2
+                | SketchStatistic::FrequencyEntropy
+                | SketchStatistic::Quantile { .. }
+                | SketchStatistic::PointCount { .. }
+                | SketchStatistic::Cardinality => 1,
             };
             let out = edge(
                 input
@@ -821,7 +1069,14 @@ pub fn node_resource_usage_and_cost<'a>(
             Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
             format!("finalize {} accumulators", input.rows),
         ),
-        _ => (
+        Payload::ASAP(
+            ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. },
+        ) => (
             edge(input.rows)?,
             Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
             format!("{} rows", input.rows),
@@ -837,7 +1092,39 @@ pub fn node_resource_usage_and_cost<'a>(
     let units = match &node.payload {
         Payload::NonASAP(NonASAPOp::Scan { .. }) => out.rows,
         Payload::ASAP(ASAPOp::SummaryMerge { .. }) => merged_states(producers)?,
-        _ => input.rows,
+        Payload::NonASAP(
+            NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Aggregate { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::TimeRange { .. }
+            | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::PromqlVectorFromScalar(..)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. },
+        )
+        | Payload::ASAP(
+            ASAPOp::SummaryAgg { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. }
+            | ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummaryTumblingWindowChain { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. },
+        ) => input.rows,
     };
     let mut detail = detail;
     // A node with an entry takes its measured time, scanning included;
@@ -1044,7 +1331,40 @@ fn chain_width_ms(producers: &[ProducerOutput<'_>]) -> Option<u64> {
             tumbling_window_width_ms,
             ..
         }) => Some(*tumbling_window_width_ms),
-        _ => None,
+        Payload::NonASAP(
+            NonASAPOp::Scan { .. }
+            | NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Aggregate { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::TimeRange { .. }
+            | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::PromqlVectorFromScalar(..)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. },
+        )
+        | Payload::ASAP(
+            ASAPOp::SummaryAgg { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. }
+            | ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummaryMerge { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. },
+        ) => None,
     }
 }
 
@@ -1076,7 +1396,10 @@ pub fn summary_type_name(summary_type: &FieldDataType) -> String {
     match summary_type {
         FieldDataType::Sketch(algorithm) => format!("{algorithm:?}"),
         FieldDataType::ExactAggregate(kind, _) => format!("exact {kind:?} accumulator"),
-        other => format!("{other:?}"),
+        other @ (FieldDataType::Plain(_)
+        | FieldDataType::SummarySample(..)
+        | FieldDataType::Wavelet(..)
+        | FieldDataType::StatModel(..)) => format!("{other:?}"),
     }
 }
 
