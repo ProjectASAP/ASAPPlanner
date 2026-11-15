@@ -89,8 +89,9 @@ fn source(fail: bool) -> (Source, Rc<Cell<usize>>, Rc<Cell<usize>>) {
 
 const ONE_EVALUATION: Lifetime = Lifetime::OneEvaluation(StorageMedium::Memory);
 
-// At query time each consumer of a store read (a leaf) reads it on its own,
-// so one consumer never waits for another.
+// At query time each consumer of a not-materialized store read (a
+// `Lifetime::None` leaf) reads it on its own, so one consumer never waits for
+// another.
 #[test]
 fn query_time_leaves_are_read_per_consumer() {
     let (source, starts, polls) = source(false);
@@ -313,11 +314,15 @@ fn within_timeout<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -
 
 /// More batches than any queue bound the runtime ever had (8 by default).
 const MANY_BATCHES: u64 = 20;
-/// Node 0 emits `MANY_BATCHES` batches; nodes 1 and 2 each read it.
-fn two_readers_of_one_leaf(dag: &mut PhysicalDAG<'static, u64, ()>) -> Rc<Cell<usize>> {
+/// Node 0, with plan lifetime `leaf`, emits `MANY_BATCHES` batches; nodes 1
+/// and 2 each read it.
+fn two_readers_of_one_leaf(
+    dag: &mut PhysicalDAG<'static, u64, ()>,
+    leaf: Lifetime,
+) -> Rc<Cell<usize>> {
     let (mut source, starts, _) = source(false);
     source.end = MANY_BATCHES;
-    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    dag.add(0, vec![], source, leaf).unwrap();
     dag.add(1, vec![0], Identity, Lifetime::None).unwrap();
     dag.add(2, vec![0], Identity, Lifetime::None).unwrap();
     starts
@@ -340,44 +345,70 @@ fn all_batches() -> Vec<Result<u64, Error>> {
 }
 
 // Two queries read one stored view (y16): draining their roots one after
-// another gives the same answers as polling them together.
+// another gives the same answers as polling them together. A `None` leaf is
+// read once per consumer (2 reads per run); a `OneEvaluation` leaf is read
+// once and held for both (1 read per run).
 #[test]
 fn roots_reading_one_leaf_drain_in_order() {
-    within_timeout(|| {
-        let mut dag = PhysicalDAG::default();
-        two_readers_of_one_leaf(&mut dag);
-        let outputs = dag.execute(&[1, 2], query_context(1024)).unwrap();
-        let joined: Vec<_> = block_on(futures::future::join_all(
-            outputs.into_iter().map(|output| output.collect::<Vec<_>>()),
-        ))
-        .into_iter()
-        .map(values)
-        .collect();
-        assert_eq!(joined, vec![all_batches(), all_batches()]);
-        let run = query_context(1024);
-        let outputs = dag.execute(&[1, 2], run.clone()).unwrap();
-        let drained: Vec<_> = outputs
+    for (leaf, reads_per_run) in [(Lifetime::None, 2), (ONE_EVALUATION, 1)] {
+        let reads = within_timeout(move || {
+            let mut dag = PhysicalDAG::default();
+            let starts = two_readers_of_one_leaf(&mut dag, leaf);
+            let outputs = dag.execute(&[1, 2], query_context(1024)).unwrap();
+            let joined: Vec<_> = block_on(futures::future::join_all(
+                outputs.into_iter().map(|output| output.collect::<Vec<_>>()),
+            ))
             .into_iter()
-            .map(|output| values(block_on(output.collect::<Vec<_>>())))
+            .map(values)
             .collect();
-        assert_eq!(drained, joined);
-        assert_eq!(run.retained_bytes(), 0);
-    });
+            assert_eq!(joined, vec![all_batches(), all_batches()]);
+            let run = query_context(1024);
+            let outputs = dag.execute(&[1, 2], run.clone()).unwrap();
+            let drained: Vec<_> = outputs
+                .into_iter()
+                .map(|output| values(block_on(output.collect::<Vec<_>>())))
+                .collect();
+            assert_eq!(drained, joined);
+            assert_eq!(run.retained_bytes(), 0);
+            starts.get()
+        });
+        assert_eq!(reads, 2 * reads_per_run, "{leaf:?}");
+    }
 }
 
 // One query whose two branches read one stored view (b17, g10), combined by
 // an operator that reads its left branch to the end first.
 #[test]
 fn one_root_with_two_branches_over_one_leaf() {
-    within_timeout(|| {
-        let mut dag = PhysicalDAG::default();
-        two_readers_of_one_leaf(&mut dag);
-        dag.add(3, vec![1, 2], LeftThenRight, Lifetime::None)
-            .unwrap();
-        let output = dag.execute(&[3], query_context(1024)).unwrap().remove(0);
-        let both: Vec<_> = all_batches().into_iter().chain(all_batches()).collect();
-        assert_eq!(values(block_on(output.collect::<Vec<_>>())), both);
-    });
+    for (leaf, reads) in [(Lifetime::None, 2), (ONE_EVALUATION, 1)] {
+        let starts = within_timeout(move || {
+            let mut dag = PhysicalDAG::default();
+            let starts = two_readers_of_one_leaf(&mut dag, leaf);
+            dag.add(3, vec![1, 2], LeftThenRight, Lifetime::None)
+                .unwrap();
+            let output = dag.execute(&[3], query_context(1024)).unwrap().remove(0);
+            let both: Vec<_> = all_batches().into_iter().chain(all_batches()).collect();
+            assert_eq!(values(block_on(output.collect::<Vec<_>>())), both);
+            starts.get()
+        });
+        assert_eq!(starts, reads, "{leaf:?}");
+    }
+}
+
+// A materialized node with one consumer streams to it: no sibling can wait
+// on that consumer, so nothing is held. Its first batch arrives after one
+// source batch, not after the whole output.
+#[test]
+fn one_evaluation_node_with_one_consumer_streams() {
+    let (source, _, polls) = source(false);
+    let mut dag = PhysicalDAG::default();
+    dag.add(0, vec![], source, ONE_EVALUATION).unwrap();
+    dag.add(1, vec![0], Identity, ONE_EVALUATION).unwrap();
+    let run = query_context(1024);
+    let mut output = dag.execute(&[1], run.clone()).unwrap().remove(0);
+    assert_eq!(*block_on(output.next()).unwrap().unwrap(), 0);
+    assert_eq!(polls.get(), 1);
+    assert_eq!(run.peak_bytes(), 8);
 }
 
 // At ingestion time one read of a source feeds several chain builds: the
@@ -386,7 +417,7 @@ fn one_root_with_two_branches_over_one_leaf() {
 fn ingestion_fan_out_reads_the_source_once() {
     within_timeout(|| {
         let mut dag = PhysicalDAG::default();
-        let starts = two_readers_of_one_leaf(&mut dag);
+        let starts = two_readers_of_one_leaf(&mut dag, Lifetime::None);
         dag.add(3, vec![0], Identity, Lifetime::None).unwrap();
         dag.add(4, vec![1, 2], LeftThenRight, Lifetime::None)
             .unwrap();
@@ -407,7 +438,7 @@ fn ingestion_fan_out_reads_the_source_once() {
 #[test]
 fn execute_rejects_ingestion_scope_and_vice_versa() {
     let mut dag = PhysicalDAG::default();
-    two_readers_of_one_leaf(&mut dag);
+    two_readers_of_one_leaf(&mut dag, Lifetime::None);
     let Err(error) = dag.execute(&[1], ingestion_context(1024)) else {
         panic!("`execute` ran an ingestion scope");
     };
