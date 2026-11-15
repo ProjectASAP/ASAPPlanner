@@ -14,9 +14,11 @@ use crate::ir::SchemaDerivationError;
 /// Where one output column of an aggregate comes from: an input column it
 /// keeps, a measure's value (with the input column the schema types it by,
 /// the measure's own or the probe value column), or a label column the
-/// aggregate computes (`count_values`' and `absent`'s, and a series identity
+/// aggregate computes (`count_values`' and `absent`'s; a series identity
 /// a `without` grouping keeps, its labels less the excluded ones and
-/// `__name__`). `sum by (job) (x)` →
+/// `__name__`; and a `by` or kept column that a `count_values` label of the
+/// same name replaces: `count_values by (job) ("job", v)` →
+/// `[ComputedLabel, Measure { .. }]`). `sum by (job) (x)` →
 /// `[InputColumn(job), Measure { index: 0, input_column: Some(value) }]`. The one layout the output schema
 /// ([`aggregate_output_schema`]) and the group properties read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +289,17 @@ pub fn without_kept_columns(in_schema: &Schema, excluded: &[ColumnId]) -> Vec<Co
         .collect()
 }
 
+/// Whether a `without(excluded)` grouping over `in_schema` removes the
+/// label `label`: an excluded column's name, or `__name__`, which PromQL's
+/// `without` always drops. `count_values("__name__", v) without (instance)`
+/// sets `__name__` to the value, then removes it.
+fn removed_by_without(in_schema: &Schema, excluded: &[ColumnId], label: &str) -> bool {
+    label == "__name__"
+        || excluded
+            .iter()
+            .any(|&id| in_schema.fields[id].name == label)
+}
+
 /// Output schema of a `without(excluded)` aggregate: the kept labels (every
 /// input label column except the `excluded` positions, the time axis, and the
 /// sample-value column) followed by the aggregate output column(s), a
@@ -298,7 +311,8 @@ pub fn without_kept_columns(in_schema: &Schema, excluded: &[ColumnId]) -> Vec<Co
 /// identity `{__name__=m, job=a, instance=1, zone=z}` becomes
 /// `{job=a, zone=z}`. A `count_values("zone", v)` label also replaces the
 /// identity's `zone`, as Prometheus overwrites it before grouping, unless
-/// `zone` is excluded: then it is removed with the excluded labels. Unlike the
+/// the grouping removes `zone` ([`removed_by_without`]): then it is removed
+/// with the excluded labels. Unlike the
 /// `by` path this stays **open** — the excluded set is enumerable but the kept
 /// set is not (the runtime carries labels the usage-derived schema never saw),
 /// so the schema can't freeze to closed and claims no unique key (issue #39).
@@ -334,14 +348,12 @@ fn without_output_schema(
         .cloned()
         .unwrap_or_else(|| Field::plain("value", DataType::Float64, false));
     for (i, intent) in measures.iter().enumerate() {
-        // A label the grouping also excludes is set and then removed, as in
+        // A label the grouping removes is set and then removed, as in
         // Prometheus: `count_values("zone", v) without (instance, zone)`
-        // counts per kept group, with no `zone` label.
+        // counts per kept group, with no `zone` label. A `without` grouping
+        // always removes `__name__` too.
         if let AggIntent::CountValues { label } = intent {
-            if !excluded
-                .iter()
-                .any(|&id| in_schema.fields[id].name == *label)
-            {
+            if !removed_by_without(in_schema, excluded, label) {
                 push_count_values_label(&mut out_cols, &mut sources, label);
             }
         }
@@ -521,6 +533,29 @@ mod tests {
                 Reduction::Reduce(GroupKeys::without(vec![3])),
                 &[AggIntent::CountValues {
                     label: "host".into()
+                }]
+            ),
+            vec![
+                InputColumn(2),
+                Measure {
+                    index: 0,
+                    input_column: Some(1)
+                }
+            ]
+        );
+    }
+
+    /// `count_values("__name__", v) without (host)`: a `without` grouping
+    /// always drops `__name__`, as Prometheus does, so the label is set and
+    /// removed like an excluded one.
+    #[test]
+    fn a_count_values_name_label_under_without_is_not_added() {
+        use OutputColumnSource::*;
+        assert_eq!(
+            columns(
+                Reduction::Reduce(GroupKeys::without(vec![3])),
+                &[AggIntent::CountValues {
+                    label: "__name__".into()
                 }]
             ),
             vec![

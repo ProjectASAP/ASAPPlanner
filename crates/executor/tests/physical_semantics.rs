@@ -384,6 +384,229 @@ fn sort_with_fetch_equals_sort_then_limit() {
     }
 }
 
+/// The rows of `ops` run in a chain over `batches` of `input`, or the
+/// error the run returns.
+fn try_chain(
+    input: &SchemaRef,
+    batches: Vec<Batch>,
+    ops: Vec<Operator>,
+) -> Result<Vec<Vec<Value>>, String> {
+    let mut dag = PhysicalDAG::default();
+    dag.add(0, vec![], Operator::source(input.clone(), batches).unwrap())
+        .unwrap();
+    let root = ops.len() as u64;
+    for (index, op) in ops.into_iter().enumerate() {
+        dag.add(index as u64 + 1, vec![index as u64], op).unwrap();
+    }
+    block_on(async {
+        let mut stream = dag
+            .execute(&[root], context())
+            .map_err(|error| error.to_string())?
+            .remove(0);
+        let mut rows = vec![];
+        while let Some(batch) = stream.next().await {
+            rows.extend(batch.map_err(|error| error.to_string())?.to_rows());
+        }
+        Ok(rows)
+    })
+}
+
+/// A linear congruential generator: the same cases on every run.
+struct Lcg(u64);
+impl Lcg {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) % n
+    }
+}
+
+// Over random batches, groups, keys, directions and `fetch`, a sort that
+// keeps the first `fetch` rows of each group answers the same rows, or the
+// same error, as a full sort and a per-group limit. The keys mix numbers
+// (NULL, NaN, ±inf, -0), nullable text (empty, case, unicode, NUL) and maps
+// of nullable numbers (a NULL, -0 or NaN value inside), so the test of a
+// row against its group's last kept row agrees with the heap's order.
+#[test]
+fn sort_with_fetch_equals_sort_then_limit_over_random_rows() {
+    let input = schema(&[
+        ("g", DataType::Utf8, false),
+        ("h", DataType::Int64, false),
+        ("v", DataType::Float64, true),
+        ("w", DataType::Int64, true),
+        ("id", DataType::Int64, false),
+        ("t", DataType::Utf8, true),
+        (
+            "m",
+            DataType::Map {
+                key: Box::new(DataType::Utf8),
+                value: Box::new(DataType::Float64),
+                value_nullable: true,
+            },
+            true,
+        ),
+    ]);
+    const TEXTS: [&str; 8] = ["", "a", "A", "b", "ä", "a\u{0}", "zz", "☃"];
+    let map = |random: &mut Lcg, nan: bool| {
+        if random.below(8) == 0 {
+            return Value::Null;
+        }
+        let mut entries = Vec::new();
+        for name in ["a", "b"] {
+            if random.below(2) == 0 {
+                continue;
+            }
+            let value = match random.below(7) {
+                0 => Value::Null,
+                1 => Value::Float64(-0.),
+                2 => Value::Float64(0.),
+                3 if nan => Value::Float64(f64::NAN),
+                _ => Value::Float64(random.below(3) as f64),
+            };
+            entries.push((Value::Utf8(name.into()), value));
+        }
+        Value::Map(entries.into())
+    };
+    for (seed, key_columns, nan_in_map) in [
+        (42, vec![2, 3], false),
+        (7, vec![2, 3, 5], false),
+        (8, vec![5], false),
+        (9, vec![6], false),
+        (10, vec![2, 5, 6], false),
+        (11, vec![6], true),
+    ] {
+        let mut random = Lcg(seed);
+        for case in 0..400 {
+            let group_count = 1 + random.below(6);
+            let distinct_values = 1 + random.below(8);
+            let mut id = 0;
+            let batches: Vec<Batch> = (0..1 + random.below(30))
+                .map(|_| {
+                    let rows = (0..random.below(40))
+                        .map(|_| {
+                            id += 1;
+                            vec![
+                                Value::Utf8(format!("g{}", random.below(group_count)).into()),
+                                Value::Int64(random.below(2) as i64),
+                                match random.below(12) {
+                                    0 => Value::Null,
+                                    1 => Value::Float64(f64::NAN),
+                                    2 => Value::Float64(f64::INFINITY),
+                                    3 => Value::Float64(f64::NEG_INFINITY),
+                                    4 => Value::Float64(-0.),
+                                    _ => Value::Float64(random.below(distinct_values) as f64),
+                                },
+                                if random.below(10) == 0 {
+                                    Value::Null
+                                } else {
+                                    Value::Int64(random.below(3) as i64)
+                                },
+                                Value::Int64(id),
+                                if random.below(5) == 0 {
+                                    Value::Null
+                                } else {
+                                    Value::Utf8(TEXTS[random.below(8) as usize].into())
+                                },
+                                map(&mut random, nan_in_map),
+                            ]
+                        })
+                        .collect();
+                    Batch::try_new(input.clone(), rows).unwrap()
+                })
+                .collect();
+            let groups = [vec![], vec![0], vec![0, 1], vec![5]][case % 4].clone();
+            let keys: Vec<SortKey> = (0..1 + random.below(3))
+                .map(|_| SortKey {
+                    column: key_columns[random.below(key_columns.len() as u64) as usize],
+                    descending: random.below(2) == 0,
+                    nulls_first: random.below(2) == 0,
+                })
+                .collect();
+            let fetch = [0, 1, 2, 3, 5, 1000][random.below(6) as usize];
+            let sort = |fetch| Operator::sort(input.clone(), keys.clone(), groups.clone(), fetch);
+            let fetched = try_chain(&input, batches.clone(), vec![sort(Some(fetch)).unwrap()]);
+            let limited = try_chain(
+                &input,
+                batches,
+                vec![
+                    sort(None).unwrap(),
+                    Operator::limit(input.clone(), fetch, 0, groups.clone()).unwrap(),
+                ],
+            );
+            assert_eq!(
+                format!("{fetched:?}"),
+                format!("{limited:?}"),
+                "seed {seed}, case {case}: groups {groups:?}, keys {keys:?}, fetch {fetch}"
+            );
+        }
+    }
+}
+
+// Two series identities that differ only in an excluded label rewrite to
+// the same identity, so `sum without (instance)` adds them in one group,
+// within a batch and across batches.
+#[test]
+fn identities_equal_but_for_an_excluded_label_aggregate_in_one_group() {
+    let input = schema(&[
+        ("identity", DataType::Utf8, false),
+        ("v", DataType::Float64, false),
+    ]);
+    let row =
+        |identity: &str, value: f64| vec![Value::Utf8(identity.into()), Value::Float64(value)];
+    let batches = vec![
+        vec![
+            row(r#"{"instance":"1","job":"a"}"#, 1.),
+            row(r#"{"instance":"2","job":"a"}"#, 2.),
+            row(r#"{"instance":"1","job":"b"}"#, 4.),
+            row(r#"{"instance":"1","job":"a"}"#, 8.),
+        ],
+        vec![row(r#"{"instance":"3","job":"a"}"#, 16.)],
+    ];
+    let project = Operator::project(
+        input.clone(),
+        vec![
+            (
+                "identity".into(),
+                Expression::LabelIdentity {
+                    column: 0,
+                    excluding: vec!["instance".into()],
+                },
+            ),
+            ("v".into(), Expression::Column(1)),
+        ],
+    )
+    .unwrap();
+    let projected = project.schema();
+    let mut dag = PhysicalDAG::default();
+    let source = batches
+        .into_iter()
+        .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
+        .collect();
+    dag.add(0, vec![], Operator::source(input.clone(), source).unwrap())
+        .unwrap();
+    dag.add(1, vec![0], project).unwrap();
+    dag.add(
+        2,
+        vec![1],
+        Operator::aggregate(projected, vec![0], vec![("sum".into(), Reduction::Sum(1))]).unwrap(),
+    )
+    .unwrap();
+    let mut sums = collect(&dag, 2)
+        .into_iter()
+        .map(|row| format!("{row:?}"))
+        .collect::<Vec<_>>();
+    sums.sort();
+    assert_eq!(
+        sums,
+        [
+            format!("{:?}", row(r#"{"job":"a"}"#, 27.)),
+            format!("{:?}", row(r#"{"job":"b"}"#, 4.)),
+        ]
+    );
+}
+
 // Outer joins preserve unmatched NULLs, while semi/anti joins preserve left multiplicity.
 #[test]
 fn joins_nulls_duplicates_and_empty_sides() {

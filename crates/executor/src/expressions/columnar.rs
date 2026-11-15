@@ -14,6 +14,10 @@
 //!   distinct combination of dictionary keys, in order of first appearance,
 //!   so a label matcher is evaluated once per series, not once per sample.
 //!   Otherwise it runs once per row over the decoded columns it reads.
+//! - **Per dictionary entry:** a series identity less some labels
+//!   (`sum without (instance)`'s [`Expression::LabelIdentity`]) over a
+//!   dictionary column rewrites each dictionary text once, as text, and
+//!   keeps the column's keys.
 //!
 //! Errors are those of row-by-row evaluation: vectorized operations cannot
 //! fail, and the per-input path visits inputs in row order.
@@ -737,6 +741,54 @@ fn evaluate_per_key_combination(
     Ok((results, indices))
 }
 
+/// Column `column` of `batch`, a dictionary of series identities, less the
+/// labels `excluding`: each dictionary text rewritten once by
+/// [`series_identity_without`](crate::physical_planner::promql_rows::series_identity_without)
+/// into a new dictionary over the same keys, with no decoded [`Value`]. Two
+/// texts can rewrite to one identity (`{"instance":"1","job":"a"}` and
+/// `{"instance":"2","job":"a"}` less `instance`), so the new dictionary may
+/// repeat a text; its readers compare texts, not keys (the group table
+/// resolves each entry by its text). `None` when the column is not a
+/// dictionary, when the dictionary is much larger than the batch (a slice
+/// of a large batch), or when a text is malformed, so the per-row path
+/// reads only the rows' entries and reports its error.
+fn identity_without_per_entry(
+    batch: &Batch,
+    column: usize,
+    excluding: &[String],
+) -> Option<ArrayRef> {
+    let dictionary = batch
+        .column(column)
+        .as_any()
+        .downcast_ref::<DictionaryArray<UInt32Type>>()?;
+    let texts = dictionary
+        .values()
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()?;
+    if !arrow_columns::dense_dictionary(texts.len(), batch.num_rows()) {
+        return None;
+    }
+    let mut rewritten =
+        arrow::array::StringBuilder::with_capacity(texts.len(), texts.value_data().len());
+    for entry in 0..texts.len() {
+        if texts.is_null(entry) {
+            rewritten.append_null();
+        } else {
+            rewritten.append_value(
+                crate::physical_planner::promql_rows::series_identity_without(
+                    texts.value(entry),
+                    excluding,
+                )
+                .ok()?,
+            );
+        }
+    }
+    let rewritten =
+        DictionaryArray::try_new(dictionary.keys().clone(), Arc::new(rewritten.finish()))
+            .expect("the keys index the same number of texts");
+    Some(Arc::new(rewritten))
+}
+
 fn expression_columns(expression: &Expression, columns: &mut Vec<usize>) {
     use Expression as E;
     match expression {
@@ -778,6 +830,11 @@ impl Expression {
     ) -> Result<ArrayRef, Error> {
         if let Some((vector, _)) = lower_expression(self, batch.schema()) {
             return evaluate_vector(&vector, batch)?.into_array(batch.num_rows());
+        }
+        if let Expression::LabelIdentity { column, excluding } = self {
+            if let Some(array) = identity_without_per_entry(batch, *column, excluding) {
+                return Ok(array);
+            }
         }
         let mut columns = Vec::new();
         expression_columns(self, &mut columns);

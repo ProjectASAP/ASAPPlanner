@@ -36,8 +36,13 @@ pub fn decode_series_identity(encoded: &str) -> Result<BTreeMap<String, String>,
 /// encoding nothing. A name token without an escape is the name itself
 /// (JSON escapes only `"`, `\` and control characters), so it is compared
 /// with the excluded names byte for byte; a token with one is compared with
-/// each excluded name's encoding. An error for input that is not a JSON
-/// object of string labels.
+/// each excluded name's encoding. The input must be canonical, as every
+/// identity the executor writes is (through `series_row`): only its
+/// structure is checked, so input that is not a JSON object of string
+/// labels is an error, but a non-canonical one (`{"b":"1","a":"2"}`,
+/// `{"a":"\/"}`) or an invalid escape inside a string is copied as it is:
+/// checking the canonical form would add a fifth to a third to the
+/// rewrite's time, on every identity of every batch.
 pub fn series_identity_without(identity: &str, excluding: &[String]) -> Result<String, Error> {
     let bytes = identity.as_bytes();
     let malformed = || invalid("series identity is not canonically encoded");
@@ -240,5 +245,67 @@ mod tests {
                 "{identity}"
             );
         }
+    }
+
+    /// Over identities mutated a character at a time (replaced, inserted,
+    /// removed, or two swapped), the rewrite never panics, and equals
+    /// decode, filter, encode wherever [`decode_series_identity`] accepts
+    /// the input. Input decode refuses may be copied (see
+    /// [`series_identity_without`]).
+    #[test]
+    fn series_identity_without_equals_decode_on_mutated_identities() {
+        const ALPHABET: [char; 18] = [
+            '"', '\\', 'u', '0', '1', 'a', 'b', 'f', 'F', 'n', 't', '{', '}', ':', ',', '/',
+            '\u{1}', '☃',
+        ];
+        let mut state = 7u64;
+        let mut below = |n: usize| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as usize % n
+        };
+        let seeds = [
+            r#"{}"#,
+            r#"{"a":"1"}"#,
+            r#"{"__name__":"m","instance":"1","job":"a"}"#,
+            r#"{"\"":"\\","a\nb":"\u0001\t","z":""}"#,
+            r#"{"a":"\b\f\r","b":"☃\u001f"}"#,
+        ];
+        let exclusions: [Vec<String>; 3] = [
+            vec![],
+            vec!["a".into()],
+            vec!["instance".into(), "\"".into()],
+        ];
+        let (mut accepted, mut refused) = (0, 0);
+        for case in 0..20_000 {
+            let mut identity: Vec<char> = seeds[case % seeds.len()].chars().collect();
+            for _ in 0..1 + below(3) {
+                let at = below(identity.len() + 1);
+                let letter = ALPHABET[below(ALPHABET.len())];
+                match below(4) {
+                    0 if at < identity.len() => identity[at] = letter,
+                    1 => identity.insert(at, letter),
+                    2 if at < identity.len() => drop(identity.remove(at)),
+                    _ if at + 1 < identity.len() => identity.swap(at, at + 1),
+                    _ => {}
+                }
+            }
+            let identity: String = identity.into_iter().collect();
+            let excluding = &exclusions[case % exclusions.len()];
+            let rewritten = series_identity_without(&identity, excluding);
+            match decode_series_identity(&identity) {
+                Ok(_) => {
+                    accepted += 1;
+                    assert_eq!(
+                        rewritten.unwrap(),
+                        decoded_without(&identity, excluding),
+                        "{identity}"
+                    );
+                }
+                Err(_) => refused += 1,
+            }
+        }
+        assert!(accepted > 1_000 && refused > 1_000, "{accepted}/{refused}");
     }
 }

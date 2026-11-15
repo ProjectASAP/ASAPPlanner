@@ -359,6 +359,43 @@ impl<'a> DictionaryTexts<'a> {
     }
 }
 
+/// The value of row `row` of `array`, a column of Planner type `dtype`,
+/// read from that one cell: `Float64(2.5)` from a `Float64Array` holding
+/// `2.5`. `None` for a type [`decode`] reads a column at a time: text (a
+/// batch holds it as a dictionary) and the nested types.
+pub(crate) fn decode_cell(array: &dyn Array, dtype: &DataType, row: usize) -> Option<Value> {
+    fn typed<A: 'static>(array: &dyn Array) -> &A {
+        array
+            .as_any()
+            .downcast_ref::<A>()
+            .expect("column has its declared layout")
+    }
+    let null = array.is_null(row);
+    Some(match dtype {
+        DataType::Null => Value::Null,
+        DataType::Bool | DataType::Int64 | DataType::Float64 if null => Value::Null,
+        DataType::Timestamp | DataType::Date | DataType::Interval if null => Value::Null,
+        DataType::Bool => Value::Bool(typed::<BooleanArray>(array).value(row)),
+        DataType::Int64 => Value::Int64(typed::<Int64Array>(array).value(row)),
+        DataType::Float64 => Value::Float64(typed::<Float64Array>(array).value(row)),
+        DataType::Timestamp => {
+            Value::Timestamp(typed::<TimestampMillisecondArray>(array).value(row))
+        }
+        DataType::Date => Value::Date(typed::<Date32Array>(array).value(row)),
+        DataType::Interval => {
+            let value: IntervalMonthDayNano = typed::<IntervalMonthDayNanoArray>(array).value(row);
+            Value::Interval {
+                months: value.months,
+                days: value.days,
+                nanos: value.nanoseconds,
+            }
+        }
+        DataType::Utf8 | DataType::List { .. } | DataType::Struct { .. } | DataType::Map { .. } => {
+            return None
+        }
+    })
+}
+
 /// Every value of `array`, a column of Planner type `dtype`.
 pub(crate) fn decode(array: &dyn Array, dtype: &DataType, depth: ColumnDepth) -> Vec<Value> {
     let length = array.len();
@@ -383,18 +420,14 @@ pub(crate) fn decode(array: &dyn Array, dtype: &DataType, depth: ColumnDepth) ->
     }
     match dtype {
         DataType::Null => vec![Value::Null; length],
-        DataType::Bool => primitive!(BooleanArray, Value::Bool),
-        DataType::Int64 => primitive!(Int64Array, Value::Int64),
-        DataType::Float64 => primitive!(Float64Array, Value::Float64),
-        DataType::Timestamp => primitive!(TimestampMillisecondArray, Value::Timestamp),
-        DataType::Date => primitive!(Date32Array, Value::Date),
-        DataType::Interval => primitive!(IntervalMonthDayNanoArray, |v: IntervalMonthDayNano| {
-            Value::Interval {
-                months: v.months,
-                days: v.days,
-                nanos: v.nanoseconds,
-            }
-        }),
+        DataType::Bool
+        | DataType::Int64
+        | DataType::Float64
+        | DataType::Timestamp
+        | DataType::Date
+        | DataType::Interval => (0..length)
+            .map(|row| decode_cell(array, dtype, row).expect("a type read by the cell"))
+            .collect(),
         DataType::Utf8 if depth == ColumnDepth::BatchColumn => {
             let typed = array
                 .as_any()
