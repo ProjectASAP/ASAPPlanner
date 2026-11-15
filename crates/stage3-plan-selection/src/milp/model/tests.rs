@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::ColumnRef;
@@ -190,6 +191,7 @@ fn selection_inputs(
             })
             .collect(),
         retention_cost_per_retained_second,
+        newest_output_retention_ms: HashMap::new(),
         least_need_ms_per_execution: Vec::new(),
         raw_data_source: HashMap::new(),
         unbounded_raw_data_on_disk_cost_per_second: HashMap::new(),
@@ -198,6 +200,7 @@ fn selection_inputs(
         &selectable,
         &costs.per_edge,
         &costs.retention_need_ms_per_edge,
+        &costs.newest_output_retention_ms,
         entries,
     );
     (selectable, costs)
@@ -433,6 +436,75 @@ fn a_materialized_chain_runs_once_and_retains_what_its_consumers_read_back() {
         .find(|node| node.selected_physical_candidate == Some(PhysicalCandidateId(1)))
         .unwrap();
     assert_eq!(chain_node.retention_ms, Some(300_000));
+}
+
+/// A chain of 10 s windows materialized across evaluations, read every
+/// 10 s at its newest output only (no range above it): no read needs a
+/// retention, but a store always keeps the newest output, so the chain
+/// retains one window, 10 s, and pays for it (1 + 1 + 1e-3 · 10 = 2.01),
+/// as `plan_cost` charges one retained output. Without the newest output
+/// it would retain 0 and pay 2.
+#[test]
+fn a_stored_result_read_at_its_newest_output_retains_one_output() {
+    let mut memo = empty_memo();
+    let m = scan(&mut memo);
+    let chain = group(
+        &mut memo,
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: m,
+            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+            tumbling_window_width_ms: 10_000,
+        }),
+    );
+    query(&mut memo, chain, None);
+    let physical = physical(
+        memo,
+        &[
+            (own_candidate(m), NONE),
+            (own_candidate(chain), ACROSS_EVALUATIONS),
+        ],
+    );
+    let entries = every_10s(1);
+    let solved_with = |newest_output_ms: Option<u64>| {
+        let (selectable, mut costs) =
+            selection_inputs(&physical, &entries, &[1.0, 1.0], &[], &[(1, 1e-3)]);
+        if let Some(newest_output_ms) = newest_output_ms {
+            costs
+                .newest_output_retention_ms
+                .insert(PhysicalCandidateId(1), newest_output_ms);
+            costs.least_need_ms_per_execution = least_need_ms_per_execution(
+                &selectable,
+                &costs.per_edge,
+                &costs.retention_need_ms_per_edge,
+                &costs.newest_output_retention_ms,
+                &entries,
+            );
+        }
+        solve_selection(&SelectionInputs {
+            physical: &physical,
+            entries: &entries,
+            selectable: &selectable,
+            costs: &costs,
+        })
+        .unwrap()
+    };
+    let solved = solved_with(Some(10_000));
+    assert_eq!(
+        solved.retention_ms.get(&PhysicalCandidateId(1)),
+        Some(&10_000)
+    );
+    assert!((solved.cost_per_second_without_request_overhead - 2.01).abs() < 1e-9);
+    let without_newest_output = solved_with(None);
+    assert_eq!(
+        without_newest_output
+            .retention_ms
+            .get(&PhysicalCandidateId(1)),
+        Some(&0)
+    );
+    assert!((without_newest_output.cost_per_second_without_request_overhead - 2.0).abs() < 1e-9);
 }
 
 /// Ga = `m offset 1s` and Gb = `m offset 2s`, each also computed from the
@@ -901,7 +973,9 @@ fn a_none_execution_its_one_evaluation_twin_dominates_is_left_out() {
 /// query share their variables, and the optimum reads the scan's
 /// `OneEvaluation` candidate in both (1.5 + 0 against 1 + 2), costing
 /// 2.5 + 1.25. With one cost of the 20 s context not half, they are not
-/// copies.
+/// copies; nor are they when the queries' accuracy targets differ (rank
+/// 0.01 every 10 s, rank 0.05 every 20 s), which the accuracy constraint
+/// (K) reads per query.
 #[test]
 fn a_context_equivalent_to_another_shares_its_variables() {
     let mut memo = empty_memo();
@@ -982,6 +1056,27 @@ fn a_context_equivalent_to_another_shares_its_variables() {
     let first_of_20s = (0..executions.len())
         .find(|&index| every_20s(index))
         .unwrap();
+    let rank =
+        |max_error| AccuracyTarget::max_error(max_error).accuracy_metric(AccuracyMetric::Rank);
+    let mut differing_targets = entries.clone();
+    differing_targets[0].requirements.accuracy = rank(0.01);
+    differing_targets[1].requirements.accuracy = rank(0.05);
+    let shared = copies_in_equivalent_contexts(
+        &SelectionInputs {
+            physical: &physical,
+            entries: &differing_targets,
+            selectable: &selectable,
+            costs: &costs,
+        },
+        &kept,
+    );
+    assert_eq!(shared.original_of_query, vec![QueryId(0), QueryId(1)]);
+    assert!(shared
+        .original_of_execution
+        .iter()
+        .enumerate()
+        .all(|(index, &original)| original == index));
+
     costs.per_execution[first_of_20s] = Ok(10.0);
     assert!(copies(&costs)
         .original_of_execution

@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use asap_types::accuracy::AccuracyTarget;
 use asap_types::stages::{
     ExecutionContext, ExecutionContextId, MemoGroupId, PhysicalCandidateId, PhysicalEdgeId,
 };
@@ -63,11 +64,14 @@ struct ExecutionKey {
 }
 
 /// A query's part of a [`ContextKey`]: the executions that may answer each
-/// of its outputs, its exact-only groups and its range-evaluation span.
+/// of its outputs, its exact-only groups, its range-evaluation span and
+/// its accuracy target (by index among the workload's distinct targets,
+/// [`AccuracyTarget`] holding floats: metric, ε, δ and scope all equal).
 type QuerySignature<'a> = (
     Vec<Vec<ExecutionInContext>>,
     Option<&'a BTreeSet<MemoGroupId>>,
     u64,
+    usize,
 );
 
 /// Which executions, edges and queries share variables
@@ -77,7 +81,8 @@ type QuerySignature<'a> = (
 /// they have the same [`ContextKey`] (the same candidates, kept alike, the
 /// same memo edges from producers that correspond, in the context or the
 /// same execution outside every evaluation context, and queries that pair
-/// up with the same output executions, exact-only groups and span) and
+/// up with the same output executions, exact-only groups, span and
+/// accuracy target, so the accuracy constraint holds alike in both) and
 /// every cost in one is the same multiple $\alpha$ of the other's, to
 /// [`COST_RELATIVE_TOLERANCE`]. Each query belongs to its own evaluation
 /// context (`SelectableExecutions::evaluation_context`), wherever its
@@ -143,6 +148,22 @@ pub(crate) fn copies_in_equivalent_contexts(
             }
         }
     };
+    // Each query's accuracy target, as an index among the distinct ones.
+    let mut targets: Vec<&AccuracyTarget> = Vec::new();
+    let target_of_query: Vec<usize> = inputs
+        .entries
+        .iter()
+        .map(|entry| {
+            let target = &entry.requirements.accuracy;
+            targets
+                .iter()
+                .position(|&known| known == target)
+                .unwrap_or_else(|| {
+                    targets.push(target);
+                    targets.len() - 1
+                })
+        })
+        .collect();
     let signature = |context: ExecutionContextId, query: QueryId| -> Option<QuerySignature<'_>> {
         let outputs = outputs_of[&query]
             .iter()
@@ -161,6 +182,7 @@ pub(crate) fn copies_in_equivalent_contexts(
                 .exact_only_groups_of_query
                 .get(query.0),
             inputs.entries[query.0].range_span_ms(),
+            target_of_query[query.0],
         ))
     };
     let key_of = |context: ExecutionContextId| -> Option<ContextKey<'_>> {

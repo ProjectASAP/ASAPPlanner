@@ -332,3 +332,48 @@ fn a_scalar_roots_operands_are_roots() {
     check(scalar_of, vec![AccuracyMetric::Relative], true);
     check(doubled, vec![], false);
 }
+
+/// `count(quantile_over_time(0.99, m[5m]))` at an exact target: the
+/// count of the quantiles does not depend on their values (its error
+/// factor on its input is 0), so the quantile, its readouts and their
+/// states are not exact-only for the query: the count's own group is,
+/// and the raw window and scan below are (read only by the exact
+/// quantile and the sketch builds, which pass no error). A
+/// `count` beside a `sum` in `avg = sum / count` is such a path: it no
+/// longer makes the quantile exact-only for a relative `avg`.
+#[test]
+fn a_count_reads_its_input_in_any_metric() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let p99 = quantile_readouts(&mut memo, 0.99);
+    let count = group(
+        &mut memo,
+        Operator::NonASAP(NonASAPOp::Aggregate {
+            child: p99.result,
+            reduction: Reduction::by(vec![]),
+            measures: vec![AggIntent::Count],
+            output_names: vec!["count".into()],
+            filters: vec![None],
+            having: None,
+        }),
+    );
+    query(&mut memo, count, Some(AccuracyTarget::exact()));
+    let order = memo.topological_order().expect("acyclic");
+    let exact_only = error_metrics(&memo).exact_only_groups_of_query(
+        &memo,
+        &order,
+        &BTreeSet::new(),
+        &BTreeMap::new(),
+    );
+    let [exact_only] = exact_only.as_slice() else {
+        panic!("one query: {exact_only:?}");
+    };
+    assert!(exact_only.contains(&count));
+    let mut quantile_groups = vec![p99.result];
+    for readout in &p99.by_algorithm {
+        quantile_groups.extend([readout.state, readout.readout.group]);
+    }
+    for group in quantile_groups {
+        assert!(!exact_only.contains(&group), "{group:?} in {exact_only:?}");
+    }
+    assert_eq!(exact_only.len(), 3, "{exact_only:?}");
+}
