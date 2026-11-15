@@ -97,7 +97,7 @@ impl Operator {
 
 /// The column [`Operator::with_tumbling_window_ends`] appends: each row's
 /// tumbling window end.
-pub const TUMBLING_WINDOW_END_COLUMN: &str = "$tumbling_window_end";
+pub(crate) const TUMBLING_WINDOW_END_COLUMN: &str = "$tumbling_window_end";
 
 impl Operator {
     /// A `TimeShift { offset_ms, at }`: its rows are its input's, which a
@@ -324,4 +324,102 @@ fn window_ends(
     arrays.push(std::sync::Arc::new(ends) as arrow::array::ArrayRef);
     states.push(None);
     Batch::from_parts(output.clone(), arrays, states, rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::PhysicalDAG;
+    use crate::runtime::{Limits, Scope};
+    use futures::executor::block_on;
+    use planner_types::stages::Lifetime;
+
+    const MINUTE_MS: i64 = 60_000;
+
+    // A range window with tumbling-window ends: at T = 10m, `(T - 3m, T]`
+    // in windows of 1 minute keeps the rows at 7m (out), 7m + 1 ms, 8m,
+    // 9m 30 s and 10m, each keeping its time and followed, in
+    // `TUMBLING_WINDOW_END_COLUMN`, by its window's end: 8m, 8m, 10m and
+    // 10m.
+    #[test]
+    fn a_range_window_stamps_each_row_with_its_tumbling_windows_end() {
+        let schema = Arc::new(Schema::with_time_index(
+            vec![
+                SummaryField::plain("job", DataType::Utf8, false),
+                SummaryField::plain("ts", DataType::Timestamp, false),
+                SummaryField::plain("value", DataType::Float64, false),
+            ],
+            1,
+            vec![],
+        ));
+        let times = [
+            7 * MINUTE_MS,
+            7 * MINUTE_MS + 1,
+            8 * MINUTE_MS,
+            570_000,
+            10 * MINUTE_MS,
+        ];
+        let rows = times
+            .iter()
+            .map(|&t| {
+                vec![
+                    Value::Utf8("a".into()),
+                    Value::Timestamp(t),
+                    Value::Float64(1.0),
+                ]
+            })
+            .collect();
+        let batch = Batch::try_new(schema.clone(), rows).unwrap();
+        let mut dag = PhysicalDAG::default();
+        dag.add(
+            0,
+            vec![],
+            Operator::source(schema.clone(), vec![batch]).unwrap(),
+            Lifetime::None,
+        )
+        .unwrap();
+        let window = Operator::time_range(schema, 1, 0, 3 * MINUTE_MS, None, None)
+            .unwrap()
+            .with_tumbling_window_ends(MINUTE_MS)
+            .unwrap();
+        let output = window.schema();
+        let end = output
+            .fields
+            .iter()
+            .position(|field| field.name == TUMBLING_WINDOW_END_COLUMN)
+            .unwrap();
+        dag.add(1, vec![0], window, Lifetime::None).unwrap();
+        let context = RunContext::new(
+            Scope::Query {
+                evaluation_time_ms: 10 * MINUTE_MS,
+            },
+            Limits::default(),
+        )
+        .unwrap();
+        let mut outputs = dag.execute(&[1], context).unwrap();
+        let rows = block_on(async {
+            let mut rows = Vec::new();
+            while let Some(batch) = outputs[0].next().await {
+                rows.extend(batch.unwrap().to_rows());
+            }
+            rows
+        });
+        // Each kept row's own time and, appended, its window's end.
+        let times_and_ends: Vec<(i64, i64)> = rows
+            .into_iter()
+            .map(|row| match (&row[1], &row[end]) {
+                (Value::Timestamp(time), Value::Timestamp(end)) => (*time, *end),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            times_and_ends,
+            [
+                (7 * MINUTE_MS + 1, 8 * MINUTE_MS),
+                (8 * MINUTE_MS, 8 * MINUTE_MS),
+                (570_000, 10 * MINUTE_MS),
+                (10 * MINUTE_MS, 10 * MINUTE_MS),
+            ]
+        );
+    }
 }
