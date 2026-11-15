@@ -162,11 +162,12 @@ The contracts are used in three places:
   `unless`, read no value and pass no cap down; a query that combines
   several readouts whose errors reach its output (β > 0: a ratio of two
   quantiles; `q and r` reads one, since `r`'s values are not read, and so
-  does `q / count(r)`) gives every level of the grid
+  does `q / count(r)`; `q or r` combines none, since each output value is
+  copied from one side) gives every level of the grid
   `MAX_ERROR_LEVELS` × a failure-probability grid (powers of ten from 1e-2
   down to 1e-5, continued to the first at or below a tenth of the per-value
-  δ) that is not looser than the cap and the per-value δ. Pass 2 writes each level on a readout
-  candidate of its own.
+  δ) that is not looser than the cap and the per-value δ. Pass 2 writes
+  each level on a readout candidate of its own.
 - **$\alpha^{\log}$** (`ErrorMetricsOfMemo::edge_meets_logical_requirements`,
   `accuracy/src/logical_edge/mod.rs`): an edge into a readout holds when the
   producer's θ has a guarantee (measured, else `theoretical_guarantee`)

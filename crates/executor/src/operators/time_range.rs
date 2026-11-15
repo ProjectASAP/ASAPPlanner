@@ -4,6 +4,7 @@
 //! end-of-series NaN) are never rows; an ordinary NaN is. And a `TimeShift`
 //! with an `@` anchor, which evaluates its input at the anchor's time.
 use super::*;
+use crate::values::is_stale_marker;
 use arrow::array::Array;
 use planner_types::ir::operator::AtModifier;
 
@@ -207,7 +208,7 @@ pub(super) fn execute<'a>(
                         start < t && t <= end
                     };
                     let stale = values.is_some_and(|values| {
-                        values.is_valid(row) && crate::values::is_stale_marker(values.value(row))
+                        values.is_valid(row) && is_stale_marker(values.value(row))
                     });
                     Some(in_window && !stale)
                 })

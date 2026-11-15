@@ -159,8 +159,7 @@ fn a_readout_of_one_value_keeps_the_whole_failure_probability() {
 /// copies the left values and reads only which series the right has
 /// (β = 0), so it combines no errors: the left readout gets the single
 /// level of its cap, 0.05 at δ = 0.01 over 100 series (1e-4), not the
-/// composed grid, and the right one gets none. `or` copies values from
-/// both sides and stays composed.
+/// composed grid, and the right one gets none.
 #[test]
 fn an_and_combines_no_readout_errors() {
     let target = AccuracyTarget::max_error(0.05)
@@ -188,8 +187,46 @@ fn an_and_combines_no_readout_errors() {
         "{required:?}"
     );
     assert_eq!(right, vec![]);
-    let (left, right) = readouts_under(PromQLVectorSetOpKind::Or);
-    assert!(left.len() > 1 && right.len() > 1, "{left:?}, {right:?}");
+}
+
+/// `quantile_over_time(0.9, m[5m]) or quantile_over_time(0.5, m[5m])`
+/// copies each output value from one side, so its error is the larger of
+/// the two readouts' errors, not their sum: each readout gets the single
+/// level of its cap, 0.05 at δ = 0.01 over 100 series (1e-4). A ratio of
+/// the same readouts combines both errors and keeps the composed grid.
+#[test]
+fn an_or_takes_each_value_from_one_readout() {
+    let target = AccuracyTarget::max_error(0.05)
+        .failure_probability(0.01)
+        .accuracy_metric(AccuracyMetric::Relative);
+    let readouts_under = |operator: fn(MemoGroupId, MemoGroupId) -> _| {
+        let mut memo = Memo::new(&with_series("m", 100));
+        let (_, state, p90) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
+        let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
+        let root = group(&mut memo, operator(p90, p50));
+        memo.add_query(MemoQuery {
+            root: QueryRoot::Operator(root),
+            accuracy_target: Some(target.clone()),
+            number_of_values_per_query_evaluation: Some(100),
+        });
+        [levels_of(&memo, p90), levels_of(&memo, p50)]
+    };
+    for levels in readouts_under(|q, r| set_operator(PromQLVectorSetOpKind::Or, q, r)) {
+        let [required] = levels[..] else {
+            panic!("one level for each readout of `or`: {levels:?}");
+        };
+        assert!((required.max_error - 0.05).abs() < 1e-12, "{required:?}");
+        assert!(
+            (required.failure_probability - 1e-4).abs() < 1e-12,
+            "{required:?}"
+        );
+    }
+    for levels in readouts_under(|q, r| arithmetic(ArithmeticOpKind::Div, q, r)) {
+        assert!(
+            levels.len() > 1,
+            "the composed grid for a ratio: {levels:?}"
+        );
+    }
 }
 
 /// A count reads which readouts exist, not their values (β = 0), so an

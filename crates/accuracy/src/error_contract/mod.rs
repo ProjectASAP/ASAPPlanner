@@ -324,8 +324,14 @@ fn function_of_a_column_and_literals<C>(expr: &ScalarExpr<C>, functions: &[&str]
     let ScalarExpr::FunctionCall { name, args } = expr else {
         return false;
     };
-    let name = name.to_ascii_lowercase();
-    functions.contains(&name.strip_prefix("promql_").unwrap_or(&name))
+    const FRONTEND_PREFIX: &str = "promql_";
+    let name = match name.split_at_checked(FRONTEND_PREFIX.len()) {
+        Some((prefix, rest)) if prefix.eq_ignore_ascii_case(FRONTEND_PREFIX) => rest,
+        _ => name.as_str(),
+    };
+    functions
+        .iter()
+        .any(|function| function.eq_ignore_ascii_case(name))
         && matches!(args.first(), Some(ScalarExpr::Column(_)))
         && args[1..]
             .iter()
