@@ -1581,40 +1581,35 @@ fn lower_count_values(
     input: &SchemaRef,
     output: &SchemaRef,
 ) -> Result<(Option<Operator>, Operator), Error> {
-    if !output.fields.iter().any(|field| field.name == label) {
-        let count = Operator::aggregate(
-            input.clone(),
-            groups(input, keys)?,
-            vec![(String::new(), Reduction::Count)],
-        )?
-        .with_output_schema(output.clone())?;
-        return Ok((None, count));
-    }
-    let value = named_column(input, &ColumnRef::SampleValue)?;
-    let mut columns: Vec<_> = input
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(i, field)| (field.name.clone(), Expression::Column(i)))
-        .collect();
-    columns.push((label.to_string(), Expression::FloatText(value)));
-    let text = input.fields.len();
-    let mut partitions = groups(input, keys)?;
-    match partitions
-        .iter()
-        .position(|&key| input.fields[key].name == label)
-    {
-        Some(key) => partitions[key] = text,
-        None => partitions.push(text),
-    }
-    let project = Operator::project(input.clone(), columns)?;
-    let aggregate = Operator::aggregate(
-        project.schema(),
-        partitions,
-        vec![(String::new(), Reduction::Count)],
-    )?
-    .with_output_schema(output.clone())?;
-    Ok((Some(project), aggregate))
+    let (project, partitions) = if output.fields.iter().any(|field| field.name == label) {
+        let value = named_column(input, &ColumnRef::SampleValue)?;
+        let mut columns: Vec<_> = input
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(i, field)| (field.name.clone(), Expression::Column(i)))
+            .collect();
+        columns.push((label.to_string(), Expression::FloatText(value)));
+        let text = input.fields.len();
+        let mut partitions = groups(input, keys)?;
+        match partitions
+            .iter()
+            .position(|&key| input.fields[key].name == label)
+        {
+            Some(key) => partitions[key] = text,
+            None => partitions.push(text),
+        }
+        (Some(Operator::project(input.clone(), columns)?), partitions)
+    } else {
+        (None, groups(input, keys)?)
+    };
+    let counted = project
+        .as_ref()
+        .map_or_else(|| input.clone(), Operator::schema);
+    let aggregate =
+        Operator::aggregate(counted, partitions, vec![(String::new(), Reduction::Count)])?
+            .with_output_schema(output.clone())?;
+    Ok((project, aggregate))
 }
 
 /// `node` with its `without` grouping (PromQL `sum without (instance) (m)`)
@@ -1669,10 +1664,13 @@ fn resolve_without(
     // `count_values("zone", v)`'s label replaces a kept label `zone`, as
     // Prometheus overwrites it before grouping: the kept label set drops it
     // too, so `{job=b, zone=z}` and `{job=b}` with the value 2 are one group
-    // `{job=b, zone="2"}`. An excluded label is removed already.
+    // `{job=b, zone="2"}`. Whether the label itself is output (not when the
+    // grouping removes it: an excluded label or `__name__`) is the IR's
+    // `output`, which `lower_count_values` reads; removing such a label
+    // twice here changes nothing.
     let replaced = match &node.payload {
         Payload::NonASAP(NonASAPOp::Aggregate { measures, .. }) => match measures.as_slice() {
-            [AggIntent::CountValues { label }] if !excluded.contains(label) => Some(label.clone()),
+            [AggIntent::CountValues { label }] => Some(label.clone()),
             _ => None,
         },
         _ => None,

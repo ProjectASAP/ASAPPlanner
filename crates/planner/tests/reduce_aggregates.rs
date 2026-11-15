@@ -319,6 +319,50 @@ async fn promql_count_values_label_excluded_by_without_is_dropped() {
     );
 }
 
+/// A `count_values` label `__name__` under `without` is set and then
+/// removed, as a `without` grouping always drops `__name__` in Prometheus:
+/// the values do not split the groups, so the two `zone="z"` series count
+/// in one group.
+#[tokio::test]
+async fn promql_count_values_name_label_under_without_is_dropped() {
+    let at = EVALUATION_MS - 5_000;
+    let samples = vec![
+        sample(
+            "h",
+            &[("job", "a"), ("instance", "1"), ("zone", "z")],
+            at,
+            2.0,
+        ),
+        sample("h", &[("job", "a"), ("instance", "2")], at, 2.0),
+        sample(
+            "h",
+            &[("job", "a"), ("instance", "3"), ("zone", "y")],
+            at,
+            2.0,
+        ),
+        sample(
+            "h",
+            &[("job", "a"), ("instance", "4"), ("zone", "z")],
+            at,
+            5.0,
+        ),
+    ];
+    let answers = promql(
+        r#"count_values("__name__", h) without (instance)"#,
+        "h",
+        &samples,
+    )
+    .await;
+    assert_close(
+        &answers,
+        &[
+            (labels(&[("job", "a")]), 1.0),
+            (labels(&[("job", "a"), ("zone", "y")]), 1.0),
+            (labels(&[("job", "a"), ("zone", "z")]), 2.0),
+        ],
+    );
+}
+
 /// A `count_values` label named like a kept label column (here `job`,
 /// a column since the selector names it) replaces that column with the
 /// value text: job `b`'s series both read `job="2"`, apart by `zone`.
