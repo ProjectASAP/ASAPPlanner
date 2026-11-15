@@ -192,7 +192,9 @@ fn an_and_combines_no_readout_errors() {
 /// `quantile_over_time(0.9, m[5m]) or quantile_over_time(0.5, m[5m])`
 /// copies each output value from one side, so its error is the larger of
 /// the two readouts' errors, not their sum: each readout gets the single
-/// level of its cap, 0.05 at δ = 0.01 over 100 series (1e-4). A ratio of
+/// level of its cap, 0.05. Its whole result still fails when any of the
+/// 200 readout values it can return does, so δ = 0.01 splits over all of
+/// them: 5e-5 per value, not 1e-4 over its 100 output values. A ratio of
 /// the same readouts combines both errors and keeps the composed grid.
 #[test]
 fn an_or_takes_each_value_from_one_readout() {
@@ -217,7 +219,7 @@ fn an_or_takes_each_value_from_one_readout() {
         };
         assert!((required.max_error - 0.05).abs() < 1e-12, "{required:?}");
         assert!(
-            (required.failure_probability - 1e-4).abs() < 1e-12,
+            (required.failure_probability - 5e-5).abs() < 1e-12,
             "{required:?}"
         );
     }
@@ -225,6 +227,43 @@ fn an_or_takes_each_value_from_one_readout() {
         assert!(
             levels.len() > 1,
             "the composed grid for a ratio: {levels:?}"
+        );
+    }
+}
+
+/// A reduction above an `or` reads every readout value of both sides:
+/// `max by (job) (quantile_over_time(0.9, m[5m]) or
+/// quantile_over_time(0.5, m[5m]))` over 3 series returns 3 values, but
+/// fails when any of the 6 readout values below it does, so each readout
+/// gets δ = 0.01 / 6, not 0.01 / 3 (one side's values), which would let
+/// the union bound reach 2δ.
+#[test]
+fn a_reduction_above_an_or_splits_the_failure_probability_over_both_sides() {
+    let mut memo = Memo::new(&with_series("m", 3));
+    let (_, state, p90) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
+    let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
+    let either = group(&mut memo, set_operator(PromQLVectorSetOpKind::Or, p90, p50));
+    let max = group(
+        &mut memo,
+        aggregate(Reduction::by(vec![0]), AggIntent::Max { col: None }, either),
+    );
+    memo.add_query(MemoQuery {
+        root: QueryRoot::Operator(max),
+        accuracy_target: Some(
+            AccuracyTarget::max_error(0.05)
+                .failure_probability(0.01)
+                .accuracy_metric(AccuracyMetric::Relative),
+        ),
+        number_of_values_per_query_evaluation: Some(3),
+    });
+    for readout in [p90, p50] {
+        let levels = levels_of(&memo, readout);
+        let [required] = levels[..] else {
+            panic!("one level for each readout: {levels:?}");
+        };
+        assert!(
+            (required.failure_probability - 0.01 / 6.0).abs() < 1e-12,
+            "{required:?}"
         );
     }
 }
