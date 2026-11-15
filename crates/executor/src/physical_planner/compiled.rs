@@ -44,6 +44,10 @@ pub(super) struct RawDataSlot {
     /// The rows its consumers read, back from the evaluation time; `None`
     /// when one reads every row.
     pub(super) read_window: Option<TimeWindow>,
+    /// The `Scan` node's plan lifetime, which the runtime runs the leaf by:
+    /// at query time `OneEvaluation` is one read held for every consumer,
+    /// `None` one read per consumer.
+    pub(super) lifetime: Lifetime,
 }
 
 /// Selected native operators and input slots. Rebinding never repeats lowering.
@@ -170,10 +174,12 @@ impl CompiledPhysicalDAG {
         let mut dag = PhysicalDAG::default();
         for (&id, node) in &self.nodes {
             match node {
-                Node::MaterializedView(MaterializedViewSlot { schema, .. })
-                | Node::RawData(RawDataSlot { schema, .. }) => {
-                    dag.add(id, vec![], UnboundInput(schema.clone()), SLOT_LIFETIME)?
+                Node::MaterializedView(MaterializedViewSlot { schema, .. }) => {
+                    dag.add(id, vec![], UnboundInput(schema.clone()), VIEW_SLOT_LIFETIME)?
                 }
+                Node::RawData(RawDataSlot {
+                    schema, lifetime, ..
+                }) => dag.add(id, vec![], UnboundInput(schema.clone()), *lifetime)?,
                 Node::Operator {
                     inputs,
                     operator,
@@ -202,7 +208,7 @@ impl CompiledPhysicalDAG {
                         slot.schema.clone(),
                         slot.read_window,
                     );
-                    dag.add(id, vec![], scan, SLOT_LIFETIME)?;
+                    dag.add(id, vec![], scan, VIEW_SLOT_LIFETIME)?;
                 }
                 Node::RawData(slot) => {
                     let scan = Scan::raw_data(
@@ -212,7 +218,7 @@ impl CompiledPhysicalDAG {
                         slot.predicates.clone(),
                         slot.read_window,
                     );
-                    dag.add(id, vec![], scan, SLOT_LIFETIME)?;
+                    dag.add(id, vec![], scan, slot.lifetime)?;
                 }
                 Node::Operator {
                     inputs,
@@ -225,10 +231,11 @@ impl CompiledPhysicalDAG {
         Ok(dag)
     }
 }
-/// An input slot's lifetime in the runtime DAG. The runtime runs a leaf by
-/// the run's scope, not by its lifetime: at query time each consumer reads
-/// the store, at ingestion time one read reaches every consumer.
-const SLOT_LIFETIME: Lifetime = Lifetime::None;
+/// A materialized view slot's lifetime in the runtime DAG. The store keeps
+/// the view's states across evaluations, so the slot is a not-materialized
+/// read of them: at query time each consumer reads the store, at ingestion
+/// time one read reaches every consumer.
+const VIEW_SLOT_LIFETIME: Lifetime = Lifetime::None;
 
 /// Stands in for an input slot when validating or deriving properties.
 struct UnboundInput(SchemaRef);

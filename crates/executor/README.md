@@ -14,22 +14,29 @@ worker-local streams, with no internal thread pool.
 A node runs once per evaluation time in a run (an `@` anchor evaluates the
 nodes below it at another time), as its `Lifetime` and the run's scope say:
 
-- Query time, a leaf (a raw data or materialized view slot, a store read):
-  each consumer reads the store on its own, as the planner charges a
-  not-materialized read on each edge.
-- Query time, `OneEvaluation` or `AcrossEvaluations`: the node runs to the
-  end before any consumer reads it, and every consumer reads its finished
-  output independently. The output is charged to the run's byte budget until
-  every consumer has read it; over the budget the run fails with
-  `MemoryLimit` (nothing spills).
-- Query time, `None`: streamed to its one consumer. A computed node with more
-  than one consumer is a planner bug; `execute` returns an error naming the
-  node before any operator starts.
+- Query time, `OneEvaluation` or `AcrossEvaluations`, with more than one
+  consumer (a computed node or a raw data scan): the node runs once, to the
+  end, before any consumer reads it, and every consumer reads its finished
+  output independently, as the planner charges one run whose output is held.
+  For example, a `OneEvaluation` scan read by three queries is one store
+  read. The output is charged to the run's byte budget until every consumer
+  has read it; over the budget the run fails with `MemoryLimit` (nothing
+  spills). With one consumer the node streams to it, since no sibling can
+  wait on that consumer.
+- Query time, `None` leaf (a raw data scan the plan does not materialize, or
+  a materialized view slot, whose states the store keeps): each consumer
+  reads the store on its own, as the planner charges a not-materialized read
+  once per consumer.
+- Query time, `None` computed node: streamed to its one consumer. More than
+  one consumer is a planner bug; `execute` returns an error naming the node
+  before any operator starts.
 - Ingestion time: every node streams, whatever its lifetime. A node with
   several consumers (one per-row node feeding several chain builds or views)
-  runs once and each batch reaches every consumer. `execute_ingestion` polls
-  every root itself and returns one future that resolves to each root's
-  batches, for the caller to write.
+  runs once and each batch reaches every consumer's own queue. The queues
+  are bounded only by the run's byte budget: a consumer that lags holds what
+  the others have read. `execute_ingestion` polls every root itself and
+  returns one future that resolves to each root's batches, for the caller to
+  write.
 
 `execute` runs a query and returns one stream per root; the caller may drain
 them in any order. It rejects an ingestion scope, which `execute_ingestion`

@@ -84,26 +84,34 @@ pub(crate) fn execute_ingestion<'r, V: 'r, S: Clone + PartialEq + Debug + 'r>(
 /// evaluates it at another time than the run's.
 type ProducerKey = (NodeId, Option<i64>);
 
-/// How a node runs in a run, from the run's scope, whether it is a leaf and
-/// its plan `Lifetime` (see the crate README).
+/// How a node runs in a run, from the run's scope, its plan `Lifetime`,
+/// whether it is a leaf and how many consumers it has at its evaluation
+/// time (see the crate README).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NodeRun {
-    /// Query time, a leaf (a raw data or materialized view slot): each
-    /// consumer reads the store on its own, as the planner charges a
-    /// not-materialized read on each edge.
+    /// Query time, a not-materialized leaf (a raw data or materialized view
+    /// slot): each consumer reads the store on its own, as the planner
+    /// charges a `Lifetime::None` read once per consumer. Example: a
+    /// `Lifetime::None` scan read by two queries is two store reads.
     ReadPerConsumer,
-    /// Query time, a materialized computed node: run to the end before any
-    /// consumer reads it, then read by each consumer.
+    /// Query time, a materialized node (computed or a leaf) with more than
+    /// one consumer: run to the end once before any consumer reads it, then
+    /// read by each consumer, as the planner charges one run whose output is
+    /// held. Example: a `OneEvaluation` scan read by three queries is one
+    /// store read whose batches every query reads.
     Held,
     /// Every other node: one run whose batches reach each consumer as they
-    /// come. At query time a computed one has a single consumer.
+    /// come. At query time it has a single consumer, or it is a computed
+    /// `Lifetime::None` node with several, which `start` rejects.
     Streamed,
 }
-fn run_as<V, S>(node: &Node<'_, V, S>, context: &RunContext) -> NodeRun {
+fn run_as<V, S>(node: &Node<'_, V, S>, context: &RunContext, consumers: usize) -> NodeRun {
     let query = context.evaluation_time_ms().is_some();
-    match (query, node.inputs.is_empty(), node.lifetime) {
-        (true, true, _) => NodeRun::ReadPerConsumer,
-        (true, false, Lifetime::OneEvaluation(_) | Lifetime::AcrossEvaluations(_)) => NodeRun::Held,
+    match (query, node.lifetime, node.inputs.is_empty()) {
+        (true, Lifetime::None, true) => NodeRun::ReadPerConsumer,
+        (true, Lifetime::OneEvaluation(_) | Lifetime::AcrossEvaluations(_), _) if consumers > 1 => {
+            NodeRun::Held
+        }
         _ => NodeRun::Streamed,
     }
 }
@@ -153,7 +161,7 @@ fn build<'r, V: 'r, S: 'r>(
 ) -> Result<Rc<RefCell<Producer<'r, V>>>, Error> {
     let key = (id, context.evaluation_time_ms());
     let node = &dag.nodes[&id];
-    let run = run_as(node, context);
+    let run = run_as(node, context, reached[&key].0);
     if run != NodeRun::ReadPerConsumer {
         if let Some(state) = states.get(&key) {
             return Ok(Rc::clone(state));
@@ -221,7 +229,8 @@ fn start<'r, V: 'r, S: Clone + PartialEq + Debug + 'r>(
     }
     for (&(id, time), (count, _)) in &reached {
         let node = &dag.nodes[&id];
-        if let (Some(time), NodeRun::Streamed, 2..) = (time, run_as(node, &context), *count) {
+        if let (Some(time), NodeRun::Streamed, 2..) = (time, run_as(node, &context, *count), *count)
+        {
             return Err(Error::Invalid(format!(
                 "node {id} ({}) at evaluation time {time} has {count} consumers but \
                  Lifetime::None; a shared query-time output must be OneEvaluation (planner bug)",
@@ -249,9 +258,10 @@ struct Producer<'a, V> {
     stream: Option<OutputStream<'a, V>>,
     size: Box<dyn Fn(&V) -> usize + 'a>,
     context: RunContext,
-    /// At query time, a materialized node ([`NodeRun::Held`]) is computed
-    /// to the end before any consumer reads it, and its batches stay
-    /// charged to the run until every consumer has read them.
+    /// At query time, a materialized node with several consumers
+    /// ([`NodeRun::Held`]) is computed to the end before any consumer reads
+    /// it, and its batches stay charged to the run until every consumer has
+    /// read them.
     hold_until_finished: bool,
     /// How many consumers subscribe to it in the run; its stream is dropped
     /// early only once all have subscribed and all have left.
