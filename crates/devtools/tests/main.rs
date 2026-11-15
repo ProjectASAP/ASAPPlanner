@@ -5,5 +5,6 @@
 mod asap_planner;
 mod asap_planner_acceptance;
 mod cross_language;
+mod measurement;
 mod planner_fuzz;
 mod viewer_contract;
