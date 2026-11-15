@@ -18,11 +18,13 @@
 //! candidates for the viewer document. [`corpora`] splits the checked-in
 //! query corpora and holds their SQL catalogs. [`rqe_atomic_costs`] converts
 //! sketch-bench's measured per-operation costs into plan selection's
-//! measured table. [`planner_fuzz`] is the metamorphic fuzz tester for
+//! measured table. [`measurement`] runs selected plans on the executor
+//! and measures them, behind the `asap_run` bin. [`planner_fuzz`] is the metamorphic fuzz tester for
 //! missed reuse and sharing behind the `planner_fuzz` bin.
 
 pub mod candidate_labels;
 pub mod corpora;
+pub mod measurement;
 pub mod planner_fuzz;
 pub mod planner_layering_examples;
 pub mod planning_stages;
