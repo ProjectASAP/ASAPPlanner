@@ -17,7 +17,7 @@ use asap_types::ir::schema::series_identity::{with_promql_series_identity, Serie
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::{LogicalASAPMemoCandidates, Memo, PhysicalASAPMemoCandidates};
-use asap_types::workload::{DataWorkload, QueryLanguage, QueryWorkloadEntry};
+use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::models::PlanningModels;
 use crate::pass::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput};
@@ -169,12 +169,13 @@ fn elapsed_ms(started: Instant) -> f64 {
 }
 
 /// The planner pipeline behind the optimization-pass interface: the
-/// workload's roots in entry order, PromQL roots with each series' full
-/// identity as a column (the row representation per-series state needs at
-/// runtime; a root with no such representation is planned over its labels
-/// alone), through [`run_planning`] with every entry's accuracy target. The
-/// output is the plan Stage 3 built; its `Selection` report is
-/// [`run_planning`]'s.
+/// workload's roots in entry order, those of a time-series language
+/// ([`asap_types::workload::QueryLanguage::reads_time_series`]: PromQL and
+/// MetricsQL) with each series' full identity as a column (the row
+/// representation per-series state needs at runtime; a root with no such
+/// representation is planned over its labels alone), through
+/// [`run_planning`] with every entry's accuracy target. The output is the
+/// plan Stage 3 built; its `Selection` report is [`run_planning`]'s.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Stage1ToStage3Pass;
 
@@ -185,13 +186,18 @@ impl OptimizationPass for Stage1ToStage3Pass {
 
     fn optimize(&self, input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
         let workload = input.workload;
-        let promql = workload.query_workload().language == QueryLanguage::PromQL;
+        // Time-series rows are keyed by each series' full label set: the
+        // `PROMQL_SERIES_IDENTITY` column, added to every root before Stage
+        // 0. `rate(requests_total[5m])` keeps one rate per series, each
+        // series `{"__name__":"requests_total","instance":"a","job":"j1"}`
+        // one identity. Table rows have no such identity.
+        let series_identity = workload.query_workload().language.reads_time_series();
         let mut roots: Vec<(usize, QueryRoot)> = workload
             .operator_indices()
             .iter()
             .zip(workload.exprs())
             .map(|(&index, node)| {
-                let node = match promql {
+                let node = match series_identity {
                     true => promql_root(node, with_promql_series_identity(node))?,
                     false => Rc::clone(node),
                 };
@@ -221,7 +227,7 @@ impl OptimizationPass for Stage1ToStage3Pass {
     }
 }
 
-/// The PromQL root `node` planned: `realized`, its series identity
+/// The PromQL or MetricsQL root `node` planned: `realized`, its series identity
 /// realization (`with_promql_series_identity`), or `node` itself, over its
 /// label columns, when the realization does not apply to one of its
 /// operators (`limitk(2, m)`'s `PromqlSeriesSample`, `info(m)`'s

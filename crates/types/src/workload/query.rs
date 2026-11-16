@@ -57,6 +57,17 @@ pub enum QueryLanguage {
     ElasticDSL,
 }
 
+impl QueryLanguage {
+    /// Whether this language's queries read time series rather than
+    /// tables. PromQL and MetricsQL read time series:
+    /// `rate(requests_total[5m])` reads each `requests_total` series, such
+    /// as `{instance="a", job="j1"}`. SQL, DataFusion and ElasticDSL read
+    /// tables.
+    pub fn reads_time_series(&self) -> bool {
+        matches!(self, Self::PromQL | Self::MetricsQL)
+    }
+}
+
 /// Independent accuracy and response-latency constraints attached to one
 /// query in the workload.
 ///
@@ -886,6 +897,22 @@ mod tests {
         ];
         for (language, expected) in cases {
             assert_eq!(serde_json::to_value(language).unwrap(), expected);
+        }
+    }
+
+    /// PromQL and MetricsQL read time series; the other languages read
+    /// tables.
+    #[test]
+    fn only_promql_and_metricsql_read_time_series() {
+        let cases = [
+            (QueryLanguage::PromQL, true),
+            (QueryLanguage::MetricsQL, true),
+            (QueryLanguage::SQL(SqlDialect::DataFusionSQL), false),
+            (QueryLanguage::DataFusion, false),
+            (QueryLanguage::ElasticDSL, false),
+        ];
+        for (language, expected) in cases {
+            assert_eq!(language.reads_time_series(), expected, "{language:?}");
         }
     }
 

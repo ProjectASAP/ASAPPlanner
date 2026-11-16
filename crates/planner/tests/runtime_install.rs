@@ -4,25 +4,20 @@
 //! the compiler checks that no internal is used (CI runs
 //! `cargo check -p asap-planner --tests --locked` on its own for that).
 
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::time_series;
-use asap_executor::runtime::{OutputStream, RunContext, Scope};
-use asap_executor::sources::{
-    DataStore, InMemoryDataStore, MaterializedViewRequest, RawDataRequest,
-};
-use asap_executor::values::{Batch, Value};
-use asap_executor::Error as ExecutorError;
+use asap_executor::runtime::Scope;
 use asap_planner::{
     plan_installable, CostInputs, DeploymentCapabilities, FrontendInput, InstallablePlan,
-    MaterializedView, OperatorKind, PlanningModels, PlanningWorkload, SelectedPlanReport,
-    UserInput,
+    OperatorKind, PlanningModels, PlanningWorkload, SelectedPlanReport, UserInput,
 };
-use asap_types::ir::operator::Source;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 
-use time_series::{run, sample, series_labels, time_series_tables, RawDataSample};
+use time_series::{
+    answers, assert_answers_near, query_roots, run, sample, time_series_tables, Answer,
+    RawDataSample,
+};
 
 /// Example 4b's evaluation time: the end of the 60-minute window.
 const EVALUATION_MS: i64 = 3_600_000;
@@ -60,57 +55,6 @@ fn workload_every(queries: &[(&str, u64)]) -> PlanningWorkload {
     .unwrap()
 }
 
-thread_local! {
-    /// How many `read_raw_data` calls the runs on this thread made.
-    static RAW_DATA_READS: Cell<usize> = const { Cell::new(0) };
-}
-
-/// A store counting its `read_raw_data` calls in [`RAW_DATA_READS`].
-struct CountingStore(InMemoryDataStore);
-
-impl DataStore for CountingStore {
-    fn read_raw_data(
-        &self,
-        source: &Source,
-        request: &RawDataRequest,
-        context: RunContext,
-    ) -> Result<OutputStream<'_, Batch>, ExecutorError> {
-        RAW_DATA_READS.with(|reads| reads.set(reads.get() + 1));
-        self.0.read_raw_data(source, request, context)
-    }
-
-    fn read_materialized_view(
-        &self,
-        view: &MaterializedView,
-        request: &MaterializedViewRequest,
-        context: RunContext,
-    ) -> Result<OutputStream<'_, Batch>, ExecutorError> {
-        self.0.read_materialized_view(view, request, context)
-    }
-}
-
-/// One answer row: its series labels and its value.
-type Answer = (BTreeMap<String, String>, f64);
-
-/// Each answer row as its series labels and value, sorted by labels.
-fn answers(batches: &[Batch]) -> Vec<Answer> {
-    let mut answers: Vec<_> = batches
-        .iter()
-        .flat_map(|batch| {
-            batch.to_rows().into_iter().map(|row| {
-                let labels = series_labels(batch.schema(), &row);
-                let value = row.iter().find_map(|v| match v {
-                    Value::Float64(v) => Some(*v),
-                    _ => None,
-                });
-                (labels, value.expect("a Float64 answer"))
-            })
-        })
-        .collect();
-    answers.sort_by(|a, b| a.0.cmp(&b.0));
-    answers
-}
-
 /// The plan for `queries` on a deployment that keeps no raw samples, and
 /// Stage 3's report of the selection it made (which the plan file does not
 /// carry).
@@ -146,11 +90,6 @@ async fn plan_with_report_for(
     plan_installable(UserInput::new(&workload, FrontendInput::Promql, models))
         .await
         .unwrap()
-}
-
-/// The node that answers each query of `plan`, in workload order.
-fn query_roots(plan: &InstallablePlan) -> Vec<u64> {
-    plan.dag.roots.iter().map(|&root| root as u64).collect()
 }
 
 /// The plan file carries Stage 3's predicted usage of the selected plan, so
@@ -296,7 +235,7 @@ async fn an_instant_selector_reads_the_latest_sample_per_series() {
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
     };
-    let store = CountingStore(time_series_tables(dag, &samples));
+    let store = time_series_tables(dag, &samples);
     let answered = answers(&run(dag, store, &query_roots(&plan), query)[0]);
     assert_eq!(answered.len(), 1);
     assert_eq!(answered[0].1, 110.0);
@@ -512,28 +451,15 @@ fn query_answers(plan: &InstallablePlan, samples: &[RawDataSample]) -> Vec<Vec<A
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
     };
-    let store = CountingStore(time_series_tables(&plan.dag, samples));
-    run(&plan.dag, store, &query_roots(plan), query)
-        .iter()
-        .map(|batches| answers(batches))
-        .collect()
-}
-
-/// Whether `answered` matches `expected`, label set for label set, each
-/// value within `tolerance`.
-fn assert_answers_near(answered: &[Answer], expected: &[Answer], tolerance: f64) {
-    assert_eq!(
-        answered.len(),
-        expected.len(),
-        "{answered:?} vs {expected:?}"
-    );
-    for (answer, expected) in answered.iter().zip(expected) {
-        assert_eq!(answer.0, expected.0, "{answered:?} vs {expected:?}");
-        assert!(
-            (answer.1 - expected.1).abs() <= tolerance,
-            "{answered:?} vs {expected:?}"
-        );
-    }
+    run(
+        &plan.dag,
+        time_series_tables(&plan.dag, samples),
+        &query_roots(plan),
+        query,
+    )
+    .iter()
+    .map(|batches| answers(batches))
+    .collect()
 }
 
 /// `sum_over_time(m[5m] offset 1m)` and `sum_over_time(m[5m])`, every

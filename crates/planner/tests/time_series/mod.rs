@@ -1,7 +1,9 @@
 //! A stand-in runtime's raw data samples, bound at the plan's `Scan`s with
 //! public APIs only: one raw data table per time series in an
 //! `InMemoryDataStore`, `(ts, value, *labels)` over the samples it received. The DAG's own
-//! `TimeRange`s apply each window, instant lookback and stale marker.
+//! `TimeRange`s apply each window, instant lookback and stale marker. It
+//! also runs a plan over them as that runtime does ([`run`]) and compares
+//! the answer rows with expected ones ([`assert_answers_near`]).
 #![allow(dead_code)] // Each test uses part of it.
 
 use std::collections::BTreeMap;
@@ -11,6 +13,7 @@ use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::{DataStore, InMemoryDataStore};
 use asap_executor::values::{Batch, Value};
+use asap_planner::InstallablePlan;
 use asap_types::ir::operator::Source;
 use asap_types::ir::schema::{DataType, FieldDataType, Schema, PROMQL_SERIES_IDENTITY};
 use asap_types::ir::NonASAPOp;
@@ -50,35 +53,6 @@ pub fn sample(
         timestamp_ms,
         value,
     }
-}
-
-/// Compile `ids` of `dag` and run them in `scope` over `store`, as a
-/// runtime does with the executor: each id's output batches.
-pub fn run(
-    dag: &PhysicalASAPDAG,
-    store: impl DataStore + 'static,
-    ids: &[u64],
-    scope: Scope,
-) -> Vec<Vec<Batch>> {
-    // The executor's plan for `ids`; every `Scan` it reaches is a raw data
-    // slot.
-    let compiled = compile(dag, &[], ids).expect("the executor compiles the plan");
-    let instance = compiled.instantiate(Arc::new(store)).unwrap();
-    block_on(async {
-        // The run's scope (ingestion window or query time) and limits.
-        let context = RunContext::new(scope, Limits::default()).unwrap();
-        // One output stream per id.
-        let outputs = instance.execute(compiled.roots(), context).unwrap();
-        futures::future::join_all(outputs.into_iter().map(|mut output| async move {
-            // Its batches, collected.
-            let mut batches = Vec::new();
-            while let Some(batch) = output.next().await {
-                batches.push((*batch.expect("the query runs")).clone());
-            }
-            batches
-        }))
-        .await
-    })
 }
 
 /// The series identity column's text: the canonical JSON of every label
@@ -165,4 +139,101 @@ pub fn series_labels(schema: &Schema, row: &[Value]) -> BTreeMap<String, String>
         }
     }
     labels
+}
+
+/// One answer row: its series labels and its value.
+pub type Answer = (BTreeMap<String, String>, f64);
+
+/// Each answer row as its series labels and value, sorted by labels.
+pub fn answers(batches: &[Batch]) -> Vec<Answer> {
+    let mut answers: Vec<_> = batches
+        .iter()
+        .flat_map(|batch| {
+            batch.to_rows().into_iter().map(|row| {
+                let labels = series_labels(batch.schema(), &row);
+                let value = row.iter().find_map(|v| match v {
+                    Value::Float64(v) => Some(*v),
+                    _ => None,
+                });
+                (labels, value.expect("a Float64 answer"))
+            })
+        })
+        .collect();
+    answers.sort_by(|a, b| a.0.cmp(&b.0));
+    answers
+}
+
+/// The node that answers each query of `plan`, in workload order.
+pub fn query_roots(plan: &InstallablePlan) -> Vec<u64> {
+    plan.dag.roots.iter().map(|&root| root as u64).collect()
+}
+
+/// Compile `ids` of `dag` and run them in `scope` over `store` (usually
+/// [`time_series_tables`]), as a runtime does with the executor: each id's
+/// output batches.
+pub fn run(
+    dag: &PhysicalASAPDAG,
+    store: impl DataStore + 'static,
+    ids: &[u64],
+    scope: Scope,
+) -> Vec<Vec<Batch>> {
+    // The executor's plan for `ids`; every `Scan` it reaches is a slot of
+    // `store`.
+    let compiled = compile(dag, &[], ids).expect("the executor compiles the plan");
+    let instance = compiled.instantiate(Arc::new(store)).unwrap();
+    block_on(async {
+        // The run's scope (ingestion window or query time) and limits.
+        let context = RunContext::new(scope, Limits::default()).unwrap();
+        // One output stream per id.
+        let outputs = instance.execute(compiled.roots(), context).unwrap();
+        futures::future::join_all(outputs.into_iter().map(|mut output| async move {
+            // Its batches, collected.
+            let mut batches = Vec::new();
+            while let Some(batch) = output.next().await {
+                batches.push((*batch.unwrap()).clone());
+            }
+            batches
+        }))
+        .await
+    })
+}
+
+/// Asserts `answered` matches `expected`, label set for label set, each
+/// value within absolute error `tolerance`: 10.04 is near 10 at 0.05.
+pub fn assert_answers_near(answered: &[Answer], expected: &[Answer], tolerance: f64) {
+    assert_answers_within(answered, expected, |_| tolerance);
+}
+
+/// Asserts `answered` matches `expected`, label set for label set, each
+/// value within relative error `relative_tolerance` of its expected value:
+/// 1000.5 is near 1000 at 0.001.
+pub fn assert_answers_near_relative(
+    answered: &[Answer],
+    expected: &[Answer],
+    relative_tolerance: f64,
+) {
+    assert_answers_within(answered, expected, |expected_value| {
+        relative_tolerance * expected_value.abs()
+    });
+}
+
+/// Asserts `answered` matches `expected`, label set for label set, each
+/// value within `allowed_error(expected value)`.
+fn assert_answers_within(
+    answered: &[Answer],
+    expected: &[Answer],
+    allowed_error: impl Fn(f64) -> f64,
+) {
+    assert_eq!(
+        answered.len(),
+        expected.len(),
+        "{answered:?} vs {expected:?}"
+    );
+    for (answer, expected_answer) in answered.iter().zip(expected) {
+        assert_eq!(answer.0, expected_answer.0, "{answered:?} vs {expected:?}");
+        assert!(
+            (answer.1 - expected_answer.1).abs() <= allowed_error(expected_answer.1),
+            "{answered:?} vs {expected:?}"
+        );
+    }
 }
