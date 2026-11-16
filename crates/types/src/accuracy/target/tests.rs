@@ -332,3 +332,18 @@ fn exact_targets() {
         AccuracyScope::WholeResult
     );
 }
+
+/// A whole-result δ splits over the values one evaluation returns; a
+/// per-value δ does not; no δ is 1; an unknown count has none.
+#[test]
+fn a_whole_result_failure_probability_splits_over_the_values() {
+    let whole = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+    assert_eq!(whole.failure_probability_per_value(Some(100)), Some(1e-4));
+    assert_eq!(whole.failure_probability_per_value(None), None);
+    let per_value = whole.clone().accuracy_scope(AccuracyScope::PerValue);
+    assert_eq!(per_value.failure_probability_per_value(None), Some(0.01));
+    assert_eq!(
+        AccuracyTarget::max_error(0.01).failure_probability_per_value(None),
+        Some(1.0)
+    );
+}

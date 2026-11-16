@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use super::accuracy::AccuracyRules;
 use super::model::{has_one_reader, selection_cost_per_second, SelectionInputs};
 use super::COST_RELATIVE_TOLERANCE;
 use crate::selectable::QueryId;
@@ -33,11 +34,15 @@ type TreeInputs = Vec<Option<(usize, usize)>>;
 /// can take off ($\min(0, c_{\kappa,u,v,i})$ per input) is over the
 /// bound. Such an execution is in no optimal plan, as long as every
 /// other selected execution costs at least 0 with its selected inputs.
-/// None is ruled out when no feasible plan is found.
-pub(crate) fn dearer_than_a_feasible_plan(inputs: &SelectionInputs<'_>) -> Vec<bool> {
+/// None is ruled out when no feasible plan is found, the accuracy
+/// constraint (K) (`rules`) included.
+pub(crate) fn dearer_than_a_feasible_plan(
+    inputs: &SelectionInputs<'_>,
+    rules: Option<&AccuracyRules>,
+) -> Vec<bool> {
     let selectable = inputs.selectable;
     let count = selectable.executions().len();
-    let Some(bound) = feasible_plan_cost_per_second(inputs) else {
+    let Some(bound) = feasible_plan_cost_per_second(inputs, rules) else {
         return vec![false; count];
     };
     let costs = inputs.costs;
@@ -91,8 +96,15 @@ pub(crate) fn dearer_than_a_feasible_plan(inputs: &SelectionInputs<'_>) -> Vec<b
 /// second consumer, closes a cycle, or reuses a tree with an execution
 /// the query must not read, the plan is rebuilt with that execution left
 /// out of the query's trees. `None` when no feasible plan is found that
-/// way.
-fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
+/// way, or when the plan found misses an accuracy target under (K)
+/// (`rules`, [`AccuracyRules::selection_meets_targets`]): the cheapest
+/// readouts of a ratio may each meet their level and compose above the
+/// target, and a bound from such a plan could leave out the readouts the
+/// optimum needs.
+fn feasible_plan_cost_per_second(
+    inputs: &SelectionInputs<'_>,
+    rules: Option<&AccuracyRules>,
+) -> Option<f64> {
     let selectable = inputs.selectable;
     let executions = selectable.executions();
     let count = executions.len();
@@ -134,6 +146,11 @@ fn feasible_plan_cost_per_second(inputs: &SelectionInputs<'_>) -> Option<f64> {
                 excluded.get_mut(query).expect("a query")[repair] = true;
                 continue 'repair;
             }
+        }
+        if rules
+            .is_some_and(|rules| !rules.selection_meets_targets(inputs, &plan.edges, &answering))
+        {
+            return None;
         }
         let (cost, _) =
             selection_cost_per_second(inputs, &plan.executions, &plan.edges, &answering);

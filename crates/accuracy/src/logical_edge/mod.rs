@@ -4,9 +4,12 @@
 //! ([`within_limit`]).
 
 use asap_types::accuracy::AccuracyMetric;
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
-use asap_types::stages::{CandidateForMemoGroupId, Memo, RootPruneReason};
-use asap_types::summary_type::{MergedError, SketchParams, SketchStatistic, SummaryTypeCapability};
+use asap_types::stages::{CandidateForMemoGroupId, Memo, RootPruneReason, ValueSign};
+use asap_types::summary_type::{
+    MergedError, SketchAlgorithm, SketchParams, SketchStatistic, SummaryTypeCapability,
+};
 
 use crate::guarantee::{guarantee_before_failure_probability_check, holds_at_failure_probability};
 use crate::readout::sketch_readout;
@@ -21,7 +24,16 @@ const SATISFACTION_TOLERANCE: f64 = 1e-9;
 /// `limit`: at most `limit` widened by [`SATISFACTION_TOLERANCE`], so a
 /// bound equal to it up to floating-point noise meets it.
 pub fn within_limit(evaluated: f64, limit: f64) -> bool {
-    evaluated <= limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON
+    evaluated <= tolerated_limit(limit)
+}
+
+/// The largest value [`within_limit`] admits for `limit`: `limit` widened
+/// by [`SATISFACTION_TOLERANCE`]. Stage 3's root checks of constraint (K)
+/// bound a composed error by it, so they accept what an edge accepts.
+///
+/// Example: a limit of 0.01 admits up to 0.01 · (1 + 1e-9) + 2.2e-16.
+pub fn tolerated_limit(limit: f64) -> f64 {
+    limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON
 }
 
 impl ErrorMetricsOfMemo {
@@ -37,7 +49,11 @@ impl ErrorMetricsOfMemo {
     ///   guarantee of the producer's θ for the readout's statistic, at the
     ///   required failure probability, is within the required error
     ///   ([`within_limit`]) and in its metric: the deployment's measurement
-    ///   (`evidence`) when it has one, else the theoretical guarantee; a
+    ///   (`evidence`) when it has one, else the theoretical guarantee when
+    ///   its sign condition holds for the state's values
+    ///   ([`sign_condition_holds`]), a distinct count's over the scanned
+    ///   sources' declared distinct bound
+    ///   (`Memo::max_distinct_per_evaluation`); a
     ///   merged state (any producer but a build) must keep the guarantee
     ///   (`MergedError::Exact` or `AsIfBuiltOverUnion`). A top-k's heap
     ///   holds its `k` whatever the requirement.
@@ -68,7 +84,8 @@ impl ErrorMetricsOfMemo {
                 })
             }
         };
-        let Operator::ASAP(ASAPOp::SummaryEstimate { .. }) = consumer_candidate.expression.operator
+        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) =
+            consumer_candidate.expression.operator
         else {
             let Some(producer_metric) = self.readout_error_metric(producer) else {
                 return Ok(());
@@ -101,18 +118,25 @@ impl ErrorMetricsOfMemo {
         let measured =
             evidence.measured_guarantee(summary_type, parameters, statistic, failure_probability);
         let allowed = self.error_metrics_allowed_on_input_edge(consumer, input);
+        // The sign of the values the read states were updated with.
+        let state_sign = memo.groups()[summary_input.0 as usize]
+            .group_properties
+            .state_column_sign();
         // The theoretical guarantee before its failure-probability check,
         // computed once for both checks below.
-        let theoretical = (measured.is_none() && (allowed.is_some() || required.is_some()))
-            .then(|| {
-                guarantee_before_failure_probability_check(
-                    summary_type,
-                    parameters,
-                    statistic,
-                    failure_probability,
-                )
-            })
-            .flatten();
+        let theoretical = (measured.is_none()
+            && (allowed.is_some() || required.is_some())
+            && sign_condition_holds(summary_type, statistic, state_sign))
+        .then(|| {
+            guarantee_before_failure_probability_check(
+                summary_type,
+                parameters,
+                statistic,
+                failure_probability,
+                memo.max_distinct_per_evaluation(summary_input),
+            )
+        })
+        .flatten();
         if let Some(allowed) = allowed {
             // A query with a target reads this readout: its error needs a
             // metric and a failure probability a guarantee states.
@@ -163,6 +187,29 @@ impl ErrorMetricsOfMemo {
                 required,
             })
         }
+    }
+}
+
+/// Whether the theoretical guarantee of reading `statistic` from a state
+/// of `summary_type` holds for states updated with values of sign `sign`
+/// (`GroupProperties::state_column_sign`; concepts doc, section 2, "Sign
+/// conditions"): DDSketch's relative error on a quantile needs values of
+/// one sign, `NonNegative` or `NonPositive`; every other guarantee holds
+/// whatever their sign.
+///
+/// Example: `quantile_over_time(0.99, latency[1h])` from DDSketch with
+/// `latency` declared non-negative holds; over a gauge of unknown sign it
+/// does not, as the sketch's buckets around 0 have no relative bound.
+fn sign_condition_holds(
+    summary_type: &FieldDataType,
+    statistic: &SketchStatistic,
+    sign: Option<ValueSign>,
+) -> bool {
+    match (summary_type, statistic) {
+        (FieldDataType::Sketch(SketchAlgorithm::DDSketch), SketchStatistic::Quantile { .. }) => {
+            matches!(sign, Some(ValueSign::NonNegative | ValueSign::NonPositive))
+        }
+        _ => true,
     }
 }
 

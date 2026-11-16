@@ -4,12 +4,15 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use asap_accuracy::readout_error_metric;
 use asap_cost::node::analytical::AnalyticalCostError;
 use asap_cost::{summary_type_name, CostModel};
 use asap_types::accuracy::AccuracyMetric;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
-use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
+use asap_types::plan::physical_asap_dag::{
+    PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
+};
 use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidate, PrunedCandidate};
 use thiserror::Error;
 
@@ -112,8 +115,11 @@ impl RejectionCause {
 /// bound that met its target, and the sketches its output reads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcceptedAccuracy {
-    /// The metric of the accepted error bound; `None` for an exact output,
-    /// which meets every metric, and for a query without an accuracy target.
+    /// Whether the query has an accuracy target.
+    pub has_accuracy_target: bool,
+    /// The metric of the accepted error bound, that of the first sketch
+    /// readout the output reads; `None` for an exact output, which meets
+    /// every metric, and for a query without an accuracy target.
     pub accepted_metric: Option<AccuracyMetric>,
     /// The sketch algorithms the query's output reads, in plan order
     /// (e.g. `["Kll"]`); empty for an exact plan.
@@ -121,9 +127,11 @@ pub struct AcceptedAccuracy {
 }
 
 impl std::fmt::Display for AcceptedAccuracy {
-    /// E.g. `accepted rank (Kll)`, or `accepted exact`.
+    /// E.g. `accepted rank (Kll)`, `accepted exact`, or `no accuracy
+    /// target (DDSketch)`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.accepted_metric {
+            None if !self.has_accuracy_target => write!(f, "no accuracy target")?,
             None => write!(f, "accepted exact")?,
             Some(metric) => {
                 let name = serde_json::to_value(metric)
@@ -224,12 +232,15 @@ pub(crate) fn infeasible(costs: &ExecutionCosts) -> ErrorSelectingPlan {
 }
 
 /// Per query, the sketches its output reads in `plan` (each sketch build
-/// below its root, in node order) and, when it reads one, its target's
-/// metric.
+/// below its root, in node order) and, when it has an accuracy target and
+/// reads a sketch, the metric of the first sketch readout below its root
+/// (`asap_accuracy::readout_error_metric`), whatever metric the target
+/// names: a target naming none reports the one it accepted.
 pub(crate) fn accepted_accuracy(
     physical: &PhysicalASAPMemoCandidates,
     plan: &PhysicalASAPDAG,
 ) -> Vec<AcceptedAccuracy> {
+    let memo = &physical.logical_candidates.memo;
     let mut operator_roots = plan.roots.iter();
     let mut producers_of: HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>> = HashMap::new();
     for edge in &plan.edges {
@@ -238,10 +249,7 @@ pub(crate) fn accepted_accuracy(
             .or_default()
             .push(edge.producer);
     }
-    physical
-        .logical_candidates
-        .memo
-        .queries()
+    memo.queries()
         .iter()
         .enumerate()
         .map(|(query, memo_query)| {
@@ -253,10 +261,45 @@ pub(crate) fn accepted_accuracy(
                 Some((_, expression)) => expression.operator_refs().into_iter().copied().collect(),
                 None => vec![*operator_roots.next().expect("one operator root per query")],
             };
-            let sketches = sketches_below(plan, &producers_of, starts);
+            let mut sketches: Vec<String> = Vec::new();
+            let mut readout_metrics: Vec<AccuracyMetric> = Vec::new();
+            for node in nodes_below(plan, &producers_of, starts) {
+                match &node.payload {
+                    Operator::ASAP(
+                        ASAPOp::SummaryAgg { summary_type, .. }
+                        | ASAPOp::SummaryTumblingWindowChain { summary_type, .. },
+                    ) if matches!(summary_type, FieldDataType::Sketch(_)) => {
+                        let name = summary_type_name(summary_type);
+                        if !sketches.contains(&name) {
+                            sketches.push(name);
+                        }
+                    }
+                    Operator::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
+                        // The algorithm of the state group the readout's
+                        // candidate reads.
+                        let algorithm = node.selected_physical_candidate.and_then(|v| {
+                            let id = physical.physical_candidates[v.0].logical_candidate_id;
+                            match memo.candidate(id).expression.operator {
+                                Operator::ASAP(ASAPOp::SummaryEstimate {
+                                    summary_input, ..
+                                }) => memo.groups()[summary_input.0 as usize]
+                                    .group_properties
+                                    .sketch_algorithm_of_state(),
+                                _ => None,
+                            }
+                        });
+                        readout_metrics.extend(algorithm.and_then(|algorithm| {
+                            readout_error_metric(&FieldDataType::Sketch(algorithm), query)
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+            let has_accuracy_target = memo_query.accuracy_target.is_some();
             AcceptedAccuracy {
-                accepted_metric: (!sketches.is_empty())
-                    .then(|| memo_query.accuracy_target.as_ref()?.accuracy_metric)
+                has_accuracy_target,
+                accepted_metric: (has_accuracy_target && !sketches.is_empty())
+                    .then(|| readout_metrics.first().copied())
                     .flatten(),
                 sketches,
             }
@@ -264,13 +307,12 @@ pub(crate) fn accepted_accuracy(
         .collect()
 }
 
-/// The summary type names of the sketch builds at or below `starts` in
-/// `plan`, in node order, each once.
-fn sketches_below(
-    plan: &PhysicalASAPDAG,
+/// The nodes at or below `starts` in `plan`, in node order.
+fn nodes_below<'a>(
+    plan: &'a PhysicalASAPDAG,
     producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
     starts: Vec<PhysicalASAPNodeId>,
-) -> Vec<String> {
+) -> impl Iterator<Item = &'a PhysicalASAPDAGNode> {
     let mut below = BTreeSet::new();
     let mut pending = starts;
     while let Some(id) = pending.pop() {
@@ -278,22 +320,9 @@ fn sketches_below(
             pending.extend(producers_of.get(&id).into_iter().flatten().copied());
         }
     }
-    let mut sketches: Vec<String> = Vec::new();
-    for node in plan.nodes.iter().filter(|node| below.contains(&node.id)) {
-        if let Operator::ASAP(
-            ASAPOp::SummaryAgg { summary_type, .. }
-            | ASAPOp::SummaryTumblingWindowChain { summary_type, .. },
-        ) = &node.payload
-        {
-            if matches!(summary_type, FieldDataType::Sketch(_)) {
-                let name = summary_type_name(summary_type);
-                if !sketches.contains(&name) {
-                    sketches.push(name);
-                }
-            }
-        }
-    }
-    sketches
+    plan.nodes
+        .iter()
+        .filter(move |node| below.contains(&node.id))
 }
 
 #[cfg(test)]

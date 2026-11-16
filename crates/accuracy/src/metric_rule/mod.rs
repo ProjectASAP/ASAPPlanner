@@ -285,7 +285,9 @@ fn metric_index(metric: AccuracyMetric) -> usize {
 /// (which return the value they read) allow the target's metrics
 /// (`AccuracyTarget::metrics`); any other scalar expression's operands
 /// allow none, as no error contract covers it, so they are read exactly.
-pub(crate) fn query_roots_with_target(
+/// Pass 2's readout caps and Stage 3's root checks of constraint (K) read
+/// it.
+pub fn query_roots_with_target(
     memo: &Memo,
 ) -> Vec<(usize, MemoGroupId, &AccuracyTarget, Vec<AccuracyMetric>)> {
     let mut roots = Vec::new();

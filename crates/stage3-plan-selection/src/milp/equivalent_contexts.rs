@@ -3,8 +3,9 @@
 //! ([`copies_in_equivalent_contexts`]), so HiGHS does not branch over each
 //! copy.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use asap_accuracy::query_roots_with_target;
 use asap_types::accuracy::AccuracyTarget;
 use asap_types::stages::{ExecutionContextId, MemoGroupId, PhysicalCandidateId, PhysicalEdgeId};
 
@@ -73,6 +74,14 @@ struct QuerySignature<'a> {
     /// Its accuracy target, by index among the workload's distinct targets
     /// ([`AccuracyTarget`] holds floats: metric, ε, δ and scope all equal).
     accuracy_target_index: usize,
+    /// $n_q$ (`MemoQuery::number_of_values_per_query_evaluation`), which
+    /// splits its target's failure probability per value in (K).
+    number_of_values_per_query_evaluation: Option<u64>,
+    /// Per output, whether the group it reads allows the target's metrics
+    /// at the root (`asap_accuracy::query_roots_with_target`: an operator
+    /// root does, an operand of `scalar(...) * 2` does not), which (K)'s
+    /// root rows read.
+    allows_target_metrics_per_output: Vec<bool>,
 }
 
 /// Which executions, edges and queries share variables
@@ -82,8 +91,9 @@ struct QuerySignature<'a> {
 /// they have the same [`ContextKey`] (the same candidates, kept alike, the
 /// same memo edges from producers that correspond, in the context or the
 /// same execution outside every evaluation context, and queries that pair
-/// up with the same output executions, exact-only groups, span and
-/// accuracy target, so the accuracy constraint holds alike in both) and
+/// up with the same output executions, exact-only groups, span, accuracy
+/// target, $n_q$ and metrics allowed at each output, so the accuracy
+/// constraint (K) has the same rows in both) and
 /// every cost the MILP reads in one (of a kept execution, or of an edge
 /// between two kept ones) is the same multiple $\alpha > 0$ of the
 /// other's, to [`COST_RELATIVE_TOLERANCE`] of the copy's largest such
@@ -131,9 +141,25 @@ pub(crate) fn copies_in_equivalent_contexts(
             own.push(index);
         }
     }
-    let mut outputs_of: BTreeMap<QueryId, Vec<&[usize]>> = BTreeMap::new();
-    for (query, answering) in selectable.answering() {
-        outputs_of.entry(*query).or_default().push(answering);
+    let memo = &inputs.physical.logical_candidates.memo;
+    // The (query, output group) pairs that allow the target's metrics.
+    let allowing_target_metrics: HashSet<(usize, MemoGroupId)> = query_roots_with_target(memo)
+        .into_iter()
+        .filter(|(_, _, _, metrics)| !metrics.is_empty())
+        .map(|(query, group, _, _)| (query, group))
+        .collect();
+    // Per query, each output's answering executions and whether it allows
+    // the target's metrics.
+    let mut outputs_of: BTreeMap<QueryId, Vec<(&[usize], bool)>> = BTreeMap::new();
+    for (&(query, group), (query_id, answering)) in
+        memo.output_groups().iter().zip(selectable.answering())
+    {
+        debug_assert_eq!(query, query_id.0, "answering is in output_groups order");
+        let allows = allowing_target_metrics.contains(&(query, group));
+        outputs_of
+            .entry(*query_id)
+            .or_default()
+            .push((answering, allows));
     }
     // Each evaluation context's queries; a query without an output has
     // none.
@@ -176,7 +202,7 @@ pub(crate) fn copies_in_equivalent_contexts(
         // A query has an evaluation context exactly when it has an output reference.
         let outputs = outputs_of[&query]
             .iter()
-            .map(|answering| {
+            .map(|(answering, _)| {
                 answering
                     .iter()
                     .map(|&index| in_context(context, index))
@@ -185,6 +211,12 @@ pub(crate) fn copies_in_equivalent_contexts(
             .collect::<Option<Vec<_>>>()?;
         Some(QuerySignature {
             answering_executions_per_output: outputs,
+            number_of_values_per_query_evaluation: memo.queries()[query.0]
+                .number_of_values_per_query_evaluation,
+            allows_target_metrics_per_output: outputs_of[&query]
+                .iter()
+                .map(|&(_, allows)| allows)
+                .collect(),
             exact_only_groups: inputs
                 .physical
                 .logical_candidates

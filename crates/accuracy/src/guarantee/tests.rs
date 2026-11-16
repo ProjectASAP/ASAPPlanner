@@ -49,8 +49,9 @@ fn every_listed_parameters_has_a_guarantee_at_one_percent() {
         let errors: Vec<f64> = parameter_list(algorithm)
             .iter()
             .map(|parameters| {
-                let guarantee = theoretical_guarantee(&summary_type, parameters, &statistic, 0.01)
-                    .unwrap_or_else(|| panic!("{algorithm:?} {parameters:?}"));
+                let guarantee =
+                    theoretical_guarantee(&summary_type, parameters, &statistic, 0.01, None)
+                        .unwrap_or_else(|| panic!("{algorithm:?} {parameters:?}"));
                 assert_eq!(guarantee.spec.accuracy_metric, metric, "{algorithm:?}");
                 guarantee.spec.error.evaluate().unwrap()
             })
@@ -77,7 +78,7 @@ fn a_guarantee_is_evaluated_at_the_required_failure_probability() {
     let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let k = SketchParams::Kll { k: 547 };
     let error_at = |delta| {
-        theoretical_guarantee(&kll, &k, &quantile, delta)
+        theoretical_guarantee(&kll, &k, &quantile, delta, None)
             .unwrap()
             .spec
             .error
@@ -92,9 +93,9 @@ fn a_guarantee_is_evaluated_at_the_required_failure_probability() {
         value: None,
     };
     let depth = |depth| SketchParams::Cms { width: 272, depth };
-    assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-2).is_some());
-    assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-4).is_none());
-    assert!(theoretical_guarantee(&cms, &depth(10), &point, 1e-4).is_some());
+    assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-2, None).is_some());
+    assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-4, None).is_none());
+    assert!(theoretical_guarantee(&cms, &depth(10), &point, 1e-4, None).is_some());
     // A statistic the summary type does not answer has no guarantee.
-    assert!(theoretical_guarantee(&kll, &k, &SketchStatistic::Cardinality, 0.01).is_none());
+    assert!(theoretical_guarantee(&kll, &k, &SketchStatistic::Cardinality, 0.01, None).is_none());
 }

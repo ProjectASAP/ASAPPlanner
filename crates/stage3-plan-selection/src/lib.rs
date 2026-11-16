@@ -17,9 +17,11 @@
 //! exact candidates only, $a_{q,e}$ marking what its selected path reads. It
 //! builds the plan (`PhysicalASAPDAG`) from the selected executions and
 //! edges as its last step ([`plan`], each node retaining its candidate's
-//! $h_v$, the needs from [`retention`]). Accuracy at each query root,
-//! constraint (K), with per-candidate error bounds $E_c$ and $D_c$
-//! (section 4), is the remaining extension. Costs come from `asap-cost`.
+//! $h_v$, the needs from [`retention`]). Accuracy at each query root is
+//! constraint (K) (section 4): error bounds $E_{\kappa,c,m}$ per execution
+//! and metric and failure probabilities $D_{\kappa,c}$, composed along the
+//! selected edges and checked at each query's root. Costs come from
+//! `asap-cost`.
 
 mod cost;
 mod milp;
