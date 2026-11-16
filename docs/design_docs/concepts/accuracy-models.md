@@ -126,19 +126,23 @@ most 6 x 16 = 96 rows, so `R` = 96, and without a sampling interval or
 `rows_held` `R` is unbound. Keys from different scans multiply, since a join
 pairs their values: `flows JOIN hosts ... GROUP BY f.src, h.region` with 6
 `src` and 6 `region` values declared returns up to 36 values, not 6 + 6.
-With both unbound the target stays unmet. A grouped result's `G` is bound by
-the distinct values its sources declare for its group keys
-(`SourceFacts.distinct_values_per_label`, and
-`distinct_values_per_label_set` for labels that depend on each other): the
-smallest product of declared label and label-set counts covering the keys,
-at most the series read. With each of 625 endpoints in one of 25 services
-and `(service, endpoint)` declared at 625, `by (service, endpoint)` returns
-at most 625 values, not 25 x 625. A key counts only when it is a source
-column passed through unchanged; a relabeled or computed key leaves `G`
-unbound. So a sketch meets a whole-result target over SQL groups when every
-grouping column's distinct values are declared, and over 25 services and 25
-endpoints requires each group's sketch to meet `δ / 625`. Nothing declared
-leaves `G` unbound; no default stands in for it.
+With both unbound the target stays unmet. A grouped result's `G` follows
+the same rule as `R` (`Memo::max_values_per_evaluation` of the root group):
+the product, over the scans its group keys come from, of the distinct values
+each scan's source declares for them (`SourceFacts.distinct_values_per_label`,
+and `distinct_values_per_label_set` for labels that depend on each other: the
+smallest product of declared label and label-set counts covering the keys),
+clamped to the rows its grouping reads; a PromQL instant vector is also at
+most the series read. With each of 625 endpoints in one of 25 services and
+`(service, endpoint)` declared at 625, `by (service, endpoint)` returns at
+most 625 values, not 25 x 625. `GROUP BY dst` over a table declaring 6
+groups of rows and 300 `dst` values returns up to 300 values, not 6. A key
+counts only when it is a source column passed through unchanged; a relabeled
+or computed key, or an undeclared one, leaves only the rows read to bound
+`G`. So a sketch meets a whole-result target over SQL groups when every
+grouping column's distinct values, or the rows read, are declared, and over
+25 services and 25 endpoints requires each group's sketch to meet
+`δ / 625`. Nothing declared leaves `G` unbound; no default stands in for it.
 
 An `AccuracyGuarantee` contains an error metric, an error bound and a
 failure probability (possibly unknown, as HLL's). The metric is essential:
