@@ -5,7 +5,6 @@
 
 use super::views::ViewIndex;
 use super::{InstallableDagError, RawDataRetention};
-use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::Operator;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
@@ -117,20 +116,16 @@ impl PhysicalASAPDAGNode {
 }
 
 impl ViewIndex<'_> {
-    /// See [`PhysicalASAPDAG::check_raw_data_windows`].
+    /// See [`PhysicalASAPDAG::check_raw_data_windows`]. Only an operator
+    /// that covers a window ([`Operator::covered_window_ms`]: a `TimeRange`
+    /// or a tumbling-window chain) holds a window over raw data to check.
     pub(super) fn check_raw_data_windows(&self) -> Result<(), InstallableDagError> {
         for node in &self.dag.nodes {
             if !self.reading_raw_data.contains(&node.id) {
                 continue;
             }
-            match &node.payload {
-                Operator::NonASAP(NonASAPOp::TimeRange { .. }) => {
-                    self.check_raw_window_at(node.id)?;
-                }
-                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
-                    self.check_raw_window_below(node.id)?;
-                }
-                _ => {}
+            if node.payload.covered_window_ms().is_some() {
+                self.check_raw_window_below(node.id)?;
             }
         }
         Ok(())

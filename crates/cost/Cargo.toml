@@ -16,5 +16,6 @@ serde_json = "1"
 
 [dev-dependencies]
 # The executor's charge for each summary state, checked against the bytes
-# the state byte models give for it plus the accumulator's own fields (#947).
+# the state byte models give for it plus the accumulator's own fields, and
+# against priced bytes on seeded workload data (#947).
 asap-executor = { path = "../executor" }

@@ -200,11 +200,12 @@ impl<'a> ViewIndex<'a> {
                 .flatten()
                 .any(|input| match payload(input) {
                     Some(Operator::NonASAP(NonASAPOp::Scan { .. })) => true,
-                    Some(
-                        Operator::NonASAP(NonASAPOp::TimeRange { .. })
-                        | Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
-                    ) => false,
-                    _ => reading_raw_data.contains(input),
+                    // A window (`TimeRange`, chain) between it and the raw
+                    // data: it reads the window's output, not raw rows.
+                    Some(operator) if operator.covered_window_ms().is_some() => false,
+                    // Any other operator passes on whether its input reads
+                    // raw data.
+                    Some(_) | None => reading_raw_data.contains(input),
                 });
             if reads {
                 reading_raw_data.insert(*id);

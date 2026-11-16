@@ -1,6 +1,22 @@
 //! One node of a physical plan DAG: its resource usage and cost
 //! ([`node_resource_usage_and_cost`], [`NodeCost`]).
 
+// The rules here answer per operator, summary type or cost model, and
+// each lists every variant: a wildcard arm would give a new variant a
+// default answer instead of failing the build (under `-D warnings`).
+// Clippy does not check `matches!` and `if let`, so they stay only for a
+// check of one variant's identity, where every other variant's answer is
+// "no" by definition: "is it a `Scan`" (a scan's retained raw bytes), and
+// `raw_data_samples_non_negative`'s "is its producer a `Scan` or a
+// `TimeRange`" (raw samples; any other producer's are not, the safe
+// answer). The lifetime check "is it stored across evaluations"
+// (`matches!(node.lifetime, Lifetime::AcrossEvaluations(_))`) is kept the
+// same way.
+#![warn(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::node::analytical::{
@@ -14,8 +30,8 @@ use crate::node::state_bytes::{
 };
 use crate::{aggregate_lookup, lookup, StateFamily};
 use crate::{
-    CalibrationFit, CostInputs, CostModel, NodeCostSource, OperatorKind, COST_SOURCE,
-    MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
+    CalibrationFit, CostInputs, NodeCostSource, OperatorKind, COST_SOURCE, MEASURED_COST_SOURCE,
+    MIXED_COST_SOURCE,
 };
 use asap_types::ir::operator::{GroupKeys, Reduction, Source};
 use asap_types::ir::properties::ExecutionTiming;
@@ -93,14 +109,46 @@ fn state_family<'a>(
                 .map(StateFamily::Sketch)
                 .ok_or(AnalyticalCostError::UnsupportedCandidate)?,
             FieldDataType::ExactAggregate(kind, _) => StateFamily::Exact(kind),
-            _ => StateFamily::None,
+            FieldDataType::Plain(_)
+            | FieldDataType::SummarySample(..)
+            | FieldDataType::Wavelet(..)
+            | FieldDataType::StatModel(..) => StateFamily::None,
         },
         Payload::ASAP(
             ASAPOp::SummaryMerge { .. }
             | ASAPOp::SummaryEstimate { .. }
             | ASAPOp::FinalizeExactAccumulator { .. },
         ) => producer_family.unwrap_or(StateFamily::None),
-        _ => StateFamily::None,
+        Payload::NonASAP(
+            NonASAPOp::Scan { .. }
+            | NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Aggregate { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::TimeRange { .. }
+            | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::PromqlVectorFromScalar(..)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. },
+        )
+        | Payload::ASAP(
+            ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. },
+        ) => StateFamily::None,
     })
 }
 
@@ -264,10 +312,7 @@ pub fn node_resource_usage_and_cost<'a>(
     let formula_scale = settings.frozen_calibration_factor.unwrap_or(1.0);
     let table = &settings.measured_operation_costs;
     let speed = settings.resource_speed;
-    let unit_costs = match &settings.cost_model {
-        CostModel::UsageOverTime(unit_cost) => Some(unit_cost),
-        _ => None,
-    };
+    let unit_costs = settings.cost_model.per_node_unit_costs();
     let sketch_size =
         |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
     let mut fit = CalibrationFit::default();
@@ -308,15 +353,19 @@ pub fn node_resource_usage_and_cost<'a>(
         payload if payload.keeps_input_window() => producers
             .first()
             .map_or(1, |producer| producer.tumbling_windows),
-        _ => 1,
+        // Any other operator spans one window: `keeps_input_window`
+        // answers per operator, so listing them here would decide nothing.
+        Payload::NonASAP(_) | Payload::ASAP(_) => 1,
     };
-    let sources: BTreeSet<&str> = match &node.payload {
-        Payload::NonASAP(NonASAPOp::Scan { source, .. }) => [source_name(source)].into(),
-        _ => producers
-            .iter()
-            .flat_map(|p| p.sources.iter().copied())
-            .collect(),
-    };
+    let sources: BTreeSet<&str> =
+        if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {
+            [source_name(source)].into()
+        } else {
+            producers
+                .iter()
+                .flat_map(|p| p.sources.iter().copied())
+                .collect()
+        };
     // The series its sources declare, when they all do.
     let series = declared_series(&sources, data);
     // The rows per ms its sources receive, which its scans and time
@@ -373,7 +422,40 @@ pub fn node_resource_usage_and_cost<'a>(
         Payload::NonASAP(NonASAPOp::Aggregate { measures, .. }) => {
             aggregate_lookup(table, node.output_state.timing, measures)
         }
-        _ => lookup(
+        Payload::NonASAP(
+            NonASAPOp::Scan { .. }
+            | NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::TimeRange { .. }
+            | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::PromqlVectorFromScalar(..)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. },
+        )
+        | Payload::ASAP(
+            ASAPOp::SummaryAgg { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. }
+            | ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummaryMerge { .. }
+            | ASAPOp::SummaryTumblingWindowChain { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. },
+        ) => lookup(
             table,
             operator,
             node.output_state.timing,
@@ -530,7 +612,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 let group_count = groups(reduction)?;
                 let keys = match reduction {
                     Reduction::Reduce(keys) => keys.keys().len() as u64,
-                    _ => 1,
+                    Reduction::PerEntity => 1,
                 };
                 let out = edge(group_count)?;
                 let held = input.rows.div_ceil(group_count.max(1));
@@ -696,7 +778,20 @@ pub fn node_resource_usage_and_cost<'a>(
                     ),
                 )
             }
-            _ => {
+            NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::PromqlVectorFromScalar(..)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. } => {
                 let estimate = estimate_operator(
                     PhysicalOperator::PassThrough,
                     OperatorStatistics::PassThrough {
@@ -827,7 +922,11 @@ pub fn node_resource_usage_and_cost<'a>(
         Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
             let per_group = match query {
                 SketchStatistic::TopK { k } => *k as u64,
-                _ => 1,
+                SketchStatistic::FrequencyL2
+                | SketchStatistic::FrequencyEntropy
+                | SketchStatistic::Quantile { .. }
+                | SketchStatistic::PointCount { .. }
+                | SketchStatistic::Cardinality => 1,
             };
             let out = edge(
                 input
@@ -846,7 +945,14 @@ pub fn node_resource_usage_and_cost<'a>(
             Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
             format!("finalize {} accumulators", input.rows),
         ),
-        _ => (
+        Payload::ASAP(
+            ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. },
+        ) => (
             edge(input.rows)?,
             Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
             format!("{} rows", input.rows),
@@ -862,7 +968,39 @@ pub fn node_resource_usage_and_cost<'a>(
     let units = match &node.payload {
         Payload::NonASAP(NonASAPOp::Scan { .. }) => out.rows,
         Payload::ASAP(ASAPOp::SummaryMerge { .. }) => merged_states(producers)?,
-        _ => input.rows,
+        Payload::NonASAP(
+            NonASAPOp::Values { .. }
+            | NonASAPOp::Filter { .. }
+            | NonASAPOp::Project { .. }
+            | NonASAPOp::Aggregate { .. }
+            | NonASAPOp::Join { .. }
+            | NonASAPOp::SetOp { .. }
+            | NonASAPOp::Concat { .. }
+            | NonASAPOp::Dedup { .. }
+            | NonASAPOp::Sort { .. }
+            | NonASAPOp::Limit { .. }
+            | NonASAPOp::BinaryOp { .. }
+            | NonASAPOp::SQLWindowFunc { .. }
+            | NonASAPOp::TimeRange { .. }
+            | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::PromqlVectorFromScalar(..)
+            | NonASAPOp::PromqlRelabel { .. }
+            | NonASAPOp::PromqlInfoEnrich { .. }
+            | NonASAPOp::PromqlSeriesSample { .. }
+            | NonASAPOp::PromqlSubquery { .. },
+        )
+        | Payload::ASAP(
+            ASAPOp::SummaryAgg { .. }
+            | ASAPOp::SummaryEstimate { .. }
+            | ASAPOp::FinalizeExactAccumulator { .. }
+            | ASAPOp::MaintainPopulation { .. }
+            | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::SummaryTumblingWindowChain { .. }
+            | ASAPOp::SummarySubtract { .. }
+            | ASAPOp::SummaryDelete { .. }
+            | ASAPOp::SummaryJoin { .. }
+            | ASAPOp::Extension { .. },
+        ) => input.rows,
     };
     let mut detail = detail;
     // A node with an entry takes its measured time, scanning included;
@@ -1102,6 +1240,9 @@ fn merged_states(producers: &[ProducerOutput<'_>]) -> Result<u64, AnalyticalCost
 
 /// A summary type's name in reports: a sketch by its algorithm, e.g.
 /// `HydraCms`; an exact accumulator by its kind.
+// Any other type prints its Debug form, which names a new variant too, so
+// listing them would decide nothing.
+#[allow(clippy::wildcard_enum_match_arm)]
 pub fn summary_type_name(summary_type: &FieldDataType) -> String {
     match summary_type {
         FieldDataType::Sketch(algorithm) => format!("{algorithm:?}"),

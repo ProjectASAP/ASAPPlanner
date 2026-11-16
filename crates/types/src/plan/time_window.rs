@@ -23,6 +23,20 @@
 //! read through `TimeWindow { ends_before_evaluation_ms: 60_000,
 //! length_ms: 300_000 }`, `(t - 6m, t - 1m]`, reaching back 360,000 ms.
 
+// The rules here answer per operator, and each lists every operator: a
+// wildcard arm would give a new operator a default answer instead of
+// failing the build (under `-D warnings`). Clippy does not check
+// `matches!` and `let ... else`, so they stay only for a check of one
+// variant's identity, where every other operator's answer is "no" by
+// definition: "is it a `Scan`" (only a raw scan's read at t needs every
+// row), "is it a `TimeShift`" (the shifts directly below a window), and
+// the lifetime check "is it stored across evaluations" in
+// `InputTimeAccess::of` (`matches!(lifetime, Lifetime::AcrossEvaluations(_))`).
+#![warn(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
+
 use serde::{Deserialize, Serialize};
 
 use crate::ir::operator::asap::ASAPOp;
@@ -128,6 +142,17 @@ impl InputTimeAccess {
             reads,
             shifts_back_ms: 0,
         };
+        // The window a `TimeRange` or a chain covers, read in one place
+        // ([`Operator::covered_window_ms`]); only those two arms call this.
+        let last_window = || {
+            reads(InputRows::LastWindow {
+                length_ms: operator
+                    .covered_window_ms()
+                    .expect("a TimeRange or a tumbling-window chain covers a window"),
+            })
+        };
+        // Every operator is listed, so a new one fails to build here until
+        // its input time access is decided.
         match operator {
             Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => match shift.at {
                 None => Self {
@@ -141,19 +166,47 @@ impl InputTimeAccess {
                 },
                 Some(_) => reads(InputRows::AllRows),
             },
-            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => reads(InputRows::LastWindow {
-                length_ms: u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
-            }),
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }) => match timing {
-                ExecutionTiming::IngestionTime => reads(InputRows::LastWindow {
-                    length_ms: *tumbling_window_width_ms,
-                }),
+            Operator::NonASAP(NonASAPOp::TimeRange { .. }) => last_window(),
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => match timing {
+                ExecutionTiming::IngestionTime => last_window(),
                 ExecutionTiming::QueryTime => reads(InputRows::WhatItsReadersRead),
             },
-            _ => reads(InputRows::CurrentTimeOnly),
+            // A subquery evaluates its input at other times than its own,
+            // but is read here as the rows at t.
+            Operator::NonASAP(NonASAPOp::PromqlSubquery { .. }) => {
+                reads(InputRows::CurrentTimeOnly)
+            }
+            Operator::NonASAP(
+                NonASAPOp::Scan { .. }
+                | NonASAPOp::Values { .. }
+                | NonASAPOp::Filter { .. }
+                | NonASAPOp::Project { .. }
+                | NonASAPOp::Aggregate { .. }
+                | NonASAPOp::Join { .. }
+                | NonASAPOp::SetOp { .. }
+                | NonASAPOp::Concat { .. }
+                | NonASAPOp::Dedup { .. }
+                | NonASAPOp::Sort { .. }
+                | NonASAPOp::Limit { .. }
+                | NonASAPOp::BinaryOp { .. }
+                | NonASAPOp::SQLWindowFunc { .. }
+                | NonASAPOp::PromqlVectorFromScalar(..)
+                | NonASAPOp::PromqlRelabel { .. }
+                | NonASAPOp::PromqlInfoEnrich { .. }
+                | NonASAPOp::PromqlSeriesSample { .. },
+            )
+            | Operator::ASAP(
+                ASAPOp::SummaryAgg { .. }
+                | ASAPOp::SummaryEstimate { .. }
+                | ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. }
+                | ASAPOp::SummaryMerge { .. }
+                | ASAPOp::SummarySubtract { .. }
+                | ASAPOp::SummaryDelete { .. }
+                | ASAPOp::SummaryJoin { .. }
+                | ASAPOp::Extension { .. },
+            ) => reads(InputRows::CurrentTimeOnly),
         }
     }
 }
@@ -308,14 +361,13 @@ pub fn shift_back_ms_below<P: TimeIndexedPlan>(plan: &P, node: P::Node) -> Optio
         // shift.
         let mut path_ends = inputs.is_empty();
         for input in inputs {
-            match plan.operator_of(input) {
-                Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
-                    if shift.at.is_some() {
-                        return None;
-                    }
-                    pending.push((input, walked_ms.checked_add(shift.offset_ms)?));
+            if let Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) = plan.operator_of(input) {
+                if shift.at.is_some() {
+                    return None;
                 }
-                _ => path_ends = true,
+                pending.push((input, walked_ms.checked_add(shift.offset_ms)?));
+            } else {
+                path_ends = true;
             }
         }
         if path_ends {
@@ -347,18 +399,9 @@ pub fn windows_computed_from<P: TimeIndexedPlan>(
         if !seen.insert(id) {
             continue;
         }
-        let length_ms = match plan.operator_of(id) {
-            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
-                u64::try_from(range.as_millis()).ok()?
-            }
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }) => *tumbling_window_width_ms,
-            _ => {
-                pending.extend(plan.inputs_of(id));
-                continue;
-            }
+        let Some(length_ms) = plan.operator_of(id).covered_window_ms() else {
+            pending.extend(plan.inputs_of(id));
+            continue;
         };
         windows.push(TimeWindow {
             ends_before_evaluation_ms: shift_back_ms_below(plan, id)?,
@@ -393,6 +436,117 @@ mod tests {
             }
         );
         assert_eq!(shifted.bounds_ms(1_000_000), (640_000, 940_000));
+    }
+
+    /// The operators whose input time access is a decision, not the rows
+    /// at t: `TimeShift` by timing and lifetime, `@ end`, `TimeRange` and
+    /// the chain, plus `PromqlSubquery`, which keeps reading the rows at t
+    /// although it evaluates its input at other times. Pins the operators
+    /// that exist today; a new operator fails to build in
+    /// [`InputTimeAccess::of`], and its decision gets a row here.
+    #[test]
+    fn operators_with_a_time_access_decision() {
+        use crate::ir::operator::{AggIntent, AtModifier, Reduction, TimeShift};
+        use crate::ir::scalar::ColumnRef;
+        use crate::ir::schema::FieldDataType;
+        use crate::ir::TimeRangeKind;
+        use crate::stages::StorageMedium;
+        use crate::summary_type::{SketchAlgorithm, SummaryUpdate};
+        use std::time::Duration;
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        use InputRows::*;
+
+        let non_asap = |op: NonASAPOp<u32>| Operator::NonASAP(op);
+        let shift = |at| {
+            non_asap(NonASAPOp::TimeShift {
+                shift: TimeShift {
+                    offset_ms: 3_600_000,
+                    at,
+                },
+                child: 0,
+            })
+        };
+        let chain = || {
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                child: 0,
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::PerEntity,
+                filter: None,
+                tumbling_window_width_ms: 60_000,
+            })
+        };
+        let subquery = non_asap(NonASAPOp::PromqlSubquery {
+            range: Duration::from_secs(300),
+            resolution: None,
+            child: 0,
+        });
+        let aggregate = non_asap(NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![AggIntent::Rate],
+            output_names: vec![String::new()],
+            filters: vec![],
+            having: None,
+            child: 0,
+        });
+        let stored = Lifetime::AcrossEvaluations(StorageMedium::Memory);
+        let once = Lifetime::OneEvaluation(StorageMedium::Memory);
+        let access = |reads, shifts_back_ms| InputTimeAccess {
+            reads,
+            shifts_back_ms,
+        };
+        let table: Vec<(Operator<u32>, ExecutionTiming, Lifetime, InputTimeAccess)> = vec![
+            (
+                shift(None),
+                QueryTime,
+                once,
+                access(WhatItsReadersRead, 3_600_000),
+            ),
+            (
+                shift(None),
+                IngestionTime,
+                once,
+                access(WhatItsReadersRead, 3_600_000),
+            ),
+            (
+                shift(None),
+                IngestionTime,
+                stored,
+                access(CurrentTimeOnly, 3_600_000),
+            ),
+            (
+                shift(Some(AtModifier::End)),
+                QueryTime,
+                once,
+                access(AllRows, 0),
+            ),
+            (
+                non_asap(NonASAPOp::TimeRange {
+                    range: Duration::from_secs(300),
+                    kind: TimeRangeKind::Range,
+                    child: 0,
+                }),
+                QueryTime,
+                once,
+                access(LastWindow { length_ms: 300_000 }, 0),
+            ),
+            (chain(), QueryTime, once, access(WhatItsReadersRead, 0)),
+            (
+                chain(),
+                IngestionTime,
+                stored,
+                access(LastWindow { length_ms: 60_000 }, 0),
+            ),
+            (subquery, QueryTime, once, access(CurrentTimeOnly, 0)),
+            (aggregate, IngestionTime, stored, access(CurrentTimeOnly, 0)),
+        ];
+        for (operator, timing, lifetime, expected) in table {
+            assert_eq!(
+                InputTimeAccess::of(&operator, timing, lifetime),
+                expected,
+                "{operator:?} at {timing:?}, {lifetime:?}"
+            );
+        }
     }
 
     /// A hand-built plan: each node's readers and input time access, and

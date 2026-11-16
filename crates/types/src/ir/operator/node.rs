@@ -5,6 +5,18 @@
 //! each physical candidate holds its own
 //! ([`crate::stages::PhysicalCandidate::properties`]).
 
+// The questions answered here per operator (e.g. the window it covers)
+// list every operator: a wildcard arm would give a new operator a default
+// answer instead of failing the build (under `-D warnings`). Clippy does
+// not check `if let` and `matches!`, so they stay only for a check of one
+// variant's identity, where every other operator's answer is "no" by
+// definition: "is it a `Scan`" (`scanned_sources`: only a scan reads a
+// source itself) and "is it an ASAP operator" (`is_asap`).
+#![warn(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
+
 use std::collections::{BTreeSet, HashSet};
 use std::rc::Rc;
 
@@ -108,6 +120,65 @@ impl<C> Operator<C> {
         }
     }
 
+    /// The window of input rows one output covers, in ms: a `TimeRange`'s
+    /// range or a chain's tumbling window; `None` for every other operator.
+    /// E.g. `TimeRange(5m)`: `Some(300_000)`; a chain of 1-minute windows:
+    /// `Some(60_000)`; `Filter`: `None`. A `PromqlSubquery` evaluates its
+    /// input over a range, but each of its outputs is one evaluation, so it
+    /// covers none here.
+    ///
+    /// A `TimeRange` longer than `u64::MAX` ms (about 584 million years)
+    /// saturates to `Some(u64::MAX)`, so `Some` always means "covers a
+    /// window"; a caller that once gave `None` for such a range
+    /// (`windows_computed_from`, and so `RefreshWindow::computed_from`) now
+    /// carries on with `u64::MAX`. PromQL planning never reaches it: costing such a range
+    /// overflows first.
+    pub fn covered_window_ms(&self) -> Option<u64> {
+        match self {
+            // Saturates, so `Some` means exactly "a window", whatever its length.
+            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
+                Some(u64::try_from(range.as_millis()).unwrap_or(u64::MAX))
+            }
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }) => Some(*tumbling_window_width_ms),
+            Operator::NonASAP(
+                NonASAPOp::Scan { .. }
+                | NonASAPOp::Values { .. }
+                | NonASAPOp::Filter { .. }
+                | NonASAPOp::Project { .. }
+                | NonASAPOp::Aggregate { .. }
+                | NonASAPOp::Join { .. }
+                | NonASAPOp::SetOp { .. }
+                | NonASAPOp::Concat { .. }
+                | NonASAPOp::Dedup { .. }
+                | NonASAPOp::Sort { .. }
+                | NonASAPOp::Limit { .. }
+                | NonASAPOp::BinaryOp { .. }
+                | NonASAPOp::SQLWindowFunc { .. }
+                | NonASAPOp::TimeShift { .. }
+                | NonASAPOp::PromqlVectorFromScalar(..)
+                | NonASAPOp::PromqlRelabel { .. }
+                | NonASAPOp::PromqlInfoEnrich { .. }
+                | NonASAPOp::PromqlSeriesSample { .. }
+                | NonASAPOp::PromqlSubquery { .. },
+            )
+            | Operator::ASAP(
+                ASAPOp::SummaryAgg { .. }
+                | ASAPOp::SummaryEstimate { .. }
+                | ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. }
+                | ASAPOp::SummaryMerge { .. }
+                | ASAPOp::SummarySubtract { .. }
+                | ASAPOp::SummaryDelete { .. }
+                | ASAPOp::SummaryJoin { .. }
+                | ASAPOp::Extension { .. },
+            ) => None,
+        }
+    }
+
     /// The anchor of a `TimeShift` with `@ end()` or `@ start()`, whose
     /// input runs once per request; `None` for any other operator (`@ <ts>`
     /// included).
@@ -154,13 +225,12 @@ impl<C> Operator<C> {
         }
     }
 
-    /// Whether each output row keeps its input row's time window, so the
-    /// window its input covers is also its own: `Filter` and `Project`
-    /// keep rows and times; `TimeShift` moves every row by one offset but
-    /// keeps the window's length. E.g. `Filter <- TimeRange(5m)` covers
-    /// 5 minutes, and `Project <- chain of 1-minute windows` holds
-    /// 1-minute windows; `Aggregate <- TimeRange(5m)` combines rows, so
-    /// `false`.
+    /// Whether the window its input covers is also its own, with the same
+    /// length: `Filter` and `Project` keep each row and its time;
+    /// `TimeShift` moves every row's time by one offset, so the window
+    /// moves but keeps its length. E.g. `Filter <- TimeRange(5m)` and
+    /// `TimeShift(1h) <- TimeRange(5m)` both cover 5 minutes;
+    /// `Aggregate <- TimeRange(5m)` combines rows, so `false`.
     pub fn keeps_input_window(&self) -> bool {
         match self {
             Operator::NonASAP(
@@ -209,14 +279,13 @@ impl<I: OperatorInput> Operator<I> {
     /// own, else the union over its inputs'
     /// ([`OperatorInput::scanned_sources`]).
     pub(crate) fn scanned_sources(&self) -> BTreeSet<Source> {
-        match self {
-            Operator::NonASAP(NonASAPOp::Scan { source, .. }) => BTreeSet::from([source.clone()]),
-            operator => operator
-                .children()
-                .into_iter()
-                .flat_map(OperatorInput::scanned_sources)
-                .collect(),
+        if let Operator::NonASAP(NonASAPOp::Scan { source, .. }) = self {
+            return BTreeSet::from([source.clone()]);
         }
+        self.children()
+            .into_iter()
+            .flat_map(OperatorInput::scanned_sources)
+            .collect()
     }
 
     pub(crate) fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
@@ -438,5 +507,152 @@ impl OperatorNode {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::ir::operator::{AggIntent, Reduction, TimeShift};
+    use crate::ir::scalar::ColumnRef;
+    use crate::ir::schema::FieldDataType;
+    use crate::ir::{Predicate, ScalarExpr, TimeRangeKind};
+    use crate::summary_type::{SketchAlgorithm, SummaryUpdate};
+
+    fn scan() -> Operator<u32> {
+        Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::default(),
+        })
+    }
+
+    fn filter() -> Operator<u32> {
+        Operator::NonASAP(NonASAPOp::Filter {
+            pred: Predicate(ScalarExpr::Column(0)),
+            child: 0,
+        })
+    }
+
+    fn project() -> Operator<u32> {
+        Operator::NonASAP(NonASAPOp::Project {
+            cols: vec![],
+            child: 0,
+        })
+    }
+
+    fn time_shift_one_hour() -> Operator<u32> {
+        Operator::NonASAP(NonASAPOp::TimeShift {
+            shift: TimeShift {
+                offset_ms: 3_600_000,
+                at: None,
+            },
+            child: 0,
+        })
+    }
+
+    fn aggregate() -> Operator<u32> {
+        Operator::NonASAP(NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![AggIntent::Rate],
+            output_names: vec![String::new()],
+            filters: vec![],
+            having: None,
+            child: 0,
+        })
+    }
+
+    fn time_range_five_minutes() -> Operator<u32> {
+        Operator::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(300),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        })
+    }
+
+    fn subquery_five_minutes() -> Operator<u32> {
+        Operator::NonASAP(NonASAPOp::PromqlSubquery {
+            range: Duration::from_secs(300),
+            resolution: None,
+            child: 0,
+        })
+    }
+
+    fn summary_agg() -> Operator<u32> {
+        Operator::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+        })
+    }
+
+    fn chain_one_minute() -> Operator<u32> {
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: 0,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+            tumbling_window_width_ms: 60_000,
+        })
+    }
+
+    /// Only a chain has a tumbling-window width; a `TimeRange` covers a
+    /// window but tumbles none.
+    #[test]
+    fn only_a_chain_has_a_tumbling_window_width() {
+        let table = [
+            (chain_one_minute(), Some(60_000)),
+            (time_range_five_minutes(), None),
+            (summary_agg(), None),
+            (filter(), None),
+        ];
+        for (operator, expected) in table {
+            assert_eq!(
+                operator.chain_tumbling_window_width_ms(),
+                expected,
+                "{operator:?}"
+            );
+        }
+    }
+
+    /// A `TimeRange` covers its range and a chain its tumbling window; a
+    /// subquery's range is not a covered window, as each of its outputs is
+    /// one evaluation.
+    #[test]
+    fn a_time_range_and_a_chain_cover_a_window() {
+        let table = [
+            (time_range_five_minutes(), Some(300_000)),
+            (chain_one_minute(), Some(60_000)),
+            (subquery_five_minutes(), None),
+            (time_shift_one_hour(), None),
+            (aggregate(), None),
+            (scan(), None),
+        ];
+        for (operator, expected) in table {
+            assert_eq!(operator.covered_window_ms(), expected, "{operator:?}");
+        }
+    }
+
+    /// `Filter`, `Project` and `TimeShift` keep their input's time window;
+    /// an operator that combines rows or covers its own window does not.
+    #[test]
+    fn filters_projections_and_shifts_keep_input_window() {
+        let table = [
+            (filter(), true),
+            (project(), true),
+            (time_shift_one_hour(), true),
+            (aggregate(), false),
+            (time_range_five_minutes(), false),
+            (chain_one_minute(), false),
+            (scan(), false),
+        ];
+        for (operator, expected) in table {
+            assert_eq!(operator.keeps_input_window(), expected, "{operator:?}");
+        }
     }
 }
