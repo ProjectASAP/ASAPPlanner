@@ -702,10 +702,14 @@ fn max_over_time_5m_at_1_hz_with_raw_data_keeps_stored_max_windows() {
 /// 10 Hz every 300 s, raw data kept. Measured cost per second (cost model
 /// 1's default prices on the measured usage), the Rate or Increase built at
 /// query time from raw rows against stored 300 s windows: 0.86 against
-/// 0.95 for both. Per row, the query-time plan's time range and update
-/// measure 79 ns, the stored plan's ingestion-time chain 87: the chain
-/// assigns each arriving row its window, which was not charged, so the
-/// stored plan was predicted cheaper (regret 1.08–1.10 in every run).
+/// 0.95 for both. A grouping's cost per row depends on the sample rate:
+/// the executor visits each group's state once per 10 s raw batch, which
+/// holds 100 rows of a series at 10 Hz and 10 at 1 Hz, and a chain also
+/// splits each group's rows of a batch by window. Charged one per-row
+/// constant fitted across both rates, the query-time build was
+/// over-charged at 10 Hz (69 ns per row measured, 82 charged) while the
+/// stored chain was charged about right, so the stored plan was predicted
+/// cheaper (regret 1.08–1.10 in every run).
 #[test]
 fn sum_rate_and_increase_over_5m_at_10_hz_every_300_s_with_raw_data_build_at_query_time() {
     for query in [
