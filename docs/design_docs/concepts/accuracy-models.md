@@ -126,7 +126,14 @@ most 6 x 16 = 96 rows, so `R` = 96, and without a sampling interval or
 `rows_held` `R` is unbound. Keys from different scans multiply, since a join
 pairs their values: `flows JOIN hosts ... GROUP BY f.src, h.region` with 6
 `src` and 6 `region` values declared returns up to 36 values, not 6 + 6.
-With both unbound the target stays unmet. A grouped result's `G` follows
+The "one" side of a many-to-one vector match is another scan in the same
+way: `m{side="l"} * on(x) group_left(instance) m{side="r"}` by `job,
+instance` pairs one series' `job` with another's `instance`, up to 10 x 10
+with 10 (`job`, `instance`) pairs declared. A column of an outer join's
+nullable side gains a NULL its source may not hold (`flows LEFT JOIN hosts
+... GROUP BY h.region` returns the 6 regions and a NULL), so it counts as
+computed and only the rows read bound it. With both unbound the target
+stays unmet. A grouped result's `G` follows
 the same rule as `R` (`Memo::max_values_per_evaluation` of the root group):
 the product, over the scans its group keys come from, of the distinct values
 each scan's source declares for them (`SourceFacts.distinct_values_per_label`,
