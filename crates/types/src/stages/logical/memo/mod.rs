@@ -113,7 +113,9 @@ impl Memo {
     ///   columns form them;
     /// - the rows its input reads per evaluation
     ///   ([`Self::max_rows_per_evaluation`]): there are never more groups
-    ///   than input rows.
+    ///   than input rows;
+    /// - the rows the group itself returns: `ORDER BY q DESC LIMIT 5` above
+    ///   `GROUP BY dst` returns at most 5 values, whatever `dst` declares.
     ///
     /// Keys from different scans multiply, for a join pairs their values:
     /// `flows JOIN hosts ... GROUP BY f.src, h.region`, with 6 `src` and 6
@@ -169,7 +171,11 @@ impl Memo {
             }
             KeysOfValues::ComputedOrTime => None,
         };
-        smaller_known(by_keys, self.max_rows_per_evaluation(input))
+        let by_rows = smaller_known(
+            self.max_rows_per_evaluation(input),
+            self.max_rows_per_evaluation(group),
+        );
+        smaller_known(by_keys, by_rows)
     }
 
     /// The most rows one evaluation of `group` returns, from the facts the
