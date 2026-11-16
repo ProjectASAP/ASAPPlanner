@@ -2,9 +2,8 @@
 //     optimizer_cost/rqe_atomic_costs.json measured_operation_costs.json
 //
 // Reads sketch-bench's per-operation cost table (`rqe_atomic_costs.json`)
-// and writes plan selection's measured table: a JSON array of
-// `{"sketch": <SketchParams>, "operation": "update|merge|estimate",
-// "cpu_ns_per_operation": <ns>}`, three entries per converted row
+// and writes plan selection's measured table in its object form
+// (`MeasuredOperationCosts`): four `OperatorCost` entries per converted row
 // (`asap_devtools::rqe_atomic_costs`). Set it as
 // `CostInputs::measured_operation_costs` (`asap_planner --cost-inputs`). Skipped rows (exact
 // accumulators, Hydra structures, unknown names) are listed on stderr.
@@ -27,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     eprintln!(
         "wrote {} entries to {output}",
-        converted.measured_operation_costs.len()
+        converted.measured_operation_costs.operators.len()
     );
     Ok(())
 }
