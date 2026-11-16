@@ -237,3 +237,85 @@ fn assert_levels(logical: &LogicalASAPMemoCandidates, expected: &[f64]) {
         assert!((level - expected).abs() < 1e-12, "{levels:?}");
     }
 }
+
+/// $n_q$, the values one evaluation of the only query of `logical`
+/// returns at most.
+fn values_per_evaluation(logical: &LogicalASAPMemoCandidates) -> Option<u64> {
+    logical.memo.queries()[0].number_of_values_per_query_evaluation
+}
+
+/// `GROUP BY dst`, with 300 distinct `dst` values declared, returns up to
+/// 300 values: the key's declared values, not the 6 groups of rows
+/// `flows` declares (nothing says which columns form them). The readout's
+/// δ splits over all 300. Sampled every minute, the last 15 minutes hold
+/// at most 6 × 16 = 96 rows, which bound the groups instead: δ / 96.
+#[test]
+fn a_result_grouped_by_a_declared_key_returns_up_to_its_declared_values() {
+    let by_dst = |sample_interval: Option<u64>| {
+        whole_result_quantile(
+            "SELECT dst, approx_percentile_cont(bytes, 0.9) AS q FROM flows \
+             WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY dst",
+            json!({"flows": {
+                "series_count": 6,
+                "sample_interval": sample_interval,
+                "distinct_values_per_label": {"dst": 300},
+            }}),
+        )
+    };
+    let unsampled = by_dst(None);
+    assert_eq!(values_per_evaluation(&unsampled), Some(300));
+    assert_levels(&unsampled, &[0.01 / 300.0]);
+    let sampled = by_dst(Some(60_000));
+    assert_eq!(values_per_evaluation(&sampled), Some(96));
+    assert_levels(&sampled, &[0.01 / 96.0]);
+}
+
+/// `GROUP BY bytes` keys each value by a measure with no declared count of
+/// distinct values: only the rows read bound the result. Unknown without a
+/// sampling interval; sampled every minute, at most 6 × 16 = 96 rows over
+/// the last 15 minutes.
+#[test]
+fn a_result_grouped_by_an_undeclared_key_returns_at_most_the_rows_read() {
+    let by_bytes = |sample_interval: Option<u64>| {
+        whole_result_quantile(
+            "SELECT bytes, approx_percentile_cont(bytes, 0.9) AS q FROM flows \
+             WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY bytes",
+            json!({"flows": {
+                "series_count": 6,
+                "sample_interval": sample_interval,
+                "distinct_values_per_label": {"src": 6},
+            }}),
+        )
+    };
+    assert_eq!(values_per_evaluation(&by_bytes(None)), None);
+    assert_eq!(values_per_evaluation(&by_bytes(Some(60_000))), Some(96));
+}
+
+/// `flows JOIN hosts` grouped by `f.src` (6 declared) and `h.region` (6
+/// declared) returns up to 6 × 6 = 36 values, the keys of different scans
+/// multiplying; with `flows` holding 6 rows and `hosts` 5, the join reads
+/// at most 30 rows, which bound it instead.
+#[test]
+fn a_result_grouped_by_keys_of_joined_scans_returns_up_to_their_product() {
+    let join = |flows_rows: Option<u64>, hosts_rows: Option<u64>| {
+        whole_result_quantile(
+            "SELECT f.src, h.region, approx_percentile_cont(f.bytes, 0.9) AS q \
+             FROM flows f JOIN hosts h ON f.dst = h.host \
+             WHERE f.ts >= now() - INTERVAL '15 minutes' GROUP BY f.src, h.region",
+            json!({
+                "flows": {
+                    "series_count": 6,
+                    "rows_held": flows_rows,
+                    "distinct_values_per_label": {"src": 6, "dst": 300},
+                },
+                "hosts": {
+                    "series_count": 6,
+                    "rows_held": hosts_rows,
+                    "distinct_values_per_label": {"host": 6, "region": 6},
+                },
+            }),
+        )
+    };
+    assert_eq!(values_per_evaluation(&join(None, None)), Some(36));
+    assert_eq!(values_per_evaluation(&join(Some(6), Some(5))), Some(30));
+}
