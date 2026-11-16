@@ -62,7 +62,8 @@
         "series_count": 10000,
         "sample_interval": 5,
         "column_signs": {"value": "non_negative"},
-        "max_distinct_per_evaluation": 1000000
+        "max_distinct_per_evaluation": 1000000,
+        "distinct_values_per_label": {"user_id": 1000000}
       }
     }
   }

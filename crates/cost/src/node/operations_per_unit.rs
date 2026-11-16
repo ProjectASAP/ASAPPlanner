@@ -218,51 +218,108 @@ const KMV_OPERATIONS_PER_COMPARED_HASH: f64 = 0.5;
 /// its lookups and inserts below, the measure's own
 /// `AGGREGATE_MEASURE_OPERATIONS_PER_ROW`, its grouping keys
 /// (`HASH_AGGREGATE_OPERATIONS_PER_ROW`,
-/// `HASH_AGGREGATE_OPERATIONS_PER_FURTHER_KEY`) and its group visits
-/// (`OPERATIONS_PER_GROUP_PER_RAW_BATCH`): reading the row's value.
-/// Measured on the executor's exact `COUNT(DISTINCT user_id)` over 300,000
-/// and 3,000,000 rows of 100 to 100,000,000 distinct values, in 1 to 1,000
-/// groups (45 aggregates). Of 26 forms, the one with the lowest error
-/// leaving each distinct count and row count out in turn is a constant,
-/// a term per square root of the distinct values and one per inserted
-/// entry (0.215 by squared log error, fitted 61 + 0.4845 × √(distinct
-/// values) + 103.7 per entry with the key and visits inside the
-/// constant). Refit with the key, the measure, the visits and each
-/// group's output row (`OUTPUT_ROW_OPERATIONS_PER_GROUP`) fixed at their
-/// constants, so a grouped count pays them once: 41.2 per row, 0.529 per
-/// square root and 71.7 per entry (leave-one-out error 0.233; measured ÷
-/// charged 0.74–2.40, 0.74–1.29 for grouped counts over at most 1,000
-/// distinct values, which were 0.59–1.05).
-const EXACT_DISTINCT_OPERATIONS_PER_ROW: f64 = 41.0;
+/// `HASH_AGGREGATE_OPERATIONS_PER_FURTHER_KEY`), its group visits
+/// (`OPERATIONS_PER_GROUP_PER_RAW_BATCH`) and each group's output row
+/// (`OUTPUT_ROW_OPERATIONS_PER_GROUP`), which are fixed at their
+/// constants: reading the row's value and looking it and its pair up while
+/// both tables fit in the cache, at `EXACT_DISTINCT_FEWEST_VALUES`.
+///
+/// Measured on the executor's exact `COUNT(DISTINCT user_id)` (median of 3
+/// runs on one pinned core) over 10,000 series, 10 rows per series per
+/// batch: 1,200,000, 12,000,000 and 36,000,000 rows of 1,000 to 10,000,000
+/// distinct values, ungrouped and in 10, 100, 1,000 and 10,000 groups (75
+/// aggregates); with an earlier grid over 1,000 series: 300,000 and
+/// 3,000,000 rows of 100 to 100,000,000 values in 1 to 1,000 groups (44).
+/// The terms are of the values the planner passes (at most the rows read).
+/// Of the forms tried, the one with the lowest error leaving out each
+/// (distinct values, rows, series) setting in turn (0.122 RMS log error;
+/// 0.116 leaving out each group count, 0.148 each distinct count, 0.128
+/// each row count) is this constant, a term per doubling of the values,
+/// a cache-miss term for each table, and one per inserted value and per
+/// inserted pair. Fitted 59.2, 12.9, 207, 79.2, 356 and 13.3, minimizing
+/// the squared log error: measured ÷ charged 0.76–1.32 (RMS log 0.109),
+/// where a constant, a term per square root of the values and one per
+/// inserted entry gave 0.61–1.58 (0.224). Fitted on one grid alone, the
+/// form predicts the other within 0.65–1.40.
+const EXACT_DISTINCT_OPERATIONS_PER_ROW: f64 = 59.0;
 
-/// Per input row of an exact distinct count, per square root of the
-/// distinct values its value table holds (at most
-/// `EXACT_DISTINCT_LOOKUP_MOST_VALUES`): looking the value up, a cache
-/// miss more often as the table grows (fitted 0.529). Example: 300,000
-/// rows of 10,000 distinct values in one group measure 115 ns per row,
-/// charged 4 + 41 + 53 + 5 = 103; of 1,000,000 (charged as 300,000, the
-/// rows read), 589, charged 4 + 41 + 290 + 118 = 453.
-const EXACT_DISTINCT_LOOKUP_OPERATIONS_PER_SQRT_VALUE: f64 = 0.53;
+/// Per doubling of the distinct values an exact distinct count's value
+/// table holds past `EXACT_DISTINCT_FEWEST_VALUES` (at most
+/// `EXACT_DISTINCT_MOST_VALUES`): a larger table spreads its lookups over
+/// more cache lines (fitted 12.9). Example: 100,000 values are 6.6
+/// doublings past 1,000, 86 per row.
+const EXACT_DISTINCT_OPERATIONS_PER_VALUE_DOUBLING: f64 = 13.0;
 
-/// The most distinct values measured: past 3,000,000 the lookup is
-/// charged as at 3,000,000 (943 ns per row at 2,955,000 values against
-/// 918 at 2,592,000, as each lookup misses the cache either way).
-const EXACT_DISTINCT_LOOKUP_MOST_VALUES: f64 = 3_000_000.0;
+/// The fewest distinct values on this host's grid: fewer are charged as
+/// 1,000 (the earlier grid measured 60–92 ns per row over 100 values and
+/// 58–123 over 1,000).
+const EXACT_DISTINCT_FEWEST_VALUES: f64 = 1_000.0;
 
-/// Per entry an exact distinct count inserts, shared over its input rows:
-/// each distinct value into its value table and each (group, value) pair
-/// into its set of pairs (fitted 71.7).
-const EXACT_DISTINCT_OPERATIONS_PER_INSERTED_ENTRY: f64 = 72.0;
+/// The most distinct values on this host's grid: more are charged as
+/// 10,000,000 (the earlier grid measured 943–1,155 ns per row over
+/// 100,000,000 values and 918–1,114 over 10,000,000).
+const EXACT_DISTINCT_MOST_VALUES: f64 = 10_000_000.0;
+
+/// Per input row when every value lookup misses the cache, so charged
+/// times the fraction that miss ([`cache_miss_fraction`] of the values over
+/// `EXACT_DISTINCT_VALUES_IN_CACHE`): a lookup in a value table that has
+/// outgrown the cache reads memory (fitted 207). Example: 1,000,000 values
+/// miss 0.8 of their lookups, 166 per row.
+const EXACT_DISTINCT_OPERATIONS_PER_ROW_AT_FULL_VALUE_MISS: f64 = 207.0;
+
+/// The distinct values whose table still fits in the cache: the best by
+/// leave-one-setting-out error of 100,000, 200,000, 300,000, 500,000 and
+/// 1,000,000 (0.122 at 200,000, 0.123–0.128 from 100,000 to 500,000).
+/// Machine-specific: it follows the cache size of the machine the grid
+/// ran on, so it is a default until calibration measures it per machine.
+const EXACT_DISTINCT_VALUES_IN_CACHE: f64 = 200_000.0;
+
+/// Per input row when every (group, value) pair lookup misses the cache,
+/// so charged times the fraction that miss ([`cache_miss_fraction`] of the
+/// pairs over
+/// `EXACT_DISTINCT_PAIRS_IN_CACHE`, fitted 79.2).
+const EXACT_DISTINCT_OPERATIONS_PER_ROW_AT_FULL_PAIR_MISS: f64 = 79.0;
+
+/// The (group, value) pairs whose set still fits in the cache: the best by
+/// leave-one-setting-out error of 500,000, 1,000,000, 3,000,000 and
+/// 10,000,000 (0.122 at 500,000, 0.127 at 1,000,000, 0.134 at 3,000,000).
+/// A pair is two 4-byte numbers, so fewer bytes than the value table
+/// holds per value. Machine-specific: it follows the cache size of the
+/// machine the grid ran on, so it is a default until calibration measures
+/// it per machine.
+const EXACT_DISTINCT_PAIRS_IN_CACHE: f64 = 500_000.0;
+
+/// Per distinct value an exact distinct count interns into its value
+/// table, shared over its input rows: storing the value and growing the
+/// table (fitted 356). Example: 300,000 rows of 259,000 distinct values
+/// pay 307 per row for them.
+const EXACT_DISTINCT_OPERATIONS_PER_INSERTED_VALUE: f64 = 356.0;
+
+/// Per (group, value) pair an exact distinct count inserts into its set of
+/// pairs, shared over its input rows (fitted 13.3).
+const EXACT_DISTINCT_OPERATIONS_PER_INSERTED_PAIR: f64 = 13.0;
+
+/// The fraction of random lookups into a table of `entries` that miss a
+/// cache holding `entries_in_cache` of them: none while the table fits,
+/// then the share of the table outside the cache. Example: 2,000,000
+/// entries in a cache of 500,000 miss 0.75 of their lookups.
+fn cache_miss_fraction(entries: f64, entries_in_cache: f64) -> f64 {
+    (1.0 - entries_in_cache / entries.max(1.0)).max(0.0)
+}
 
 /// The operations one input row costs an exact distinct count (or
 /// frequency statistic) over `rows` rows in `group_count` groups, of a
 /// column taking `distinct_values` values, beyond the measure's own, its
-/// grouping keys and its group visits: the executor interns each value in
-/// one table of every distinct value read and keeps each group's (group,
-/// value) pairs in a set, so its time per row grows with the distinct
-/// values. The pairs are each group's expected distinct values among its
-/// rows, drawn from `distinct_values`. Example: 300,000 rows of 10,000
-/// values in one group cost 41 + 0.53 × 100 + 72 × 20,000 ÷ 300,000 = 99.
+/// grouping keys, its group visits and its groups' output rows: the
+/// executor interns each value in one table of every distinct value read
+/// and keeps each group's (group, value) pairs in a set, so its time per
+/// row grows with both tables, sharply once one outgrows the cache, and
+/// with the values and pairs it inserts. The pairs are each group's
+/// expected distinct values among its rows, drawn from `distinct_values`.
+/// Example: 12,000,000 rows of 1,000,000 values in 100 groups (11.3 M
+/// pairs) cost 59 + 13 × 10.0 + 207 × 0.8 + 79 × 0.96 + 356 × 1 M ÷ 12 M +
+/// 13 × 11.3 M ÷ 12 M = 472 (measured 488 ns per row with the key and the
+/// measure, charged 492).
 pub(crate) fn exact_distinct_value_operations_per_row(
     distinct_values: u64,
     group_count: u64,
@@ -272,10 +329,17 @@ pub(crate) fn exact_distinct_value_operations_per_row(
     let rows = rows.max(1) as f64;
     let groups = group_count.max(1) as f64;
     let pairs = groups * -values * (-(rows / groups) / values).exp_m1();
+    let table_values = values.clamp(EXACT_DISTINCT_FEWEST_VALUES, EXACT_DISTINCT_MOST_VALUES);
     EXACT_DISTINCT_OPERATIONS_PER_ROW
-        + EXACT_DISTINCT_LOOKUP_OPERATIONS_PER_SQRT_VALUE
-            * values.min(EXACT_DISTINCT_LOOKUP_MOST_VALUES).sqrt()
-        + EXACT_DISTINCT_OPERATIONS_PER_INSERTED_ENTRY * (values.min(rows) + pairs) / rows
+        + EXACT_DISTINCT_OPERATIONS_PER_VALUE_DOUBLING
+            * (table_values / EXACT_DISTINCT_FEWEST_VALUES).log2()
+        + EXACT_DISTINCT_OPERATIONS_PER_ROW_AT_FULL_VALUE_MISS
+            * cache_miss_fraction(table_values, EXACT_DISTINCT_VALUES_IN_CACHE)
+        + EXACT_DISTINCT_OPERATIONS_PER_ROW_AT_FULL_PAIR_MISS
+            * cache_miss_fraction(pairs, EXACT_DISTINCT_PAIRS_IN_CACHE)
+        + (EXACT_DISTINCT_OPERATIONS_PER_INSERTED_VALUE * values.min(rows)
+            + EXACT_DISTINCT_OPERATIONS_PER_INSERTED_PAIR * pairs)
+            / rows
 }
 
 /// One counter update of any other sketch, per counter its row updates
