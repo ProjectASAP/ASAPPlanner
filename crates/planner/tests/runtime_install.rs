@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::time_series;
 use asap_executor::runtime::Scope;
+use asap_executor::values::{Batch, Value};
 use asap_planner::{
     plan_installable, CostInputs, DeploymentCapabilities, FrontendInput, InstallablePlan,
     OperatorKind, PlanningModels, PlanningWorkload, SelectedPlanReport, UserInput,
@@ -553,8 +554,8 @@ async fn grouped_and_per_series_counts_over_a_shared_query_time_chain_install_an
 /// `count(sum by (job) (m >= 0))` counts the 2 jobs, and
 /// `count(count by (x) (m))` counts one group, as no series has `x`.
 /// `stddev` and `stdvar` follow the same rule: none over the empty vector,
-/// and 0 over that one group. With no sample at all every query is empty. Each query is planned on its
-/// own, exactly.
+/// and 0 over that one group. With no sample at all every query is empty.
+/// Each query is planned on its own, exactly.
 #[tokio::test]
 async fn a_global_promql_count_over_an_empty_aggregate_answers_no_sample() {
     // The query's answer values over `samples` (an answer row has no labels).
@@ -562,7 +563,7 @@ async fn a_global_promql_count_over_an_empty_aggregate_answers_no_sample() {
         let query_time = Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
         };
-        let store = CountingStore(time_series_tables(&plan.dag, samples));
+        let store = time_series_tables(&plan.dag, samples);
         run(&plan.dag, store, &query_roots(plan), query_time)
             .concat()
             .iter()
