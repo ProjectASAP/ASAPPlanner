@@ -680,14 +680,14 @@ fn ddsketch_state_bytes(
         .bytes
 }
 
-/// The bytes `sketch_shape` gives a DDSketch state at α = 0.01 over 600
+/// The bytes `sketch_state_bytes` gives a DDSketch state at α = 0.01 over 600
 /// rows of the given sign and magnitude range.
 fn ddsketch_costed_bytes(
     non_negative: bool,
     value_magnitude_range: Option<asap_types::workload::ValueMagnitudeRange>,
 ) -> u64 {
-    use crate::node::state_bytes::{sketch_shape, StateInputRows};
-    sketch_shape(
+    use crate::node::state_bytes::{sketch_state_bytes, StateInputRows};
+    sketch_state_bytes(
         &SketchParams::DDSketch { alpha: 0.01 },
         StateInputRows {
             rows_per_state: Some(600),
@@ -695,7 +695,6 @@ fn ddsketch_costed_bytes(
             value_magnitude_range,
         },
     )
-    .1
 }
 
 /// A scan of PromQL metric `metric`.

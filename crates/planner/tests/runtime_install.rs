@@ -583,14 +583,12 @@ async fn sum_rate_at_10_hz_with_unknown_arrival_installs_and_answers() {
     let mut samples = Vec::new();
     for (instance, job) in series {
         for step in 0..=3_600i64 {
-            let mut sample = sample(
+            samples.push(sample(
                 "requests_total",
-                instance,
+                &[("instance", instance), ("job", job)],
                 EVALUATION_MS - 360_000 + step * 100,
                 step as f64,
-            );
-            sample.labels.insert("job".to_string(), job.to_string());
-            samples.push(sample);
+            ));
         }
     }
     let answered = query_answers(&plan, &samples);
