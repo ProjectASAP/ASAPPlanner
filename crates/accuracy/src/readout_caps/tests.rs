@@ -5,13 +5,13 @@ use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::QueryRoot;
 use asap_types::stages::{MemoQuery, ValueSign};
-use asap_types::workload::DataWorkload;
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
 use asap_types::test_support::memo_builders::{
     estimate, group, own_candidate, quantile_over_time, query, scan_group, sketch_state,
     with_series,
 };
 use asap_types::test_support::memo_fixtures::{aggregate, arithmetic, set_operator};
+use asap_types::workload::DataWorkload;
 
 /// The levels [`readout_levels`] gives the readout candidate `readout`.
 fn levels_of(memo: &Memo, readout: MemoGroupId) -> Vec<RequiredAccuracy> {
@@ -321,7 +321,10 @@ fn failure_probability_of(memo: &Memo, readout: MemoGroupId) -> Option<f64> {
     let required = readout_levels(memo, &ErrorMetricsOfMemo::of(memo, &order), &order)
         .remove(&own_candidate(readout))
         .expect("a sketch readout");
-    if !required.queries_without_per_value_failure_probability.is_empty() {
+    if !required
+        .queries_without_per_value_failure_probability
+        .is_empty()
+    {
         assert_eq!(required.levels, vec![], "a listed query gives no level");
         return None;
     }
@@ -429,7 +432,11 @@ fn a_grouped_sum_per_value_splits_over_every_readout_value_when_group_sizes_are_
     let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
     let sum = group(
         &mut memo,
-        aggregate(Reduction::by(vec![0]), AggIntent::Sum { col: None }, readout),
+        aggregate(
+            Reduction::by(vec![0]),
+            AggIntent::Sum { col: None },
+            readout,
+        ),
     );
     with_query(
         &mut memo,
@@ -448,7 +455,11 @@ fn a_grouped_sum_over_its_whole_result_splits_over_every_readout_value() {
     let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
     let sum = group(
         &mut memo,
-        aggregate(Reduction::by(vec![0]), AggIntent::Sum { col: None }, readout),
+        aggregate(
+            Reduction::by(vec![0]),
+            AggIntent::Sum { col: None },
+            readout,
+        ),
     );
     with_query(
         &mut memo,
@@ -488,7 +499,11 @@ fn nested_reductions_split_over_every_readout_value_below_them() {
     let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
     let sum = group(
         &mut memo,
-        aggregate(Reduction::by(vec![0]), AggIntent::Sum { col: None }, readout),
+        aggregate(
+            Reduction::by(vec![0]),
+            AggIntent::Sum { col: None },
+            readout,
+        ),
     );
     let max = group(
         &mut memo,
