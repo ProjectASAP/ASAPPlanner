@@ -1,3 +1,9 @@
+//! Test-only oracle: the group table as it was before group ids stopped
+//! hashing every row, verbatim apart from the type's name. The rewrite in
+//! the parent module must give the same ids, order, labels and errors.
+//!
+//! The original module documentation follows.
+//!
 //! Group ids for grouped operators: each row's group as a `u32`, assigned
 //! across all batches of one operator run.
 //!
@@ -66,7 +72,7 @@ impl ColumnParts {
 }
 
 /// Group numbers for the rows of one grouped operator's input.
-pub(crate) struct GroupTable {
+pub(crate) struct ReferenceGroupTable {
     /// The input's group columns.
     group_columns: Vec<usize>,
     /// Per group column, its distinct values.
@@ -128,7 +134,7 @@ fn value_at(batch: &Batch, column: usize, row: usize) -> Value {
     .remove(0)
 }
 
-impl GroupTable {
+impl ReferenceGroupTable {
     /// A table over the input's `group_columns`; with none, every row is in
     /// one group.
     pub(crate) fn new(group_columns: Vec<usize>) -> Self {
@@ -456,141 +462,5 @@ impl GroupTable {
                 arrow_columns::encode(dtype, ColumnDepth::BatchColumn, &values)
             })
             .collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use planner_types::ir::schema::{Field, Schema};
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-
-    // Groups and their order equal the row-at-a-time grouping: a `BTreeMap`
-    // keyed by each row's `Value::key`s, which merges zero signs and NaN
-    // payloads and keeps NULL as a group; across batches with different
-    // dictionaries too.
-    #[test]
-    fn groups_equal_value_key_grouping_across_batches() {
-        let field = |name: &str, dtype| Field {
-            name: name.into(),
-            dtype: FieldDataType::Plain(dtype),
-            nullable: true,
-        };
-        let schema = Arc::new(Schema {
-            fields: vec![
-                field("text", DataType::Utf8),
-                field("float", DataType::Float64),
-                field("int", DataType::Int64),
-                field("flag", DataType::Bool),
-                field("time", DataType::Timestamp),
-                field("date", DataType::Date),
-            ],
-            time_index: None,
-            unique_keys: vec![],
-            closed: false,
-        });
-        let texts = ["b", "a", "", "a"];
-        let floats = [0.0, -0.0, f64::NAN, -f64::NAN, 1.5];
-        let mut seed = 3u64;
-        let mut next = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            (seed >> 33) as usize
-        };
-        let batches = (0..3)
-            .map(|_| {
-                let rows = (0..200)
-                    .map(|_| {
-                        let maybe =
-                            |n: usize, v: Value| if n.is_multiple_of(7) { Value::Null } else { v };
-                        vec![
-                            maybe(next(), Value::Utf8(texts[next() % 4].into())),
-                            maybe(next(), Value::Float64(floats[next() % 5])),
-                            maybe(next(), Value::Int64((next() % 3) as i64 - 1)),
-                            maybe(next(), Value::Bool(next().is_multiple_of(2))),
-                            Value::Timestamp((next() % 2) as i64),
-                            maybe(next(), Value::Date((next() % 2) as i32)),
-                        ]
-                    })
-                    .collect();
-                Batch::try_new(schema.clone(), rows).unwrap()
-            })
-            .collect::<Vec<_>>();
-        for columns in [vec![], vec![0], vec![1], vec![0, 1, 2, 3, 4, 5], vec![5, 3]] {
-            let mut table = GroupTable::new(columns.clone());
-            let mut reference: BTreeMap<Vec<Vec<u8>>, Vec<usize>> = BTreeMap::new();
-            let mut ids = Vec::new();
-            let mut row_number = 0;
-            for batch in &batches {
-                ids.extend(table.group_ids(batch).unwrap());
-                for row in &batch.to_rows() {
-                    let key = columns.iter().map(|&c| row[c].key().unwrap()).collect();
-                    reference.entry(key).or_default().push(row_number);
-                    row_number += 1;
-                }
-            }
-            assert_eq!(table.len(), reference.len(), "{columns:?}");
-            let order = table.groups_in_key_order();
-            for (group, rows) in order.iter().zip(reference.values()) {
-                assert!(rows.iter().all(|&row| ids[row] == *group), "{columns:?}");
-            }
-        }
-    }
-
-    // A group's labels are its own first row's values, as the row operators
-    // kept them: with two group columns, the group (0.0, "a") seen after
-    // (-0.0, "b") is labelled 0.0, not the -0.0 its float part was first
-    // seen with.
-    #[test]
-    fn each_group_keeps_its_own_first_values() {
-        let field = |name: &str, dtype| Field {
-            name: name.into(),
-            dtype: FieldDataType::Plain(dtype),
-            nullable: false,
-        };
-        let schema = Arc::new(Schema {
-            fields: vec![
-                field("float", DataType::Float64),
-                field("text", DataType::Utf8),
-            ],
-            time_index: None,
-            unique_keys: vec![],
-            closed: false,
-        });
-        let row = |f: f64, t: &str| vec![Value::Float64(f), Value::Utf8(t.into())];
-        let batch = Batch::try_new(
-            schema.clone(),
-            vec![
-                row(-0.0, "b"),
-                row(0.0, "a"),
-                row(0.0, "b"),
-                row(-f64::NAN, "a"),
-            ],
-        )
-        .unwrap();
-        for columns in [vec![0, 1], vec![0]] {
-            let mut table = GroupTable::new(columns.clone());
-            table.group_ids(&batch).unwrap();
-            let groups = (0..table.len() as u32).collect::<Vec<_>>();
-            let labels = table.label_arrays(&schema, &groups).unwrap();
-            let floats = labels[0]
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .values()
-                .iter()
-                .map(|v| v.to_bits())
-                .collect::<Vec<_>>();
-            let expected: &[f64] = if columns.len() == 2 {
-                &[-0.0, 0.0, -f64::NAN]
-            } else {
-                &[-0.0, -f64::NAN]
-            };
-            assert_eq!(
-                floats,
-                expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                "{columns:?}"
-            );
-        }
     }
 }
