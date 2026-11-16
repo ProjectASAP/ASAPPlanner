@@ -783,8 +783,11 @@ pub fn node_resource_usage_and_cost<'a>(
                 // The values its distinct counts and frequency statistics
                 // read: the most any one's columns take together, as
                 // declared for source columns passed on unchanged, else
-                // every row's differs; at most each group's bound on
-                // distinct items, and the rows read.
+                // every row's differs; at most the sources' bound on the
+                // items any one distinct count over their rows counts
+                // (the ungrouped count over every row meets it too, so
+                // it bounds the values of all groups together), and the
+                // rows read.
                 let declared_together = |cols: &[usize]| -> Option<u64> {
                     let unchanged = &producers.first()?.unchanged_columns;
                     cols.iter().try_fold(1_u64, |product, &col| {
@@ -815,7 +818,7 @@ pub fn node_resource_usage_and_cost<'a>(
                     })
                     .max()
                     .into_iter()
-                    .chain(distinct_items_per_group().map(|per| per.saturating_mul(group_count)))
+                    .chain(distinct_items_per_group())
                     .chain([input.rows])
                     .min()
                     .unwrap_or(input.rows);
