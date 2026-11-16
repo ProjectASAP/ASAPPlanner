@@ -77,55 +77,67 @@ unknown (generic HLL) serves no query with an accuracy target
 (`RootPruneReason::NoGuarantee`), and a top-k readout is admitted on its
 heap size and its value guarantee alone (the contracts table).
 
-Pass 2 gives each sketch readout the error and per-value failure
-probability `δ / min(R, V · fan_in)` it must meet
+Pass 2 gives each sketch readout the error and per-value failure probability
+`δ / min(R, V · fan_in)` it must meet
 (`AccuracyTarget::failure_probability_per_readout_value`): the statement
-fails only when a readout value one of its `V` covered output values
-depends on does. `R` is the readout values the query reads per evaluation
-(the values per evaluation of every readout group below it, summed: the
-series their scans read, for readouts keyed by the sources' labels), and `fan_in` the most readout values one output
-value depends on: 1 when no reduction lies above the readout, the
-reduction's input values under one (all of `R` for a global `max`; for
-`sum by (job)` too, since the declared facts bound how many jobs there are,
-not how many series one job holds), the sum over the sides of a binary
-operator, the larger side of `or` or input of a concatenation. A top-k
-readout chooses its output keys by their estimates, so each of its output
-values depends on every value it ranks. A readout group whose candidates
-include a reduction over readouts below it takes the larger of the two
-counts. Both counts are per evaluation, not per subquery step. An unknown
-term drops out of the `min`; with both unknown no per-value failure
-probability follows. At δ = 0.01, `quantile_over_time(0.99, m[5m])` over 8
-series per value keeps 0.01 (min(8, 1 · 1)), and over its whole result
-gets 0.01 / 8; a `max` over 1000 readouts returns one value yet fails when
-any readout does, so it gets 0.01 / 1000 in any scope; and
-`max by (job) (q or r)` splits over the readouts of both sides. Pass 1's
-candidate takes the first requirement level and Pass 2 adds a copy per
-further level. A readout several queries reach gets the union of their
-levels, less each level the listed builds that meet it are exactly those
-that meet a stricter one: DDSketch's relative error does not depend on δ,
-so of (5%, 0.01) and (5%, 1e-4) only the second is kept. Pass 2 sizes
-nothing: a state has one build per listed θ, and each edge checks the
-guarantee of its producer's θ at the required failure probability, so a
-build several readers share serves the readers whose levels its θ meets.
-Stage 3 only checks the guarantee; it never resizes. At equal δ, the scope
-covering the most values is the strictest: every group (`G`, when `G` is
-above 100), then a 1% share (100), then a 5% share (20), then a single
-value (1). A whole-result target with an unbound `G` splits over `R`, which
-bounds every readout value read only when each readout is keyed by the
-sources' labels or columns: grouped by a computed key or a time, one value
-per bucket of `GROUP BY date_trunc('minute', ts)` is about 16 values over the
-last 15 minutes however few groups of rows the table declares, so `R` is
-unbound there. With both unbound the target stays unmet. A grouped result's `G` is bound by
+fails only when a readout value one of its `V` covered output values depends
+on does. `R` is the readout values the query reads per evaluation (the
+values per evaluation of every readout group below it, summed), and `fan_in`
+the most readout values one output value depends on: 1 when no reduction
+lies above the readout, the reduction's input values under one (all of `R`
+for a global `max`; for `sum by (job)` too, since the declared facts bound
+how many jobs there are, not how many series one job holds), the sum over
+the sides of a binary operator, the larger side of `or` or input of a
+concatenation. A top-k readout chooses its output keys by their estimates,
+so each of its output values depends on every value it ranks. A readout
+group whose candidates include a reduction over readouts below it takes the
+larger of the two counts. Both counts are per evaluation, not per subquery
+step. An unknown term drops out of the `min`; with both unknown no per-value
+failure probability follows. At δ = 0.01, `quantile_over_time(0.99, m[5m])`
+over 8 series per value keeps 0.01 (min(8, 1 · 1)), and over its whole
+result gets 0.01 / 8; a `max` over 1000 readouts returns one value yet fails
+when any readout does, so it gets 0.01 / 1000 in any scope; and `max by
+(job) (q or r)` splits over the readouts of both sides. Pass 1's candidate
+takes the first requirement level and Pass 2 adds a copy per further level.
+A readout several queries reach gets the union of their levels, less each
+level the listed builds that meet it are exactly those that meet a stricter
+one: DDSketch's relative error does not depend on δ, so of (5%, 0.01) and
+(5%, 1e-4) only the second is kept. Pass 2 sizes nothing: a state has one
+build per listed θ, and each edge checks the guarantee of its producer's θ
+at the required failure probability, so a build several readers share serves
+the readers whose levels its θ meets. Stage 3 only checks the guarantee; it
+never resizes. At equal δ, the scope covering the most values is the
+strictest: every group (`G`, when `G` is above 100), then a 1% share (100),
+then a 5% share (20), then a single value (1). A whole-result target with an
+unbound `G` splits over `R`, so `R` must be an upper bound. A readout
+group's values are bounded as SQL optimizers estimate the groups of a `GROUP
+BY` (the product of the key columns' distinct counts, clamped to the input
+rows), but from declared facts only: by the smaller of the product, over the
+scans its keys come from, of the distinct combinations each scan's source
+declares for them (at most its series for a PromQL source; 1 without keys),
+and the rows its input reads per evaluation (each source's `series_count`
+times the samples its window holds at its `sample_interval`, or its
+`rows_held`), since there are never more groups than input rows. A key with
+no declared count bounds nothing by itself: a SQL measure key (`GROUP BY
+bytes`), a computed key or a time. The groups of rows a SQL table declares
+do not say which columns form them, so they bound no key; `GROUP BY bytes`
+over the last 15 minutes of 6 groups of rows sampled every minute reads at
+most 6 x 16 = 96 rows, so `R` = 96, and without a sampling interval or
+`rows_held` `R` is unbound. Keys from different scans multiply, since a join
+pairs their values: `flows JOIN hosts ... GROUP BY f.src, h.region` with 6
+`src` and 6 `region` values declared returns up to 36 values, not 6 + 6.
+With both unbound the target stays unmet. A grouped result's `G` is bound by
 the distinct values its sources declare for its group keys
 (`SourceFacts.distinct_values_per_label`, and
 `distinct_values_per_label_set` for labels that depend on each other): the
-smallest product of declared label and label-set counts covering the keys, at
-most the series read. With each of 625 endpoints in one of 25 services and
-`(service, endpoint)` declared at 625, `by (service, endpoint)` returns at
-most 625 values, not 25 x 625. A key counts only when it is a source column passed through
-unchanged; a relabeled or computed key leaves `G` unbound. So a sketch meets a whole-result target over SQL groups when
-every grouping column's distinct values are declared, and over 25 services
-and 25 endpoints requires each group's sketch to meet `δ / 625`. Nothing declared
+smallest product of declared label and label-set counts covering the keys,
+at most the series read. With each of 625 endpoints in one of 25 services
+and `(service, endpoint)` declared at 625, `by (service, endpoint)` returns
+at most 625 values, not 25 x 625. A key counts only when it is a source
+column passed through unchanged; a relabeled or computed key leaves `G`
+unbound. So a sketch meets a whole-result target over SQL groups when every
+grouping column's distinct values are declared, and over 25 services and 25
+endpoints requires each group's sketch to meet `δ / 625`. Nothing declared
 leaves `G` unbound; no default stands in for it.
 
 An `AccuracyGuarantee` contains an error metric, an error bound and a
@@ -295,17 +307,17 @@ the readout to the query root, and capped by the validity caps on the way: the
 largest error the readout's output may have for that query.
 
 - A query whose path reads one readout gives one requirement level: the
-  target divided by the path's factor, at the target's failure probability per
-  value: δ split over `min(R, V · fan_in)`, the readout values the output
-  values the scope covers depend on (`R` summed over every readout group
-  below it, `Memo::max_values_per_evaluation` each: at most the series
-  scanned below it, the declared distinct values of its state's keys, one
-  without keys, when the keys are the sources' labels or columns; unbound
-  for a computed key or a time), since a reduction such as `max` fails when any readout it
-  reads does. `SELECT count(DISTINCT dst) FROM flows` at δ = 0.01 reads
-  one distinct count, so its readout keeps 0.01. `max by (job) (q or r)`
-  with 3 series per side reads 6 readout values, and one job's value may
-  depend on all, so each gets δ / 6; a bare `q or r` copies each output
+  target divided by the path's factor, at the target's failure probability
+  per value: δ split over `min(R, V · fan_in)`, the readout values the
+  output values the scope covers depend on (`R` summed over every readout
+  group below it, `Memo::max_values_per_evaluation` each: the product of the
+  distinct values its keys' scans declare for them, at most the series for
+  PromQL labels and one without keys, clamped to the rows its input reads;
+  unbound when neither is known), since a reduction such as `max` fails when
+  any readout it reads does. `SELECT count(DISTINCT dst) FROM flows` at δ =
+  0.01 reads one distinct count, so its readout keeps 0.01. `max by (job) (q
+  or r)` with 3 series per side reads 6 readout values, and one job's value
+  may depend on all, so each gets δ / 6; a bare `q or r` copies each output
   value from one readout value, so per value it keeps δ and over a whole
   result of `n_q` values gets δ / `n_q`.
 - A composed query (several readouts whose errors reach its output, `β > 0`,
