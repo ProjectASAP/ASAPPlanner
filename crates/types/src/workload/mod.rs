@@ -11,7 +11,7 @@ mod query;
 pub(crate) use data::series_facts;
 pub use data::{
     DataArrival, DataWorkload, LabelSetDistinctValues, PrometheusMetricType, Rate, SourceFacts,
-    StreamNorms, ONE_SECOND_MS,
+    StreamNorms, ValueMagnitudeRange, ONE_SECOND_MS,
 };
 pub use planning::{PlanningWorkload, WorkloadError};
 pub use query::{

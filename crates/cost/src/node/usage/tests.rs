@@ -486,3 +486,252 @@ fn a_view_over_an_ingestion_time_chain_keeps_one_output_per_chain_window() {
     .unwrap();
     assert_eq!(usage.peak_memory_bytes, 16_000 * 66);
 }
+
+/// The bytes of a DDSketch state at α = 0.01 built over `column` of the
+/// 600 rows `producer` emits from `source`, which passes on
+/// `unchanged_columns` unchanged.
+fn ddsketch_state_bytes(
+    data: &DataWorkload,
+    producer: Payload,
+    source: &str,
+    column: &str,
+    unchanged_columns: BTreeSet<&str>,
+) -> u64 {
+    use asap_types::ir::schema::{DataType, Field};
+    use asap_types::summary_type::SketchAlgorithm;
+    let producer = PhysicalASAPDAGNode {
+        output_schema: Schema::new(vec![
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain(column, DataType::Float64, false),
+        ]),
+        ..node(producer)
+    };
+    let build = PhysicalASAPDAGNode {
+        parameters: Some(SketchParams::DDSketch { alpha: 0.01 }),
+        ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::DDSketch),
+            input: SummaryUpdate::column(ColumnRef::Named(column.to_string())),
+            reduction: Reduction::Reduce(GroupKeys::default()),
+            filter: None,
+        }))
+    };
+    let producer_output = ProducerOutput {
+        payload: &producer.payload,
+        output_schema: &producer.output_schema,
+        output: EdgeStatistics {
+            rows: 600,
+            bytes: 9_600,
+        },
+        sources: BTreeSet::from([source]),
+        family: StateFamily::None,
+        unchanged_columns,
+        tumbling_windows: 1,
+        chain_tumbling_window_width_ms: None,
+    };
+    let settings = CostInputs::default();
+    node_resource_usage_and_cost(&build, &[producer_output], (1, 1.0), None, data, &settings)
+        .unwrap()
+        .output
+        .bytes
+}
+
+/// The bytes `sketch_shape` gives a DDSketch state at α = 0.01 over 600
+/// rows of the given sign and magnitude range.
+fn ddsketch_costed_bytes(
+    non_negative: bool,
+    value_magnitude_range: Option<asap_types::workload::ValueMagnitudeRange>,
+) -> u64 {
+    use crate::node::state_bytes::{sketch_shape, StateInputRows};
+    sketch_shape(
+        &SketchParams::DDSketch { alpha: 0.01 },
+        StateInputRows {
+            rows_per_state: Some(600),
+            non_negative,
+            value_magnitude_range,
+        },
+    )
+    .1
+}
+
+/// A scan of PromQL metric `metric`.
+fn metric_scan(metric: &str) -> Payload {
+    Payload::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries {
+            metric: metric.into(),
+        },
+        predicates: vec![],
+        schema: Schema::default(),
+    })
+}
+
+/// A data workload whose one source `source` declares `facts`.
+fn declaring(source: &str, facts: asap_types::workload::SourceFacts) -> DataWorkload {
+    DataWorkload {
+        sources: BTreeMap::from([(source.to_string(), facts)]),
+        ..DataWorkload::default()
+    }
+}
+
+/// A DDSketch built over a scan's `value` is costed at the bins its
+/// source's declared `column_magnitudes` span: 807 at α = 0.01 for
+/// [0.001, 10000], against 1,037 for the assumed [1, 1e9]. Undeclared, or
+/// a column its producer does not pass on unchanged, keeps the assumed
+/// range.
+#[test]
+fn a_ddsketch_over_a_scan_is_costed_at_its_declared_value_magnitude_range() {
+    use asap_types::workload::{SourceFacts, ValueMagnitudeRange};
+    let latency = ValueMagnitudeRange {
+        min_abs: 0.001,
+        max_abs: 10_000.0,
+    };
+    let data = |range: Option<ValueMagnitudeRange>| {
+        declaring(
+            "latency",
+            SourceFacts {
+                column_magnitudes: range
+                    .map(|range| ("value".to_string(), range))
+                    .into_iter()
+                    .collect(),
+                ..SourceFacts::default()
+            },
+        )
+    };
+    let state_bytes = |data: &DataWorkload, unchanged_columns| {
+        ddsketch_state_bytes(
+            data,
+            metric_scan("latency"),
+            "latency",
+            "value",
+            unchanged_columns,
+        )
+    };
+    let unchanged = || BTreeSet::from(["ts", "value"]);
+    assert_eq!(
+        state_bytes(&data(Some(latency)), unchanged()),
+        ddsketch_costed_bytes(false, Some(latency))
+    );
+    assert_eq!(
+        state_bytes(&data(None), unchanged()),
+        ddsketch_costed_bytes(false, None)
+    );
+    assert_eq!(
+        state_bytes(&data(Some(latency)), BTreeSet::from(["ts"])),
+        ddsketch_costed_bytes(false, None)
+    );
+    assert!(ddsketch_costed_bytes(false, Some(latency)) < ddsketch_costed_bytes(false, None));
+}
+
+/// A DDSketch over a SQL table's `latency` column that the table declares
+/// non-negative keeps one store: the sign is read for the folded column,
+/// not for a PromQL `value`. Undeclared, it keeps both stores.
+#[test]
+fn a_ddsketch_over_a_sql_column_declared_non_negative_keeps_one_store() {
+    use asap_types::stages::ValueSign;
+    use asap_types::workload::SourceFacts;
+    let table_scan = || {
+        Payload::NonASAP(NonASAPOp::Scan {
+            source: Source::Table {
+                table_ref: "requests".into(),
+            },
+            predicates: vec![],
+            schema: Schema::default(),
+        })
+    };
+    let declared = declaring(
+        "requests",
+        SourceFacts {
+            column_signs: BTreeMap::from([("latency".to_string(), ValueSign::NonNegative)]),
+            ..SourceFacts::default()
+        },
+    );
+    let state_bytes = |data: &DataWorkload| {
+        ddsketch_state_bytes(
+            data,
+            table_scan(),
+            "requests",
+            "latency",
+            BTreeSet::from(["ts", "latency"]),
+        )
+    };
+    assert_eq!(state_bytes(&declared), ddsketch_costed_bytes(true, None));
+    assert_eq!(
+        state_bytes(&DataWorkload::default()),
+        ddsketch_costed_bytes(false, None)
+    );
+    assert!(ddsketch_costed_bytes(true, None) < ddsketch_costed_bytes(false, None));
+}
+
+/// A DDSketch over a filter on a scan of a source declared non-negative
+/// keeps one store: the filter passes `value` on unchanged. A producer
+/// that computes `value` (not among its unchanged columns) keeps both.
+#[test]
+fn a_ddsketch_over_a_filter_on_a_non_negative_scan_keeps_one_store() {
+    use asap_types::ir::scalar::{Predicate, ScalarExpr, ScalarValue};
+    use asap_types::stages::ValueSign;
+    use asap_types::workload::SourceFacts;
+    let filter = || {
+        Payload::NonASAP(NonASAPOp::Filter {
+            pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
+            child: 0,
+        })
+    };
+    let data = declaring(
+        "latency",
+        SourceFacts {
+            column_signs: BTreeMap::from([("value".to_string(), ValueSign::NonNegative)]),
+            ..SourceFacts::default()
+        },
+    );
+    let state_bytes = |unchanged_columns| {
+        ddsketch_state_bytes(&data, filter(), "latency", "value", unchanged_columns)
+    };
+    assert_eq!(
+        state_bytes(BTreeSet::from(["ts", "value"])),
+        ddsketch_costed_bytes(true, None)
+    );
+    assert_eq!(
+        state_bytes(BTreeSet::from(["ts"])),
+        ddsketch_costed_bytes(false, None)
+    );
+}
+
+/// A counter's `value` is non-negative unless the source declares another
+/// sign for it: a counter `requests_total` declaring `{"value": "unknown"}`
+/// keeps both stores, the sign the memo gives its `Scan` too. Without the
+/// declaration it keeps one store.
+#[test]
+fn a_ddsketch_over_a_counter_declaring_its_value_unknown_keeps_both_stores() {
+    use asap_types::stages::ValueSign;
+    use asap_types::workload::{PrometheusMetricType, SourceFacts};
+    let counter = |column_signs| {
+        declaring(
+            "requests_total",
+            SourceFacts {
+                metric_type: Some(PrometheusMetricType::Counter),
+                column_signs,
+                ..SourceFacts::default()
+            },
+        )
+    };
+    let state_bytes = |data: &DataWorkload| {
+        ddsketch_state_bytes(
+            data,
+            metric_scan("requests_total"),
+            "requests_total",
+            "value",
+            BTreeSet::from(["ts", "value"]),
+        )
+    };
+    assert_eq!(
+        state_bytes(&counter(BTreeMap::from([(
+            "value".to_string(),
+            ValueSign::Unknown
+        )]))),
+        ddsketch_costed_bytes(false, None)
+    );
+    assert_eq!(
+        state_bytes(&counter(BTreeMap::new())),
+        ddsketch_costed_bytes(true, None)
+    );
+}

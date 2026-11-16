@@ -11,8 +11,9 @@ use crate::ir::{
     ASAPOp, NonASAPOp, Operator, OperatorNode, OperatorResultKind, QueryRoot, ScalarExpr,
 };
 use crate::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
+use crate::stages::ValueSign;
 use crate::summary_type::SketchStatistic;
-use crate::workload::{DataWorkload, PrometheusMetricType};
+use crate::workload::{DataWorkload, PrometheusMetricType, SourceFacts, ValueMagnitudeRange};
 
 /// A scan source's name: its PromQL metric or SQL table.
 pub fn source_name(source: &Source) -> &str {
@@ -405,23 +406,72 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
     }
 }
 
-/// Whether `data` declares every sample of `metric` non-negative: the
-/// metric is declared a counter, or its `value` column is declared
-/// non-negative ([`SourceFacts::column_signs`](crate::workload::SourceFacts::column_signs)).
-pub fn declared_non_negative(data: &DataWorkload, metric: &str) -> bool {
-    declared_counter(data, metric)
-        || data.series_facts(metric).is_some_and(|(facts, _)| {
-            facts.column_signs.get("value") == Some(&crate::stages::ValueSign::NonNegative)
-        })
+/// The sign `data` declares for `source`'s `column`: its
+/// [`SourceFacts::column_signs`] entry (a histogram or summary family's
+/// applies to its series, [`DataWorkload::series_facts`]), else
+/// `NonNegative` for a counter's `value`, else `Unknown`. The memo signs a
+/// `Scan`'s columns by this rule, and DDSketch costing reads it. E.g. a
+/// counter `requests_total` gives `NonNegative` for `value`, or `Unknown`
+/// when it declares `{"value": "unknown"}`; a SQL table declaring
+/// `{"latency": "non_negative"}` gives `NonNegative` for `latency`.
+pub fn declared_sign(data: &DataWorkload, source: &str, column: &str) -> ValueSign {
+    declared_column_sign(data.series_facts(source), column)
 }
 
-/// Whether `data` declares `metric` a counter, itself or as the `_sum` or
-/// `_count` series of a declared histogram or summary
-/// ([`DataWorkload::series_facts`]). A declared type does not expire, so its
-/// evidence is not checked.
-fn declared_counter(data: &DataWorkload, metric: &str) -> bool {
-    data.series_facts(metric)
-        .is_some_and(|(_, series_type)| series_type == Some(PrometheusMetricType::Counter))
+/// [`declared_sign`] from the facts and series type
+/// [`DataWorkload::series_facts`] finds for the source, for a caller that
+/// holds only the sources: `Unknown` when there are none.
+pub(crate) fn declared_column_sign(
+    series_facts: Option<(&SourceFacts, Option<PrometheusMetricType>)>,
+    column: &str,
+) -> ValueSign {
+    let Some((facts, series_type)) = series_facts else {
+        return ValueSign::Unknown;
+    };
+    match facts.column_signs.get(column) {
+        Some(&declared) => declared,
+        None if column == "value" && series_type == Some(PrometheusMetricType::Counter) => {
+            ValueSign::NonNegative
+        }
+        None => ValueSign::Unknown,
+    }
+}
+
+/// Whether `data` declares every value of `source`'s `column` non-negative
+/// ([`declared_sign`]).
+pub fn declared_non_negative(data: &DataWorkload, source: &str, column: &str) -> bool {
+    declared_sign(data, source, column) == ValueSign::NonNegative
+}
+
+/// The range of magnitudes of `column`'s non-zero values over every source
+/// in `sources`, from each one's own declared `column_magnitudes`
+/// ([`SourceFacts::column_magnitudes`](crate::workload::SourceFacts::column_magnitudes)):
+/// the smallest `min_abs` and the largest `max_abs` among them. Each series
+/// is read under its own name, so a histogram family `foo`'s range does not
+/// bound `foo_sum`, `foo_count` or `foo_bucket`. `None` when `sources` is
+/// empty or some source declares none for `column`. E.g. sources declaring
+/// `[0.001, 10]` and `[0.01, 100]` give `[0.001, 100]`.
+pub fn declared_value_magnitude_range<'a>(
+    data: &DataWorkload,
+    sources: impl IntoIterator<Item = &'a str>,
+    column: &str,
+) -> Option<ValueMagnitudeRange> {
+    let declared = |source: &str| {
+        data.sources
+            .get(source)?
+            .column_magnitudes
+            .get(column)
+            .copied()
+    };
+    let mut sources = sources.into_iter();
+    let first = declared(sources.next()?)?;
+    sources.try_fold(first, |union, source| {
+        let range = declared(source)?;
+        Some(ValueMagnitudeRange {
+            min_abs: union.min_abs.min(range.min_abs),
+            max_abs: union.max_abs.max(range.max_abs),
+        })
+    })
 }
 
 /// Rows per millisecond the sources in `sources` receive together, each
@@ -678,6 +728,84 @@ pub fn declared_series(sources: &BTreeSet<&str>, data: &DataWorkload) -> Option<
 mod tests {
     use super::*;
     use crate::workload::{DataArrival, DurationMs, SourceFacts};
+
+    /// The magnitudes over several sources span all of theirs, and are
+    /// unknown when any of them declares none for the column.
+    #[test]
+    fn declared_value_magnitude_ranges_are_the_union_over_the_sources() {
+        let facts = |min_abs, max_abs| SourceFacts {
+            column_magnitudes: BTreeMap::from([(
+                "value".to_string(),
+                ValueMagnitudeRange { min_abs, max_abs },
+            )]),
+            ..SourceFacts::default()
+        };
+        let data = DataWorkload {
+            sources: BTreeMap::from([
+                ("a".to_string(), facts(0.001, 10.0)),
+                ("b".to_string(), facts(0.01, 100.0)),
+                ("c".to_string(), SourceFacts::default()),
+            ]),
+            ..DataWorkload::default()
+        };
+        let magnitude = |sources: &[&str], column| {
+            declared_value_magnitude_range(&data, sources.iter().copied(), column)
+        };
+        assert_eq!(
+            magnitude(&["a", "b"], "value"),
+            Some(ValueMagnitudeRange {
+                min_abs: 0.001,
+                max_abs: 100.0
+            })
+        );
+        assert_eq!(magnitude(&["a", "c"], "value"), None);
+        assert_eq!(magnitude(&["a"], "latency"), None);
+        assert_eq!(magnitude(&[], "value"), None);
+    }
+
+    /// A histogram family's declared range bounds its observations, not
+    /// the counts in `foo_count` or the sums in `foo_sum`: each series'
+    /// range is read from its own entry. Here `foo` declares observations
+    /// in [0.001, 10] and `foo_count` its counts in [1, 1e6].
+    #[test]
+    fn a_series_magnitudes_come_from_its_own_entry_not_its_family() {
+        let magnitudes = |min_abs, max_abs| {
+            BTreeMap::from([(
+                "value".to_string(),
+                ValueMagnitudeRange { min_abs, max_abs },
+            )])
+        };
+        let data = DataWorkload {
+            sources: BTreeMap::from([
+                (
+                    "foo".to_string(),
+                    SourceFacts {
+                        metric_type: Some(PrometheusMetricType::Histogram),
+                        column_magnitudes: magnitudes(0.001, 10.0),
+                        ..SourceFacts::default()
+                    },
+                ),
+                (
+                    "foo_count".to_string(),
+                    SourceFacts {
+                        column_magnitudes: magnitudes(1.0, 1e6),
+                        ..SourceFacts::default()
+                    },
+                ),
+            ]),
+            ..DataWorkload::default()
+        };
+        let magnitude = |source| declared_value_magnitude_range(&data, [source], "value");
+        assert_eq!(
+            magnitude("foo_count"),
+            Some(ValueMagnitudeRange {
+                min_abs: 1.0,
+                max_abs: 1e6
+            })
+        );
+        assert_eq!(magnitude("foo_sum"), None);
+        assert_eq!(magnitude("foo_bucket"), None);
+    }
 
     /// A source's rows per ms: its series over its sample interval when it
     /// declares both, else its series share of the workload's rate.

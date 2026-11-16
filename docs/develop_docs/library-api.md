@@ -306,7 +306,10 @@ query's window comes from its text (range and offset). These facts are separate:
 `DataWorkload` holds `arrival` (`DataArrival`: `AtRest`, `Ingesting` or
 `Mixed` with `rows_per_second`, or `Unknown`) and `sources`, a map from
 PromQL metric or SQL table name to `SourceFacts`: `series_count`,
-`metric_type`, `column_signs`, `sample_interval` (PromQL and
+`metric_type`, `column_signs`, `column_magnitudes` (bounds on each
+column's non-zero value magnitudes, `{"value": {"min_abs": 0.001,
+"max_abs": 10000.0}}`, read per series name, which cost a DDSketch state
+at the bins that range spans instead of nine decades), `sample_interval` (PromQL and
 MetricsQL), `stream_norms`, `max_distinct_per_evaluation` and
 `distinct_values_per_label` (distinct values per label or column, which
 plan selection prices a `by (...)` grouping's groups at: the product of its

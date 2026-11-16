@@ -35,16 +35,17 @@ use crate::{
 };
 use asap_types::ir::operator::{GroupKeys, Reduction, Source};
 use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::scalar::resolve_column_ref;
 use asap_types::ir::schema::{FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
 use asap_types::stages::{Lifetime, StorageMedium};
-use asap_types::summary_type::{SketchParams, SketchStatistic};
+use asap_types::summary_type::{SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate};
 use asap_types::workload::bounds::{
-    declared_non_negative, declared_series, group_count_bound, source_name, source_rows_per_ms,
-    unchanged_source_columns,
+    declared_non_negative, declared_series, declared_value_magnitude_range, group_count_bound,
+    source_name, source_rows_per_ms, unchanged_source_columns,
 };
 use asap_types::workload::{DataWorkload, ONE_SECOND_MS};
 
@@ -180,6 +181,22 @@ pub struct ProducerOutput<'a> {
     /// `Filter`, `Project`), so a `TimeRange` over them selects windows;
     /// `None` for any other node.
     pub chain_tumbling_window_width_ms: Option<u64>,
+}
+
+impl ProducerOutput<'_> {
+    /// The source column `weight` reads, when this producer passes that
+    /// column on unchanged from the sources: the column whose values a
+    /// summary built over this producer folds. E.g. `value` for a DDSketch
+    /// over a scan of `latency` or over a filter on that scan; `None` for a
+    /// computed weight such as a rate.
+    pub(crate) fn unchanged_column(&self, weight: &SummaryInputExpr) -> Option<&str> {
+        let SummaryInputExpr::Column(column) = weight else {
+            return None;
+        };
+        let index = resolve_column_ref(column, self.output_schema).ok()?;
+        let name = self.output_schema.fields.get(index)?.name.as_str();
+        self.unchanged_columns.contains(name).then_some(name)
+    }
 }
 
 /// What one node uses and outputs ([`node_resource_usage_and_cost`]): its
@@ -481,18 +498,22 @@ pub fn node_resource_usage_and_cost<'a>(
                 .ok_or(AnalyticalCostError::Overflow)?,
         })
     };
-    // Whether a summary built here sees raw data samples (its producer a
-    // scan or a time range) of sources all declared non-negative.
-    let raw_data_samples_non_negative = || {
-        let raw = producers.first().is_some_and(|producer| {
-            matches!(
-                producer.payload,
-                Payload::NonASAP(NonASAPOp::Scan { .. } | NonASAPOp::TimeRange { .. })
-            )
-        });
-        raw && sources
-            .iter()
-            .all(|source| declared_non_negative(data, source))
+    // What the sources declare about the values a summary built here folds:
+    // whether every one is non-negative, and their magnitude range, both
+    // from the one source column it folds
+    // (`ProducerOutput::unchanged_column`).
+    let folded_values = |update: &SummaryUpdate| {
+        producers
+            .first()
+            .and_then(|producer| producer.unchanged_column(&update.weight))
+            .map_or((false, None), |column| {
+                let non_negative = !sources.is_empty()
+                    && sources
+                        .iter()
+                        .all(|source| declared_non_negative(data, source, column));
+                let range = declared_value_magnitude_range(data, sources.iter().copied(), column);
+                (non_negative, range)
+            })
     };
     let unary = |output| UnaryEdgeStatistics {
         input,
@@ -807,6 +828,7 @@ pub fn node_resource_usage_and_cost<'a>(
         },
         Payload::ASAP(ASAPOp::SummaryAgg {
             summary_type: family,
+            input: update,
             reduction,
             ..
         }) => {
@@ -814,9 +836,11 @@ pub fn node_resource_usage_and_cost<'a>(
             // At query time, each state sees its group's input rows; at
             // ingestion time, the rows of a window one second of
             // arriving rows does not bound.
+            let (non_negative, value_magnitude_range) = folded_values(update);
             let input_rows = StateInputRows {
                 rows_per_state: (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
-                non_negative: raw_data_samples_non_negative(),
+                non_negative,
+                value_magnitude_range,
             };
             let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
@@ -842,6 +866,7 @@ pub fn node_resource_usage_and_cost<'a>(
         }
         Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
             summary_type: family,
+            input: update,
             reduction,
             tumbling_window_width_ms,
             ..
@@ -859,9 +884,11 @@ pub fn node_resource_usage_and_cost<'a>(
                 .map_err(|_| AnalyticalCostError::Overflow)?,
                 false => input.rows.div_ceil(retained_output_count),
             };
+            let (non_negative, value_magnitude_range) = folded_values(update);
             let input_rows = StateInputRows {
                 rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
-                non_negative: raw_data_samples_non_negative(),
+                non_negative,
+                value_magnitude_range,
             };
             let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);

@@ -91,11 +91,11 @@ pub struct DataWorkload {
     /// family name; its `metric_type`, `column_signs` and
     /// `sample_interval` apply to every series of the family
     /// ([`Self::series_facts`]). Counts, norms and bounds (`series_count`,
-    /// `stream_norms`, …) differ per series name (a `foo_bucket` has one
-    /// series per `le`), so they are read from the series' own entry;
-    /// pricing a source's own arrival rate reads its `series_count` and
-    /// `sample_interval` there together. A source without an entry has no
-    /// known facts.
+    /// `stream_norms`, `column_magnitudes`, …) differ per series name (a
+    /// `foo_bucket` has one series per `le`), so they are read from the
+    /// series' own entry; pricing a source's own arrival rate reads its
+    /// `series_count` and `sample_interval` there together. A source
+    /// without an entry has no known facts.
     #[serde(default)]
     pub sources: BTreeMap<String, SourceFacts>,
 }
@@ -120,12 +120,29 @@ pub struct SourceFacts {
     pub metric_type: Option<PrometheusMetricType>,
     /// The declared sign of each column's values, keyed by column name
     /// (default: none declared), e.g. `{"value": "non_negative"}` for a
-    /// latency gauge. A `Scan`'s `column_signs` reads it; an undeclared
-    /// column is `Unknown`, except a PromQL counter's value, which is
-    /// non-negative without a declaration. The deployment must ensure it.
+    /// latency gauge. A `Scan`'s `column_signs` reads it, and so does
+    /// DDSketch costing, which gives a state over a non-negative column one
+    /// store instead of two (both by
+    /// [`declared_sign`](crate::workload::bounds::declared_sign)); an
+    /// undeclared column is `Unknown`, except a PromQL counter's value,
+    /// which is non-negative without a declaration. The deployment must
+    /// ensure it.
     /// Omitted from JSON when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub column_signs: BTreeMap<String, ValueSign>,
+    /// Bounds on the magnitude of each column's non-zero values, keyed by
+    /// column name (default: none declared), e.g. `{"value": {"min_abs":
+    /// 0.001, "max_abs": 10000.0}}` for a latency in seconds. Read per
+    /// series name: a histogram or summary family's range does not apply to
+    /// its `_sum`, `_count` or `_bucket` series. A DDSketch state built from
+    /// the column unchanged is costed at the bins those magnitudes span (the
+    /// bucket indices from ⌊log_γ min_abs⌋ to ⌊log_γ max_abs⌋, at least one)
+    /// instead of an assumed range of nine decades. The deployment must
+    /// ensure it: a range that is too narrow can make Stage 3 pick a finer
+    /// and much larger sketch than the default range would. Omitted from
+    /// JSON when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub column_magnitudes: BTreeMap<String, ValueMagnitudeRange>,
     /// How often each series of the metric (or group of rows of a SQL
     /// table) receives a sample (default: unknown). A PromQL or MetricsQL
     /// bare instant selector over the metric reads the latest sample within it; lowering such a
@@ -194,6 +211,19 @@ pub struct SourceFacts {
     /// arrival rate. Must be positive. Omitted from JSON when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows_held: Option<u64>,
+}
+
+/// Bounds on the magnitude of one column's non-zero values:
+/// `min_abs <= |v| <= max_abs` for every non-zero `v`, with
+/// `0 < min_abs <= max_abs`, both finite. E.g. `{"min_abs": 0.001,
+/// "max_abs": 10000.0}` for latencies from 1 ms to about 3 h in seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValueMagnitudeRange {
+    /// The smallest magnitude of a non-zero value.
+    pub min_abs: f64,
+    /// The largest magnitude of a value.
+    pub max_abs: f64,
 }
 
 /// The distinct combinations of values a set of labels (or columns) of one
@@ -372,6 +402,21 @@ impl DataWorkload {
                     }
                 }
             }
+            for (column, magnitude) in &facts.column_magnitudes {
+                let ValueMagnitudeRange { min_abs, max_abs } = *magnitude;
+                if !(min_abs.is_finite()
+                    && max_abs.is_finite()
+                    && 0.0 < min_abs
+                    && min_abs <= max_abs)
+                {
+                    return Err(WorkloadError::InvalidValueMagnitudeRange {
+                        source_name: source_name.clone(),
+                        column: column.clone(),
+                        min_abs,
+                        max_abs,
+                    });
+                }
+            }
             if facts.max_distinct_per_evaluation == Some(0) {
                 return Err(WorkloadError::ZeroMaxDistinct);
             }
@@ -505,6 +550,46 @@ mod tests {
         };
         assert!(with(1).validate().is_ok());
         assert_eq!(with(0).validate(), Err(WorkloadError::ZeroMaxDistinct));
+    }
+
+    /// A declared value magnitude has `0 < min_abs <= max_abs`, both
+    /// finite; any other is an input error naming the source and column.
+    #[test]
+    fn column_magnitudes_must_be_positive_ordered_and_finite() {
+        let with = |min_abs: f64, max_abs: f64| DataWorkload {
+            sources: BTreeMap::from([(
+                "latency".to_string(),
+                SourceFacts {
+                    column_magnitudes: BTreeMap::from([(
+                        "value".to_string(),
+                        ValueMagnitudeRange { min_abs, max_abs },
+                    )]),
+                    ..SourceFacts::default()
+                },
+            )]),
+            ..DataWorkload::default()
+        };
+        assert!(with(0.001, 10_000.0).validate().is_ok());
+        assert!(with(5.0, 5.0).validate().is_ok());
+        for (min_abs, max_abs) in [
+            (0.0, 1.0),
+            (-1.0, 1.0),
+            (10.0, 1.0),
+            (1.0, f64::INFINITY),
+            (f64::NAN, 1.0),
+            (1.0, f64::NAN),
+        ] {
+            let error = with(min_abs, max_abs).validate().unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    WorkloadError::InvalidValueMagnitudeRange { source_name, column, .. }
+                        if source_name == "latency" && column == "value"
+                ),
+                "{min_abs}, {max_abs}: {error:?}"
+            );
+            assert!(error.to_string().contains("min_abs"), "{error}");
+        }
     }
 
     /// A declared `rows_held` is positive.

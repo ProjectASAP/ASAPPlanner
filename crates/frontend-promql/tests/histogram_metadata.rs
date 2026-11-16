@@ -183,9 +183,9 @@ fn declared_summary_family() {
         Summary
     ));
     let data = over_family("", "foo", Summary).data_workload.unwrap();
-    assert!(declared_non_negative(&data, "foo_sum"));
-    assert!(declared_non_negative(&data, "foo_count"));
-    assert!(!declared_non_negative(&data, "foo"));
+    assert!(declared_non_negative(&data, "foo_sum", "value"));
+    assert!(declared_non_negative(&data, "foo_count", "value"));
+    assert!(!declared_non_negative(&data, "foo", "value"));
 }
 
 /// A declared histogram family `foo`: `foo_sum` and `foo_count` read as
@@ -203,6 +203,6 @@ fn declared_histogram_family() {
         Histogram
     ));
     let data = over_family("", "foo", Histogram).data_workload.unwrap();
-    assert!(declared_non_negative(&data, "foo_sum"));
-    assert!(declared_non_negative(&data, "foo_count"));
+    assert!(declared_non_negative(&data, "foo_sum", "value"));
+    assert!(declared_non_negative(&data, "foo_count", "value"));
 }

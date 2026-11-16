@@ -134,6 +134,18 @@ pub enum WorkloadError {
         distinct_values: u64,
         label_product: u64,
     },
+    /// Bad input: a `column_magnitudes` entry that is not
+    /// `0 < min_abs <= max_abs` with both finite.
+    #[error(
+        "source {source_name}: column_magnitudes for column {column} must have \
+         0 < min_abs <= max_abs, both finite, got min_abs {min_abs}, max_abs {max_abs}"
+    )]
+    InvalidValueMagnitudeRange {
+        source_name: String,
+        column: String,
+        min_abs: f64,
+        max_abs: f64,
+    },
     /// Bad input: a source's `rows_held` of zero.
     #[error("a source's rows_held must be greater than zero")]
     ZeroRowsHeld,
@@ -187,6 +199,13 @@ mod tests {
                             "value".to_string(),
                             ValueSign::NonNegative,
                         )]),
+                        column_magnitudes: BTreeMap::from([(
+                            "value".to_string(),
+                            ValueMagnitudeRange {
+                                min_abs: 1.0,
+                                max_abs: 1e12,
+                            },
+                        )]),
                         sample_interval: Some(DurationMs(15_000)),
                         stream_norms: Some(StreamNorms {
                             l1: Some(1e9),
@@ -216,6 +235,7 @@ mod tests {
                     "series_count": 10000,
                     "metric_type": "counter",
                     "column_signs": {"value": "non_negative"},
+                    "column_magnitudes": {"value": {"min_abs": 1.0, "max_abs": 1e12}},
                     "sample_interval": 15000,
                     "stream_norms": {"l1": 1e9, "l2": null},
                     "max_distinct_per_evaluation": 100,
@@ -247,5 +267,8 @@ mod tests {
                 ..SourceFacts::default()
             }
         );
+        // Empty column magnitudes are omitted from JSON.
+        let json = serde_json::to_value(&minimal.sources["flows"]).unwrap();
+        assert!(json.get("column_magnitudes").is_none(), "{json}");
     }
 }
