@@ -8,6 +8,16 @@
 //! contracts that hold only for values of one sign read the sign;
 //! aggregate coverage names a selection's columns by the lineage.
 
+// Each rule here answers per operator (or per expression, measure or
+// operator kind) and lists every variant: a wildcard arm would give a new
+// operator a default lineage, which bounds and coverage then trust,
+// instead of failing the build (under `-D warnings`). `matches!` and `let
+// ... else` stay only for a check of one variant's identity.
+#![warn(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
+
 use std::collections::BTreeMap;
 
 use super::{MemoGroupAsInput, MemoGroupId};
@@ -74,9 +84,10 @@ pub enum ColumnLineage {
     /// Copied unchanged from a column of one scan of a source.
     SourceColumn(SourceColumn),
     /// Column `column` of memo group `group`, where it was computed: a
-    /// measure, an expression, a summary state or a readout, or a column
+    /// measure, an expression, a summary state or a readout, a column
     /// the inputs of a union-like operator (`SetOp`, `Concat`,
-    /// `SummaryMerge`) disagree on.
+    /// `SummaryMerge`) disagree on, or a column of an outer join's nullable
+    /// side, which holds a NULL its source may not.
     Computed {
         group: MemoGroupId,
         column: ColumnId,
@@ -176,11 +187,14 @@ fn columns_of(input: &Input<'_>) -> Vec<ColumnProperties> {
         .collect()
 }
 
-/// `right`, the right side's columns of a `Join`, which concatenates them
-/// after `left`'s: a source column of a source `left` also
-/// scans moves to the scans after `left`'s (its scan ordinal shifted by
-/// `left`'s largest for that source, plus one), so a self-join's two sides
-/// name different scans.
+/// `right`, the columns of an input whose rows pair with `left`'s (a
+/// `Join`'s right side, or the "one" side of a many-to-one vector match),
+/// moved to the scans after `left`'s: a source column of a source `left`
+/// also scans gets its scan ordinal shifted by `left`'s largest for that
+/// source, plus one. Paired rows can be any two rows of the source, so the
+/// two sides name different scans: a self-join's `a.src` and `b.src`, or
+/// `job` and `instance` of `m{side="l"} * on(x) group_left(instance)
+/// m{side="r"}`, each pair taken from a different series.
 fn after_left_scans(
     left: &[ColumnProperties],
     mut right: Vec<ColumnProperties>,
@@ -273,12 +287,32 @@ fn non_asap_columns(
             }
             aggregate_columns(child, reduction, measures, output)
         }
+        // The left side's columns, then the right side's after the left's
+        // scans. An outer join's nullable side holds a NULL its source may
+        // not: `flows f LEFT JOIN hosts h` gives `h.region` NULL for a flow
+        // no host matches. Its columns no longer hold their source column's
+        // values, so they are computed by the join.
         Join {
             kind, left, right, ..
         } => {
+            let (left_nullable, right_nullable, right_kept) = match kind {
+                JoinKind::Inner | JoinKind::Cross => (false, false, true),
+                JoinKind::Left => (false, true, true),
+                JoinKind::Right => (true, false, true),
+                JoinKind::Full => (true, true, true),
+                JoinKind::Semi | JoinKind::Anti => (false, false, false),
+            };
             let mut columns = columns_of(left);
-            if !matches!(kind, JoinKind::Semi | JoinKind::Anti) {
-                let right = after_left_scans(&columns, columns_of(right));
+            let mut right = after_left_scans(&columns, columns_of(right));
+            for (columns, nullable) in [(&mut columns, left_nullable), (&mut right, right_nullable)]
+            {
+                if nullable {
+                    for column in columns.iter_mut() {
+                        column.lineage = None;
+                    }
+                }
+            }
+            if right_kept {
                 columns.extend(right);
             }
             columns
@@ -298,13 +332,30 @@ fn non_asap_columns(
         // one side lacks is computed). A label
         // `group_left(...)` names comes from the right ("one") side and one
         // `group_right(...)` names from the left, overwriting a column of
-        // that name. The output does not concatenate both sides' columns,
-        // so no scan ordinal shifts.
+        // that name. Each output series pairs a series of the output side
+        // with one of the "one" side, as a join pairs rows, so the "one"
+        // side's columns move past the output side's scans
+        // ([`after_left_scans`]): a label of each side, of one metric, can
+        // pair values no one series holds.
         BinaryOp {
             operator, lhs, rhs, ..
         } => {
-            let left = columns_of(lhs);
-            let right = columns_of(rhs);
+            let grouping = operator
+                .vector_match
+                .as_ref()
+                .and_then(|m| m.grouping.as_ref());
+            let (left, right) = match grouping.map(|grouping| &grouping.side) {
+                None => (columns_of(lhs), columns_of(rhs)),
+                Some(GroupSide::Left) => {
+                    let left = columns_of(lhs);
+                    let right = after_left_scans(&left, columns_of(rhs));
+                    (left, right)
+                }
+                Some(GroupSide::Right) => {
+                    let right = columns_of(rhs);
+                    (after_left_scans(&right, columns_of(lhs)), right)
+                }
+            };
             let named = |input: &Input<'_>, columns: &[ColumnProperties], name: &str| {
                 input
                     .schema()
@@ -312,10 +363,6 @@ fn non_asap_columns(
                     .and_then(|column| columns.get(column).cloned())
                     .unwrap_or_default()
             };
-            let grouping = operator
-                .vector_match
-                .as_ref()
-                .and_then(|m| m.grouping.as_ref());
             let output_side_is_right =
                 grouping.is_some_and(|grouping| grouping.side == GroupSide::Right);
             let is_or = matches!(operator.kind, BinaryOpKind::Set(PromQLVectorSetOpKind::Or));
@@ -512,7 +559,25 @@ pub(super) fn project_lineage<C>(
     cols.iter()
         .map(|item| match item.expr {
             ScalarExpr::Column(column) => input.get(column).cloned().flatten(),
-            _ => None,
+            ScalarExpr::Literal(_)
+            | ScalarExpr::Negative { .. }
+            | ScalarExpr::Compare { .. }
+            | ScalarExpr::BoolAnd(_)
+            | ScalarExpr::BoolOr(_)
+            | ScalarExpr::Not(_)
+            | ScalarExpr::IsNull(_)
+            | ScalarExpr::IsNotNull(_)
+            | ScalarExpr::Cast { .. }
+            | ScalarExpr::InList { .. }
+            | ScalarExpr::FunctionCall { .. }
+            | ScalarExpr::Arithmetic { .. }
+            | ScalarExpr::Case { .. }
+            | ScalarExpr::CurrentTimestamp
+            | ScalarExpr::EvalTimestamp
+            | ScalarExpr::PromqlScalarFromVector(_)
+            | ScalarExpr::ScalarSubquery(_)
+            | ScalarExpr::Exists { .. }
+            | ScalarExpr::InSubquery { .. } => None,
         })
         .collect()
 }
@@ -540,7 +605,22 @@ fn expression_sign<C>(expr: &ScalarExpr<C>, input: &[ValueSign]) -> ValueSign {
         {
             NonNegative
         }
-        _ => Unknown,
+        ScalarExpr::Literal(_)
+        | ScalarExpr::Compare { .. }
+        | ScalarExpr::BoolAnd(_)
+        | ScalarExpr::BoolOr(_)
+        | ScalarExpr::Not(_)
+        | ScalarExpr::IsNull(_)
+        | ScalarExpr::IsNotNull(_)
+        | ScalarExpr::InList { .. }
+        | ScalarExpr::FunctionCall { .. }
+        | ScalarExpr::Case { .. }
+        | ScalarExpr::CurrentTimestamp
+        | ScalarExpr::EvalTimestamp
+        | ScalarExpr::PromqlScalarFromVector(_)
+        | ScalarExpr::ScalarSubquery(_)
+        | ScalarExpr::Exists { .. }
+        | ScalarExpr::InSubquery { .. } => Unknown,
     }
 }
 
@@ -612,7 +692,31 @@ fn measure_sign(measure: &AggIntent, input: ValueSign) -> ValueSign {
         // A counter's rate and increase are non-negative; over a value of
         // another sign a decrease reads as a reset, so no sign is known.
         Rate | IRate | Increase if input == NonNegative => NonNegative,
-        _ => Unknown,
+        PearsonCorr { .. }
+        | TopK { .. }
+        | Rate
+        | IRate
+        | Increase
+        | Delta
+        | IDelta
+        | Deriv
+        | PredictLinear { .. }
+        | DoubleExpSmoothing { .. }
+        | HistogramCount
+        | HistogramSum
+        | HistogramAvg
+        | HistogramStdDev
+        | HistogramStdVar
+        | HistogramFraction { .. }
+        | HistogramQuantile { .. }
+        | Math(_)
+        | TimeFn(_)
+        | MadOverTime
+        | TsOfMinOverTime
+        | TsOfMaxOverTime
+        | TsOfFirstOverTime
+        | TsOfLastOverTime
+        | Extension { .. } => Unknown,
     }
 }
 
