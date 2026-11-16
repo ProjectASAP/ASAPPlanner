@@ -11,8 +11,8 @@ use crate::time_series;
 use asap_executor::runtime::Scope;
 use asap_executor::values::{Batch, Value};
 use asap_planner::{
-    plan_installable, CostInputs, DeploymentCapabilities, FrontendInput, InstallablePlan,
-    OperatorKind, PlanningModels, PlanningWorkload, SelectedPlanReport, UserInput,
+    plan_installable, CostInputs, DeploymentCapabilities, ExecutionTiming, FrontendInput,
+    InstallablePlan, OperatorKind, PlanningModels, PlanningWorkload, SelectedPlanReport, UserInput,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 
@@ -562,13 +562,21 @@ async fn grouped_and_per_series_counts_over_a_shared_query_time_chain_install_an
 
 // ── Counter rate and increase, per series and per group ─────────────────────
 
+/// Counter samples arriving at 1,000 rows per second while the queries run.
+const COUNTERS_INGESTING: &str = r#"{"ingesting": {"rows_per_second": 1000.0}}"#;
+/// Counter samples all stored already: nothing arrives, so no state can be
+/// built at ingestion time and every chain is built at query time.
+const COUNTERS_AT_REST: &str = r#""at_rest""#;
+
 /// `queries`, each every `interval_ms` within relative error 0.01, over
-/// 1,000 `requests_total` counter series sampled every second, planned
+/// 1,000 `requests_total` counter series sampled every second with data
+/// `arrival` ([`COUNTERS_INGESTING`] or [`COUNTERS_AT_REST`]), planned
 /// together with the built-in models on a deployment that keeps raw data
 /// or not.
 async fn plan_counter_queries(
     queries: &[&str],
     interval_ms: u64,
+    arrival: &str,
     raw_data_retained: bool,
 ) -> InstallablePlan {
     let entries: Vec<String> = queries
@@ -584,7 +592,7 @@ async fn plan_counter_queries(
         .collect();
     let workload: PlanningWorkload = serde_json::from_str(&format!(
         r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}]}},
-            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 1000.0}}}},
+            "data_workload": {{"arrival": {arrival},
               "sources": {{"requests_total": {{"series_count": 1000,
                   "metric_type": "counter", "sample_interval": 1000}}}}}}}}"#,
         entries.join(",")
@@ -724,7 +732,8 @@ async fn counter_query_mismatches(
     let mut mismatches = Vec::new();
     for raw_data_retained in [true, false] {
         for (query, expected) in counter_queries() {
-            let plan = plan_counter_queries(&[query], 10_000, raw_data_retained).await;
+            let plan =
+                plan_counter_queries(&[query], 10_000, COUNTERS_INGESTING, raw_data_retained).await;
             let answered = answer(&plan, &samples).remove(0);
             let matches = answered.len() == expected.len()
                 && answered.iter().zip(&expected).all(|(answer, expected)| {
@@ -763,42 +772,63 @@ async fn counter_rates_and_increases_answer_at_query_time_from_raw_samples() {
 }
 
 /// `rate(requests_total[5m] offset 1m)` and `rate(requests_total[5m])`,
-/// each every minute, share a tumbling-window chain of 1-minute windows
-/// that the plan builds at query time. Installed, the query run builds it
-/// from the raw samples, each update at its sample's own time: over
-/// [`counter_samples`] (four samples per window) both queries answer the
-/// hand-worked rates `(i + 1) * 20 / 300` per series. `(T - 6m, T - 1m]`
-/// holds steps 9..=28, 20 samples as `(T - 5m, T]` does.
-#[tokio::test]
-async fn counter_rates_over_a_shared_query_time_chain_answer_as_installed() {
+/// each every minute, planned together with data `arrival`: the plan with
+/// its shared tumbling-window chain (1-minute windows) built at `timing`.
+async fn plan_shared_rate_chain(arrival: &str, timing: ExecutionTiming) -> InstallablePlan {
     let plan = plan_counter_queries(
         &[
             "rate(requests_total[5m] offset 1m)",
             "rate(requests_total[5m])",
         ],
         60_000,
+        arrival,
         true,
     )
     .await;
     assert!(
         plan.dag.nodes.iter().any(|node| matches!(
             node.payload,
-            asap_types::ir::Operator::ASAP(
-                asap_types::ir::ASAPOp::SummaryTumblingWindowChain { .. }
-            )
-        ) && node.output_state.timing
-            == asap_types::ir::properties::ExecutionTiming::QueryTime),
-        "the plan builds a chain at query time: {:#?}",
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+        ) && node.output_state.timing == timing),
+        "the plan builds a chain at {timing:?}: {:#?}",
         plan.dag.nodes
     );
+    plan
+}
+
+/// The answers of [`plan_shared_rate_chain`]'s plan as installed, over
+/// [`counter_samples`] (four samples per window): both queries answer the
+/// hand-worked rates `(i + 1) * 20 / 300` per series. `(T - 6m, T - 1m]`
+/// holds steps 9..=28, 20 samples as `(T - 5m, T]` does.
+fn assert_shared_rate_chain_answers(plan: &InstallablePlan) {
     let rates: Vec<f64> = (1..=4).map(|i| i as f64 * 20.0 / 300.0).collect();
-    for answered in installed_answers(&plan, &counter_samples()) {
+    for answered in installed_answers(plan, &counter_samples()) {
         let values: Vec<f64> = answered.iter().map(|(_, value)| *value).collect();
         assert_eq!(values.len(), rates.len(), "{answered:?}");
         for (value, rate) in values.iter().zip(&rates) {
             assert!((value - rate).abs() <= 1e-9 * rate, "{answered:?}");
         }
     }
+}
+
+/// With the counter samples at rest nothing arrives, so the two rates'
+/// shared tumbling-window chain is built at query time. Installed, the
+/// query run builds it from the raw samples, each update at its sample's
+/// own time, and both queries answer the hand-worked rates.
+#[tokio::test]
+async fn counter_rates_over_a_shared_query_time_chain_answer_as_installed() {
+    let plan = plan_shared_rate_chain(COUNTERS_AT_REST, ExecutionTiming::QueryTime).await;
+    assert_shared_rate_chain_answers(&plan);
+}
+
+/// With the counter samples arriving, the two rates' shared
+/// tumbling-window chain is cheaper stored: the plan builds it at
+/// ingestion time into a materialized view, and both queries, reading the
+/// view, answer the same hand-worked rates.
+#[tokio::test]
+async fn counter_rates_over_a_shared_ingestion_time_chain_answer_as_installed() {
+    let plan = plan_shared_rate_chain(COUNTERS_INGESTING, ExecutionTiming::IngestionTime).await;
+    assert_shared_rate_chain_answers(&plan);
 }
 
 // ── Global aggregates over an aggregate's output ─────────────────────────────
