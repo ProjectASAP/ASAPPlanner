@@ -14,9 +14,10 @@ use super::group::{
 use crate::accuracy::AccuracyTarget;
 use crate::ir::operator::arguments::Reduction;
 use crate::ir::operator::input::InputOrTemporaryBuild;
-use crate::ir::schema::Schema;
+use crate::ir::operator::AggIntent;
+use crate::ir::schema::{DataType, FieldDataType, Schema};
 use crate::ir::QueryRoot;
-use crate::ir::{ASAPOp, Operator};
+use crate::ir::{ASAPOp, NonASAPOp, Operator};
 use crate::stages::{
     CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, ColumnLineage,
     LogicalRequirements, MemoGroup, MemoGroupId,
@@ -92,25 +93,33 @@ impl Memo {
         &self.groups
     }
 
-    /// The most values one evaluation of `group` returns, from the facts
-    /// the data workload declares; `None` when they bound it in no way.
-    /// The smaller of:
+    /// The most values one evaluation of `group`, a readout or a state,
+    /// returns, from the facts the data workload declares; `None` when they
+    /// bound it in no way. Only a result keyed by the sources' labels (or
+    /// SQL columns copied unchanged, not times) is bounded
+    /// ([`Self::keys_of_values`]), by the smaller of:
     /// - the series (PromQL) or groups of rows (SQL) of the sources scanned
     ///   below it (`GroupProperties::scanned_sources`, each source's
-    ///   `SourceFacts::series_count`, when every one declares it): every
-    ///   value of a per-series or grouped result over them comes from at
-    ///   least one of them;
-    /// - for a readout (`SummaryEstimate`, not a top-k) of a state, or a
-    ///   state, grouped `by` keys, the groups those keys form: 1 for no
-    ///   key, else the distinct combinations the source declares for keys
-    ///   copied from one source (`SourceFacts::distinct_values_per_label`
-    ///   and `distinct_values_per_label_set`).
+    ///   `SourceFacts::series_count`, when every one declares it): each
+    ///   value of a per-series result, or of a result grouped by their
+    ///   labels, comes from at least one of them;
+    /// - for keys copied from one source, the distinct combinations it
+    ///   declares for them (`SourceFacts::distinct_values_per_label` and
+    ///   `distinct_values_per_label_set`); 1 for no key.
+    ///
+    /// A result grouped by a computed key or a time is not bounded: one
+    /// value per bucket of `GROUP BY date_trunc('minute', ts)` over the last
+    /// 15 minutes is about 16 values, however few groups of rows the table
+    /// holds.
     ///
     /// Examples: a readout of `quantile_over_time(0.9, m[5m])` over `m`
     /// with 1000 series returns at most 1000 values, which `max(...)` over
     /// it reads at once; `SELECT count(DISTINCT dst) FROM flows` reads one
     /// distinct count per evaluation.
     pub fn max_values_per_evaluation(&self, group: MemoGroupId) -> Option<u64> {
+        let KeysOfValues::Labels { declared_groups } = self.keys_of_values(group) else {
+            return None;
+        };
         let series_scanned = self.groups[group.0 as usize]
             .group_properties
             .scanned_sources
@@ -119,56 +128,93 @@ impl Memo {
                 let (facts, _) = series_facts(&self.source_facts, source_name(source))?;
                 total.checked_add(facts.series_count?)
             });
-        match (series_scanned, self.declared_groups_of_state(group)) {
+        match (series_scanned, declared_groups) {
             (Some(series), Some(groups)) => Some(series.min(groups)),
             (series, groups) => series.or(groups),
         }
     }
 
-    /// The groups the `by` keys of the state `group` is, or reads, form
-    /// ([`Self::max_values_per_evaluation`]).
-    fn declared_groups_of_state(&self, group: MemoGroupId) -> Option<u64> {
-        match &self.groups[group.0 as usize].expression {
+    /// What the values of `group` are keyed by
+    /// ([`Self::max_values_per_evaluation`]): the keys of the state it is,
+    /// or reads, or of the aggregate it is. A top-k readout or aggregate
+    /// returns several rows per group, so its declared groups are unknown.
+    fn keys_of_values(&self, group: MemoGroupId) -> KeysOfValues {
+        let (reduction, child, one_row_per_group) = match &self.groups[group.0 as usize].expression
+        {
             Operator::ASAP(ASAPOp::SummaryEstimate {
                 summary_input,
                 query,
-            }) if !matches!(query, SketchStatistic::TopK { .. }) => {
-                self.declared_groups_of_state(*summary_input)
+            }) => {
+                let keys = self.keys_of_values(*summary_input);
+                return if matches!(query, SketchStatistic::TopK { .. }) {
+                    keys.without_declared_groups()
+                } else {
+                    keys
+                };
             }
             Operator::ASAP(
                 ASAPOp::SummaryAgg {
-                    reduction: Reduction::Reduce(by),
-                    child,
-                    ..
+                    reduction, child, ..
                 }
                 | ASAPOp::SummaryTumblingWindowChain {
-                    reduction: Reduction::Reduce(by),
-                    child,
-                    ..
+                    reduction, child, ..
                 },
-            ) if !by.is_without() => {
-                let lineage = &self.groups[child.0 as usize]
-                    .group_properties
-                    .column_lineage;
-                let mut source = None;
-                let mut labels = Vec::new();
-                for key in by.keys() {
-                    let Some(ColumnLineage::SourceColumn(column)) = lineage.get(*key) else {
-                        return None;
-                    };
-                    if source.is_some_and(|source| source != &column.source) {
-                        return None;
-                    }
-                    source = Some(&column.source);
-                    labels.push(column.column.as_str());
+            ) => (reduction, *child, true),
+            Operator::NonASAP(NonASAPOp::Aggregate {
+                reduction,
+                measures,
+                child,
+                ..
+            }) => (
+                reduction,
+                *child,
+                !measures
+                    .iter()
+                    .any(|m| matches!(m, AggIntent::TopK { .. } | AggIntent::CountValues { .. })),
+            ),
+            _ => return KeysOfValues::ComputedOrTime,
+        };
+        let keys = match reduction {
+            Reduction::Reduce(by) if !by.is_without() => by.keys(),
+            // One value per series, or per group of every label but some.
+            _ => {
+                return KeysOfValues::Labels {
+                    declared_groups: None,
                 }
-                let Some(source) = source else {
-                    return Some(1);
-                };
-                let (facts, _) = series_facts(&self.source_facts, source_name(source))?;
-                facts.declared_distinct_combinations(&labels)
             }
-            _ => None,
+        };
+        let input = &self.groups[child.0 as usize].group_properties;
+        let mut source = None;
+        let mut labels = Vec::new();
+        let mut one_source = true;
+        for key in keys {
+            let Some(ColumnLineage::SourceColumn(column)) = input.column_lineage.get(*key) else {
+                return KeysOfValues::ComputedOrTime;
+            };
+            let time_valued = input.schema.fields.get(*key).is_some_and(|field| {
+                matches!(
+                    field.dtype,
+                    FieldDataType::Plain(DataType::Timestamp | DataType::Date)
+                )
+            });
+            if time_valued {
+                return KeysOfValues::ComputedOrTime;
+            }
+            one_source &= source.is_none_or(|source| source == &column.source);
+            source = Some(&column.source);
+            labels.push(column.column.as_str());
+        }
+        let declared_groups = match source {
+            None => Some(1),
+            Some(source) if one_source => series_facts(&self.source_facts, source_name(source))
+                .and_then(|(facts, _)| facts.declared_distinct_combinations(&labels)),
+            Some(_) => None,
+        };
+        let keys = KeysOfValues::Labels { declared_groups };
+        if one_row_per_group {
+            keys
+        } else {
+            keys.without_declared_groups()
         }
     }
 
@@ -528,6 +574,33 @@ impl Memo {
 fn add_parent(group: &mut MemoGroup, parent: MemoGroupId) {
     if !group.parents.contains(&parent) {
         group.parents.push(parent);
+    }
+}
+
+/// What the values one evaluation of a readout or state returns are keyed
+/// by ([`Memo::max_values_per_evaluation`]).
+enum KeysOfValues {
+    /// Each value is one series, or one group of labels (SQL columns)
+    /// copied unchanged from the sources: at most the series (groups of
+    /// rows) scanned, and at most `declared_groups`, the combinations the
+    /// source declares for the keys, when known (`Some(20)` for `by (job)`
+    /// over 20 declared jobs, `Some(1)` for no key).
+    Labels { declared_groups: Option<u64> },
+    /// A key is computed (`date_trunc('minute', ts)`, an expression) or a
+    /// time: one value per bucket or time, which no fact bounds.
+    ComputedOrTime,
+}
+
+impl KeysOfValues {
+    /// These keys, with no declared groups: a top-k returns several rows
+    /// per group.
+    fn without_declared_groups(self) -> Self {
+        match self {
+            Self::Labels { .. } => Self::Labels {
+                declared_groups: None,
+            },
+            Self::ComputedOrTime => Self::ComputedOrTime,
+        }
     }
 }
 
