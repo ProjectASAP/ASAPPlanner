@@ -3225,8 +3225,8 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
 }
 
 /// A refit of one constant changes the charge by its units times the
-/// change, which is `fitlib.charge`'s rule: the per-series Max aggregate's
-/// 13.6 M with 140 operations per group visit instead of 170 is
+/// change, i.e. the new charge is the old charge plus the change times the
+/// units: the per-series Max aggregate's 13.6 M with 140 operations per group visit instead of 170 is
 /// 13.6 M − 30 × 30,000 = 12.7 M.
 #[test]
 fn replacing_a_constant_changes_the_charge_by_its_units() {

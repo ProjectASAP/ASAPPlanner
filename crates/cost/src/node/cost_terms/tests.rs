@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use super::*;
 
 /// Each constant's value is the per-unit constant of the same name in
-/// `operations_per_unit.rs`, which P2 does not change. Example:
+/// `operations_per_unit.rs`. Example:
 /// `OperationsPerGroupPerRawBatch` is 170 operations per group visit.
 #[test]
 fn cost_constants_hold_the_built_in_values() {
@@ -84,6 +84,61 @@ fn cost_constant_json_names_are_snake_case() {
         assert_eq!(serde_json::to_string(&constant).unwrap(), json);
     }
     assert!(serde_json::from_str::<CostConstant>("\"operations_per_group\"").is_err());
+}
+
+/// The JSON name of every constant, in declaration order: the approx-bench
+/// side reads these keys, so renaming a variant must fail here.
+#[test]
+fn cost_constant_json_names_are_the_full_snake_case_list() {
+    let expected: [&str; 37] = [
+        "time_range_operations_per_row",
+        "operations_per_group_per_raw_batch",
+        "chain_operations_per_arriving_row",
+        "hash_aggregate_operations_per_row",
+        "hash_aggregate_operations_per_further_key",
+        "aggregate_measure_operations_per_row",
+        "sort_operations_per_row_per_level",
+        "ddsketch_update_operations_per_row",
+        "kll_update_operations_per_row",
+        "exact_update_operations_per_row",
+        "counter_update_operations_per_row",
+        "carried_label_operations_per_row_per_label",
+        "kmv_update_operations_per_row",
+        "kmv_operations_per_compared_hash",
+        "exact_distinct_operations_per_row",
+        "exact_distinct_operations_per_value_doubling",
+        "exact_distinct_operations_per_row_at_full_value_miss",
+        "exact_distinct_operations_per_row_at_full_pair_miss",
+        "exact_distinct_operations_per_inserted_value",
+        "exact_distinct_operations_per_inserted_pair",
+        "sketch_update_operations_per_counter",
+        "exact_merge_operations_per_state",
+        "extremum_merge_operations_per_state",
+        "counter_merge_operations_per_state",
+        "ddsketch_merge_operations_per_state",
+        "kll_merge_operations_per_state",
+        "kll_merge_operations_per_input_byte",
+        "kll_merge_operations_per_merged_byte",
+        "merge_operations_per_output_group",
+        "sketch_merge_operations_per_byte",
+        "kll_estimate_operations_per_byte",
+        "kll_estimate_operations_per_unsorted_item",
+        "sketch_estimate_operations_per_group",
+        "output_row_operations_per_group",
+        "sketch_chain_emit_operations_per_state",
+        "exact_chain_emit_operations_per_state",
+        "kll_merge_operations_per_output_group",
+    ];
+    let actual: Vec<String> = CostConstant::ALL
+        .iter()
+        .map(|constant| {
+            serde_json::to_string(constant)
+                .unwrap()
+                .trim_matches('"')
+                .to_string()
+        })
+        .collect();
+    assert_eq!(actual, expected);
 }
 
 /// The exact-distinct cache and size parameters: not operations per unit.
