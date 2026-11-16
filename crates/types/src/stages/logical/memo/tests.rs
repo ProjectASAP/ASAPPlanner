@@ -463,3 +463,82 @@ fn max_values_per_evaluation_bounds_a_readout_by_its_states_keys() {
         assert_eq!(memo.max_values_per_evaluation(quantile), Some(values));
     }
 }
+
+/// A readout of a state grouped by a computed key or a time has no bound
+/// from the facts: over `latency` with 1000 series and 20 declared jobs,
+/// grouped by `date_trunc('minute', ts)` it returns one value per minute
+/// bucket of the range it reads, however many series there are; by `job`
+/// and the bucket, up to 20 per bucket; by the time `ts` itself, one per
+/// timestamp. Grouped by `job` through the same projection, still 20.
+#[test]
+fn max_values_per_evaluation_is_unbounded_for_a_computed_or_time_key() {
+    use crate::ir::scalar::ScalarValue;
+    use crate::ir::{ProjectItem, ScalarExpr};
+    let data = crate::workload::DataWorkload {
+        sources: [(
+            "latency".to_string(),
+            crate::workload::SourceFacts {
+                series_count: Some(1000),
+                distinct_values_per_label: [("job".to_string(), 20)].into(),
+                ..Default::default()
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let mut memo = Memo::new(&data);
+    let input = memo
+        .find_or_add_group(scan(
+            "latency",
+            &[("job", crate::ir::schema::DataType::Utf8)],
+            vec![],
+        ))
+        .unwrap();
+    // `[ts, value, job, date_trunc('minute', ts)]`.
+    let column = |index| ProjectItem {
+        alias: None,
+        expr: ScalarExpr::Column(index),
+    };
+    let bucketed = memo
+        .find_or_add_group(Operator::NonASAP(NonASAPOp::Project {
+            cols: vec![
+                column(0),
+                column(1),
+                column(2),
+                ProjectItem {
+                    alias: Some("minute".into()),
+                    expr: ScalarExpr::FunctionCall {
+                        name: "date_trunc".into(),
+                        args: vec![
+                            ScalarExpr::Literal(ScalarValue::Utf8("minute".into())),
+                            ScalarExpr::Column(0),
+                        ],
+                    },
+                },
+            ],
+            child: input,
+        }))
+        .unwrap();
+    for (keys, values) in [
+        (vec![3], None),
+        (vec![2, 3], None),
+        (vec![0], None),
+        (vec![2], Some(20)),
+    ] {
+        let state = memo
+            .find_or_add_group(state_grouped_by(
+                FieldDataType::Sketch(SketchAlgorithm::Kll),
+                Reduction::by(keys.clone()),
+                bucketed,
+            ))
+            .unwrap();
+        let quantile = memo
+            .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.9 }, state))
+            .unwrap();
+        assert_eq!(
+            memo.max_values_per_evaluation(quantile),
+            values,
+            "by {keys:?}"
+        );
+    }
+}
