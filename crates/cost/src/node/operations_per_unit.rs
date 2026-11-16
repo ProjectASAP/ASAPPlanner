@@ -736,7 +736,7 @@ pub(crate) fn counters_updated_per_row(parameters: &SketchParams) -> f64 {
 /// UnivMon; none for any other sketch, whose state grows with its rows
 /// (their update charges it). Example: a 7,500 x 81 Count Sketch with heap
 /// has 607,500; a UnivMon of 5 rows of 2,367 columns in 1 layer 11,835.
-pub(crate) fn sketch_state_counters(parameters: &SketchParams) -> f64 {
+fn sketch_state_counters(parameters: &SketchParams) -> f64 {
     match parameters {
         SketchParams::Cms { width, depth }
         | SketchParams::CountSketch { width, depth }
@@ -786,7 +786,7 @@ fn distinct_items_seen(rows: f64, distinct_items: Option<u64>) -> f64 {
 /// distinct items seen so far, at most `heap_size`. Averaged over 16 equal
 /// slices of the rows. Example: a heap of 10 over 10 rows of 10 items
 /// holds 3.7 on average, over 100 rows of 100 items 9.5.
-pub(crate) fn heap_residents_per_update(
+fn heap_residents_per_update(
     heap_size: u32,
     rows_per_state: Option<u64>,
     distinct_items: Option<u64>,
