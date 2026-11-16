@@ -20,15 +20,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::node::analytical::{
-    estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
+    estimate_operator_with_terms, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
 };
+use crate::node::cost_terms::{CostConstant, NodeCostTerms};
 use crate::node::operations_per_unit::{
     chain_emit_operations_per_state, estimate_operations_per_group,
-    hash_aggregate_operations_per_row, merge_operations_per_state, merge_output_operations,
+    hash_aggregate_operations_per_row, merge_output_terms, merge_terms_per_state,
     pass_through_merge_operations, update_operations_per_row, StateLastWrittenBy,
-    CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL, CHAIN_OPERATIONS_PER_ARRIVING_ROW,
-    OPERATIONS_PER_GROUP_PER_RAW_BATCH, OUTPUT_ROW_OPERATIONS_PER_GROUP,
-    TIME_RANGE_OPERATIONS_PER_ROW,
 };
 use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
@@ -391,6 +389,22 @@ pub fn node_resource_usage_and_cost<'a>(
     data: &DataWorkload,
     settings: &'a CostInputs,
 ) -> Result<NodeResourceUsageAndCost<'a>, AnalyticalCostError> {
+    node_usage_and_cost_terms(node, producers, rate, window_ms, data, settings)
+        .map(|(usage, _)| usage)
+}
+
+/// [`node_resource_usage_and_cost`] and the terms of its formula CPU per
+/// execution ([`crate::node_cost_terms`]). The formula CPU is computed from
+/// those terms, so the two cannot drift; the terms are taken before a
+/// measured entry or the calibration factor replaces or scales it.
+pub(crate) fn node_usage_and_cost_terms<'a>(
+    node: &'a asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode,
+    producers: &[ProducerOutput<'a>],
+    rate: (u64, f64),
+    window_ms: Option<u64>,
+    data: &DataWorkload,
+    settings: &'a CostInputs,
+) -> Result<(NodeResourceUsageAndCost<'a>, NodeCostTerms), AnalyticalCostError> {
     // The formulas' CPU scaled by the deployment's calibration, 1 unset.
     let formula_scale = settings.frozen_calibration_factor.unwrap_or(1.0);
     let table = &settings.measured_operation_costs;
@@ -775,7 +789,7 @@ pub fn node_resource_usage_and_cost<'a>(
                     })?,
                 };
                 let out = edge(rows.max(1))?;
-                let estimate = estimate_operator(
+                let estimate = estimate_operator_with_terms(
                     PhysicalOperator::Scan,
                     OperatorStatistics::Scan {
                         edges: UnaryEdgeStatistics {
@@ -854,16 +868,20 @@ pub fn node_resource_usage_and_cost<'a>(
                     .chain([input.rows])
                     .min()
                     .unwrap_or(input.rows);
-                let operations_per_row =
-                    hash_aggregate_operations_per_row(
-                        keys,
-                        measures,
-                        input.rows,
-                        group_count,
-                        distinct_values,
-                    ) + carried_label_operations_per_row(&node.output_schema, reduction);
+                let terms_per_row = hash_aggregate_operations_per_row(
+                    keys,
+                    measures,
+                    input.rows,
+                    group_count,
+                    distinct_values,
+                )
+                .plus_terms(&carried_label_operations_per_row(
+                    &node.output_schema,
+                    reduction,
+                ));
+                let operations_per_row = terms_per_row.operations();
                 let group_visits = visits(group_count);
-                let estimate = estimate_operator(
+                let estimate = estimate_operator_with_terms(
                     PhysicalOperator::HashAggregate {
                         grouping_key_count: keys,
                         operations_per_row: operations_per_row.ceil() as u64,
@@ -887,12 +905,20 @@ pub fn node_resource_usage_and_cost<'a>(
                             .max(8),
                     },
                 )
-                .map(|estimate| {
-                    ResourceEstimate::new(
-                        estimate.cpu_ops() + group_visits * OPERATIONS_PER_GROUP_PER_RAW_BATCH,
-                        estimate.peak_memory_bytes(),
-                        estimate.scan_bytes(),
-                    )
+                .map(|(estimate, operator_terms)| {
+                    // The operator charges its rows times the per-row
+                    // operations rounded up, without a constant: split
+                    // into the per-row terms and the rounding.
+                    let rounding = operator_terms.operations_without_constant
+                        - input.rows as f64 * operations_per_row;
+                    let terms = NodeCostTerms {
+                        operations_without_constant: 0.0,
+                        ..operator_terms
+                    }
+                    .plus_terms(&terms_per_row.times(input.rows as f64))
+                    .plus_terms(&NodeCostTerms::without_constant(rounding))
+                    .plus(CostConstant::OperationsPerGroupPerRawBatch, group_visits);
+                    charged(terms, estimate.peak_memory_bytes(), estimate.scan_bytes())
                 });
                 (
                     out,
@@ -912,7 +938,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 } else {
                     estimated_groups(partition_by)?
                 };
-                let estimate = estimate_operator(
+                let estimate = estimate_operator_with_terms(
                     PhysicalOperator::InMemoryComparisonSort {
                         ordering_key_count: keys.len() as u64,
                         partitioned: partitions > 1,
@@ -942,7 +968,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 let limit = n.map_or(u64::MAX, |n| (n as u64).saturating_mul(partitions));
                 let offset = (*offset as u64).saturating_mul(partitions);
                 let out = edge(input.rows.saturating_sub(offset).min(limit))?;
-                let estimate = estimate_operator(
+                let estimate = estimate_operator_with_terms(
                     PhysicalOperator::Limit { limit, offset },
                     OperatorStatistics::Limit { edges: unary(out) },
                 );
@@ -964,7 +990,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 };
                 (
                     out,
-                    estimate_operator(
+                    estimate_operator_with_terms(
                         PhysicalOperator::TimeShift,
                         OperatorStatistics::PassThrough {
                             edges: unary(input),
@@ -990,7 +1016,7 @@ pub fn node_resource_usage_and_cost<'a>(
                         .ok_or(AnalyticalCostError::Overflow)?,
                 };
                 // It reads those windows' states from the chain's store.
-                let estimate = estimate_operator(
+                let estimate = estimate_operator_with_terms(
                     PhysicalOperator::TimeRange,
                     OperatorStatistics::PassThrough {
                         edges: UnaryEdgeStatistics {
@@ -1026,7 +1052,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 read_raw_rows_span_ms = Some(
                     input_raw_rows_span_ms.map_or(range_ms, |input_ms| input_ms.min(range_ms)),
                 );
-                let estimate = estimate_operator(
+                let estimate = estimate_operator_with_terms(
                     PhysicalOperator::TimeRange,
                     OperatorStatistics::PassThrough { edges: unary(out) },
                 );
@@ -1053,7 +1079,7 @@ pub fn node_resource_usage_and_cost<'a>(
             | NonASAPOp::PromqlInfoEnrich { .. }
             | NonASAPOp::PromqlSeriesSample { .. }
             | NonASAPOp::PromqlSubquery { .. } => {
-                let estimate = estimate_operator(
+                let estimate = estimate_operator_with_terms(
                     PhysicalOperator::PassThrough,
                     OperatorStatistics::PassThrough {
                         edges: unary(input),
@@ -1089,12 +1115,17 @@ pub fn node_resource_usage_and_cost<'a>(
                 input_rows,
             )?);
             assumed_data_facts.extend(assumed_magnitude_range_fact(column, input_rows));
-            let update_ops = update_operations_per_row(
+            let update_terms = update_operations_per_row(
                 family,
                 node.parameters.as_ref(),
                 input_rows.rows_per_state,
                 folded_distinct_values(update),
-            ) + carried_label_operations_per_row(&node.output_schema, reduction);
+            )
+            .plus_terms(&carried_label_operations_per_row(
+                &node.output_schema,
+                reduction,
+            ));
+            let update_ops = update_terms.operations();
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
@@ -1102,14 +1133,12 @@ pub fn node_resource_usage_and_cost<'a>(
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             let group_visits = visits(group_count);
+            let terms = update_terms
+                .times(input.rows as f64)
+                .plus(CostConstant::OperationsPerGroupPerRawBatch, group_visits);
             (
                 out,
-                Ok(ResourceEstimate::new(
-                    input.rows as f64 * update_ops
-                        + group_visits * OPERATIONS_PER_GROUP_PER_RAW_BATCH,
-                    out.bytes,
-                    0,
-                )),
+                Ok(charged(terms, out.bytes, 0)),
                 format!(
                     "build {} into {group_count} states: {} rows x {update_ops} ops, \
                      {group_visits:.0} group visits",
@@ -1159,12 +1188,17 @@ pub fn node_resource_usage_and_cost<'a>(
                 input_rows,
             )?);
             assumed_data_facts.extend(assumed_magnitude_range_fact(column, input_rows));
-            let update_ops = update_operations_per_row(
+            let update_terms = update_operations_per_row(
                 family,
                 node.parameters.as_ref(),
                 input_rows.rows_per_state,
                 folded_distinct_values(update),
-            ) + carried_label_operations_per_row(&node.output_schema, reduction);
+            )
+            .plus_terms(&carried_label_operations_per_row(
+                &node.output_schema,
+                reduction,
+            ));
+            let update_ops = update_terms.operations();
             // The states it completes in one execution: at ingestion time
             // one second's share of each group's window (a 10 s window: a
             // tenth of a state per group); at query time every retained
@@ -1179,11 +1213,10 @@ pub fn node_resource_usage_and_cost<'a>(
             // window's range, the work a `TimeRange` over the same rows does
             // (11 per row); at ingestion time each arriving row is routed to
             // its window's state (14 per row).
-            let range_ops = input.rows as f64
-                * match ingestion {
-                    true => CHAIN_OPERATIONS_PER_ARRIVING_ROW,
-                    false => TIME_RANGE_OPERATIONS_PER_ROW,
-                };
+            let range_constant = match ingestion {
+                true => CostConstant::ChainOperationsPerArrivingRow,
+                false => CostConstant::TimeRangeOperationsPerRow,
+            };
             // Each group's state found once per raw batch.
             let group_visits = visits(group_count);
             let out = EdgeStatistics {
@@ -1194,11 +1227,12 @@ pub fn node_resource_usage_and_cost<'a>(
             };
             (
                 out,
-                Ok(ResourceEstimate::new(
-                    input.rows as f64 * update_ops
-                        + range_ops
-                        + group_visits * OPERATIONS_PER_GROUP_PER_RAW_BATCH
-                        + emitted_states * chain_emit_operations_per_state(family),
+                Ok(charged(
+                    update_terms
+                        .times(input.rows as f64)
+                        .plus(range_constant, input.rows as f64)
+                        .plus(CostConstant::OperationsPerGroupPerRawBatch, group_visits)
+                        .plus_terms(&chain_emit_operations_per_state(family).times(emitted_states)),
                     out.bytes,
                     0,
                 )),
@@ -1265,26 +1299,25 @@ pub fn node_resource_usage_and_cost<'a>(
                     .iter()
                     .all(|producer| keys_are_input_keys(keys, producer.output_schema))
             });
-            let merge_ops: f64 = match keeps_input_groups && states <= group_count {
+            let merge_terms = match keeps_input_groups && states <= group_count {
                 true => pass_through_merge_operations(group_count),
-                false => {
-                    producers
-                        .iter()
-                        .map(|producer| {
-                            producer.output.rows as f64
-                                * merge_operations_per_state(
-                                    family,
-                                    input_state_bytes(producer),
-                                    merged_state_bytes,
-                                    producer
-                                        .state_input_rows
-                                        .and_then(|rows| rows.rows_per_state),
-                                    states.div_ceil(group_count.max(1)),
-                                )
-                        })
-                        .sum::<f64>()
-                        + merge_output_operations(family, group_count)
-                }
+                false => producers
+                    .iter()
+                    .fold(NodeCostTerms::default(), |terms, producer| {
+                        terms.plus_terms(
+                            &merge_terms_per_state(
+                                family,
+                                input_state_bytes(producer),
+                                merged_state_bytes,
+                                producer
+                                    .state_input_rows
+                                    .and_then(|rows| rows.rows_per_state),
+                                states.div_ceil(group_count.max(1)),
+                            )
+                            .times(producer.output.rows as f64),
+                        )
+                    })
+                    .plus_terms(&merge_output_terms(family, group_count)),
             };
             let out = EdgeStatistics {
                 rows: group_count,
@@ -1294,7 +1327,7 @@ pub fn node_resource_usage_and_cost<'a>(
             };
             (
                 out,
-                Ok(ResourceEstimate::new(merge_ops, out.bytes, 0)),
+                Ok(charged(merge_terms, out.bytes, 0)),
                 format!("merge {states} states into {group_count}"),
             )
         }
@@ -1329,9 +1362,9 @@ pub fn node_resource_usage_and_cost<'a>(
             )?;
             (
                 out,
-                Ok(ResourceEstimate::new(
-                    input.rows as f64
-                        * estimate_operations_per_group(family, input_state_bytes(), written_by),
+                Ok(charged(
+                    estimate_operations_per_group(family, input_state_bytes(), written_by)
+                        .times(input.rows as f64),
                     0,
                     0,
                 )),
@@ -1341,8 +1374,8 @@ pub fn node_resource_usage_and_cost<'a>(
         Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => (
             edge(input.rows)?,
             // An exact accumulator's read is its output row alone.
-            Ok(ResourceEstimate::new(
-                input.rows as f64 * OUTPUT_ROW_OPERATIONS_PER_GROUP,
+            Ok(charged(
+                NodeCostTerms::of(CostConstant::OutputRowOperationsPerGroup, input.rows as f64),
                 0,
                 0,
             )),
@@ -1357,11 +1390,15 @@ pub fn node_resource_usage_and_cost<'a>(
             | ASAPOp::Extension { .. },
         ) => (
             edge(input.rows)?,
-            Ok(ResourceEstimate::new(input.rows as f64, 0, 0)),
+            Ok(charged(
+                NodeCostTerms::without_constant(input.rows as f64),
+                0,
+                0,
+            )),
             format!("{} rows", input.rows),
         ),
     };
-    let estimate = estimate?;
+    let (estimate, terms) = estimate?;
     let (multiplier, per_second) = rate;
     let formula_ms = estimate.cpu_ops() * speed.ms_per_cpu_op
         + estimate.scan_bytes() as f64 * speed.ms_per_scanned_byte;
@@ -1610,7 +1647,7 @@ pub fn node_resource_usage_and_cost<'a>(
             .then_some(input_raw_rows_span_ms)
             .flatten()
     });
-    Ok(NodeResourceUsageAndCost {
+    let usage = NodeResourceUsageAndCost {
         output: out,
         sources,
         family,
@@ -1638,7 +1675,21 @@ pub fn node_resource_usage_and_cost<'a>(
             cost_source,
             assumed_data_facts,
         },
-    })
+    };
+    Ok((usage, terms))
+}
+
+/// A formula estimate whose CPU operations are `terms` at the built-in
+/// values, holding `peak_memory_bytes` and scanning `scan_bytes`.
+fn charged(
+    terms: NodeCostTerms,
+    peak_memory_bytes: u64,
+    scan_bytes: u64,
+) -> (ResourceEstimate, NodeCostTerms) {
+    (
+        ResourceEstimate::new(terms.operations(), peak_memory_bytes, scan_bytes),
+        terms,
+    )
 }
 
 /// [`PlanCost::source`] for nodes costed as `per_node` says.
@@ -1724,14 +1775,20 @@ fn grouping_key_count(reduction: &Reduction) -> u64 {
 /// the per-series sum under `sum by (job) (sum_over_time(latency[5m]))`
 /// outputs the series identity (its key) and `job`, so it carries one
 /// label: 37 operations per row.
-fn carried_label_operations_per_row(output_schema: &Schema, reduction: &Reduction) -> f64 {
+fn carried_label_operations_per_row(
+    output_schema: &Schema,
+    reduction: &Reduction,
+) -> NodeCostTerms {
     let label_columns = output_schema
         .fields
         .iter()
         .filter(|field| field.dtype == FieldDataType::Plain(asap_types::ir::schema::DataType::Utf8))
         .count() as u64;
     let carried = label_columns.saturating_sub(grouping_key_count(reduction));
-    carried as f64 * CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL
+    NodeCostTerms::of(
+        CostConstant::CarriedLabelOperationsPerRowPerLabel,
+        carried as f64,
+    )
 }
 
 /// The input states a `SummaryMerge` over `producers` reads: every row of

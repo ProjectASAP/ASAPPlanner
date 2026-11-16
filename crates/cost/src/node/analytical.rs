@@ -4,9 +4,7 @@
 //! separate. Plan selection (Stage 3) turns them into one objective with
 //! [`crate::ResourceUnitCost`].
 
-use crate::node::operations_per_unit::{
-    OUTPUT_ROW_OPERATIONS_PER_GROUP, TIME_RANGE_OPERATIONS_PER_ROW,
-};
+use crate::node::cost_terms::{CostConstant, NodeCostTerms};
 use crate::resources::ModeledCpu;
 use asap_types::summary_type::{SketchAlgorithm, SketchParams};
 use serde::{Deserialize, Serialize};
@@ -373,14 +371,31 @@ fn validate_partitioning(
     Ok(())
 }
 
-/// Estimate one physical operator. Child costs are deliberately excluded;
-/// a DAG walker sums CPU/disk once per node and combines simultaneously
-/// retained state separately.
+/// [`estimate_operator_with_terms`] without its terms.
+#[cfg(test)]
 pub(crate) fn estimate_operator(
     operator: PhysicalOperator,
     statistics: OperatorStatistics,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
+    estimate_operator_with_terms(operator, statistics).map(|(estimate, _)| estimate)
+}
+
+/// Estimate one physical operator. Child costs are deliberately excluded;
+/// a DAG walker sums CPU/disk once per node and combines simultaneously
+/// retained state separately. Its CPU operations are also returned as
+/// terms: units of the
+/// named constants it charges (rows a time range keeps, groups a hash
+/// aggregate outputs), the rest without a constant. Example: a time
+/// range keeping 200 rows is 200 units of `TimeRangeOperationsPerRow`
+/// (2,200 operations); a sort's comparisons are charged without one.
+pub(crate) fn estimate_operator_with_terms(
+    operator: PhysicalOperator,
+    statistics: OperatorStatistics,
+) -> Result<(ResourceEstimate, NodeCostTerms), AnalyticalCostError> {
     validate_operator_semantics(operator, &statistics)?;
+    // The terms of an operator charging a named constant; any other's CPU
+    // is charged without one.
+    let mut named_terms = None;
     let per_row_width = |rows: u64, bytes: u64| -> Result<u64, AnalyticalCostError> {
         match (rows, bytes) {
             (0, 0) => return Ok(0),
@@ -410,10 +425,14 @@ pub(crate) fn estimate_operator(
                 "PromQL scalar leaf must emit one scalar row per evaluation step",
             ));
         }
-        return Ok(ResourceEstimate::new(
+        let estimate = ResourceEstimate::new(
             output.rows as f64,
             per_row_width(output.rows, output.bytes)?,
             0,
+        );
+        return Ok((
+            estimate,
+            NodeCostTerms::without_constant(output.rows as f64),
         ));
     }
     let left = input(0)?;
@@ -449,11 +468,17 @@ pub(crate) fn estimate_operator(
             0,
         ),
         (PhysicalOperator::TimeShift, _) => ResourceEstimate::new(0.0, 0, 0),
-        (PhysicalOperator::TimeRange, _) => ResourceEstimate::new(
-            output.rows as f64 * TIME_RANGE_OPERATIONS_PER_ROW,
-            per_row_width(output.rows, output.bytes)?,
-            0,
-        ),
+        (PhysicalOperator::TimeRange, _) => {
+            let terms =
+                NodeCostTerms::of(CostConstant::TimeRangeOperationsPerRow, output.rows as f64);
+            let estimate = ResourceEstimate::new(
+                terms.operations(),
+                per_row_width(output.rows, output.bytes)?,
+                0,
+            );
+            named_terms = Some(terms);
+            estimate
+        }
         (PhysicalOperator::PassThrough, _) => ResourceEstimate::new(
             left.rows as f64,
             per_row_width(output.rows, output.bytes)?,
@@ -469,18 +494,29 @@ pub(crate) fn estimate_operator(
                 accumulator_bytes_per_group,
                 ..
             },
-        ) => ResourceEstimate::new(
-            checked_cpu_product(left.rows, operations_per_row)?
-                + *group_count as f64 * OUTPUT_ROW_OPERATIONS_PER_GROUP,
-            checked_bytes(&[
-                *group_count,
-                key_bytes
-                    .checked_add(*accumulator_bytes_per_group)
-                    .and_then(|bytes| bytes.checked_add(16))
-                    .ok_or(AnalyticalCostError::Overflow)?,
-            ])?,
-            0,
-        ),
+        ) => {
+            let terms = NodeCostTerms::without_constant(checked_cpu_product(
+                left.rows,
+                operations_per_row,
+            )?)
+            .plus(
+                CostConstant::OutputRowOperationsPerGroup,
+                *group_count as f64,
+            );
+            let estimate = ResourceEstimate::new(
+                terms.operations(),
+                checked_bytes(&[
+                    *group_count,
+                    key_bytes
+                        .checked_add(*accumulator_bytes_per_group)
+                        .and_then(|bytes| bytes.checked_add(16))
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                ])?,
+                0,
+            );
+            named_terms = Some(terms);
+            estimate
+        }
         (
             PhysicalOperator::HashDeduplicate { key_count },
             OperatorStatistics::HashDeduplicate {
@@ -743,7 +779,9 @@ pub(crate) fn estimate_operator(
         }
     };
     if estimate.cpu_ops().is_finite() {
-        Ok(estimate)
+        let terms =
+            named_terms.unwrap_or_else(|| NodeCostTerms::without_constant(estimate.cpu_ops()));
+        Ok((estimate, terms))
     } else {
         Err(AnalyticalCostError::Overflow)
     }
@@ -1538,6 +1576,9 @@ fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::operations_per_unit::{
+        OUTPUT_ROW_OPERATIONS_PER_GROUP, TIME_RANGE_OPERATIONS_PER_ROW,
+    };
     use crate::node::operator_statistics::{
         BinaryEdgeStatistics, EdgeStatistics, OperatorStatistics, PartitionStatistics,
         PromqlBinaryEdgeStatistics, PromqlEdgeStatistics, PromqlUnaryEdgeStatistics,
