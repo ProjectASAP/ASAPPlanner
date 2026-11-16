@@ -13,12 +13,11 @@
 //! Each query is planned by `asap_planner --run-until stage3`: one exact
 //! search over every legal tumbling-window width, with no time limit.
 //!
-//! A snapshot holds only the plan, never the search that found it: the
-//! selected plan's DAG (Stage 2 candidate `P1`) and display name, its cost
-//! and accepted accuracy per query, the materialized views, tumbling-window retention,
-//! and whether the search proved the plan optimal; for a query that does not
-//! plan, the error. Candidate ids, timings, the Stage 1 and Stage 2
-//! candidate lists and the memo are left out. Floats are rounded to 12
+//! A snapshot holds only the plan, never the search that found it: Stage
+//! 3's plan (its `PhysicalASAPDAG`, retention on its nodes), its cost and
+//! accepted accuracy per query, and the materialized views; for a query
+//! that does not plan, the error. The selection MILP's size and timings,
+//! the Stage 1 and Stage 2 candidate lists and the memo are left out. Floats are rounded to 12
 //! significant digits. A query with a `skip_reason` is skipped.
 //!
 //! The same binary holds the sketch plan snapshots (`sketch_plan_snapshots.rs`),
@@ -64,8 +63,9 @@ fn plan(workload: &Value, args: &[String], scratch: &Path) -> Value {
 }
 
 /// Runs `asap_planner --run-until stage3 --format json` with `args`, which
-/// name its input (paths relative to the repository root); panics (a
-/// planner crash) on failure.
+/// name its input (paths relative to the repository root). A run whose plan
+/// selection failed still writes its document, with Stage 3's `error`,
+/// which is returned; any other failure (a planner crash) panics.
 fn asap_planner(args: &[String], scratch: &Path) -> Value {
     let output = scratch.join("document.json");
     let mut command = Command::new(env!("CARGO_BIN_EXE_asap_planner"));
@@ -76,22 +76,21 @@ fn asap_planner(args: &[String], scratch: &Path) -> Value {
         .arg("--out")
         .arg(&output);
     let result = command.output().unwrap();
-    assert!(
-        result.status.success(),
-        "{command:?} failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    serde_json::from_str(&std::fs::read_to_string(output).unwrap()).unwrap()
-}
-
-/// The selected plan's search status (`optimal`), or null without a plan.
-fn search_status(document: &Value) -> &Value {
-    &document["stage3_plan_selection"]["search_report"]["status"]
-}
-
-/// Whether the plan is proven optimal: its search says so.
-fn proven_optimal(document: &Value) -> bool {
-    search_status(document) == "optimal"
+    let document: Option<Value> = std::fs::read_to_string(&output)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok());
+    match document {
+        Some(document)
+            if result.status.success()
+                || document["stage3_plan_selection"]["error"].is_string() =>
+        {
+            document
+        }
+        _ => panic!(
+            "{command:?} failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        ),
+    }
 }
 
 /// `value` with every non-integer number rounded to 12 significant digits.
@@ -129,28 +128,16 @@ fn plan_snapshot(document: &Value) -> Map<String, Value> {
         "accuracy_guarantees".into(),
         document["accuracy_guarantees"].clone(),
     );
-    if stage3["cost"].is_object() {
-        // The document shows the selected plan as Stage 2 candidate `P1`.
-        let candidate = document["stage2_physical_asap_optimization"]["candidates"]
-            .as_array()
-            .and_then(|candidates| candidates.iter().find(|c| c["id"] == "P1"))
-            .unwrap_or_else(|| panic!("the selected plan P1 is not shown"));
+    if stage3["plan"].is_object() {
         snapshot.insert(
             "selected".into(),
             json!({
-                "display_name": candidate["display_name"],
-                "dag": candidate["dag"],
+                "dag": stage3["plan"],
                 "cost": stage3["cost"],
                 "accepted": stage3["accepted_accuracy_per_query"],
             }),
         );
-        snapshot.insert("proven_optimal".into(), json!(proven_optimal(document)));
-        for key in [
-            "materialized_views",
-            "materialized_views_error",
-            "tumbling_window_retention_ms",
-            "warnings",
-        ] {
+        for key in ["materialized_views", "materialized_views_error", "warnings"] {
             if let Some(value) = stage3.get(key) {
                 snapshot.insert(key.into(), value.clone());
             }
@@ -158,7 +145,6 @@ fn plan_snapshot(document: &Value) -> Map<String, Value> {
     } else {
         snapshot.insert("selected".into(), Value::Null);
         if let Some(error) = stage3["error"].as_str() {
-            let error = error.split(" Search report: ").next().unwrap();
             snapshot.insert("error".into(), json!(error));
         }
     }
@@ -305,23 +291,19 @@ fn corpus_plans_match_snapshots() {
     );
 }
 
-/// The snapshot keeps the selected plan without the search report, and
-/// rounds floats.
+/// The snapshot keeps the plan without the selection MILP's size and
+/// timings, and rounds floats.
 #[test]
 fn snapshot_keeps_only_the_plan() {
     let document = json!({
         "accuracy_guarantees": "enforced",
         "workload": {"queries": [{"text": "sum(up)"}]},
-        "stage2_physical_asap_optimization": {"candidates": [
-            {"id": "P1", "display_name": "plan A", "dag": {"nodes": [1]}},
-        ]},
         "stage3_plan_selection": {
-            "selected_dag": {"candidate_of_node": [0]},
+            "plan": {"nodes": [1]},
             "cost": {"cost_per_second": 0.1 + 0.2},
             "accepted_accuracy_per_query": [],
             "materialized_views": [],
-            "tumbling_window_retention_ms": {"1": 60000},
-            "search_report": {"solver_ms": 1},
+            "milp_solve_ms": 1,
         },
     });
     assert_eq!(
@@ -330,28 +312,22 @@ fn snapshot_keeps_only_the_plan() {
             "query": "sum(up)",
             "accuracy_guarantees": "enforced",
             "selected": {
-                "display_name": "plan A",
                 "dag": {"nodes": [1]},
                 "cost": {"cost_per_second": 0.3},
                 "accepted": [],
             },
-            "proven_optimal": false,
             "materialized_views": [],
-            "tumbling_window_retention_ms": {"1": 60000},
         })
     );
 }
 
-/// A query without a plan keeps the error up to the embedded search report.
+/// A query without a plan keeps the error.
 #[test]
 fn snapshot_of_a_failed_query() {
     let document = json!({
         "accuracy_guarantees": "enforced",
         "workload": {"queries": [{"text": "sum(up)"}]},
-        "stage3_plan_selection": {
-            "selected_dag": null,
-            "error": "infeasible. Search report: {\"solver_ms\":1.5}",
-        },
+        "stage3_plan_selection": {"plan": null, "error": "infeasible"},
     });
     assert_eq!(
         snapshot_of(&document),
@@ -359,18 +335,9 @@ fn snapshot_of_a_failed_query() {
             "query": "sum(up)",
             "accuracy_guarantees": "enforced",
             "selected": null,
-            "error": "infeasible.",
+            "error": "infeasible",
         })
     );
-}
-
-/// Only an `optimal` search status proves the plan optimal.
-#[test]
-fn proven_optimal_needs_an_optimal_status() {
-    let document =
-        |status: Value| json!({"stage3_plan_selection": {"search_report": {"status": status}}});
-    assert!(proven_optimal(&document(json!("optimal"))));
-    assert!(!proven_optimal(&document(Value::Null)));
 }
 
 /// The failure message names the first differing JSON path.

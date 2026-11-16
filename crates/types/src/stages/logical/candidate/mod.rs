@@ -74,8 +74,10 @@ pub fn listed_build_parameters(build: &Operator<MemoGroupId>) -> Vec<Option<Sket
     }
 }
 
-/// Which rule added a candidate. Nothing in planning reads it.
+/// Which rule added a candidate. Nothing in planning reads it. JSON: the
+/// snake_case variant name, e.g. `"top_k_reuse"`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OriginOfCandidateForMemoGroup {
     /// Pass 1: exact, exact accumulator, or a summary type.
     Pass1,

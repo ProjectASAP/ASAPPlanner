@@ -59,8 +59,6 @@ fn marginal_relations_derive_the_documented_query() {
         text(Relation::ExactDuplicate).as_deref(),
         Some(w.queries[0].text())
     );
-    let looser = derive(Relation::LooserAccuracy, &w, 0).unwrap();
-    assert_eq!(looser.query.accuracy().max_error, 0.01);
     let interval = derive(Relation::OtherRepeatInterval, &w, 0).unwrap();
     assert_eq!(repeat_interval_ms(&interval.query), Some(30_000));
 }
@@ -256,7 +254,8 @@ fn relation_names_parse() {
     for relation in Relation::ALL {
         assert_eq!(Relation::parse(relation.name()), Some(relation));
     }
-    assert_eq!(Relation::parse("a"), Some(Relation::LooserAccuracy));
+    assert_eq!(Relation::parse("a"), None);
+    assert_eq!(Relation::parse("b"), Some(Relation::FilterOnGroupKey));
     assert_eq!(Relation::parse("k"), Some(Relation::UnionOfSelections));
     assert_eq!(Relation::parse("z"), None);
 }
