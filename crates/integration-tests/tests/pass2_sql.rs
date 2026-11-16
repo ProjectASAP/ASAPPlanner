@@ -319,3 +319,65 @@ fn a_result_grouped_by_keys_of_joined_scans_returns_up_to_their_product() {
     assert_eq!(values_per_evaluation(&join(None, None)), Some(36));
     assert_eq!(values_per_evaluation(&join(Some(6), Some(5))), Some(30));
 }
+
+/// `flows` holding 96 rows, sampled every minute (6 groups of rows, 300
+/// `dst` values), and `hosts` holding 6 rows (6 hosts, 6 regions), as
+/// [`sql_pass2_over`] declares them, for the outer-join and `LIMIT` tests.
+fn flows_and_six_hosts() -> serde_json::Value {
+    json!({
+        "flows": {
+            "series_count": 6,
+            "rows_held": 96,
+            "sample_interval": 60_000,
+            "distinct_values_per_label": {"src": 6, "dst": 300},
+        },
+        "hosts": {
+            "series_count": 6,
+            "rows_held": 6,
+            "distinct_values_per_label": {"host": 6, "region": 6},
+        },
+    })
+}
+
+/// An outer join adds a NULL to the columns of its nullable side: `flows f
+/// LEFT JOIN hosts h ... GROUP BY h.region` returns the 6 declared regions
+/// and a NULL group for the flows no host matches, 7 values, so the
+/// declared 6 do not bound it. The key counts as computed and the rows the
+/// grouping reads bound it: 96 `flows` rows and 6 `hosts` rows, at most
+/// 96 × 6 pairs plus each side's own rows, 678. A
+/// `FULL JOIN` makes both sides nullable, so `GROUP BY f.src, h.region` is
+/// bounded the same way, not by 6 × 6.
+#[test]
+fn a_key_from_the_nullable_side_of_an_outer_join_is_bounded_by_the_rows_read() {
+    for join in ["LEFT JOIN", "FULL JOIN"] {
+        for keys in ["h.region", "f.src, h.region"] {
+            let query = format!(
+                "SELECT {keys}, approx_percentile_cont(f.bytes, 0.9) AS q \
+                 FROM flows f {join} hosts h ON f.dst = h.host \
+                 WHERE f.ts >= now() - INTERVAL '15 minutes' GROUP BY {keys}"
+            );
+            let logical = whole_result_quantile(&query, flows_and_six_hosts());
+            assert_eq!(values_per_evaluation(&logical), Some(678), "{query}");
+        }
+    }
+    // An inner join adds no NULL: 6 × 6 pairs.
+    let inner = whole_result_quantile(
+        "SELECT f.src, h.region, approx_percentile_cont(f.bytes, 0.9) AS q \
+         FROM flows f JOIN hosts h ON f.dst = h.host \
+         WHERE f.ts >= now() - INTERVAL '15 minutes' GROUP BY f.src, h.region",
+        flows_and_six_hosts(),
+    );
+    assert_eq!(values_per_evaluation(&inner), Some(36));
+}
+
+/// A `LIMIT 10` below the grouping keeps at most 10 rows, so the result
+/// holds at most 10 `dst` values, not the 96 rows the window holds.
+#[test]
+fn a_grouping_over_a_limit_returns_at_most_its_rows() {
+    let logical = whole_result_quantile(
+        "SELECT dst, approx_percentile_cont(b, 0.9) AS q FROM (SELECT dst, bytes AS b \
+         FROM flows WHERE ts >= now() - INTERVAL '15 minutes' LIMIT 10) t GROUP BY dst",
+        flows_and_six_hosts(),
+    );
+    assert_eq!(values_per_evaluation(&logical), Some(10));
+}
