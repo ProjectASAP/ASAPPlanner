@@ -262,18 +262,25 @@ fn sort_with_fetch_over_ascending_input_equals_sort_then_limit() {
                     .into_iter()
                     .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
                     .collect();
-                dag.add(0, vec![], Operator::source(input.clone(), source).unwrap())
-                    .unwrap();
+                dag.add(
+                    0,
+                    vec![],
+                    Operator::source(input.clone(), source).unwrap(),
+                    Lifetime::None,
+                )
+                .unwrap();
                 dag.add(
                     1,
                     vec![0],
                     Operator::sort(input.clone(), key.clone(), groups.clone(), None).unwrap(),
+                    Lifetime::None,
                 )
                 .unwrap();
                 dag.add(
                     2,
                     vec![1],
                     Operator::limit(input.clone(), fetch, 0, groups.clone()).unwrap(),
+                    Lifetime::None,
                 )
                 .unwrap();
                 assert_eq!(
@@ -363,18 +370,25 @@ fn sort_with_fetch_equals_sort_then_limit() {
                     .into_iter()
                     .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
                     .collect();
-                dag.add(0, vec![], Operator::source(input.clone(), source).unwrap())
-                    .unwrap();
+                dag.add(
+                    0,
+                    vec![],
+                    Operator::source(input.clone(), source).unwrap(),
+                    Lifetime::None,
+                )
+                .unwrap();
                 dag.add(
                     1,
                     vec![0],
                     Operator::sort(input.clone(), key.clone(), groups.clone(), None).unwrap(),
+                    Lifetime::None,
                 )
                 .unwrap();
                 dag.add(
                     2,
                     vec![1],
                     Operator::limit(input.clone(), fetch, 0, groups.clone()).unwrap(),
+                    Lifetime::None,
                 )
                 .unwrap();
                 let limited = collect(&dag, 2);
@@ -396,11 +410,17 @@ fn try_chain(
     ops: Vec<Operator>,
 ) -> Result<Vec<Vec<Value>>, String> {
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], Operator::source(input.clone(), batches).unwrap())
-        .unwrap();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(input.clone(), batches).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
     let root = ops.len() as u64;
     for (index, op) in ops.into_iter().enumerate() {
-        dag.add(index as u64 + 1, vec![index as u64], op).unwrap();
+        dag.add(index as u64 + 1, vec![index as u64], op, Lifetime::None)
+            .unwrap();
     }
     block_on(async {
         let mut stream = dag
@@ -591,13 +611,19 @@ fn identities_equal_but_for_an_excluded_label_aggregate_in_one_group() {
         .into_iter()
         .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
         .collect();
-    dag.add(0, vec![], Operator::source(input.clone(), source).unwrap())
-        .unwrap();
-    dag.add(1, vec![0], project).unwrap();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(input.clone(), source).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
+    dag.add(1, vec![0], project, Lifetime::None).unwrap();
     dag.add(
         2,
         vec![1],
         Operator::aggregate(projected, vec![0], vec![("sum".into(), Reduction::Sum(1))]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let mut sums = collect(&dag, 2)

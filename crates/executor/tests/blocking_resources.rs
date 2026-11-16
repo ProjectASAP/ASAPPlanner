@@ -158,8 +158,13 @@ fn sort_with_fetch_holds_groups_times_fetch_rows() {
             })
             .collect();
         let mut dag = PhysicalDAG::default();
-        dag.add(0, vec![], Operator::source(input.clone(), batches).unwrap())
-            .unwrap();
+        dag.add(
+            0,
+            vec![],
+            Operator::source(input.clone(), batches).unwrap(),
+            Lifetime::None,
+        )
+        .unwrap();
         let key = SortKey {
             column: 1,
             descending: true,
@@ -169,6 +174,7 @@ fn sort_with_fetch_holds_groups_times_fetch_rows() {
             1,
             vec![0],
             Operator::sort(input.clone(), vec![key], vec![0], fetch).unwrap(),
+            Lifetime::None,
         )
         .unwrap();
         let context = context(1024 * 1024);
