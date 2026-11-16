@@ -253,6 +253,7 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
         family: StateFamily::None,
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 5,
+        chain_tumbling_window_width_ms: None,
     };
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
         children: vec![0],
@@ -304,6 +305,7 @@ fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
         family: StateFamily::None,
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
+        chain_tumbling_window_width_ms: None,
     };
     let chain = PhysicalASAPDAGNode {
         retention_ms: Some(300_000),
