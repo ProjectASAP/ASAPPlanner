@@ -1,13 +1,32 @@
-//! DDSketch relative value error under its estimator/domain contract.
+//! DDSketch relative value error under its estimator/domain contract:
+//! the bound holds only over values of one sign (`accuracy-models.md`,
+//! "Sign conditions"), as the sketch's buckets around 0 have no relative bound.
 use super::*;
 
-pub(super) fn guarantee(params: &SketchParams) -> Option<AccuracyGuarantee> {
+/// DDSketch's guarantee at `params`: relative error α, failing never when
+/// `state_sign`, the sign of the values the state was updated with, is
+/// one sign ([`ValueSign::is_one_sign`]); else with an unknown failure
+/// probability, so its readout serves no query with an accuracy target.
+///
+/// Example: `quantile_over_time(0.99, latency[1h])` with `latency`
+/// declared non-negative holds at α; over a gauge of unknown sign its
+/// failure probability is unknown.
+pub(super) fn guarantee(
+    params: &SketchParams,
+    state_sign: Option<ValueSign>,
+) -> Option<AccuracyGuarantee> {
     let SketchParams::DDSketch { alpha } = params else {
         return None;
+    };
+    let failure_probability = match state_sign.is_some_and(ValueSign::is_one_sign) {
+        true => ProbabilityExpr::Zero,
+        false => ProbabilityExpr::Unknown {
+            statistic: "ddsketch_values_of_unknown_sign".into(),
+        },
     };
     Some(super::bounded_guarantee(
         AccuracyMetric::Relative,
         *alpha,
-        ProbabilityExpr::Zero,
+        failure_probability,
     ))
 }

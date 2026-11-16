@@ -18,7 +18,8 @@
 //! builds the plan (`PhysicalASAPDAG`) from the selected executions and
 //! edges as its last step ([`plan`], each node retaining its candidate's
 //! $h_v$, the needs from [`retention`]). Accuracy at each query root is
-//! constraint (K) (section 4): error bounds $E_{\kappa,c,m}$ per execution
+//! constraint (K) (`accuracy-models.md`, "Checking each query's target in
+//! selection"): error bounds $E_{\kappa,c,m}$ per execution
 //! and metric and failure probabilities $D_{\kappa,c}$, composed along the
 //! selected edges and checked at each query's root. Costs come from
 //! `asap-cost`.

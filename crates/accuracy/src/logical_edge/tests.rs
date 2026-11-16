@@ -6,6 +6,7 @@ use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::stages::{
     CandidateForMemoGroup, LogicalRequirements, OriginOfCandidateForMemoGroup, RequiredAccuracy,
+    ValueSign,
 };
 use asap_types::summary_type::{parameter_list, SketchAlgorithm, SummaryUpdate};
 use asap_types::test_support::memo_builders::query;

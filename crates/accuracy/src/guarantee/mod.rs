@@ -1,6 +1,7 @@
 //! Dispatch committed estimator parameters to their accuracy models.
 use asap_types::accuracy::{AccuracyGuarantee, AccuracyMetric, BoundExpr, ProbabilityExpr};
 use asap_types::ir::schema::FieldDataType;
+use asap_types::stages::ValueSign;
 use asap_types::summary_type::{SketchParams, SketchStatistic};
 
 use asap_types::summary_type::SummaryTypeCapability;
@@ -25,12 +26,14 @@ use binomial::binomial_upper_tail;
 /// failure probability may exceed `failure_probability` or be unknown
 /// (HLL's, unless the source declares its distinct bound
 /// `max_distinct_per_evaluation`: classic HLL's is then certified at
-/// `failure_probability`). A Hydra state reads each subpopulation's
-/// state, so it has that state's guarantee.
+/// `failure_probability`; DDSketch's, unless `state_sign`, the sign of the
+/// values the state was updated with, is one sign). A Hydra state reads
+/// each subpopulation's state, so it has that state's guarantee.
 fn guarantee_of_parameters(
     params: &SketchParams,
     query: &SketchStatistic,
     failure_probability: f64,
+    state_sign: Option<ValueSign>,
     max_distinct_per_evaluation: Option<u64>,
 ) -> Option<AccuracyGuarantee> {
     match params {
@@ -40,9 +43,10 @@ fn guarantee_of_parameters(
             &hydra.per_subpopulation(),
             query,
             failure_probability,
+            state_sign,
             max_distinct_per_evaluation,
         ),
-        SketchParams::DDSketch { .. } => ddsketch::guarantee(params),
+        SketchParams::DDSketch { .. } => ddsketch::guarantee(params, state_sign),
         SketchParams::Hll { .. } => {
             hll::guarantee(params, failure_probability, max_distinct_per_evaluation)
         }
@@ -57,14 +61,19 @@ fn guarantee_of_parameters(
 /// The guarantee [`theoretical_guarantee`] gives, before it checks that θ
 /// fails at most `failure_probability` rarely: its metric, and whether its
 /// failure probability is known at all. `None` when the summary type does
-/// not answer `statistic` or has no error model for it.
-/// `max_distinct_per_evaluation` is the source's declared distinct bound
-/// (`Memo::max_distinct_per_evaluation`), which a distinct count reads.
+/// not answer `statistic` or has no error model for it. `state_sign` is
+/// the sign of the values the read state was updated with
+/// (`GroupProperties::state_column_sign`), which DDSketch's guarantee
+/// reads; `max_distinct_per_evaluation` is the source's declared distinct
+/// bound (`Memo::max_distinct_per_evaluation`), which a distinct count
+/// reads. Without them, the guarantee's metric still holds, with an
+/// unknown failure probability.
 pub(crate) fn guarantee_before_failure_probability_check(
     summary_type: &FieldDataType,
     parameters: &SketchParams,
     statistic: &SketchStatistic,
     failure_probability: f64,
+    state_sign: Option<ValueSign>,
     max_distinct_per_evaluation: Option<u64>,
 ) -> Option<AccuracyGuarantee> {
     if !matches!(summary_type, FieldDataType::Sketch(_))
@@ -76,6 +85,7 @@ pub(crate) fn guarantee_before_failure_probability_check(
         parameters,
         statistic,
         failure_probability,
+        state_sign,
         max_distinct_per_evaluation,
     )
 }
@@ -105,15 +115,18 @@ fn bounded_guarantee(
 /// that rarely. `None` when this θ cannot fail that rarely, when the
 /// summary type does not answer `statistic` (its capability row) or has no
 /// error model (`SummarySample`, `Wavelet`, `StatModel`, and sketch
-/// readouts without a certified bound). A distinct count from classic HLL
-/// is certified only over a source of at most `max_distinct_per_evaluation`
-/// distinct items (`Memo::max_distinct_per_evaluation`); `None` without that
-/// bound.
+/// readouts without a certified bound). A quantile from DDSketch is
+/// certified only over values of one sign, `state_sign`
+/// (`GroupProperties::state_column_sign`; `accuracy-models.md`, "Sign
+/// conditions"), and a distinct count from classic HLL only over a source
+/// of at most `max_distinct_per_evaluation` distinct items
+/// (`Memo::max_distinct_per_evaluation`); `None` without them.
 pub fn theoretical_guarantee(
     summary_type: &FieldDataType,
     parameters: &SketchParams,
     statistic: &SketchStatistic,
     failure_probability: f64,
+    state_sign: Option<ValueSign>,
     max_distinct_per_evaluation: Option<u64>,
 ) -> Option<AccuracyGuarantee> {
     guarantee_before_failure_probability_check(
@@ -121,6 +134,7 @@ pub fn theoretical_guarantee(
         parameters,
         statistic,
         failure_probability,
+        state_sign,
         max_distinct_per_evaluation,
     )
     .filter(|guarantee| holds_at_failure_probability(guarantee, failure_probability))

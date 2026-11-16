@@ -7,7 +7,7 @@
 //! | baseline (section 3) over execution contexts (section 5) | $x_{\kappa,v}$ (with $x^{\mathrm{mat}}_v = x_{\mathrm{Materialized}(v),v}$), $y_{\kappa,u,c,i}$, $z_{q,v}$, $t$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) and one consumer per context of a query-time result that is not materialized [`use_constraints`], each source's raw data on disk once [`raw_data_disk_rows`]; (G), (H): $y$ exists only on admissible edges where the producer delivers on the consumer's context |
 //! | retention (section 5) | $h_v$ | (R) [`super::retention::retention_constraints`] |
 //! | exact-only reads per query | $a_{q,e}$ | (X) [`super::exact_only::exact_only_constraints`] |
-//! | accuracy (section 4), per execution | $E_{\kappa,c,m}$, $D_{\kappa,c}$ ([`AccuracyVariables`]); $F_{\kappa,c,i,m}$, $H_{\kappa,c,i}$ | (K) [`accuracy_constraints`], over [`ErrorModel`] |
+//! | accuracy (`accuracy-models.md`, constraint (K)), per execution | $E_{\kappa,c,m}$, $D_{\kappa,c}$ ([`AccuracyVariables`]); $F_{\kappa,c,i,m}$, $H_{\kappa,c,i}$ | (K) [`accuracy_constraints`], over [`ErrorModel`] |
 //!
 //! The strongly connected components (E) needs are in [`super::graph`]; the
 //! executions left out before scaling, those dearer than a feasible plan
@@ -412,20 +412,26 @@ pub(crate) fn solve_selection(
         .map(|((&dearer, dominated), cost)| cost.is_ok() && !dearer && !dominated)
         .collect();
     let components = Components::of(inputs);
-    let shared = copies_in_equivalent_contexts(inputs, &kept);
+    let shared = copies_in_equivalent_contexts(inputs, &kept, rules.as_ref());
     let mut problem = ProblemVariables::new();
     let variables = selection_variables(inputs, &kept, &shared, &components, &mut problem);
-    let error_model = ErrorModel::new(inputs, rules.as_ref(), &variables.y, &shared);
-    let accuracy = AccuracyVariables::new(&error_model, &mut problem);
-    let accuracy_rows = accuracy_constraints(
-        inputs,
-        &error_model,
-        &accuracy,
-        &variables.y,
-        &variables.z,
-        &shared,
-        &mut problem,
-    );
+    // (K), only when some query has an accuracy target.
+    let accuracy_rows = rules
+        .as_ref()
+        .map(|rules| {
+            let error_model = ErrorModel::new(inputs, rules, &variables.y, &shared);
+            let accuracy = AccuracyVariables::new(&error_model, &mut problem);
+            accuracy_constraints(
+                inputs,
+                &error_model,
+                &accuracy,
+                &variables.y,
+                &variables.z,
+                &shared,
+                &mut problem,
+            )
+        })
+        .unwrap_or_default();
     // The objective's terms per second, unscaled: (cost, variable). A
     // query-time scan's retention is in its source's r_s.
     let terms: Vec<(f64, Variable)> = costs
@@ -514,12 +520,13 @@ pub(crate) fn solve_selection(
     model.set_option("mip_abs_gap", 0.0);
     model.set_option("output_flag", false);
     model.set_option("threads", 1);
-    if !accuracy.is_empty() {
-        // Errors and failure probabilities are small (1e-3, 1e-7): the
-        // default feasibility tolerance 1e-7 would let (K) pass a bound
-        // above its limit.
-        model.set_option("primal_feasibility_tolerance", 1e-10);
-        model.set_option("mip_feasibility_tolerance", 1e-10);
+    if let Some(tolerance) = rules
+        .as_ref()
+        .and_then(|rules| rules.feasibility_tolerance())
+    {
+        // (K)'s limits can be far below HiGHS's absolute default 1e-7.
+        model.set_option("primal_feasibility_tolerance", tolerance);
+        model.set_option("mip_feasibility_tolerance", tolerance);
     }
     let construction_ms = started.elapsed().as_millis() as u64;
     let started = Instant::now();

@@ -2,6 +2,10 @@ use super::*;
 use asap_types::ir::scalar::expr_ir::ColumnRef;
 use asap_types::summary_type::SketchAlgorithm;
 
+/// Values of one sign, which every listed guarantee holds over (DDSketch's
+/// needs it).
+const ONE_SIGN: Option<ValueSign> = Some(ValueSign::NonNegative);
+
 /// Every listed θ has a theoretical guarantee for the statistic its
 /// algorithm is listed for, at failure probability 0.01, in the
 /// algorithm's metric; along a list of one structure the error never
@@ -49,9 +53,15 @@ fn every_listed_parameters_has_a_guarantee_at_one_percent() {
         let errors: Vec<f64> = parameter_list(algorithm)
             .iter()
             .map(|parameters| {
-                let guarantee =
-                    theoretical_guarantee(&summary_type, parameters, &statistic, 0.01, None)
-                        .unwrap_or_else(|| panic!("{algorithm:?} {parameters:?}"));
+                let guarantee = theoretical_guarantee(
+                    &summary_type,
+                    parameters,
+                    &statistic,
+                    0.01,
+                    ONE_SIGN,
+                    None,
+                )
+                .unwrap_or_else(|| panic!("{algorithm:?} {parameters:?}"));
                 assert_eq!(guarantee.spec.accuracy_metric, metric, "{algorithm:?}");
                 guarantee.spec.error.evaluate().unwrap()
             })
@@ -78,7 +88,7 @@ fn a_guarantee_is_evaluated_at_the_required_failure_probability() {
     let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
     let k = SketchParams::Kll { k: 547 };
     let error_at = |delta| {
-        theoretical_guarantee(&kll, &k, &quantile, delta, None)
+        theoretical_guarantee(&kll, &k, &quantile, delta, None, None)
             .unwrap()
             .spec
             .error
@@ -93,9 +103,37 @@ fn a_guarantee_is_evaluated_at_the_required_failure_probability() {
         value: None,
     };
     let depth = |depth| SketchParams::Cms { width: 272, depth };
-    assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-2, None).is_some());
-    assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-4, None).is_none());
-    assert!(theoretical_guarantee(&cms, &depth(10), &point, 1e-4, None).is_some());
+    assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-2, None, None).is_some());
+    assert!(theoretical_guarantee(&cms, &depth(5), &point, 1e-4, None, None).is_none());
+    assert!(theoretical_guarantee(&cms, &depth(10), &point, 1e-4, None, None).is_some());
     // A statistic the summary type does not answer has no guarantee.
-    assert!(theoretical_guarantee(&kll, &k, &SketchStatistic::Cardinality, 0.01, None).is_none());
+    assert!(
+        theoretical_guarantee(&kll, &k, &SketchStatistic::Cardinality, 0.01, None, None).is_none()
+    );
+}
+
+/// DDSketch's relative error on a quantile holds only over values of one
+/// sign: over non-negative or non-positive values at α, at any failure
+/// probability; over values of unknown sign, or of no known sign, the
+/// guarantee is not certified at any failure probability, though its
+/// metric is still relative error.
+#[test]
+fn a_ddsketch_quantile_is_certified_only_over_values_of_one_sign() {
+    let ddsketch = FieldDataType::Sketch(SketchAlgorithm::DDSketch);
+    let alpha = SketchParams::DDSketch { alpha: 0.01 };
+    let quantile = SketchStatistic::Quantile { q: 0.99 };
+    for (sign, certified) in [
+        (Some(ValueSign::NonNegative), true),
+        (Some(ValueSign::NonPositive), true),
+        (Some(ValueSign::Unknown), false),
+        (None, false),
+    ] {
+        let theoretical = theoretical_guarantee(&ddsketch, &alpha, &quantile, 0.01, sign, None);
+        assert_eq!(theoretical.is_some(), certified, "{sign:?}");
+        let before_check = guarantee_before_failure_probability_check(
+            &ddsketch, &alpha, &quantile, 0.01, sign, None,
+        )
+        .unwrap();
+        assert_eq!(before_check.spec.accuracy_metric, AccuracyMetric::Relative);
+    }
 }

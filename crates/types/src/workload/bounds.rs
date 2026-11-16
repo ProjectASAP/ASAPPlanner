@@ -13,7 +13,9 @@ use crate::ir::{
 use crate::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
 use crate::stages::ValueSign;
 use crate::summary_type::SketchStatistic;
-use crate::workload::{DataWorkload, PrometheusMetricType, SourceFacts, ValueMagnitudeRange};
+use crate::workload::{
+    series_facts, DataWorkload, PrometheusMetricType, SourceFacts, ValueMagnitudeRange,
+};
 
 /// A scan source's name: its PromQL metric or SQL table.
 pub fn source_name(source: &Source) -> &str {
@@ -471,6 +473,26 @@ pub fn declared_value_magnitude_range<'a>(
             min_abs: union.min_abs.min(range.min_abs),
             max_abs: union.max_abs.max(range.max_abs),
         })
+    })
+}
+
+/// The most distinct items one distinct-count summary over the sources
+/// `scanned` counts per evaluation: the sum of the bound each declares
+/// ([`SourceFacts::max_distinct_per_evaluation`]), each looked up as a
+/// PromQL selector reads it ([`DataWorkload::series_facts`]: a histogram
+/// family `foo`'s bound covers `foo_bucket`, `foo_sum` and `foo_count`, as
+/// its `series_count` does). Unlike [`declared_value_magnitude_range`],
+/// whose ranges differ between a family's series, a bound on the distinct
+/// items counted holds for each series of the family. `None` when one of
+/// them declares none, or the sum overflows. E.g. `events` bounded at
+/// 9,636 and `clicks` at 1,000 give 10,636.
+pub(crate) fn declared_max_distinct_per_evaluation<'a>(
+    sources: &BTreeMap<String, SourceFacts>,
+    scanned: impl IntoIterator<Item = &'a str>,
+) -> Option<u64> {
+    scanned.into_iter().try_fold(0u64, |total, source| {
+        let (facts, _) = series_facts(sources, source)?;
+        total.checked_add(facts.max_distinct_per_evaluation?)
     })
 }
 

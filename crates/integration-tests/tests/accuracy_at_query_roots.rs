@@ -1,7 +1,7 @@
 //! Constraint (K), each query's composed accuracy at its root, through
-//! every planning stage on #1207's problem example (concepts doc,
-//! section 1): A, the p95 of `latency` at rank error 0.01, and B, the
-//! ratio of its p99 and p50 at relative error 0.03.
+//! every planning stage on a two-query example (`accuracy-models.md`,
+//! "Example: allocation in a ratio"): A, the p95 of `latency` at rank
+//! error 0.01, and B, the ratio of its p99 and p50 at relative error 0.03.
 
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_planner::{DeploymentCapabilities, PlanningModels};
@@ -62,7 +62,7 @@ fn selection(queries: &[(&str, &str)], ignore_accuracy: bool) -> (PhysicalASAPDA
     (plan.clone(), accepted)
 }
 
-/// #1207's problem example.
+/// Queries A and B of the module's example.
 const PROBLEM_EXAMPLE: [(&str, &str); 2] = [
     (
         "quantile_over_time(0.95, latency[1h])",
@@ -153,7 +153,8 @@ fn ignoring_accuracy_plans_without_k() {
 
 /// A whole-result failure probability of 0.01 over 1,000 series is 1e-5
 /// per value: a KLL read at that failure probability meets rank error
-/// 0.01 only from k = 547 up (the concepts doc's KLL table).
+/// 0.01 only from k = 547 up (`accuracy-models.md`, the KLL row of the
+/// built-in models: 2.296 / k^0.9723 scaled by the Gaussian quantile ratio).
 #[test]
 fn a_whole_result_failure_probability_is_divided_over_the_values() {
     let plan = plan(
@@ -171,4 +172,36 @@ fn a_whole_result_failure_probability_is_divided_over_the_values() {
             "{parameters:?}"
         );
     }
+}
+
+/// p90, p50 and p90 / p50 over `latency[15m]`, each at relative 0.05: the
+/// two quantiles alone accept DDSketch readouts at α = 0.05, and sharing
+/// those with the ratio is cheapest, but the ratio's composed bound would be
+/// (0.05 + 0.05) / (1 − 0.1) = 0.111. (K) is what rules that out: the plan
+/// reads readouts at α ≤ 0.02 for the ratio, (0.02 + 0.02) / 0.9 = 0.044.
+#[test]
+fn a_ratio_sharing_its_readouts_with_its_operands_still_meets_its_target() {
+    let target = r#"{"accuracy_metric": "relative", "max_error": 0.05}"#;
+    let plan = plan(
+        &[
+            ("quantile_over_time(0.9, latency[15m])", target),
+            ("quantile_over_time(0.5, latency[15m])", target),
+            (
+                "quantile_over_time(0.9, latency[15m]) / quantile_over_time(0.5, latency[15m])",
+                target,
+            ),
+        ],
+        false,
+    );
+    let alphas: Vec<f64> = sketch_parameters(&plan)
+        .iter()
+        .filter_map(|p| match p {
+            SketchParams::DDSketch { alpha } => Some(*alpha),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        alphas.iter().any(|&alpha| alpha <= 0.02),
+        "the ratio reads readouts composing within 0.05: {alphas:?}"
+    );
 }
