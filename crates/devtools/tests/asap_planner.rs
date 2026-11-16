@@ -1749,6 +1749,86 @@ fn edges_are_listed_by_layer_with_their_alpha_and_rejection() {
     }
 }
 
+/// Each failing logical edge shows the reason Pass 2 recorded for it,
+/// eliminated endpoints included. A q0.9 with δ over its whole result and
+/// no declared `series_count` (so $n_q$ is unknown) fails every edge into
+/// its readouts, the KLL one (G5[0] <- G4) and the DDSketch one (G7[0] <-
+/// G6), with `ValuesPerEvaluationUnknown`: Pass 2 checks that rule before
+/// the metric and accuracy rules, so the DDSketch edges do not show "no
+/// guarantee" and the KLL ones do not show `✓`.
+#[test]
+fn failing_logical_edges_show_the_reason_pass_2_recorded() {
+    let workload = json!({
+        "query_workload": {"language": "promql", "repeating_queries": [
+            {"query": "quantile_over_time(0.9, latency[5m])",
+             "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
+             "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.01, "accuracy_scope": "whole_result"}},
+             "predictability": {"predictable": {"known_at": null}}},
+            {"query": "quantile_over_time(0.5, latency[5m])",
+             "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
+             "requirements": {"accuracy": {"max_error": 0.01}},
+             "predictability": {"predictable": {"known_at": null}}},
+        ]},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 2000.0}},
+            "sources": {"latency": {"metric_type": "gauge", "sample_interval": 1000}},
+        },
+    });
+    const VALUES_PER_EVALUATION_UNKNOWN: &str = "α^log = 0: query 0: the query's failure \
+        probability covers its whole result, and the number of values one evaluation returns is \
+        unknown";
+    let args = ["--run-until", "stage1_pass2", "--printing-full-candidates"];
+    let document = document(&workload, &args);
+    let pass2 = memo_step(&document, "pass2")["groups"].as_array().unwrap();
+    let readouts: Vec<&Value> = pass2
+        .iter()
+        .filter(|group| group["label"] == "SummaryEstimate Quantile(q=0.9)")
+        .collect();
+    assert_eq!(readouts.len(), 2, "the KLL and the DDSketch readout");
+    let mut readout_ids = Vec::new();
+    for group in &readouts {
+        readout_ids.push(group["id"].as_u64().unwrap());
+        let candidate = &group["candidates"][0];
+        assert_eq!(candidate["pruned"], true, "{candidate}");
+        let edges = candidate["inputs"][0]["edges"].as_array().unwrap();
+        assert!(!edges.is_empty());
+        for edge in edges {
+            assert_eq!(edge["satisfies_logical_requirement"], false, "{edge}");
+            assert_eq!(edge["rejection"], VALUES_PER_EVALUATION_UNKNOWN, "{edge}");
+        }
+    }
+
+    let file = TempFile::json(&workload);
+    let mut text_args = vec!["--workload", file.path(), "--format", "text"];
+    text_args.extend(args);
+    let output = planner(&text_args);
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    let pass2 = text
+        .split("==================== Stage 1 Pass 2 output")
+        .nth(1)
+        .expect("a Pass 2 section");
+    for id in readout_ids {
+        let block = pass2
+            .split(&format!("\nG{id}: "))
+            .nth(1)
+            .and_then(|rest| rest.split("\nG").next())
+            .unwrap_or_else(|| panic!("G{id} in:\n{pass2}"));
+        let edges: Vec<&str> = block
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| line.starts_with('G') && line.contains('['))
+            .collect();
+        assert!(!edges.is_empty(), "{block}");
+        for edge in edges {
+            assert!(
+                edge.ends_with(&format!("✗ {VALUES_PER_EVALUATION_UNKNOWN}")),
+                "{edge}"
+            );
+        }
+    }
+}
+
 /// The text output ends with Stage 3's selection and the selected plan's
 /// cost per second.
 #[test]

@@ -129,6 +129,7 @@ fn candidates(
         LogicalASAPMemoCandidates {
             memo,
             edges: vec![],
+            failing_logical_edges: vec![],
             pruned: vec![],
             evaluation_grid_of_group,
             exact_only_groups_of_query: vec![],
@@ -687,6 +688,7 @@ fn new_indexes_only_admissible_edges() {
         LogicalASAPMemoCandidates {
             memo: memo(),
             edges: vec![],
+            failing_logical_edges: vec![],
             pruned: vec![],
             evaluation_grid_of_group: vec![None; 5],
             exact_only_groups_of_query: vec![],
@@ -777,6 +779,7 @@ fn a_stored_chain_and_an_ingestion_time_result_are_stored_on_their_refresh_windo
             LogicalASAPMemoCandidates {
                 memo: memo.clone(),
                 edges: vec![],
+                failing_logical_edges: vec![],
                 pruned: vec![],
                 evaluation_grid_of_group: vec![grid_60s; group_count],
                 exact_only_groups_of_query: vec![],

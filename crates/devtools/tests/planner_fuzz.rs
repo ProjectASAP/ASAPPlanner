@@ -60,10 +60,14 @@ fn finds_issue_902_filter_on_group_key_not_reading_the_grouped_result() {
     );
 }
 
-/// #891: the per-pod CPU rate query filtered on a group key reads the
-/// grouped rate result: the related plan filters the grouped sum's exact
-/// states and merges them (`Filter`, `SummaryMerge`), adding 0.0001/s to
-/// W's 0.0085/s, within the witness's bound.
+/// #891: the per-pod CPU rate query filtered on a group key now reads the
+/// grouped rate: the related plan filters the grouped sum's exact states,
+/// then merges and finalizes them (`Filter`, `SummaryMerge`,
+/// `FinalizeExactAccumulator`), adding 0.000100/s to W's 0.008500/s. The
+/// witness filters the finished result instead, adding 0.000035/s. The
+/// gap that remains, open in #891, is pinned here: the planner's plan
+/// (0.008600/s) costs 0.000065/s more than the witness's (0.008535/s), at
+/// most the tolerance (1% of W, 0.000086/s).
 #[test]
 fn issue_891_filtered_rate_reads_the_grouped_rate() {
     let mut workload = seed("issue891.workload.json");
@@ -89,6 +93,13 @@ fn issue_891_filtered_rate_reads_the_grouped_rate() {
             let witness = m.witness.expect("a marginal relation has a witness");
             assert!(matches!(witness.derivation, Some(Witness::Filter { .. })));
             assert!(m.related_plan.contains("Filter"), "{}", m.related_plan);
+            let gap_per_second = m.related_cost_per_second - witness.cost_per_second;
+            assert!(
+                gap_per_second <= m.tolerance_per_second,
+                "the planner's plan costs {gap_per_second}/s more than the witness's, over the \
+                 tolerance {}/s",
+                m.tolerance_per_second
+            );
         }
         other => panic!("expected the filtered rate to read the grouped rate, got {other:?}"),
     }
