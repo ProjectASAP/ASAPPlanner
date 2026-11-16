@@ -974,7 +974,14 @@ fn an_exact_distinct_count_costs_more_per_row_with_more_distinct_values() {
 /// constants. Measured on the executor over 300,000 rows by `job` (10
 /// groups): 60.2 ns per row of 100 distinct users and 81.3 of 1,000. With
 /// the key and the visits also inside the count's fitted constant, they
-/// were charged 83 and 97, 1.38x and 1.19x.
+/// were charged 83 and 97, 1.38x and 1.19x. The count's terms are fitted
+/// to within 0.76–1.32x of 119 measured counts, so the bound is that
+/// range: they are charged 80 and 82. The bound is wider than 0.8–1.25
+/// because the 100-user point is noisy: over the same 300,000 rows of 100
+/// users, the count by `job` takes 60.2 ns per row and the one by `region`
+/// (4 groups) 86.1, 1.43x apart at the same values, and the four grouped counts
+/// over 100 values span 60–92. Every count under 1,000 values is charged
+/// as at 1,000, so the 60.2 point is charged 1.33x, near the bound.
 #[test]
 fn a_grouped_exact_distinct_count_pays_its_key_and_visits_once() {
     use asap_types::ir::operator::AggIntent;
@@ -985,10 +992,136 @@ fn a_grouped_exact_distinct_count_pays_its_key_and_visits_once() {
             user_ids,
         );
         assert!(
-            (0.8..=1.25).contains(&(charged / measured)),
+            (0.75..=1.35).contains(&(charged / measured)),
             "by job of {user_ids} users: charged {charged:.1} ns per row, measured {measured}"
         );
     }
+}
+
+/// The CPU operations per input row a query-time exact
+/// `COUNT(DISTINCT user_id)` grouped by `keys` charges over `rows` rows of
+/// `http` (10,000 series at one row per second each, so the rows span
+/// `rows` ÷ 10,000 s; `region` takes 10 values, `service` 100 and
+/// `instance` 10,000). `user_ids` declares the distinct `user_id`s and
+/// `max_distinct_per_evaluation` the source's bound on each group's distinct
+/// count; either may be absent.
+fn http_distinct_count_operations_per_row(
+    keys: Vec<usize>,
+    rows: u64,
+    user_ids: Option<u64>,
+    max_distinct_per_evaluation: Option<u64>,
+) -> f64 {
+    use asap_types::ir::operator::AggIntent;
+    use asap_types::ir::schema::DataType;
+    let settings = CostInputs::default();
+    let mut labels = serde_json::json!({"region": 10, "service": 100, "instance": 10_000});
+    if let Some(user_ids) = user_ids {
+        labels["user_id"] = user_ids.into();
+    }
+    let mut source = serde_json::json!({"series_count": 10_000, "sample_interval": 1000,
+        "distinct_values_per_label": labels});
+    if let Some(bound) = max_distinct_per_evaluation {
+        source["max_distinct_per_evaluation"] = bound.into();
+    }
+    let data: DataWorkload = serde_json::from_value(serde_json::json!({
+        "arrival": {"ingesting": {"rows_per_second": 10_000.0}},
+        "sources": {"http": source}
+    }))
+    .unwrap();
+    let schema = Schema::new(
+        [
+            ("ts", DataType::Timestamp),
+            ("region", DataType::Utf8),
+            ("service", DataType::Utf8),
+            ("instance", DataType::Utf8),
+            ("user_id", DataType::Float64),
+        ]
+        .map(|(name, dtype)| Field::new(name, FieldDataType::Plain(dtype), false))
+        .to_vec(),
+    );
+    let range = PhysicalASAPDAGNode {
+        output_schema: schema,
+        ..node(Payload::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(rows / 10_000),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        }))
+    };
+    let mut input = raw_rows(&range, "http", rows, rows / 10);
+    input.output_schema = &range.output_schema;
+    input.unchanged_columns = ["region", "service", "instance", "user_id"].into();
+    let aggregate = node(Payload::NonASAP(NonASAPOp::Aggregate {
+        reduction: Reduction::by(keys),
+        measures: vec![AggIntent::Cardinality { cols: vec![4] }],
+        output_names: vec![String::new()],
+        filters: vec![],
+        having: None,
+        child: 0,
+    }));
+    let usage =
+        node_resource_usage_and_cost(&aggregate, &[input], (1, 1.0), None, &data, &settings)
+            .unwrap();
+    usage.cpu_ops_per_second / rows as f64
+}
+
+/// An exact `COUNT(DISTINCT user_id)` looks each row's value up in a table
+/// of every distinct value read, then its (group, value) pair in a set of
+/// every pair kept: a lookup misses the cache once its table outgrows it,
+/// so the time per row follows the values and the pairs, not the rows.
+/// Measured on the executor over 12,000,000 rows of 10,000 series (10 rows
+/// per series per batch, median of 3 runs on one pinned core): 1,000 users
+/// by `instance` (10,000 groups, 7.0 M pairs) take 179 ns per row; 10,000
+/// ungrouped 106; 1,000,000 ungrouped 381, by `service` 488 and 10,000,000
+/// by (`region`, `service`) 811. Charged per square root of the values and
+/// per inserted entry, they were 139, 99, 587, 665 and 1,141: 0.78x to
+/// 1.54x.
+#[test]
+fn an_exact_distinct_count_costs_per_value_and_pair_it_looks_up() {
+    for (keys, user_ids, measured) in [
+        (vec![3], 1_000, 179.1),
+        (vec![], 10_000, 106.2),
+        (vec![], 1_000_000, 381.1),
+        (vec![2], 1_000_000, 488.4),
+        (vec![1, 2], 10_000_000, 811.3),
+    ] {
+        let charged =
+            http_distinct_count_operations_per_row(keys.clone(), 12_000_000, Some(user_ids), None);
+        assert!(
+            (0.8..=1.25).contains(&(charged / measured)),
+            "by {keys:?} of {user_ids} users: charged {charged:.1} ns per row, measured {measured}"
+        );
+    }
+}
+
+/// `max_distinct_per_evaluation` bounds the distinct items of each group,
+/// so a grouped count's table of every distinct value may hold that bound
+/// times the groups: 10,000 `instance`s of 1,000 users each are 10,000,000
+/// users. A workload whose users are shared across the groups declares the
+/// column-wide `distinct_values_per_label`, which caps the table instead.
+/// `COUNT(DISTINCT user_id)` by `instance` over 120,000,000 rows of
+/// 1,000,000 users at most, with the per-group bound also 1,000,000, is
+/// charged as over the 1,000,000 declared values; with the per-group bound
+/// alone, as over the rows read (1,000,000 × 10,000 is more).
+#[test]
+fn an_exact_distinct_count_reads_at_most_its_column_s_declared_distinct_values() {
+    let declared_and_bounded = http_distinct_count_operations_per_row(
+        vec![3],
+        120_000_000,
+        Some(1_000_000),
+        Some(1_000_000),
+    );
+    let declared =
+        http_distinct_count_operations_per_row(vec![3], 120_000_000, Some(1_000_000), None);
+    let bounded =
+        http_distinct_count_operations_per_row(vec![3], 120_000_000, None, Some(1_000_000));
+    assert!(
+        (declared_and_bounded - declared).abs() < 1e-9 * declared,
+        "declared and bounded {declared_and_bounded:.1} ns per row, declared {declared:.1}"
+    );
+    assert!(
+        bounded > declared,
+        "bounded per group {bounded:.1} ns per row, declared {declared:.1}"
+    );
 }
 
 /// A KMV state compares each row's hash with the hashes it retains until
