@@ -90,6 +90,11 @@ pub fn promql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
 /// `flows(ts, src, dst, bytes)` of 1000 groups of rows, each with its
 /// accuracy target, repeating every minute.
 pub fn sql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
+    sql_pass2_over(queries, json!({"flows": {"series_count": 1000}}))
+}
+
+/// [`sql_pass2`] with the facts `sources` declares for `flows`.
+pub fn sql_pass2_over(queries: &[(&str, Value)], sources: Value) -> LogicalASAPMemoCandidates {
     let flows = json!({"name": "flows", "time_index": 0, "columns": [
         {"name": "ts", "type": "timestamp"},
         {"name": "src", "type": "utf8"},
@@ -99,7 +104,7 @@ pub fn sql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
     pass2_of(
         json!({"sql": "datafusion_sql"}),
         queries,
-        json!({"flows": {"series_count": 1000}}),
+        sources,
         Some(&[flows.to_string()]),
     )
 }
