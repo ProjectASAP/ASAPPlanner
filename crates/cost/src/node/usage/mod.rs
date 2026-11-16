@@ -8,15 +8,15 @@ use crate::node::analytical::{
 };
 use crate::node::operations_per_unit::{
     estimate_operations_per_group, hash_aggregate_operations_per_row, merge_operations_per_state,
-    update_operations_per_row, CARRIED_LABEL_OPERATIONS_PER_ROW, CHAIN_EMIT_OPERATIONS_PER_STATE,
-    MERGE_OPERATIONS_PER_OUTPUT_GROUP, TIME_RANGE_OPERATIONS_PER_ROW,
+    merge_output_operations, update_operations_per_row, CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL,
+    CHAIN_EMIT_OPERATIONS_PER_STATE, TIME_RANGE_OPERATIONS_PER_ROW,
 };
 use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
 use crate::node::state_bytes::{
-    keeps_every_value, row_bytes, sketch_state_bytes, state_row_label_bytes, summary_state_bytes,
-    StateInputRows,
+    keeps_every_value, row_bytes, sketch_state_bytes, state_bytes_per_row,
+    state_row_bytes_beside_state, summary_state_bytes, StateInputRows,
 };
 use crate::{aggregate_lookup, lookup, StateFamily};
 use crate::{
@@ -456,14 +456,11 @@ pub fn node_resource_usage_and_cost<'a>(
             .iter()
             .all(|source| declared_non_negative(data, source))
     };
-    // The bytes of each summary state its first input holds, without the
-    // row's labels.
+    // The bytes of each summary state its first input holds.
     let input_state_bytes = || {
-        input.bytes_per_row().saturating_sub(
-            producers
-                .first()
-                .map_or(0, |producer| state_row_label_bytes(producer.output_schema)),
-        )
+        producers.first().map_or(0, |producer| {
+            state_bytes_per_row(producer.output, producer.output_schema)
+        })
     };
     let unary = |output| UnaryEdgeStatistics {
         input,
@@ -585,8 +582,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 let out = edge(group_count)?;
                 let held = input.rows.div_ceil(group_count.max(1));
                 let operations_per_row = hash_aggregate_operations_per_row(keys, measures, held)
-                    + carried_label_columns(&node.output_schema, keys) as f64
-                        * CARRIED_LABEL_OPERATIONS_PER_ROW;
+                    + carried_label_operations_per_row(&node.output_schema, reduction);
                 let estimate = estimate_operator(
                     PhysicalOperator::HashAggregate {
                         grouping_key_count: keys,
@@ -784,12 +780,11 @@ pub fn node_resource_usage_and_cost<'a>(
                 input_rows,
             )?);
             let update_ops = update_operations_per_row(family, node.parameters.as_ref())
-                + carried_label_columns(&node.output_schema, grouping_key_count(reduction)) as f64
-                    * CARRIED_LABEL_OPERATIONS_PER_ROW;
+                + carried_label_operations_per_row(&node.output_schema, reduction);
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
-                    .checked_mul(state_bytes + state_row_label_bytes(&node.output_schema))
+                    .checked_mul(state_bytes + state_row_bytes_beside_state(&node.output_schema))
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             (
@@ -836,8 +831,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 input_rows,
             )?);
             let update_ops = update_operations_per_row(family, node.parameters.as_ref())
-                + carried_label_columns(&node.output_schema, grouping_key_count(reduction)) as f64
-                    * CARRIED_LABEL_OPERATIONS_PER_ROW;
+                + carried_label_operations_per_row(&node.output_schema, reduction);
             // The states it completes in one execution: at ingestion time
             // one second's share of each group's window (a 10 s window: a
             // tenth of a state per group); at query time every retained
@@ -859,7 +853,7 @@ pub fn node_resource_usage_and_cost<'a>(
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
-                    .checked_mul(state_bytes + state_row_label_bytes(&node.output_schema))
+                    .checked_mul(state_bytes + state_row_bytes_beside_state(&node.output_schema))
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             (
@@ -905,10 +899,7 @@ pub fn node_resource_usage_and_cost<'a>(
             // grows towards its `k`), else as one input state.
             let states_per_group = states.div_ceil(group_count.max(1));
             let input_state_bytes = |producer: &ProducerOutput<'_>| {
-                producer
-                    .output
-                    .bytes_per_row()
-                    .saturating_sub(state_row_label_bytes(producer.output_schema))
+                state_bytes_per_row(producer.output, producer.output_schema)
             };
             let merged_input_rows = producers
                 .first()
@@ -937,10 +928,10 @@ pub fn node_resource_usage_and_cost<'a>(
                         )
                 })
                 .sum::<f64>()
-                + group_count as f64 * MERGE_OPERATIONS_PER_OUTPUT_GROUP;
+                + merge_output_operations(group_count);
             let out = EdgeStatistics {
                 rows: group_count,
-                bytes: (merged_state_bytes + state_row_label_bytes(&node.output_schema))
+                bytes: (merged_state_bytes + state_row_bytes_beside_state(&node.output_schema))
                     .checked_mul(group_count)
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
@@ -1249,18 +1240,21 @@ fn grouping_key_count(reduction: &Reduction) -> u64 {
     }
 }
 
-/// The label columns a grouping by `grouping_key_count` keys carries per
-/// group beside them, which each input row copies: the string columns of
-/// its `output_schema` that are not keys. Example: the per-series sum
-/// under `sum by (job) (sum_over_time(latency[5m]))` outputs the series
-/// identity (its key) and `job`, so it carries 1.
-fn carried_label_columns(output_schema: &Schema, grouping_key_count: u64) -> u64 {
+/// The operations per input row a grouping by `reduction` pays for the
+/// label columns it carries per group beside its keys, which each input
+/// row copies: the string columns of its `output_schema` that are not
+/// keys, at `CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL` each. Example:
+/// the per-series sum under `sum by (job) (sum_over_time(latency[5m]))`
+/// outputs the series identity (its key) and `job`, so it carries one
+/// label: 37 operations per row.
+fn carried_label_operations_per_row(output_schema: &Schema, reduction: &Reduction) -> f64 {
     let label_columns = output_schema
         .fields
         .iter()
         .filter(|field| field.dtype == FieldDataType::Plain(asap_types::ir::schema::DataType::Utf8))
         .count() as u64;
-    label_columns.saturating_sub(grouping_key_count)
+    let carried = label_columns.saturating_sub(grouping_key_count(reduction));
+    carried as f64 * CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL
 }
 
 /// The input states a `SummaryMerge` over `producers` reads: every row of

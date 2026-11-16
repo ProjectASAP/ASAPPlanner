@@ -1,6 +1,8 @@
 //! The CPU operations the formulas charge per unit of work: per row a time
 //! range keeps, per row a hash aggregate groups, per row folded into a
-//! summary state, per state merged, per group read out.
+//! summary state, per row and label column a grouping carries, per state
+//! merged and per byte of a KLL state merged or read, per output group of a
+//! merge, per group read out and per output row built.
 //!
 //! One CPU operation is one nanosecond of the reference executor's work on
 //! one core: each count below is the executor's measured time for that
@@ -82,7 +84,7 @@ pub(crate) const KLL_UPDATE_OPERATIONS_PER_ROW: f64 = 95.0;
 
 /// One row folded into an exact accumulator that keeps one value (sum,
 /// count, min, max), beyond any label it carries
-/// (`CARRIED_LABEL_OPERATIONS_PER_ROW`): over 1,000 series, an exact Max
+/// (`CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL`): over 1,000 series, an exact Max
 /// built per series takes 35 ns per row at query time (median of 12
 /// runs, 300,000 to 36 M rows) and 44 at ingestion time, an exact Sum
 /// grouped by `job` 30 at query time.
@@ -92,7 +94,8 @@ pub(crate) const EXACT_UPDATE_OPERATIONS_PER_ROW: f64 = 40.0;
 /// increase, irate), which also tracks resets and the first and last
 /// samples, beyond any label it carries: built per series carrying a
 /// `job` label it takes 77 ns per row at query time and 87 at ingestion
-/// time, of which the label is `CARRIED_LABEL_OPERATIONS_PER_ROW` (37).
+/// time, of which the label is `CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL`
+/// (37).
 pub(crate) const COUNTER_UPDATE_OPERATIONS_PER_ROW: f64 = 45.0;
 
 /// Per input row, for each label column a per-series state or group
@@ -102,7 +105,7 @@ pub(crate) const COUNTER_UPDATE_OPERATIONS_PER_ROW: f64 = 45.0;
 /// carrying nothing takes 18–38 at the same settings, and an exact Count
 /// accumulator carrying it 79 ns where a Max carrying nothing takes 42:
 /// 37 ns per row, the median difference.
-pub(crate) const CARRIED_LABEL_OPERATIONS_PER_ROW: f64 = 37.0;
+pub(crate) const CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL: f64 = 37.0;
 
 /// One counter update of any other sketch, per counter its row updates
 /// ([`counters_updated_per_row`]), above
@@ -128,29 +131,38 @@ pub(crate) const DDSKETCH_MERGE_OPERATIONS_PER_STATE: f64 = 2_500.0;
 /// state into a copy of its group's state, so a merge costs per byte of
 /// the input state (`KLL_MERGE_OPERATIONS_PER_INPUT_BYTE`) and per byte of
 /// the merged state (`KLL_MERGE_OPERATIONS_PER_MERGED_BYTE`), which grows
-/// towards its `k`. Fitted over `asap_sketchlib`'s KLL at k = 200, 547 and
-/// 1,404, states of 10 to 3,000 rows, 1 to 360 states per group (1,000
-/// groups, median of 3 runs): within 2x of 22 of the 24 points, and at
-/// most 2.6x under. Example: merging 360 states of 10 rows (872 B each)
-/// per group measures 4.3 µs per state at k = 547 (merged state 8.9 KB)
-/// and 13.0 µs at k = 1,404 (33.5 KB), 4.7 and 13.3 in the executor;
-/// charged 5.5 and 19.0.
-pub(crate) const KLL_MERGE_OPERATIONS_PER_STATE: f64 = 250.0;
+/// towards its `k`. The bytes are those the planner charges for each state
+/// (`sketch_state_bytes` of the rows it folds), so the fit is over the
+/// quantity it is applied to. Fitted over `asap_sketchlib`'s KLL at k = 200,
+/// 547 and 1,404, states of 10 to 3,000 rows, 1 to 360 states per group
+/// (1,000 groups, median of 3 runs), minimizing the squared log error:
+/// within 2x of 20 of the 24 points, 0.41–2.4x. Example: merging 360
+/// states of 10 rows (872 B each) per group, charged 17.0 KB merged at
+/// k = 547 and 33.5 KB at k = 1,404 (the library holds 8.9 and 33.5 KB),
+/// is charged 7.7 and 14.9 µs per state, measured 4.3 and 13.0 (4.7 and
+/// 13.3 in the executor): the charge past `k` is the item array's
+/// capacity, so the smaller `k` is over-charged and the two differ by
+/// 1.9x where they measure 3x.
+pub(crate) const KLL_MERGE_OPERATIONS_PER_STATE: f64 = 360.0;
 
 /// Per byte of a KLL input state merged (see
 /// `KLL_MERGE_OPERATIONS_PER_STATE`).
-pub(crate) const KLL_MERGE_OPERATIONS_PER_INPUT_BYTE: f64 = 0.4;
+pub(crate) const KLL_MERGE_OPERATIONS_PER_INPUT_BYTE: f64 = 0.1;
 
 /// Per byte of the merged KLL state each input state is merged into (see
 /// `KLL_MERGE_OPERATIONS_PER_STATE`).
-pub(crate) const KLL_MERGE_OPERATIONS_PER_MERGED_BYTE: f64 = 0.55;
+pub(crate) const KLL_MERGE_OPERATIONS_PER_MERGED_BYTE: f64 = 0.43;
 
 /// Per output group of a `SummaryMerge`, beyond its input states' merges:
 /// creating the group's state and its output row. Merging exact
 /// accumulators over 1,000 groups costs 1.17 µs per group with one state
 /// per group and 215 ns per state plus about 0.95 µs per group with 5 to
-/// 360 (median of 20–26 runs per point).
-pub(crate) const MERGE_OPERATIONS_PER_OUTPUT_GROUP: f64 = 950.0;
+/// 360 (median of 20–26 runs per point). Less than a finalize's or an
+/// estimate's output row (`OUTPUT_ROW_OPERATIONS_PER_GROUP`, 2,500): a
+/// merge's row takes its group's key columns and merged state as they are,
+/// where a finalize or an estimate also reads each state into a new value
+/// column.
+const MERGE_OPERATIONS_PER_OUTPUT_GROUP: f64 = 950.0;
 
 /// Per byte of any other sketch state merged, above
 /// `EXACT_MERGE_OPERATIONS_PER_STATE`: merging adds every counter of the
@@ -160,11 +172,14 @@ pub(crate) const MERGE_OPERATIONS_PER_OUTPUT_GROUP: f64 = 950.0;
 pub(crate) const SKETCH_MERGE_OPERATIONS_PER_BYTE: f64 = 1.0;
 
 /// Per byte of the KLL state one group's answer is read from, before its
-/// output row: the quantile sorts the items the state holds. 1.5 ns per byte fits
-/// `asap_sketchlib`'s KLL at k = 200 to 1,404 over states of 3 to 37 KB
-/// (median of 3 runs over 1,000 groups); e.g. 13 µs for a merged state of
-/// 8.9 KB at k = 547, 50 µs for 33.5 KB at k = 1,404.
-pub(crate) const KLL_ESTIMATE_OPERATIONS_PER_BYTE: f64 = 1.5;
+/// output row: the quantile sorts the items the state holds. The bytes are
+/// those the planner charges for the state (`sketch_state_bytes`); 0.9 per
+/// byte fits `asap_sketchlib`'s KLL at k = 200 to 1,404 over the same 24
+/// merged states as `KLL_MERGE_OPERATIONS_PER_STATE` (median of 3 runs over
+/// 1,000 groups) within 2x at 21 of them. Example: a merged state of 360
+/// states of 10 rows is charged 15 µs at k = 547 (17.0 KB) and 30 µs at
+/// k = 1,404 (33.5 KB), measured 23 and 42.
+pub(crate) const KLL_ESTIMATE_OPERATIONS_PER_BYTE: f64 = 0.9;
 
 /// One group's answer read from any other sketch state, before its output
 /// row (`OUTPUT_ROW_OPERATIONS_PER_GROUP`): a DDSketch quantile estimate
@@ -174,7 +189,8 @@ pub(crate) const KLL_ESTIMATE_OPERATIONS_PER_BYTE: f64 = 1.5;
 pub(crate) const SKETCH_ESTIMATE_OPERATIONS_PER_GROUP: f64 = 1_000.0;
 
 /// One group's output row built from its value, with the group's labels
-/// and series identity, by a hash aggregate, a finalize or an estimate: a
+/// and series identity, by a hash aggregate, a finalize or an estimate (a
+/// top-k estimate emits `k` rows per group and is charged one): a
 /// finalize of exact accumulators measures 2.5 µs
 /// per group (median over 135 nodes of 1,000 groups each, 1.8–15 µs). A
 /// per-series hash aggregate builds the same rows: e.g. a per-series max
@@ -187,7 +203,10 @@ pub(crate) const OUTPUT_ROW_OPERATIONS_PER_GROUP: f64 = 2_500.0;
 /// window, beyond its rows' updates: fitting each window's time to its rows
 /// and its 1,000 states at 1 Hz (10 s windows of 10,000 rows) and at
 /// 10 Hz (60 s windows of 600,000 rows), 1.9 µs per exact Rate state,
-/// 2.8 µs per KLL state and 3.4 µs per DDSketch state.
+/// 2.8 µs per KLL state and 3.4 µs per DDSketch state. Measured apart from
+/// `OUTPUT_ROW_OPERATIONS_PER_GROUP` and equal to it: both build one row per
+/// group with its labels and series identity, here around a state, there
+/// around a value.
 pub(crate) const CHAIN_EMIT_OPERATIONS_PER_STATE: f64 = 2_500.0;
 
 /// The operations one input row costs folded into a state of `summary_type`
@@ -249,7 +268,7 @@ fn univmon_expected_layers(layers: u8) -> f64 {
 /// The operations one input state of `family` holding `state_bytes` costs
 /// merged into its group's state, which holds `merged_state_bytes` once
 /// merged. Example: a KLL state of 872 bytes merged into one of 33,512
-/// costs 250 + 0.4 × 872 + 0.55 × 33,512 = 19,031.
+/// costs 360 + 0.1 × 872 + 0.43 × 33,512 = 14,857.
 pub(crate) fn merge_operations_per_state(
     family: StateFamily<'_>,
     state_bytes: u64,
@@ -270,6 +289,13 @@ pub(crate) fn merge_operations_per_state(
             EXACT_MERGE_OPERATIONS_PER_STATE + SKETCH_MERGE_OPERATIONS_PER_BYTE * state_bytes as f64
         }
     }
+}
+
+/// The operations a `SummaryMerge` with `output_groups` groups costs
+/// beyond its input states' merges ([`merge_operations_per_state`]): each
+/// group's state and output row. Example: 1,000 groups cost 950,000.
+pub(crate) fn merge_output_operations(output_groups: u64) -> f64 {
+    output_groups as f64 * MERGE_OPERATIONS_PER_OUTPUT_GROUP
 }
 
 /// The operations reading one group's answer from a state of `family`

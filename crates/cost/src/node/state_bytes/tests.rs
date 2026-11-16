@@ -33,29 +33,58 @@ fn library_ddsketch_bytes(alpha: f64, values: &[f64]) -> u64 {
     sketch.memory_bytes() as u64
 }
 
+/// A uniform draw in [0, 1) from a fixed hash of `x`.
+fn uniform(mut x: u64) -> f64 {
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    x ^= x >> 33;
+    (x >> 11) as f64 / (1_u64 << 53) as f64
+}
+
 /// `n` latency-like values of series `series`: draws of an exponential
 /// distribution of mean 10, from a fixed hash of `(series, i)`.
 fn latency_like(series: u64, n: u32) -> Vec<f64> {
-    let uniform = |mut x: u64| {
-        x ^= x >> 33;
-        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
-        x ^= x >> 33;
-        x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-        x ^= x >> 33;
-        (x >> 11) as f64 / (1_u64 << 53) as f64
-    };
     (0..u64::from(n))
         .map(|i| -(1.0 - uniform((series << 32) ^ i)).ln() * 10.0)
         .collect()
 }
 
+/// `n` values of series `series` with a floor, as measured latencies have:
+/// draws of a lognormal distribution of median 10 ms and σ = 1 (half of
+/// them within 5–20 ms), from a fixed hash of `(series, i)`.
+fn lognormal(series: u64, n: u32) -> Vec<f64> {
+    (0..u64::from(n))
+        .map(|i| {
+            // Box–Muller over two hashed uniforms.
+            let u1 = 1.0 - uniform((series << 32) ^ (2 * i));
+            let u2 = uniform((series << 32) ^ (2 * i + 1));
+            let normal = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+            10.0 * normal.exp()
+        })
+        .collect()
+}
+
+/// `n` values of series `series` of a narrow gauge: uniform in 100 ± 10.
+fn narrow_gauge(series: u64, n: u32) -> Vec<f64> {
+    (0..u64::from(n))
+        .map(|i| 90.0 + 20.0 * uniform((series << 32) ^ i))
+        .collect()
+}
+
 /// The mean bytes `asap_sketchlib`'s DDSketch holds over 20 series of `n`
-/// latency-like values each, of both signs when `signed`.
-fn library_ddsketch_mean_bytes(alpha: f64, n: u32, signed: bool) -> u64 {
+/// values each from `values`, of both signs when `signed`.
+fn library_ddsketch_mean_bytes(
+    alpha: f64,
+    n: u32,
+    signed: bool,
+    values: fn(u64, u32) -> Vec<f64>,
+) -> u64 {
     let series = 20;
     (0..series)
         .map(|s| {
-            let values: Vec<f64> = latency_like(s, n)
+            let values: Vec<f64> = values(s, n)
                 .into_iter()
                 .enumerate()
                 .map(|(i, v)| if signed && i % 2 == 0 { -v } else { v })
@@ -64,6 +93,43 @@ fn library_ddsketch_mean_bytes(alpha: f64, n: u32, signed: bool) -> u64 {
         })
         .sum::<u64>()
         / series
+}
+
+/// DDSketch states are charged as if their values spread like an
+/// exponential's ([`exponential_values_magnitude_ratio`]); these pin how
+/// far that assumption is from other value shapes, so a change to it shows
+/// here. At α = 0.01, non-negative values, 10 to 36,000 per state:
+/// lognormal latencies with a floor (σ = 1) are over-charged 1.08–1.13x; a
+/// narrow gauge of 100 ± 10, whose states hold one first block of buckets
+/// (1,168 bytes), 2.4x at 10 values to 5.6x at 36,000.
+#[test]
+fn ddsketch_state_bytes_over_charge_narrower_values_within_their_bands() {
+    let alpha = 0.01;
+    let charged = |n: u32| {
+        sketch_state_bytes(
+            &SketchParams::DDSketch { alpha },
+            StateInputRows {
+                rows_per_state: Some(u64::from(n)),
+                non_negative: true,
+            },
+        ) as f64
+    };
+    for n in [10, 100, 600, 3_000, 36_000] {
+        let lognormal_held = library_ddsketch_mean_bytes(alpha, n, false, lognormal) as f64;
+        let ratio = charged(n) / lognormal_held;
+        assert!(
+            (1.0..=1.25).contains(&ratio),
+            "{n} lognormal values: charged {} for {lognormal_held} held, {ratio:.2}x",
+            charged(n)
+        );
+        let gauge_held = library_ddsketch_mean_bytes(alpha, n, false, narrow_gauge) as f64;
+        let ratio = charged(n) / gauge_held;
+        assert!(
+            (2.0..=6.0).contains(&ratio),
+            "{n} gauge values: charged {} for {gauge_held} held, {ratio:.2}x",
+            charged(n)
+        );
+    }
 }
 
 /// A DDSketch state is charged what `asap_sketchlib` holds on average for
@@ -86,7 +152,7 @@ fn ddsketch_state_bytes_match_the_library_on_latency_like_values() {
     };
     for n in [1, 10, 100, 600, 3_000, 36_000] {
         for signed in [false, true] {
-            let held = library_ddsketch_mean_bytes(alpha, n, signed);
+            let held = library_ddsketch_mean_bytes(alpha, n, signed, latency_like);
             let charged = priced(Some(u64::from(n)), !signed);
             assert!(
                 (1.0 / 1.5..=1.5).contains(&(charged as f64 / held as f64)),
@@ -426,4 +492,34 @@ fn state_bytes_bound_the_executors_charge() {
             }
         }
     }
+}
+
+/// A summary state's row holds its labels, its window's time and its
+/// series identity beside the state; the state's own bytes, which a merge
+/// is costed by, leave them out. A stored per-series Sum carrying `job`:
+/// 144 bytes per row, 56 of them its state.
+#[test]
+fn state_bytes_per_row_leave_out_what_the_row_holds_beside_its_state() {
+    use asap_types::ir::schema::{Field, PROMQL_SERIES_IDENTITY};
+    use asap_types::summary_type::{ExactKind, ExactParams};
+    let schema = Schema::new(vec![
+        Field::new("ts", FieldDataType::Plain(DataType::Int64), false),
+        Field::new(
+            "state",
+            FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            false,
+        ),
+        Field::new("job", FieldDataType::Plain(DataType::Utf8), false),
+        Field::new(
+            PROMQL_SERIES_IDENTITY,
+            FieldDataType::Plain(DataType::Utf8),
+            false,
+        ),
+    ]);
+    assert_eq!(state_row_bytes_beside_state(&schema), 88);
+    let edge = EdgeStatistics {
+        rows: 1_000,
+        bytes: 144_000,
+    };
+    assert_eq!(state_bytes_per_row(edge, &schema), 56);
 }
