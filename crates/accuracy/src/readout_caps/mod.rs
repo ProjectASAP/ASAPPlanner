@@ -5,13 +5,17 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use asap_types::accuracy::{AccuracyMetric, AccuracyTarget, ReadoutValuesRead};
+use asap_types::accuracy::{AccuracyMetric, AccuracyTarget, ReadoutValueCounts};
 use asap_types::ir::operator::arguments::BinaryOpKind;
-use asap_types::ir::{BinaryOperator, NonASAPOp, Operator};
+use asap_types::ir::schema::FieldDataType;
+use asap_types::ir::{ASAPOp, BinaryOperator, NonASAPOp, Operator};
 use asap_types::stages::{CandidateForMemoGroupId, Memo, MemoGroupId, RequiredAccuracy};
+use asap_types::summary_type::{parameter_list, SketchStatistic};
 
+use crate::logical_edge::build_meets_level;
 use crate::metric_rule::{query_roots_with_target, ErrorContractPerMetric};
-use crate::ErrorMetricsOfMemo;
+use crate::readout::sketch_readout;
+use crate::{AccuracyEvidence, ErrorMetricsOfMemo};
 
 /// The error grid of the readouts of a query that combines several
 /// ([`query_levels`]), loosest first.
@@ -57,7 +61,8 @@ pub struct ReadoutRequiredAccuracy {
 /// The required-accuracy levels of the sketch readouts without a
 /// requirement yet, per readout ([`ReadoutRequiredAccuracy`]), from
 /// `error_metrics` of `memo` ([`ErrorMetricsOfMemo::of`]). `order` is the
-/// memo's topological order (`Memo::topological_order`).
+/// memo's topological order (`Memo::topological_order`); `evidence` is the
+/// deployment's measured accuracy the edges check builds against.
 /// - A query whose path reads one readout group gives one level: its target
 ///   divided by the path's factor, the readout group's cap, at the target's
 ///   failure probability per readout value ([`query_levels`]: split over
@@ -73,6 +78,10 @@ pub struct ReadoutRequiredAccuracy {
 ///   levels, in query order; one no query with a target reaches in the
 ///   readout's metric gets none. Readouts of one group in one metric get
 ///   the same levels.
+/// - A level is dropped when the listed builds that meet it are exactly
+///   those that meet a stricter level of the group ([`builds_meeting`]):
+///   any producer a copy at the looser level accepts, the stricter copy
+///   accepts too, so the looser copy only adds a choice of equal cost.
 ///
 /// A query whose target sets a failure probability that has no per-value
 /// one at the readout gives no level and is listed instead: Pass 2 prunes
@@ -83,6 +92,7 @@ pub fn readout_levels(
     memo: &Memo,
     error_metrics: &ErrorMetricsOfMemo,
     order: &[MemoGroupId],
+    evidence: &dyn AccuracyEvidence,
 ) -> BTreeMap<CandidateForMemoGroupId, ReadoutRequiredAccuracy> {
     let caps = caps(memo, &error_metrics.error_contract, order);
     let mut readouts: Vec<(CandidateForMemoGroupId, AccuracyMetric)> = Vec::new();
@@ -107,6 +117,16 @@ pub fn readout_levels(
         readouts.iter().map(|(readout, _)| readout.group).collect();
     let readouts_read =
         readouts_read_by_queries(memo, &error_metrics.error_contract, order, &readout_groups);
+    let mut readouts_of_group: HashMap<
+        (MemoGroupId, AccuracyMetric),
+        Vec<CandidateForMemoGroupId>,
+    > = HashMap::new();
+    for &(readout, metric) in &readouts {
+        readouts_of_group
+            .entry((readout.group, metric))
+            .or_default()
+            .push(readout);
+    }
     let mut levels_of_group: HashMap<(MemoGroupId, AccuracyMetric), ReadoutRequiredAccuracy> =
         HashMap::new();
     readouts
@@ -115,7 +135,16 @@ pub fn readout_levels(
             let group = readout.group;
             let levels = levels_of_group
                 .entry((group, metric))
-                .or_insert_with(|| group_levels(memo, &caps, &readouts_read, group, metric))
+                .or_insert_with(|| {
+                    let mut required = group_levels(memo, &caps, &readouts_read, group, metric);
+                    required.levels = without_redundant_levels(
+                        memo,
+                        &readouts_of_group[&(group, metric)],
+                        required.levels,
+                        evidence,
+                    );
+                    required
+                })
                 .clone();
             (readout, levels)
         })
@@ -164,6 +193,68 @@ fn group_levels(
     }
 }
 
+/// `levels` of the readouts `readouts` of one group, without each level
+/// the listed builds that meet it ([`builds_meeting`]) are exactly those
+/// that meet a stricter level of `levels` (at most its error and failure
+/// probability): DDSketch's relative error does not depend on δ, so of
+/// (0.05, 0.01) and (0.05, 1e-4) only the second is kept; KLL's does, so
+/// both are kept when a build meets the first only. Order is kept, and so
+/// is every strictest level, so each dropped level's builds stay those of a
+/// kept one.
+fn without_redundant_levels(
+    memo: &Memo,
+    readouts: &[CandidateForMemoGroupId],
+    levels: Vec<RequiredAccuracy>,
+    evidence: &dyn AccuracyEvidence,
+) -> Vec<RequiredAccuracy> {
+    if levels.len() < 2 {
+        return levels;
+    }
+    let builds: Vec<Vec<bool>> = levels
+        .iter()
+        .map(|&level| builds_meeting(memo, readouts, level, evidence))
+        .collect();
+    let stricter = |strict: &RequiredAccuracy, loose: &RequiredAccuracy| {
+        strict != loose
+            && strict.max_error <= loose.max_error
+            && strict.failure_probability <= loose.failure_probability
+    };
+    levels
+        .iter()
+        .enumerate()
+        .filter(|&(index, level)| {
+            !levels.iter().enumerate().any(|(other, stricter_level)| {
+                stricter(stricter_level, level) && builds[other] == builds[index]
+            })
+        })
+        .map(|(_, &level)| level)
+        .collect()
+}
+
+/// Per readout of `readouts` and listed θ of the summary type it reads
+/// (`parameter_list`, the only θ a state candidate may have), in that
+/// order: whether a state built with θ meets `level` for the readout's
+/// statistic, as the logical edge checks it ([`build_meets_level`]).
+fn builds_meeting(
+    memo: &Memo,
+    readouts: &[CandidateForMemoGroupId],
+    level: RequiredAccuracy,
+    evidence: &dyn AccuracyEvidence,
+) -> Vec<bool> {
+    readouts
+        .iter()
+        .filter_map(|&readout| sketch_readout(memo, memo.candidate(readout)))
+        .flat_map(|(summary_type, statistic)| {
+            let FieldDataType::Sketch(algorithm) = summary_type else {
+                unreachable!("a sketch readout reads a sketch state")
+            };
+            parameter_list(algorithm).iter().map(move |parameters| {
+                build_meets_level(&summary_type, parameters, statistic, level, evidence)
+            })
+        })
+        .collect()
+}
+
 /// The requirement levels one query gives a readout in `metric` whose cap
 /// for it is `cap`; `None` when its target's failure probability has no
 /// per-value one. The query's statement fails only when a readout value
@@ -180,7 +271,7 @@ fn group_levels(
 fn query_levels(
     target: &AccuracyTarget,
     number_of_values_per_query_evaluation: Option<u64>,
-    readout_values: ReadoutValuesRead,
+    readout_values: ReadoutValueCounts,
     metric: AccuracyMetric,
     cap: f64,
     composed: bool,
@@ -305,15 +396,17 @@ struct ReadoutsReadByQueries {
     /// through β > 0, among alternative candidates of a group the largest.
     /// Per evaluation, summed over the readout groups below it
     /// (`Memo::max_values_per_evaluation` each); per output value, 1 at a
-    /// readout, carried value by value through
-    /// [`inputs_read_value_by_value`] operators (summed over inputs, or the
-    /// largest for `or`) and all of the inputs' per-evaluation values
-    /// through any other operator (a reduction). `max by (job)
+    /// readout (all of its values for a top-k, which ranks them), carried
+    /// value by value through [`inputs_read_value_by_value`] operators
+    /// (summed over inputs, or the largest for `or` and a concatenation)
+    /// and all of the inputs' per-evaluation values through any other
+    /// operator (a reduction); a readout group also counts its other
+    /// candidates (a reduction over readouts below it). `max by (job)
     /// (q{host="h0"} or q{host="h1"})` with 3 series per side: 6 and 6;
     /// `q or r` alone: 6 and 1; `q / count(r)`: `q`'s alone. A readout
     /// group reached on two paths (`q or q`) counts twice, which only
     /// tightens the split.
-    readout_values: BTreeMap<usize, ReadoutValuesRead>,
+    readout_values: BTreeMap<usize, ReadoutValueCounts>,
 }
 
 /// The [`ReadoutsReadByQueries`] of `memo`, in one walk up `order` (the
@@ -326,7 +419,7 @@ fn readouts_read_by_queries(
 ) -> ReadoutsReadByQueries {
     // Per group: the readout values its output can depend on (`Some(0)`
     // when none, so it carries no readout error; `None` unknown).
-    let none_read = ReadoutValuesRead {
+    let none_read = ReadoutValueCounts {
         per_evaluation: Some(0),
         per_output_value: Some(0),
     };
@@ -341,6 +434,7 @@ fn readouts_read_by_queries(
         {
             let operator = &candidate.expression.operator;
             let children = operator.children();
+            let takes_each_value_from_one_input = takes_each_value_from_one_input(operator);
             let reads_with_error = |input: &usize| {
                 readout_values_per_group[children[*input].0 as usize].per_evaluation != Some(0)
                     && contract_per_metric
@@ -352,7 +446,7 @@ fn readouts_read_by_queries(
             // Each output value comes from one input, so the output's error
             // is one input's, never a sum of several; its values still
             // depend on the readouts of every input.
-            let inputs_combined = if takes_each_value_from_one_input(operator) {
+            let inputs_combined = if takes_each_value_from_one_input {
                 inputs_reading_with_error.min(1)
             } else {
                 inputs_reading_with_error
@@ -375,19 +469,16 @@ fn readouts_read_by_queries(
                             read_of(input).per_evaluation
                         }
                     });
-                    if takes_each_value_from_one_input(operator) {
+                    if takes_each_value_from_one_input {
                         per_input.try_fold(0u64, |most, values| Some(most.max(values?)))
                     } else {
                         per_input.try_fold(0u64, |total, values| total.checked_add(values?))
                     }
                 });
-            let largest = |most: Option<u64>, values: Option<u64>| {
-                most.zip(values).map(|(most, values)| most.max(values))
-            };
-            most_readout_values = ReadoutValuesRead {
-                per_evaluation: largest(most_readout_values.per_evaluation, per_evaluation),
-                per_output_value: largest(most_readout_values.per_output_value, per_output_value),
-            };
+            most_readout_values = most_readout_values.larger(ReadoutValueCounts {
+                per_evaluation,
+                per_output_value,
+            });
         }
         if most_inputs_reading_with_error > 1 {
             composed.extend(
@@ -397,30 +488,40 @@ fn readouts_read_by_queries(
                     .copied(),
             );
         }
+        // A readout group's own readouts read its values per evaluation,
+        // each output value one of them, or all of them for a top-k, whose
+        // output keys are chosen by their estimates; any other candidate of
+        // the group (a reduction over readouts below it) still counts.
         readout_values_per_group[group.0 as usize] = if readout_groups.contains(&group) {
-            ReadoutValuesRead {
-                per_evaluation: memo.max_values_per_evaluation(group),
-                per_output_value: Some(1),
-            }
+            let per_evaluation = memo.max_values_per_evaluation(group);
+            let ranks_by_estimate = candidates.iter().any(|candidate| {
+                matches!(
+                    candidate.expression.operator,
+                    Operator::ASAP(ASAPOp::SummaryEstimate {
+                        query: SketchStatistic::TopK { .. },
+                        ..
+                    })
+                )
+            });
+            let own = ReadoutValueCounts {
+                per_evaluation,
+                per_output_value: if ranks_by_estimate {
+                    per_evaluation
+                } else {
+                    Some(1)
+                },
+            };
+            own.larger(most_readout_values)
         } else {
             most_readout_values
         };
     }
     // A query of several roots (a scalar expression over them) reads every
     // root's values, one output value each root's output value.
-    let mut readout_values: BTreeMap<usize, ReadoutValuesRead> = BTreeMap::new();
+    let mut readout_values: BTreeMap<usize, ReadoutValueCounts> = BTreeMap::new();
     for (query, root, _, _) in query_roots_with_target(memo) {
         let total = readout_values.entry(query).or_insert(none_read);
-        let root = readout_values_per_group[root.0 as usize];
-        let add = |total: Option<u64>, values: Option<u64>| {
-            total
-                .zip(values)
-                .and_then(|(total, values)| total.checked_add(values))
-        };
-        *total = ReadoutValuesRead {
-            per_evaluation: add(total.per_evaluation, root.per_evaluation),
-            per_output_value: add(total.per_output_value, root.per_output_value),
-        };
+        *total = total.plus(readout_values_per_group[root.0 as usize]);
     }
     ReadoutsReadByQueries {
         composed,
@@ -437,7 +538,10 @@ fn readouts_read_by_queries(
 /// value one input value. A binary operator, join or relational set
 /// operator: 2, one value of each side; a concatenation: each of its
 /// inputs. Operators its scalar expressions reference (`scalar(r)`) follow
-/// the direct inputs and are read whole.
+/// the direct inputs and are read whole. Both counts are per evaluation,
+/// not per subquery step: `max_over_time(q[1h:1m])` reads each readout
+/// value of `q` at 60 steps, which they do not multiply in (no cap passes
+/// through a subquery to the readouts below it).
 fn inputs_read_value_by_value(operator: &Operator<MemoGroupId>) -> Option<usize> {
     match operator {
         Operator::NonASAP(
@@ -460,17 +564,19 @@ fn inputs_read_value_by_value(operator: &Operator<MemoGroupId>) -> Option<usize>
 /// Whether `operator` copies each output value from exactly one of its
 /// inputs: a PromQL set operator (`q or r` takes a series' value from `q`
 /// when `q` has the series, else from `r`; `and` and `unless` only from
-/// the left).
+/// the left) or a concatenation (each row from one of its inputs).
 fn takes_each_value_from_one_input(operator: &Operator<MemoGroupId>) -> bool {
     matches!(
         operator,
-        Operator::NonASAP(NonASAPOp::BinaryOp {
-            operator: BinaryOperator {
-                kind: BinaryOpKind::Set(_),
+        Operator::NonASAP(
+            NonASAPOp::BinaryOp {
+                operator: BinaryOperator {
+                    kind: BinaryOpKind::Set(_),
+                    ..
+                },
                 ..
-            },
-            ..
-        })
+            } | NonASAPOp::Concat { .. }
+        )
     )
 }
 

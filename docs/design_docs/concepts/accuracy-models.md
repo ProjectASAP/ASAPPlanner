@@ -77,33 +77,42 @@ unknown (generic HLL) serves no query with an accuracy target
 (`RootPruneReason::NoGuarantee`), and a top-k readout is admitted on its
 heap size and its value guarantee alone (the contracts table).
 
-Pass 2 gives each sketch readout the error and per-value failure probability
-`δ / min(R, V · fan_in)` it must meet (`AccuracyTarget::failure_probability_per_readout_value`):
-the statement fails only when a readout value one of its `V` covered output
-values depends on does. `R` is the readout values the query reads per
-evaluation (the values per evaluation of every readout group below it,
-summed: the series their scans read), and `fan_in` the most readout values
-one output value depends on: 1 when no reduction lies above the readout,
-the reduction's input values under one (all of `R` for a global `max`; for
+Pass 2 gives each sketch readout the error and per-value failure
+probability `δ / min(R, V · fan_in)` it must meet
+(`AccuracyTarget::failure_probability_per_readout_value`): the statement
+fails only when a readout value one of its `V` covered output values
+depends on does. `R` is the readout values the query reads per evaluation
+(the values per evaluation of every readout group below it, summed: the
+series their scans read), and `fan_in` the most readout values one output
+value depends on: 1 when no reduction lies above the readout, the
+reduction's input values under one (all of `R` for a global `max`; for
 `sum by (job)` too, since the declared facts bound how many jobs there are,
 not how many series one job holds), the sum over the sides of a binary
-operator, the larger side of `or`. An unknown term drops out of the `min`;
-with both unknown no per-value failure probability follows. At δ = 0.01,
-`quantile_over_time(0.99, m[5m])` over 8 series per value keeps 0.01
-(min(8, 1 · 1)), and over its whole result gets 0.01 / 8; a `max` over 1000
-readouts returns one value yet fails when any readout does, so it gets
-0.01 / 1000 in any scope; and `max by (job) (q or r)` splits over the
-readouts of both sides. Pass 1's candidate takes the first requirement level and Pass 2 adds a copy
-per further level. A readout several queries reach gets the union of their
-levels. Pass 2 sizes nothing: a state has one build per listed θ, and each
-edge checks the guarantee of its producer's θ at the required failure
-probability, so a build several readers share serves the readers whose
-levels its θ meets. Stage 3 only checks the guarantee; it never resizes. At equal
-δ, the scope covering the most values is the strictest: every group (`G`,
-when `G` is above 100), then a 1% share (100), then a 5% share (20), then a
-single value (1). A whole-result target with an unbound `G` splits
-over `R` alone, and stays unmet when `R` is unbound too. A grouped result's `G` is bound by the
-distinct values its sources declare for its group keys
+operator, the larger side of `or` or input of a concatenation. A top-k
+readout chooses its output keys by their estimates, so each of its output
+values depends on every value it ranks. A readout group whose candidates
+include a reduction over readouts below it takes the larger of the two
+counts. Both counts are per evaluation, not per subquery step. An unknown
+term drops out of the `min`; with both unknown no per-value failure
+probability follows. At δ = 0.01, `quantile_over_time(0.99, m[5m])` over 8
+series per value keeps 0.01 (min(8, 1 · 1)), and over its whole result
+gets 0.01 / 8; a `max` over 1000 readouts returns one value yet fails when
+any readout does, so it gets 0.01 / 1000 in any scope; and
+`max by (job) (q or r)` splits over the readouts of both sides. Pass 1's
+candidate takes the first requirement level and Pass 2 adds a copy per
+further level. A readout several queries reach gets the union of their
+levels, less each level the listed builds that meet it are exactly those
+that meet a stricter one: DDSketch's relative error does not depend on δ,
+so of (5%, 0.01) and (5%, 1e-4) only the second is kept. Pass 2 sizes
+nothing: a state has one build per listed θ, and each edge checks the
+guarantee of its producer's θ at the required failure probability, so a
+build several readers share serves the readers whose levels its θ meets.
+Stage 3 only checks the guarantee; it never resizes. At equal δ, the scope
+covering the most values is the strictest: every group (`G`, when `G` is
+above 100), then a 1% share (100), then a 5% share (20), then a single
+value (1). A whole-result target with an unbound `G` splits over `R` alone,
+and stays unmet when `R` is unbound too. A grouped result's `G` is bound by
+the distinct values its sources declare for its group keys
 (`SourceFacts.distinct_values_per_label`, and
 `distinct_values_per_label_set` for labels that depend on each other): the
 smallest product of declared label and label-set counts covering the keys, at
@@ -302,7 +311,9 @@ largest error the readout's output may have for that query.
   ten from 1e-2 down to 1e-5, continued down to the first one at or below a
   tenth of the query's per-value failure probability) not looser than the
   cap. The logical-edge check then keeps the levels a producer's θ meets.
-- A readout reached by several queries gets the union of their levels.
+- A readout reached by several queries gets the union of their levels,
+  less each level the listed builds that meet it are exactly those that
+  meet a stricter one (a copy at it would accept the same producers).
 - A count reads no value (`β = 0`), and neither does the right input of
   `and` and `unless`: the readouts below it get no level through it, and
   an operator above it combines no error of them (`q / count(r)` reads

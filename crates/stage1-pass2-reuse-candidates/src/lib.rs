@@ -85,7 +85,7 @@ pub fn generate_logical_asap_memo_candidates(
     // Readout copies add candidates, not groups: one order serves steps 3
     // and 4.
     let order = topological_order(&memo)?;
-    let readout_requirements = set_readout_requirements(&mut memo, &order)?;
+    let readout_requirements = set_readout_requirements(&mut memo, &order, evidence)?;
     let candidates_of = |pruned: &[PrunedLogicalCandidate]| -> BTreeSet<CandidateForMemoGroupId> {
         pruned.iter().map(|pruned| pruned.candidate).collect()
     };
