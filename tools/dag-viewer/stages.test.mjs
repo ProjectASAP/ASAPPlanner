@@ -107,7 +107,7 @@ test('the header shows why a stage failed and the selection\'s warnings', () => 
 
 test('the counts line counts each stage\'s candidates and pruned candidates', () => {
   assert.equal(call('candidateCountsText', fixture()),
-    'Candidates per stage: 21 logical (4 pruned by Pass 2) → 20 physical (36 pruned by Stage 2, 0 by Stage 3) → plan selected');
+    'Candidates per stage: 30 logical (13 pruned by Pass 2) → 20 physical (36 pruned by Stage 2, 0 by Stage 3) → plan selected');
 });
 
 test('the search header names the search and the MILP\'s size', () => {
@@ -127,6 +127,10 @@ test('queries show a fixed interval and its phase', () => {
 test('Stage 2 and Stage 3 pruning reasons read as words; dominated_by names its physical candidate', () => {
   assert.equal(call('prunedReasonText', 'query_time_results_not_retained'), 'query time results not retained');
   assert.equal(call('prunedReasonText', { dominated_by: 7 }), 'dominated by C7');
+  assert.equal(call('prunedReasonText', { excluded_by_deployment: 'raw_data_not_retained' }),
+    'excluded by the deployment: raw data not retained');
+  assert.equal(call('prunedReasonText', { excluded_by_deployment: { excluded_candidate: { index: 2 } } }),
+    'excluded by the deployment: excluded_candidates[2]');
 });
 
 test('a materialized view row names its plan node, kind, refresh, inputs, cost and the queries reading it', () => {

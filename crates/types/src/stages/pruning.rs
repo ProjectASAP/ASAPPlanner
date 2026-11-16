@@ -114,7 +114,8 @@ pub struct PrunedCandidate<C> {
 /// Why a stage removed a candidate: first Stage 2's (the physical candidate
 /// cannot be built, run or read by a query output), then Stage 3's, before
 /// its selection MILP. JSON: the snake_case variant name, e.g.
-/// `"raw_data_not_retained"`, or `{"dominated_by": 3}`.
+/// `"no_ingestion_pipeline"`, `{"excluded_by_deployment":
+/// "raw_data_not_retained"}` or `{"dominated_by": 3}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PruneReason {

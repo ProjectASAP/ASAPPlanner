@@ -5,11 +5,13 @@
 // edges and the pruned candidates of Pass 2, Stage 2 and Stage 3, over
 // test-fixtures/p90-kll.json: the document asap_planner writes for
 // test-fixtures/p90-workload.json under test-fixtures/kll-only-no-raw-data-capabilities.json
-// (one p90 query with accuracy enforced, KLL only and no raw data kept, so
-// the plan reads a KLL tumbling-window chain; Pass 2 prunes G4's four
-// smallest KLL sketches). Group and candidate ids are the document's
-// canonical ones: G0 is the query's root, G1 its range, G2 the scan, G3
-// the readout, G4 the KLL states, G5 the chain's range and G6 the chain.
+// (one p90 query with a rank target enforced, KLL only and no raw data
+// kept, so the plan reads a KLL tumbling-window chain; Pass 2 prunes G4's
+// four smallest KLL sketches, and the DDSketch readout G7 and states G8,
+// whose relative error the rank target does not accept). Group and
+// candidate ids are the document's canonical ones: G0 is the query's root,
+// G1 its range, G2 the scan, G3 the KLL readout, G4 the KLL states, G5 the
+// chain's range, G6 the chain, G7 the DDSketch readout and G8 its states.
 // The elements load into the vendored cytoscape (headless).
 // Run from the repository root: `node --test tools/dag-viewer/memo.test.mjs`.
 import { test } from 'node:test';
@@ -75,8 +77,10 @@ test('each step says what it added over the previous one', () => {
   const memo = fixture();
   assert.deepEqual(call('memoStepDiff', memo, 0), { groups: 3, groupsAdded: [0, 1, 2], groupsRemoved: [], candidates: 0, candidatesDelta: 0, added: 0 });
   const pass1 = call('memoStepDiff', memo, 1);
-  assert.equal(pass1.candidates, 12);
-  assert.deepEqual(pass1.groupsAdded, [3, 4]);
+  // Pass 1 offers every summary the planner builds (KLL and DDSketch for a
+  // quantile); Stage 2 applies the deployment's supported summaries.
+  assert.equal(pass1.candidates, 21);
+  assert.deepEqual(pass1.groupsAdded, [3, 4, 7, 8]);
   // Pass 2 adds the tumbling-window chain G6 and its range G5, and a merge
   // in G4, one per θ of the three KLL sizes Pass 2 keeps.
   const pass2 = call('memoStepDiff', memo, PASS2);
@@ -84,7 +88,7 @@ test('each step says what it added over the previous one', () => {
   assert.equal(pass2.candidatesDelta, 3 + 3 + 3);
   assert.equal(pass2.added, 9);
   assert.equal(call('memoStepText', memo, 0), '3 groups · 0 candidates');
-  assert.equal(call('memoStepText', memo, PASS2), '7 groups (+2) · 21 candidates (+9) · 9 candidates new at this step');
+  assert.equal(call('memoStepText', memo, PASS2), '9 groups (+2) · 30 candidates (+9) · 9 candidates new at this step');
 });
 
 test('stage 0 draws one box per group and an edge per child group', () => {
@@ -118,7 +122,8 @@ test('each candidate sits inside its group, colored by origin, with θ, and an e
 
 test("Pass 2's pruned candidates are marked and counted on their group", () => {
   const elements = call('memoStepElements', fixture(), PASS2, {});
-  assert.deepEqual(nodesOf(elements).filter((e) => /\bpruned\b/.test(e.classes || '')).map((e) => e.data.id), ['g4c0', 'g4c1', 'g4c2', 'g4c3']);
+  assert.deepEqual(nodesOf(elements).filter((e) => /\bpruned\b/.test(e.classes || '')).map((e) => e.data.id),
+    ['g0c2', 'g4c0', 'g4c1', 'g4c2', 'g4c3', 'g7c0', 'g8c0', 'g8c1', 'g8c2', 'g8c3', 'g8c4', 'g8c5', 'g8c6']);
   assert.match(byId(elements, 'g4c0').data.label, /Pass1 · ✗ pruned$/);
   assert.match(byId(elements, 'g4').data.label, /^G4 · SummaryAgg Kll\n10 candidates \(4 pruned by Pass 2\)$/);
   // Pass 1 does not prune.
@@ -210,12 +215,12 @@ test('the pruned candidates of a group: Pass 2 with its root causes, Stage 2 and
   const pruned = call('memoPrunedLines', doc, 4);
   assert.equal(pruned.pass2.length, 4);
   assert.match(pruned.pass2[0], /^#0: the producer's guarantee exceeds Rank ≤ 0\.01 \(δ 0\.00001\)$/);
-  assert.ok(pruned.stage2.includes('#4 (query_time, AcrossEvaluations(Memory)): query time results not retained'), pruned.stage2.join('\n'));
+  assert.ok(pruned.stage2.includes('#4 (query_time, AcrossEvaluations(Memory)): excluded by the deployment: query time results not retained'), pruned.stage2.join('\n'));
   assert.ok(pruned.stage2.includes('#4 (query_time, None): input has no buildable producer'), pruned.stage2.join('\n'));
   assert.deepEqual(pruned.stage3, []);
   // A cause traced through eliminated consumers names them; a Stage 3
   // reason names the physical candidate that dominates it.
-  doc.stage1_logical_asap_optimization.pruned_candidates[0].causes[0].through_pruned_candidates = [{ group: 3, index_in_group: 0 }, { group: 0, index_in_group: 1 }];
+  doc.stage1_logical_asap_optimization.pruned_candidates.find((p) => p.group === 4 && p.index_in_group === 0).causes[0].through_pruned_candidates = [{ group: 3, index_in_group: 0 }, { group: 0, index_in_group: 1 }];
   doc.stage3_plan_selection.pruned_candidates = [
     { group: 4, index_in_group: 8, properties: { timing: 'query_time', lifetime: 'None' }, reason: { dominated_by: 5 } },
     { group: 4, index_in_group: 9, properties: { timing: 'query_time', lifetime: 'None' }, reason: 'usage_not_costable' }];
