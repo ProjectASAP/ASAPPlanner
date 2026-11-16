@@ -341,7 +341,7 @@ fn an_ingestion_time_chain_assigns_each_row_its_window_as_a_time_range_does() {
 /// window's range, as a `TimeRange` over the same rows does, besides
 /// updating the row's state. Example: a sum in 60 s windows over 36,000
 /// raw rows, retaining five windows of one group, costs 36,000 × (40
-/// update + 12 range) operations plus five emitted exact states × 1,500.
+/// update + 11 range) operations plus five emitted exact states × 1,500.
 #[test]
 fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
     use crate::node::operations_per_unit::{

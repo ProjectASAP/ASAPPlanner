@@ -304,6 +304,9 @@ pub fn plan_cost(
     // such as the raw rows a `Filter` or `TimeRange` keeps or an exact
     // `Aggregate`'s values: the executor merges ingest shards only of
     // summary state columns, and partial copies of rows are concatenated.
+    // No per-group term (`merge_output_operations`, 19,000 per KLL group):
+    // the executor merges a shard's states into the existing states in
+    // place, group by group, and creates no group's state or output row.
     let merge_ms = |id: PhysicalASAPNodeId| {
         let Some(&family) = family_of.get(&id) else {
             return 0.0;
