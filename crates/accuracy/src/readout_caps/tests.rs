@@ -7,10 +7,10 @@ use asap_types::ir::QueryRoot;
 use asap_types::stages::{MemoQuery, ValueSign};
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
 use asap_types::test_support::memo_builders::{
-    estimate, group, own_candidate, quantile_over_time, query, scan_group, sketch_state,
-    with_series,
+    candidate, estimate, group, own_candidate, quantile_over_time, query, scan_group,
+    sketch_state, with_series,
 };
-use asap_types::test_support::memo_fixtures::{aggregate, arithmetic, set_operator};
+use asap_types::test_support::memo_fixtures::{aggregate, arithmetic, range, set_operator};
 use asap_types::workload::DataWorkload;
 
 /// The levels [`readout_levels`] gives the readout candidate `readout`.
@@ -605,4 +605,144 @@ fn a_per_value_ratio_splits_over_the_two_readout_values_of_each_output_value() {
             .fold(0.0, f64::max);
         assert!((loosest - 1e-3).abs() < 1e-15, "{loosest}");
     }
+}
+
+/// A readout group whose candidates are a readout and a reduction over
+/// other readouts: `quantile(0.9)` over every sample of 1000 series, read
+/// from one global sketch, or summed over the 1000 per-series readouts
+/// below it (an alternative with the same output). A per-value target on
+/// it covers one output value, which the reduction makes depend on all
+/// 1000 per-series readout values: each of them gets δ / 1000, not the δ
+/// the global readout's own fan-in of 1 would give.
+#[test]
+fn a_readout_group_holding_a_reduction_splits_over_the_readout_values_below_it() {
+    let mut memo = Memo::new(&with_series_over_jobs(1000, 10));
+    let (window, _, per_series) =
+        quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
+    let global_state = sketch_state(
+        &mut memo,
+        window,
+        SketchAlgorithm::DDSketch,
+        Reduction::by(vec![]),
+    );
+    let global = estimate(&mut memo, global_state, SketchStatistic::Quantile { q: 0.9 });
+    let sum_of_readouts = Operator::NonASAP(NonASAPOp::Aggregate {
+        child: per_series,
+        reduction: Reduction::by(vec![]),
+        measures: vec![AggIntent::Sum { col: None }],
+        output_names: vec!["quantile".into()],
+        filters: vec![],
+        having: None,
+    });
+    candidate(&mut memo, global, sum_of_readouts, None);
+    with_query(
+        &mut memo,
+        global,
+        relative_target(AccuracyScope::PerValue),
+        Some(1),
+    );
+    assert_failure_probability(failure_probability_of(&memo, per_series), 0.01 / 1000.0);
+}
+
+/// A top-k readout chooses its output keys by their estimated values, so
+/// one output value (a key in the top 10) depends on the estimates of
+/// every key it was ranked against: CMS-with-heap top-10 over 1000 series
+/// gets δ / 1000 per value, not δ.
+#[test]
+fn a_topk_readout_splits_over_every_value_it_ranks() {
+    let mut memo = Memo::new(&with_series("m", 1000));
+    let input = scan_group(&mut memo, "m", &["job"], vec![]);
+    let window = group(&mut memo, range(300_000, input));
+    let state = sketch_state(
+        &mut memo,
+        window,
+        SketchAlgorithm::CmsWithHeap,
+        Reduction::PerEntity,
+    );
+    let topk = estimate(&mut memo, state, SketchStatistic::TopK { k: 10 });
+    with_query(
+        &mut memo,
+        topk,
+        AccuracyTarget::max_error(0.05)
+            .failure_probability(0.01)
+            .accuracy_scope(AccuracyScope::PerValue),
+        Some(10),
+    );
+    assert_failure_probability(failure_probability_of(&memo, topk), 0.01 / 1000.0);
+}
+
+/// A concatenation copies each output row from one of its inputs, as `or`
+/// does: per value, each of two quantile readouts over 100 series keeps
+/// the single level of its cap at δ = 0.01, neither the composed grid nor
+/// δ / 2.
+#[test]
+fn a_concatenation_takes_each_value_from_one_readout() {
+    let mut memo = Memo::new(&with_series("m", 100));
+    let (_, state, p90) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
+    let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
+    let both = group(
+        &mut memo,
+        Operator::NonASAP(NonASAPOp::Concat {
+            children: vec![p90, p50],
+        }),
+    );
+    with_query(
+        &mut memo,
+        both,
+        relative_target(AccuracyScope::PerValue),
+        Some(200),
+    );
+    for readout in [p90, p50] {
+        assert_failure_probability(failure_probability_of(&memo, readout), 0.01);
+    }
+}
+
+/// Two queries on one DDSketch quantile readout over 100 series, one per
+/// value (δ = 0.01) and one over the whole result (δ / 100 = 1e-4), both
+/// at relative error 0.05. DDSketch's relative error does not depend on
+/// δ, so the same listed builds meet both levels: the looser one is
+/// redundant and only the stricter, (0.05, 1e-4), is kept.
+#[test]
+fn a_level_met_by_the_same_builds_as_a_stricter_one_is_dropped() {
+    let mut memo = Memo::new(&with_series("m", 100));
+    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
+    with_query(
+        &mut memo,
+        readout,
+        relative_target(AccuracyScope::PerValue),
+        Some(100),
+    );
+    with_query(
+        &mut memo,
+        readout,
+        relative_target(AccuracyScope::WholeResult),
+        Some(100),
+    );
+    let [level] = levels_of(&memo, readout)[..] else {
+        panic!("one level: {:?}", levels_of(&memo, readout));
+    };
+    assert!((level.max_error - 0.05).abs() < 1e-12, "{level:?}");
+    assert_failure_probability(Some(level.failure_probability), 1e-4);
+}
+
+/// Levels that different builds meet are both kept: a KLL rank error of
+/// 0.0025 over 8 series at δ = 0.01 per value needs k = 1404 and over the
+/// whole result (δ / 8) k = 2863, so k = 1404 meets only the first.
+#[test]
+fn levels_met_by_different_builds_are_both_kept() {
+    let mut memo = Memo::new(&with_series("m", 8));
+    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.99, 300);
+    let rank = |scope| {
+        AccuracyTarget::max_error(0.0025)
+            .failure_probability(0.01)
+            .accuracy_metric(AccuracyMetric::Rank)
+            .accuracy_scope(scope)
+    };
+    with_query(&mut memo, readout, rank(AccuracyScope::PerValue), Some(8));
+    with_query(&mut memo, readout, rank(AccuracyScope::WholeResult), Some(8));
+    let failure_probabilities: Vec<f64> = levels_of(&memo, readout)
+        .into_iter()
+        .map(|level| level.failure_probability)
+        .collect();
+    assert_eq!(failure_probabilities, vec![0.01, 0.01 / 8.0]);
 }
