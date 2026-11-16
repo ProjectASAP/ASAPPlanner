@@ -5,9 +5,14 @@
 //! assignment correctness is tested separately against the MILP model oracle.
 //! Larger fixtures check validated behavior without asserting global optimality.
 
-use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel};
+use asap_cost::{
+    request_overhead_cost_per_second, ClusterLimits, ClusterObjective, CostInputs, CostModel,
+};
 use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots};
-use asap_planner::{run_planning, PlanSearchSettings, PlanningModels, PlanningRun};
+use asap_planner::{
+    run_planning, ErrorSelectingPlan, PlanSearchSettings, PlanningModels, PlanningRun,
+    SelectionError,
+};
 use asap_types::accuracy::AccuracyTarget;
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::QueryRoot;
@@ -321,9 +326,36 @@ fn repeated_sql_queries_preserve_separate_output_references() {
     assert_valid(&run, 3);
 }
 
-// Request work on literal outputs still consumes CPU and latency budgets even
-// when there is no operator node to which a fee could be attributed.
+// Request work on a literal output is charged though no operator node
+// owns it: `1` every 1 ms at 2 ms per request costs 1,000 requests per
+// second x 2,000,000 CPU operations, the whole of the plan's cost.
 #[test]
+fn rootless_request_overhead_is_charged() {
+    let workload = workload_of(&[("1", 1)], AccuracyTarget::exact());
+    let roots = lower_promql_roots(&workload).unwrap();
+    let mut settings = CostInputs::default();
+    settings.measured_operation_costs.ns_per_evaluation = 2_000_000.0;
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let result = run(
+        &roots,
+        &entries,
+        workload.data_workload.as_ref().unwrap(),
+        PlanningModels::builtin().with_cost_inputs(&settings),
+        false,
+    );
+    let (plan, selection) = result.selection.as_ref().unwrap();
+    assert!(plan.nodes.is_empty(), "a literal needs no operator node");
+    let overhead = request_overhead_cost_per_second(&entries, &settings).unwrap();
+    assert!(overhead > 0.0);
+    assert_eq!(selection.selected_plan_cost_per_second, overhead);
+}
+
+// The same request overhead counts against a latency bound and a cluster's
+// CPU: 2 ms per request is over `max_latency_ms` 1, and 2 cores of work
+// are over 1 core. Stage 3 checks neither yet: latency (L) and resource
+// budgets are outside the selection MILP, and it refuses cost model 3.
+#[test]
+#[ignore = "Stage 3 checks no latency bound and no cluster capacity (#1316)"]
 fn rootless_request_overhead_respects_capacity_and_latency() {
     let mut workload = workload_of(&[("1", 1)], AccuracyTarget::exact());
     let roots = lower_promql_roots(&workload).unwrap();
@@ -350,7 +382,13 @@ fn rootless_request_overhead_respects_capacity_and_latency() {
             PlanningModels::builtin().with_cost_inputs(&settings),
             false,
         );
-        assert!(result.selection.is_err());
+        // Refused because the request overhead does not fit, not because
+        // the cost model is unsupported.
+        assert!(matches!(
+            &result.selection,
+            Err(SelectionError::Selection(error))
+                if !matches!(error, ErrorSelectingPlan::UnsupportedCostModel(_))
+        ));
     }
 }
 

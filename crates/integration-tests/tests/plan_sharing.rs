@@ -25,18 +25,47 @@ fn exact_coarse_sum_reuses_fine_sum() {
     );
 }
 
-/// The 1m sum reads the newest tumbling window of the existing 2m chain.
+/// The 1m sum reads the newest tumbling window of the 2m sum's chain: with
+/// no raw data kept, the plan builds one tumbling-window chain and both
+/// queries read it.
+///
+/// With raw data kept, each query is answered at query time from the raw
+/// rows (0.086/s together, 0.059/s for the 2m sum alone): the shared chain
+/// costs 2.16/s under the measured unit costs, so it is not selected.
 #[test]
 fn nested_exact_sum_reuses_newest_tumbling_windows() {
-    let related = fuzz_workload("nested_exact_sum", false);
-    let mut base = related.clone();
-    base.queries.truncate(1);
-    let base_cost = cost(&base);
-    let related_cost = cost(&related);
-    assert!(
-        related_cost <= base_cost * 1.001,
-        "{related_cost} vs {base_cost}"
-    );
+    let mut related = fuzz_workload("nested_exact_sum", false);
+    related.raw_data_retained = false;
+    let plan = selected_plan(&related, &CostInputs::default());
+    let chains: Vec<_> = plan
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.payload,
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+        })
+        .map(|node| node.id)
+        .collect();
+    assert_eq!(chains.len(), 1, "one chain: {plan:#?}");
+    for &root in &plan.roots {
+        assert!(reaches(&plan, root, chains[0]), "root {root}: {plan:#?}");
+    }
+}
+
+/// Whether `from` is `to` or reads it through the plan's edges.
+fn reaches(
+    plan: &asap_types::plan::physical_asap_dag::PhysicalASAPDAG,
+    from: usize,
+    to: usize,
+) -> bool {
+    from == to
+        || plan
+            .edges
+            .iter()
+            .filter(|edge| edge.consumer == from)
+            .any(|edge| reaches(plan, edge.producer, to))
 }
 
 /// The slower copy reads the same maintained sum.

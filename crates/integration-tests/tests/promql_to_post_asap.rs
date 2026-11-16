@@ -12,6 +12,7 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::physical_export::physical_asap_dag;
 use asap_integration_tests::planning::{
     logical_candidates, logical_candidates_ignoring_guarantees,
+    logical_candidates_with_summary_cpu_free,
 };
 use asap_types::ir::operator::arguments::Reduction;
 
@@ -62,12 +63,18 @@ fn uses_sketch(node: &OperatorNode, algorithm: &SketchAlgorithm) -> bool {
 
 /// The logical candidates of `root` at `accuracy` that build a sketch of
 /// `algorithm`, each with the `Project`s Stage 1 restores names with skipped.
+/// Summaries' CPU is costed free, so Stage 3 selects the sketch plan these
+/// shape tests inspect: under the default unit costs an exact plan is
+/// cheaper on their 1,000 series.
 fn candidates_using(
     root: &Rc<OperatorNode>,
     accuracy: AccuracyTarget,
     algorithm: SketchAlgorithm,
 ) -> Vec<Rc<OperatorNode>> {
-    using(logical_candidates(Rc::clone(root), accuracy), algorithm)
+    using(
+        logical_candidates_with_summary_cpu_free(Rc::clone(root), accuracy),
+        algorithm,
+    )
 }
 
 /// [`candidates_using`] with every output accepted whatever its guarantee:
