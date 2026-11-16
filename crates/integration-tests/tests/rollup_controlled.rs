@@ -60,7 +60,7 @@ fn nodes(roots: &[QueryRoot]) -> Vec<Rc<OperatorNode>> {
 /// planned shape (600,000,000 rows over 10,000 groups) has 60,000 rows per
 /// state, as the 60,000,000-row run does, so the test expects KMV.
 #[test]
-fn production_distinct_rollup_builds_kmv_at_600m_rows_per_evaluation() {
+fn production_distinct_rollup_builds_kmv_at_60k_rows_per_state() {
     let (workload, roots) = fixture();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
