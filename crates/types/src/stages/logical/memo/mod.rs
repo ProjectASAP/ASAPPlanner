@@ -94,8 +94,9 @@ impl Memo {
     }
 
     /// The most values one evaluation of `group`, a readout, a state, a
-    /// grouped aggregate or a query result over one, returns, from the facts the data workload declares; `None` when they
-    /// bound it in no way. As SQL optimizers estimate the groups of a
+    /// grouped aggregate or a query result over one, returns, from the
+    /// facts the data workload declares; `None` when they bound it in no
+    /// way. As SQL optimizers estimate the groups of a
     /// `GROUP BY` (the product of the key columns' distinct counts, clamped
     /// to the input rows), but as an upper bound, it is the smaller of:
     /// - the values its keys can take ([`Self::keys_of_values`]): for keys
@@ -116,7 +117,12 @@ impl Memo {
     ///
     /// Keys from different scans multiply, for a join pairs their values:
     /// `flows JOIN hosts ... GROUP BY f.src, h.region`, with 6 `src` and 6
-    /// `region` values declared, returns up to 36 values, not 6 + 6.
+    /// `region` values declared, returns up to 36 values, not 6 + 6. The
+    /// "one" side of a many-to-one vector match is another scan in the same
+    /// way (`m{side="l"} * on(x) group_left(instance) m{side="r"}` by
+    /// `job, instance` pairs labels of two series), and a key from an outer
+    /// join's nullable side, which may be NULL, is computed
+    /// (`ColumnLineage`).
     ///
     /// Examples: a readout of `quantile_over_time(0.9, m[5m])` over `m`
     /// with 1000 series returns at most 1000 values, which `max(...)` over
@@ -172,8 +178,9 @@ impl Memo {
     /// `TimeRange` over it the rows of its window
     /// (`SourceFacts::max_rows_in_window`; for an instant selector, one per
     /// series at most); an operator that keeps, drops or groups its input's
-    /// rows at most its input's; a join at most the product of its inputs'
-    /// (plus each side's own for an outer join), a union their sum.
+    /// rows at most its input's, and `LIMIT n` over the whole input at most
+    /// n; a join at most the product of its inputs' (plus each side's own
+    /// for an outer join), a union their sum.
     /// Example: `flows WHERE ts >= now() - INTERVAL '15 minutes'`, 6 groups
     /// of rows sampled every minute, returns at most 6 × 16 = 96 rows.
     fn max_rows_per_evaluation(&self, group: MemoGroupId) -> Option<u64> {
@@ -210,12 +217,25 @@ impl Memo {
             | NonASAPOp::Project { child, .. }
             | NonASAPOp::Dedup { child, .. }
             | NonASAPOp::Sort { child, .. }
-            | NonASAPOp::Limit { child, .. }
             | NonASAPOp::SQLWindowFunc { child, .. }
             | NonASAPOp::TimeShift { child, .. }
             | NonASAPOp::PromqlRelabel { child, .. }
             | NonASAPOp::PromqlInfoEnrich { child, .. }
             | NonASAPOp::PromqlSeriesSample { child, .. } => rows(child),
+            // `LIMIT n` over the whole input keeps at most n rows; per
+            // partition (`topk by (job)`), n per partition.
+            NonASAPOp::Limit {
+                n,
+                partition_by,
+                child,
+                ..
+            } => {
+                let whole_input = !partition_by.is_without() && partition_by.keys().is_empty();
+                let kept = n
+                    .filter(|_| whole_input)
+                    .and_then(|n| u64::try_from(n).ok());
+                smaller_known(kept, rows(child))
+            }
             // A global aggregate returns one row even over no rows.
             NonASAPOp::Aggregate { child, .. } => rows(child).map(|rows| rows.max(1)),
             NonASAPOp::Join {
