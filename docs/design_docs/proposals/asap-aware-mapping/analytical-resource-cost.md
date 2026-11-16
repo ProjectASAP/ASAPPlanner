@@ -790,9 +790,19 @@ from logical group count alone.
 Summary merge, subtract, delete, and readout are separate physical operators.
 Their CPU and memory use the concrete summary state size and number of input
 states. A merge costs its family's operations per input state (per byte for unmeasured
-sketches), and outputs one state per
-group: the input's groups, or for a rollup (`group_by`) the groups of its
-keys, estimated like any `by (keys)` and at most the input's groups. A plan
+sketches; for KLL also per byte of the input state and of the merged state,
+which grows towards `k`), plus each output group's state and row, and outputs
+one state per group: the input's groups, or for a rollup (`group_by`) the
+groups of its keys, estimated like any `by (keys)` and at most the input's
+groups. The merged state is sized for the rows its group's input states fold
+together: 360 stored KLL windows of 10 rows each merge into a state sized for
+3,600 rows. A readout (estimate or finalize) costs each group's output row,
+plus reading its state (a KLL's per byte). A state's row on any edge holds
+its labels, its window's time and its series identity beside the state; a
+DDSketch state is sized for the values it is expected to hold, spread like
+latencies, not for the most it could hold. A grouping that carries label
+columns beside its keys (a per-series sum keeping `job` for a later
+`sum by (job)`) costs per row and carried label. A plan
 using one of these operations is unavailable until the corresponding formula
 and required evidence are present.
 

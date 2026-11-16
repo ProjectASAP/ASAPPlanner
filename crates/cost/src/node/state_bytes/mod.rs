@@ -2,24 +2,64 @@
 //! per input row, from its parameters and the rows it folds.
 
 use crate::node::analytical::AnalyticalCostError;
+use crate::node::operator_statistics::EdgeStatistics;
 use asap_types::ir::operator::AggIntent;
-use asap_types::ir::schema::{DataType, FieldDataType, Schema};
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema, PROMQL_SERIES_IDENTITY};
 use asap_types::summary_type::KLL_MAX_K;
 use asap_types::summary_type::{SketchParams, EXACT_ACCUMULATOR_STATE_BYTES};
 use asap_types::workload::ValueMagnitudeRange;
 
-/// Plain values are 8 bytes, strings 16; summary columns are sized apart.
+/// Bytes of one output row: each column at [`column_bytes`].
 pub fn row_bytes(schema: &Schema) -> u64 {
+    schema.fields.iter().map(column_bytes).sum::<u64>().max(1)
+}
+
+/// Bytes one column of an output row is priced at: a string 16 (a label
+/// value, or a series identity, which raw rows share one copy of per
+/// series), any other value 8. Example: a PromQL sample row of a series
+/// identity, `job`, its time and value is 16 + 16 + 8 + 8 = 48 bytes.
+fn column_bytes(field: &Field) -> u64 {
+    match &field.dtype {
+        FieldDataType::Plain(DataType::Utf8) => 16,
+        _ => 8,
+    }
+}
+
+/// Bytes a summary state's output row holds beside its state: its labels
+/// and its window's time, each at [`column_bytes`] except the series
+/// identity, which a state's row holds its own copy of, at
+/// `SERIES_IDENTITY_BYTES`. Example: a stored per-series Sum carrying
+/// `job` holds its window time, `job` and the series identity: 8 + 16 + 64
+/// = 88 bytes beside its 56-byte state, 144 in all, where the executor
+/// holds 151 per state.
+pub(crate) fn state_row_bytes_beside_state(schema: &Schema) -> u64 {
     schema
         .fields
         .iter()
-        .map(|f| match &f.dtype {
-            FieldDataType::Plain(DataType::Utf8) => 16,
-            _ => 8,
+        .map(|field| match &field.dtype {
+            FieldDataType::Sketch(..) | FieldDataType::ExactAggregate(..) => 0,
+            FieldDataType::Plain(DataType::Utf8) if field.name == PROMQL_SERIES_IDENTITY => {
+                SERIES_IDENTITY_BYTES
+            }
+            _ => column_bytes(field),
         })
-        .sum::<u64>()
-        .max(1)
+        .sum()
 }
+
+/// Bytes of the state one row of `edge` holds: its bytes per row without
+/// what the row holds beside its state ([`state_row_bytes_beside_state`] of
+/// the producer's `schema`). Example: 1,000 rows of stored per-series Sums
+/// carrying `job`, 144,000 bytes, hold 144 − 88 = 56 bytes of state each.
+pub(crate) fn state_bytes_per_row(edge: EdgeStatistics, schema: &Schema) -> u64 {
+    edge.bytes_per_row()
+        .saturating_sub(state_row_bytes_beside_state(schema))
+}
+
+/// Bytes of one series identity in a state's row: its serialized label
+/// set, e.g. `{"instance":"host-17:9100","job":"api","region":"r1"}`
+/// (about 55 bytes), and the column's 4-byte offset, rounded up. An
+/// assumption: the data workload declares no label lengths.
+const SERIES_IDENTITY_BYTES: u64 = 64;
 
 /// Exact state that keeps every value or item of its group, so grows with
 /// the data; other exact accumulators are fixed-size.
@@ -42,14 +82,10 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
 /// - a Count-Min / Count Sketch top-k heap full of keys of
 ///   `ASSUMED_HEAP_KEY_BYTES`; each UnivMon layer's heap full of keys of
 ///   `ASSUMED_VALUE_KEY_BYTES`;
-/// - DDSketch and KMV: the rows the state folds, at least one (any number
-///   when unknown), each a distinct item for KMV; a DDSketch's values span
-///   `input_rows.value_magnitude_range` when declared, else
-///   `DDSKETCH_ASSUMED_MAGNITUDE_RANGE`, and fill its negative store too
-///   unless proven non-negative. Its bins are the bucket indices from
-///   ⌊log_γ min_abs⌋ to ⌊log_γ max_abs⌋, at least one, for γ = (1 + α) /
-///   (1 - α); this DDSketch has no bin limit to cap them. E.g. α = 0.01
-///   over [0.001, 10000] takes indices -346 to 460, 807 bins.
+/// - KMV: the rows the state folds, at least one (any number when
+///   unknown), each a distinct item;
+/// - DDSketch: what it is expected to hold, not the most it can
+///   ([`ddsketch_state_bytes`]).
 ///
 /// KLL is priced without the library's estimate: its fixed bytes
 /// (`kll_fixed_bytes`: the struct and its level array) plus the 8-byte
@@ -155,18 +191,7 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
         SketchParams::DDSketch { alpha } if !(*alpha > 0.0 && *alpha < 1.0) => {
             std::mem::size_of::<DdSketch>() as u64
         }
-        SketchParams::DDSketch { alpha } => {
-            let ValueMagnitudeRange { min_abs, max_abs } = input_rows
-                .value_magnitude_range
-                .unwrap_or(DDSKETCH_ASSUMED_MAGNITUDE_RANGE);
-            DdSketch::estimated_memory_bytes(
-                *alpha,
-                rows,
-                min_abs,
-                max_abs,
-                !input_rows.non_negative,
-            ) as u64
-        }
+        SketchParams::DDSketch { alpha } => ddsketch_state_bytes(*alpha, input_rows),
         SketchParams::Hll { precision, .. } => {
             HyperLogLog::<Classic>::estimated_memory_bytes(usize::from(*precision)) as u64
         }
@@ -254,14 +279,91 @@ const ASSUMED_HEAP_KEY_BYTES: usize = 3 * (1 + 4 + 16);
 /// A sample value's key owns no bytes, so this bounds it too.
 const ASSUMED_VALUE_KEY_BYTES: usize = 1 + 16;
 
-/// The range of value magnitudes a DDSketch is assumed to see when its
-/// column declares no `column_magnitudes`: nine decades, e.g. latencies from 1 ns
-/// to 1 s, costed as magnitudes in `[1, 1e9]` (its bins depend on the ratio
-/// alone). An assumption, not workload evidence.
+/// The range of value magnitudes a DDSketch is assumed to see at most when
+/// its column declares no `column_magnitudes`: nine decades, e.g.
+/// latencies from 1 ns to 1 s, costed as magnitudes in `[1, 1e9]` (its
+/// bins depend on the ratio alone). An assumption, not workload evidence.
 const DDSKETCH_ASSUMED_MAGNITUDE_RANGE: ValueMagnitudeRange = ValueMagnitudeRange {
     min_abs: 1.0,
     max_abs: 1e9,
 };
+
+/// The Euler–Mascheroni constant γ.
+const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
+
+/// The ratio of the largest to the smallest of `rows` values a DDSketch
+/// state is assumed to span when the workload declares nothing about its
+/// values: `rows` samples of an exponential distribution, as latencies
+/// roughly are, whose largest is about `H_n` times their mean and whose
+/// smallest has a log about `ln(mean / n) − γ`, so a ratio of about
+/// `n · H_n · e^γ`. Example: 10 values span a ratio of 52, 3,000 values
+/// one of 4.6e4.
+///
+/// The default when the data workload declares nothing about the values,
+/// not workload evidence. At α = 0.01, values with a floor (lognormal
+/// latencies, σ = 1) span less and are over-charged 1.1x; a narrow gauge
+/// (100 ± 10), whose states hold one first block of buckets, 2.4x at 10
+/// values per state to 5.6x at 36,000; values with a heavier tail than an
+/// exponential (Pareto) are under-charged.
+fn exponential_values_magnitude_ratio(rows: u64) -> f64 {
+    let n = rows.max(1) as f64;
+    let harmonic = n.ln() + EULER_GAMMA + 1.0 / (2.0 * n);
+    n * harmonic * EULER_GAMMA.exp()
+}
+
+/// The bytes a DDSketch of relative accuracy `alpha` is expected to hold
+/// after folding `input_rows`: its struct, and per sign it holds (one when
+/// its values are proven non-negative or it folds one row, else two) the
+/// dense bucket store `asap_sketchlib` grows, one first block of buckets
+/// (`DdSketch::estimated_memory_bytes` of one value) plus one 8-byte
+/// counter per bucket its values span beyond the first.
+///
+/// The span is that of the values the state folds, not of the column: the
+/// magnitude ratio its rows are assumed to span
+/// ([`exponential_values_magnitude_ratio`]), at most that of
+/// `DDSKETCH_ASSUMED_MAGNITUDE_RANGE` (also the span when the rows are
+/// unknown); a declared `column_magnitudes` range is not read yet. The library's worst case over every order of
+/// inserts and merges (`estimated_memory_bytes`) is about twice the span
+/// over the whole range, which is not what a state holds on average.
+///
+/// Example: at α = 0.01, 10 exponential samples span a ratio of 52, 198
+/// buckets: 144 + 1,024 + 8 × 197 = 2,744 bytes, where `asap_sketchlib`
+/// holds 2,910 on average; 3,000 samples span 538 buckets, 5,464 bytes
+/// against 5,769 held. The library's bound for either is 18,752.
+fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
+    use asap_sketchlib::DdSketch;
+    let struct_bytes = std::mem::size_of::<DdSketch>() as u64;
+    // One value allocates one store's first block.
+    let block_bytes =
+        DdSketch::estimated_memory_bytes(alpha, 1, 1.0, 1.0, false) as u64 - struct_bytes;
+    let sketch = DdSketch::new(alpha);
+    // Buckets a ratio of `ratio` between the largest and smallest
+    // magnitude spans, at least one.
+    let buckets_spanned = |ratio: f64| -> u64 {
+        let ratio = ratio.max(1.0);
+        match (sketch.bucket_index_for(ratio), sketch.bucket_index_for(1.0)) {
+            (Some(high), Some(low)) => u64::try_from(i64::from(high) - i64::from(low) + 1)
+                .unwrap_or(1)
+                .max(1),
+            _ => 1,
+        }
+    };
+    let stores = match (input_rows.non_negative, input_rows.rows_per_state) {
+        (true, _) | (false, Some(0 | 1)) => 1,
+        (false, _) => 2,
+    };
+    let rows_per_store = input_rows
+        .rows_per_state
+        .map(|rows| rows.div_ceil(stores).max(1));
+    let column_ratio =
+        DDSKETCH_ASSUMED_MAGNITUDE_RANGE.max_abs / DDSKETCH_ASSUMED_MAGNITUDE_RANGE.min_abs;
+    let span = buckets_spanned(rows_per_store.map_or(column_ratio, |rows| {
+        exponential_values_magnitude_ratio(rows).min(column_ratio)
+    }));
+    let one_value = rows_per_store == Some(1);
+    let buckets_beyond_first = if one_value { 0 } else { span - 1 };
+    struct_bytes + stores * (block_bytes + 8 * buckets_beyond_first)
+}
 
 #[cfg(test)]
 mod tests;
