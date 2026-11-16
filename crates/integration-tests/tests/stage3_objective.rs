@@ -246,7 +246,8 @@ fn raw_data_on_disk_costing_less_than_the_solver_tolerance_still_steers_selectio
 /// Two windowed quantiles over one metric (1 m and 5 m, every 10 s; 10,000
 /// series every 15 s), accuracy not enforced: the selected plan shares one
 /// query-time scan, whose execution reads the 5 m window once and retains
-/// it ($h_v$, constraint (R)), at most 0.144/s.
+/// it ($h_v$, constraint (R)), at most 1.55/s (1.544/s; planned alone, the
+/// two queries cost 0.217/s and 1.344/s, 1.561/s together).
 #[test]
 fn the_objective_is_the_plan_cost_on_a_shared_scan() {
     let w: PlanningWorkload = serde_json::from_value(serde_json::json!({
@@ -268,7 +269,7 @@ fn the_objective_is_the_plan_cost_on_a_shared_scan() {
     let (_, (objective, plan_cost)) =
         selected_plan_objective_and_plan_cost_with(&w, models, &CostInputs::default());
     assert_equal("shared scan", (objective, plan_cost));
-    assert!(plan_cost <= 0.144, "{plan_cost}");
+    assert!(plan_cost <= 1.55, "{plan_cost}");
 }
 
 /// The o11y benchmark's q21: `sum(rate(..[5m] offset 1h))`, a 1 h range
@@ -477,7 +478,8 @@ fn the_objective_is_the_plan_cost_on_anchored_and_plain_queries_on_one_grid() {
 /// maintains, so its $\pi_v$ is one output's cost over that window: costed
 /// per second instead, $\pi_v h_v$ of a view kept for years was 6.6e12/s,
 /// its $W^{\mathrm{mat}}_v$ as negative, and the objective's scale left the
-/// solver at a plan costing 4.68e7/s instead of 2.17e4/s.
+/// solver at a plan costing 4.68e7/s instead of 2.17e4/s (under the unit
+/// costs of the time; 5.29e5/s under the measured unit costs).
 #[test]
 fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     let query = |query: &str| {
@@ -505,14 +507,15 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     let (objective, plan_cost) =
         selected_plan_objective_and_plan_cost_with(&w, models, &CostInputs::default()).1;
     assert_equal("one-off queries over years", (objective, plan_cost));
-    assert!(objective < 30_000.0, "objective {objective}");
+    assert!(objective < 750_000.0, "objective {objective}");
 }
 
 /// `sum_over_time(m[5m] @ end())` and `sum_over_time(m[5m])`, both instant
 /// every 60 s: an instant query's `@ end()` is its evaluation time, so the
 /// anchored input runs in the evaluation context and shares `m[5m]` with
-/// the plain query, in the MILP and in `plan_cost` alike (0.0360/s; in a
-/// request context of its own it cost 0.0620/s).
+/// the plain query, in the MILP and in `plan_cost` alike (0.351/s;
+/// planned alone, the two queries cost 0.216/s and 0.149/s, 0.365/s
+/// together, a floor for any plan that does not share `m[5m]`).
 #[test]
 fn an_instant_at_end_input_shares_the_evaluation_context() {
     let w = over_m(vec![
@@ -524,7 +527,7 @@ fn an_instant_at_end_input_shares_the_evaluation_context() {
         "instant @ end() beside a plain query",
         (objective, plan_cost),
     );
-    assert!(objective < 0.04, "objective {objective}");
+    assert!(objective < 0.36, "objective {objective}");
 }
 
 /// `sum_over_time(m[1m])` every 20 s at phase 10 s and
