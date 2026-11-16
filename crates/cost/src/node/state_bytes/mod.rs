@@ -226,7 +226,15 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
         SketchParams::DDSketch { alpha } if !(*alpha > 0.0 && *alpha < 1.0) => {
             std::mem::size_of::<DdSketch>() as u64
         }
-        SketchParams::DDSketch { alpha } => ddsketch_state_bytes(*alpha, input_rows),
+        // Over the declared magnitude range, or the one assumed when none
+        // is declared (`assumed_magnitude_range`).
+        SketchParams::DDSketch { alpha } => ddsketch_state_bytes(
+            *alpha,
+            input_rows,
+            input_rows
+                .value_magnitude_range
+                .or_else(|| assumed_magnitude_range(params, input_rows)),
+        ),
         SketchParams::Hll { precision, .. } => {
             HyperLogLog::<Classic>::estimated_memory_bytes(usize::from(*precision)) as u64
         }
@@ -314,6 +322,27 @@ const ASSUMED_HEAP_KEY_BYTES: usize = 3 * (1 + 4 + 16);
 /// A sample value's key owns no bytes, so this bounds it too.
 const ASSUMED_VALUE_KEY_BYTES: usize = 1 + 16;
 
+/// The magnitude range a DDSketch state of `params` over `input_rows` is
+/// costed for when its values declare none, the one place that default is
+/// applied: [`DDSKETCH_ASSUMED_MAGNITUDE_RANGE`] for a DDSketch with α in
+/// (0, 1) whose values declare no range; `None` for a declared range, an α
+/// costed as an empty sketch, or any other sketch, whose bytes assume
+/// none. E.g. a DDSketch at α = 0.01 over a `value` without
+/// `column_magnitudes` gives `Some([1, 1e9])`.
+pub fn assumed_magnitude_range(
+    params: &SketchParams,
+    input_rows: StateInputRows,
+) -> Option<ValueMagnitudeRange> {
+    match params {
+        SketchParams::DDSketch { alpha }
+            if *alpha > 0.0 && *alpha < 1.0 && input_rows.value_magnitude_range.is_none() =>
+        {
+            Some(DDSKETCH_ASSUMED_MAGNITUDE_RANGE)
+        }
+        _ => None,
+    }
+}
+
 /// The range of value magnitudes a DDSketch is assumed to see at most when
 /// its column declares no `column_magnitudes`: nine decades, e.g.
 /// latencies from 1 ns to 1 s, costed as magnitudes in `[1, 1e9]` (its
@@ -354,11 +383,11 @@ fn exponential_values_magnitude_ratio(rows: u64) -> f64 {
 /// counter per bucket its values span beyond the first.
 ///
 /// The span is that of the values the state folds, not of the column: the
-/// smallest of the magnitude ratio its rows are assumed to span
-/// ([`exponential_values_magnitude_ratio`]), the ratio of its column's
-/// declared `column_magnitudes` (`input_rows.value_magnitude_range`) and
-/// that of `DDSKETCH_ASSUMED_MAGNITUDE_RANGE`; without known rows, the
-/// smaller of the last two. The library's worst case over every order of
+/// smaller of the magnitude ratio its rows are assumed to span
+/// ([`exponential_values_magnitude_ratio`]) and the ratio of
+/// `column_range`, its column's declared `column_magnitudes`, or the range
+/// [`assumed_magnitude_range`] assumes when none is declared; without known
+/// rows, the ratio of `column_range`. The library's worst case over every order of
 /// inserts and merges (`estimated_memory_bytes`) is about twice the span
 /// over the whole range, which is not what a state holds on average.
 ///
@@ -368,7 +397,11 @@ fn exponential_values_magnitude_ratio(rows: u64) -> f64 {
 /// against 5,769 held. The library's bound for either is 18,752. A gauge
 /// declared within [90, 110] spans a ratio of 1.22, 11 buckets: 1,248
 /// bytes for any number of rows.
-fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
+fn ddsketch_state_bytes(
+    alpha: f64,
+    input_rows: StateInputRows,
+    column_range: Option<ValueMagnitudeRange>,
+) -> u64 {
     use asap_sketchlib::DdSketch;
     let struct_bytes = std::mem::size_of::<DdSketch>() as u64;
     // One value allocates one store's first block.
@@ -393,12 +426,9 @@ fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
     let rows_per_store = input_rows
         .rows_per_state
         .map(|rows| rows.div_ceil(stores).max(1));
-    // The most the column's values span: its declared range, at most the
+    // The most the column's values span: its declared range, else the
     // assumed one.
-    let column_ratio = input_rows
-        .value_magnitude_range
-        .map_or(f64::INFINITY, |range| range.magnitude_ratio())
-        .min(DDSKETCH_ASSUMED_MAGNITUDE_RANGE.magnitude_ratio());
+    let column_ratio = column_range.map_or(f64::INFINITY, |range| range.magnitude_ratio());
     let span = buckets_spanned(rows_per_store.map_or(column_ratio, |rows| {
         exponential_values_magnitude_ratio(rows).min(column_ratio)
     }));

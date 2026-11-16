@@ -1476,6 +1476,159 @@ fn a_counter_function_over_a_declared_gauge_plans_with_a_warning() {
     assert!(counter["stage3_plan_selection"].get("warnings").is_none());
 }
 
+/// A relative-error quantile over `m` (1,000 series, non-negative values)
+/// whose `value` declares `column_magnitudes` when `magnitudes` is set.
+fn relative_quantile_over(magnitudes: Option<Value>) -> Value {
+    let mut workload = json!({
+        "query_workload": {"language": "promql", "query_batch": [{
+            "query": "quantile_over_time(0.99, m[5m])",
+            "requirements": {"accuracy": {"max_error": 0.01, "accuracy_metric": "relative"}},
+            "predictability": "unknown", "invocations": 1
+        }]},
+        "data_workload": {"arrival": "unknown", "sources": {"m": {
+            "sample_interval": 1000, "series_count": 1000, "rows_held": 600000,
+            "column_signs": {"value": "non_negative"}
+        }}}
+    });
+    if let Some(magnitudes) = magnitudes {
+        workload["data_workload"]["sources"]["m"]["column_magnitudes"] =
+            json!({"value": magnitudes});
+    }
+    workload
+}
+
+/// The warning a selected DDSketch over `m`'s undeclared `value`
+/// magnitudes carries.
+const DDSKETCH_ASSUMED_RANGE_WARNING: &str = "assumed data fact: source m declares no \
+     column_magnitudes for value, so a DDSketch state over it is costed for magnitudes in \
+     [1, 1000000000]; this affects cost only, the accuracy guarantee does not depend on it";
+
+/// A selected DDSketch over a column that declares no `column_magnitudes`
+/// is costed over an assumed range, and the plan output names that
+/// assumption under `stage3_plan_selection.warnings` (and as a record
+/// under `stage3_plan_selection.assumed_data_facts`) and in the text
+/// output, once. Declaring the range removes it.
+#[test]
+fn a_selected_ddsketch_over_undeclared_magnitudes_is_warned_about() {
+    let no_raw = TempFile::new(NO_RAW);
+    let args = [
+        "--run-until",
+        "stage3",
+        "--deployment-capabilities",
+        no_raw.path(),
+    ];
+    let undeclared = document(&relative_quantile_over(None), &args);
+    let selection = &undeclared["stage3_plan_selection"];
+    assert!(selects_a_plan(selection), "{selection}");
+    assert_eq!(
+        selection["accepted_accuracy_per_query"][0]["sketches"],
+        json!(["DDSketch"]),
+        "{selection}"
+    );
+    assert_eq!(
+        selection["warnings"],
+        json!([DDSKETCH_ASSUMED_RANGE_WARNING])
+    );
+    assert_eq!(
+        selection["assumed_data_facts"],
+        json!([{"sources": ["m"], "assumption": {"ddsketch_value_magnitude_range": {
+            "column": "value", "assumed_range": {"min_abs": 1.0, "max_abs": 1e9}
+        }}}])
+    );
+    let file = TempFile::json(&relative_quantile_over(None));
+    let mut text_args = vec!["--workload", file.path()];
+    text_args.extend_from_slice(&args);
+    let output = planner(&text_args);
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        text.lines()
+            .filter_map(|line| line.strip_prefix("warning: "))
+            .collect::<Vec<_>>(),
+        [DDSKETCH_ASSUMED_RANGE_WARNING]
+    );
+    let declared = document(
+        &relative_quantile_over(Some(json!({"min_abs": 0.001, "max_abs": 10000.0}))),
+        &args,
+    );
+    assert!(selects_a_plan(&declared["stage3_plan_selection"]));
+    assert!(declared["stage3_plan_selection"].get("warnings").is_none());
+    assert!(declared["stage3_plan_selection"]
+        .get("assumed_data_facts")
+        .is_none());
+}
+
+/// `sum by (job) (rate(http_requests_total[1m]))` every minute over
+/// ingesting samples of a counter, with `max_out_of_order_ms` when set.
+fn repeating_rate_over_ingesting(max_out_of_order_ms: Option<u64>) -> Value {
+    let mut arrival = json!({"rows_per_second": 1000.0});
+    if let Some(bound) = max_out_of_order_ms {
+        arrival["max_out_of_order_ms"] = json!(bound);
+    }
+    json!({
+        "query_workload": {
+            "language": "promql",
+            "query_batch": null,
+            "repeating_queries": [{
+                "query": "sum by (job) (rate(http_requests_total[1m]))",
+                "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
+                "requirements": {},
+                "predictability": {"predictable": {"known_at": null}},
+            }],
+        },
+        "data_workload": {
+            "arrival": {"ingesting": arrival},
+            "sources": {"http_requests_total": {
+                "series_count": 15000, "metric_type": "counter", "sample_interval": 15000
+            }},
+        },
+    })
+}
+
+/// The warning an ingestion-time `rate` state over
+/// `http_requests_total` carries when the arrival declares no
+/// `max_out_of_order_ms`.
+const IN_ORDER_ARRIVAL_WARNING: &str = "assumed data fact: the data arrival declares no \
+     max_out_of_order_ms, so the samples of source http_requests_total that an ingestion-time \
+     rate, increase or irate state reads are taken to arrive in timestamp order; if this does \
+     not hold, answers may be wrong by an amount no accuracy target bounds (a late sample can \
+     be read as a counter reset), or ingestion may fail";
+
+/// A deployment that keeps no raw data computes a repeating `rate` at
+/// ingestion time. Without a declared `max_out_of_order_ms` its samples are
+/// taken to arrive in order, which the exact answer depends on, so the plan
+/// output warns that answers may be wrong beyond any accuracy target. A declared bound
+/// removes the warning and leaves the plan as it was.
+#[test]
+fn an_ingestion_time_rate_over_undeclared_arrival_order_is_warned_about() {
+    let no_raw = TempFile::new(NO_RAW);
+    let args = [
+        "--run-until",
+        "stage3",
+        "--deployment-capabilities",
+        no_raw.path(),
+    ];
+    let undeclared = document(&repeating_rate_over_ingesting(None), &args);
+    let selection = &undeclared["stage3_plan_selection"];
+    assert!(selects_a_plan(selection), "{selection}");
+    assert_eq!(selection["warnings"], json!([IN_ORDER_ARRIVAL_WARNING]));
+    assert_eq!(
+        selection["assumed_data_facts"],
+        json!([{"sources": ["http_requests_total"], "assumption": "in_order_arrival"}])
+    );
+    let declared = document(&repeating_rate_over_ingesting(Some(5_000)), &args);
+    let declared_selection = &declared["stage3_plan_selection"];
+    assert!(
+        declared_selection.get("warnings").is_none(),
+        "{declared_selection}"
+    );
+    assert!(declared_selection.get("assumed_data_facts").is_none());
+    assert_eq!(
+        declared_selection["selected_dag"],
+        selection["selected_dag"]
+    );
+}
+
 /// A PromQL file and a SQL file, each a `PlanningWorkload` in its own
 /// language.
 fn mixed_language_workload_files(sql_arrival: Value, sql_facts: Value) -> (TempFile, TempFile) {
