@@ -332,7 +332,9 @@ fn with_kll_k(plan: &PhysicalASAPDAG, k: u32) -> PhysicalASAPDAG {
 /// k = 1,404 against k = 547: 589 against 240 every 10 s, 31.4 against 19.4
 /// every 60 s. Charged a flat merge per state, every `k` cost the same to
 /// the last digit and the MILP picked any. The plan now keeps the smallest
-/// `k` offered, and the next larger one is charged more.
+/// `k` offered, k = 1,404 is charged over 1.25x more than k = 547 (the
+/// measured pair), and the next larger `k` than the smallest is charged
+/// more (not measured).
 #[test]
 fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
     use asap_types::summary_type::SketchParams;
@@ -394,6 +396,12 @@ fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
             .unwrap();
             cost.cost_per_second.unwrap()
         };
+        assert!(
+            cost(1_404) > 1.25 * cost(547),
+            "{setting:?}: k = 1,404 predicted {}/s, k = 547 {}/s; measured 1.6-2.5x",
+            cost(1_404),
+            cost(547)
+        );
         let (large, small) = (cost(next_larger), cost(smallest));
         assert!(
             large > small,
