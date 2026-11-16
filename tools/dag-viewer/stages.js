@@ -206,8 +206,8 @@ function validatePlanSelection(stage3, queryCount) {
     if (!nodeIds.has(view.node_id)) errors.push(`${where}: node_id must name a node of the plan`);
     if (!VIEW_REFRESHES.includes(view.refresh)) errors.push(`${where}: refresh must be one of ${VIEW_REFRESHES.join(', ')}`);
     if (!view.coverage || typeof view.coverage.definition_id !== 'string') errors.push(`${where}: coverage.definition_id must be a string`);
-    if (!view.inputs || !Array.isArray(view.inputs.raw_data_windows) || !Array.isArray(view.inputs.materialized_views)) {
-      errors.push(`${where}: inputs needs raw_data_windows and materialized_views arrays`);
+    if (!view.inputs || !Array.isArray(view.inputs.materialized_views)) {
+      errors.push(`${where}: inputs needs a materialized_views array`);
     }
     if (!(typeof view.retention_ms === 'number' && view.retention_ms >= 0)) errors.push(`${where}: retention_ms must be a non-negative number`);
   });
@@ -372,17 +372,16 @@ function accuracyGuaranteesText(doc) {
   }[doc.accuracy_guarantees] || '';
 }
 
-// The search behind the document and the size and times of Stage 3's
-// selection MILP, for the plan list's header, e.g. "candidate-connection
-// search · MILP 88 variables, 126 constraints · construction 1 ms, solve
-// 23 ms". "" for a document that names no search.
+// The search behind the document and the size of Stage 3's selection
+// MILP, for the plan list's header, e.g. "candidate-connection search ·
+// MILP 88 variables, 126 constraints" (the document leaves out the MILP's
+// times). "" for a document that names no search.
 function searchText(doc) {
   const name = { 'candidate-connections': 'candidate-connection search' }[doc.search];
   if (!name) return '';
   const stage3 = doc.stage3_plan_selection || {};
   if (typeof stage3.milp_variables !== 'number') return name;
-  return `${name} · MILP ${stage3.milp_variables} variables, ${stage3.milp_constraints} constraints`
-    + ` · construction ${stage3.milp_construction_ms} ms, solve ${stage3.milp_solve_ms} ms`;
+  return `${name} · MILP ${stage3.milp_variables} variables, ${stage3.milp_constraints} constraints`;
 }
 
 function compactWire(value) {
@@ -677,9 +676,9 @@ function planQueriesReaching(dag, nodeId, queryIds) {
 
 // The selected plan's materialized views as table rows: the plan node, its
 // coverage's definition, the node's operator and summary type, how it is
-// refreshed, what its refresh reads, its retention, the raw-data windows it
-// scans, the node's Stage 3 cost and the queries that read it. Empty
-// without a plan.
+// refreshed, what its refresh reads (the views it reads, else raw data),
+// its retention, the node's Stage 3 cost and the queries that read it.
+// Empty without a plan.
 function materializedViewRows(doc) {
   const stage3 = doc.stage3_plan_selection || {};
   if (!stage3.plan) return [];
@@ -694,10 +693,8 @@ function materializedViewRows(doc) {
       definition: view.coverage.definition_id,
       kind: 'summary_type' in body ? `${kind} · ${summaryTypeText(body.summary_type)}` : kind,
       refresh: view.refresh === 'at_ingestion' ? 'at ingestion' : 'on first read (materialized across evaluations)',
-      inputs: `${view.inputs.raw_data_windows.length} raw-data window(s)` +
-        (view.inputs.materialized_views.length ? `, views ${view.inputs.materialized_views.join(', ')}` : ''),
+      inputs: view.inputs.materialized_views.length ? `views ${view.inputs.materialized_views.join(', ')}` : 'raw data',
       retention: durationText(view.retention_ms),
-      window: view.inputs.raw_data_windows.map((w) => `t−${durationText(w.end_offset_ms + w.width_ms)} … ${w.end_offset_ms ? `t−${durationText(w.end_offset_ms)}` : 't'}`).join(', ') || '—',
       cost: cost ? cost.detail || '' : '',
       readBy: planQueriesReaching(stage3.plan, view.node_id, queryIds),
     };

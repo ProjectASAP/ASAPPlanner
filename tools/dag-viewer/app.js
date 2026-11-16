@@ -237,10 +237,10 @@
       : `<b>${rows.length}</b> materialized view${rows.length === 1 ? '' : 's'}` +
         (rows.length ? '' : ': nothing is materialized across evaluations; every query computes at query time');
     $('materializedViews').innerHTML = rows.length ? table(
-      ['plan node', 'definition', 'kind', 'refresh', 'reads', 'retention', 'raw-data windows', 'Stage 3 cost', 'read by'],
+      ['plan node', 'definition', 'kind', 'refresh', 'reads', 'retention', 'Stage 3 cost', 'read by'],
       rows.map((r) => `<tr class="clickable" tabindex="0" data-node="${esc(r.nodeId)}"><td>${esc(r.nodeId)}</td>` +
         `<td class="wrap">${esc(r.definition)}</td><td class="wrap">${esc(r.kind)}</td><td>${esc(r.refresh)}</td><td class="wrap">${esc(r.inputs)}</td>` +
-        `<td>${esc(r.retention)}</td><td class="wrap">${esc(r.window)}</td><td class="wrap">${esc(r.cost)}</td><td class="wrap">${esc(r.readBy.join(', ') || '—')}</td></tr>`).join('')) : '';
+        `<td>${esc(r.retention)}</td><td class="wrap">${esc(r.cost)}</td><td class="wrap">${esc(r.readBy.join(', ') || '—')}</td></tr>`).join('')) : '';
     $('materializedViews').querySelectorAll('tr.clickable').forEach((tr) => {
       const pick = () => selectPlanNode(Number(tr.dataset.node));
       tr.addEventListener('click', pick);

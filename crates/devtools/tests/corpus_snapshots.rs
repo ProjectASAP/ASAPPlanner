@@ -17,8 +17,8 @@
 //! 3's plan (its `PhysicalASAPDAG`, retention on its nodes), its cost and
 //! accepted accuracy per query, and the materialized views; for a query
 //! that does not plan, the error. The selection MILP's size and timings,
-//! the Stage 1 and Stage 2 candidate lists and the memo are left out. Floats are rounded to 12
-//! significant digits. A query with a `skip_reason` is skipped.
+//! the Stage 1 and Stage 2 candidate lists and the memo are left out. Floats are as
+//! `asap_planner` prints them, rounded to 12 significant digits. A query with a `skip_reason` is skipped.
 //!
 //! The same binary holds the sketch plan snapshots (`sketch_plan_snapshots.rs`),
 //! which reuse these helpers on multi-query workloads with accuracy targets.
@@ -93,21 +93,6 @@ fn asap_planner(args: &[String], scratch: &Path) -> Value {
     }
 }
 
-/// `value` with every non-integer number rounded to 12 significant digits.
-fn rounded(value: &Value) -> Value {
-    match value {
-        Value::Number(n) if n.is_f64() => {
-            let x = n.as_f64().unwrap();
-            json!(format!("{x:.11e}").parse::<f64>().unwrap())
-        }
-        Value::Object(map) => {
-            Value::Object(map.iter().map(|(k, v)| (k.clone(), rounded(v))).collect())
-        }
-        Value::Array(items) => Value::Array(items.iter().map(rounded).collect()),
-        other => other.clone(),
-    }
-}
-
 /// The stable part of a one-query `asap_planner` document: the query, the
 /// selected plan and its cost, or why there is none. See the module docs.
 fn snapshot_of(document: &Value) -> Value {
@@ -116,10 +101,10 @@ fn snapshot_of(document: &Value) -> Value {
         "query".into(),
         document["workload"]["queries"][0]["text"].clone(),
     );
-    rounded(&Value::Object(snapshot))
+    Value::Object(snapshot)
 }
 
-/// The selected plan and its cost, or why there is none, unrounded: the
+/// The selected plan and its cost, or why there is none: the
 /// part of a snapshot the sketch plan snapshots share.
 fn plan_snapshot(document: &Value) -> Map<String, Value> {
     let stage3 = &document["stage3_plan_selection"];
@@ -291,8 +276,7 @@ fn corpus_plans_match_snapshots() {
     );
 }
 
-/// The snapshot keeps the plan without the selection MILP's size and
-/// timings, and rounds floats.
+/// The snapshot keeps the plan without the selection MILP's size.
 #[test]
 fn snapshot_keeps_only_the_plan() {
     let document = json!({
@@ -300,10 +284,10 @@ fn snapshot_keeps_only_the_plan() {
         "workload": {"queries": [{"text": "sum(up)"}]},
         "stage3_plan_selection": {
             "plan": {"nodes": [1]},
-            "cost": {"cost_per_second": 0.1 + 0.2},
+            "cost": {"cost_per_second": 0.3},
             "accepted_accuracy_per_query": [],
             "materialized_views": [],
-            "milp_solve_ms": 1,
+            "milp_variables": 1,
         },
     });
     assert_eq!(

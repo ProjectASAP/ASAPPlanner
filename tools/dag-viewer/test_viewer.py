@@ -30,8 +30,9 @@ EXAMPLE1 = WORKLOADS / "planner-layering" / "example1.json"
 EXAMPLE3A = WORKLOADS / "planner-layering" / "example3a.json"
 # The document asap_planner writes for test-fixtures/p90-workload.json under
 # test-fixtures/kll-only-capabilities.json: one p90 query with accuracy
-# enforced, whose Pass 2 prunes G3's four smallest KLL sketches (memo.js
-# tests).
+# enforced, KLL only and no raw data kept, so the plan reads a KLL
+# tumbling-window chain; Pass 2 prunes G4's four smallest KLL sketches
+# (memo.js tests).
 P90_KLL = HERE / "test-fixtures" / "p90-kll.json"
 # #1005's ratio-of-quantiles query.
 RATIO_OF_QUANTILES = HERE / "memo-examples" / "promql" / "ratio-of-quantiles-5m.json"
@@ -99,10 +100,10 @@ def p90_kll() -> dict:
 
 def materialized_view(node_id: int) -> dict:
     """A materialized view of plan node `node_id`, refreshed at ingestion
-    over the last 5 min of raw data. No workload the tests plan today
-    yields an installable plan with views, so the view tests add this one."""
+    from raw data and kept 5 min, for the view tests over plans without
+    one."""
     return {"node_id": node_id, "refresh": "at_ingestion", "coverage": {"definition_id": "d1", "selection": []},
-            "inputs": {"raw_data_windows": [{"end_offset_ms": 0, "width_ms": 300000}], "materialized_views": []},
+            "inputs": {"materialized_views": []},
             "retention_ms": 300000}
 
 
@@ -183,7 +184,7 @@ class ValidationTests(unittest.TestCase):
             "node id": lambda d: views(d)[0].update(node_id="2"),
             "refresh": lambda d: views(d)[0].update(refresh="later"),
             "definition id": lambda d: views(d)[0]["coverage"].pop("definition_id"),
-            "inputs": lambda d: views(d)[0]["inputs"].pop("raw_data_windows"),
+            "inputs": lambda d: views(d)[0]["inputs"].pop("materialized_views"),
             "retention": lambda d: views(d)[0].update(retention_ms=-1),
             "views without a plan": lambda d: d["stage3_plan_selection"].update(plan=None),
         }
@@ -444,11 +445,10 @@ class SearchTests(unittest.TestCase):
 
     def test_header_names_the_search_and_its_milp(self):
         """The header names the candidate-connection search and its MILP's
-        size and times."""
+        size."""
         text = self.js.call("searchText", self.doc)
         stage3 = self.doc["stage3_plan_selection"]
-        self.assertEqual(text, f"candidate-connection search · MILP {stage3['milp_variables']} variables, {stage3['milp_constraints']} constraints"
-                               f" · construction {stage3['milp_construction_ms']} ms, solve {stage3['milp_solve_ms']} ms")
+        self.assertEqual(text, f"candidate-connection search · MILP {stage3['milp_variables']} variables, {stage3['milp_constraints']} constraints")
 
 
 @unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
@@ -525,7 +525,8 @@ class WorkloadViewTests(unittest.TestCase):
         shared = next(n["id"] for n in plan["nodes"] if "SummaryAgg" in n["payload"].get("ASAP", {}))
         self.doc["stage3_plan_selection"]["materialized_views"] = [materialized_view(shared)]
         [row] = self.js.call("materializedViewRows", self.doc)
-        self.assertEqual((row["nodeId"], row["definition"], row["refresh"], row["window"]), (shared, "d1", "at ingestion", "t−5 min … t"))
+        self.assertEqual((row["nodeId"], row["definition"], row["refresh"], row["inputs"], row["retention"]),
+                         (shared, "d1", "at ingestion", "raw data", "5 min"))
         self.assertTrue(row["kind"].startswith("SummaryAgg · exact "), row["kind"])
         self.assertTrue(row["readBy"])
 
@@ -825,7 +826,7 @@ class AppTests(unittest.TestCase):
         js = self.page("?doc=s.json", {"s.json": json.dumps(doc)})
         self.assertEqual(js.eval("(__els.materializedViews.innerHTML.match(/data-node=/g) || []).length"), 1)
         self.assertIn("1 materialized view", self.text(js, "views-meta"))
-        self.assertIn("t−5 min … t", self.text(js, "materializedViews"))
+        self.assertIn("raw data", self.text(js, "materializedViews"))
 
     def test_picking_a_query_dims_what_it_does_not_reach(self):
         """Picking a query dims what it does not reach; clearing it undims."""
@@ -886,8 +887,8 @@ class AppTests(unittest.TestCase):
         self.assertIn('data-step="2" aria-pressed="true"', tabs)
         meta = self.text(js, "memoView-meta")
         self.assertIn("7 groups (+2) · 21 candidates (+9)", meta)
-        self.assertIn("selected plan's candidates highlighted (5 groups)", meta)
-        self.assertEqual(len(self.memo_ids(js, "g3")), 10)
+        self.assertIn("selected plan's candidates highlighted (6 groups)", meta)
+        self.assertEqual(len(self.memo_ids(js, "g4")), 10)
         js.eval("window.MemoView.selectStep(0)")
         self.assertEqual(len(self.memo_ids(js)), 3)
         self.assertIn("3 groups · 0 candidates", self.text(js, "memoView-meta"))
@@ -912,25 +913,25 @@ class AppTests(unittest.TestCase):
         logical edges (α^log, with why it is 0), and its physical
         candidates with their physical edges (α^phys), the selected edge marked."""
         js = self.memo_page()
-        self.tap_memo(js, "g4c0")
+        self.tap_memo(js, "g3c0")
         details = self.text(js, "details")
-        self.assertIn("Candidate #0 of G4", details)
+        self.assertIn("Candidate #0 of G3", details)
         self.assertIn("used by the selected plan", details)
-        self.assertIn("required accuracyG3: rank ≤ 0.01, δ 0.00001", details)
+        self.assertIn("required accuracyG4: rank ≤ 0.01, δ 0.00001", details)
         self.assertIn("pruned by Pass 2no", details)
-        self.assertIn("logical edges (α^log)input G3 · required rank ≤ 0.01, δ 0.00001", details)
+        self.assertIn("logical edges (α^log)input G4 · required rank ≤ 0.01, δ 0.00001", details)
         self.assertIn("✗ #0: α^log = 0: the producer's guarantee exceeds", details)
         self.assertIn("✓ #5", details)
-        self.assertIn("C23 (query_time, OneEvaluation(Memory))", details)
-        self.assertIn("✓ C15 · selected", details)
-        self.tap_memo(js, "g3c5")
+        self.assertIn("C4 (query_time, OneEvaluation(Memory))", details)
+        self.assertIn("✓ C6 · selected", details)
+        self.tap_memo(js, "g4c5")
         self.assertIn("parameters θθ Kll(k=1404)", self.text(js, "details"))
 
     def test_tapping_a_pruned_candidate_shows_why_pass2_pruned_it(self):
         """A candidate Pass 2 pruned shows its root cause and has no
         physical candidate."""
         js = self.memo_page()
-        self.tap_memo(js, "g3c0")
+        self.tap_memo(js, "g4c0")
         details = self.text(js, "details")
         self.assertIn("pruned by Pass 2yes", details)
         self.assertIn("why Pass 2 pruned it", details)
@@ -942,26 +943,26 @@ class AppTests(unittest.TestCase):
         Pass 2 (with their cause), Stage 2 and Stage 3 pruned there."""
         doc = p90_kll()
         doc["stage3_plan_selection"]["pruned_candidates"] = [
-            {"group": 3, "index_in_group": 6, "properties": {"timing": "query_time", "lifetime": "None"}, "reason": {"dominated_by": 12}}]
+            {"group": 4, "index_in_group": 8, "properties": {"timing": "query_time", "lifetime": "None"}, "reason": {"dominated_by": 5}}]
         js = self.memo_page(doc)
-        self.tap_memo(js, "g3")
+        self.tap_memo(js, "g4")
         details = self.text(js, "details")
         self.assertIn("#0 SummaryAgg Kll · θ Kll(k=26) · pruned by Pass 2", details)
         self.assertIn("pruned by Pass 24", details)
         self.assertIn("#0: the producer", details)
         self.assertIn("#4 (query_time, AcrossEvaluations(Memory)): query time results not retained", details)
-        self.assertIn("#6 (query_time, None): dominated by C12", details)
+        self.assertIn("#8 (query_time, None): dominated by C5", details)
 
     def test_highlighting_a_query_dims_the_memo_groups_it_does_not_reach(self):
         """Highlighting a query dims the memo groups it does not reach."""
         doc = p90_kll()
-        doc["memo"]["steps"][-1]["groups"][6]["queries"] = []
+        doc["memo"]["steps"][-1]["groups"][5]["queries"] = []
         js = self.memo_page(doc)
         js.eval("__els.queryPick.__on.change({ target: { value: 'q1' } })")
         dimmed = set(self.ev(js, "__dimmed.cyMemo"))
-        self.assertIn("g6", dimmed)
-        self.assertIn("g6c0", dimmed)
-        self.assertNotIn("g3c5", dimmed)
+        self.assertIn("g5", dimmed)
+        self.assertIn("g5c0", dimmed)
+        self.assertNotIn("g4c5", dimmed)
         js.eval("__els.queryPick.__on.change({ target: { value: '' } })")
         self.assertEqual(js.eval("__dimmed.cyMemo.length"), 0)
 

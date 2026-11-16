@@ -63,8 +63,8 @@ To run it, see [RUNNING.md](RUNNING.md).
   query's highlight.
 - **Materialized views** under the plan lane: one row per view: its plan
   node, coverage definition, operator and summary type, how it is
-  refreshed, what its refresh reads, its retention, the raw-data windows it
-  scans, the node's Stage 3 cost and the queries that read it. A plan that
+  refreshed, what its refresh reads (the views it reads, else raw data),
+  its retention, the node's Stage 3 cost and the queries that read it. A plan that
   is not installable says why instead. Clicking a row selects its node in
   the plan lane.
 - **Memo**: the memo after each planner step, one tab per step (`Stage 0`,
@@ -128,8 +128,7 @@ whole document):
   `usage` and `per_node`, keyed by plan node id, with `cost_per_second`,
   `multiplier` and `detail`), `accepted_accuracy_per_query` (`summary`),
   `pruned_candidates` (as Stage 2's), `milp_variables`,
-  `milp_constraints`, `milp_construction_ms`, `milp_solve_ms`,
-  `materialized_views` (`node_id`, a plan node, `refresh`,
+  `milp_constraints`, `materialized_views` (`node_id`, a plan node, `refresh`,
   `coverage.definition_id`, `inputs` and `retention_ms`),
   `materialized_views_error`, `warnings` and `error`;
 - `memo.steps[].groups[]`: `id`, `label`, `operator` (the group's

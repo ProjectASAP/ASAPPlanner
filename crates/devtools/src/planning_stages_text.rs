@@ -217,11 +217,15 @@ fn write_rows(out: &mut String, indent: &str, rows: Vec<Vec<String>>) {
 /// Each output column's lineage, one per schema field: `source.column`
 /// for a column copied from a scan (`source#1.column` for a self-join's
 /// second scan), `G<n>.<column>` for one computed by column `column` of
-/// group `n`.
+/// group `n`, where `n` is `group_id` of the group (the planner's id in
+/// the text, the canonical id in the JSON document).
 ///
 /// Example: `Scan latency` → `["latency.ts", "latency.value",
 /// "latency.job"]`; G2 = `Aggregate sum()` over it → `["G2.0"]`.
-pub fn column_lineage_text(group: &MemoGroup) -> Vec<String> {
+pub fn column_lineage_text(
+    group: &MemoGroup,
+    group_id: impl Fn(MemoGroupId) -> u32,
+) -> Vec<String> {
     group
         .group_properties
         .column_lineage
@@ -237,7 +241,7 @@ pub fn column_lineage_text(group: &MemoGroup) -> Vec<String> {
                     ordinal => format!("{source}#{ordinal}.{}", column.column),
                 }
             }
-            ColumnLineage::Computed { group, column } => format!("G{}.{column}", group.0),
+            ColumnLineage::Computed { group, column } => format!("G{}.{column}", group_id(*group)),
         })
         .collect()
 }
@@ -256,7 +260,7 @@ fn group_properties_text(group: &MemoGroup, grid: Option<Option<&EvaluationGrid>
         .schema
         .fields
         .iter()
-        .zip(column_lineage_text(group))
+        .zip(column_lineage_text(group, |group| group.0))
         .zip(&properties.column_signs)
         .map(|((field, lineage), sign)| format!("{}={lineage}:{sign:?}", field.name))
         .collect();
@@ -290,7 +294,11 @@ fn group_properties_text(group: &MemoGroup, grid: Option<Option<&EvaluationGrid>
         None => {}
     }
     if let Some(coverage) = &properties.aggregate_coverage {
-        let _ = write!(text, " · {}", aggregate_coverage_text(coverage));
+        let _ = write!(
+            text,
+            " · {}",
+            aggregate_coverage_text(coverage, |group| group.0)
+        );
     }
     text
 }
@@ -299,13 +307,16 @@ fn group_properties_text(group: &MemoGroup, grid: Option<Option<&EvaluationGrid>
 /// which decides whether a rollup or a view match may read it: its input
 /// group (`a scan` when the scan's matchers are lifted too), its
 /// operators not lifted into the selection, top down, and its selection as
-/// JSON. Example: `covers G1 through [SummaryAgg Kll] selecting
-/// [{"columns":[...]}]`.
-pub fn aggregate_coverage_text(coverage: &AggregateCoverage) -> String {
+/// JSON, the input group named by `group_id`. Example: `covers G1 through
+/// [SummaryAgg Kll] selecting [{"columns":[...]}]`.
+pub fn aggregate_coverage_text(
+    coverage: &AggregateCoverage,
+    group_id: impl Fn(MemoGroupId) -> u32,
+) -> String {
     let definition = coverage.definition();
     let input = definition
         .input
-        .map_or("a scan".to_owned(), |group| format!("G{}", group.0));
+        .map_or("a scan".to_owned(), |group| format!("G{}", group_id(group)));
     let operators: Vec<String> = definition
         .unlifted_operators
         .iter()
@@ -1176,12 +1187,13 @@ fn write_selection(
     };
     let _ = writeln!(
         out,
-        "selection MILP: {} variables, {} constraints, {} ms building, {} ms solving, \
-         objective {:.6e}/s",
+        "selection MILP: {} variables, {} constraints, {} ms building, {} ms solving \
+         ({} solves), objective {:.6e}/s",
         selection.milp_variable_count,
         selection.milp_constraint_count,
         selection.milp_construction_ms,
         selection.milp_solve_ms,
+        selection.milp_solve_count,
         selection.selected_plan_cost_per_second
     );
     let physical = run.physical_asap_candidates.as_ref();

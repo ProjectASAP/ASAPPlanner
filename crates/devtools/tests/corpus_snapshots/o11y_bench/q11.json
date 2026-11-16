@@ -12,8 +12,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 0.00630638335754,
-      "cpu_core_seconds_per_second": 6.30638333333e-6,
+      "cost_per_second": 0.0249703500958,
+      "cpu_core_seconds_per_second": 0.00002497035,
       "per_node": {
         "0": {
           "cost_per_second": 0.00427000001708,
@@ -25,19 +25,19 @@
           "timing": "query_time"
         },
         "1": {
-          "cost_per_second": 0.00101666667073,
+          "cost_per_second": 0.0111833333781,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.01666666667e-6,
-          "detail": "time range 1s: keep 1000 of 1000 rows; x 1.0167/s; holds 32 bytes for 0.001 ms",
+          "cpu_core_seconds_per_second": 0.0000111833333333,
+          "detail": "time range 1s: keep 1000 of 1000 rows; x 1.0167/s; holds 32 bytes for 0.011 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 0.00101666666972,
+          "cost_per_second": 0.00678116668701,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.01666666667e-6,
-          "detail": "hash aggregate 1000 rows into 1 groups; x 1.0167/s; holds 24 bytes for 0.001 ms",
+          "cpu_core_seconds_per_second": 6.78116666667e-6,
+          "detail": "hash aggregate 1000 rows into 1 groups: 4 ops per row, 1 group visits; x 1.0167/s; holds 24 bytes for 0.007 ms",
           "multiplier": 1,
           "operator": "Aggregate",
           "timing": "query_time"
@@ -52,10 +52,10 @@
           "timing": "query_time"
         },
         "4": {
-          "cost_per_second": 2.0333333435e-6,
+          "cost_per_second": 0.00273483334701,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 2.03333333333e-9,
-          "detail": "hash aggregate 1 rows into 1 groups; x 1.0167/s; holds 40 bytes for 0.000 ms",
+          "cpu_core_seconds_per_second": 2.73483333333e-6,
+          "detail": "hash aggregate 1 rows into 1 groups: 20 ops per row, 1 group visits; x 1.0167/s; holds 40 bytes for 0.003 ms",
           "multiplier": 1,
           "operator": "Aggregate",
           "timing": "query_time"
@@ -63,8 +63,8 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 0.0001936628,
-        "cpu_ops_per_second": 3053.05,
+        "average_memory_bytes": 0.000766656133333,
+        "cpu_ops_per_second": 21717.0166667,
         "disk_bytes": 115232000,
         "peak_cpu_cores": 1,
         "peak_memory_bytes": 136,
