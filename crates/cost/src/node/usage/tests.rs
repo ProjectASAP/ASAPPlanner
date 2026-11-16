@@ -1128,10 +1128,10 @@ fn an_exact_distinct_count_reads_at_most_its_column_s_declared_distinct_values()
 /// it holds `k` of them, then only hashes below its largest
 /// (`asap_sketchlib`'s duplicate check). Over 300,000 rows of 100,000
 /// distinct `user_id`s, one state at k = 4,323 fills early and measures
-/// 191 ns per row; four states by `region` at k = 26,656 (75,000 rows
-/// each) stay below `k` for most rows and measure 7,410. Charged a fixed
-/// 48 per row, the grouped build looked cheaper than an exact distinct
-/// count it measures 25x more than.
+/// 329 ns per row; four states by `region` at k = 26,656 (75,000 rows
+/// each) stay below `k` for most rows and measure 8,357 (median of 3
+/// runs of 3). Charged a fixed 48 per row, the grouped build looked
+/// cheaper than an exact distinct count it measures 25x more than.
 #[test]
 fn a_kmv_build_costs_per_retained_hash_it_compares() {
     use asap_types::summary_type::SketchAlgorithm;
@@ -1145,7 +1145,7 @@ fn a_kmv_build_costs_per_retained_hash_it_compares() {
             child: 0,
         }))
     };
-    for (keys, k, measured) in [(vec![], 4_323, 191.0), (vec![2], 26_656, 7_410.0)] {
+    for (keys, k, measured) in [(vec![], 4_323, 329.0), (vec![2], 26_656, 8_357.0)] {
         let mut rows = raw_rows(&range, "t", 300_000, 300_000);
         rows.output_schema = &range.output_schema;
         rows.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
@@ -1165,6 +1165,60 @@ fn a_kmv_build_costs_per_retained_hash_it_compares() {
         assert!(
             (0.75..=1.33).contains(&(charged / measured)),
             "k = {k}, keys {keys:?}: charged {charged:.1} ns per row, measured {measured}"
+        );
+    }
+}
+
+/// A KMV build's time per row, measured on the executor (median of 3 runs
+/// on one pinned core) over `user_id`s drawn from 1,000,000 values, in 10
+/// states by `job` and 1,000 by `instance`, from 1,200 to 60,000 rows per
+/// state at k = 1,081 to 106,263. Charged 65 per row and 0.5 per compared
+/// hash, these builds were charged 0.62–0.84 of their time: 400 states at
+/// k = 4,323 over 60,000 rows each were charged 553 ns per row and
+/// measure 712.
+#[test]
+fn a_kmv_build_charges_its_measured_time_per_row() {
+    use asap_types::summary_type::SketchAlgorithm;
+    let settings = CostInputs::default();
+    let (data, schema) = sql_rows_of_t(1_000_000);
+    let range = PhysicalASAPDAGNode {
+        output_schema: schema,
+        ..node(Payload::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(300),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        }))
+    };
+    // (grouping keys, input rows, k, measured ns per row)
+    for (keys, rows, k, measured) in [
+        (vec![1], 600_000, 1_081, 176.4),
+        (vec![1], 600_000, 4_323, 733.6),
+        (vec![1], 120_000, 26_656, 3_611.3),
+        (vec![3], 1_200_000, 4_323, 513.0),
+        (vec![3], 12_000_000, 4_323, 1_645.4),
+        (vec![3], 12_000_000, 106_263, 3_911.4),
+    ] {
+        let mut input = raw_rows(&range, "t", rows, 300_000);
+        input.output_schema = &range.output_schema;
+        input.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
+        let build = PhysicalASAPDAGNode {
+            parameters: Some(SketchParams::Kmv { k }),
+            ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+                child: 0,
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+                input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
+                reduction: Reduction::by(keys.clone()),
+                filter: None,
+            }))
+        };
+        let usage =
+            node_resource_usage_and_cost(&build, &[input], (1, 1.0), None, &data, &settings)
+                .unwrap();
+        let charged = usage.cpu_ops_per_second / rows as f64;
+        assert!(
+            (0.8..=1.25).contains(&(charged / measured)),
+            "k = {k}, keys {keys:?}, {rows} rows: charged {charged:.1} ns per row, \
+             measured {measured}"
         );
     }
 }
