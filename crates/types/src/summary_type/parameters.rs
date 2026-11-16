@@ -268,3 +268,105 @@ impl HydraParams {
         }
     }
 }
+
+/// An inclusive range of one sketch parameter; an unset bound is open.
+/// JSON: `{"kll_k": {"at_most": 1403}}`,
+/// `{"ddsketch_alpha": {"at_least": 0.01}}`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SketchParameterRange {
+    KllK {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_least: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_most: Option<u32>,
+    },
+    KmvK {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_least: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_most: Option<u32>,
+    },
+    #[serde(rename = "ddsketch_alpha")]
+    DDSketchAlpha {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_least: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_most: Option<f64>,
+    },
+}
+
+impl SketchParameterRange {
+    /// The algorithm whose parameter it ranges over (`Kll`, `Kmv`,
+    /// `DDSketch`).
+    pub fn algorithm(&self) -> super::SketchAlgorithm {
+        todo!("tests-only PR: SketchParameterRange::algorithm")
+    }
+
+    /// Whether `parameters` are that algorithm's and the parameter is in
+    /// range, both ends included: `KllK { at_most: Some(547) }` contains
+    /// `Kll { k: 547 }`, not `Kll { k: 1404 }` nor any `Kmv`.
+    pub fn contains(&self, parameters: &SketchParams) -> bool {
+        let _ = parameters;
+        todo!("tests-only PR: SketchParameterRange::contains")
+    }
+}
+
+#[cfg(test)]
+mod sketch_parameter_range_tests {
+    use super::*;
+    use crate::summary_type::SketchAlgorithm;
+
+    /// Both ends of a `k` range are included, an unset end is open, and a
+    /// range over KLL's `k` never contains another algorithm's parameters.
+    #[test]
+    fn kll_k_range_bounds_are_inclusive() {
+        let k547 = SketchParams::Kll { k: 547 };
+        let k1404 = SketchParams::Kll { k: 1404 };
+        let at_most_547 = SketchParameterRange::KllK {
+            at_least: None,
+            at_most: Some(547),
+        };
+        assert!(at_most_547.contains(&k547));
+        assert!(!at_most_547.contains(&k1404));
+        let at_least_1404 = SketchParameterRange::KllK {
+            at_least: Some(1404),
+            at_most: None,
+        };
+        assert!(at_least_1404.contains(&k1404));
+        assert!(!at_least_1404.contains(&k547));
+        let at_most_2863 = SketchParameterRange::KllK {
+            at_least: None,
+            at_most: Some(2863),
+        };
+        assert_eq!(at_most_2863.algorithm(), SketchAlgorithm::Kll);
+        assert!(!at_most_2863.contains(&SketchParams::Kmv { k: 547 }));
+        assert!(!at_most_2863.contains(&SketchParams::DDSketch { alpha: 0.01 }));
+    }
+
+    /// A KMV `k` range and a DDSketch α range each select their own
+    /// algorithm's listed sizes (`parameter_list`), both ends included.
+    #[test]
+    fn kmv_k_and_ddsketch_alpha_ranges_select_their_own_parameter() {
+        let kmv = SketchParameterRange::KmvK {
+            at_least: Some(4323),
+            at_most: None,
+        };
+        assert_eq!(kmv.algorithm(), SketchAlgorithm::Kmv);
+        let kmv_contained: Vec<bool> = [1_118, 4_323, 26_656, 106_263]
+            .into_iter()
+            .map(|k| kmv.contains(&SketchParams::Kmv { k }))
+            .collect();
+        assert_eq!(kmv_contained, [false, true, true, true]);
+        let ddsketch = SketchParameterRange::DDSketchAlpha {
+            at_least: Some(0.01),
+            at_most: Some(0.05),
+        };
+        assert_eq!(ddsketch.algorithm(), SketchAlgorithm::DDSketch);
+        let ddsketch_contained: Vec<bool> = [0.1, 0.05, 0.01, 0.005]
+            .into_iter()
+            .map(|alpha| ddsketch.contains(&SketchParams::DDSketch { alpha }))
+            .collect();
+        assert_eq!(ddsketch_contained, [false, true, true, false]);
+    }
+}

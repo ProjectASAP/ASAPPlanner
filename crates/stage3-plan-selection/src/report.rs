@@ -90,6 +90,17 @@ pub enum RejectionCause {
     /// catalog's consumer constraints together: the selection MILP is
     /// infeasible. The reason names a query when it has no plan even alone.
     Infeasible,
+    /// No plan is left without the candidates the deployment excludes
+    /// (`DeploymentCapabilities::exclusions`, which Stage 2 pruned as
+    /// `ExcludedByDeployment`). The reason names the query whose every
+    /// candidate was excluded, else says the selection MILP is infeasible;
+    /// then each exclusion source that pruned a candidate, by its JSON
+    /// name (`excluded_candidates[i]` for the caller's own), with how many
+    /// it pruned, e.g. `counter_not_extrapolated (7 candidates)`; and that
+    /// the workload may be infeasible without these exclusions too (telling
+    /// would take a second solve). Not a failed check: the excluded
+    /// candidates were valid.
+    ExcludedByDeployment,
 }
 
 impl RejectionCause {

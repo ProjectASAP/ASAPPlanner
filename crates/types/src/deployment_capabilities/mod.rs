@@ -1,0 +1,242 @@
+//! What the deployment's executor can run and keep (the third
+//! deployment input, beside the cost and accuracy models).
+//!
+//! [`DeploymentCapabilities`] says three things:
+//!
+//! * which sketch summary types the executor supports, and which readouts
+//!   it supports for each. A summary type is supported when the executor can build
+//!   its state, and a readout of it when the executor can answer that
+//!   statistic ([`StatisticKind`]) from the state. Stage 1 (Pass 1) offers
+//!   no summary candidate whose summary type or readout is unsupported, so no
+//!   Pass 2 candidate has one either (Pass 2 rules share, split into tumbling windows
+//!   or reuse existing builds; none adds a summary type or a readout). Exact
+//!   accumulators and plain exact execution are always supported;
+//! * whether raw data samples are retained. If they are, Stage 3 counts them on
+//!   disk once per source, at the longest window a query-time scan of it
+//!   reads. If they are not, raw data samples are not retained after they arrive, so
+//!   a candidate that scans raw data at query time is invalid (the
+//!   rejection lists every such scan): only ingestion-time work reads raw
+//!   rows. Stored data (at rest or mixed) with no raw data retained is a
+//!   contradiction, refused as bad input ([`DeploymentCapabilities::validate`]);
+//! * whether query-time results are retained across evaluations. If they
+//!   are, Stage 2 also offers a tumbling-window chain whose queries evaluate
+//!   together at its tumbling-window width as query-time `AcrossEvaluations`: each
+//!   evaluation builds one new tumbling window and keeps the others for the next ones,
+//!   covering the queries' longest look-back. A chain two or more queries
+//!   read keeps its `OneEvaluation` option too (shared within one evaluation),
+//!   and Stage 3 picks the cheaper. If they are not, a query-time result is
+//!   reused only within one evaluation.
+//!
+//! * what the executor's counter functions do (`counter_semantics`):
+//!   whether they handle counter resets and extrapolate to the range's ends;
+//! * which state families it cannot merge across windows
+//!   (`state_not_mergeable_across_windows`): it builds and finalizes their
+//!   state within one evaluation only;
+//! * further candidates the caller rules out directly
+//!   (`excluded_candidates`), e.g. a benchmark arm that must not scan raw
+//!   data at query time.
+//!
+//! Every capability a deployment lacks expands into [`CandidateExclusion`]s
+//! ([`DeploymentCapabilities::exclusions`]), each with the capability it
+//! comes from ([`ExclusionSource`]). Stage 2 applies them as one filter:
+//! a physical candidate one of them matches is pruned with
+//! `PruneReason::ExcludedByDeployment`, and its consumers lose it as an
+//! input.
+//!
+//! The default supports everything the planner can build, retains raw data
+//! and keeps no query-time result across evaluations, which is the
+//! planner's behavior without deployment inputs: its only exclusion is the
+//! one for query-time results kept across evaluations.
+
+// The executor lists the summary types it builds as `SupportedSummary`s, so the
+// type lives with the readout vocabulary in `asap-types`.
+pub use crate::summary_type::SupportedSummary;
+use crate::summary_type::{SketchAlgorithm, StatisticKind, SummaryFamily};
+use crate::workload::{DataArrival, DataWorkload};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+mod exclusion;
+#[cfg(test)]
+mod tests;
+
+pub use exclusion::{CandidateDescription, CandidateExclusion, CounterSemantics, SketchReadout};
+
+/// What the deployment's executor can run and keep. Planning reads it in
+/// Stage 2, as the exclusions it expands into
+/// ([`DeploymentCapabilities::exclusions`]). It is data only; `asap_planner` reads it from
+/// `--deployment-capabilities <json>` and shows it in the stage document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DeploymentCapabilities {
+    /// The sketch summary types the executor can build, each with the
+    /// readouts it can answer from one; `None` (the default) supports every summary type
+    /// and readout the planner can build.
+    pub supported_summaries: Option<Vec<SupportedSummary>>,
+    /// Whether raw data samples are retained for query-time scans; default `true`.
+    pub raw_data_retained: bool,
+    /// Whether a query-time result may be materialized across evaluations
+    /// (query-time `AcrossEvaluations`); default `false`.
+    pub query_time_results_retained: bool,
+    /// What the executor's counter functions do; default: they handle
+    /// counter resets and extrapolate, as PromQL's do.
+    pub counter_semantics: CounterSemanticsSupport,
+    /// The state families the executor cannot merge across windows: it
+    /// builds and finalizes their state within one evaluation only, so no
+    /// tumbling-window chain or state kept across evaluations of them is
+    /// offered. E.g. a target without mergeable rate state lists
+    /// `{"exact": "Rate"}`. Default: none.
+    pub state_not_mergeable_across_windows: Vec<SummaryFamily>,
+    /// Candidates the caller rules out directly, beyond what the fields
+    /// above imply; default none. E.g. `[{"timing": "query_time",
+    /// "operator": "Scan"}]` leaves only plans that read stored state.
+    pub excluded_candidates: Vec<CandidateExclusion>,
+}
+
+impl Default for DeploymentCapabilities {
+    fn default() -> Self {
+        Self {
+            supported_summaries: None,
+            raw_data_retained: true,
+            query_time_results_retained: false,
+            counter_semantics: CounterSemanticsSupport::default(),
+            state_not_mergeable_across_windows: Vec::new(),
+            excluded_candidates: Vec::new(),
+        }
+    }
+}
+
+/// What a deployment's counter functions (`rate`, `increase`, `irate`,
+/// `resets`, and `delta`'s extrapolation) do. JSON: an object; an omitted
+/// field is `true`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CounterSemanticsSupport {
+    /// A counter that drops to a lower value is taken to have reset, and
+    /// the drop is added back (`rate`, `increase`, `irate`, `resets`).
+    pub reset_handling: bool,
+    /// The increase over the samples is extrapolated to the range's ends
+    /// (`rate`, `increase`, `delta`).
+    pub extrapolation: bool,
+}
+
+impl Default for CounterSemanticsSupport {
+    fn default() -> Self {
+        Self {
+            reset_handling: true,
+            extrapolation: true,
+        }
+    }
+}
+
+/// Which capability an exclusion comes from: the reason Stage 2 records
+/// for a candidate it matches (`PruneReason::ExcludedByDeployment`).
+/// JSON: the snake_case variant name, e.g. `"raw_data_not_retained"`, or
+/// `{"excluded_candidate": {"index": 0}}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExclusionSource {
+    /// `supported_summaries` does not list the sketch algorithm.
+    SummaryNotSupported,
+    /// `supported_summaries` lists the sketch algorithm, but not this
+    /// readout of it.
+    ReadoutNotSupported,
+    /// `raw_data_retained` is false: no query-time scan of raw data, and no
+    /// raw rows kept across evaluations.
+    RawDataNotRetained,
+    /// `query_time_results_retained` is false: no query-time result kept
+    /// across evaluations.
+    QueryTimeResultsNotRetained,
+    /// `counter_semantics.reset_handling` is false.
+    CounterResetsNotHandled,
+    /// `counter_semantics.extrapolation` is false.
+    CounterNotExtrapolated,
+    /// `state_not_mergeable_across_windows` lists the state's family.
+    StateNotMergeableAcrossWindows,
+    /// The caller's `excluded_candidates[index]`.
+    ExcludedCandidate { index: usize },
+}
+
+/// One exclusion a deployment's capabilities expand into, with the
+/// capability it comes from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeploymentExclusion {
+    pub source: ExclusionSource,
+    pub candidates: CandidateExclusion,
+}
+
+impl DeploymentCapabilities {
+    /// The exclusions these capabilities expand into, the caller's
+    /// `excluded_candidates` last (in their order): the one list Stage 2
+    /// filters physical candidates by. A capability the deployment has
+    /// expands into nothing, so the default's only exclusion is
+    /// `{timing: query_time, kept_across_evaluations: true}` from
+    /// `query_time_results_retained: false`. E.g. `raw_data_retained:
+    /// false` expands into `{timing: query_time, operator: Scan}` and
+    /// `{operator: Scan, kept_across_evaluations: true}`.
+    pub fn exclusions(&self) -> Vec<DeploymentExclusion> {
+        todo!("tests-only PR: DeploymentCapabilities::exclusions")
+    }
+
+    /// Whether the executor can build `summary_type` and answer `readout` from it.
+    pub fn supports(&self, summary_type: &SketchAlgorithm, readout: StatisticKind) -> bool {
+        summary_supported(self.supported_summaries.as_deref(), summary_type, readout)
+    }
+
+    /// Checks these capabilities against the data workload: stored data
+    /// (at rest, or mixed) is raw data the deployment keeps, so it
+    /// contradicts `raw_data_retained: false`. Plan selection refuses such
+    /// inputs before measuring any candidate. An exclusion of
+    /// `excluded_candidates` that sets no field (it would exclude every
+    /// candidate), whose range is empty or names an α outside (0, 1), whose
+    /// `summary_family` its `sketch_parameters` contradict, or whose
+    /// `aggregate_measure` names no aggregate is bad input too
+    /// ([`DeploymentCapabilitiesError::InvalidExclusion`]).
+    pub fn validate(&self, data: &DataWorkload) -> Result<(), DeploymentCapabilitiesError> {
+        match &data.arrival {
+            DataArrival::AtRest | DataArrival::Mixed { .. } if !self.raw_data_retained => {
+                Err(DeploymentCapabilitiesError::StoredDataNotRetained {
+                    arrival: data.arrival,
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Whether an executor that builds `supported_summaries` (`None`: every
+/// summary type and readout the planner can build) can build
+/// `summary_type` and answer `readout` from it. Pass 1 reads only this
+/// field of [`DeploymentCapabilities`].
+pub fn summary_supported(
+    supported_summaries: Option<&[SupportedSummary]>,
+    summary_type: &SketchAlgorithm,
+    readout: StatisticKind,
+) -> bool {
+    supported_summaries.is_none_or(|supported| {
+        supported
+            .iter()
+            .any(|s| s.summary_type == *summary_type && s.readouts.contains(&readout))
+    })
+}
+
+/// Deployment capabilities that contradict the other planning inputs
+/// ([`DeploymentCapabilities::validate`]); always bad input.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum DeploymentCapabilitiesError {
+    /// Bad input: the data workload declares stored raw data (`AtRest` or
+    /// `Mixed`), but the deployment says it retains none.
+    #[error("the data is stored ({arrival:?}), but the deployment does not retain raw data")]
+    StoredDataNotRetained {
+        /// The declared arrival that stores raw data.
+        arrival: DataArrival,
+    },
+    /// Bad input: `excluded_candidates[index]` cannot be applied.
+    #[error("deployment capabilities, excluded candidate {index}: {reason}")]
+    InvalidExclusion {
+        /// Its index in `excluded_candidates`.
+        index: usize,
+        /// Why, e.g. "it sets no field, so it would exclude every candidate".
+        reason: String,
+    },
+}
