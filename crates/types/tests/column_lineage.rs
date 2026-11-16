@@ -671,8 +671,10 @@ fn a_same_source_binary_op_keeps_its_labels_scan() {
 
 /// `rate(x[5m]) * on(job) group_right(team) rate(x[1h])`: the output's rows
 /// are the right ("many") side's, so its labels take that side's lineage,
-/// `x` scan 0's, not a shifted scan or a disagreement; `team` comes from
-/// the left ("one") side, also `x` scan 0's.
+/// `x` scan 0's, not a shifted scan or a disagreement. `team` comes from
+/// the left ("one") side's series matched on `job`, another series of `x`
+/// than the one each output row keeps, so it is `x` scan 1's: the two
+/// sides pair labels of different series, as a self-join pairs rows.
 #[test]
 fn a_same_source_group_right_takes_the_right_sides_labels() {
     let mut memo = match_grouping_memo();
@@ -681,10 +683,10 @@ fn a_same_source_group_right_takes_the_right_sides_labels() {
     let product = memo
         .find_or_add_group(grouped_product(GroupSide::Right, short, long))
         .unwrap();
-    for label in ["job", "team"] {
+    for (label, scan_ordinal) in [("job", 0), ("team", 1)] {
         assert_eq!(
             lineage_and_sign_of(&memo, product, label).0,
-            ColumnLineage::SourceColumn(series_column("x", 0, label))
+            ColumnLineage::SourceColumn(series_column("x", scan_ordinal, label))
         );
     }
 }
