@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::time_series;
 use asap_executor::runtime::Scope;
-use asap_executor::values::Batch;
+use asap_executor::values::{Batch, Value};
 use asap_planner::{
     plan_installable, CostInputs, DeploymentCapabilities, FrontendInput, InstallablePlan,
     OperatorKind, PlanningModels, PlanningWorkload, SelectedPlanReport, UserInput,
@@ -799,8 +799,8 @@ async fn counter_rates_over_a_shared_query_time_chain_answer_as_installed() {
 /// `count(sum by (job) (m >= 0))` counts the 2 jobs, and
 /// `count(count by (x) (m))` counts one group, as no series has `x`.
 /// `stddev` and `stdvar` follow the same rule: none over the empty vector,
-/// and 0 over that one group. With no sample at all every query is empty. Each query is planned on its
-/// own, exactly.
+/// and 0 over that one group. With no sample at all every query is empty.
+/// Each query is planned on its own, exactly.
 #[tokio::test]
 async fn a_global_promql_count_over_an_empty_aggregate_answers_no_sample() {
     // The query's answer values over `samples` (an answer row has no labels).
