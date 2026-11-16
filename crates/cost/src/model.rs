@@ -240,7 +240,7 @@ pub struct CostInputs {
     /// The deployment's measured CPU time per unit of each operator; a node
     /// with an entry is priced from it, every other node from the formulas
     /// scaled by the calibration factor (module doc, "Measured operation
-    /// costs"). Also loads the earlier array of [`MeasuredOperationCost`](crate::MeasuredOperationCost).
+    /// costs").
     /// Default empty: every node is priced from the formulas.
     pub measured_operation_costs: MeasuredOperationCosts,
     /// Externally established formula-to-measurement scale, held constant across

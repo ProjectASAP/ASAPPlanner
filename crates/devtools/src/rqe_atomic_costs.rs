@@ -28,7 +28,7 @@
 //!
 //! [`CostInputs::measured_operation_costs`]: asap_cost::CostInputs::measured_operation_costs
 
-use asap_cost::{MeasuredOperationCost, MeasuredOperationCosts, SummaryOperation};
+use asap_cost::{MeasuredOperationCosts, OperatorCost, OperatorKind};
 use asap_types::summary_type::SketchParams;
 use serde_json::Value;
 
@@ -61,10 +61,7 @@ pub fn convert_rqe_atomic_costs(rows: &Value) -> Result<ConvertedCosts, String> 
     let rows = rows
         .as_array()
         .ok_or("rqe_atomic_costs.json is not a JSON array of rows")?;
-    // Test-first stub: the rows are still converted into the earlier
-    // format's entries, which the implementation replaces by `OperatorCost`
-    // entries.
-    let mut legacy_entries: Vec<MeasuredOperationCost> = Vec::new();
+    let mut operators: Vec<OperatorCost> = Vec::new();
     let mut skipped_rows = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         let sketch_name = row["sketch"]
@@ -82,15 +79,24 @@ pub fn convert_rqe_atomic_costs(rows: &Value) -> Result<ConvertedCosts, String> 
             }
             Err(error) => return Err(format!("row {index} ({sketch_name}): {error}")),
         };
-        if legacy_entries.iter().any(|entry| entry.sketch == sketch) {
+        if operators
+            .iter()
+            .any(|entry| entry.sketch.as_ref() == Some(&sketch))
+        {
             return Err(format!(
                 "row {index} ({sketch_name}): a second row for {sketch:?}"
             ));
         }
-        for (field, operation) in [
-            ("insert_cpu_secs", SummaryOperation::Update),
-            ("merge_cpu_secs", SummaryOperation::Merge),
-            ("query_cpu_secs", SummaryOperation::Estimate),
+        // An update prices both operators that fold rows into a state; a
+        // merge and an estimate their one operator.
+        let updates: &[OperatorKind] = &[
+            OperatorKind::SummaryAgg,
+            OperatorKind::SummaryTumblingWindowChain,
+        ];
+        for (field, kinds) in [
+            ("insert_cpu_secs", updates),
+            ("merge_cpu_secs", &[OperatorKind::SummaryMerge]),
+            ("query_cpu_secs", &[OperatorKind::SummaryEstimate]),
         ] {
             let seconds = row[field]
                 .as_f64()
@@ -98,15 +104,25 @@ pub fn convert_rqe_atomic_costs(rows: &Value) -> Result<ConvertedCosts, String> 
                 .ok_or(format!(
                     "row {index} ({sketch_name}): `{field}` is not a non-negative number"
                 ))?;
-            legacy_entries.push(MeasuredOperationCost {
-                sketch: sketch.clone(),
-                operation,
-                cpu_ns_per_operation: seconds * 1e9,
-            });
+            operators.extend(kinds.iter().map(|&operator| OperatorCost {
+                operator,
+                phase: None,
+                sketch: Some(sketch.clone()),
+                exact: None,
+                measure: None,
+                ns_per_unit: seconds * 1e9,
+                ns_per_invocation: 0.0,
+                memory_bytes_per_state: None,
+            }));
         }
     }
-    let _ = (legacy_entries, skipped_rows);
-    todo!("write the object form: OperatorCost entries, phase None")
+    Ok(ConvertedCosts {
+        measured_operation_costs: MeasuredOperationCosts {
+            operators,
+            ..MeasuredOperationCosts::default()
+        },
+        skipped_rows,
+    })
 }
 
 /// Why a row whose name has no planner sketch is skipped.

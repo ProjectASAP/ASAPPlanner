@@ -9,11 +9,14 @@
 //! request at 0.001 gets no measured guarantee, so the theoretical one
 //! applies.
 
-use asap_types::accuracy::{AccuracyGuarantee, AccuracyMetric};
+use asap_types::accuracy::{AccuracyGuarantee, AccuracyMetric, BoundExpr, ProbabilityExpr};
 use asap_types::ir::schema::FieldDataType;
+use asap_types::stages::ValueSign;
 use asap_types::summary_type::{SketchParams, SketchStatistic};
 use serde::{Deserialize, Serialize};
 
+use crate::guarantee::guarantee_before_failure_probability_check;
+use crate::readout::readout_error_metric;
 use crate::AccuracyEvidence;
 
 /// Errors measured on the executor's own sketches. Default: empty, every
@@ -24,7 +27,13 @@ pub struct MeasuredSketchAccuracy {
     pub entries: Vec<MeasuredAccuracyEntry>,
 }
 
-/// One sketch configuration, read for one statistic, in one metric.
+/// One sketch configuration, read for one statistic, in one metric. Each
+/// recorded error is the worst case over the merge counts the calibration
+/// measured: a state built over one window and a state merged from many
+/// windows of the same θ share the entry, so its error must hold for
+/// every one of them. Example: KLL k = 547 measured unmerged and merged
+/// from 5 and 60 windows, with rank errors 0.0021, 0.0024 and 0.0023 at
+/// δ = 0.01, records 0.0024 at 0.01.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MeasuredAccuracyEntry {
@@ -64,6 +73,8 @@ pub enum MeasuredSketchAccuracyError {
         entry: usize,
         failure_probability: f64,
     },
+    /// Entry `entry` records no point, so it can answer no request.
+    NoPoints { entry: usize },
     /// Entry `entry` has a negative or non-finite error.
     InvalidError { entry: usize, error: f64 },
     /// Entry `entry`'s failure probabilities are not ascending, or its
@@ -75,23 +86,155 @@ pub enum MeasuredSketchAccuracyError {
 }
 
 impl MeasuredSketchAccuracy {
-    /// Check every entry: failure probabilities in (0, 1] and at least
-    /// 3 / trials, errors finite and non-negative, ascending failure
+    /// Check every entry: at least one point, failure probabilities in
+    /// (0, 1] and at least 3 / trials, errors finite and non-negative, ascending failure
     /// probability with non-increasing error, and no two entries for one
     /// (sketch, statistic, metric).
     pub fn validate(&self) -> Result<(), MeasuredSketchAccuracyError> {
-        todo!("measured accuracy table: implement after the tests are approved")
+        for (index, entry) in self.entries.iter().enumerate() {
+            entry.validate(index)?;
+            if let Some(first) = self.entries[..index]
+                .iter()
+                .position(|earlier| earlier.measures_the_same_as(entry))
+            {
+                return Err(MeasuredSketchAccuracyError::DuplicateEntry {
+                    first,
+                    second: index,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The entry measuring `sketch` read for `statistic` in `metric`.
+    fn entry(
+        &self,
+        sketch: &SketchParams,
+        statistic: &SketchStatistic,
+        metric: AccuracyMetric,
+    ) -> Option<&MeasuredAccuracyEntry> {
+        self.entries.iter().find(|entry| {
+            entry.sketch == *sketch
+                && entry.statistic == *statistic
+                && entry.accuracy_metric == metric
+        })
     }
 }
 
+impl MeasuredAccuracyEntry {
+    /// Check this entry, the `index`th of its table.
+    fn validate(&self, index: usize) -> Result<(), MeasuredSketchAccuracyError> {
+        // Fewer than 3 failures in `trials` cannot estimate the (1 − δ)
+        // quantile: 1,000 trials record δ ≥ 0.003.
+        let smallest_failure_probability = 3.0 / f64::from(self.trials);
+        if self.error_at.is_empty() {
+            return Err(MeasuredSketchAccuracyError::NoPoints { entry: index });
+        }
+        for point in &self.error_at {
+            let failure_probability = point.failure_probability;
+            if !(failure_probability > 0.0
+                && failure_probability <= 1.0
+                && failure_probability >= smallest_failure_probability)
+            {
+                return Err(MeasuredSketchAccuracyError::FailureProbabilityOutOfRange {
+                    entry: index,
+                    failure_probability,
+                });
+            }
+            if !(point.error.is_finite() && point.error >= 0.0) {
+                return Err(MeasuredSketchAccuracyError::InvalidError {
+                    entry: index,
+                    error: point.error,
+                });
+            }
+        }
+        let monotone = self.error_at.windows(2).all(|pair| {
+            pair[0].failure_probability < pair[1].failure_probability
+                && pair[0].error >= pair[1].error
+        });
+        match monotone {
+            true => Ok(()),
+            false => Err(MeasuredSketchAccuracyError::NotMonotone { entry: index }),
+        }
+    }
+
+    /// Whether `other` measures the same sketch, statistic and metric.
+    fn measures_the_same_as(&self, other: &MeasuredAccuracyEntry) -> bool {
+        self.sketch == other.sketch
+            && self.statistic == other.statistic
+            && self.accuracy_metric == other.accuracy_metric
+    }
+
+    /// The point at the largest recorded failure probability at most
+    /// `failure_probability`; `None` below the smallest (never
+    /// extrapolated). Example: recorded at 0.003, 0.01 and 0.05, a request
+    /// at 0.02 gets the point at 0.01.
+    fn point_at_most(&self, failure_probability: f64) -> Option<ErrorAtFailureProbability> {
+        self.error_at
+            .iter()
+            .filter(|point| point.failure_probability <= failure_probability)
+            .max_by(|a, b| a.failure_probability.total_cmp(&b.failure_probability))
+            .copied()
+    }
+}
+
+/// Whether θ's theoretical guarantee for `statistic` can be deterministic
+/// (failure probability zero) under the data it requires: then a
+/// measurement never replaces it. Example: DDSketch's relative error α
+/// over values of one sign; a KLL's rank error always has a failure
+/// probability.
+fn has_deterministic_guarantee(
+    summary_type: &FieldDataType,
+    parameters: &SketchParams,
+    statistic: &SketchStatistic,
+) -> bool {
+    guarantee_before_failure_probability_check(
+        summary_type,
+        parameters,
+        statistic,
+        1.0,
+        Some(ValueSign::NonNegative),
+        None,
+    )
+    .is_some_and(|guarantee| guarantee.spec.failure_probability == ProbabilityExpr::Zero)
+}
+
+/// Loaders must call [`MeasuredSketchAccuracy::validate`] before handing a
+/// table to the planner: `measured_guarantee` does not re-check it, so an
+/// unvalidated table could give Pass 2 non-monotone or empty entries.
 impl AccuracyEvidence for MeasuredSketchAccuracy {
+    /// The entry for exactly `parameters` and `statistic`, in the
+    /// readout's own metric (`Rank` for a KLL quantile), at its largest
+    /// recorded failure probability at most `failure_probability`; the
+    /// guarantee states that recorded failure probability. `None` when no
+    /// entry matches, below its smallest recorded failure probability, at
+    /// a failure probability that is not positive, and for a θ whose
+    /// theoretical guarantee can be deterministic (DDSketch).
     fn measured_guarantee(
         &self,
-        _summary_type: &FieldDataType,
-        _parameters: &SketchParams,
-        _statistic: &SketchStatistic,
-        _failure_probability: f64,
+        summary_type: &FieldDataType,
+        parameters: &SketchParams,
+        statistic: &SketchStatistic,
+        failure_probability: f64,
     ) -> Option<AccuracyGuarantee> {
-        todo!("measured accuracy table: implement after the tests are approved")
+        if failure_probability.is_nan() || failure_probability <= 0.0 {
+            return None;
+        }
+        let metric = readout_error_metric(summary_type, statistic)?;
+        // Look the entry up first: the deterministic-guarantee check below
+        // computes a theoretical guarantee, so it runs only for a θ that
+        // has an entry.
+        let entry = self.entry(parameters, statistic, metric)?;
+        if has_deterministic_guarantee(summary_type, parameters, statistic) {
+            return None;
+        }
+        let point = entry.point_at_most(failure_probability)?;
+        Some(AccuracyGuarantee::new(
+            metric,
+            BoundExpr::Constant { value: point.error },
+            ProbabilityExpr::Constant {
+                value: point.failure_probability,
+            },
+        ))
     }
 }
