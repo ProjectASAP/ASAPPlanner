@@ -25,12 +25,16 @@ pub fn within_limit(evaluated: f64, limit: f64) -> bool {
 }
 
 /// The largest value [`within_limit`] admits for `limit`: `limit` widened
-/// by [`SATISFACTION_TOLERANCE`]. Stage 3's root checks of constraint (K)
-/// bound a composed error by it, so they accept what an edge accepts.
+/// by [`SATISFACTION_TOLERANCE`], relatively only. Stage 3's root checks of
+/// constraint (K) bound a composed error by it, so they accept what an
+/// edge accepts.
 ///
-/// Example: a limit of 0.01 admits up to 0.01 · (1 + 1e-9) + 2.2e-16.
+/// Example: a limit of 0.01 admits up to 0.01 · (1 + 1e-9), and a failure
+/// probability of 1e-16 per output value (δ = 0.01 over 1e14 values) up to
+/// 1e-16 · (1 + 1e-9); an absolute floor such as `f64::EPSILON` (2.2e-16)
+/// would admit three times that limit.
 pub fn tolerated_limit(limit: f64) -> f64 {
-    limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON
+    limit * (1.0 + SATISFACTION_TOLERANCE)
 }
 
 impl ErrorMetricsOfMemo {

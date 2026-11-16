@@ -425,7 +425,7 @@ const LEAST_HIGHS_FEASIBILITY_TOLERANCE: f64 = 1e-10;
 /// at its default tolerances and the selection is then checked exactly
 /// ([`AccuracyRules::selection_meets_targets`]); a selection that misses a
 /// target is solved once more at [`LEAST_HIGHS_FEASIBILITY_TOLERANCE`],
-/// and if that one misses too, the error is
+/// and if that one misses too, or finds no plan at all, the error is
 /// [`SelectionMilpError::TargetBelowSolverPrecision`].
 pub(crate) fn solve_selection(
     inputs: &SelectionInputs<'_>,
@@ -553,6 +553,23 @@ pub(crate) fn solve_selection(
     let executions = selectable.executions();
     let mut solve_ms = 0;
     let mut solve_count = 0;
+    // The query the first solve's selection missed, checked exactly: the
+    // error names it if the second solve finds no plan at all.
+    let mut missed_at_default_tolerance: Option<QueryId> = None;
+    let below_solver_precision = |query: QueryId| {
+        let memo = &inputs.physical.logical_candidates.memo;
+        let memo_query = &memo.queries()[query.0];
+        SelectionMilpError::TargetBelowSolverPrecision {
+            query,
+            failure_probability_per_output_value: memo_query.accuracy_target.as_ref().and_then(
+                |target| {
+                    target.failure_probability_per_output_value(
+                        memo_query.number_of_values_per_query_evaluation,
+                    )
+                },
+            ),
+        }
+    };
     let (selected, selected_edges, answering) = loop {
         let started = Instant::now();
         let solved = model
@@ -570,8 +587,14 @@ pub(crate) fn solve_selection(
             {
                 solved.get_solution().columns().to_vec()
             }
+            // At LEAST_HIGHS_FEASIBILITY_TOLERANCE no plan meets the
+            // target the first solve's selection missed by less than the
+            // default tolerance: every plan misses it, by less than 1e-7.
             HighsModelStatus::Infeasible | HighsModelStatus::UnboundedOrInfeasible => {
-                return Err(SelectionMilpError::Infeasible)
+                return Err(match missed_at_default_tolerance {
+                    Some(query) => below_solver_precision(query),
+                    None => SelectionMilpError::Infeasible,
+                })
             }
             other => return Err(SelectionMilpError::Solver(format!("{other:?}"))),
         };
@@ -610,19 +633,12 @@ pub(crate) fn solve_selection(
             break (selected, selected_edges, answering);
         };
         if solve_count == 2 {
-            let memo = &inputs.physical.logical_candidates.memo;
-            let memo_query = &memo.queries()[query.0];
-            return Err(SelectionMilpError::TargetBelowSolverPrecision {
-                query,
-                failure_probability_per_output_value: memo_query.accuracy_target.as_ref().and_then(
-                    |target| {
-                        target.failure_probability_per_output_value(
-                            memo_query.number_of_values_per_query_evaluation,
-                        )
-                    },
-                ),
-            });
+            return Err(below_solver_precision(query));
         }
+        missed_at_default_tolerance = Some(query);
+        // Solving the same HiGHS model again offers the first selection as
+        // a starting solution; HiGHS checks it at the tighter tolerance and
+        // drops it when it misses (as here), so it cannot bias the result.
         model = solved.into();
         model.set_option(
             "primal_feasibility_tolerance",
