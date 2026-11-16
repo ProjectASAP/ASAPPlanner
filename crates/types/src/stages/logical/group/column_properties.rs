@@ -50,6 +50,15 @@ pub enum ValueSign {
     Unknown,
 }
 
+impl ValueSign {
+    /// Whether every value has one sign (`NonNegative` or `NonPositive`):
+    /// then a relative error ε on each value is at most ε on their sum, and
+    /// DDSketch's relative bound on a quantile holds.
+    pub fn is_one_sign(self) -> bool {
+        matches!(self, Self::NonNegative | Self::NonPositive)
+    }
+}
+
 /// Where an output column's values come from, a group property derived
 /// from the input groups (concepts doc, section 3, "Column lineage"). It
 /// names a column across groups where a schema field's name cannot: two

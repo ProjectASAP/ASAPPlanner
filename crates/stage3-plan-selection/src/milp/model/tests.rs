@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
+use asap_types::accuracy::{AccuracyMetric, AccuracyScope, AccuracyTarget};
 use asap_types::ir::operator::Reduction;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
@@ -776,7 +776,8 @@ fn contexts_whose_queries_read_different_groups_are_not_copies() {
         selectable: &selectable,
         costs: &costs,
     };
-    let shared = copies_in_equivalent_contexts(&inputs, &vec![true; selectable.executions().len()]);
+    let shared =
+        copies_in_equivalent_contexts(&inputs, &vec![true; selectable.executions().len()], None);
     assert!(shared
         .original_of_execution
         .iter()
@@ -1021,7 +1022,7 @@ fn a_context_equivalent_to_another_shares_its_variables() {
             selectable: &selectable,
             costs,
         };
-        copies_in_equivalent_contexts(&inputs, &kept)
+        copies_in_equivalent_contexts(&inputs, &kept, None)
     };
     let SharedVariables {
         original_of_execution,
@@ -1071,6 +1072,7 @@ fn a_context_equivalent_to_another_shares_its_variables() {
             costs: &costs,
         },
         &kept,
+        None,
     );
     assert_eq!(shared.original_of_query, vec![QueryId(0), QueryId(1)]);
     assert!(shared
@@ -1142,6 +1144,7 @@ fn contexts_whose_small_edge_costs_differ_by_rounding_are_copies() {
             costs: &costs,
         },
         &vec![true; executions.len()],
+        None,
     );
     assert_eq!(shared.original_of_query, vec![QueryId(0), QueryId(0)]);
     for (index, &original) in shared.original_of_execution.iter().enumerate() {
@@ -1285,8 +1288,8 @@ fn relative(max_error: f64) -> AccuracyTarget {
     AccuracyTarget::max_error(max_error).accuracy_metric(AccuracyMetric::Relative)
 }
 
-/// #1207's query B, p99 / p50 at relative 0.03 (concepts doc, section 4,
-/// "Example: allocation in a ratio"), over readouts required at relative
+/// Query B, p99 / p50 at relative 0.03 (`accuracy-models.md`, "Example:
+/// allocation in a ratio"), over readouts required at relative
 /// 0.02 (cost 1) or 0.01 (cost 3) each: 1.111 (0.02 + 0.02) = 0.044 and
 /// 1.111 (0.02 + 0.01) = 0.033 are above 0.03, so (K) selects both 0.01
 /// readouts (0.022). The greedy plan reads the two 0.02 readouts (cost 2)
@@ -1343,7 +1346,8 @@ fn k_allocates_a_ratio_s_error_among_its_readouts() {
         // (K)'s E and D exist only in the 10 s context (the 20 s one is
         // its copy), and only for the ratio: a readout's error is fixed.
         let kept = vec![true; selectable.executions().len()];
-        let shared = copies_in_equivalent_contexts(&inputs, &kept);
+        let rules = AccuracyRules::of(&inputs).unwrap();
+        let shared = copies_in_equivalent_contexts(&inputs, &kept, Some(&rules));
         let mut problem = ProblemVariables::new();
         let variables = selection_variables(
             &inputs,
@@ -1352,8 +1356,7 @@ fn k_allocates_a_ratio_s_error_among_its_readouts() {
             &Components::of(&inputs),
             &mut problem,
         );
-        let rules = AccuracyRules::of(&inputs);
-        let model = ErrorModel::new(&inputs, rules.as_ref(), &variables.y, &shared);
+        let model = ErrorModel::new(&inputs, &rules, &variables.y, &shared);
         let accuracy = AccuracyVariables::new(&model, &mut problem);
         let one_context = 2;
         assert_eq!(accuracy.variable_count(), one_context, "{entries:?}");
@@ -1540,4 +1543,89 @@ fn contexts_whose_roots_allow_different_metrics_are_not_copies() {
     let w = vec![1.0; physical.physical_candidates.len()];
     let (solved, _) = solve(&physical, &[every(10_000), every(20_000)], &w, &[], &[]);
     assert_eq!(solved.unwrap_err(), SelectionMilpError::Infeasible);
+}
+
+/// The same readout every 10 s and every 20 s, returning 10 values every
+/// 10 s and 100 every 20 s, at relative 0.01 without a failure probability
+/// or with δ = 0.01 per value: (K) reads the same root limits for both
+/// (no per-value δ, or 0.01 per value whatever $n_q$), so the 20 s context
+/// is a copy of the 10 s one.
+#[test]
+fn contexts_whose_queries_differ_only_in_values_not_split_by_k_are_copies() {
+    let per_value = relative(0.01)
+        .failure_probability(0.01)
+        .accuracy_scope(AccuracyScope::PerValue);
+    for target in [relative(0.01), per_value] {
+        let mut memo = empty_memo();
+        let (readout_group, _) = ddsketch_readouts(&mut memo, 0.5, &[(0.01, 1.0)]);
+        for values in [10, 100] {
+            memo.add_query(MemoQuery {
+                root: QueryRoot::Operator(readout_group),
+                accuracy_target: Some(target.clone()),
+                number_of_values_per_query_evaluation: Some(values),
+            });
+        }
+        let physical = physical(memo.clone(), &every_candidate(&memo));
+        let w = vec![1.0; physical.physical_candidates.len()];
+        let entries = [every(10_000), every(20_000)];
+        let (selectable, mut costs) = selection_inputs(&physical, &entries, &w, &[], &[]);
+        for (index, cost) in costs.per_execution.iter_mut().enumerate() {
+            if let asap_types::stages::ExecutionContext::Evaluation { grid } =
+                selectable.context(selectable.executions()[index].context)
+            {
+                if grid.period_ms == 20_000 {
+                    *cost = Ok(cost.clone().unwrap() / 2.0);
+                }
+            }
+        }
+        let inputs = SelectionInputs {
+            physical: &physical,
+            entries: &entries,
+            selectable: &selectable,
+            costs: &costs,
+        };
+        let kept = vec![true; selectable.executions().len()];
+        let rules = AccuracyRules::of(&inputs);
+        let shared = copies_in_equivalent_contexts(&inputs, &kept, rules.as_ref());
+        assert_eq!(
+            shared.original_of_query,
+            vec![QueryId(0), QueryId(0)],
+            "{target:?}"
+        );
+    }
+}
+
+/// p99 / p50 at relative 0.03 with δ = 0.01 over a whole result of 1e4
+/// values, 1e-6 per value, over readouts at relative 0.01 failing with
+/// 5.4e-7 (cost 1) or 4e-7 (cost 3) each: two at 5.4e-7 fail together with
+/// up to 1.08e-6, above 1e-6 by 8e-8, within HiGHS's default feasibility
+/// tolerance 1e-7; one of each, 9.4e-7, is within it. (K) solves at 1e-9
+/// (`AccuracyRules::feasibility_tolerance`), so it selects one of each.
+#[test]
+fn k_bounds_a_per_value_failure_probability_below_the_default_solver_tolerance() {
+    let mut memo = empty_memo();
+    let levels = [(0.01, 5.4e-7), (0.01, 4e-7)];
+    let (p99, p99_readouts) = ddsketch_readouts(&mut memo, 0.99, &levels);
+    let (p50, p50_readouts) = ddsketch_readouts(&mut memo, 0.5, &levels);
+    let ratio = group(&mut memo, arithmetic(ArithmeticOpKind::Div, p99, p50));
+    memo.add_query(MemoQuery {
+        root: QueryRoot::Operator(ratio),
+        accuracy_target: Some(relative(0.03).failure_probability(0.01)),
+        number_of_values_per_query_evaluation: Some(10_000),
+    });
+    let physical = physical(memo.clone(), &every_candidate(&memo));
+    let mut w = vec![0.0; physical.physical_candidates.len()];
+    for readouts in [&p99_readouts, &p50_readouts] {
+        w[physical_of(&physical, readouts[0])] = 1.0;
+        w[physical_of(&physical, readouts[1])] = 3.0;
+    }
+    let (solved, _) = solve(&physical, &every_10s(1), &w, &[], &[]);
+    let selected = candidates(&solved.unwrap());
+    let count = |level: usize| {
+        [&p99_readouts, &p50_readouts]
+            .iter()
+            .filter(|readouts| selected.contains(&physical_of(&physical, readouts[level])))
+            .count()
+    };
+    assert_eq!((count(0), count(1)), (1, 1), "{selected:?}");
 }

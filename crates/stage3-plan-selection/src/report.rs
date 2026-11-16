@@ -4,7 +4,6 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use asap_accuracy::readout_error_metric;
 use asap_cost::node::analytical::AnalyticalCostError;
 use asap_cost::{summary_type_name, CostModel};
 use asap_types::accuracy::AccuracyMetric;
@@ -118,8 +117,11 @@ pub struct AcceptedAccuracy {
     /// Whether the query has an accuracy target.
     pub has_accuracy_target: bool,
     /// The metric of the accepted error bound, that of the first sketch
-    /// readout the output reads; `None` for an exact output, which meets
-    /// every metric, and for a query without an accuracy target.
+    /// readout the output reads (in plan order; with a target naming no
+    /// metric, readouts in several metrics may each be within it, as (K)
+    /// bounds each metric apart, and this is the first's); `None` for an
+    /// exact output, which meets every metric, and for a query without an
+    /// accuracy target.
     pub accepted_metric: Option<AccuracyMetric>,
     /// The sketch algorithms the query's output reads, in plan order
     /// (e.g. `["Kll"]`); empty for an exact plan.
@@ -234,8 +236,9 @@ pub(crate) fn infeasible(costs: &ExecutionCosts) -> ErrorSelectingPlan {
 /// Per query, the sketches its output reads in `plan` (each sketch build
 /// below its root, in node order) and, when it has an accuracy target and
 /// reads a sketch, the metric of the first sketch readout below its root
-/// (`asap_accuracy::readout_error_metric`), whatever metric the target
-/// names: a target naming none reports the one it accepted.
+/// (`CandidateForMemoGroup::required_accuracy`, the requirement (K)
+/// checked), whatever metric the target names: a target naming none
+/// reports the one it accepted.
 pub(crate) fn accepted_accuracy(
     physical: &PhysicalASAPMemoCandidates,
     plan: &PhysicalASAPDAG,
@@ -274,22 +277,12 @@ pub(crate) fn accepted_accuracy(
                             sketches.push(name);
                         }
                     }
-                    Operator::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
-                        // The algorithm of the state group the readout's
-                        // candidate reads.
-                        let algorithm = node.selected_physical_candidate.and_then(|v| {
+                    Operator::ASAP(ASAPOp::SummaryEstimate { .. }) => {
+                        // The metric of the error the readout's candidate
+                        // was required to meet, the one (K) checked.
+                        readout_metrics.extend(node.selected_physical_candidate.and_then(|v| {
                             let id = physical.physical_candidates[v.0].logical_candidate_id;
-                            match memo.candidate(id).expression.operator {
-                                Operator::ASAP(ASAPOp::SummaryEstimate {
-                                    summary_input, ..
-                                }) => memo.groups()[summary_input.0 as usize]
-                                    .group_properties
-                                    .sketch_algorithm_of_state(),
-                                _ => None,
-                            }
-                        });
-                        readout_metrics.extend(algorithm.and_then(|algorithm| {
-                            readout_error_metric(&FieldDataType::Sketch(algorithm), query)
+                            Some(memo.candidate(id).required_accuracy()?.metric)
                         }));
                     }
                     _ => {}

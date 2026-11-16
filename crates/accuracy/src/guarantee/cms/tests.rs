@@ -8,7 +8,7 @@ fn heap_evaluation_retains_frequency_metric() {
         heap_size: 10,
     };
     let topk_frequency =
-        guarantee_of_parameters(&cms_heap, &SketchStatistic::TopK { k: 10 }, 1.0, None)
+        guarantee_of_parameters(&cms_heap, &SketchStatistic::TopK { k: 10 }, 1.0, None, None)
             .expect("heap sketch still provides per-key frequency intervals");
     assert_eq!(
         topk_frequency.spec.accuracy_metric,

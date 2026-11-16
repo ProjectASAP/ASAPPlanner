@@ -64,6 +64,18 @@ impl AccuracyMetric {
         Self::Relative,
         Self::Rank,
     ];
+    /// How many metrics there are: `ALL`'s length, the size of an array
+    /// holding one value per metric.
+    pub const COUNT: usize = Self::ALL.len();
+
+    /// The position of `self` in [`Self::ALL`], the index of its entry in
+    /// an array of one value per metric: `Relative` is 3.
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|&listed| listed == self)
+            .expect("AccuracyMetric::ALL lists every metric")
+    }
 }
 
 /// The wire name of an [`AccuracyMetric`].
@@ -285,20 +297,24 @@ impl AccuracyTarget {
         self.max_error == 0.0 && self.failure_probability == Some(0.0)
     }
 
-    /// The target's failure probability per value: its δ split evenly over
-    /// the values its scope covers when one evaluation returns
-    /// `values_per_evaluation` ($n_q$; [`AccuracyScope::max_values_covered`]);
-    /// 1 when it sets no δ. `None` when that count is not known for a δ over
-    /// the whole result: no per-value δ follows (Pass 2 then gives the
-    /// query's readouts no level).
+    /// The failure probability each output value of one evaluation must
+    /// meet: the target's δ split evenly, by the union bound, over the
+    /// values its scope covers when one evaluation returns
+    /// `values_per_evaluation` ($n_q$; [`AccuracyScope::max_values_covered`]).
+    /// `None` when the target sets no δ, and when that count is not known
+    /// for a δ over the whole result. A readout value's failure probability
+    /// splits δ further over the readout values an output value depends
+    /// on, and is built on this one.
     ///
     /// Example: δ = 0.01 over the whole result of a query returning 100
-    /// series gives 0.0001 per value; with the number of series unknown,
-    /// `None`; per value (`AccuracyScope::PerValue`), 0.01 either way.
-    pub fn failure_probability_per_value(&self, values_per_evaluation: Option<u64>) -> Option<f64> {
-        let Some(delta) = self.failure_probability else {
-            return Some(1.0);
-        };
+    /// series gives 0.0001 per output value; with the number of series
+    /// unknown, `None`; per value (`AccuracyScope::PerValue`), 0.01 either
+    /// way.
+    pub fn failure_probability_per_output_value(
+        &self,
+        values_per_evaluation: Option<u64>,
+    ) -> Option<f64> {
+        let delta = self.failure_probability?;
         let values = self
             .accuracy_scope
             .max_values_covered(values_per_evaluation)?;

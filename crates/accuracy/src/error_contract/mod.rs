@@ -8,7 +8,7 @@ use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, ScalarValue};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, BinaryOperator, NonASAPOp, Operator, ScalarExpr};
-use asap_types::stages::{ColumnLineage, Memo, MemoGroupId, ValueSign};
+use asap_types::stages::{ColumnLineage, Memo, MemoGroupId};
 use asap_types::summary_type::{ExactKind, SummaryInputExpr};
 
 /// $g_c$'s linear bound for errors in `metric`, each input's and the
@@ -221,13 +221,11 @@ fn copied_from_a_source(
 /// $|\sum_i (\hat{x}_i - x_i)| \le \varepsilon \sum_i |x_i| =
 /// \varepsilon |\sum_i x_i|$. Values of unknown sign may cancel.
 fn values_of_one_sign(memo: &Memo, group: MemoGroupId, column: usize) -> bool {
-    matches!(
-        memo.groups()[group.0 as usize]
-            .group_properties
-            .column_signs
-            .get(column),
-        Some(ValueSign::NonNegative | ValueSign::NonPositive)
-    )
+    memo.groups()[group.0 as usize]
+        .group_properties
+        .column_signs
+        .get(column)
+        .is_some_and(|sign| sign.is_one_sign())
 }
 
 /// Whether every key `reduction` groups `child`'s rows by is copied from a
