@@ -35,17 +35,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use asap_accuracy::{AccuracyEvidence, ErrorMetricsOfMemo};
 use asap_cost::PlanCost;
-use asap_stage1_pass2_reuse_candidates::chain_off_the_evaluation_grid;
 use asap_types::ir::flat::flatten;
 use asap_types::ir::operator::Source;
 use asap_types::ir::QueryRoot;
+use asap_types::plan::materialized_view::MaterializedView;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::{
-    CandidateForMemoGroup, CandidateForMemoGroupId, ColumnLineage, EvaluationGrid,
-    LogicalASAPMemoCandidates, Memo, MemoGroup, MemoGroupId, PhysicalASAPMemoCandidates,
-    PhysicalCandidateId, PhysicalEdge, PhysicalProperties, RequiredAccuracy, RootPruneReason,
+    AggregateCoverage, CandidateForMemoGroup, CandidateForMemoGroupId, ColumnLineage,
+    EvaluationGrid, LogicalASAPMemoCandidates, Memo, MemoGroup, MemoGroupId,
+    PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdge, PhysicalProperties,
+    RequiredAccuracy, RootPruneReason,
 };
 use asap_types::summary_type::SketchParams;
 
@@ -53,10 +53,10 @@ use crate::candidate_labels::{operator_label, parameters_label};
 use crate::planning_stages::{PlanningStagesRun, RunUntil};
 
 /// The output of every stage `stages` ran, as text, one section per stage
-/// boundary. `evidence` is the accuracy evidence the run planned with
-/// (each failing logical edge's reason is computed from it), and
-/// `plan_cost` the selected plan's `asap_cost::plan_cost`, printed with
-/// the plan when given. A failure ends the text with its error.
+/// boundary. `plan_cost` is the selected plan's `asap_cost::plan_cost` and
+/// `materialized_views` its materialized views as `plan_installable`
+/// derives them (or why it is not installable), each printed with the plan
+/// when given. A failure ends the text with its error.
 ///
 /// Unless `printing_full_candidates`, the candidates of a memo group that differ only in θ
 /// are folded ([`write_memo`]): one line gives their indices, each θ
@@ -65,8 +65,8 @@ use crate::planning_stages::{PlanningStagesRun, RunUntil};
 /// Pass 2 and Stage 2 are then counts per cause.
 pub fn planning_stages_text(
     stages: &PlanningStagesRun,
-    evidence: &dyn AccuracyEvidence,
     plan_cost: Option<&PlanCost>,
+    materialized_views: Option<&Result<Vec<MaterializedView>, String>>,
     printing_full_candidates: bool,
 ) -> String {
     let mut out = String::new();
@@ -89,7 +89,7 @@ pub fn planning_stages_text(
         "Stage 0 → Stage 1: Memo (the roots hash-consed, without candidates)",
     );
     if let Some(memo) = &stages.stage0_memo_groups {
-        write_memo(&mut out, memo, None, None, printing_full_candidates);
+        write_memo(&mut out, memo, None, printing_full_candidates);
     }
     if until == RunUntil::Stage0 {
         return out;
@@ -104,7 +104,6 @@ pub fn planning_stages_text(
         &mut out,
         pass1,
         Some(MemoStep::Pass1),
-        None,
         printing_full_candidates,
     );
     if until == RunUntil::Pass1 {
@@ -123,7 +122,6 @@ pub fn planning_stages_text(
         &mut out,
         &logical.memo,
         Some(MemoStep::Pass2 { pass1, logical }),
-        Some(evidence),
         printing_full_candidates,
     );
     write_pass2_pruned(&mut out, logical, printing_full_candidates);
@@ -146,7 +144,7 @@ pub fn planning_stages_text(
     }
 
     section(&mut out, "Stage 3 output: PhysicalASAPDAG and Selection");
-    write_selection(&mut out, stages, plan_cost);
+    write_selection(&mut out, stages, plan_cost, materialized_views);
     out
 }
 
@@ -244,12 +242,14 @@ pub fn column_lineage_text(group: &MemoGroup) -> Vec<String> {
         .collect()
 }
 
-/// A group's properties on one line: each column's name, lineage and sign,
-/// whether its result depends on the evaluation time, the sources it
-/// scans, and (from Pass 2 on, `grid`) the grid a result of it is
-/// evaluated on:
-/// `ts=latency.ts:Unknown value=latency.value:NonNegative · depends on the
-/// evaluation time · scans latency · evaluated every 60000 ms at 0`.
+/// A group's properties on one line: its result kind, each column's name,
+/// lineage and sign, whether its result depends on the evaluation time,
+/// whether two equal expressions of it may not be one group, the sources
+/// it scans, (from Pass 2 on, `grid`) the grid a result of it is evaluated
+/// on, and an aggregate's coverage ([`aggregate_coverage_text`]):
+/// `State ts=latency.ts:Unknown state=G4.1:Unknown · depends on the
+/// evaluation time · scans latency · evaluated every 60000 ms at 0 ·
+/// covers G1 through [SummaryAgg Kll] selecting [...]`.
 fn group_properties_text(group: &MemoGroup, grid: Option<Option<&EvaluationGrid>>) -> String {
     let properties = &group.group_properties;
     let columns: Vec<String> = properties
@@ -260,9 +260,12 @@ fn group_properties_text(group: &MemoGroup, grid: Option<Option<&EvaluationGrid>
         .zip(&properties.column_signs)
         .map(|((field, lineage), sign)| format!("{}={lineage}:{sign:?}", field.name))
         .collect();
-    let mut text = columns.join(" ");
+    let mut text = format!("{:?} {}", properties.result_kind, columns.join(" "));
     if properties.depends_on_evaluation_time {
         text += " · depends on the evaluation time";
+    }
+    if !properties.shareable_when_equal {
+        text += " · not shareable when equal";
     }
     let sources: Vec<&str> = properties
         .scanned_sources
@@ -286,7 +289,33 @@ fn group_properties_text(group: &MemoGroup, grid: Option<Option<&EvaluationGrid>
         Some(None) => text += " · no known evaluation grid",
         None => {}
     }
+    if let Some(coverage) = &properties.aggregate_coverage {
+        let _ = write!(text, " · {}", aggregate_coverage_text(coverage));
+    }
     text
+}
+
+/// What an aggregate group covers (`GroupProperties::aggregate_coverage`),
+/// which decides whether a rollup or a view match may read it: its input
+/// group (`a scan` when the scan's matchers are lifted too), its
+/// operators not lifted into the selection, top down, and its selection as
+/// JSON. Example: `covers G1 through [SummaryAgg Kll] selecting
+/// [{"columns":[...]}]`.
+pub fn aggregate_coverage_text(coverage: &AggregateCoverage) -> String {
+    let definition = coverage.definition();
+    let input = definition
+        .input
+        .map_or("a scan".to_owned(), |group| format!("G{}", group.0));
+    let operators: Vec<String> = definition
+        .unlifted_operators
+        .iter()
+        .map(operator_label)
+        .collect();
+    format!(
+        "covers {input} through [{}] selecting {}",
+        operators.join(", "),
+        serde_json::to_string(coverage.selection()).unwrap_or_default()
+    )
 }
 
 /// `<- a, b`, or nothing when there is nothing read.
@@ -316,7 +345,8 @@ enum MemoStep<'a> {
 /// past the group's Pass 1 candidates), `pruned` (Pass 2 eliminated it),
 /// the operator $e_v$ with its input groups, θ, the fused groups and the
 /// required accuracy per input; at Pass 2, under each candidate, the
-/// logical edges into each input with $\alpha^{\log}$ (from `evidence`).
+/// logical edges into each input with $\alpha^{\log}$ and, when it is 0,
+/// the reason Pass 2 recorded.
 ///
 /// Unless `printing_full_candidates`, candidates that differ only in θ (same origin, `new`,
 /// operator, fused groups and requirements) are folded when there are
@@ -338,7 +368,6 @@ fn write_memo(
     out: &mut String,
     memo: &Memo,
     step: Option<MemoStep<'_>>,
-    evidence: Option<&dyn AccuracyEvidence>,
     printing_full_candidates: bool,
 ) {
     // The group lines share one set of column widths, with each group's
@@ -367,11 +396,6 @@ fn write_memo(
         Some(MemoStep::Pass2 { pass1, logical }) => (Some(pass1), Some(logical)),
         _ => (None, None),
     };
-    // The metric rule's error metrics of Pass 2's memo, once.
-    let error_metrics = logical.and_then(|logical| {
-        let order = logical.memo.topological_order()?;
-        Some(ErrorMetricsOfMemo::of(&logical.memo, &order))
-    });
     let pruned: BTreeMap<CandidateForMemoGroupId, &'static str> = logical
         .map(|logical| {
             logical
@@ -500,18 +524,9 @@ fn write_memo(
             );
             cells.insert(3, flag(pruned.contains_key(&candidate_id), "pruned"));
             write_rows(out, "    ", vec![cells]);
-            if let (Some(logical), Some(error_metrics), Some(evidence)) =
-                (logical, &error_metrics, evidence)
-            {
+            if let Some(logical) = logical {
                 let folded_producers = (!printing_full_candidates).then_some(&pruned);
-                write_logical_edges(
-                    out,
-                    logical,
-                    error_metrics,
-                    candidate_id,
-                    evidence,
-                    folded_producers,
-                );
+                write_logical_edges(out, logical, candidate_id, folded_producers);
             }
         }
     }
@@ -533,9 +548,7 @@ fn write_memo(
 fn write_logical_edges(
     out: &mut String,
     logical: &LogicalASAPMemoCandidates,
-    error_metrics: &ErrorMetricsOfMemo,
     consumer: CandidateForMemoGroupId,
-    evidence: &dyn AccuracyEvidence,
     folded: Option<&BTreeMap<CandidateForMemoGroupId, &'static str>>,
 ) {
     let groups = logical
@@ -544,17 +557,16 @@ fn write_logical_edges(
         .expression
         .operator
         .children();
-    for ((input, group), edges) in groups.into_iter().enumerate().zip(logical_edges_into(
-        logical,
-        error_metrics,
-        consumer,
-        evidence,
-    )) {
+    for ((input, group), edges) in groups
+        .into_iter()
+        .enumerate()
+        .zip(logical_edges_into(logical, consumer))
+    {
         let (mut pruned_producers, mut other_parameters) = (0, 0);
         let rows: Vec<Vec<String>> = edges
             .into_iter()
             .enumerate()
-            .filter_map(|(index_in_group, rejection)| {
+            .filter_map(|(index_in_group, status)| {
                 let producer = CandidateForMemoGroupId {
                     group: *group,
                     index_in_group,
@@ -564,13 +576,13 @@ fn write_logical_edges(
                         pruned_producers += 1;
                         return None;
                     }
-                    if rejection.as_deref() == Some(NO_EDGE_OTHER_PARAMETERS) {
+                    if matches!(status, LogicalEdgeStatus::NoEdgeOtherTheta) {
                         other_parameters += 1;
                         return None;
                     }
                 }
                 let producer = candidate_id_text(producer);
-                Some(match rejection {
+                Some(match status.rejection() {
                     None => vec![producer, "✓".into()],
                     Some(reason) => vec![producer, format!("✗ {reason}")],
                 })
@@ -594,45 +606,64 @@ fn write_logical_edges(
     }
 }
 
+/// Whether a possible logical edge $(u, c, i)$ holds, as Pass 2 decided.
+#[derive(Debug, Clone, Copy)]
+pub enum LogicalEdgeStatus<'a> {
+    /// $\alpha^{\log} = 1$: Pass 2 recorded no failure for it.
+    Holds,
+    /// No edge: the consumer reads only producers of its own θ
+    /// (`Memo::producers`), e.g. a `SummaryMerge` with θ = `Kll(k=200)`
+    /// and a `Kll(k=400)` build.
+    NoEdgeOtherTheta,
+    /// $\alpha^{\log} = 0$, with the reason Pass 2 recorded
+    /// (`LogicalASAPMemoCandidates::failing_logical_edges`).
+    Fails(&'a RootPruneReason),
+}
+
+impl LogicalEdgeStatus<'_> {
+    /// Why the edge fails, `None` when it holds: `no edge: the producer's
+    /// θ differs`, or `α^log = 0: ` and [`root_prune_reason_text`].
+    pub fn rejection(&self) -> Option<String> {
+        match self {
+            Self::Holds => None,
+            Self::NoEdgeOtherTheta => Some("no edge: the producer's θ differs".to_owned()),
+            Self::Fails(reason) => Some(format!("α^log = 0: {}", root_prune_reason_text(reason))),
+        }
+    }
+}
+
 /// Per input $i$ of `consumer` $c$, per candidate $u$ of the input group
-/// $G_{c,i}$ (eliminated ones included): why $\alpha^{\log}_{u,c,i} = 0$,
-/// `no edge` when it cannot read the producer at all (`Memo::producers`: a
-/// different θ), else `α^log = 0: ` and [`root_prune_reason_text`] of the
-/// reason Pass 2's edge rule gives, or `None` when it holds. Pass 2's rule
-/// is checked in its order: a chain whose windows do not end on the
-/// consumer's evaluation grid (`chain_off_the_evaluation_grid`), then the
-/// metric and accuracy rules (`error_metrics`, `ErrorMetricsOfMemo::of`
-/// the memo, with `evidence`, the evidence Pass 2 read). An edge Pass 2
-/// recorded as failing that both pass fails its last rule: the consumer
-/// is a readout of a query whose whole-result failure probability has no
-/// per-value one.
+/// $G_{c,i}$ (eliminated ones included), in group order: whether the edge
+/// holds, read from Pass 2's output. A producer the consumer cannot read
+/// has no edge; a readable one fails with the reason Pass 2 recorded in
+/// `failing_logical_edges`, and holds when it is not listed there.
 pub fn logical_edges_into(
     logical: &LogicalASAPMemoCandidates,
-    error_metrics: &ErrorMetricsOfMemo,
     consumer: CandidateForMemoGroupId,
-    evidence: &dyn AccuracyEvidence,
-) -> Vec<Vec<Option<String>>> {
+) -> Vec<Vec<LogicalEdgeStatus<'_>>> {
     let memo = &logical.memo;
-    let recorded_failing: BTreeSet<(CandidateForMemoGroupId, usize)> = logical
-        .edges
+    // `failing_logical_edges` is sorted by consumer.
+    let first = logical
+        .failing_logical_edges
+        .partition_point(|(edge, _)| edge.consumer_candidate_id < consumer);
+    let failing: BTreeMap<(usize, CandidateForMemoGroupId), &RootPruneReason> = logical
+        .failing_logical_edges[first..]
         .iter()
-        .filter(|edge| {
-            edge.consumer_candidate_id == consumer && !edge.satisfies_logical_requirement
+        .take_while(|(edge, _)| edge.consumer_candidate_id == consumer)
+        .map(|(edge, reason)| {
+            (
+                (edge.input_index_of_consumer, edge.producer_candidate_id),
+                reason,
+            )
         })
-        .map(|edge| (edge.producer_candidate_id, edge.input_index_of_consumer))
         .collect();
     let groups = memo.candidate(consumer).expression.operator.children();
     groups
         .into_iter()
         .enumerate()
         .map(|(input, group)| {
-            let readable = memo.producers(consumer, input);
-            let chain_off_the_grid = chain_off_the_evaluation_grid(
-                memo,
-                &logical.evaluation_grid_of_group,
-                consumer.group,
-                *group,
-            );
+            let readable: BTreeSet<CandidateForMemoGroupId> =
+                memo.producers(consumer, input).into_iter().collect();
             (0..memo.groups()[group.0 as usize].candidates.len())
                 .map(|index_in_group| {
                     let producer = CandidateForMemoGroupId {
@@ -640,44 +671,18 @@ pub fn logical_edges_into(
                         index_in_group,
                     };
                     if !readable.contains(&producer) {
-                        return Some(NO_EDGE_OTHER_PARAMETERS.to_owned());
+                        return LogicalEdgeStatus::NoEdgeOtherTheta;
                     }
-                    let reason = match chain_off_the_grid {
-                        Some((tumbling_window_width_ms, evaluation_period_ms)) => {
-                            Err(RootPruneReason::ChainWidthDoesNotDivideEvaluationGrid {
-                                consumer,
-                                input,
-                                tumbling_window_width_ms,
-                                evaluation_period_ms,
-                            })
-                        }
-                        None => error_metrics.edge_meets_logical_requirements(
-                            memo, producer, consumer, input, evidence,
-                        ),
-                    };
-                    match reason {
-                        Err(reason) => {
-                            Some(format!("α^log = 0: {}", root_prune_reason_text(&reason)))
-                        }
-                        Ok(()) if recorded_failing.contains(&(producer, input)) => {
-                            Some(format!("α^log = 0: {VALUES_PER_EVALUATION_UNKNOWN}"))
-                        }
-                        Ok(()) => None,
-                    }
+                    failing
+                        .get(&(input, producer))
+                        .map_or(LogicalEdgeStatus::Holds, |reason| {
+                            LogicalEdgeStatus::Fails(reason)
+                        })
                 })
                 .collect()
         })
         .collect()
 }
-
-/// Why an edge into a readout fails when its query's failure probability
-/// has no per-value one (`RootPruneReason::ValuesPerEvaluationUnknown`).
-const VALUES_PER_EVALUATION_UNKNOWN: &str = "the query's failure probability covers its whole \
-     result, and the number of values one evaluation returns is unknown";
-
-/// A logical edge's rejection when the consumer cannot read the producer
-/// (`Memo::producers`: another θ).
-const NO_EDGE_OTHER_PARAMETERS: &str = "no edge: the producer's θ differs";
 
 /// `0..279`, or `0..3, 7, 9..12`: sorted indices as ranges.
 fn index_ranges(indices: &[usize]) -> String {
@@ -853,7 +858,10 @@ pub fn root_prune_reason_text(reason: &RootPruneReason) -> String {
             "the producer's summary type has no guarantee for the readout's statistic".to_owned()
         }
         RootPruneReason::ValuesPerEvaluationUnknown { query, .. } => {
-            format!("query {query}: {VALUES_PER_EVALUATION_UNKNOWN}")
+            format!(
+                "query {query}: the query's failure probability covers its whole result, and the \
+                 number of values one evaluation returns is unknown"
+            )
         }
         RootPruneReason::ChainWidthDoesNotDivideEvaluationGrid {
             tumbling_window_width_ms,
@@ -1143,10 +1151,17 @@ fn write_physical(
 }
 
 /// Stage 3's plan, each node with its physical candidate, operator and
-/// input nodes; the plan's cost (`plan_cost`) with each node's charge;
-/// each query's accepted accuracy; the selection MILP's size; and the
-/// candidates Stage 3 pruned. Or why no plan was selected.
-fn write_selection(out: &mut String, stages: &PlanningStagesRun, plan_cost: Option<&PlanCost>) {
+/// input nodes; the plan's cost (`plan_cost`) with each node's charge; its
+/// materialized views (`materialized_views`), one line each with its node,
+/// refresh and retention; each query's accepted accuracy; the selection
+/// MILP's size; and the candidates Stage 3 pruned. Or why no plan was
+/// selected. Costs print as `{:.6e}`.
+fn write_selection(
+    out: &mut String,
+    stages: &PlanningStagesRun,
+    plan_cost: Option<&PlanCost>,
+    materialized_views: Option<&Result<Vec<MaterializedView>, String>>,
+) {
     let run = &stages.run;
     let (plan, selection) = match &run.selection {
         Ok(selected) => selected,
@@ -1158,7 +1173,7 @@ fn write_selection(out: &mut String, stages: &PlanningStagesRun, plan_cost: Opti
     let _ = writeln!(
         out,
         "selection MILP: {} variables, {} constraints, {} ms building, {} ms solving, \
-         objective {}/s",
+         objective {:.6e}/s",
         selection.milp_variable_count,
         selection.milp_constraint_count,
         selection.milp_construction_ms,
@@ -1221,6 +1236,26 @@ fn write_selection(out: &mut String, stages: &PlanningStagesRun, plan_cost: Opti
             })
             .collect();
         write_rows(out, "    ", rows);
+    }
+    match materialized_views {
+        Some(Ok(views)) => {
+            let _ = writeln!(out, "materialized views ({}):", views.len());
+            let rows = views
+                .iter()
+                .map(|view| {
+                    vec![
+                        format!("n{}", view.node_id),
+                        format!("{:?}", view.refresh()),
+                        format!("retention {} ms", view.retention_ms()),
+                    ]
+                })
+                .collect();
+            write_rows(out, "    ", rows);
+        }
+        Some(Err(error)) => {
+            let _ = writeln!(out, "materialized views: not installable: {error}");
+        }
+        None => {}
     }
     let _ = writeln!(out, "accepted accuracy:");
     for (query, accepted) in selection.accepted_accuracy_per_query.iter().enumerate() {

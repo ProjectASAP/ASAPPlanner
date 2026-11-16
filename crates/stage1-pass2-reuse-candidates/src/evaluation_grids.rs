@@ -86,7 +86,7 @@ pub(crate) fn evaluation_grids(
 /// divide `group`'s evaluation period (`evaluation_grid_of_group`, from
 /// [`evaluation_grids`]) or that period is unknown: the chain's width and
 /// the period in ms. Its windows do not end at `group`'s evaluation times.
-pub fn chain_off_the_evaluation_grid(
+pub(crate) fn chain_off_the_evaluation_grid(
     memo: &Memo,
     evaluation_grid_of_group: &[Option<EvaluationGrid>],
     group: MemoGroupId,

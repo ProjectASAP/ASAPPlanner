@@ -28,10 +28,6 @@ mod tests;
 
 use std::collections::BTreeSet;
 
-/// Pass 2's chain rule, which `asap_planner` reads to say why a logical
-/// edge fails.
-pub use evaluation_grids::chain_off_the_evaluation_grid;
-
 use asap_accuracy::{AccuracyEvidence, ErrorMetricsOfMemo};
 use asap_types::stages::{
     CandidateError, CandidateForMemoGroupId, LogicalASAPMemoCandidates, LogicalEdge, Memo,
@@ -69,7 +65,8 @@ pub enum Pass2RuleError {
 ///    dead-candidate elimination again over the memo with them (a merge
 ///    whose θ serves no consumer);
 /// 6. the logical edges between the surviving candidates, with
-///    $\alpha^{\log}$ from `evidence` or the theoretical guarantee, and the
+///    $\alpha^{\log}$ from `evidence` or the theoretical guarantee, every
+///    failing edge with its reason (eliminated candidates' included), and the
 ///    groups each query may read only exactly
 ///    (`ErrorMetricsOfMemo::exact_only_groups_of_query`).
 ///
@@ -122,15 +119,24 @@ pub fn generate_logical_asap_memo_candidates(
     );
     let pruned = eliminate_dead_candidates(&memo, &candidate_edges);
     let dead = candidates_of(&pruned);
-    let edges = candidate_edges
-        .into_iter()
-        .filter(|edge| !dead.contains(&edge.producer) && !dead.contains(&edge.consumer))
-        .map(|edge| LogicalEdge {
-            producer_candidate_id: edge.producer,
-            consumer_candidate_id: edge.consumer,
-            input_index_of_consumer: edge.input,
-            satisfies_logical_requirement: edge.satisfies.is_ok(),
+    let logical_edge = |edge: &edges::CandidateEdge| LogicalEdge {
+        producer_candidate_id: edge.producer,
+        consumer_candidate_id: edge.consumer,
+        input_index_of_consumer: edge.input,
+        satisfies_logical_requirement: edge.satisfies.is_ok(),
+    };
+    // Before the dead endpoints are dropped: why each failing edge fails.
+    let failing_logical_edges = candidate_edges
+        .iter()
+        .filter_map(|edge| {
+            let reason = edge.satisfies.as_ref().err()?;
+            Some((logical_edge(edge), reason.clone()))
         })
+        .collect();
+    let edges = candidate_edges
+        .iter()
+        .filter(|edge| !dead.contains(&edge.producer) && !dead.contains(&edge.consumer))
+        .map(logical_edge)
         .collect();
     let exact_only_groups_of_query = error_metrics.exact_only_groups_of_query(
         &memo,
@@ -141,6 +147,7 @@ pub fn generate_logical_asap_memo_candidates(
     Ok(LogicalASAPMemoCandidates {
         memo,
         edges,
+        failing_logical_edges,
         pruned,
         evaluation_grid_of_group,
         exact_only_groups_of_query,

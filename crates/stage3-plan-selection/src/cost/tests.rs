@@ -148,6 +148,7 @@ fn no_execution_reading_a_producer_costs_less_than_nothing() {
         LogicalASAPMemoCandidates {
             memo,
             edges: vec![],
+            failing_logical_edges: vec![],
             pruned: vec![],
             evaluation_grid_of_group: vec![None; groups],
             exact_only_groups_of_query: vec![],

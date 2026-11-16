@@ -106,6 +106,7 @@ fn physical(
         LogicalASAPMemoCandidates {
             memo,
             edges: vec![],
+            failing_logical_edges: vec![],
             pruned: vec![],
             evaluation_grid_of_group: vec![None; groups],
             exact_only_groups_of_query: vec![],
