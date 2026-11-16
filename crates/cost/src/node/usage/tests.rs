@@ -1291,7 +1291,7 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
         rows_per_state: Some(12_000),
         non_negative: false,
         value_magnitude_range: None,
-        distinct_values: None,
+        distinct_values: Some(1_000_000),
     };
     let state_bytes = crate::node::state_bytes::sketch_state_bytes(&parameters, rows);
     let build = PhysicalASAPDAGNode {

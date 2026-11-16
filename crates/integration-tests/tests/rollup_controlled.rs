@@ -47,6 +47,7 @@ fn nodes(roots: &[QueryRoot]) -> Vec<Rc<OperatorNode>> {
 /// of its 10,000 series sampled every `sample_interval_ms`: at 5 ms,
 /// 2,000,000 rows per second and 600,000,000 rows per evaluation, 10,000
 /// groups for each grouping and 1,000,000 users.
+///
 /// Returns the sketches each query's accepted plan reads and how many KMV
 /// builds (at query time, or in tumbling windows as rows arrive) the
 /// selected plan holds.
@@ -129,10 +130,10 @@ fn production_distinct_rollup_builds_kmv_at_60k_rows_per_state() {
     assert!(kmv_builds > 0, "the selected plan builds a KMV");
 }
 
-/// At 400,000 rows per second (a sample every 25 ms) the planned shape (120,000,000 rows over
-/// 10,000 groups) has 12,000 rows per state, as the 12,000,000-row run
-/// above does, where exact measured 1.39x faster than KMV: the planner
-/// counts both queries exactly.
+/// At 400,000 rows per second (a sample every 25 ms) the planned shape
+/// (120,000,000 rows over 10,000 groups) has 12,000 rows per state, as the
+/// 12,000,000-row run above does, where exact measured 1.39x faster than
+/// KMV: the planner counts both queries exactly.
 #[test]
 fn production_distinct_rollup_counts_exactly_at_12k_rows_per_state() {
     let (sketches, kmv_builds) = plan_rollup(25);

@@ -360,6 +360,13 @@ fn cache_miss_fraction(entries: f64, entries_in_cache: f64) -> f64 {
     (1.0 - entries_in_cache / entries.max(1.0)).max(0.0)
 }
 
+/// The expected distinct values among `draws` uniform draws from a column
+/// of `values` values: `values · (1 − e^(−draws / values))`. Example:
+/// 12,000 rows of 1,000,000 users hold 11,929 distinct users.
+fn expected_distinct_values(draws: f64, values: f64) -> f64 {
+    -values * (-draws / values).exp_m1()
+}
+
 /// The operations one input row costs an exact distinct count (or
 /// frequency statistic) over `rows` rows in `group_count` groups, of a
 /// column taking `distinct_values` values, beyond the measure's own, its
@@ -381,7 +388,7 @@ pub(crate) fn exact_distinct_value_operations_per_row(
     let values = distinct_values.max(1) as f64;
     let rows = rows.max(1) as f64;
     let groups = group_count.max(1) as f64;
-    let pairs = groups * -values * (-(rows / groups) / values).exp_m1();
+    let pairs = groups * expected_distinct_values(rows / groups, values);
     let table_values = values.clamp(EXACT_DISTINCT_FEWEST_VALUES, EXACT_DISTINCT_MOST_VALUES);
     EXACT_DISTINCT_OPERATIONS_PER_ROW
         + EXACT_DISTINCT_OPERATIONS_PER_VALUE_DOUBLING
@@ -611,7 +618,7 @@ pub(crate) fn kmv_compared_hashes_per_row(
             // Distinct values among the rows before it, and the share of
             // its own value among them.
             let seen = match values.is_finite() {
-                true => -values * (-row / values).exp_m1(),
+                true => expected_distinct_values(row, values),
                 false => row,
             };
             let seen_before = seen / values;
@@ -702,7 +709,7 @@ pub(crate) fn merge_operations_per_state(
                 let rows = rows as f64;
                 values.map_or(rows, |values| {
                     let values = values.max(1) as f64;
-                    -values * (-rows / values).exp_m1()
+                    expected_distinct_values(rows, values)
                 })
             });
             let retained_hashes =

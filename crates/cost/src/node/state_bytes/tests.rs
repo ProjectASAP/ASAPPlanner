@@ -24,6 +24,33 @@ fn exact_state_is_priced_at_the_executors_state_size() {
     assert_eq!(asap_types::summary_type::EXACT_ACCUMULATOR_STATE_BYTES, 56);
 }
 
+/// Merging states keeps the larger column's distinct values, since they
+/// describe the column the states were built from, not one state: states
+/// over 1,000 and 1,000,000 users merge as 1,000,000; with either unknown,
+/// unknown. Rows add up per state.
+#[test]
+fn merged_input_rows_keep_the_larger_distinct_values() {
+    let rows = |rows_per_state, distinct_values| StateInputRows {
+        rows_per_state: Some(rows_per_state),
+        non_negative: true,
+        value_magnitude_range: None,
+        distinct_values,
+    };
+    let merged = StateInputRows::merged([
+        Some((rows(12_000, Some(1_000)), 2)),
+        Some((rows(6_000, Some(1_000_000)), 1)),
+    ])
+    .unwrap();
+    assert_eq!(merged.rows_per_state, Some(30_000));
+    assert_eq!(merged.distinct_values, Some(1_000_000));
+    let merged = StateInputRows::merged([
+        Some((rows(12_000, Some(1_000)), 1)),
+        Some((rows(6_000, None), 1)),
+    ])
+    .unwrap();
+    assert_eq!(merged.distinct_values, None);
+}
+
 /// The rows a family is fed.
 enum Rows {
     /// One sample value a row.
