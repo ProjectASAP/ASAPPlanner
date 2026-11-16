@@ -720,3 +720,28 @@ fn sum_rate_and_increase_over_5m_at_10_hz_every_300_s_with_raw_data_build_at_que
         );
     }
 }
+
+/// Two identical `sum_over_time(m[5m])` every 60 s over 1,000 series of a
+/// gauge at 1 Hz, raw data kept, no accuracy target. Measured cost per
+/// evaluation (cost model 1's default prices on the measured usage), the
+/// exact scan against stored 10 s Sum windows: 0.323 against 0.261. The
+/// exact plan's per-series hash aggregate measures 46 ns per row where it
+/// was charged 35: at 1 Hz a 10 s raw batch holds 10 rows of a series, and
+/// the executor visits each series' group once per batch. Charged per row
+/// alone, the two plans were predicted within 0.4% (0.2527 against 0.2538)
+/// and the exact scan was selected.
+#[test]
+fn identical_sum_over_time_pair_at_1_hz_keeps_stored_sum_windows() {
+    let entry = r#"{"query": "sum_over_time(m[5m])", "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
+        "requirements": {"max_latency_ms": null}, "predictability": {"predictable": {"known_at": null}}}"#;
+    let workload: PlanningWorkload = serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{entry}, {entry}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 2000.0}}}},
+              "sources": {{
+                "m": {{"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000}},
+                "c": {{"series_count": 1000, "metric_type": "counter", "sample_interval": 1000}}}}}}}}"#
+    ))
+    .unwrap();
+    let (plan, _) = selected(&workload, true);
+    assert_eq!(plan_kind(&plan), PlanKind::StoredStates);
+}
