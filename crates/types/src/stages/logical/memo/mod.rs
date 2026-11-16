@@ -23,7 +23,7 @@ use crate::stages::{
     LogicalRequirements, MemoGroup, MemoGroupId,
 };
 use crate::summary_type::SketchStatistic;
-use crate::workload::bounds::source_name;
+use crate::workload::bounds::{smaller_known, source_name};
 use crate::workload::{series_facts, DataArrival, DataWorkload, SourceFacts};
 use hash_consing::{
     expression_hash, same_candidate, same_serialized_expression, serialized_expression,
@@ -93,8 +93,8 @@ impl Memo {
         &self.groups
     }
 
-    /// The most values one evaluation of `group`, a readout or a state,
-    /// returns, from the facts the data workload declares; `None` when they
+    /// The most values one evaluation of `group`, a readout, a state, a
+    /// grouped aggregate or a query result over one, returns, from the facts the data workload declares; `None` when they
     /// bound it in no way. As SQL optimizers estimate the groups of a
     /// `GROUP BY` (the product of the key columns' distinct counts, clamped
     /// to the input rows), but as an upper bound, it is the smaller of:
@@ -123,7 +123,10 @@ impl Memo {
     /// it reads at once; `SELECT count(DISTINCT dst) FROM flows` reads one
     /// distinct count per evaluation; `GROUP BY bytes` over the last 15
     /// minutes of `flows`, 6 groups of rows sampled every minute, returns
-    /// at most the 6 × 16 = 96 rows it reads.
+    /// at most the 6 × 16 = 96 rows it reads. It is the readout values `R`
+    /// a query's failure probability splits over, and Stage 0's bound on a
+    /// query's values `n_q` (`workload::bounds::values_per_result`): `GROUP
+    /// BY dst` with 300 `dst` values declared returns up to 300.
     pub fn max_values_per_evaluation(&self, group: MemoGroupId) -> Option<u64> {
         let (keys, input) = self.keys_of_values(group)?;
         let by_keys = match keys {
@@ -251,11 +254,30 @@ impl Memo {
     /// are computed from ([`Self::max_values_per_evaluation`]): the keys of
     /// the state it is, or reads, or of the aggregate it is, and that
     /// state's or aggregate's input. A top-k readout or aggregate returns
-    /// several rows per group, so it counts as per series. `None` for any
-    /// other group.
+    /// several rows per group, so it counts as per series. Above them, an
+    /// operator that keeps, drops or reorders their rows (the projection,
+    /// `HAVING`, `ORDER BY` and `LIMIT` of `SELECT src, count(*) ... GROUP
+    /// BY src`), a finalization, or a merge keeping its states' groups has
+    /// their keys. `None` for any other group.
     fn keys_of_values(&self, group: MemoGroupId) -> Option<(KeysOfValues, MemoGroupId)> {
         let (reduction, child, one_row_per_group) = match &self.groups[group.0 as usize].expression
         {
+            Operator::NonASAP(
+                NonASAPOp::Project { child, .. }
+                | NonASAPOp::Filter { child, .. }
+                | NonASAPOp::Sort { child, .. }
+                | NonASAPOp::Limit { child, .. }
+                | NonASAPOp::Dedup { child, .. },
+            )
+            | Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => {
+                return self.keys_of_values(*child);
+            }
+            // A merge's children are states of one definition: its first
+            // build's keys stand for all of them.
+            Operator::ASAP(ASAPOp::SummaryMerge {
+                children,
+                group_by: None,
+            }) => return self.keys_of_values(*children.first()?),
             Operator::ASAP(ASAPOp::SummaryEstimate {
                 summary_input,
                 query,
@@ -702,15 +724,6 @@ impl KeysOfValues {
             Self::PerSeries | Self::SourceColumns(_) => Self::PerSeries,
             Self::ComputedOrTime => Self::ComputedOrTime,
         }
-    }
-}
-
-/// The smaller of two upper bounds, either alone when the other is
-/// unknown.
-fn smaller_known(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
     }
 }
 
