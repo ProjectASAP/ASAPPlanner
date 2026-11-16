@@ -490,3 +490,213 @@ fn a_time_independent_group_without_a_grid_is_materialized_across_evaluations() 
     assert!(offered(&physical, pinned).contains(&properties(IT_NONE)));
     assert_eq!(pruned(&physical, pinned), vec![]);
 }
+
+/// A Count-Min state (`Cms`, `CmsWithHeap`, `HydraCms`) estimates a count
+/// as the minimum over its rows of counters that only grow, which
+/// over-estimates only while every weight is non-negative: with weights
+/// +5 and -5 hashed to one counter, a key that saw only +5 reads 0. So
+/// Stage 2 offers a Count-Min build exactly when its state column's sign
+/// (the weights it is updated with) is `NonNegative`, and prunes it with
+/// `CountMinWeightsNotProvenNonNegative` otherwise. Each build is keyed
+/// by the series and weighted by:
+///
+/// | Weight | Sign (hand-derived) | Expected |
+/// |---|---|---|
+/// | `pos` (declared non-negative) | N | offered |
+/// | `neg` (declared non-positive) | P | pruned |
+/// | `mixed` (undeclared) | U | pruned |
+/// | `rate(c_total[5m])` (a counter) | N | offered |
+/// | `clamp_min(mixed, 0)` | N: `max(x, +0)` is ≥ +0, `max(-0.0, +0.0)` = +0 | offered |
+/// | `Constant(1.0)` over `mixed` | N | offered |
+/// | `Constant(-1.0)` over `mixed` | P | pruned |
+///
+/// Each runs for `Cms` and `CmsWithHeap`. Every mismatch is listed, then
+/// the test fails once with all of them; it then checks
+/// `state_column_sign` against the same hand-derived signs. Today the
+/// `clamp_min` row is pruned (the function has no sign rule).
+#[test]
+fn count_min_is_offered_only_over_non_negative_weights() {
+    use asap_types::ir::operator::AggIntent;
+    use asap_types::ir::scalar::{resolve_column_ref, ScalarValue};
+    use asap_types::ir::{NonASAPOp, ProjectItem, ScalarExpr};
+    use asap_types::stages::MemoGroupId;
+    use asap_types::summary_type::parameter_list;
+    use asap_types::test_support::memo_fixtures::aggregate;
+    use asap_types::workload::PrometheusMetricType;
+    use ValueSign::{NonNegative, NonPositive, Unknown};
+
+    let declared = |sign| SourceFacts {
+        column_signs: BTreeMap::from([("value".to_string(), sign)]),
+        ..SourceFacts::default()
+    };
+    let data = DataWorkload {
+        sources: BTreeMap::from([
+            ("pos".to_string(), declared(NonNegative)),
+            ("neg".to_string(), declared(NonPositive)),
+            ("mixed".to_string(), SourceFacts::default()),
+            (
+                "c_total".to_string(),
+                SourceFacts {
+                    metric_type: Some(PrometheusMetricType::Counter),
+                    ..SourceFacts::default()
+                },
+            ),
+        ]),
+        ..DataWorkload::default()
+    };
+    /// The group of each row's weight column: a scan, a rate or a clamp,
+    /// built over a scan by the groups listed bottom-up (each one's own
+    /// candidate feeding the next).
+    enum WeightInput {
+        Scan(&'static str),
+        RateOf(&'static str),
+        ClampMinZeroOf(&'static str),
+    }
+    let weight_input = |memo: &mut Memo, input: &WeightInput| -> Vec<MemoGroupId> {
+        match input {
+            WeightInput::Scan(metric) => vec![scan_group(memo, metric, &["job"], vec![])],
+            WeightInput::RateOf(metric) => {
+                let scan = scan_group(memo, metric, &["job"], vec![]);
+                let window = group(memo, range(300_000, scan));
+                let rate = group(
+                    memo,
+                    aggregate(Reduction::PerEntity, AggIntent::Rate, window),
+                );
+                vec![scan, window, rate]
+            }
+            WeightInput::ClampMinZeroOf(metric) => {
+                let scan = scan_group(memo, metric, &["job"], vec![]);
+                let schema = &memo.groups()[scan.0 as usize].group_properties.schema;
+                let value = resolve_column_ref(&ColumnRef::SampleValue, schema).unwrap();
+                let cols = schema
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(column, field)| ProjectItem {
+                        alias: Some(field.name.clone()),
+                        expr: if column == value {
+                            ScalarExpr::FunctionCall {
+                                name: "promql_clamp_min".into(),
+                                args: vec![
+                                    ScalarExpr::Column(column),
+                                    ScalarExpr::Literal(ScalarValue::Float64(0.0)),
+                                ],
+                            }
+                        } else {
+                            ScalarExpr::Column(column)
+                        },
+                    })
+                    .collect();
+                let clamped = group(
+                    memo,
+                    Operator::NonASAP(NonASAPOp::Project { cols, child: scan }),
+                );
+                vec![scan, clamped]
+            }
+        }
+    };
+    let sample_value = || SummaryInputExpr::Column(ColumnRef::SampleValue);
+    let rows = [
+        ("pos", WeightInput::Scan("pos"), sample_value(), NonNegative),
+        ("neg", WeightInput::Scan("neg"), sample_value(), NonPositive),
+        ("mixed", WeightInput::Scan("mixed"), sample_value(), Unknown),
+        (
+            "rate(c_total[5m])",
+            WeightInput::RateOf("c_total"),
+            sample_value(),
+            NonNegative,
+        ),
+        // provisional answer Q3: the executor resolves max(-0.0, +0.0)
+        // as +0.0 (as Go does), so clamp_min(x, 0) is never -0.0.
+        (
+            "clamp_min(mixed, 0)",
+            WeightInput::ClampMinZeroOf("mixed"),
+            sample_value(),
+            NonNegative,
+        ),
+        (
+            "Constant(1.0)",
+            WeightInput::Scan("mixed"),
+            SummaryInputExpr::Constant(1.0),
+            NonNegative,
+        ),
+        (
+            "Constant(-1.0)",
+            WeightInput::Scan("mixed"),
+            SummaryInputExpr::Constant(-1.0),
+            NonPositive,
+        ),
+    ];
+    let mut mismatches = Vec::new();
+    let mut state_signs = Vec::new();
+    // `HydraCms` is checked by the same rule, but it lists no build
+    // parameters (`parameter_list` is empty), so the memo accepts no
+    // HydraCms build candidate to offer or prune.
+    assert!(parameter_list(SketchAlgorithm::HydraCms).is_empty());
+    for algorithm in [SketchAlgorithm::Cms, SketchAlgorithm::CmsWithHeap] {
+        for (name, input, weight, sign) in &rows {
+            let mut memo = Memo::new(&data);
+            let chain = weight_input(&mut memo, input);
+            let producer = *chain.last().unwrap();
+            let state = sketch_group(
+                &mut memo,
+                Operator::ASAP(ASAPOp::SummaryAgg {
+                    child: producer,
+                    summary_type: FieldDataType::Sketch(algorithm),
+                    input: SummaryUpdate {
+                        item: Some(SummaryInputExpr::EntityIdentity(
+                            EntityIdentity::PromqlLabelSet { excluding: vec![] },
+                        )),
+                        weight: weight.clone(),
+                    },
+                    reduction: Reduction::Reduce(Default::default()),
+                    filter: None,
+                }),
+                algorithm,
+                1,
+            );
+            query(&mut memo, state, None);
+            let (producer_candidate, state_candidate) =
+                (candidate_id(producer, 0), candidate_id(state, 0));
+            let evaluation_grid_of_group = vec![None; memo.groups().len()];
+            let edges = chain
+                .windows(2)
+                .map(|pair| edge(candidate_id(pair[0], 0), candidate_id(pair[1], 0), 0, true))
+                .chain([edge(producer_candidate, state_candidate, 0, true)])
+                .collect();
+            let logical = logical(memo, edges, evaluation_grid_of_group);
+            let physical = generate(&logical, &ingesting(None), &retaining_everything());
+            let kept = offered(&physical, state_candidate);
+            let count_min_pruned = pruned(&physical, state_candidate)
+                .iter()
+                .any(|(_, reason)| *reason == PruneReason::CountMinWeightsNotProvenNonNegative);
+            let expected = match *sign == NonNegative {
+                true => "offered",
+                false => "pruned",
+            };
+            let outcome = match (kept.is_empty(), count_min_pruned) {
+                (false, false) => "offered",
+                (true, true) => "pruned",
+                (false, true) => "offered and pruned",
+                (true, false) => "neither offered nor pruned for its weights",
+            };
+            if outcome != expected {
+                mismatches.push(format!(
+                    "{algorithm:?} over {name}: {outcome}, expected {expected}"
+                ));
+            }
+            state_signs.push((algorithm, *name, logical, state, *sign));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+    // The consumer reads the state column's sign through one method.
+    for (algorithm, name, logical, state, sign) in state_signs {
+        assert_eq!(
+            logical.memo.groups()[state.0 as usize]
+                .group_properties
+                .state_column_sign(),
+            Some(sign),
+            "{algorithm:?} over {name}"
+        );
+    }
+}

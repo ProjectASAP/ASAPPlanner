@@ -735,3 +735,254 @@ fn a_ddsketch_over_a_counter_declaring_its_value_unknown_keeps_both_stores() {
         ddsketch_costed_bytes(true, None)
     );
 }
+
+/// A DDSketch keeps a store for positive values, one for negative values
+/// and a zero bucket (both +0.0 and -0.0 land in it). Values all ≥ 0 or
+/// all ≤ 0 fill one store, values of both signs two; a sign-bit slip
+/// (-0.0 where +0.0 was expected) still lands in the zero bucket, so the
+/// store count follows the real-number sign of the values the sketch is
+/// updated with: one store over a column of known sign, two over an
+/// `Unknown` one. Today the cost decides it from its own lookup of a raw
+/// producer over sources declared non-negative instead of the producer's
+/// column signs.
+mod ddsketch_stores_by_sign {
+    use super::*;
+    use asap_types::ir::operator::AggIntent;
+    use asap_types::stages::ValueSign;
+    use asap_types::summary_type::SketchAlgorithm;
+    use asap_types::workload::{PrometheusMetricType, SourceFacts};
+    use std::collections::BTreeMap;
+
+    const ALPHA: f64 = 0.01;
+    const INPUT_ROWS: u64 = 100_000;
+
+    /// Sources `pos` (`value` declared non-negative), `neg` (declared
+    /// non-positive), `mixed` (nothing declared), `c_total` (a counter)
+    /// and the histogram family `h` (its `h_sum` undeclared).
+    fn signed_sources() -> DataWorkload {
+        let declared = |sign| SourceFacts {
+            column_signs: BTreeMap::from([("value".to_string(), sign)]),
+            ..SourceFacts::default()
+        };
+        let typed = |metric_type| SourceFacts {
+            metric_type: Some(metric_type),
+            ..SourceFacts::default()
+        };
+        DataWorkload {
+            sources: BTreeMap::from([
+                ("pos".to_string(), declared(ValueSign::NonNegative)),
+                ("neg".to_string(), declared(ValueSign::NonPositive)),
+                ("mixed".to_string(), SourceFacts::default()),
+                ("c_total".to_string(), typed(PrometheusMetricType::Counter)),
+                ("h".to_string(), typed(PrometheusMetricType::Histogram)),
+            ]),
+            ..DataWorkload::default()
+        }
+    }
+
+    /// The bytes of one DDSketch state of α = 0.01 over all
+    /// [`INPUT_ROWS`] rows (one group) holding one store (`one_store`) or
+    /// two: the state-bytes formula with the store count chosen by hand.
+    fn state_bytes_with(one_store: bool) -> u64 {
+        sketch_shape(
+            &SketchParams::DDSketch { alpha: ALPHA },
+            StateInputRows {
+                rows_per_state: Some(INPUT_ROWS),
+                non_negative: one_store,
+                value_magnitude_range: None,
+            },
+        )
+        .1
+    }
+
+    /// The bytes the cost prices for a query-time DDSketch build over all
+    /// rows of `producer`, which reads `source` and outputs `[ts, value]`:
+    /// a time range passes both on unchanged from the scan, any other
+    /// producer (the rate) computes `value`.
+    fn priced_state_bytes(producer: Payload, source: &str) -> u64 {
+        use asap_types::ir::schema::{DataType, Field};
+        let settings = CostInputs::default();
+        let data = signed_sources();
+        let unchanged_columns = match &producer {
+            Payload::NonASAP(NonASAPOp::TimeRange { .. }) => BTreeSet::from(["ts", "value"]),
+            _ => BTreeSet::new(),
+        };
+        let producer_node = PhysicalASAPDAGNode {
+            output_schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                ],
+                0,
+                vec![],
+            ),
+            ..node(producer)
+        };
+        let input = ProducerOutput {
+            payload: &producer_node.payload,
+            output_schema: &producer_node.output_schema,
+            output: EdgeStatistics {
+                rows: INPUT_ROWS,
+                bytes: INPUT_ROWS * 16,
+            },
+            sources: BTreeSet::from([source]),
+            family: StateFamily::None,
+            unchanged_columns,
+            tumbling_windows: 1,
+            chain_tumbling_window_width_ms: None,
+        };
+        let build = PhysicalASAPDAGNode {
+            parameters: Some(SketchParams::DDSketch { alpha: ALPHA }),
+            ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+                child: 0,
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::DDSketch),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::by(vec![]),
+                filter: None,
+            }))
+        };
+        node_resource_usage_and_cost(&build, &[input], (1, 1.0), None, &data, &settings)
+            .unwrap()
+            .output
+            .bytes
+    }
+
+    /// The last five minutes of a scan: raw samples.
+    fn last_five_minutes() -> Payload {
+        Payload::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(300),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        })
+    }
+
+    /// `rate(x[1m])` per series: not raw samples.
+    fn rate_per_series() -> Payload {
+        Payload::NonASAP(NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![AggIntent::Rate],
+            output_names: vec!["rate".into()],
+            filters: vec![],
+            having: None,
+            child: 0,
+        })
+    }
+
+    /// The two store counts price differently, so each test below can
+    /// tell them apart.
+    fn assert_store_counts_differ() {
+        assert!(state_bytes_with(true) < state_bytes_with(false));
+    }
+
+    /// A DDSketch updated with `rate(c_total[1m])` per series (its
+    /// producer the rate, as in `quantile_over_time(0.9,
+    /// rate(c_total[1m])[5m:1m])`): a counter's rates are each ≥ +0, so
+    /// one store, though its producer is not a raw scan.
+    #[test]
+    #[ignore = "PR S2: PhysicalASAPDAGNode.column_signs"]
+    fn b08_ddsketch_over_a_rate_of_a_counter_prices_one_store() {
+        assert_store_counts_differ();
+        assert_eq!(
+            priced_state_bytes(rate_per_series(), "c_total"),
+            state_bytes_with(true)
+        );
+    }
+
+    /// Over `neg`, declared non-positive: every value ≤ 0, one store.
+    #[test]
+    #[ignore = "PR S2: PhysicalASAPDAGNode.column_signs"]
+    fn ddsketch_over_non_positive_values_prices_one_store() {
+        assert_store_counts_differ();
+        assert_eq!(
+            priced_state_bytes(last_five_minutes(), "neg"),
+            state_bytes_with(true)
+        );
+    }
+
+    /// Over `mixed`, undeclared: values of both signs, two stores.
+    #[test]
+    #[ignore = "PR S2: PhysicalASAPDAGNode.column_signs"]
+    fn ddsketch_over_mixed_values_prices_two_stores() {
+        assert_store_counts_differ();
+        assert_eq!(
+            priced_state_bytes(last_five_minutes(), "mixed"),
+            state_bytes_with(false)
+        );
+    }
+
+    /// Over `pos`, declared non-negative and read raw: one store, as
+    /// today.
+    #[test]
+    #[ignore = "PR S2: PhysicalASAPDAGNode.column_signs"]
+    fn ddsketch_over_a_declared_raw_scan_is_unchanged() {
+        assert_store_counts_differ();
+        assert_eq!(
+            priced_state_bytes(last_five_minutes(), "pos"),
+            state_bytes_with(true)
+        );
+    }
+
+    /// Over `h_sum`, the sum of an undeclared histogram family: a
+    /// histogram may observe negative values (a temperature delta), so
+    /// its sum may fall and have either sign: two stores. Today the cost
+    /// reads `_sum` as a counter.
+    #[test]
+    #[ignore = "PR S2: PhysicalASAPDAGNode.column_signs"]
+    fn an_undeclared_histogram_sum_prices_two_stores() {
+        // provisional answer Q8: only a declaration on the family's
+        // `value` makes `h_sum` one-signed.
+        assert_store_counts_differ();
+        assert_eq!(
+            priced_state_bytes(last_five_minutes(), "h_sum"),
+            state_bytes_with(false)
+        );
+    }
+}
+
+/// The cost derives no sign of its own (sign test plan T6): the source
+/// lookups `declared_non_negative`, `declared_counter` and
+/// `raw_data_samples_non_negative` are gone from the cost crate and from
+/// `asap_types::workload::bounds`, and the cost reads the producer's
+/// `column_signs`. A source-text check of the non-test files.
+#[test]
+#[ignore = "PR S2: PhysicalASAPDAGNode.column_signs"]
+fn cost_derives_no_sign() {
+    use std::path::{Path, PathBuf};
+    fn non_test_files(directory: &Path, files: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "tests" {
+                    non_test_files(&path, files);
+                }
+            } else if name.ends_with(".rs") && name != "tests.rs" {
+                files.push(path);
+            }
+        }
+    }
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    non_test_files(&crate_dir.join("src"), &mut files);
+    files.push(crate_dir.join("../types/src/workload/bounds.rs"));
+    let mut violations = Vec::new();
+    let mut reads_column_signs = false;
+    for path in &files {
+        let source = std::fs::read_to_string(path).unwrap();
+        let in_cost = path.starts_with(crate_dir.join("src"));
+        reads_column_signs |= in_cost && source.contains("column_signs");
+        for derivation in [
+            "declared_non_negative",
+            "declared_counter",
+            "raw_data_samples_non_negative",
+        ] {
+            if source.contains(derivation) {
+                violations.push(format!("{}: {derivation}", path.display()));
+            }
+        }
+    }
+    if !reads_column_signs {
+        violations.push("the cost crate reads no column_signs".into());
+    }
+    assert!(violations.is_empty(), "{violations:#?}");
+}

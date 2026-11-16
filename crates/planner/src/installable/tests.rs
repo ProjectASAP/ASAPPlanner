@@ -363,3 +363,70 @@ fn a_root_time_shift_is_read_whole_by_the_installer_not_by_the_cost() {
     assert_eq!(retention.len(), 1);
     assert_eq!(retention[0].lookback_ms(), None);
 }
+
+/// `max_over_time(neg[300s])` over `neg`, whose `value` is declared
+/// non-positive, planned exactly: a plan whose root's value column is
+/// `NonPositive` (the max of values ≤ 0 is one of them).
+async fn plan_over_non_positive_values() -> InstallablePlan {
+    let workload: crate::PlanningWorkload = serde_json::from_str(
+        r#"{"query_workload": {"language": "promql", "repeating_queries": [{
+              "query": "max_over_time(neg[300s])",
+              "demand": {"fixed_interval_at": {"interval": 1000, "evaluation_phase": 0}},
+              "requirements": {},
+              "predictability": {"predictable": {"known_at": null}}}]},
+            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 10000.0}},
+              "sources": {"neg": {"series_count": 1000, "metric_type": "gauge",
+                  "sample_interval": 100, "column_signs": {"value": "non_positive"}}}}}"#,
+    )
+    .unwrap();
+    let (plan, _) = plan_installable(crate::UserInput::new(
+        &workload,
+        crate::FrontendInput::Promql,
+        crate::PlanningModels::builtin(),
+    ))
+    .await
+    .expect("a plan");
+    assert!(!plan.dag.nodes.is_empty());
+    plan
+}
+
+/// Every physical node carries its output columns' signs, one per output
+/// field, equal to those of the memo group its selected candidate is in:
+/// the executor and the cost read them from the plan, not from the memo.
+/// DAG validation rejects a node whose sign list has another length.
+#[tokio::test]
+#[ignore = "PR S2: PhysicalASAPDAGNode.column_signs"]
+async fn physical_nodes_carry_their_groups_column_signs() {
+    let plan = plan_over_non_positive_values().await;
+    // Intended assertions, once the field exists:
+    //   for node in &plan.dag.nodes {
+    //       assert_eq!(node.column_signs.len(), node.output_schema.fields.len());
+    //   }
+    //   let root = &plan.dag.nodes[plan.dag.roots[0] as usize];
+    //   let value = root.output_schema.column_id("value").unwrap();
+    //   assert_eq!(root.column_signs[value], ValueSign::NonPositive);
+    //   and a DAG whose node has one sign too few fails validation.
+    let _ = plan;
+    todo!("PR S2: PhysicalASAPDAGNode.column_signs")
+}
+
+/// A plan file keeps every node's column signs: serialized and read back,
+/// the plan is equal but for each node's `selected_physical_candidate`,
+/// which the plan file does not carry, and the root's value column is
+/// still `NonPositive`.
+#[tokio::test]
+#[ignore = "PR S2: PhysicalASAPDAGNode.column_signs"]
+async fn column_signs_survive_plan_serialization() {
+    let mut plan = plan_over_non_positive_values().await;
+    let decoded: InstallablePlan =
+        serde_json::from_str(&serde_json::to_string(&plan).unwrap()).unwrap();
+    for node in &mut plan.dag.nodes {
+        node.selected_physical_candidate = None;
+    }
+    assert_eq!(decoded, plan);
+    // Intended assertion, once the field exists:
+    //   let root = &decoded.dag.nodes[decoded.dag.roots[0] as usize];
+    //   let value = root.output_schema.column_id("value").unwrap();
+    //   assert_eq!(root.column_signs[value], ValueSign::NonPositive);
+    todo!("PR S2: PhysicalASAPDAGNode.column_signs")
+}

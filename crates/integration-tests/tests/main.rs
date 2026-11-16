@@ -35,3 +35,7 @@ mod sql_frequency;
 mod sql_to_post_asap;
 mod stage3_objective;
 mod time_range;
+mod value_sign_consumers;
+mod value_sign_executor_zeros;
+mod value_sign_function_keys;
+mod value_sign_oracle;

@@ -405,7 +405,9 @@ dependencies = [
  "asap-types",
  "asap_sketchlib",
  "futures",
+ "metricsql_parser",
  "serde_json",
+ "strum",
  "tokio",
 ]
 

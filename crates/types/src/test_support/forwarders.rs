@@ -130,3 +130,16 @@ pub fn population_over_selector(
     });
     Rc::new(OperatorNode::with_schema(evaluation, root.schema.clone()))
 }
+
+/// The column signs `expression`, a candidate expression over `memo`'s
+/// groups, derives on its own, without adding it to the memo: the signs a
+/// new group computing it would get. A test compares them with the signs
+/// of the group the candidate joined, which an exact candidate must never
+/// contradict (`NonNegative` against `NonPositive`).
+pub fn column_signs_of_candidate_expression(
+    memo: &crate::stages::Memo,
+    expression: &Operator<crate::stages::MemoGroupId>,
+) -> Result<Vec<crate::stages::ValueSign>, crate::stages::MemoGroupError> {
+    let _ = (memo, expression);
+    todo!("sign derivation by construction: column_signs_of_candidate_expression")
+}
