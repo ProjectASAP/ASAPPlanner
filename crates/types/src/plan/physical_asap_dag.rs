@@ -110,6 +110,20 @@ pub struct PhysicalASAPDAGNode {
     pub view_coverage: Option<ViewCoverage>,
 }
 
+impl PhysicalASAPDAGNode {
+    /// The nodes this node reads, one per edge into it in a validated DAG,
+    /// in its payload's input order ([`Operator::children`]): its direct
+    /// inputs, then each node its scalar expressions refer to, once.
+    /// Example: `q + scalar(count(q))` as a `Project` over `q` reads `q`,
+    /// then the count.
+    pub fn producers(&self) -> Vec<PhysicalASAPNodeId> {
+        edge_roles(&self.payload)
+            .into_iter()
+            .map(|(producer, _)| producer)
+            .collect()
+    }
+}
+
 /// A view's aggregate coverage
 /// ([`AggregateCoverage`](crate::stages::AggregateCoverage), `docs/design_docs/proposals/asap-primitive-schema.md`
 /// §4.2): what it computes and which rows went in.

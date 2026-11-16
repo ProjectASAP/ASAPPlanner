@@ -20,7 +20,7 @@
 //!   Stage 3 (`asap-stage3-plan-selection`) costs each candidate as one node
 //!   with the same function and the rules `plan_cost` applies:
 //!   [`plan::execution_demand::executions_per_second`],
-//!   [`maintained_window_ms`], [`read_back_ms`],
+//!   `RefreshWindow::computed_from` (an ingestion-time node's window), [`read_back_ms`],
 //!   [`raw_data_disk_cost_per_second`] and
 //!   [`request_overhead_cost_per_second`].
 mod measured;
@@ -40,8 +40,8 @@ pub use model::{
 };
 pub use node::operator_statistics::EdgeStatistics;
 pub use node::usage::{
-    maintained_window_ms, node_resource_usage_and_cost, summary_type_name, NodeCost,
-    NodeResourceUsageAndCost, ProducerOutput,
+    node_resource_usage_and_cost, output_interval_ms, reads_one_batch_of, summary_type_name,
+    NodeCost, NodeResourceUsageAndCost, ProducerOutput,
 };
 pub use plan::cost::{
     plan_cost, raw_data_disk_cost_per_second, request_overhead_cost_per_second, PlanCost,

@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
-use super::arguments::Source;
+use super::arguments::{AtModifier, Source};
 use super::asap::ASAPOp;
 use super::input::OperatorInput;
 use super::non_asap::NonASAPOp;
@@ -45,6 +45,7 @@ impl<C> Operator<C> {
         }
     }
 
+    /// `self` with `f` applied to each child, in [`Self::children`] order.
     /// `f` may change the reference type, e.g. from `Rc<OperatorNode>` to a
     /// node id.
     pub fn map_children<D>(&self, f: impl FnMut(&C) -> D) -> Operator<D> {
@@ -58,6 +59,145 @@ impl<C> Operator<C> {
         match self {
             Operator::NonASAP(op) => op.kind_name(),
             Operator::ASAP(op) => op.kind_name(),
+        }
+    }
+
+    /// Its tumbling-window width when it is a `SummaryTumblingWindowChain`,
+    /// in ms; `None` for every other operator. E.g. a chain of 1-minute
+    /// windows: `Some(60_000)`; `TimeRange(5m)`: `None`.
+    pub fn chain_tumbling_window_width_ms(&self) -> Option<u64> {
+        match self {
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }) => Some(*tumbling_window_width_ms),
+            Operator::NonASAP(
+                NonASAPOp::Scan { .. }
+                | NonASAPOp::Values { .. }
+                | NonASAPOp::Filter { .. }
+                | NonASAPOp::Project { .. }
+                | NonASAPOp::Aggregate { .. }
+                | NonASAPOp::Join { .. }
+                | NonASAPOp::SetOp { .. }
+                | NonASAPOp::Concat { .. }
+                | NonASAPOp::Dedup { .. }
+                | NonASAPOp::Sort { .. }
+                | NonASAPOp::Limit { .. }
+                | NonASAPOp::BinaryOp { .. }
+                | NonASAPOp::SQLWindowFunc { .. }
+                | NonASAPOp::TimeRange { .. }
+                | NonASAPOp::TimeShift { .. }
+                | NonASAPOp::PromqlVectorFromScalar(..)
+                | NonASAPOp::PromqlRelabel { .. }
+                | NonASAPOp::PromqlInfoEnrich { .. }
+                | NonASAPOp::PromqlSeriesSample { .. }
+                | NonASAPOp::PromqlSubquery { .. },
+            )
+            | Operator::ASAP(
+                ASAPOp::SummaryAgg { .. }
+                | ASAPOp::SummaryEstimate { .. }
+                | ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. }
+                | ASAPOp::SummaryMerge { .. }
+                | ASAPOp::SummarySubtract { .. }
+                | ASAPOp::SummaryDelete { .. }
+                | ASAPOp::SummaryJoin { .. }
+                | ASAPOp::Extension { .. },
+            ) => None,
+        }
+    }
+
+    /// The anchor of a `TimeShift` with `@ end()` or `@ start()`, whose
+    /// input runs once per request; `None` for any other operator (`@ <ts>`
+    /// included).
+    pub fn request_anchor(&self) -> Option<AtModifier> {
+        match self {
+            Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => match shift.at {
+                Some(at @ (AtModifier::End | AtModifier::Start)) => Some(at),
+                Some(AtModifier::Timestamp(_)) | None => None,
+            },
+            Operator::NonASAP(
+                NonASAPOp::Scan { .. }
+                | NonASAPOp::Values { .. }
+                | NonASAPOp::Filter { .. }
+                | NonASAPOp::Project { .. }
+                | NonASAPOp::Aggregate { .. }
+                | NonASAPOp::Join { .. }
+                | NonASAPOp::SetOp { .. }
+                | NonASAPOp::Concat { .. }
+                | NonASAPOp::Dedup { .. }
+                | NonASAPOp::Sort { .. }
+                | NonASAPOp::Limit { .. }
+                | NonASAPOp::BinaryOp { .. }
+                | NonASAPOp::SQLWindowFunc { .. }
+                | NonASAPOp::TimeRange { .. }
+                | NonASAPOp::PromqlVectorFromScalar(..)
+                | NonASAPOp::PromqlRelabel { .. }
+                | NonASAPOp::PromqlInfoEnrich { .. }
+                | NonASAPOp::PromqlSeriesSample { .. }
+                | NonASAPOp::PromqlSubquery { .. },
+            )
+            | Operator::ASAP(
+                ASAPOp::SummaryTumblingWindowChain { .. }
+                | ASAPOp::SummaryAgg { .. }
+                | ASAPOp::SummaryEstimate { .. }
+                | ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. }
+                | ASAPOp::SummaryMerge { .. }
+                | ASAPOp::SummarySubtract { .. }
+                | ASAPOp::SummaryDelete { .. }
+                | ASAPOp::SummaryJoin { .. }
+                | ASAPOp::Extension { .. },
+            ) => None,
+        }
+    }
+
+    /// Whether each output row keeps its input row's time window, so the
+    /// window its input covers is also its own: `Filter` and `Project`
+    /// keep rows and times; `TimeShift` moves every row by one offset but
+    /// keeps the window's length. E.g. `Filter <- TimeRange(5m)` covers
+    /// 5 minutes, and `Project <- chain of 1-minute windows` holds
+    /// 1-minute windows; `Aggregate <- TimeRange(5m)` combines rows, so
+    /// `false`.
+    pub fn keeps_input_window(&self) -> bool {
+        match self {
+            Operator::NonASAP(
+                NonASAPOp::Filter { .. } | NonASAPOp::Project { .. } | NonASAPOp::TimeShift { .. },
+            ) => true,
+            Operator::NonASAP(
+                NonASAPOp::Scan { .. }
+                | NonASAPOp::Values { .. }
+                | NonASAPOp::Aggregate { .. }
+                | NonASAPOp::Join { .. }
+                | NonASAPOp::SetOp { .. }
+                | NonASAPOp::Concat { .. }
+                | NonASAPOp::Dedup { .. }
+                | NonASAPOp::Sort { .. }
+                | NonASAPOp::Limit { .. }
+                | NonASAPOp::BinaryOp { .. }
+                | NonASAPOp::SQLWindowFunc { .. }
+                | NonASAPOp::TimeRange { .. }
+                | NonASAPOp::PromqlVectorFromScalar(..)
+                | NonASAPOp::PromqlRelabel { .. }
+                | NonASAPOp::PromqlInfoEnrich { .. }
+                | NonASAPOp::PromqlSeriesSample { .. }
+                | NonASAPOp::PromqlSubquery { .. },
+            )
+            | Operator::ASAP(
+                ASAPOp::SummaryAgg { .. }
+                | ASAPOp::SummaryEstimate { .. }
+                | ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. }
+                | ASAPOp::SummaryMerge { .. }
+                | ASAPOp::SummaryTumblingWindowChain { .. }
+                | ASAPOp::SummarySubtract { .. }
+                | ASAPOp::SummaryDelete { .. }
+                | ASAPOp::SummaryJoin { .. }
+                | ASAPOp::Extension { .. },
+            ) => false,
         }
     }
 }

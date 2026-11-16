@@ -75,8 +75,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::physical_asap_dag::{PhysicalASAPDAGValidationError, PhysicalASAPNodeId, ViewCoverage};
-use super::time_window::TimeWindow;
+use super::time_window::{self, TimeIndexedPlan, TimeWindow};
 use crate::ir::operator::arguments::Source;
+use crate::stages::EvaluationGrid;
 
 /// One materialized view of a DAG: what its stored state is, what it is
 /// refreshed from, when, and for how long it is retained.
@@ -171,6 +172,40 @@ impl RefreshWindow {
             width_ms: window.length_ms,
             phase_ms,
         })
+    }
+
+    /// The refresh window of `node`, stored at ingestion time in `plan`:
+    /// that of the smallest window holding every window its result is
+    /// computed from ([`time_window::windows_computed_from`]). A
+    /// `SummaryTumblingWindowChain` of width `w` over shifts summing to `s`
+    /// is `(w, s mod w)`; any other node takes the union of the windows
+    /// below it (each `TimeRange`'s, and each chain's reached without
+    /// passing one). `None` when that window is unbounded (none below it,
+    /// or an `@` anchor below a window) or empty. One rule for the
+    /// installed plan ([`PhysicalASAPDAG::refresh_window`]), Stage 2's
+    /// output (`PhysicalASAPMemoCandidates`, which Stage 3 selects from)
+    /// and the cost model.
+    ///
+    /// Example: `sum(TimeRange(5m))` is `(5m, 0)` whatever grid reads it; a
+    /// chain of 60 s windows over `TimeShift(30s)` is `(60s, 30s)`.
+    pub fn computed_from<P: TimeIndexedPlan>(plan: &P, node: P::Node) -> Option<Self> {
+        time_window::windows_computed_from(plan, node)?
+            .into_iter()
+            .reduce(TimeWindow::union)
+            .and_then(Self::of_window)
+    }
+}
+
+/// The times a refresh window ends at: every `width_ms`, at `phase_ms`.
+///
+/// Example: `RefreshWindow { width_ms: 300_000, phase_ms: 0 }`, the
+/// refresh of `sum(TimeRange(5m))`, ends every 5 min at phase 0.
+impl From<RefreshWindow> for EvaluationGrid {
+    fn from(window: RefreshWindow) -> Self {
+        EvaluationGrid {
+            period_ms: window.width_ms,
+            phase_ms: window.phase_ms,
+        }
     }
 }
 

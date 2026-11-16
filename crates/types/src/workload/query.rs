@@ -1,6 +1,8 @@
 //! The query workload: each query, its requirements and its recurrence.
 
 use crate::accuracy::AccuracyTarget;
+use crate::ir::operator::AtModifier;
+use crate::stages::EvaluationGrid;
 use serde::{Deserialize, Serialize};
 
 use super::data::validate_rate;
@@ -222,7 +224,7 @@ impl QueryRecurrence {
     /// known: an estimated rate, a one-off query without a time, an unknown
     /// recurrence, or a zero interval. Pass 2's chain widths and the evaluation grids of
     /// Stage 3's contexts, which
-    /// [`PhysicalCandidate::delivers_on`](crate::stages::PhysicalCandidate::delivers_on)
+    /// [`PhysicalASAPMemoCandidates::delivers_on`](crate::stages::PhysicalASAPMemoCandidates::delivers_on)
     /// reads, both come from it.
     pub fn evaluation_grid_ms(&self, range_evaluation: Option<RangeEvaluation>) -> Option<u64> {
         let times_grid_ms = match self {
@@ -413,6 +415,53 @@ pub struct QueryWorkloadEntry {
     /// [`RangeEvaluation::evaluations_per_request`] evaluations per run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range_evaluation: Option<RangeEvaluation>,
+}
+
+impl QueryWorkloadEntry {
+    /// The grid, in ms, every evaluation of the query falls on
+    /// ([`QueryRecurrence::evaluation_grid_ms`] of its range evaluation),
+    /// the grid of its evaluation context; 1 ms when not known, a grid on
+    /// which only producers stored at every time deliver.
+    pub fn evaluation_grid_ms(&self) -> u64 {
+        self.recurrence
+            .evaluation_grid_ms(self.range_evaluation)
+            .unwrap_or(1)
+    }
+
+    /// The evaluation grid of the query's evaluation context: every
+    /// [`Self::evaluation_grid_ms`], anchored at the epoch (phase 0).
+    ///
+    /// Example: every 20 s at phase 5 s: `{ period_ms: 5_000, phase_ms: 0 }`.
+    pub fn evaluation_grid(&self) -> EvaluationGrid {
+        EvaluationGrid {
+            period_ms: self.evaluation_grid_ms(),
+            phase_ms: 0,
+        }
+    }
+
+    /// How far back from a request's end its evaluations reach, in ms: its
+    /// range-evaluation span, 0 for one evaluation per run. The output it
+    /// reads directly is read back that far.
+    ///
+    /// Example: a range request over the last hour at 60 s steps:
+    /// 3,600,000 ms; an instant query: 0.
+    pub fn range_span_ms(&self) -> u64 {
+        self.range_evaluation.map_or(0, |range| range.span_ms)
+    }
+
+    /// The grid, in ms, of the times its requests anchor `@ end()` or
+    /// `@ start()` (`at`) at: its request end times, shifted back by its
+    /// range-evaluation span for `@ start()`; 1 ms when not known.
+    ///
+    /// Example: a query every 60 s over the last hour: `@ end()` 60,000
+    /// ms, `@ start()` gcd(60,000, 3,600,000) = 60,000 ms.
+    pub fn request_time_grid_ms(&self, at: AtModifier) -> u64 {
+        let end_ms = self.recurrence.evaluation_grid_ms(None).unwrap_or(1);
+        match (at, self.range_evaluation) {
+            (AtModifier::Start, Some(range)) => greatest_common_divisor(end_ms, range.span_ms),
+            _ => end_ms,
+        }
+    }
 }
 
 impl From<&BatchEntry> for QueryWorkloadEntry {

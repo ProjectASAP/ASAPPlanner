@@ -363,7 +363,7 @@ fn a_top_k_ranks_values_of_its_inputs_sign() {
 /// `@ T` reads a fixed window, and `@ T` over an `@ end()`, `now()` or
 /// `time()` still depends, since those are not pinned by it. `@ end()` does
 /// not pin a subtree to a fixed time. A `Scan` reads no time: whether its
-/// data arrives is `PhysicalCandidate::delivers_on`'s check.
+/// data arrives is `PhysicalASAPMemoCandidates::delivers_on`'s check.
 ///
 /// | Group | Expression | Depends |
 /// |---|---|---|

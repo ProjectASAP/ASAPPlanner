@@ -391,7 +391,7 @@ pub struct VectorMatch {
 
 /// PromQL `@` modifier — pins a selector's evaluation time to an anchor instead
 /// of the query evaluation time (issue #40).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AtModifier {
     /// `@ start()` — the query range's start instant.
     Start,

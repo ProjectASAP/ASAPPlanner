@@ -1,8 +1,10 @@
-//! The plan Stage 3 builds from the baseline MILP's optimum as its last
-//! step (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
+//! The plan Stage 3 builds from the MILP's optimum as its last step
+//! (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
 //! section 3, "Plan output"): one `PhysicalASAPDAG` node per selected
-//! candidate ([`candidate_node`], which costing builds too), its inputs
-//! from the selected edges, each node's `selected_physical_candidate` set.
+//! execution ([`candidate_node`], which costing builds too), its inputs
+//! from the selected edges, each node's `selected_physical_candidate` set
+//! and `retention_ms` its candidate's $h_v$. Several nodes may come from
+//! one candidate, one per context it runs in.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -12,13 +14,10 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPDAGValidationError, PhysicalASAPNodeId,
 };
 use asap_types::plan::view_coverage;
-use asap_types::stages::{
-    Lifetime, MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId,
-};
-use asap_types::workload::QueryWorkloadEntry;
+use asap_types::stages::{MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId};
 
-use crate::milp::model::{QueryId, SolvedSelection};
-use crate::retention::retention_need_ms;
+use crate::milp::model::{SelectedEdge, SolvedSelection};
+use crate::selectable::{Execution, QueryId};
 
 /// Candidate `v` as a plan node with id `id`, its input `i` read from node
 /// `input_ids[i]`: its operator, timing, lifetime and θ, its group's schema
@@ -35,9 +34,8 @@ pub(crate) fn candidate_node(
     let logical = memo.candidate(candidate.logical_candidate_id);
     let group = &memo.groups()[candidate.logical_candidate_id.group.0 as usize].group_properties;
     let mut inputs = input_ids.iter();
-    let payload = logical
-        .expression
-        .operator
+    let payload = physical
+        .operator(v)
         .map_children(|_| *inputs.next().expect("one node per input"));
     let lifetime = candidate.physical_properties.lifetime();
     PhysicalASAPDAGNode {
@@ -52,7 +50,9 @@ pub(crate) fn candidate_node(
         output_schema: group.schema.clone(),
         retention_ms: None,
         selected_physical_candidate: Some(v),
-        view_coverage: matches!(lifetime, Lifetime::AcrossEvaluations(_))
+        view_coverage: candidate
+            .physical_properties
+            .is_across_evaluations()
             .then(|| view_coverage(memo, candidate.logical_candidate_id.group))
             .flatten(),
     }
@@ -60,97 +60,75 @@ pub(crate) fn candidate_node(
 
 /// The plan of `solved`, whose output `j` answers `outputs[j]` (a query and
 /// the group its root, or one operator its scalar root, reads). Nodes are
-/// numbered producers first. A node that retains rows (materialized, or a
-/// query-time `Scan`) has `retention_ms` the most its selected consumers
-/// read back ([`retention_need_ms`]), and at least the range-evaluation
-/// span of a query it answers directly.
+/// numbered producers first. A node whose candidate has $h_v$ retains that
+/// much (`retention_ms`); one that retains rows a consumer reads unbounded
+/// has `retention_ms` `None` and keeps every row.
 pub(crate) fn plan_of(
     physical: &PhysicalASAPMemoCandidates,
-    entries: &[QueryWorkloadEntry],
     solved: &SolvedSelection,
     outputs: &[(QueryId, MemoGroupId)],
 ) -> Result<PhysicalASAPDAG, PhysicalASAPDAGValidationError> {
-    let mut producer_of: HashMap<(PhysicalCandidateId, usize), PhysicalCandidateId> =
-        HashMap::new();
-    let mut consumers_of: BTreeMap<PhysicalCandidateId, Vec<PhysicalEdgeId>> = BTreeMap::new();
-    for &id in &solved.edges {
-        let edge = physical.edge(id);
+    let mut producer_of: HashMap<(Execution, usize), Execution> = HashMap::new();
+    let mut consumers_of: BTreeMap<Execution, Vec<Execution>> = BTreeMap::new();
+    for &SelectedEdge {
+        consumer,
+        edge,
+        producer,
+    } in &solved.edges
+    {
         producer_of.insert(
-            (edge.consumer_candidate_id, edge.input_index_of_consumer),
-            edge.producer_candidate_id,
+            (consumer, physical.edge(edge).input_index_of_consumer),
+            producer,
         );
-        consumers_of
-            .entry(edge.producer_candidate_id)
-            .or_default()
-            .push(id);
+        consumers_of.entry(producer).or_default().push(consumer);
     }
-    let consumers = |v: PhysicalCandidateId| consumers_of.get(&v).into_iter().flatten().copied();
-    let readers_of =
-        |v: PhysicalCandidateId| consumers(v).map(|edge| physical.edge(edge).consumer_candidate_id);
-    let inputs = |v: PhysicalCandidateId| -> Vec<PhysicalCandidateId> {
-        (0..physical.input_count(v))
-            .map(|i| producer_of[&(v, i)])
-            .collect()
-    };
+    let input_count = |execution: Execution| physical.input_count(execution.candidate);
     // Producers first: Kahn's order over the selected edges, which (E)
     // keeps acyclic.
-    let mut waiting: HashMap<PhysicalCandidateId, usize> = solved
-        .candidates
+    let mut waiting: HashMap<Execution, usize> = solved
+        .executions
         .iter()
-        .map(|&v| (v, physical.input_count(v)))
+        .map(|&execution| (execution, input_count(execution)))
         .collect();
-    let mut ready: Vec<PhysicalCandidateId> = solved
-        .candidates
+    let mut ready: Vec<Execution> = solved
+        .executions
         .iter()
         .rev()
         .copied()
-        .filter(|v| waiting[v] == 0)
+        .filter(|execution| waiting[execution] == 0)
         .collect();
-    let mut node_of: HashMap<PhysicalCandidateId, PhysicalASAPNodeId> = HashMap::new();
-    let mut order = Vec::with_capacity(solved.candidates.len());
-    while let Some(v) = ready.pop() {
-        node_of.insert(v, order.len());
-        order.push(v);
-        for edge in consumers(v) {
-            let consumer = physical.edge(edge).consumer_candidate_id;
-            let left = waiting.get_mut(&consumer).expect("a selected consumer");
+    let mut node_of: HashMap<Execution, PhysicalASAPNodeId> = HashMap::new();
+    let mut order = Vec::with_capacity(solved.executions.len());
+    while let Some(execution) = ready.pop() {
+        node_of.insert(execution, order.len());
+        order.push(execution);
+        for consumer in consumers_of.get(&execution).into_iter().flatten() {
+            let left = waiting.get_mut(consumer).expect("a selected consumer");
             *left -= 1;
             if *left == 0 {
-                ready.push(consumer);
+                ready.push(*consumer);
             }
         }
     }
-    if order.len() != solved.candidates.len() {
+    if order.len() != solved.executions.len() {
         return Err(PhysicalASAPDAGValidationError::Cycle);
-    }
-    // The span of the queries each candidate answers directly.
-    let mut output_span_ms: HashMap<PhysicalCandidateId, u64> = HashMap::new();
-    for (&(query, _), &v) in outputs.iter().zip(&solved.outputs) {
-        let span_ms = entries
-            .get(query.0)
-            .and_then(|entry| entry.range_evaluation)
-            .map_or(0, |range| range.span_ms);
-        let known = output_span_ms.entry(v).or_default();
-        *known = (*known).max(span_ms);
     }
     let nodes = order
         .iter()
         .enumerate()
-        .map(|(id, &v)| {
-            let input_ids: Vec<PhysicalASAPNodeId> =
-                inputs(v).iter().map(|producer| node_of[producer]).collect();
-            let mut node = candidate_node(physical, v, id, &input_ids);
-            if node.retains_rows() {
-                node.retention_ms = retention_need_ms(physical, entries, v, readers_of)
-                    .map(|need_ms| need_ms.max(output_span_ms.get(&v).copied().unwrap_or(0)));
-            }
+        .map(|(id, &execution)| {
+            let input_ids: Vec<PhysicalASAPNodeId> = (0..input_count(execution))
+                .map(|i| node_of[&producer_of[&(execution, i)]])
+                .collect();
+            let mut node = candidate_node(physical, execution.candidate, id, &input_ids);
+            node.retention_ms = solved.retention_ms.get(&execution.candidate).copied();
             node
         })
         .collect();
     let output_node: HashMap<(QueryId, MemoGroupId), PhysicalASAPNodeId> = outputs
         .iter()
         .zip(&solved.outputs)
-        .map(|(&output, v)| (output, node_of[v]))
+        .map(|(&output, execution)| (output, node_of[execution]))
         .collect();
     let mut roots = Vec::new();
     let mut scalar_roots = Vec::new();

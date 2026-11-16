@@ -74,12 +74,11 @@ impl PhysicalASAPDAG {
             .filter(|view| view.refresh == MaterializedViewRefresh::AtIngestion)
             .cloned()
             .collect();
-        let refresh_windows = self.refresh_windows(views.iter().map(|view| view.node_id));
         let mut groups: Vec<IngestionRefreshGroup> = Vec::new();
         let mut group_by_window: HashMap<RefreshWindow, usize> = HashMap::new();
         let mut group_by_view: HashMap<PhysicalASAPNodeId, usize> = HashMap::new();
         for view in views {
-            let refresh_window = refresh_windows[&view.node_id];
+            let refresh_window = self.refresh_window(view.node_id);
             let group = match refresh_window.and_then(|window| group_by_window.get(&window)) {
                 Some(&group) => group,
                 None => {
@@ -133,34 +132,10 @@ impl PhysicalASAPDAG {
             .collect()
     }
 
-    /// The refresh window of `node` ([`RefreshWindow::of_window`]): for a
-    /// `SummaryTumblingWindowChain` of width `w`, `(w, s mod w)` with `s`
-    /// the sum of the offsets of the `TimeShift`s below it; for any other
-    /// node, that of the smallest window holding the windows below it (each
-    /// `TimeRange`'s, and each chain's reached without passing one). `None`
-    /// when that window is unbounded (none below it, or an `@` anchor below
-    /// a `TimeRange`) or empty. O(nodes + edges).
+    /// The refresh window of `node` ([`RefreshWindow::computed_from`] over
+    /// this DAG). O(nodes + edges) per window walked.
     pub fn refresh_window(&self, node: PhysicalASAPNodeId) -> Option<RefreshWindow> {
-        self.refresh_windows([node])[&node]
-    }
-
-    /// [`Self::refresh_window`] of each of `nodes`, by id, with the DAG
-    /// indexed once for all of them.
-    pub fn refresh_windows(
-        &self,
-        nodes: impl IntoIterator<Item = PhysicalASAPNodeId>,
-    ) -> HashMap<PhysicalASAPNodeId, Option<RefreshWindow>> {
-        let index = ViewIndex::new(self);
-        nodes
-            .into_iter()
-            .map(|node| {
-                let refresh_window = index
-                    .windows_computed_from(node)
-                    .and_then(|windows| windows.into_iter().reduce(TimeWindow::union))
-                    .and_then(RefreshWindow::of_window);
-                (node, refresh_window)
-            })
-            .collect()
+        RefreshWindow::computed_from(self, node)
     }
 }
 
