@@ -13,8 +13,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 2.69870722985e-10,
-      "cpu_core_seconds_per_second": 0.000024,
+      "cost_per_second": 3.21715414712e-8,
+      "cpu_core_seconds_per_second": 0.00286066666667,
       "per_node": {
         "0": {
           "cost_per_second": 1.57416000515e-10,
@@ -26,19 +26,19 @@
           "timing": "query_time"
         },
         "1": {
-          "cost_per_second": 3.74800001227e-11,
+          "cost_per_second": 4.1228000135e-10,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 3.33333333333e-6,
-          "detail": "time range 300s: keep 200000 of 200000 rows; x 0.0167/s; holds 32 bytes for 0.200 ms",
+          "cpu_core_seconds_per_second": 0.0000366666666667,
+          "detail": "time range 300s: keep 200000 of 200000 rows; x 0.0167/s; holds 32 bytes for 2.200 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 7.49747223473e-11,
+          "cost_per_second": 3.16018454694e-8,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 6.66666666667e-6,
-          "detail": "hash aggregate 200000 rows into 10000 groups; x 0.0167/s; holds 1920000 bytes for 0.400 ms",
+          "cpu_core_seconds_per_second": 0.00281,
+          "detail": "hash aggregate 200000 rows into 10000 groups: 547 ops per row, 200000 group visits; x 0.0167/s; holds 1920000 bytes for 168.600 ms",
           "multiplier": 1,
           "operator": "Aggregate",
           "timing": "query_time"
@@ -46,8 +46,8 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 12.8005546667,
-        "cpu_ops_per_second": 13333.3333333,
+        "average_memory_bytes": 5395.20162133,
+        "cpu_ops_per_second": 2850000.0,
         "disk_bytes": 6400000,
         "peak_cpu_cores": 1,
         "peak_memory_bytes": 1920064,
@@ -147,7 +147,6 @@
       ],
       "nodes": [
         {
-          "guarantee": null,
           "id": 0,
           "lifetime": "None",
           "output_schema": {
@@ -235,7 +234,6 @@
           "retention_ms": 300000
         },
         {
-          "guarantee": null,
           "id": 1,
           "lifetime": "None",
           "output_schema": {
@@ -289,7 +287,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 2,
           "lifetime": {
             "OneEvaluation": "Memory"

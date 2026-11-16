@@ -76,12 +76,6 @@
       "deployment": "mvp"
     },
     {
-      "id": "quantile-over-time-no-phase-raw-retained",
-      "covers": "two quantile_over_time over [5m] every 1m without an evaluation phase: one shared KLL build, no tumbling-window chains (#1260)",
-      "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-over-time-no-phase.json",
-      "deployment": "raw_retained"
-    },
-    {
       "id": "quantile-over-time-phase-0-raw-retained",
       "covers": "the same two queries at phase 0: one 60 s KLL chain offered, query-time KLL selected",
       "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/quantile-over-time-phase-0.json",

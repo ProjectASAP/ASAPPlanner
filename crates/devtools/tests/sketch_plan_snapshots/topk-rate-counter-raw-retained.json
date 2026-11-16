@@ -1,7 +1,6 @@
 {
   "accuracy_guarantees": "enforced",
   "materialized_views": [],
-  "materialized_views_error": "the executor cannot compile the plan's query run: invalid DAG: node 4: invalid DAG: aggregate output names differ from measures",
   "queries": [
     "topk(5, rate(data[5m]))",
     "topk(10, rate(data[5m]))"
@@ -20,8 +19,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 2.36126350386e-10,
-      "cpu_core_seconds_per_second": 0.0000210000166667,
+      "cost_per_second": 1.29944529231e-8,
+      "cpu_core_seconds_per_second": 0.00115559015,
       "per_node": {
         "0": {
           "cost_per_second": 1.57416000515e-10,
@@ -33,46 +32,46 @@
           "timing": "query_time"
         },
         "1": {
-          "cost_per_second": 3.74800001227e-11,
+          "cost_per_second": 4.1228000135e-10,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 3.33333333333e-6,
-          "detail": "time range 300s: keep 200000 of 200000 rows; x 0.0167/s; holds 32 bytes for 0.200 ms",
+          "cpu_core_seconds_per_second": 0.0000366666666667,
+          "detail": "time range 300s: keep 200000 of 200000 rows; x 0.0167/s; holds 32 bytes for 2.200 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 3.7482147009e-11,
+          "cost_per_second": 7.60943621216e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 3.33333333333e-6,
-          "detail": "build exact Rate accumulator into 10000 states: 200000 rows x depth 1; x 0.0167/s; holds 560000 bytes for 0.200 ms",
+          "cpu_core_seconds_per_second": 0.000676666666667,
+          "detail": "build exact Rate accumulator into 10000 states: 200000 rows x 33 ops, 200000 group visits; x 0.0167/s; holds 1280000 bytes for 40.600 ms",
           "multiplier": 1,
           "operator": "SummaryAgg",
           "timing": "query_time"
         },
         "3": {
-          "cost_per_second": 1.874e-12,
+          "cost_per_second": 4.685e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.66666666667e-7,
+          "cpu_core_seconds_per_second": 0.000416666666667,
           "detail": "finalize 10000 accumulators; x 0.0167/s",
           "multiplier": 1,
           "operator": "FinalizeExactAccumulator",
           "timing": "query_time"
         },
         "4": {
-          "cost_per_second": 1.87401533885e-12,
+          "cost_per_second": 1.29807420476e-10,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.66666666667e-7,
-          "detail": "hash aggregate 10000 rows into 1 groups; x 0.0167/s; holds 80016 bytes for 0.010 ms",
+          "cpu_core_seconds_per_second": 0.0000115445,
+          "detail": "hash aggregate 10000 rows into 1 groups: 69 ops per row, 1 group visits; x 0.0167/s; holds 80016 bytes for 0.693 ms",
           "multiplier": 1,
           "operator": "Aggregate",
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 1.8740000046e-16,
+          "cost_per_second": 5.1328860126e-13,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.66666666667e-11,
-          "detail": "hash aggregate 1 rows into 1 groups; x 0.0167/s; holds 24 bytes for 0.000 ms",
+          "cpu_core_seconds_per_second": 4.565e-8,
+          "detail": "hash aggregate 1 rows into 1 groups: 69 ops per row, 1 group visits; x 0.0167/s; holds 24 bytes for 0.003 ms",
           "multiplier": 1,
           "operator": "Aggregate",
           "timing": "query_time"
@@ -80,11 +79,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 1.88055733373,
-        "cpu_ops_per_second": 10333.35,
+        "average_memory_bytes": 867.058700474,
+        "cpu_ops_per_second": 1144923.48333,
         "disk_bytes": 6400000,
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 640104,
+        "peak_memory_bytes": 1360104,
         "scanned_bytes_per_second": 106666.666667
       }
     },
@@ -308,7 +307,6 @@
       ],
       "nodes": [
         {
-          "guarantee": null,
           "id": 0,
           "lifetime": "None",
           "output_schema": {
@@ -396,7 +394,6 @@
           "retention_ms": 300000
         },
         {
-          "guarantee": null,
           "id": 1,
           "lifetime": "None",
           "output_schema": {
@@ -450,9 +447,10 @@
           }
         },
         {
-          "guarantee": null,
           "id": 2,
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "output_schema": {
             "closed": true,
             "fields": [
@@ -516,7 +514,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 3,
           "lifetime": "None",
           "output_schema": {
@@ -565,7 +562,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 4,
           "lifetime": {
             "OneEvaluation": "Memory"
@@ -611,7 +607,9 @@
                     "kind": "top_k"
                   }
                 ],
-                "output_names": [],
+                "output_names": [
+                  ""
+                ],
                 "reduction": {
                   "Reduce": []
                 }
@@ -620,7 +618,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 5,
           "lifetime": {
             "OneEvaluation": "Memory"
@@ -666,7 +663,9 @@
                     "kind": "top_k"
                   }
                 ],
-                "output_names": [],
+                "output_names": [
+                  ""
+                ],
                 "reduction": {
                   "Reduce": []
                 }

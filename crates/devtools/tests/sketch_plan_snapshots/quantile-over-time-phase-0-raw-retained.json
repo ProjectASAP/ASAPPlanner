@@ -23,8 +23,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 2.39910340096e-10,
-      "cpu_core_seconds_per_second": 0.0000213333333333,
+      "cost_per_second": 2.24722033729e-8,
+      "cpu_core_seconds_per_second": 0.00199766666667,
       "per_node": {
         "0": {
           "cost_per_second": 1.57416000515e-10,
@@ -36,27 +36,27 @@
           "timing": "query_time"
         },
         "1": {
-          "cost_per_second": 3.74800001227e-11,
+          "cost_per_second": 4.1228000135e-10,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 3.33333333333e-6,
-          "detail": "time range 300s: keep 200000 of 200000 rows; x 0.0167/s; holds 32 bytes for 0.200 ms",
+          "cpu_core_seconds_per_second": 0.0000366666666667,
+          "detail": "time range 300s: keep 200000 of 200000 rows; x 0.0167/s; holds 32 bytes for 2.200 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 3.7518339446e-11,
+          "cost_per_second": 9.53035937107e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 3.33333333333e-6,
-          "detail": "build Kll into 10000 states: 200000 rows x depth 1; x 0.0167/s; holds 10000000 bytes for 0.200 ms",
+          "cpu_core_seconds_per_second": 0.000846666666667,
+          "detail": "build Kll into 10000 states: 200000 rows x 84 ops, 200000 group visits; x 0.0167/s; holds 10720000 bytes for 50.800 ms",
           "multiplier": 1,
           "operator": "SummaryAgg",
           "timing": "query_time"
         },
         "3": {
-          "cost_per_second": 1.874e-12,
+          "cost_per_second": 6.1842e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.66666666667e-7,
+          "cpu_core_seconds_per_second": 0.00055,
           "detail": "estimate 10000 groups x 1; x 0.0167/s",
           "multiplier": 1,
           "operator": "SummaryEstimate",
@@ -72,9 +72,9 @@
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 1.874e-12,
+          "cost_per_second": 6.1842e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.66666666667e-7,
+          "cpu_core_seconds_per_second": 0.00055,
           "detail": "estimate 10000 groups x 1; x 0.0167/s",
           "multiplier": 1,
           "operator": "SummaryEstimate",
@@ -92,11 +92,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 33.3338986667,
-        "cpu_ops_per_second": 10666.6666667,
+        "average_memory_bytes": 9076.26829867,
+        "cpu_ops_per_second": 1987000.0,
         "disk_bytes": 6400000,
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 10000128,
+        "peak_memory_bytes": 10720128,
         "scanned_bytes_per_second": 106666.666667
       }
     },
@@ -369,7 +369,6 @@
       ],
       "nodes": [
         {
-          "guarantee": null,
           "id": 0,
           "lifetime": "None",
           "output_schema": {
@@ -457,7 +456,6 @@
           "retention_ms": 300000
         },
         {
-          "guarantee": null,
           "id": 1,
           "lifetime": "None",
           "output_schema": {
@@ -511,7 +509,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 2,
           "lifetime": {
             "OneEvaluation": "Memory"
@@ -578,7 +575,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 3,
           "lifetime": "None",
           "output_schema": {
@@ -632,7 +628,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 4,
           "lifetime": "None",
           "output_schema": {
@@ -701,7 +696,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 5,
           "lifetime": "None",
           "output_schema": {
@@ -755,7 +749,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 6,
           "lifetime": "None",
           "output_schema": {

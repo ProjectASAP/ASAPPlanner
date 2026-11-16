@@ -35,16 +35,14 @@
         "summary": "accepted exact"
       },
       {
-        "accepted_metric": "rank",
-        "sketches": [
-          "Kll"
-        ],
-        "summary": "accepted rank (Kll)"
+        "accepted_metric": null,
+        "sketches": [],
+        "summary": "accepted exact"
       }
     ],
     "cost": {
-      "cost_per_second": 5.76155537119e-10,
-      "cpu_core_seconds_per_second": 0.0000512333333333,
+      "cost_per_second": 5.92760058672e-8,
+      "cpu_core_seconds_per_second": 0.0052704,
       "per_node": {
         "0": {
           "cost_per_second": 1.57416000515e-10,
@@ -56,10 +54,10 @@
           "timing": "query_time"
         },
         "1": {
-          "cost_per_second": 3.74800001227e-11,
+          "cost_per_second": 4.1228000135e-10,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 3.33333333333e-6,
-          "detail": "time range 300s: keep 200000 of 200000 rows; x 0.0167/s; holds 32 bytes for 0.200 ms",
+          "cpu_core_seconds_per_second": 0.0000366666666667,
+          "detail": "time range 300s: keep 200000 of 200000 rows; x 0.0167/s; holds 32 bytes for 2.200 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
@@ -74,19 +72,19 @@
           "timing": "query_time"
         },
         "11": {
-          "cost_per_second": 7.49600004907e-12,
+          "cost_per_second": 8.24560005398e-11,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 6.66666666667e-7,
-          "detail": "time range 15s: keep 10000 of 10000 rows; x 0.0667/s; holds 64 bytes for 0.010 ms",
+          "cpu_core_seconds_per_second": 7.33333333333e-6,
+          "detail": "time range 15s: keep 10000 of 10000 rows; x 0.0667/s; holds 64 bytes for 0.110 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "12": {
-          "cost_per_second": 2.24892882054e-11,
+          "cost_per_second": 2.04202736905e-8,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 2e-6,
-          "detail": "hash aggregate 10000 rows into 10000 groups; x 0.0667/s; holds 560000 bytes for 0.030 ms",
+          "cpu_core_seconds_per_second": 0.001816,
+          "detail": "hash aggregate 10000 rows into 10000 groups: 54 ops per row, 10000 group visits; x 0.0667/s; holds 560000 bytes for 27.240 ms",
           "multiplier": 1,
           "operator": "Aggregate",
           "timing": "query_time"
@@ -101,54 +99,36 @@
           "timing": "query_time"
         },
         "14": {
-          "cost_per_second": 3.74800001227e-11,
+          "cost_per_second": 4.1228000135e-10,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 3.33333333333e-6,
-          "detail": "time range 600s: keep 400000 of 400000 rows; x 0.0083/s; holds 32 bytes for 0.400 ms",
+          "cpu_core_seconds_per_second": 0.0000366666666667,
+          "detail": "time range 600s: keep 400000 of 400000 rows; x 0.0083/s; holds 32 bytes for 4.400 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "15": {
-          "cost_per_second": 3.75281543442e-11,
+          "cost_per_second": 1.05919124745e-8,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 3.33333333333e-6,
-          "detail": "build Kll into 10000 states: 400000 rows x depth 1; x 0.0083/s; holds 12560000 bytes for 0.400 ms",
+          "cpu_core_seconds_per_second": 0.000941666666667,
+          "detail": "hash aggregate 400000 rows into 10000 groups: 49 ops per row, 400000 group visits; x 0.0083/s; holds 3520000 bytes for 113.000 ms",
           "multiplier": 1,
-          "operator": "SummaryAgg",
-          "timing": "query_time"
-        },
-        "16": {
-          "cost_per_second": 9.37e-13,
-          "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 8.33333333333e-8,
-          "detail": "estimate 10000 groups x 1; x 0.0083/s",
-          "multiplier": 1,
-          "operator": "SummaryEstimate",
-          "timing": "query_time"
-        },
-        "17": {
-          "cost_per_second": 9.37000003067e-13,
-          "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 8.33333333333e-8,
-          "detail": "operator: pass 10000 rows; x 0.0083/s; holds 32 bytes for 0.010 ms",
-          "multiplier": 1,
-          "operator": "Project",
+          "operator": "Aggregate",
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 3.7518339446e-11,
+          "cost_per_second": 9.53035937107e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 3.33333333333e-6,
-          "detail": "build Kll into 10000 states: 200000 rows x depth 1; x 0.0167/s; holds 10000000 bytes for 0.200 ms",
+          "cpu_core_seconds_per_second": 0.000846666666667,
+          "detail": "build Kll into 10000 states: 200000 rows x 84 ops, 200000 group visits; x 0.0167/s; holds 10720000 bytes for 50.800 ms",
           "multiplier": 1,
           "operator": "SummaryAgg",
           "timing": "query_time"
         },
         "3": {
-          "cost_per_second": 1.874e-12,
+          "cost_per_second": 6.1842e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.66666666667e-7,
+          "cpu_core_seconds_per_second": 0.00055,
           "detail": "estimate 10000 groups x 1; x 0.0167/s",
           "multiplier": 1,
           "operator": "SummaryEstimate",
@@ -164,9 +144,9 @@
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 1.874e-12,
+          "cost_per_second": 6.1842e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.66666666667e-7,
+          "cpu_core_seconds_per_second": 0.00055,
           "detail": "estimate 10000 groups x 1; x 0.0167/s",
           "multiplier": 1,
           "operator": "SummaryEstimate",
@@ -191,19 +171,19 @@
           "timing": "query_time"
         },
         "8": {
-          "cost_per_second": 1.8740000092e-12,
+          "cost_per_second": 2.06140001012e-11,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.66666666667e-7,
-          "detail": "time range 15s: keep 10000 of 10000 rows; x 0.0167/s; holds 48 bytes for 0.010 ms",
+          "cpu_core_seconds_per_second": 1.83333333333e-6,
+          "detail": "time range 15s: keep 10000 of 10000 rows; x 0.0167/s; holds 48 bytes for 0.110 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "9": {
-          "cost_per_second": 3.74815335778e-12,
+          "cost_per_second": 5.05251072629e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 3.33333333333e-7,
-          "detail": "hash aggregate 10000 rows into 10000 groups; x 0.0167/s; holds 400000 bytes for 0.020 ms",
+          "cpu_core_seconds_per_second": 0.000449333333333,
+          "detail": "hash aggregate 10000 rows into 10000 groups: 26 ops per row, 10000 group visits; x 0.0167/s; holds 400000 bytes for 26.960 ms",
           "multiplier": 1,
           "operator": "Aggregate",
           "timing": "query_time"
@@ -211,11 +191,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 76.4548688,
-        "cpu_ops_per_second": 24833.3333333,
+        "average_memory_bytes": 13587.6308395,
+        "cpu_ops_per_second": 5244000.0,
         "disk_bytes": 12800000,
         "peak_cpu_cores": 5,
-        "peak_memory_bytes": 23520448,
+        "peak_memory_bytes": 15200416,
         "scanned_bytes_per_second": 264000.0
       }
     },
@@ -790,99 +770,10 @@
           "producer": 14,
           "role": "Input",
           "window": "NotApplicable"
-        },
-        {
-          "consumer": 16,
-          "data_state": {
-            "primitive": "SummaryState",
-            "timing": "query_time"
-          },
-          "grouping": "NotApplicable",
-          "intermediate_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "Plain": "timestamp"
-                },
-                "name": "ts",
-                "nullable": false
-              },
-              {
-                "dtype": {
-                  "Sketch": "Kll"
-                },
-                "name": "state",
-                "nullable": false
-              },
-              {
-                "dtype": {
-                  "Plain": "utf8"
-                },
-                "name": "$promql_series_identity",
-                "nullable": false
-              }
-            ],
-            "time_index": 0,
-            "unique_keys": [
-              [
-                2,
-                0
-              ]
-            ]
-          },
-          "producer": 15,
-          "role": "Input",
-          "window": "NotApplicable"
-        },
-        {
-          "consumer": 17,
-          "data_state": {
-            "primitive": "Raw",
-            "timing": "query_time"
-          },
-          "grouping": "NotApplicable",
-          "intermediate_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "Plain": "timestamp"
-                },
-                "name": "ts",
-                "nullable": false
-              },
-              {
-                "dtype": {
-                  "Plain": "float64"
-                },
-                "name": "quantile",
-                "nullable": false
-              },
-              {
-                "dtype": {
-                  "Plain": "utf8"
-                },
-                "name": "$promql_series_identity",
-                "nullable": false
-              }
-            ],
-            "time_index": 0,
-            "unique_keys": [
-              [
-                2,
-                0
-              ]
-            ]
-          },
-          "producer": 16,
-          "role": "Input",
-          "window": "NotApplicable"
         }
       ],
       "nodes": [
         {
-          "guarantee": null,
           "id": 0,
           "lifetime": "None",
           "output_schema": {
@@ -970,7 +861,6 @@
           "retention_ms": 600000
         },
         {
-          "guarantee": null,
           "id": 1,
           "lifetime": "None",
           "output_schema": {
@@ -1024,7 +914,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 2,
           "lifetime": {
             "OneEvaluation": "Memory"
@@ -1091,7 +980,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 3,
           "lifetime": "None",
           "output_schema": {
@@ -1145,7 +1033,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 4,
           "lifetime": "None",
           "output_schema": {
@@ -1214,7 +1101,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 5,
           "lifetime": "None",
           "output_schema": {
@@ -1268,7 +1154,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 6,
           "lifetime": "None",
           "output_schema": {
@@ -1337,7 +1222,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 7,
           "lifetime": "None",
           "output_schema": {
@@ -1439,7 +1323,6 @@
           "retention_ms": 15000
         },
         {
-          "guarantee": null,
           "id": 8,
           "lifetime": "None",
           "output_schema": {
@@ -1500,9 +1383,10 @@
           }
         },
         {
-          "guarantee": null,
           "id": 9,
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1558,7 +1442,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 10,
           "lifetime": "None",
           "output_schema": {
@@ -1674,7 +1557,6 @@
           "retention_ms": 15000
         },
         {
-          "guarantee": null,
           "id": 11,
           "lifetime": "None",
           "output_schema": {
@@ -1742,9 +1624,10 @@
           }
         },
         {
-          "guarantee": null,
           "id": 12,
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1809,7 +1692,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 13,
           "lifetime": "None",
           "output_schema": {
@@ -1897,7 +1779,6 @@
           "retention_ms": 600000
         },
         {
-          "guarantee": null,
           "id": 14,
           "lifetime": "None",
           "output_schema": {
@@ -1951,128 +1832,10 @@
           }
         },
         {
-          "guarantee": null,
           "id": 15,
-          "lifetime": "None",
-          "output_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "Plain": "timestamp"
-                },
-                "name": "ts",
-                "nullable": false
-              },
-              {
-                "dtype": {
-                  "Sketch": "Kll"
-                },
-                "name": "state",
-                "nullable": false
-              },
-              {
-                "dtype": {
-                  "Plain": "utf8"
-                },
-                "name": "$promql_series_identity",
-                "nullable": false
-              }
-            ],
-            "time_index": 0,
-            "unique_keys": [
-              [
-                2,
-                0
-              ]
-            ]
+          "lifetime": {
+            "OneEvaluation": "Memory"
           },
-          "output_state": {
-            "primitive": "SummaryState",
-            "timing": "query_time"
-          },
-          "parameters": {
-            "Kll": {
-              "k": 2863
-            }
-          },
-          "payload": {
-            "ASAP": {
-              "SummaryAgg": {
-                "child": 14,
-                "filter": null,
-                "input": {
-                  "item": null,
-                  "weight": {
-                    "Column": "SampleValue"
-                  }
-                },
-                "reduction": "PerEntity",
-                "summary_type": {
-                  "Sketch": "Kll"
-                }
-              }
-            }
-          }
-        },
-        {
-          "guarantee": null,
-          "id": 16,
-          "lifetime": "None",
-          "output_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "Plain": "timestamp"
-                },
-                "name": "ts",
-                "nullable": false
-              },
-              {
-                "dtype": {
-                  "Plain": "float64"
-                },
-                "name": "quantile",
-                "nullable": false
-              },
-              {
-                "dtype": {
-                  "Plain": "utf8"
-                },
-                "name": "$promql_series_identity",
-                "nullable": false
-              }
-            ],
-            "time_index": 0,
-            "unique_keys": [
-              [
-                2,
-                0
-              ]
-            ]
-          },
-          "output_state": {
-            "primitive": "Raw",
-            "timing": "query_time"
-          },
-          "payload": {
-            "ASAP": {
-              "SummaryEstimate": {
-                "query": {
-                  "Quantile": {
-                    "q": 0.75
-                  }
-                },
-                "summary_input": 15
-              }
-            }
-          }
-        },
-        {
-          "guarantee": null,
-          "id": 17,
-          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -2112,28 +1875,21 @@
           },
           "payload": {
             "NonASAP": {
-              "Project": {
-                "child": 16,
-                "cols": [
+              "Aggregate": {
+                "child": 14,
+                "filters": [],
+                "having": null,
+                "measures": [
                   {
-                    "alias": "ts",
-                    "expr": {
-                      "Column": 0
-                    }
-                  },
-                  {
-                    "alias": "value",
-                    "expr": {
-                      "Column": 1
-                    }
-                  },
-                  {
-                    "alias": "$promql_series_identity",
-                    "expr": {
-                      "Column": 2
-                    }
+                    "col": null,
+                    "kind": "quantile",
+                    "q": 0.75
                   }
-                ]
+                ],
+                "output_names": [
+                  ""
+                ],
+                "reduction": "PerEntity"
               }
             }
           }
@@ -2144,7 +1900,7 @@
         4,
         9,
         12,
-        17
+        15
       ],
       "scalar_roots": []
     }

@@ -25,8 +25,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 4.94739224068e-11,
-      "cpu_core_seconds_per_second": 4.4e-6,
+      "cost_per_second": 5.23892853776e-9,
+      "cpu_core_seconds_per_second": 0.000465905083333,
       "per_node": {
         "0": {
           "cost_per_second": 1.08692000534e-11,
@@ -38,19 +38,19 @@
           "timing": "query_time"
         },
         "1": {
-          "cost_per_second": 1.8740000092e-12,
+          "cost_per_second": 2.06140001012e-11,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.66666666667e-7,
-          "detail": "time range 15s: keep 10000 of 10000 rows; x 0.0167/s; holds 48 bytes for 0.010 ms",
+          "cpu_core_seconds_per_second": 1.83333333333e-6,
+          "detail": "time range 15s: keep 10000 of 10000 rows; x 0.0167/s; holds 48 bytes for 0.110 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 3.74800015336e-12,
+          "cost_per_second": 4.26428717448e-11,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 3.33333333333e-7,
-          "detail": "hash aggregate 10000 rows into 10 groups; x 0.0167/s; holds 400 bytes for 0.020 ms",
+          "cpu_core_seconds_per_second": 3.7925e-6,
+          "detail": "hash aggregate 10000 rows into 10 groups: 20 ops per row, 15 group visits; x 0.0167/s; holds 400 bytes for 0.228 ms",
           "multiplier": 1,
           "operator": "Aggregate",
           "timing": "query_time"
@@ -65,19 +65,19 @@
           "timing": "query_time"
         },
         "4": {
-          "cost_per_second": 1.87400001227e-12,
+          "cost_per_second": 2.0614000135e-11,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.66666666667e-7,
-          "detail": "time range 15s: keep 10000 of 10000 rows; x 0.0167/s; holds 64 bytes for 0.010 ms",
+          "cpu_core_seconds_per_second": 1.83333333333e-6,
+          "detail": "time range 15s: keep 10000 of 10000 rows; x 0.0167/s; holds 64 bytes for 0.110 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 5.62232205135e-12,
+          "cost_per_second": 5.09382377852e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 5e-7,
-          "detail": "hash aggregate 10000 rows into 10000 groups; x 0.0167/s; holds 560000 bytes for 0.030 ms",
+          "cpu_core_seconds_per_second": 0.000453,
+          "detail": "hash aggregate 10000 rows into 10000 groups: 48 ops per row, 10000 group visits; x 0.0167/s; holds 560000 bytes for 27.180 ms",
           "multiplier": 1,
           "operator": "Aggregate",
           "timing": "query_time"
@@ -92,19 +92,19 @@
           "timing": "query_time"
         },
         "7": {
-          "cost_per_second": 1.87400000613e-12,
+          "cost_per_second": 2.06140000675e-11,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.66666666667e-7,
-          "detail": "time range 15s: keep 10000 of 10000 rows; x 0.0167/s; holds 32 bytes for 0.010 ms",
+          "cpu_core_seconds_per_second": 1.83333333333e-6,
+          "detail": "time range 15s: keep 10000 of 10000 rows; x 0.0167/s; holds 32 bytes for 0.110 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "8": {
-          "cost_per_second": 1.8740000046e-12,
+          "cost_per_second": 8.01228701967e-12,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.66666666667e-7,
-          "detail": "hash aggregate 10000 rows into 1 groups; x 0.0167/s; holds 24 bytes for 0.010 ms",
+          "cpu_core_seconds_per_second": 7.12583333333e-7,
+          "detail": "hash aggregate 10000 rows into 1 groups: 4 ops per row, 2 group visits; x 0.0167/s; holds 24 bytes for 0.043 ms",
           "multiplier": 1,
           "operator": "Aggregate",
           "timing": "query_time"
@@ -112,8 +112,8 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 0.280309066667,
-        "cpu_ops_per_second": 2000.0,
+        "average_memory_bytes": 253.681945835,
+        "cpu_ops_per_second": 463505.083333,
         "disk_bytes": 640000,
         "peak_cpu_cores": 3,
         "peak_memory_bytes": 560712,
@@ -431,7 +431,6 @@
       ],
       "nodes": [
         {
-          "guarantee": null,
           "id": 0,
           "lifetime": "None",
           "output_schema": {
@@ -533,7 +532,6 @@
           "retention_ms": 15000
         },
         {
-          "guarantee": null,
           "id": 1,
           "lifetime": "None",
           "output_schema": {
@@ -594,9 +592,10 @@
           }
         },
         {
-          "guarantee": null,
           "id": 2,
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "output_schema": {
             "closed": true,
             "fields": [
@@ -651,7 +650,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 3,
           "lifetime": "None",
           "output_schema": {
@@ -767,7 +765,6 @@
           "retention_ms": 15000
         },
         {
-          "guarantee": null,
           "id": 4,
           "lifetime": "None",
           "output_schema": {
@@ -835,7 +832,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 5,
           "lifetime": {
             "OneEvaluation": "Memory"
@@ -903,7 +899,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 6,
           "lifetime": "None",
           "output_schema": {
@@ -991,7 +986,6 @@
           "retention_ms": 15000
         },
         {
-          "guarantee": null,
           "id": 7,
           "lifetime": "None",
           "output_schema": {
@@ -1045,7 +1039,6 @@
           }
         },
         {
-          "guarantee": null,
           "id": 8,
           "lifetime": {
             "OneEvaluation": "Memory"
