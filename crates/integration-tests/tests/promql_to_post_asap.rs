@@ -29,7 +29,12 @@ use asap_types::summary_type::{
 /// a query at `accuracy` that uses an ASAP operator, or the plain exact one
 /// when none does: the summary-bound form the pins below inspect.
 fn realize(root: &Rc<OperatorNode>, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
-    let candidates = logical_candidates(Rc::clone(root), accuracy);
+    realize_from(logical_candidates(Rc::clone(root), accuracy))
+}
+
+/// The first of `candidates` that uses an ASAP operator, or the first when
+/// none does, checked against the IR contract.
+fn realize_from(candidates: Vec<Rc<OperatorNode>>) -> Rc<OperatorNode> {
     let node = candidates
         .iter()
         .find(|candidate| candidate.contains_asap())
@@ -105,22 +110,21 @@ fn lower_and_realize(query: &str) -> Rc<OperatorNode> {
     realize(&pre, AccuracyTarget::exact())
 }
 
-/// `query` lowered at an exact target, planned with summaries' CPU costed
-/// free ([`logical_candidates_ignoring_guarantees`]), and its candidate
-/// reading a summary taken: for tests of a summary plan's shape. Under the
-/// default unit costs a query-time exact accumulator pays its finalize
-/// (2.5 µs per group) and can lose to the plain exact plan.
+/// `query` lowered at an exact target and realized
+/// ([`realize_from`]) from the plan selected with accuracy guarantees
+/// ignored and summaries' CPU costed free
+/// ([`logical_candidates_ignoring_guarantees`]): for tests of a summary
+/// plan's shape. Under the default unit costs a query-time exact
+/// accumulator pays its finalize (2.5 µs per group) and can lose to the
+/// plain exact plan on these tests' small data.
 fn lower_and_realize_summaries(query: &str) -> Rc<OperatorNode> {
     let pre = lower_promql(query, AccuracyTarget::exact()).expect("lowering failed");
-    let candidates = logical_candidates_ignoring_guarantees(pre, AccuracyTarget::exact());
-    let node = candidates
-        .iter()
-        .find(|candidate| candidate.contains_asap())
-        .cloned()
-        .expect("a candidate reads a summary");
-    node.validate_structure()
-        .expect("planned dag satisfies the unified IR contract");
-    node
+    let root = realize_from(logical_candidates_ignoring_guarantees(
+        pre,
+        AccuracyTarget::exact(),
+    ));
+    assert!(root.contains_asap(), "{query}: a candidate reads a summary");
+    root
 }
 
 #[test]

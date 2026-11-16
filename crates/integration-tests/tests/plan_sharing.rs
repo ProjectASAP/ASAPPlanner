@@ -3,7 +3,8 @@
 //! more than planning the first query alone.
 use crate::planning_common::{cost, cost_with, fuzz_workload, selected_plan};
 use asap_cost::CostInputs;
-use asap_types::ir::NonASAPOp;
+use asap_devtools::planner_fuzz::{FuzzQuery, FuzzWorkload};
+use asap_types::ir::{ASAPOp, NonASAPOp};
 use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
 use serde_json::json;
 
@@ -100,7 +101,10 @@ fn duplicate_exact_topk_shares_work() {
     assert!(duplicate <= single * 1.001, "{duplicate} vs {single}");
 }
 
-/// SQL variants of the nested and slower-repeat cases: nested windows and slower queries reuse one sum.
+/// SQL variants of the nested and slower-repeat cases: nested windows and
+/// slower queries reuse one sum. The plan builds the sum once, and the
+/// added reader costs far less than planned alone: it reads the shared sum
+/// and pays only for its own answer each evaluation (its finalize).
 #[test]
 fn sql_sum_shares_nested_windows_and_slower_readers() {
     let mut w = fuzz_workload("identical_percentiles", false);
@@ -112,26 +116,47 @@ fn sql_sum_shares_nested_windows_and_slower_readers() {
     )
     .unwrap();
     let single = cost(&w);
-    let mut nested = w.clone();
+    // The nodes of `w`'s selected plan that build the sum: a summary state,
+    // stored or not, or an exact aggregate.
+    let sum_builders = |w: &FuzzWorkload| {
+        selected_plan(w, &CostInputs::default())
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.payload,
+                    Payload::ASAP(
+                        ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }
+                    ) | Payload::NonASAP(NonASAPOp::Aggregate { .. })
+                )
+            })
+            .count()
+    };
+    // A reader added to `w`: it builds no sum of its own, and costs less
+    // than a tenth of what it costs planned alone.
+    let assert_shares = |w: &FuzzWorkload, reader: &FuzzQuery| {
+        let mut with_reader = w.clone();
+        with_reader.queries.push(reader.clone());
+        let mut alone = w.clone();
+        alone.queries = vec![reader.clone()];
+        assert_eq!(sum_builders(&with_reader), 1, "{}", reader.entry.query.0);
+        let marginal = cost(&with_reader) - single;
+        let standalone = cost(&alone);
+        assert!(
+            marginal < 0.1 * standalone,
+            "{}: adds {marginal}, alone {standalone}",
+            reader.entry.query.0
+        );
+    };
     let mut shorter = w.queries[0].clone();
     shorter.entry.query.0 = shorter.entry.query.0.replace("'5'", "'1'");
-    nested.queries.push(shorter);
-    let nested_cost = cost(&nested);
-    // The 1m reader shares the 5m reader's sum but finalizes its own
-    // answer each evaluation (2.5 µs per group): 0.16% more.
-    assert!(nested_cost <= single * 1.01, "{nested_cost} vs {single}");
+    assert_shares(&w, &shorter);
     let mut slower = w.queries[0].clone();
     slower.entry.demand = serde_json::from_value(
         json!({"fixed_interval_at": {"interval": 120000, "evaluation_phase": 0}}),
     )
     .unwrap();
-    w.queries.push(slower);
-    let repeated_cost = cost(&w);
-    // Likewise the slower reader's own finalize: 0.1% more.
-    assert!(
-        repeated_cost <= single * 1.01,
-        "{repeated_cost} vs {single}"
-    );
+    assert_shares(&w, &slower);
 }
 
 /// Two identical exact percentile queries pay for their result once.
