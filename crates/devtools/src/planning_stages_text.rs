@@ -855,7 +855,11 @@ pub fn root_prune_reason_text(reason: &RootPruneReason) -> String {
              producer's {producer_metric:?}"
         ),
         RootPruneReason::NoGuarantee { .. } => {
-            "the producer's summary type has no guarantee for the readout's statistic".to_owned()
+            "the readout's error has no bound at the failure probability its queries require: \
+             no metric, or no guarantee known to hold there (a randomized sketch under an exact \
+             target's δ 0; HLL, whose failure probability is unknown; DDSketch over values not \
+             of one sign)"
+                .to_owned()
         }
         RootPruneReason::ValuesPerEvaluationUnknown { query, .. } => {
             format!(
