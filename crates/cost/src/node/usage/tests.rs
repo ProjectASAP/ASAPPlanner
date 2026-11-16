@@ -1003,7 +1003,7 @@ fn a_grouped_exact_distinct_count_pays_its_key_and_visits_once() {
 /// `http` (10,000 series at one row per second each, so the rows span
 /// `rows` ÷ 10,000 s; `region` takes 10 values, `service` 100 and
 /// `instance` 10,000). `user_ids` declares the distinct `user_id`s and
-/// `max_distinct_per_evaluation` the source's bound on any one distinct
+/// `max_distinct_per_evaluation` the source's bound on each group's distinct
 /// count; either may be absent.
 fn http_distinct_count_operations_per_row(
     keys: Vec<usize>,

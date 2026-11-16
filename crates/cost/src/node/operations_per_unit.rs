@@ -250,12 +250,12 @@ const EXACT_DISTINCT_OPERATIONS_PER_ROW: f64 = 59.0;
 /// doublings past 1,000, 86 per row.
 const EXACT_DISTINCT_OPERATIONS_PER_VALUE_DOUBLING: f64 = 13.0;
 
-/// The fewest distinct values on this host's grid: fewer are charged as
+/// The fewest distinct values on the 10,000-series grid: fewer are charged as
 /// 1,000 (the earlier grid measured 60–92 ns per row over 100 values and
 /// 58–123 over 1,000).
 const EXACT_DISTINCT_FEWEST_VALUES: f64 = 1_000.0;
 
-/// The most distinct values on this host's grid: more are charged as
+/// The most distinct values on the 10,000-series grid: more are charged as
 /// 10,000,000 (the earlier grid measured 943–1,155 ns per row over
 /// 100,000,000 values and 918–1,114 over 10,000,000).
 const EXACT_DISTINCT_MOST_VALUES: f64 = 10_000_000.0;
