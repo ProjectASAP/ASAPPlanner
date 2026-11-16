@@ -731,9 +731,11 @@ fn the_cost_model_chooses_how_candidates_are_compared() {
 }
 
 /// AWS Fargate's us-east-1 costs Example 4 under cost model 1 in US
-/// dollars per second: the selected plan costs no more than the
-/// whole-window KLL, $2.60278e-8/s (its 2.1 CPU-ms/s at $1.1244e-8 per
-/// CPU-ms, and its states held while the query runs).
+/// dollars per second: the selected plan's cost is its usage at the page's
+/// prices, $1.1244e-5 per vCPU-second (1.1244e-14 per CPU operation of
+/// 1 ns, 1.1244e-15 per scanned byte) and $1.235e-6 per GiB-second of
+/// memory. E.g. 1.17e8 CPU operations, 1.07e7 scanned bytes and 2.17e7
+/// average bytes held per second cost $1.3525e-6/s.
 #[test]
 fn aws_fargate_prices_example_4_in_dollars() {
     let fargate = cost_inputs(&aws_fargate());
@@ -747,11 +749,18 @@ fn aws_fargate_prices_example_4_in_dollars() {
             fargate.path(),
         ],
     );
-    let cost = document["stage3_plan_selection"]["cost"]["cost_per_second"]
-        .as_f64()
-        .unwrap();
-    assert!(cost.is_finite() && cost > 0.0);
-    assert!(cost <= 2.602778532914e-8 * (1.0 + 1e-6), "{cost}");
+    let cost = &document["stage3_plan_selection"]["cost"];
+    let cost_per_second = cost["cost_per_second"].as_f64().unwrap();
+    let usage = |field: &str| cost["usage"][field].as_f64().unwrap();
+    let at_page_prices = usage("cpu_ops_per_second") * 1.1244e-14
+        + usage("scanned_bytes_per_second") * 1.1244e-15
+        + usage("average_memory_bytes") * 1.235e-6 / (1u64 << 30) as f64;
+    assert!(cost_per_second > 0.0, "{cost}");
+    // 1e-9: the document's numbers are rounded to 12 significant digits.
+    assert!(
+        (cost_per_second - at_page_prices).abs() <= 1e-9 * at_page_prices,
+        "{cost_per_second} != {at_page_prices}: {cost}"
+    );
 }
 
 /// `--deployment-capabilities` declares the executor's capabilities, which
@@ -1047,9 +1056,10 @@ fn undeclared_supported_summaries_default_to_the_executors_families() {
 
 /// Two windowed quantiles over one metric (Q1 over 1 m, Q2 over 5 m, both
 /// every 10 s): with a shared scan, Stage 2 also offers the scan built once
-/// per evaluation, which reads the 5 m window once (≈0.1364/s) instead of
-/// once per query (0.2203/s); the selected plan reads the scan built once
-/// per evaluation and costs at most 0.144/s.
+/// per evaluation, which reads the 5 m window once instead of once per
+/// query. The selected plan has that one scan, and it is charged for the
+/// 5 m window's 10,000 series × 300 s / 15 s = 200,000 samples per
+/// evaluation.
 #[test]
 fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
     let workload = json!({
@@ -1071,8 +1081,6 @@ fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
         &["--run-until", "stage3", "--ignore-accuracy-guarantees"],
     );
     let selection = &document["stage3_plan_selection"];
-    let cost = selection["cost"]["cost_per_second"].as_f64().unwrap();
-    assert!(cost <= 0.144, "{cost}");
     // The plan's one scan, built once per evaluation.
     let selected_scans: Vec<&Value> = selection["plan"]["nodes"]
         .as_array()
@@ -1085,10 +1093,25 @@ fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
         selected_scans[0]["lifetime"],
         json!({"OneEvaluation": "Memory"})
     );
+    let scan_charges: Vec<&Value> = selection["cost"]["per_node"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|charge| charge["operator"] == "Scan")
+        .collect();
+    assert_eq!(scan_charges.len(), 1, "{scan_charges:?}");
+    assert!(
+        scan_charges[0]["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("scan 200000 samples;"),
+        "{scan_charges:?}"
+    );
 }
 
 /// The search is the candidate-connection search, whose selection MILP's
-/// size and times Stage 3's section reports.
+/// size Stage 3's section reports. Its times and solve count, which
+/// change from run to run, are left out of the document.
 #[test]
 fn the_search_reports_candidate_connections() {
     let document = document(
@@ -1097,14 +1120,108 @@ fn the_search_reports_candidate_connections() {
     );
     assert_eq!(document["search"], "candidate-connections");
     let selection = &document["stage3_plan_selection"];
-    for field in [
-        "milp_variables",
-        "milp_constraints",
-        "milp_construction_ms",
-        "milp_solve_ms",
-    ] {
+    for field in ["milp_variables", "milp_constraints"] {
         assert!(selection[field].is_u64(), "{field}: {selection}");
     }
+    for field in ["milp_construction_ms", "milp_solve_ms", "milp_solve_count"] {
+        assert!(selection.get(field).is_none(), "{field}: {selection}");
+    }
+}
+
+/// Memo ids are canonical: depth first from the query roots, so adding a
+/// query over another metric after `quantile_over_time(0.9, a[5m])` keeps
+/// every id of the first query's groups and candidates, at every step
+/// (the planner's own ids would interleave the two queries' groups).
+#[test]
+fn memo_ids_of_a_query_do_not_move_when_another_query_is_added() {
+    let first = "quantile_over_time(0.9, a[5m])";
+    let target = json!({"max_error": 0.01, "failure_probability": 0.001});
+    let args = ["--run-until", "stage3"];
+    let alone = document(&adhoc(&[first], target.clone(), &["a"]), &args);
+    let with_another = document(
+        &adhoc(
+            &[first, "quantile_over_time(0.5, b[1m])"],
+            target,
+            &["a", "b"],
+        ),
+        &args,
+    );
+    // A group and its candidates by what they are, without the queries
+    // that reach them.
+    let shape = |group: &Value| {
+        let mut group = group.clone();
+        let object = group.as_object_mut().unwrap();
+        object.remove("queries");
+        object.remove("roots_of");
+        group
+    };
+    for step in ["stage0", "pass1", "pass2"] {
+        let groups_alone = memo_step(&alone, step)["groups"].as_array().unwrap();
+        let groups_with_another = memo_step(&with_another, step)["groups"].as_array().unwrap();
+        assert!(groups_with_another.len() > groups_alone.len(), "{step}");
+        for group in groups_alone {
+            let same = groups_with_another
+                .iter()
+                .find(|other| other["id"] == group["id"])
+                .unwrap_or_else(|| panic!("{step}: no group {}", group["id"]));
+            assert_eq!(shape(same), shape(group), "{step}");
+        }
+    }
+    // The first query's root is group 0.
+    assert_eq!(
+        memo_step(&with_another, "stage0")["groups"][0]["roots_of"],
+        json!([0])
+    );
+}
+
+/// Stage 3 reports which plan nodes several queries read, by what they
+/// compute: the two windowed quantiles over one metric share their scan.
+/// One query shares nothing. Every number of the planner's output keeps
+/// at most 12 significant digits.
+#[test]
+fn the_sharing_summary_names_the_nodes_several_queries_read() {
+    let workload = json!({
+        "query_workload": {
+            "language": "promql",
+            "query_batch": null,
+            "repeating_queries": [
+                every_10s_within_1_percent("quantile_over_time(0.5, data[1m])"),
+                every_10s_within_1_percent("quantile_over_time(0.9, data[5m])"),
+            ],
+        },
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 666.67}},
+            "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}},
+        },
+    });
+    let args = ["--run-until", "stage3", "--ignore-accuracy-guarantees"];
+    let selection = &document(&workload, &args)["stage3_plan_selection"];
+    let shared = selection["sharing_summary"].as_array().unwrap();
+    assert!(
+        shared
+            .iter()
+            .any(|node| node["operator"] == "Scan" && node["queries"] == json!(["q1", "q2"])),
+        "{shared:?}"
+    );
+    assert!(shared.iter().all(|node| node.get("id").is_none()));
+    let alone = document(
+        &adhoc(&["quantile_over_time(0.9, m[5m])"], exact(), &["m"]),
+        &["--run-until", "stage3"],
+    );
+    assert_eq!(alone["stage3_plan_selection"]["sharing_summary"], json!([]));
+
+    fn assert_rounded(value: &Value) {
+        match value {
+            Value::Number(n) if n.is_f64() => {
+                let x = n.as_f64().unwrap();
+                assert_eq!(format!("{x:.11e}").parse::<f64>().unwrap(), x);
+            }
+            Value::Array(items) => items.iter().for_each(assert_rounded),
+            Value::Object(map) => map.values().for_each(assert_rounded),
+            _ => {}
+        }
+    }
+    assert_rounded(selection);
 }
 
 /// The selected plan's `per_node` entries carry the node's operator,
@@ -1217,17 +1334,20 @@ fn a_counter_function_over_a_declared_gauge_plans_with_a_warning() {
     assert!(counter["stage3_plan_selection"].get("warnings").is_none());
 }
 
-/// A relative-error quantile over `m` (1,000 series, non-negative values)
-/// whose `value` declares `column_magnitudes` when `magnitudes` is set.
+/// A relative-error quantile over `m` (1,000 series, non-negative values,
+/// ingesting) every 10 s, whose `value` declares `column_magnitudes` when
+/// `magnitudes` is set. Repeating, so a deployment without raw data can
+/// still answer it from a state built at ingestion.
 fn relative_quantile_over(magnitudes: Option<Value>) -> Value {
     let mut workload = json!({
-        "query_workload": {"language": "promql", "query_batch": [{
+        "query_workload": {"language": "promql", "query_batch": null, "repeating_queries": [{
             "query": "quantile_over_time(0.99, m[5m])",
+            "demand": {"fixed_interval_at": {"interval": 10000, "evaluation_phase": 0}},
             "requirements": {"accuracy": {"max_error": 0.01, "accuracy_metric": "relative"}},
-            "predictability": "unknown", "invocations": 1
+            "predictability": {"predictable": {"known_at": null}}
         }]},
-        "data_workload": {"arrival": "unknown", "sources": {"m": {
-            "sample_interval": 1000, "series_count": 1000, "rows_held": 600000,
+        "data_workload": {"arrival": {"ingesting": {"rows_per_second": 1000.0}}, "sources": {"m": {
+            "sample_interval": 1000, "series_count": 1000,
             "column_signs": {"value": "non_negative"}
         }}}
     });
@@ -1610,7 +1730,7 @@ fn memo_section_lists_each_step_and_the_selected_candidates() {
                 );
                 assert!(children
                     .iter()
-                    .all(|child| (child.as_u64().unwrap() as usize) < groups.len()));
+                    .all(|child| groups.iter().any(|group| group["id"] == *child)));
                 assert!(candidate.get("parameters").is_some());
             }
         }
@@ -1785,9 +1905,7 @@ fn failing_logical_edges_show_the_reason_pass_2_recorded() {
         .filter(|group| group["label"] == "SummaryEstimate Quantile(q=0.9)")
         .collect();
     assert_eq!(readouts.len(), 2, "the KLL and the DDSketch readout");
-    let mut readout_ids = Vec::new();
     for group in &readouts {
-        readout_ids.push(group["id"].as_u64().unwrap());
         let candidate = &group["candidates"][0];
         assert_eq!(candidate["pruned"], true, "{candidate}");
         let edges = candidate["inputs"][0]["edges"].as_array().unwrap();
@@ -1808,12 +1926,19 @@ fn failing_logical_edges_show_the_reason_pass_2_recorded() {
         .split("==================== Stage 1 Pass 2 output")
         .nth(1)
         .expect("a Pass 2 section");
-    for id in readout_ids {
-        let block = pass2
-            .split(&format!("\nG{id}: "))
-            .nth(1)
-            .and_then(|rest| rest.split("\nG").next())
-            .unwrap_or_else(|| panic!("G{id} in:\n{pass2}"));
+    // The text keeps the planner's group ids, so its readouts are found by
+    // label.
+    let blocks: Vec<&str> = pass2
+        .split("\nG")
+        .filter(|block| {
+            block
+                .lines()
+                .next()
+                .is_some_and(|header| header.contains("SummaryEstimate Quantile(q=0.9)"))
+        })
+        .collect();
+    assert_eq!(blocks.len(), 2, "{pass2}");
+    for block in blocks {
         let edges: Vec<&str> = block
             .lines()
             .map(str::trim_start)

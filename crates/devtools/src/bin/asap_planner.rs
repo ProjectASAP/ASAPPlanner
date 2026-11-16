@@ -74,12 +74,11 @@
 //     `PhysicalASAPDAG`), its `cost` (`asap_cost::plan_cost`:
 //     `cost_per_second`, `source`, `usage` and each node's charge), and its
 //     `Selection`: `accepted_accuracy_per_query`, `pruned_candidates` (as
-//     Stage 2's), `milp_variables`, `milp_constraints`,
-//     `milp_construction_ms`, `milp_solve_ms`, `milp_solve_count` (2 when
-//     the solve at HiGHS's default tolerances missed an accuracy target and
-//     was repeated at 1e-10) and `milp_objective_cost_per_second` (the
-//     selected plan's cost per second); `error` when no plan was
-//     selected.
+//     Stage 2's), `milp_variables`, `milp_constraints` and
+//     `milp_objective_cost_per_second` (the selected plan's cost per
+//     second); `error` when no plan was selected. `sharing_summary`: each
+//     plan node two or more queries read, by what it computes (`operator`,
+//     `parameters`, `timing`, `lifetime`) and the `queries` reading it.
 //     `materialized_views` are the plan's materialized views as
 //     `plan_installable` derives them; `materialized_views_error` when the
 //     plan is not installable. `warnings`: a PromQL query applying `rate`, `increase`
@@ -112,6 +111,14 @@
 //   - `search`, `accuracy_guarantees` (`"enforced"` or `"ignored"`),
 //     `deployment_capabilities` (as planned with) and `run_until`.
 // A section of a stage after `--run-until` is null.
+//
+// The document is stable, so it can be compared as text: memo group,
+// candidate and physical candidate ids are canonical (renumbered depth
+// first from the query roots, `asap_devtools::stable_output::CanonicalIds`),
+// lists are in canonical id order, every non-integer number is rounded to
+// 12 significant digits, and the MILP's times and solve count are left
+// out. The text output keeps the planner's own ids, as in logs and error
+// messages, and prints the times and solve count.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -126,6 +133,7 @@ use asap_devtools::planning_stages_text::{
     aggregate_coverage_text, column_lineage_text, edges_per_input, logical_edges_into,
     physical_edge_rejection, planning_stages_text, root_prune_reason_text, selected_edges,
 };
+use asap_devtools::stable_output::{rounded_to_12_significant_digits, CanonicalIds};
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{metric_type_warnings, promql_metric_names};
 use asap_planner::{assumed_data_facts, installable_plan_of, PlanningModels, SelectionError};
@@ -138,6 +146,7 @@ use asap_types::ir::QueryRoot;
 use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::plan::materialized_view::MaterializedView;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
+use asap_types::plan::physical_asap_dag::PhysicalASAPNodeId;
 use asap_types::stages::{
     CandidateForMemoGroup, CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, MemoGroupId,
     PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PrunedCandidate,
@@ -306,6 +315,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 );
             }
         }
+        // The planner's numbers; the inputs added below stay as given.
+        let mut document = rounded_to_12_significant_digits(document);
         document["workload"]["data_workload"] =
             serde_json::to_value(&data).map_err(|e| e.to_string())?;
         document["search"] = json!("candidate-connections");
@@ -382,10 +393,11 @@ fn document(
 ) -> Value {
     let until = run.run_until;
     let plan = run.run.selection.as_ref().ok().map(|(plan, _)| plan);
+    let ids = canonical_ids_of(run);
     let stage1 = (until >= RunUntil::Pass1).then(|| {
         let mut stage1 = json!({});
         if let Some(logical) = &run.run.logical_asap_candidates {
-            stage1["pruned_candidates"] = json!(pass2_pruned_json(logical));
+            stage1["pruned_candidates"] = json!(pass2_pruned_json(logical, &ids));
         } else if let Err(error) = &run.run.selection {
             // Pass 1 or Pass 2 failed, or the deployment's capabilities
             // contradict the data workload.
@@ -398,8 +410,8 @@ fn document(
     let stage2 = (until >= RunUntil::Stage2).then(|| {
         let mut stage2 = match &run.run.physical_asap_candidates {
             Some(physical) => json!({
-                "physical_candidates": physical_candidates_json(physical, plan),
-                "pruned_candidates": pruned_candidates_json(&physical.pruned_candidates),
+                "physical_candidates": physical_candidates_json(physical, plan, &ids),
+                "pruned_candidates": pruned_candidates_json(&physical.pruned_candidates, &ids),
             }),
             None => json!({ "physical_candidates": [], "pruned_candidates": [] }),
         };
@@ -412,7 +424,7 @@ fn document(
         stage2
     });
     let stage3 =
-        (until == RunUntil::Stage3).then(|| stage3_json(run, plan_cost, materialized_views));
+        (until == RunUntil::Stage3).then(|| stage3_json(run, plan_cost, materialized_views, &ids));
     json!({
         "format": "asap-stage-pipeline/v2",
         "run_until": until.name(),
@@ -421,20 +433,34 @@ fn document(
         "stage1_logical_asap_optimization": stage1,
         "stage2_physical_asap_optimization": stage2,
         "stage3_plan_selection": stage3,
-        "memo": memo_json(run),
+        "memo": memo_json(run, &ids),
     })
 }
 
-/// Stage 3's section: the plan, its cost, the selection and the plan's
-/// materialized views.
+/// The canonical ids of `run`'s last memo (Pass 2's, else Pass 1's, else
+/// Stage 0's) and of its physical candidates.
+fn canonical_ids_of(run: &PlanningStagesRun) -> CanonicalIds {
+    let logical = run.run.logical_asap_candidates.as_ref();
+    let memo = logical
+        .map(|logical| &logical.memo)
+        .or(run.run.pass1_memo.as_ref())
+        .or(run.stage0_memo_groups.as_ref())
+        .expect("run_stages_until builds Stage 0's memo");
+    CanonicalIds::of(memo, run.run.physical_asap_candidates.as_ref())
+}
+
+/// Stage 3's section: the plan, its cost, its sharing summary, the
+/// selection and the plan's materialized views.
 fn stage3_json(
     run: &PlanningStagesRun,
     plan_cost: Option<&PlanCost>,
     materialized_views: Option<&Result<Vec<MaterializedView>, String>>,
+    ids: &CanonicalIds,
 ) -> Value {
-    let mut stage3 = selection_json(&run.run.selection);
-    if run.run.selection.is_ok() {
+    let mut stage3 = selection_json(&run.run.selection, ids);
+    if let Ok((plan, _)) = &run.run.selection {
         stage3["cost"] = plan_cost.map_or(Value::Null, cost_json);
+        stage3["sharing_summary"] = json!(sharing_summary_json(plan));
     }
     stage3["materialized_views"] = json!([]);
     match materialized_views {
@@ -448,8 +474,8 @@ fn stage3_json(
 /// The document's `memo` section: the memo after each step `run` ran,
 /// and, with a selected plan, `selected_candidates`: each memo group the
 /// plan uses, with the indices of its candidates there (a group may be
-/// used through several candidates).
-fn memo_json(run: &PlanningStagesRun) -> Value {
+/// used through several candidates). Ids are `ids`' canonical ones.
+fn memo_json(run: &PlanningStagesRun, ids: &CanonicalIds) -> Value {
     let stage0 = run
         .stage0_memo_groups
         .as_ref()
@@ -457,19 +483,19 @@ fn memo_json(run: &PlanningStagesRun) -> Value {
     let mut steps = vec![json!({
         "step": "stage0",
         "title": "Stage 0, the frontends' DAG hash-consed",
-        "groups": memo_groups_json(stage0, None),
+        "groups": memo_groups_json(stage0, None, ids),
     })];
     if let Some(pass1) = &run.run.pass1_memo {
         steps.push(json!({
             "step": "pass1",
             "title": "Stage 1, Pass 1",
-            "groups": memo_groups_json(pass1, None),
+            "groups": memo_groups_json(pass1, None, ids),
         }));
         if let Some(logical) = &run.run.logical_asap_candidates {
             steps.push(json!({
                 "step": "pass2",
                 "title": "Stage 1, Pass 2",
-                "groups": memo_groups_json(&logical.memo, Some((pass1, logical))),
+                "groups": memo_groups_json(&logical.memo, Some((pass1, logical)), ids),
             }));
         }
     }
@@ -478,18 +504,20 @@ fn memo_json(run: &PlanningStagesRun) -> Value {
         &run.run.selection,
         run.run.physical_asap_candidates.as_ref(),
     ) {
-        let mut selected: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+        let mut selected: BTreeMap<u32, BTreeSet<usize>> = BTreeMap::new();
         for candidate in plan
             .nodes
             .iter()
             .filter_map(|node| node.selected_physical_candidate)
         {
             let logical = physical.physical_candidates[candidate.0].logical_candidate_id;
-            selected
-                .entry(logical.group.0.to_string())
-                .or_default()
-                .insert(logical.index_in_group);
+            let (group, index_in_group) = ids.candidate(logical);
+            selected.entry(group).or_default().insert(index_in_group);
         }
+        let selected: serde_json::Map<String, Value> = selected
+            .into_iter()
+            .map(|(group, indices)| (group.to_string(), json!(indices)))
+            .collect();
         memo["selected_candidates"] = json!(selected);
     }
     memo
@@ -686,13 +714,15 @@ fn materialized_views_of(
 /// each physical edge whose logical edge holds: `producer`,
 /// `satisfies_physical_requirement` ($\alpha^{\mathrm{phys}}$), `rejection`
 /// (why it fails, null when it holds) and `selected` (an edge of `plan`).
+/// In canonical id order (`ids`), each input's edges by producer.
 fn physical_candidates_json(
     physical: &PhysicalASAPMemoCandidates,
     plan: Option<&PhysicalASAPDAG>,
+    ids: &CanonicalIds,
 ) -> Vec<Value> {
     let memo = &physical.logical_candidates.memo;
     let selected = selected_edges(plan);
-    physical
+    let mut listed: Vec<(usize, Value)> = physical
         .physical_candidates
         .iter()
         .zip(edges_per_input(physical))
@@ -705,57 +735,73 @@ fn physical_candidates_json(
                 .zip(edges_into)
                 .enumerate()
                 .map(|(input, (group, edges))| {
-                    let edges: Vec<Value> = edges
+                    let mut edges: Vec<(usize, Value)> = edges
                         .iter()
                         .filter(|edge| edge.satisfies_logical_requirement)
                         .map(|edge| {
                             let producer = edge.producer_candidate_id;
-                            json!({
-                                "producer": producer.0,
+                            let canonical_producer = ids.physical(producer);
+                            (canonical_producer, json!({
+                                "producer": canonical_producer,
                                 "satisfies_physical_requirement": edge.satisfies_physical_requirement,
                                 "rejection": physical_edge_rejection(physical, edge),
                                 "selected": selected.contains(&(producer, PhysicalCandidateId(id), input)),
-                            })
+                            }))
                         })
                         .collect();
-                    json!({ "group": group.0, "edges": edges })
+                    edges.sort_by_key(|(producer, _)| *producer);
+                    let edges: Vec<Value> = edges.into_iter().map(|(_, edge)| edge).collect();
+                    json!({ "group": ids.group(*group), "edges": edges })
                 })
                 .collect();
-            json!({
-                "id": id,
-                "group": logical.group.0,
-                "index_in_group": logical.index_in_group,
+            let canonical_id = ids.physical(PhysicalCandidateId(id));
+            let (group, index_in_group) = ids.candidate(logical);
+            (canonical_id, json!({
+                "id": canonical_id,
+                "group": group,
+                "index_in_group": index_in_group,
                 "properties": candidate.physical_properties,
                 "inputs": inputs,
-            })
+            }))
         })
-        .collect()
+        .collect();
+    listed.sort_by_key(|(id, _)| *id);
+    listed.into_iter().map(|(_, candidate)| candidate).collect()
 }
 
-/// Candidates Stage 2 or Stage 3 pruned, in pruning order: each logical
-/// candidate (`group`, `index_in_group`), the `properties` it would have
-/// had and the `reason`.
-fn pruned_candidates_json(pruned: &[PrunedCandidate<PhysicalCandidate>]) -> Vec<Value> {
-    pruned
+/// Candidates Stage 2 or Stage 3 pruned: each logical candidate (`group`,
+/// `index_in_group`), the `properties` it would have had and the `reason`;
+/// by canonical candidate id (`ids`), then in pruning order.
+fn pruned_candidates_json(
+    pruned: &[PrunedCandidate<PhysicalCandidate>],
+    ids: &CanonicalIds,
+) -> Vec<Value> {
+    let mut listed: Vec<((u32, usize), Value)> = pruned
         .iter()
         .map(|pruned| {
-            let logical = pruned.candidate.logical_candidate_id;
-            json!({
-                "group": logical.group.0,
-                "index_in_group": logical.index_in_group,
-                "properties": pruned.candidate.physical_properties,
-                "reason": pruned.reason,
-            })
+            let (group, index_in_group) = ids.candidate(pruned.candidate.logical_candidate_id);
+            let reason = serde_json::to_value(pruned.reason).unwrap_or_default();
+            (
+                (group, index_in_group),
+                json!({
+                    "group": group,
+                    "index_in_group": index_in_group,
+                    "properties": pruned.candidate.physical_properties,
+                    "reason": ids.in_serialized(reason),
+                }),
+            )
         })
-        .collect()
+        .collect();
+    listed.sort_by_key(|(id, _)| *id);
+    listed.into_iter().map(|(_, pruned)| pruned).collect()
 }
 
 /// The candidates Pass 2 eliminated: each candidate (`group`,
 /// `index_in_group`) with its `causes`, each the eliminated consumers it
 /// comes through (`through_pruned_candidates`), the `root` reason and its
-/// `text`.
-fn pass2_pruned_json(logical: &LogicalASAPMemoCandidates) -> Vec<Value> {
-    logical
+/// `text`; by canonical candidate id (`ids`).
+fn pass2_pruned_json(logical: &LogicalASAPMemoCandidates, ids: &CanonicalIds) -> Vec<Value> {
+    let mut listed: Vec<((u32, usize), Value)> = logical
         .pruned
         .iter()
         .map(|pruned| {
@@ -763,20 +809,32 @@ fn pass2_pruned_json(logical: &LogicalASAPMemoCandidates) -> Vec<Value> {
                 .causes
                 .iter()
                 .map(|cause| {
+                    let through: Vec<Value> = cause
+                        .through_pruned_candidates
+                        .iter()
+                        .map(|id| ids.candidate_json(*id))
+                        .collect();
+                    let root = serde_json::to_value(&cause.root).unwrap_or_default();
                     json!({
-                        "through_pruned_candidates": cause.through_pruned_candidates,
-                        "root": cause.root,
+                        "through_pruned_candidates": through,
+                        "root": ids.in_serialized(root),
                         "text": root_prune_reason_text(&cause.root),
                     })
                 })
                 .collect();
-            json!({
-                "group": pruned.candidate.group.0,
-                "index_in_group": pruned.candidate.index_in_group,
-                "causes": causes,
-            })
+            let (group, index_in_group) = ids.candidate(pruned.candidate);
+            (
+                (group, index_in_group),
+                json!({
+                    "group": group,
+                    "index_in_group": index_in_group,
+                    "causes": causes,
+                }),
+            )
         })
-        .collect()
+        .collect();
+    listed.sort_by_key(|(id, _)| *id);
+    listed.into_iter().map(|(_, pruned)| pruned).collect()
 }
 
 /// One plan's cost: per second, its predicted CPU, its source, its usage
@@ -839,9 +897,14 @@ fn accepted_json(queries: &[AcceptedAccuracy]) -> Value {
 }
 
 /// Stage 3's plan and selection ([`Selection`]): the plan it built, the
-/// accuracy accepted per query, the candidates it pruned and the selection
-/// MILP's size and time; `error` when the facade selected no plan.
-fn selection_json(selection: &Result<(PhysicalASAPDAG, Selection), SelectionError>) -> Value {
+/// accuracy accepted per query, the candidates it pruned, the selection
+/// MILP's size and its objective; `error` when the facade selected no
+/// plan. Its times and solve count, which change from run to run or with
+/// the solver, are in the text output only.
+fn selection_json(
+    selection: &Result<(PhysicalASAPDAG, Selection), SelectionError>,
+    ids: &CanonicalIds,
+) -> Value {
     let (plan, selection) = match selection {
         Ok(selected) => selected,
         Err(error) => return json!({ "plan": null, "error": error.to_string() }),
@@ -849,12 +912,9 @@ fn selection_json(selection: &Result<(PhysicalASAPDAG, Selection), SelectionErro
     json!({
         "plan": plan,
         "accepted_accuracy_per_query": accepted_json(&selection.accepted_accuracy_per_query),
-        "pruned_candidates": pruned_candidates_json(&selection.pruned_candidates),
+        "pruned_candidates": pruned_candidates_json(&selection.pruned_candidates, ids),
         "milp_variables": selection.milp_variable_count,
         "milp_constraints": selection.milp_constraint_count,
-        "milp_construction_ms": selection.milp_construction_ms,
-        "milp_solve_ms": selection.milp_solve_ms,
-        "milp_solve_count": selection.milp_solve_count,
         "milp_objective_cost_per_second": selection.selected_plan_cost_per_second,
     })
 }
@@ -934,20 +994,32 @@ fn with_default_metrics(mut queries: Vec<Value>, roots: &[QueryRoot]) -> Vec<Val
     queries
 }
 
-/// `memo`'s groups, each with its operator and its candidates. At Pass 2
-/// (`pass2`: the memo at Pass 1 and Pass 2's output) a candidate is
-/// `added` when its index is past the group's Pass 1 candidates (the memo
-/// only appends), has `pruned`, and lists its logical edges per input,
-/// with the reasons Pass 2 recorded.
-fn memo_groups_json(memo: &Memo, pass2: Option<(&Memo, &LogicalASAPMemoCandidates)>) -> Vec<Value> {
-    let ids = |groups: &[MemoGroupId]| groups.iter().map(|g| g.0).collect::<Vec<_>>();
+/// `memo`'s groups, each with its operator and its candidates, groups and
+/// candidates in canonical id order (`ids`). At Pass 2 (`pass2`: the memo
+/// at Pass 1 and Pass 2's output) a candidate is `added` when its index is
+/// past the group's Pass 1 candidates (the memo only appends), has
+/// `pruned`, and lists its logical edges per input, with the reasons Pass
+/// 2 recorded.
+fn memo_groups_json(
+    memo: &Memo,
+    pass2: Option<(&Memo, &LogicalASAPMemoCandidates)>,
+    ids: &CanonicalIds,
+) -> Vec<Value> {
+    let group_ids = |groups: Vec<&MemoGroupId>| {
+        groups
+            .into_iter()
+            .map(|g| ids.group(*g))
+            .collect::<Vec<_>>()
+    };
     let pruned: BTreeSet<CandidateForMemoGroupId> = pass2
         .map(|(_, logical)| logical.pruned.iter().map(|p| p.candidate).collect())
         .unwrap_or_default();
-    memo.groups()
+    let mut listed_groups: Vec<(u32, Value)> = memo
+        .groups()
         .iter()
         .enumerate()
         .map(|(id, group)| {
+            let group_id = MemoGroupId(id as u32);
             let candidates = &group.candidates;
             let mut by_origin = serde_json::Map::new();
             for candidate in candidates {
@@ -956,34 +1028,38 @@ fn memo_groups_json(memo: &Memo, pass2: Option<(&Memo, &LogicalASAPMemoCandidate
                     .or_insert(json!(0));
                 *count = json!(count.as_u64().unwrap_or(0) + 1);
             }
-            let listed: Vec<Value> = candidates
+            let mut listed: Vec<(usize, Value)> = candidates
                 .iter()
                 .enumerate()
                 .map(|(index, candidate)| {
-                    let mut value = candidate_json(index, candidate);
+                    let candidate_id = CandidateForMemoGroupId {
+                        group: group_id,
+                        index_in_group: index,
+                    };
+                    let (_, canonical_index) = ids.candidate(candidate_id);
+                    let mut value = candidate_json(canonical_index, candidate, ids);
                     if let Some((pass1, logical)) = pass2 {
-                        let candidate_id = CandidateForMemoGroupId {
-                            group: MemoGroupId(id as u32),
-                            index_in_group: index,
-                        };
                         value["added"] = json!(pass1
                             .groups()
                             .get(id)
                             .is_none_or(|before| index >= before.candidates.len()));
                         value["pruned"] = json!(pruned.contains(&candidate_id));
-                        value["inputs"] = json!(logical_inputs_json(logical, candidate_id));
+                        value["inputs"] = json!(logical_inputs_json(logical, candidate_id, ids));
                     }
-                    value
+                    (canonical_index, value)
                 })
                 .collect();
-            json!({
-                "id": id,
+            listed.sort_by_key(|(index, _)| *index);
+            let listed: Vec<Value> = listed.into_iter().map(|(_, value)| value).collect();
+            let canonical_group = ids.group(group_id);
+            (canonical_group, json!({
+                "id": canonical_group,
                 "label": operator_label(&group.expression),
-                "operator": group.expression.map_children(|child| child.0),
-                "children": group.expression.children().into_iter().map(|g| g.0).collect::<Vec<_>>(),
-                "parents": ids(group.parent_groups()),
+                "operator": group.expression.map_children(|child| ids.group(*child)),
+                "children": group_ids(group.expression.children()),
+                "parents": group_ids(group.parent_groups().iter().collect()),
                 "result_kind": group.group_properties.result_kind,
-                "column_lineage": column_lineage_text(group),
+                "column_lineage": column_lineage_text(group, |group| ids.group(group)),
                 "column_signs": group.group_properties.column_signs,
                 "depends_on_evaluation_time": group.group_properties.depends_on_evaluation_time,
                 "shareable_when_equal": group.group_properties.shareable_when_equal,
@@ -991,28 +1067,32 @@ fn memo_groups_json(memo: &Memo, pass2: Option<(&Memo, &LogicalASAPMemoCandidate
                     .group_properties
                     .aggregate_coverage
                     .as_ref()
-                    .map(aggregate_coverage_text),
+                    .map(|coverage| aggregate_coverage_text(coverage, |group| ids.group(group))),
                 "scanned_sources": group.group_properties.scanned_sources,
                 "evaluation_grid": pass2
                     .and_then(|(_, logical)| logical.evaluation_grid_of_group[id].as_ref())
                     .map(|grid| json!({"period_ms": grid.period_ms, "phase_ms": grid.phase_ms})),
                 "queries": group.reached_by_queries(),
-                "roots_of": memo.queries_rooted_at(MemoGroupId(id as u32)),
+                "roots_of": memo.queries_rooted_at(group_id),
                 "candidate_count": candidates.len(),
                 "candidate_count_by_origin": by_origin,
                 "candidates": listed,
-            })
+            }))
         })
-        .collect()
+        .collect();
+    listed_groups.sort_by_key(|(id, _)| *id);
+    listed_groups.into_iter().map(|(_, group)| group).collect()
 }
 
 /// Per input of `consumer`, its `group` and, as `edges`, each candidate of
 /// the group ([`logical_edges_into`], eliminated ones included):
 /// `producer` (its index in the group), `satisfies_logical_requirement`
 /// ($\alpha^{\log}$) and `rejection` (why it fails, null when it holds).
+/// Ids are canonical (`ids`), edges by producer.
 fn logical_inputs_json(
     logical: &LogicalASAPMemoCandidates,
     consumer: CandidateForMemoGroupId,
+    ids: &CanonicalIds,
 ) -> Vec<Value> {
     let groups = logical
         .memo
@@ -1024,19 +1104,28 @@ fn logical_inputs_json(
         .into_iter()
         .zip(logical_edges_into(logical, consumer))
         .map(|(group, edges)| {
-            let edges: Vec<Value> = edges
+            let mut edges: Vec<(usize, Value)> = edges
                 .into_iter()
                 .enumerate()
                 .map(|(producer, status)| {
+                    let (_, producer) = ids.candidate(CandidateForMemoGroupId {
+                        group: *group,
+                        index_in_group: producer,
+                    });
                     let rejection = status.rejection();
-                    json!({
-                        "producer": producer,
-                        "satisfies_logical_requirement": rejection.is_none(),
-                        "rejection": rejection,
-                    })
+                    (
+                        producer,
+                        json!({
+                            "producer": producer,
+                            "satisfies_logical_requirement": rejection.is_none(),
+                            "rejection": rejection,
+                        }),
+                    )
                 })
                 .collect();
-            json!({ "group": group.0, "edges": edges })
+            edges.sort_by_key(|(producer, _)| *producer);
+            let edges: Vec<Value> = edges.into_iter().map(|(_, edge)| edge).collect();
+            json!({ "group": ids.group(*group), "edges": edges })
         })
         .collect()
 }
@@ -1044,17 +1133,24 @@ fn logical_inputs_json(
 /// One candidate $v = (e_v, p^{\log}_v)$ of a group: its `index`,
 /// `origin`, `label`, `operator` $e_v$ (children are its input groups),
 /// `children` (the input groups), `fused_groups`, `parameters` (θ) and
-/// `required_accuracy` (one per input, null without one).
-fn candidate_json(index: usize, candidate: &CandidateForMemoGroup) -> Value {
+/// `required_accuracy` (one per input, null without one). Group ids are
+/// canonical (`ids`).
+fn candidate_json(index: usize, candidate: &CandidateForMemoGroup, ids: &CanonicalIds) -> Value {
     let operator = &candidate.expression.operator;
+    let group_ids = |groups: Vec<&MemoGroupId>| {
+        groups
+            .into_iter()
+            .map(|g| ids.group(*g))
+            .collect::<Vec<_>>()
+    };
     json!({
         "index": index,
         "origin": origin_name(candidate),
         "added": false,
         "label": operator_label(operator),
-        "operator": operator.map_children(|child| child.0),
-        "children": operator.children().into_iter().map(|g| g.0).collect::<Vec<_>>(),
-        "fused_groups": candidate.fused_groups.iter().map(|g| g.0).collect::<Vec<_>>(),
+        "operator": operator.map_children(|child| ids.group(*child)),
+        "children": group_ids(operator.children()),
+        "fused_groups": group_ids(candidate.fused_groups.iter().collect()),
         "parameters": candidate.logical_properties.parameters(),
         "required_accuracy": candidate
             .input_requirements
@@ -1062,6 +1158,59 @@ fn candidate_json(index: usize, candidate: &CandidateForMemoGroup) -> Value {
             .map(|requirement| requirement.required_accuracy)
             .collect::<Vec<_>>(),
     })
+}
+
+/// The plan's sharing summary: each node that two or more queries read,
+/// directly or through other nodes, with its `operator`, `parameters` (θ),
+/// `timing`, `lifetime` and the `queries` (`q1`, ...). Described by what
+/// it computes, not by node id, so it stays the same when other parts of
+/// the plan change; sorted by queries, then operator. Example: two
+/// quantiles over one metric sharing a scan give `{"operator": "Scan",
+/// "queries": ["q1", "q2"], ...}`.
+fn sharing_summary_json(plan: &PhysicalASAPDAG) -> Vec<Value> {
+    let position: BTreeMap<PhysicalASAPNodeId, usize> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(position, node)| (node.id, position))
+        .collect();
+    // Query `i` is the scalar root keyed `i` when there is one, else the
+    // next operator root.
+    let mut operator_roots = plan.roots.iter();
+    let mut queries_of_node: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); plan.nodes.len()];
+    for query in 0..plan.roots.len() + plan.scalar_roots.len() {
+        let mut pending: Vec<PhysicalASAPNodeId> =
+            match plan.scalar_roots.iter().find(|(index, _)| *index == query) {
+                Some((_, expr)) => expr.operator_refs().into_iter().copied().collect(),
+                None => operator_roots.next().into_iter().copied().collect(),
+            };
+        while let Some(id) = pending.pop() {
+            let node = position[&id];
+            if queries_of_node[node].insert(query) {
+                pending.extend(plan.nodes[node].payload.children());
+            }
+        }
+    }
+    let mut shared: Vec<(Vec<usize>, String, Value)> = plan
+        .nodes
+        .iter()
+        .zip(queries_of_node)
+        .filter(|(_, queries)| queries.len() > 1)
+        .map(|(node, queries)| {
+            let operator = operator_label(&node.payload);
+            let names: Vec<String> = queries.iter().map(|q| format!("q{}", q + 1)).collect();
+            let entry = json!({
+                "operator": operator,
+                "parameters": node.parameters,
+                "timing": node.output_state.timing,
+                "lifetime": node.lifetime,
+                "queries": names,
+            });
+            (queries.into_iter().collect(), operator, entry)
+        })
+        .collect();
+    shared.sort_by(|a, b| (&a.0, &a.1, a.2.to_string()).cmp(&(&b.0, &b.1, b.2.to_string())));
+    shared.into_iter().map(|(_, _, entry)| entry).collect()
 }
 
 /// A candidate's origin, as `OriginOfCandidateForMemoGroup` serializes.

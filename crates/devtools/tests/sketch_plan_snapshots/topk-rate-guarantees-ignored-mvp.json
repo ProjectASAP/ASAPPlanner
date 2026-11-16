@@ -25,13 +25,15 @@
     "accepted": [
       {
         "accepted_metric": null,
-        "sketches": [],
-        "summary": "no accuracy target"
+        "sketches": [
+          "CmsWithHeap"
+        ],
+        "summary": "no accuracy target (CmsWithHeap)"
       }
     ],
     "cost": {
-      "cost_per_second": 2.94571395319e-8,
-      "cpu_core_seconds_per_second": 0.000844,
+      "cost_per_second": 3.34907479468e-7,
+      "cpu_core_seconds_per_second": 0.0252173675,
       "per_node": {
         "0": {
           "cost_per_second": 6.52152e-9,
@@ -43,76 +45,76 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 2.22159834707e-8,
+          "cost_per_second": 1.64571266068e-7,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.0002,
-          "detail": "build exact Rate accumulator in tumbling windows of 10000 ms for 10000 groups: 100000 rows x (1 + depth 1); x 1.0000/s; keeps 17360000 bytes",
+          "cpu_core_seconds_per_second": 0.01007,
+          "detail": "build exact Rate accumulator in tumbling windows of 10000 ms for 10000 groups: 100000 rows x 70 ops, 1000 group visits, 1000.0 states emitted; x 1.0000/s; keeps 44640000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
         },
         "2": {
-          "cost_per_second": 3.37320001932e-10,
+          "cost_per_second": 3.71052005466e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.00003,
-          "detail": "time range 300s: 30 tumbling windows of states; x 0.1000/s; holds 56 bytes for 0.300 ms",
+          "cpu_core_seconds_per_second": 0.00033,
+          "detail": "time range 300s: 30 tumbling windows of states; x 0.1000/s; holds 144 bytes for 3.300 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "3": {
-          "cost_per_second": 3.37339323081e-10,
+          "cost_per_second": 1.30449612663e-7,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.00003,
-          "detail": "merge 300000 states into 10000; x 0.1000/s; holds 560000 bytes for 0.300 ms",
+          "cpu_core_seconds_per_second": 0.0116,
+          "detail": "merge 300000 states into 10000; x 0.1000/s; holds 1440000 bytes for 116.000 ms",
           "multiplier": 1,
           "operator": "SummaryMerge",
           "timing": "query_time"
         },
         "4": {
-          "cost_per_second": 1.1244e-11,
+          "cost_per_second": 2.811e-8,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1e-6,
+          "cpu_core_seconds_per_second": 0.0025,
           "detail": "finalize 10000 accumulators; x 0.1000/s",
           "multiplier": 1,
           "operator": "FinalizeExactAccumulator",
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 1.12446441027e-11,
+          "cost_per_second": 1.54061966081e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1e-6,
-          "detail": "build exact Sum accumulator into 10000 states: 10000 rows x depth 1; x 0.1000/s; holds 560000 bytes for 0.010 ms",
+          "cpu_core_seconds_per_second": 0.000137017,
+          "detail": "build CmsWithHeap into 1 states: 10000 rows x 137 ops, 1 group visits; x 0.1000/s; holds 3254 bytes for 1.370 ms",
           "multiplier": 1,
           "operator": "SummaryAgg",
           "timing": "query_time"
         },
         "6": {
-          "cost_per_second": 1.1244e-11,
+          "cost_per_second": 3.93540004831e-12,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1e-6,
-          "detail": "finalize 10000 accumulators; x 0.1000/s",
+          "cpu_core_seconds_per_second": 3.5e-7,
+          "detail": "estimate 1 groups x 5; x 0.1000/s; holds 120 bytes for 0.003 ms",
           "multiplier": 1,
-          "operator": "FinalizeExactAccumulator",
+          "operator": "SummaryEstimate",
           "timing": "query_time"
         },
         "7": {
-          "cost_per_second": 1.12440920331e-11,
+          "cost_per_second": 5.622000013799999e-15,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1e-6,
-          "detail": "hash aggregate 10000 rows into 1 groups; x 0.1000/s; holds 80016 bytes for 0.010 ms",
+          "cpu_core_seconds_per_second": 5e-10,
+          "detail": "operator: pass 5 rows; x 0.1000/s; holds 24 bytes for 0.000 ms",
           "multiplier": 1,
-          "operator": "Aggregate",
+          "operator": "Project",
           "timing": "query_time"
         }
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 17360017.4417,
-        "cpu_ops_per_second": 364000.0,
+        "average_memory_bytes": 44656704.4934,
+        "cpu_ops_per_second": 24737367.5,
         "disk_bytes": 0,
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 18560120,
+        "peak_memory_bytes": 46083590,
         "scanned_bytes_per_second": 4800000.0
       }
     },
@@ -396,28 +398,14 @@
             "fields": [
               {
                 "dtype": {
-                  "Plain": "utf8"
-                },
-                "name": "job",
-                "nullable": true
-              },
-              {
-                "dtype": {
-                  "ExactAggregate": [
-                    "Sum",
-                    "Sum"
-                  ]
+                  "Sketch": "CmsWithHeap"
                 },
                 "name": "state",
                 "nullable": false
               }
             ],
             "time_index": null,
-            "unique_keys": [
-              [
-                0
-              ]
-            ]
+            "unique_keys": []
           },
           "producer": 5,
           "role": "Input",
@@ -444,7 +432,7 @@
                 "dtype": {
                   "Plain": "float64"
                 },
-                "name": "sum",
+                "name": "topk",
                 "nullable": false
               }
             ],
@@ -837,32 +825,25 @@
             "fields": [
               {
                 "dtype": {
-                  "Plain": "utf8"
-                },
-                "name": "job",
-                "nullable": true
-              },
-              {
-                "dtype": {
-                  "ExactAggregate": [
-                    "Sum",
-                    "Sum"
-                  ]
+                  "Sketch": "CmsWithHeap"
                 },
                 "name": "state",
                 "nullable": false
               }
             ],
             "time_index": null,
-            "unique_keys": [
-              [
-                0
-              ]
-            ]
+            "unique_keys": []
           },
           "output_state": {
             "primitive": "SummaryState",
             "timing": "query_time"
+          },
+          "parameters": {
+            "CmsWithHeap": {
+              "depth": 5,
+              "heap_size": 10,
+              "width": 28
+            }
           },
           "payload": {
             "ASAP": {
@@ -870,21 +851,20 @@
                 "child": 4,
                 "filter": null,
                 "input": {
-                  "item": null,
+                  "item": {
+                    "Column": {
+                      "Named": "job"
+                    }
+                  },
                   "weight": {
                     "Column": "SampleValue"
                   }
                 },
                 "reduction": {
-                  "Reduce": [
-                    2
-                  ]
+                  "Reduce": []
                 },
                 "summary_type": {
-                  "ExactAggregate": [
-                    "Sum",
-                    "Sum"
-                  ]
+                  "Sketch": "CmsWithHeap"
                 }
               }
             }
@@ -892,7 +872,9 @@
         },
         {
           "id": 6,
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "output_schema": {
             "closed": true,
             "fields": [
@@ -907,7 +889,7 @@
                 "dtype": {
                   "Plain": "float64"
                 },
-                "name": "sum",
+                "name": "topk",
                 "nullable": false
               }
             ],
@@ -924,17 +906,20 @@
           },
           "payload": {
             "ASAP": {
-              "FinalizeExactAccumulator": {
-                "child": 5
+              "SummaryEstimate": {
+                "query": {
+                  "TopK": {
+                    "k": 5
+                  }
+                },
+                "summary_input": 5
               }
             }
           }
         },
         {
           "id": 7,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -966,22 +951,22 @@
           },
           "payload": {
             "NonASAP": {
-              "Aggregate": {
+              "Project": {
                 "child": 6,
-                "filters": [],
-                "having": null,
-                "measures": [
+                "cols": [
                   {
-                    "k": 5,
-                    "kind": "top_k"
+                    "alias": "topk_5",
+                    "expr": {
+                      "Column": 1
+                    }
+                  },
+                  {
+                    "alias": "job",
+                    "expr": {
+                      "Column": 0
+                    }
                   }
-                ],
-                "output_names": [
-                  ""
-                ],
-                "reduction": {
-                  "Reduce": []
-                }
+                ]
               }
             }
           }
@@ -992,5 +977,8 @@
       ],
       "scalar_roots": []
     }
-  }
+  },
+  "warnings": [
+    "assumed data fact: the data arrival declares no max_out_of_order_ms, so the samples of source data_total that an ingestion-time rate, increase or irate state reads are taken to arrive in timestamp order; if this does not hold, answers may be wrong by an amount no accuracy target bounds (a late sample can be read as a counter reset), or ingestion may fail"
+  ]
 }

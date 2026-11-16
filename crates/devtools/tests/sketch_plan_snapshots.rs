@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use super::{asap_planner, first_difference, first_differing_path, plan_snapshot, rounded};
+use super::{asap_planner, first_difference, first_differing_path, plan_snapshot};
 
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -77,7 +77,7 @@ fn snapshot_of(document: &Value) -> Value {
         .map(|query| query["text"].clone())
         .collect();
     snapshot.insert("queries".into(), Value::Array(queries));
-    rounded(&Value::Object(snapshot))
+    Value::Object(snapshot)
 }
 
 /// Every manifest workload's plan matches its committed snapshot.
@@ -191,7 +191,7 @@ fn snapshot_keeps_the_queries() {
         "workload": {"queries": [{"text": "q1"}, {"text": "q2"}]},
         "stage3_plan_selection": {
             "plan": {"nodes": [1]},
-            "cost": {"cost_per_second": 0.1 + 0.2},
+            "cost": {"cost_per_second": 0.3},
             "accepted_accuracy_per_query": [],
         },
     });

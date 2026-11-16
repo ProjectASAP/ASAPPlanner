@@ -52,14 +52,18 @@ test("the plan's lane draws each node with its timing and Stage 3 cost; cytoscap
   const elements = call('stageLaneElements', plan, { physical: true, costPerNode: cost.per_node, queryIds: ['q1'] });
   assert.equal(nodesOf(elements).length, plan.nodes.length);
   assert.equal(edgesOf(elements).length, plan.edges.length);
+  // The scan and the KLL chain run at ingestion, the rest at query time.
   for (const node of nodesOf(elements)) {
-    assert.ok(node.data.label.includes('⏱ query time'), node.data.label);
-    assert.equal(node.classes, 'queryTime');
+    const ingestion = ['Scan', 'SummaryTumblingWindowChain'].includes(node.data.kind);
+    assert.equal(node.classes, ingestion ? 'ingestionTime' : 'queryTime');
+    if (node.data.kind !== 'SummaryTumblingWindowChain') {
+      assert.ok(node.data.label.includes(ingestion ? '⏱ ingestion time' : '⏱ query time'), node.data.label);
+    }
     assert.deepEqual(node.data.cost, cost.per_node[String(node.data.nodeId)]);
     assert.deepEqual(node.data.reachedBy, ['q1']);
   }
-  const kll = nodesOf(elements).find((n) => n.data.kind === 'SummaryAgg');
-  assert.deepEqual(kll.data.label.split('\n').slice(0, 3), ['SummaryAgg', 'summary: Kll', 'per series']);
+  const kll = nodesOf(elements).find((n) => n.data.kind === 'SummaryTumblingWindowChain');
+  assert.deepEqual(kll.data.label.split('\n').slice(0, 4), ['SummaryTumblingWindowChain', 'summary: Kll', 'tumbling windows of 1 min', 'per series']);
   assert.deepEqual(nodesOf(elements).filter((n) => n.data.rootFor.length).map((n) => n.data.nodeId), plan.roots);
   assert.equal(cytoscape(elements).nodes().length, plan.nodes.length);
 });
@@ -103,14 +107,13 @@ test('the header shows why a stage failed and the selection\'s warnings', () => 
 
 test('the counts line counts each stage\'s candidates and pruned candidates', () => {
   assert.equal(call('candidateCountsText', fixture()),
-    'Candidates per stage: 21 logical (4 pruned by Pass 2) → 39 physical (17 pruned by Stage 2, 0 by Stage 3) → plan selected');
+    'Candidates per stage: 21 logical (4 pruned by Pass 2) → 20 physical (36 pruned by Stage 2, 0 by Stage 3) → plan selected');
 });
 
-test('the search header names the search and the MILP\'s size and times', () => {
+test('the search header names the search and the MILP\'s size', () => {
   const doc = fixture();
   const s3 = doc.stage3_plan_selection;
-  assert.equal(call('searchText', doc), `candidate-connection search · MILP ${s3.milp_variables} variables, ${s3.milp_constraints} constraints`
-    + ` · construction ${s3.milp_construction_ms} ms, solve ${s3.milp_solve_ms} ms`);
+  assert.equal(call('searchText', doc), `candidate-connection search · MILP ${s3.milp_variables} variables, ${s3.milp_constraints} constraints`);
   assert.equal(call('searchText', { search: 'candidate-connections', stage3_plan_selection: { error: 'x' } }), 'candidate-connection search');
   assert.equal(call('searchText', {}), '');
 });
@@ -126,22 +129,24 @@ test('Stage 2 and Stage 3 pruning reasons read as words; dominated_by names its 
   assert.equal(call('prunedReasonText', { dominated_by: 7 }), 'dominated by C7');
 });
 
-test('a materialized view row names its plan node, kind, refresh, windows, cost and the queries reading it', () => {
+test('a materialized view row names its plan node, kind, refresh, inputs, cost and the queries reading it', () => {
+  // The plan keeps its KLL chain across evaluations, refreshed at ingestion.
   const doc = fixture();
   const s3 = doc.stage3_plan_selection;
-  const kll = s3.plan.nodes.find((n) => n.payload.ASAP && n.payload.ASAP.SummaryAgg);
-  s3.materialized_views = [{ node_id: kll.id, refresh: 'at_ingestion', coverage: { definition_id: 'd1', selection: [] },
-    inputs: { raw_data_windows: [{ end_offset_ms: 0, width_ms: 300000 }], materialized_views: [] }, retention_ms: 300000 }];
+  const chain = s3.plan.nodes.find((n) => n.payload.ASAP && n.payload.ASAP.SummaryTumblingWindowChain);
   assert.deepEqual(call('validateStagePipeline', doc), []);
   assert.deepEqual(call('materializedViewRows', doc), [{
-    nodeId: kll.id, definition: 'd1', kind: 'SummaryAgg · Kll', refresh: 'at ingestion', inputs: '1 raw-data window(s)',
-    retention: '5 min', window: 't−5 min … t', cost: s3.cost.per_node[String(kll.id)].detail, readBy: ['q1'],
+    nodeId: chain.id, definition: s3.materialized_views[0].coverage.definition_id, kind: 'SummaryTumblingWindowChain · Kll',
+    refresh: 'at ingestion', inputs: 'raw data', retention: '5 min', cost: s3.cost.per_node[String(chain.id)].detail, readBy: ['q1'],
   }]);
+  // A view that reads other views names them.
+  s3.materialized_views[0].inputs.materialized_views = [0];
+  assert.equal(call('materializedViewRows', doc)[0].inputs, 'views 0');
 });
 
 test('plan, view and per-node cost violations are reported', () => {
   const check = (edit) => { const doc = fixture(); edit(doc.stage3_plan_selection, doc); return call('validateStagePipeline', doc).join('\n'); };
-  const view = { node_id: 0, refresh: 'at_ingestion', coverage: { definition_id: 'd' }, inputs: { raw_data_windows: [], materialized_views: [] }, retention_ms: 0 };
+  const view = { node_id: 0, refresh: 'at_ingestion', coverage: { definition_id: 'd' }, inputs: { materialized_views: [] }, retention_ms: 0 };
   assert.match(check((s3) => { s3.plan.roots.pop(); }), /plan: 0 roots and 0 scalar roots for 1 workload queries/);
   assert.match(check((s3) => { s3.plan.edges[0].producer = 99; }), /edge #0 names a missing producer or consumer/);
   assert.match(check((s3) => { s3.cost.per_node['99'] = {}; }), /cost.per_node names missing node 99/);

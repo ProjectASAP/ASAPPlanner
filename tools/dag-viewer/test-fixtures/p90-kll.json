@@ -2,7 +2,7 @@
   "accuracy_guarantees": "enforced",
   "deployment_capabilities": {
     "query_time_results_retained": false,
-    "raw_data_retained": true,
+    "raw_data_retained": false,
     "supported_summaries": [
       {
         "readouts": [
@@ -16,18 +16,21 @@
   "memo": {
     "selected_candidates": {
       "0": [
-        0
-      ],
-      "1": [
-        0
-      ],
-      "2": [
         1
       ],
+      "2": [
+        0
+      ],
       "3": [
-        6
+        0
       ],
       "4": [
+        7
+      ],
+      "5": [
+        0
+      ],
+      "6": [
         0
       ]
     },
@@ -35,6 +38,117 @@
       {
         "groups": [
           {
+            "aggregate_coverage": "covers G2 through [Aggregate quantile(q=0.9)] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
+            "candidate_count": 0,
+            "candidate_count_by_origin": {},
+            "candidates": [],
+            "children": [
+              1
+            ],
+            "column_lineage": [
+              "data.ts",
+              "G0.1",
+              "data.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": null,
+            "id": 0,
+            "label": "Aggregate quantile(q=0.9)",
+            "operator": {
+              "NonASAP": {
+                "Aggregate": {
+                  "child": 1,
+                  "filters": [],
+                  "having": null,
+                  "measures": [
+                    {
+                      "col": null,
+                      "kind": "quantile",
+                      "q": 0.9
+                    }
+                  ],
+                  "output_names": [
+                    ""
+                  ],
+                  "reduction": "PerEntity"
+                }
+              }
+            },
+            "parents": [],
+            "queries": [
+              0
+            ],
+            "result_kind": "instant_vector",
+            "roots_of": [
+              0
+            ],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "data"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": null,
+            "candidate_count": 0,
+            "candidate_count_by_origin": {},
+            "candidates": [],
+            "children": [
+              2
+            ],
+            "column_lineage": [
+              "data.ts",
+              "data.value",
+              "data.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": null,
+            "id": 1,
+            "label": "TimeRange 300s",
+            "operator": {
+              "NonASAP": {
+                "TimeRange": {
+                  "child": 2,
+                  "kind": "range",
+                  "range": {
+                    "nanos": 0,
+                    "secs": 300
+                  }
+                }
+              }
+            },
+            "parents": [
+              0
+            ],
+            "queries": [
+              0
+            ],
+            "result_kind": "range_vector",
+            "roots_of": [],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "data"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": null,
             "candidate_count": 0,
             "candidate_count_by_origin": {},
             "candidates": [],
@@ -51,7 +165,7 @@
             ],
             "depends_on_evaluation_time": false,
             "evaluation_grid": null,
-            "id": 0,
+            "id": 2,
             "label": "Scan",
             "operator": {
               "NonASAP": {
@@ -104,6 +218,7 @@
             "queries": [
               0
             ],
+            "result_kind": "instant_vector",
             "roots_of": [],
             "scanned_sources": [
               {
@@ -111,66 +226,104 @@
                   "metric": "data"
                 }
               }
-            ]
-          },
+            ],
+            "shareable_when_equal": true
+          }
+        ],
+        "step": "stage0",
+        "title": "Stage 0, the frontends' DAG hash-consed"
+      },
+      {
+        "groups": [
           {
-            "candidate_count": 0,
-            "candidate_count_by_origin": {},
-            "candidates": [],
-            "children": [
-              0
-            ],
-            "column_lineage": [
-              "data.ts",
-              "data.value",
-              "data.$promql_series_identity"
-            ],
-            "column_signs": [
-              "unknown",
-              "unknown",
-              "unknown"
-            ],
-            "depends_on_evaluation_time": true,
-            "evaluation_grid": null,
-            "id": 1,
-            "label": "TimeRange 300s",
-            "operator": {
-              "NonASAP": {
-                "TimeRange": {
-                  "child": 0,
-                  "kind": "range",
-                  "range": {
-                    "nanos": 0,
-                    "secs": 300
-                  }
-                }
-              }
+            "aggregate_coverage": "covers G2 through [Aggregate quantile(q=0.9)] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
+            "candidate_count": 2,
+            "candidate_count_by_origin": {
+              "pass1": 2
             },
-            "parents": [
-              2
-            ],
-            "queries": [
-              0
-            ],
-            "roots_of": [],
-            "scanned_sources": [
+            "candidates": [
               {
-                "TimeSeries": {
-                  "metric": "data"
-                }
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 0,
+                "label": "Aggregate quantile(q=0.9)",
+                "operator": {
+                  "NonASAP": {
+                    "Aggregate": {
+                      "child": 1,
+                      "filters": [],
+                      "having": null,
+                      "measures": [
+                        {
+                          "col": null,
+                          "kind": "quantile",
+                          "q": 0.9
+                        }
+                      ],
+                      "output_names": [
+                        ""
+                      ],
+                      "reduction": "PerEntity"
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": null,
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  3
+                ],
+                "fused_groups": [],
+                "index": 1,
+                "label": "Project",
+                "operator": {
+                  "NonASAP": {
+                    "Project": {
+                      "child": 3,
+                      "cols": [
+                        {
+                          "alias": "ts",
+                          "expr": {
+                            "Column": 0
+                          }
+                        },
+                        {
+                          "alias": "value",
+                          "expr": {
+                            "Column": 1
+                          }
+                        },
+                        {
+                          "alias": "$promql_series_identity",
+                          "expr": {
+                            "Column": 2
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": null,
+                "required_accuracy": [
+                  null
+                ]
               }
-            ]
-          },
-          {
-            "candidate_count": 0,
-            "candidate_count_by_origin": {},
-            "candidates": [],
+            ],
             "children": [
               1
             ],
             "column_lineage": [
               "data.ts",
-              "G2.1",
+              "G0.1",
               "data.$promql_series_identity"
             ],
             "column_signs": [
@@ -180,7 +333,7 @@
             ],
             "depends_on_evaluation_time": true,
             "evaluation_grid": null,
-            "id": 2,
+            "id": 0,
             "label": "Aggregate quantile(q=0.9)",
             "operator": {
               "NonASAP": {
@@ -206,6 +359,7 @@
             "queries": [
               0
             ],
+            "result_kind": "instant_vector",
             "roots_of": [
               0
             ],
@@ -215,15 +369,92 @@
                   "metric": "data"
                 }
               }
-            ]
-          }
-        ],
-        "step": "stage0",
-        "title": "Stage 0, the frontends' DAG hash-consed"
-      },
-      {
-        "groups": [
+            ],
+            "shareable_when_equal": true
+          },
           {
+            "aggregate_coverage": null,
+            "candidate_count": 1,
+            "candidate_count_by_origin": {
+              "pass1": 1
+            },
+            "candidates": [
+              {
+                "added": false,
+                "children": [
+                  2
+                ],
+                "fused_groups": [],
+                "index": 0,
+                "label": "TimeRange 300s",
+                "operator": {
+                  "NonASAP": {
+                    "TimeRange": {
+                      "child": 2,
+                      "kind": "range",
+                      "range": {
+                        "nanos": 0,
+                        "secs": 300
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": null,
+                "required_accuracy": [
+                  null
+                ]
+              }
+            ],
+            "children": [
+              2
+            ],
+            "column_lineage": [
+              "data.ts",
+              "data.value",
+              "data.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": null,
+            "id": 1,
+            "label": "TimeRange 300s",
+            "operator": {
+              "NonASAP": {
+                "TimeRange": {
+                  "child": 2,
+                  "kind": "range",
+                  "range": {
+                    "nanos": 0,
+                    "secs": 300
+                  }
+                }
+              }
+            },
+            "parents": [
+              0,
+              4
+            ],
+            "queries": [
+              0
+            ],
+            "result_kind": "range_vector",
+            "roots_of": [],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "data"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": null,
             "candidate_count": 1,
             "candidate_count_by_origin": {
               "pass1": 1
@@ -298,7 +529,7 @@
             ],
             "depends_on_evaluation_time": false,
             "evaluation_grid": null,
-            "id": 0,
+            "id": 2,
             "label": "Scan",
             "operator": {
               "NonASAP": {
@@ -351,6 +582,7 @@
             "queries": [
               0
             ],
+            "result_kind": "instant_vector",
             "roots_of": [],
             "scanned_sources": [
               {
@@ -358,9 +590,11 @@
                   "metric": "data"
                 }
               }
-            ]
+            ],
+            "shareable_when_equal": true
           },
           {
+            "aggregate_coverage": null,
             "candidate_count": 1,
             "candidate_count_by_origin": {
               "pass1": 1
@@ -369,20 +603,20 @@
               {
                 "added": false,
                 "children": [
-                  0
+                  4
                 ],
                 "fused_groups": [],
                 "index": 0,
-                "label": "TimeRange 300s",
+                "label": "SummaryEstimate Quantile(q=0.9)",
                 "operator": {
-                  "NonASAP": {
-                    "TimeRange": {
-                      "child": 0,
-                      "kind": "range",
-                      "range": {
-                        "nanos": 0,
-                        "secs": 300
-                      }
+                  "ASAP": {
+                    "SummaryEstimate": {
+                      "query": {
+                        "Quantile": {
+                          "q": 0.9
+                        }
+                      },
+                      "summary_input": 4
                     }
                   }
                 },
@@ -394,11 +628,11 @@
               }
             ],
             "children": [
-              0
+              4
             ],
             "column_lineage": [
               "data.ts",
-              "data.value",
+              "G3.1",
               "data.$promql_series_identity"
             ],
             "column_signs": [
@@ -408,27 +642,27 @@
             ],
             "depends_on_evaluation_time": true,
             "evaluation_grid": null,
-            "id": 1,
-            "label": "TimeRange 300s",
+            "id": 3,
+            "label": "SummaryEstimate Quantile(q=0.9)",
             "operator": {
-              "NonASAP": {
-                "TimeRange": {
-                  "child": 0,
-                  "kind": "range",
-                  "range": {
-                    "nanos": 0,
-                    "secs": 300
-                  }
+              "ASAP": {
+                "SummaryEstimate": {
+                  "query": {
+                    "Quantile": {
+                      "q": 0.9
+                    }
+                  },
+                  "summary_input": 4
                 }
               }
             },
             "parents": [
-              2,
-              3
+              0
             ],
             "queries": [
               0
             ],
+            "result_kind": "instant_vector",
             "roots_of": [],
             "scanned_sources": [
               {
@@ -436,143 +670,11 @@
                   "metric": "data"
                 }
               }
-            ]
+            ],
+            "shareable_when_equal": true
           },
           {
-            "candidate_count": 2,
-            "candidate_count_by_origin": {
-              "pass1": 2
-            },
-            "candidates": [
-              {
-                "added": false,
-                "children": [
-                  1
-                ],
-                "fused_groups": [],
-                "index": 0,
-                "label": "Aggregate quantile(q=0.9)",
-                "operator": {
-                  "NonASAP": {
-                    "Aggregate": {
-                      "child": 1,
-                      "filters": [],
-                      "having": null,
-                      "measures": [
-                        {
-                          "col": null,
-                          "kind": "quantile",
-                          "q": 0.9
-                        }
-                      ],
-                      "output_names": [
-                        ""
-                      ],
-                      "reduction": "PerEntity"
-                    }
-                  }
-                },
-                "origin": "pass1",
-                "parameters": null,
-                "required_accuracy": [
-                  null
-                ]
-              },
-              {
-                "added": false,
-                "children": [
-                  4
-                ],
-                "fused_groups": [],
-                "index": 1,
-                "label": "Project",
-                "operator": {
-                  "NonASAP": {
-                    "Project": {
-                      "child": 4,
-                      "cols": [
-                        {
-                          "alias": "ts",
-                          "expr": {
-                            "Column": 0
-                          }
-                        },
-                        {
-                          "alias": "value",
-                          "expr": {
-                            "Column": 1
-                          }
-                        },
-                        {
-                          "alias": "$promql_series_identity",
-                          "expr": {
-                            "Column": 2
-                          }
-                        }
-                      ]
-                    }
-                  }
-                },
-                "origin": "pass1",
-                "parameters": null,
-                "required_accuracy": [
-                  null
-                ]
-              }
-            ],
-            "children": [
-              1
-            ],
-            "column_lineage": [
-              "data.ts",
-              "G2.1",
-              "data.$promql_series_identity"
-            ],
-            "column_signs": [
-              "unknown",
-              "unknown",
-              "unknown"
-            ],
-            "depends_on_evaluation_time": true,
-            "evaluation_grid": null,
-            "id": 2,
-            "label": "Aggregate quantile(q=0.9)",
-            "operator": {
-              "NonASAP": {
-                "Aggregate": {
-                  "child": 1,
-                  "filters": [],
-                  "having": null,
-                  "measures": [
-                    {
-                      "col": null,
-                      "kind": "quantile",
-                      "q": 0.9
-                    }
-                  ],
-                  "output_names": [
-                    ""
-                  ],
-                  "reduction": "PerEntity"
-                }
-              }
-            },
-            "parents": [],
-            "queries": [
-              0
-            ],
-            "roots_of": [
-              0
-            ],
-            "scanned_sources": [
-              {
-                "TimeSeries": {
-                  "metric": "data"
-                }
-              }
-            ]
-          },
-          {
+            "aggregate_coverage": "covers G2 through [SummaryAgg Kll] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
             "candidate_count": 7,
             "candidate_count_by_origin": {
               "pass1": 7
@@ -836,7 +938,7 @@
             ],
             "column_lineage": [
               "data.ts",
-              "G3.1",
+              "G4.1",
               "data.$promql_series_identity"
             ],
             "column_signs": [
@@ -846,7 +948,7 @@
             ],
             "depends_on_evaluation_time": true,
             "evaluation_grid": null,
-            "id": 3,
+            "id": 4,
             "label": "SummaryAgg Kll",
             "operator": {
               "ASAP": {
@@ -867,88 +969,12 @@
               }
             },
             "parents": [
-              4
-            ],
-            "queries": [
-              0
-            ],
-            "roots_of": [],
-            "scanned_sources": [
-              {
-                "TimeSeries": {
-                  "metric": "data"
-                }
-              }
-            ]
-          },
-          {
-            "candidate_count": 1,
-            "candidate_count_by_origin": {
-              "pass1": 1
-            },
-            "candidates": [
-              {
-                "added": false,
-                "children": [
-                  3
-                ],
-                "fused_groups": [],
-                "index": 0,
-                "label": "SummaryEstimate Quantile(q=0.9)",
-                "operator": {
-                  "ASAP": {
-                    "SummaryEstimate": {
-                      "query": {
-                        "Quantile": {
-                          "q": 0.9
-                        }
-                      },
-                      "summary_input": 3
-                    }
-                  }
-                },
-                "origin": "pass1",
-                "parameters": null,
-                "required_accuracy": [
-                  null
-                ]
-              }
-            ],
-            "children": [
               3
             ],
-            "column_lineage": [
-              "data.ts",
-              "G4.1",
-              "data.$promql_series_identity"
-            ],
-            "column_signs": [
-              "unknown",
-              "unknown",
-              "unknown"
-            ],
-            "depends_on_evaluation_time": true,
-            "evaluation_grid": null,
-            "id": 4,
-            "label": "SummaryEstimate Quantile(q=0.9)",
-            "operator": {
-              "ASAP": {
-                "SummaryEstimate": {
-                  "query": {
-                    "Quantile": {
-                      "q": 0.9
-                    }
-                  },
-                  "summary_input": 3
-                }
-              }
-            },
-            "parents": [
-              2
-            ],
             "queries": [
               0
             ],
+            "result_kind": "state",
             "roots_of": [],
             "scanned_sources": [
               {
@@ -956,7 +982,8 @@
                   "metric": "data"
                 }
               }
-            ]
+            ],
+            "shareable_when_equal": true
           }
         ],
         "step": "pass1",
@@ -965,6 +992,270 @@
       {
         "groups": [
           {
+            "aggregate_coverage": "covers G2 through [Aggregate quantile(q=0.9)] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
+            "candidate_count": 2,
+            "candidate_count_by_origin": {
+              "pass1": 2
+            },
+            "candidates": [
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 0,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      }
+                    ],
+                    "group": 1
+                  }
+                ],
+                "label": "Aggregate quantile(q=0.9)",
+                "operator": {
+                  "NonASAP": {
+                    "Aggregate": {
+                      "child": 1,
+                      "filters": [],
+                      "having": null,
+                      "measures": [
+                        {
+                          "col": null,
+                          "kind": "quantile",
+                          "q": 0.9
+                        }
+                      ],
+                      "output_names": [
+                        ""
+                      ],
+                      "reduction": "PerEntity"
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": null,
+                "pruned": false,
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  3
+                ],
+                "fused_groups": [],
+                "index": 1,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      }
+                    ],
+                    "group": 3
+                  }
+                ],
+                "label": "Project",
+                "operator": {
+                  "NonASAP": {
+                    "Project": {
+                      "child": 3,
+                      "cols": [
+                        {
+                          "alias": "ts",
+                          "expr": {
+                            "Column": 0
+                          }
+                        },
+                        {
+                          "alias": "value",
+                          "expr": {
+                            "Column": 1
+                          }
+                        },
+                        {
+                          "alias": "$promql_series_identity",
+                          "expr": {
+                            "Column": 2
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": null,
+                "pruned": false,
+                "required_accuracy": [
+                  null
+                ]
+              }
+            ],
+            "children": [
+              1
+            ],
+            "column_lineage": [
+              "data.ts",
+              "G0.1",
+              "data.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": {
+              "period_ms": 60000,
+              "phase_ms": 0
+            },
+            "id": 0,
+            "label": "Aggregate quantile(q=0.9)",
+            "operator": {
+              "NonASAP": {
+                "Aggregate": {
+                  "child": 1,
+                  "filters": [],
+                  "having": null,
+                  "measures": [
+                    {
+                      "col": null,
+                      "kind": "quantile",
+                      "q": 0.9
+                    }
+                  ],
+                  "output_names": [
+                    ""
+                  ],
+                  "reduction": "PerEntity"
+                }
+              }
+            },
+            "parents": [],
+            "queries": [
+              0
+            ],
+            "result_kind": "instant_vector",
+            "roots_of": [
+              0
+            ],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "data"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": null,
+            "candidate_count": 1,
+            "candidate_count_by_origin": {
+              "pass1": 1
+            },
+            "candidates": [
+              {
+                "added": false,
+                "children": [
+                  2
+                ],
+                "fused_groups": [],
+                "index": 0,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      }
+                    ],
+                    "group": 2
+                  }
+                ],
+                "label": "TimeRange 300s",
+                "operator": {
+                  "NonASAP": {
+                    "TimeRange": {
+                      "child": 2,
+                      "kind": "range",
+                      "range": {
+                        "nanos": 0,
+                        "secs": 300
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": null,
+                "pruned": false,
+                "required_accuracy": [
+                  null
+                ]
+              }
+            ],
+            "children": [
+              2
+            ],
+            "column_lineage": [
+              "data.ts",
+              "data.value",
+              "data.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": {
+              "period_ms": 60000,
+              "phase_ms": 0
+            },
+            "id": 1,
+            "label": "TimeRange 300s",
+            "operator": {
+              "NonASAP": {
+                "TimeRange": {
+                  "child": 2,
+                  "kind": "range",
+                  "range": {
+                    "nanos": 0,
+                    "secs": 300
+                  }
+                }
+              }
+            },
+            "parents": [
+              0,
+              4
+            ],
+            "queries": [
+              0
+            ],
+            "result_kind": "range_vector",
+            "roots_of": [],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "data"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": null,
             "candidate_count": 1,
             "candidate_count_by_origin": {
               "pass1": 1
@@ -1044,7 +1335,7 @@
               "period_ms": 60000,
               "phase_ms": 0
             },
-            "id": 0,
+            "id": 2,
             "label": "Scan",
             "operator": {
               "NonASAP": {
@@ -1093,11 +1384,12 @@
             },
             "parents": [
               1,
-              5
+              6
             ],
             "queries": [
               0
             ],
+            "result_kind": "instant_vector",
             "roots_of": [],
             "scanned_sources": [
               {
@@ -1105,9 +1397,11 @@
                   "metric": "data"
                 }
               }
-            ]
+            ],
+            "shareable_when_equal": true
           },
           {
+            "aggregate_coverage": null,
             "candidate_count": 1,
             "candidate_count_by_origin": {
               "pass1": 1
@@ -1116,156 +1410,60 @@
               {
                 "added": false,
                 "children": [
-                  0
-                ],
-                "fused_groups": [],
-                "index": 0,
-                "inputs": [
-                  {
-                    "edges": [
-                      {
-                        "producer": 0,
-                        "rejection": null,
-                        "satisfies_logical_requirement": true
-                      }
-                    ],
-                    "group": 0
-                  }
-                ],
-                "label": "TimeRange 300s",
-                "operator": {
-                  "NonASAP": {
-                    "TimeRange": {
-                      "child": 0,
-                      "kind": "range",
-                      "range": {
-                        "nanos": 0,
-                        "secs": 300
-                      }
-                    }
-                  }
-                },
-                "origin": "pass1",
-                "parameters": null,
-                "pruned": false,
-                "required_accuracy": [
-                  null
-                ]
-              }
-            ],
-            "children": [
-              0
-            ],
-            "column_lineage": [
-              "data.ts",
-              "data.value",
-              "data.$promql_series_identity"
-            ],
-            "column_signs": [
-              "unknown",
-              "unknown",
-              "unknown"
-            ],
-            "depends_on_evaluation_time": true,
-            "evaluation_grid": {
-              "period_ms": 60000,
-              "phase_ms": 0
-            },
-            "id": 1,
-            "label": "TimeRange 300s",
-            "operator": {
-              "NonASAP": {
-                "TimeRange": {
-                  "child": 0,
-                  "kind": "range",
-                  "range": {
-                    "nanos": 0,
-                    "secs": 300
-                  }
-                }
-              }
-            },
-            "parents": [
-              2,
-              3
-            ],
-            "queries": [
-              0
-            ],
-            "roots_of": [],
-            "scanned_sources": [
-              {
-                "TimeSeries": {
-                  "metric": "data"
-                }
-              }
-            ]
-          },
-          {
-            "candidate_count": 2,
-            "candidate_count_by_origin": {
-              "pass1": 2
-            },
-            "candidates": [
-              {
-                "added": false,
-                "children": [
-                  1
-                ],
-                "fused_groups": [],
-                "index": 0,
-                "inputs": [
-                  {
-                    "edges": [
-                      {
-                        "producer": 0,
-                        "rejection": null,
-                        "satisfies_logical_requirement": true
-                      }
-                    ],
-                    "group": 1
-                  }
-                ],
-                "label": "Aggregate quantile(q=0.9)",
-                "operator": {
-                  "NonASAP": {
-                    "Aggregate": {
-                      "child": 1,
-                      "filters": [],
-                      "having": null,
-                      "measures": [
-                        {
-                          "col": null,
-                          "kind": "quantile",
-                          "q": 0.9
-                        }
-                      ],
-                      "output_names": [
-                        ""
-                      ],
-                      "reduction": "PerEntity"
-                    }
-                  }
-                },
-                "origin": "pass1",
-                "parameters": null,
-                "pruned": false,
-                "required_accuracy": [
-                  null
-                ]
-              },
-              {
-                "added": false,
-                "children": [
                   4
                 ],
                 "fused_groups": [],
-                "index": 1,
+                "index": 0,
                 "inputs": [
                   {
                     "edges": [
                       {
                         "producer": 0,
+                        "rejection": "α^log = 0: the producer's guarantee exceeds Rank ≤ 0.01 (δ 0.00001)",
+                        "satisfies_logical_requirement": false
+                      },
+                      {
+                        "producer": 1,
+                        "rejection": "α^log = 0: the producer's guarantee exceeds Rank ≤ 0.01 (δ 0.00001)",
+                        "satisfies_logical_requirement": false
+                      },
+                      {
+                        "producer": 2,
+                        "rejection": "α^log = 0: the producer's guarantee exceeds Rank ≤ 0.01 (δ 0.00001)",
+                        "satisfies_logical_requirement": false
+                      },
+                      {
+                        "producer": 3,
+                        "rejection": "α^log = 0: the producer's guarantee exceeds Rank ≤ 0.01 (δ 0.00001)",
+                        "satisfies_logical_requirement": false
+                      },
+                      {
+                        "producer": 4,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      },
+                      {
+                        "producer": 5,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      },
+                      {
+                        "producer": 6,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      },
+                      {
+                        "producer": 7,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      },
+                      {
+                        "producer": 8,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      },
+                      {
+                        "producer": 9,
                         "rejection": null,
                         "satisfies_logical_requirement": true
                       }
@@ -1273,31 +1471,16 @@
                     "group": 4
                   }
                 ],
-                "label": "Project",
+                "label": "SummaryEstimate Quantile(q=0.9)",
                 "operator": {
-                  "NonASAP": {
-                    "Project": {
-                      "child": 4,
-                      "cols": [
-                        {
-                          "alias": "ts",
-                          "expr": {
-                            "Column": 0
-                          }
-                        },
-                        {
-                          "alias": "value",
-                          "expr": {
-                            "Column": 1
-                          }
-                        },
-                        {
-                          "alias": "$promql_series_identity",
-                          "expr": {
-                            "Column": 2
-                          }
+                  "ASAP": {
+                    "SummaryEstimate": {
+                      "query": {
+                        "Quantile": {
+                          "q": 0.9
                         }
-                      ]
+                      },
+                      "summary_input": 4
                     }
                   }
                 },
@@ -1305,16 +1488,20 @@
                 "parameters": null,
                 "pruned": false,
                 "required_accuracy": [
-                  null
+                  {
+                    "failure_probability": 0.00001,
+                    "max_error": 0.01,
+                    "metric": "rank"
+                  }
                 ]
               }
             ],
             "children": [
-              1
+              4
             ],
             "column_lineage": [
               "data.ts",
-              "G2.1",
+              "G3.1",
               "data.$promql_series_identity"
             ],
             "column_signs": [
@@ -1327,44 +1514,39 @@
               "period_ms": 60000,
               "phase_ms": 0
             },
-            "id": 2,
-            "label": "Aggregate quantile(q=0.9)",
+            "id": 3,
+            "label": "SummaryEstimate Quantile(q=0.9)",
             "operator": {
-              "NonASAP": {
-                "Aggregate": {
-                  "child": 1,
-                  "filters": [],
-                  "having": null,
-                  "measures": [
-                    {
-                      "col": null,
-                      "kind": "quantile",
+              "ASAP": {
+                "SummaryEstimate": {
+                  "query": {
+                    "Quantile": {
                       "q": 0.9
                     }
-                  ],
-                  "output_names": [
-                    ""
-                  ],
-                  "reduction": "PerEntity"
+                  },
+                  "summary_input": 4
                 }
               }
             },
-            "parents": [],
+            "parents": [
+              0
+            ],
             "queries": [
               0
             ],
-            "roots_of": [
-              0
-            ],
+            "result_kind": "instant_vector",
+            "roots_of": [],
             "scanned_sources": [
               {
                 "TimeSeries": {
                   "metric": "data"
                 }
               }
-            ]
+            ],
+            "shareable_when_equal": true
           },
           {
+            "aggregate_coverage": "covers G2 through [SummaryAgg Kll] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
             "candidate_count": 10,
             "candidate_count_by_origin": {
               "pass1": 7,
@@ -1717,7 +1899,7 @@
               {
                 "added": true,
                 "children": [
-                  6
+                  5
                 ],
                 "fused_groups": [],
                 "index": 7,
@@ -1740,7 +1922,7 @@
                         "satisfies_logical_requirement": false
                       }
                     ],
-                    "group": 6
+                    "group": 5
                   }
                 ],
                 "label": "SummaryMerge",
@@ -1748,7 +1930,7 @@
                   "ASAP": {
                     "SummaryMerge": {
                       "children": [
-                        6
+                        5
                       ]
                     }
                   }
@@ -1767,7 +1949,7 @@
               {
                 "added": true,
                 "children": [
-                  6
+                  5
                 ],
                 "fused_groups": [],
                 "index": 8,
@@ -1790,7 +1972,7 @@
                         "satisfies_logical_requirement": false
                       }
                     ],
-                    "group": 6
+                    "group": 5
                   }
                 ],
                 "label": "SummaryMerge",
@@ -1798,7 +1980,7 @@
                   "ASAP": {
                     "SummaryMerge": {
                       "children": [
-                        6
+                        5
                       ]
                     }
                   }
@@ -1817,7 +1999,7 @@
               {
                 "added": true,
                 "children": [
-                  6
+                  5
                 ],
                 "fused_groups": [],
                 "index": 9,
@@ -1840,7 +2022,7 @@
                         "satisfies_logical_requirement": true
                       }
                     ],
-                    "group": 6
+                    "group": 5
                   }
                 ],
                 "label": "SummaryMerge",
@@ -1848,7 +2030,7 @@
                   "ASAP": {
                     "SummaryMerge": {
                       "children": [
-                        6
+                        5
                       ]
                     }
                   }
@@ -1870,7 +2052,7 @@
             ],
             "column_lineage": [
               "data.ts",
-              "G3.1",
+              "G4.1",
               "data.$promql_series_identity"
             ],
             "column_signs": [
@@ -1883,7 +2065,7 @@
               "period_ms": 60000,
               "phase_ms": 0
             },
-            "id": 3,
+            "id": 4,
             "label": "SummaryAgg Kll",
             "operator": {
               "ASAP": {
@@ -1904,11 +2086,12 @@
               }
             },
             "parents": [
-              4
+              3
             ],
             "queries": [
               0
             ],
+            "result_kind": "state",
             "roots_of": [],
             "scanned_sources": [
               {
@@ -1916,18 +2099,20 @@
                   "metric": "data"
                 }
               }
-            ]
+            ],
+            "shareable_when_equal": true
           },
           {
-            "candidate_count": 1,
+            "aggregate_coverage": "covers G2 through [SummaryAgg Kll] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
+            "candidate_count": 3,
             "candidate_count_by_origin": {
-              "pass1": 1
+              "tumbling_windows": 3
             },
             "candidates": [
               {
-                "added": false,
+                "added": true,
                 "children": [
-                  3
+                  6
                 ],
                 "fused_groups": [],
                 "index": 0,
@@ -1936,89 +2121,160 @@
                     "edges": [
                       {
                         "producer": 0,
-                        "rejection": "α^log = 0: the producer's guarantee exceeds Rank ≤ 0.01 (δ 0.00001)",
-                        "satisfies_logical_requirement": false
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
                       },
                       {
                         "producer": 1,
-                        "rejection": "α^log = 0: the producer's guarantee exceeds Rank ≤ 0.01 (δ 0.00001)",
+                        "rejection": "no edge: the producer's θ differs",
                         "satisfies_logical_requirement": false
                       },
                       {
                         "producer": 2,
-                        "rejection": "α^log = 0: the producer's guarantee exceeds Rank ≤ 0.01 (δ 0.00001)",
+                        "rejection": "no edge: the producer's θ differs",
+                        "satisfies_logical_requirement": false
+                      }
+                    ],
+                    "group": 6
+                  }
+                ],
+                "label": "TimeRange 300s",
+                "operator": {
+                  "NonASAP": {
+                    "TimeRange": {
+                      "child": 6,
+                      "kind": "range",
+                      "range": {
+                        "nanos": 0,
+                        "secs": 300
+                      }
+                    }
+                  }
+                },
+                "origin": "tumbling_windows",
+                "parameters": {
+                  "Kll": {
+                    "k": 547
+                  }
+                },
+                "pruned": false,
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": true,
+                "children": [
+                  6
+                ],
+                "fused_groups": [],
+                "index": 1,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": "no edge: the producer's θ differs",
                         "satisfies_logical_requirement": false
                       },
                       {
-                        "producer": 3,
-                        "rejection": "α^log = 0: the producer's guarantee exceeds Rank ≤ 0.01 (δ 0.00001)",
+                        "producer": 1,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      },
+                      {
+                        "producer": 2,
+                        "rejection": "no edge: the producer's θ differs",
+                        "satisfies_logical_requirement": false
+                      }
+                    ],
+                    "group": 6
+                  }
+                ],
+                "label": "TimeRange 300s",
+                "operator": {
+                  "NonASAP": {
+                    "TimeRange": {
+                      "child": 6,
+                      "kind": "range",
+                      "range": {
+                        "nanos": 0,
+                        "secs": 300
+                      }
+                    }
+                  }
+                },
+                "origin": "tumbling_windows",
+                "parameters": {
+                  "Kll": {
+                    "k": 1404
+                  }
+                },
+                "pruned": false,
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": true,
+                "children": [
+                  6
+                ],
+                "fused_groups": [],
+                "index": 2,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": "no edge: the producer's θ differs",
                         "satisfies_logical_requirement": false
                       },
                       {
-                        "producer": 4,
-                        "rejection": null,
-                        "satisfies_logical_requirement": true
+                        "producer": 1,
+                        "rejection": "no edge: the producer's θ differs",
+                        "satisfies_logical_requirement": false
                       },
                       {
-                        "producer": 5,
-                        "rejection": null,
-                        "satisfies_logical_requirement": true
-                      },
-                      {
-                        "producer": 6,
-                        "rejection": null,
-                        "satisfies_logical_requirement": true
-                      },
-                      {
-                        "producer": 7,
-                        "rejection": null,
-                        "satisfies_logical_requirement": true
-                      },
-                      {
-                        "producer": 8,
-                        "rejection": null,
-                        "satisfies_logical_requirement": true
-                      },
-                      {
-                        "producer": 9,
+                        "producer": 2,
                         "rejection": null,
                         "satisfies_logical_requirement": true
                       }
                     ],
-                    "group": 3
+                    "group": 6
                   }
                 ],
-                "label": "SummaryEstimate Quantile(q=0.9)",
+                "label": "TimeRange 300s",
                 "operator": {
-                  "ASAP": {
-                    "SummaryEstimate": {
-                      "query": {
-                        "Quantile": {
-                          "q": 0.9
-                        }
-                      },
-                      "summary_input": 3
+                  "NonASAP": {
+                    "TimeRange": {
+                      "child": 6,
+                      "kind": "range",
+                      "range": {
+                        "nanos": 0,
+                        "secs": 300
+                      }
                     }
                   }
                 },
-                "origin": "pass1",
-                "parameters": null,
+                "origin": "tumbling_windows",
+                "parameters": {
+                  "Kll": {
+                    "k": 2863
+                  }
+                },
                 "pruned": false,
                 "required_accuracy": [
-                  {
-                    "failure_probability": 0.00001,
-                    "max_error": 0.01,
-                    "metric": "rank"
-                  }
+                  null
                 ]
               }
             ],
             "children": [
-              3
+              6
             ],
             "column_lineage": [
-              "data.ts",
-              "G4.1",
+              "G6.0",
+              "G6.1",
               "data.$promql_series_identity"
             ],
             "column_signs": [
@@ -2031,26 +2287,27 @@
               "period_ms": 60000,
               "phase_ms": 0
             },
-            "id": 4,
-            "label": "SummaryEstimate Quantile(q=0.9)",
+            "id": 5,
+            "label": "TimeRange 300s",
             "operator": {
-              "ASAP": {
-                "SummaryEstimate": {
-                  "query": {
-                    "Quantile": {
-                      "q": 0.9
-                    }
-                  },
-                  "summary_input": 3
+              "NonASAP": {
+                "TimeRange": {
+                  "child": 6,
+                  "kind": "range",
+                  "range": {
+                    "nanos": 0,
+                    "secs": 300
+                  }
                 }
               }
             },
             "parents": [
-              2
+              4
             ],
             "queries": [
               0
             ],
+            "result_kind": "state",
             "roots_of": [],
             "scanned_sources": [
               {
@@ -2058,9 +2315,11 @@
                   "metric": "data"
                 }
               }
-            ]
+            ],
+            "shareable_when_equal": true
           },
           {
+            "aggregate_coverage": "covers G2 through [SummaryAgg Kll] selecting [{\"columns\":[]}]",
             "candidate_count": 3,
             "candidate_count_by_origin": {
               "tumbling_windows": 3
@@ -2069,7 +2328,7 @@
               {
                 "added": true,
                 "children": [
-                  0
+                  2
                 ],
                 "fused_groups": [],
                 "index": 0,
@@ -2082,14 +2341,14 @@
                         "satisfies_logical_requirement": true
                       }
                     ],
-                    "group": 0
+                    "group": 2
                   }
                 ],
                 "label": "SummaryTumblingWindowChain Kll tumbling_window_width_ms=60000",
                 "operator": {
                   "ASAP": {
                     "SummaryTumblingWindowChain": {
-                      "child": 0,
+                      "child": 2,
                       "filter": null,
                       "input": {
                         "item": null,
@@ -2119,7 +2378,7 @@
               {
                 "added": true,
                 "children": [
-                  0
+                  2
                 ],
                 "fused_groups": [],
                 "index": 1,
@@ -2132,14 +2391,14 @@
                         "satisfies_logical_requirement": true
                       }
                     ],
-                    "group": 0
+                    "group": 2
                   }
                 ],
                 "label": "SummaryTumblingWindowChain Kll tumbling_window_width_ms=60000",
                 "operator": {
                   "ASAP": {
                     "SummaryTumblingWindowChain": {
-                      "child": 0,
+                      "child": 2,
                       "filter": null,
                       "input": {
                         "item": null,
@@ -2169,7 +2428,7 @@
               {
                 "added": true,
                 "children": [
-                  0
+                  2
                 ],
                 "fused_groups": [],
                 "index": 2,
@@ -2182,14 +2441,14 @@
                         "satisfies_logical_requirement": true
                       }
                     ],
-                    "group": 0
+                    "group": 2
                   }
                 ],
                 "label": "SummaryTumblingWindowChain Kll tumbling_window_width_ms=60000",
                 "operator": {
                   "ASAP": {
                     "SummaryTumblingWindowChain": {
-                      "child": 0,
+                      "child": 2,
                       "filter": null,
                       "input": {
                         "item": null,
@@ -2218,11 +2477,11 @@
               }
             ],
             "children": [
-              0
+              2
             ],
             "column_lineage": [
-              "G5.0",
-              "G5.1",
+              "G6.0",
+              "G6.1",
               "data.$promql_series_identity"
             ],
             "column_signs": [
@@ -2235,12 +2494,12 @@
               "period_ms": 60000,
               "phase_ms": 0
             },
-            "id": 5,
+            "id": 6,
             "label": "SummaryTumblingWindowChain Kll tumbling_window_width_ms=60000",
             "operator": {
               "ASAP": {
                 "SummaryTumblingWindowChain": {
-                  "child": 0,
+                  "child": 2,
                   "filter": null,
                   "input": {
                     "item": null,
@@ -2257,224 +2516,12 @@
               }
             },
             "parents": [
-              6
-            ],
-            "queries": [
-              0
-            ],
-            "roots_of": [],
-            "scanned_sources": [
-              {
-                "TimeSeries": {
-                  "metric": "data"
-                }
-              }
-            ]
-          },
-          {
-            "candidate_count": 3,
-            "candidate_count_by_origin": {
-              "tumbling_windows": 3
-            },
-            "candidates": [
-              {
-                "added": true,
-                "children": [
-                  5
-                ],
-                "fused_groups": [],
-                "index": 0,
-                "inputs": [
-                  {
-                    "edges": [
-                      {
-                        "producer": 0,
-                        "rejection": null,
-                        "satisfies_logical_requirement": true
-                      },
-                      {
-                        "producer": 1,
-                        "rejection": "no edge: the producer's θ differs",
-                        "satisfies_logical_requirement": false
-                      },
-                      {
-                        "producer": 2,
-                        "rejection": "no edge: the producer's θ differs",
-                        "satisfies_logical_requirement": false
-                      }
-                    ],
-                    "group": 5
-                  }
-                ],
-                "label": "TimeRange 300s",
-                "operator": {
-                  "NonASAP": {
-                    "TimeRange": {
-                      "child": 5,
-                      "kind": "range",
-                      "range": {
-                        "nanos": 0,
-                        "secs": 300
-                      }
-                    }
-                  }
-                },
-                "origin": "tumbling_windows",
-                "parameters": {
-                  "Kll": {
-                    "k": 547
-                  }
-                },
-                "pruned": false,
-                "required_accuracy": [
-                  null
-                ]
-              },
-              {
-                "added": true,
-                "children": [
-                  5
-                ],
-                "fused_groups": [],
-                "index": 1,
-                "inputs": [
-                  {
-                    "edges": [
-                      {
-                        "producer": 0,
-                        "rejection": "no edge: the producer's θ differs",
-                        "satisfies_logical_requirement": false
-                      },
-                      {
-                        "producer": 1,
-                        "rejection": null,
-                        "satisfies_logical_requirement": true
-                      },
-                      {
-                        "producer": 2,
-                        "rejection": "no edge: the producer's θ differs",
-                        "satisfies_logical_requirement": false
-                      }
-                    ],
-                    "group": 5
-                  }
-                ],
-                "label": "TimeRange 300s",
-                "operator": {
-                  "NonASAP": {
-                    "TimeRange": {
-                      "child": 5,
-                      "kind": "range",
-                      "range": {
-                        "nanos": 0,
-                        "secs": 300
-                      }
-                    }
-                  }
-                },
-                "origin": "tumbling_windows",
-                "parameters": {
-                  "Kll": {
-                    "k": 1404
-                  }
-                },
-                "pruned": false,
-                "required_accuracy": [
-                  null
-                ]
-              },
-              {
-                "added": true,
-                "children": [
-                  5
-                ],
-                "fused_groups": [],
-                "index": 2,
-                "inputs": [
-                  {
-                    "edges": [
-                      {
-                        "producer": 0,
-                        "rejection": "no edge: the producer's θ differs",
-                        "satisfies_logical_requirement": false
-                      },
-                      {
-                        "producer": 1,
-                        "rejection": "no edge: the producer's θ differs",
-                        "satisfies_logical_requirement": false
-                      },
-                      {
-                        "producer": 2,
-                        "rejection": null,
-                        "satisfies_logical_requirement": true
-                      }
-                    ],
-                    "group": 5
-                  }
-                ],
-                "label": "TimeRange 300s",
-                "operator": {
-                  "NonASAP": {
-                    "TimeRange": {
-                      "child": 5,
-                      "kind": "range",
-                      "range": {
-                        "nanos": 0,
-                        "secs": 300
-                      }
-                    }
-                  }
-                },
-                "origin": "tumbling_windows",
-                "parameters": {
-                  "Kll": {
-                    "k": 2863
-                  }
-                },
-                "pruned": false,
-                "required_accuracy": [
-                  null
-                ]
-              }
-            ],
-            "children": [
               5
             ],
-            "column_lineage": [
-              "G5.0",
-              "G5.1",
-              "data.$promql_series_identity"
-            ],
-            "column_signs": [
-              "unknown",
-              "unknown",
-              "unknown"
-            ],
-            "depends_on_evaluation_time": true,
-            "evaluation_grid": {
-              "period_ms": 60000,
-              "phase_ms": 0
-            },
-            "id": 6,
-            "label": "TimeRange 300s",
-            "operator": {
-              "NonASAP": {
-                "TimeRange": {
-                  "child": 5,
-                  "kind": "range",
-                  "range": {
-                    "nanos": 0,
-                    "secs": 300
-                  }
-                }
-              }
-            },
-            "parents": [
-              3
-            ],
             "queries": [
               0
             ],
+            "result_kind": "state",
             "roots_of": [],
             "scanned_sources": [
               {
@@ -2482,7 +2529,8 @@
                   "metric": "data"
                 }
               }
-            ]
+            ],
+            "shareable_when_equal": true
           }
         ],
         "step": "pass2",
@@ -2696,7 +2744,7 @@
             "root": {
               "below_required_accuracy": {
                 "consumer": {
-                  "group": 4,
+                  "group": 3,
                   "index_in_group": 0
                 },
                 "input": 0,
@@ -2711,7 +2759,7 @@
             "through_pruned_candidates": []
           }
         ],
-        "group": 3,
+        "group": 4,
         "index_in_group": 0
       },
       {
@@ -2720,7 +2768,7 @@
             "root": {
               "below_required_accuracy": {
                 "consumer": {
-                  "group": 4,
+                  "group": 3,
                   "index_in_group": 0
                 },
                 "input": 0,
@@ -2735,7 +2783,7 @@
             "through_pruned_candidates": []
           }
         ],
-        "group": 3,
+        "group": 4,
         "index_in_group": 1
       },
       {
@@ -2744,7 +2792,7 @@
             "root": {
               "below_required_accuracy": {
                 "consumer": {
-                  "group": 4,
+                  "group": 3,
                   "index_in_group": 0
                 },
                 "input": 0,
@@ -2759,7 +2807,7 @@
             "through_pruned_candidates": []
           }
         ],
-        "group": 3,
+        "group": 4,
         "index_in_group": 2
       },
       {
@@ -2768,7 +2816,7 @@
             "root": {
               "below_required_accuracy": {
                 "consumer": {
-                  "group": 4,
+                  "group": 3,
                   "index_in_group": 0
                 },
                 "input": 0,
@@ -2783,7 +2831,7 @@
             "through_pruned_candidates": []
           }
         ],
-        "group": 3,
+        "group": 4,
         "index_in_group": 3
       }
     ]
@@ -2793,8 +2841,26 @@
       {
         "group": 0,
         "id": 0,
-        "index_in_group": 0,
-        "inputs": [],
+        "index_in_group": 1,
+        "inputs": [
+          {
+            "edges": [
+              {
+                "producer": 3,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
+                "selected": true
+              },
+              {
+                "producer": 4,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
+                "selected": false
+              }
+            ],
+            "group": 3
+          }
+        ],
         "properties": {
           "lifetime": "None",
           "timing": "query_time"
@@ -2803,8 +2869,26 @@
       {
         "group": 0,
         "id": 1,
-        "index_in_group": 0,
-        "inputs": [],
+        "index_in_group": 1,
+        "inputs": [
+          {
+            "edges": [
+              {
+                "producer": 3,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
+                "selected": false
+              },
+              {
+                "producer": 4,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
+                "selected": false
+              }
+            ],
+            "group": 3
+          }
+        ],
         "properties": {
           "lifetime": {
             "OneEvaluation": "Memory"
@@ -2813,7 +2897,7 @@
         }
       },
       {
-        "group": 0,
+        "group": 2,
         "id": 2,
         "index_in_group": 0,
         "inputs": [],
@@ -2823,404 +2907,408 @@
         }
       },
       {
-        "group": 0,
+        "group": 3,
         "id": 3,
         "index_in_group": 0,
-        "inputs": [],
+        "inputs": [
+          {
+            "edges": [
+              {
+                "producer": 5,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
+                "selected": false
+              },
+              {
+                "producer": 6,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
+                "selected": true
+              },
+              {
+                "producer": 7,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
+                "selected": false
+              },
+              {
+                "producer": 8,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
+                "selected": false
+              },
+              {
+                "producer": 9,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
+                "selected": false
+              },
+              {
+                "producer": 10,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
+                "selected": false
+              }
+            ],
+            "group": 4
+          }
+        ],
         "properties": {
-          "lifetime": {
-            "AcrossEvaluations": "Memory"
-          },
-          "timing": "ingestion_time"
+          "lifetime": "None",
+          "timing": "query_time"
         }
       },
       {
-        "group": 1,
+        "group": 3,
         "id": 4,
         "index_in_group": 0,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 0,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": true
-              },
-              {
-                "producer": 1,
+                "producer": 5,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               },
               {
-                "producer": 2,
-                "rejection": "α^phys = 0: consumer (QueryTime, None) cannot read producer (IngestionTime, None)",
-                "satisfies_physical_requirement": false,
+                "producer": 6,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
                 "selected": false
               },
               {
-                "producer": 3,
+                "producer": 7,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
+                "selected": false
+              },
+              {
+                "producer": 8,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
+                "selected": false
+              },
+              {
+                "producer": 9,
+                "rejection": null,
+                "satisfies_physical_requirement": true,
+                "selected": false
+              },
+              {
+                "producer": 10,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               }
             ],
-            "group": 0
+            "group": 4
           }
         ],
         "properties": {
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "timing": "query_time"
         }
       },
       {
-        "group": 1,
+        "group": 4,
         "id": 5,
-        "index_in_group": 0,
+        "index_in_group": 7,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 0,
+                "producer": 11,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               },
               {
-                "producer": 1,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 2,
-                "rejection": "α^phys = 0: consumer (QueryTime, OneEvaluation(Memory)) cannot read producer (IngestionTime, None)",
-                "satisfies_physical_requirement": false,
-                "selected": false
-              },
-              {
-                "producer": 3,
+                "producer": 12,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               }
             ],
-            "group": 0
+            "group": 5
           }
         ],
         "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "timing": "query_time"
         }
       },
       {
-        "group": 2,
+        "group": 4,
         "id": 6,
-        "index_in_group": 0,
+        "index_in_group": 7,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 4,
+                "producer": 11,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
-                "selected": false
+                "selected": true
               },
               {
-                "producer": 5,
+                "producer": 12,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               }
             ],
-            "group": 1
+            "group": 5
           }
         ],
         "properties": {
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "timing": "query_time"
         }
       },
       {
-        "group": 2,
+        "group": 4,
         "id": 7,
-        "index_in_group": 0,
+        "index_in_group": 8,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 4,
+                "producer": 13,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               },
               {
-                "producer": 5,
+                "producer": 14,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               }
             ],
-            "group": 1
+            "group": 5
           }
         ],
         "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "timing": "query_time"
         }
       },
       {
-        "group": 2,
+        "group": 4,
         "id": 8,
-        "index_in_group": 1,
+        "index_in_group": 8,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 22,
+                "producer": 13,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
-                "selected": true
+                "selected": false
               },
               {
-                "producer": 23,
+                "producer": 14,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               }
             ],
-            "group": 4
+            "group": 5
           }
         ],
         "properties": {
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "timing": "query_time"
         }
       },
       {
-        "group": 2,
+        "group": 4,
         "id": 9,
-        "index_in_group": 1,
+        "index_in_group": 9,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 22,
+                "producer": 15,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               },
               {
-                "producer": 23,
+                "producer": 16,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               }
             ],
-            "group": 4
+            "group": 5
           }
         ],
         "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "timing": "query_time"
         }
       },
       {
-        "group": 3,
+        "group": 4,
         "id": 10,
-        "index_in_group": 4,
+        "index_in_group": 9,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 4,
+                "producer": 15,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               },
               {
-                "producer": 5,
+                "producer": 16,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               }
             ],
-            "group": 1
+            "group": 5
           }
         ],
         "properties": {
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "timing": "query_time"
         }
       },
       {
-        "group": 3,
+        "group": 5,
         "id": 11,
-        "index_in_group": 4,
+        "index_in_group": 0,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 4,
+                "producer": 17,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 5,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
+                "selected": true
               }
             ],
-            "group": 1
+            "group": 6
           }
         ],
         "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "timing": "query_time"
         }
       },
       {
-        "group": 3,
+        "group": 5,
         "id": 12,
-        "index_in_group": 5,
+        "index_in_group": 0,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 4,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 5,
+                "producer": 17,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               }
             ],
-            "group": 1
+            "group": 6
           }
         ],
         "properties": {
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "timing": "query_time"
         }
       },
       {
-        "group": 3,
+        "group": 5,
         "id": 13,
-        "index_in_group": 5,
+        "index_in_group": 1,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 4,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 5,
+                "producer": 18,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               }
             ],
-            "group": 1
+            "group": 6
           }
         ],
         "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "timing": "query_time"
         }
       },
       {
-        "group": 3,
+        "group": 5,
         "id": 14,
-        "index_in_group": 6,
+        "index_in_group": 1,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 4,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 5,
+                "producer": 18,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               }
             ],
-            "group": 1
+            "group": 6
           }
         ],
         "properties": {
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "timing": "query_time"
         }
       },
       {
-        "group": 3,
+        "group": 5,
         "id": 15,
-        "index_in_group": 6,
+        "index_in_group": 2,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 4,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": true
-              },
-              {
-                "producer": 5,
+                "producer": 19,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               }
             ],
-            "group": 1
+            "group": 6
           }
         ],
         "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "timing": "query_time"
         }
       },
       {
-        "group": 3,
+        "group": 5,
         "id": 16,
-        "index_in_group": 7,
+        "index_in_group": 2,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 33,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 34,
+                "producer": 19,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
@@ -3230,697 +3318,27 @@
           }
         ],
         "properties": {
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "timing": "query_time"
         }
       },
       {
-        "group": 3,
+        "group": 6,
         "id": 17,
-        "index_in_group": 7,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 33,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 34,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 6
-          }
-        ],
-        "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 3,
-        "id": 18,
-        "index_in_group": 8,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 35,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 36,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 6
-          }
-        ],
-        "properties": {
-          "lifetime": "None",
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 3,
-        "id": 19,
-        "index_in_group": 8,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 35,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 36,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 6
-          }
-        ],
-        "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 3,
-        "id": 20,
-        "index_in_group": 9,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 37,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 38,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 6
-          }
-        ],
-        "properties": {
-          "lifetime": "None",
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 3,
-        "id": 21,
-        "index_in_group": 9,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 37,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 38,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 6
-          }
-        ],
-        "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 4,
-        "id": 22,
         "index_in_group": 0,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 10,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 11,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 12,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 13,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 14,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 15,
+                "producer": 2,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": true
-              },
-              {
-                "producer": 16,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 17,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 18,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 19,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 20,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 21,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
               }
             ],
-            "group": 3
-          }
-        ],
-        "properties": {
-          "lifetime": "None",
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 4,
-        "id": 23,
-        "index_in_group": 0,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 10,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 11,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 12,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 13,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 14,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 15,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 16,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 17,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 18,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 19,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 20,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 21,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 3
-          }
-        ],
-        "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 5,
-        "id": 24,
-        "index_in_group": 0,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 0,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 1,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 2,
-                "rejection": "α^phys = 0: consumer (QueryTime, None) cannot read producer (IngestionTime, None)",
-                "satisfies_physical_requirement": false,
-                "selected": false
-              },
-              {
-                "producer": 3,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 0
-          }
-        ],
-        "properties": {
-          "lifetime": "None",
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 5,
-        "id": 25,
-        "index_in_group": 0,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 0,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 1,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 2,
-                "rejection": "α^phys = 0: consumer (QueryTime, OneEvaluation(Memory)) cannot read producer (IngestionTime, None)",
-                "satisfies_physical_requirement": false,
-                "selected": false
-              },
-              {
-                "producer": 3,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 0
-          }
-        ],
-        "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 5,
-        "id": 26,
-        "index_in_group": 0,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 0,
-                "rejection": "α^phys = 0: consumer (IngestionTime, AcrossEvaluations(Memory)) cannot read producer (QueryTime, None)",
-                "satisfies_physical_requirement": false,
-                "selected": false
-              },
-              {
-                "producer": 1,
-                "rejection": "α^phys = 0: consumer (IngestionTime, AcrossEvaluations(Memory)) cannot read producer (QueryTime, OneEvaluation(Memory))",
-                "satisfies_physical_requirement": false,
-                "selected": false
-              },
-              {
-                "producer": 2,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 3,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 0
-          }
-        ],
-        "properties": {
-          "lifetime": {
-            "AcrossEvaluations": "Memory"
-          },
-          "timing": "ingestion_time"
-        }
-      },
-      {
-        "group": 5,
-        "id": 27,
-        "index_in_group": 1,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 0,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 1,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 2,
-                "rejection": "α^phys = 0: consumer (QueryTime, None) cannot read producer (IngestionTime, None)",
-                "satisfies_physical_requirement": false,
-                "selected": false
-              },
-              {
-                "producer": 3,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 0
-          }
-        ],
-        "properties": {
-          "lifetime": "None",
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 5,
-        "id": 28,
-        "index_in_group": 1,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 0,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 1,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 2,
-                "rejection": "α^phys = 0: consumer (QueryTime, OneEvaluation(Memory)) cannot read producer (IngestionTime, None)",
-                "satisfies_physical_requirement": false,
-                "selected": false
-              },
-              {
-                "producer": 3,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 0
-          }
-        ],
-        "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 5,
-        "id": 29,
-        "index_in_group": 1,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 0,
-                "rejection": "α^phys = 0: consumer (IngestionTime, AcrossEvaluations(Memory)) cannot read producer (QueryTime, None)",
-                "satisfies_physical_requirement": false,
-                "selected": false
-              },
-              {
-                "producer": 1,
-                "rejection": "α^phys = 0: consumer (IngestionTime, AcrossEvaluations(Memory)) cannot read producer (QueryTime, OneEvaluation(Memory))",
-                "satisfies_physical_requirement": false,
-                "selected": false
-              },
-              {
-                "producer": 2,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 3,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 0
-          }
-        ],
-        "properties": {
-          "lifetime": {
-            "AcrossEvaluations": "Memory"
-          },
-          "timing": "ingestion_time"
-        }
-      },
-      {
-        "group": 5,
-        "id": 30,
-        "index_in_group": 2,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 0,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 1,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 2,
-                "rejection": "α^phys = 0: consumer (QueryTime, None) cannot read producer (IngestionTime, None)",
-                "satisfies_physical_requirement": false,
-                "selected": false
-              },
-              {
-                "producer": 3,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 0
-          }
-        ],
-        "properties": {
-          "lifetime": "None",
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 5,
-        "id": 31,
-        "index_in_group": 2,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 0,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 1,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 2,
-                "rejection": "α^phys = 0: consumer (QueryTime, OneEvaluation(Memory)) cannot read producer (IngestionTime, None)",
-                "satisfies_physical_requirement": false,
-                "selected": false
-              },
-              {
-                "producer": 3,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 0
-          }
-        ],
-        "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 5,
-        "id": 32,
-        "index_in_group": 2,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 0,
-                "rejection": "α^phys = 0: consumer (IngestionTime, AcrossEvaluations(Memory)) cannot read producer (QueryTime, None)",
-                "satisfies_physical_requirement": false,
-                "selected": false
-              },
-              {
-                "producer": 1,
-                "rejection": "α^phys = 0: consumer (IngestionTime, AcrossEvaluations(Memory)) cannot read producer (QueryTime, OneEvaluation(Memory))",
-                "satisfies_physical_requirement": false,
-                "selected": false
-              },
-              {
-                "producer": 2,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 3,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 0
+            "group": 2
           }
         ],
         "properties": {
@@ -3932,212 +3350,50 @@
       },
       {
         "group": 6,
-        "id": 33,
-        "index_in_group": 0,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 24,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 25,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 26,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 5
-          }
-        ],
-        "properties": {
-          "lifetime": "None",
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 6,
-        "id": 34,
-        "index_in_group": 0,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 24,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 25,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 26,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 5
-          }
-        ],
-        "properties": {
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 6,
-        "id": 35,
+        "id": 18,
         "index_in_group": 1,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 27,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 28,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 29,
+                "producer": 2,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               }
             ],
-            "group": 5
-          }
-        ],
-        "properties": {
-          "lifetime": "None",
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 6,
-        "id": 36,
-        "index_in_group": 1,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 27,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 28,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 29,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 5
+            "group": 2
           }
         ],
         "properties": {
           "lifetime": {
-            "OneEvaluation": "Memory"
+            "AcrossEvaluations": "Memory"
           },
-          "timing": "query_time"
+          "timing": "ingestion_time"
         }
       },
       {
         "group": 6,
-        "id": 37,
+        "id": 19,
         "index_in_group": 2,
         "inputs": [
           {
             "edges": [
               {
-                "producer": 30,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 31,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 32,
+                "producer": 2,
                 "rejection": null,
                 "satisfies_physical_requirement": true,
                 "selected": false
               }
             ],
-            "group": 5
-          }
-        ],
-        "properties": {
-          "lifetime": "None",
-          "timing": "query_time"
-        }
-      },
-      {
-        "group": 6,
-        "id": 38,
-        "index_in_group": 2,
-        "inputs": [
-          {
-            "edges": [
-              {
-                "producer": 30,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 31,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              },
-              {
-                "producer": 32,
-                "rejection": null,
-                "satisfies_physical_requirement": true,
-                "selected": false
-              }
-            ],
-            "group": 5
+            "group": 2
           }
         ],
         "properties": {
           "lifetime": {
-            "OneEvaluation": "Memory"
+            "AcrossEvaluations": "Memory"
           },
-          "timing": "query_time"
+          "timing": "ingestion_time"
         }
       }
     ],
@@ -4154,6 +3410,37 @@
         "reason": "query_time_results_not_retained"
       },
       {
+        "group": 0,
+        "index_in_group": 0,
+        "properties": {
+          "lifetime": "None",
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 0,
+        "index_in_group": 0,
+        "properties": {
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 0,
+        "index_in_group": 1,
+        "properties": {
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "query_time_results_not_retained"
+      },
+      {
         "group": 1,
         "index_in_group": 0,
         "properties": {
@@ -4165,6 +3452,46 @@
         "reason": "query_time_results_not_retained"
       },
       {
+        "group": 1,
+        "index_in_group": 0,
+        "properties": {
+          "lifetime": "None",
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 1,
+        "index_in_group": 0,
+        "properties": {
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 2,
+        "index_in_group": 0,
+        "properties": {
+          "lifetime": "None",
+          "timing": "query_time"
+        },
+        "reason": "raw_data_not_retained"
+      },
+      {
+        "group": 2,
+        "index_in_group": 0,
+        "properties": {
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "raw_data_not_retained"
+      },
+      {
         "group": 2,
         "index_in_group": 0,
         "properties": {
@@ -4173,77 +3500,22 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": "raw_data_not_retained"
       },
       {
         "group": 2,
-        "index_in_group": 1,
+        "index_in_group": 0,
         "properties": {
           "lifetime": {
             "AcrossEvaluations": "Memory"
           },
-          "timing": "query_time"
+          "timing": "ingestion_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": "raw_data_not_retained"
       },
       {
         "group": 3,
-        "index_in_group": 4,
-        "properties": {
-          "lifetime": {
-            "AcrossEvaluations": "Memory"
-          },
-          "timing": "query_time"
-        },
-        "reason": "query_time_results_not_retained"
-      },
-      {
-        "group": 3,
-        "index_in_group": 5,
-        "properties": {
-          "lifetime": {
-            "AcrossEvaluations": "Memory"
-          },
-          "timing": "query_time"
-        },
-        "reason": "query_time_results_not_retained"
-      },
-      {
-        "group": 3,
-        "index_in_group": 6,
-        "properties": {
-          "lifetime": {
-            "AcrossEvaluations": "Memory"
-          },
-          "timing": "query_time"
-        },
-        "reason": "query_time_results_not_retained"
-      },
-      {
-        "group": 3,
-        "index_in_group": 7,
-        "properties": {
-          "lifetime": {
-            "AcrossEvaluations": "Memory"
-          },
-          "timing": "query_time"
-        },
-        "reason": "query_time_results_not_retained"
-      },
-      {
-        "group": 3,
-        "index_in_group": 8,
-        "properties": {
-          "lifetime": {
-            "AcrossEvaluations": "Memory"
-          },
-          "timing": "query_time"
-        },
-        "reason": "query_time_results_not_retained"
-      },
-      {
-        "group": 3,
-        "index_in_group": 9,
+        "index_in_group": 0,
         "properties": {
           "lifetime": {
             "AcrossEvaluations": "Memory"
@@ -4254,7 +3526,122 @@
       },
       {
         "group": 4,
-        "index_in_group": 0,
+        "index_in_group": 4,
+        "properties": {
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "query_time_results_not_retained"
+      },
+      {
+        "group": 4,
+        "index_in_group": 4,
+        "properties": {
+          "lifetime": "None",
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 4,
+        "index_in_group": 4,
+        "properties": {
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 4,
+        "index_in_group": 5,
+        "properties": {
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "query_time_results_not_retained"
+      },
+      {
+        "group": 4,
+        "index_in_group": 5,
+        "properties": {
+          "lifetime": "None",
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 4,
+        "index_in_group": 5,
+        "properties": {
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 4,
+        "index_in_group": 6,
+        "properties": {
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "query_time_results_not_retained"
+      },
+      {
+        "group": 4,
+        "index_in_group": 6,
+        "properties": {
+          "lifetime": "None",
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 4,
+        "index_in_group": 6,
+        "properties": {
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 4,
+        "index_in_group": 7,
+        "properties": {
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "query_time_results_not_retained"
+      },
+      {
+        "group": 4,
+        "index_in_group": 8,
+        "properties": {
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "query_time_results_not_retained"
+      },
+      {
+        "group": 4,
+        "index_in_group": 9,
         "properties": {
           "lifetime": {
             "AcrossEvaluations": "Memory"
@@ -4309,7 +3696,58 @@
       },
       {
         "group": 6,
+        "index_in_group": 0,
+        "properties": {
+          "lifetime": "None",
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 6,
+        "index_in_group": 0,
+        "properties": {
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 6,
         "index_in_group": 1,
+        "properties": {
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "query_time_results_not_retained"
+      },
+      {
+        "group": 6,
+        "index_in_group": 1,
+        "properties": {
+          "lifetime": "None",
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 6,
+        "index_in_group": 1,
+        "properties": {
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 6,
+        "index_in_group": 2,
         "properties": {
           "lifetime": {
             "AcrossEvaluations": "Memory"
@@ -4322,12 +3760,21 @@
         "group": 6,
         "index_in_group": 2,
         "properties": {
+          "lifetime": "None",
+          "timing": "query_time"
+        },
+        "reason": "input_has_no_buildable_producer"
+      },
+      {
+        "group": 6,
+        "index_in_group": 2,
+        "properties": {
           "lifetime": {
-            "AcrossEvaluations": "Memory"
+            "OneEvaluation": "Memory"
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": "input_has_no_buildable_producer"
       }
     ]
   },
@@ -4342,49 +3789,58 @@
       }
     ],
     "cost": {
-      "cost_per_second": 0.031036358437400005,
-      "cpu_core_seconds_per_second": 0.00003103333333333334,
+      "cost_per_second": 1.82130369142,
+      "cpu_core_seconds_per_second": 0.000824966666667,
       "per_node": {
         "0": {
-          "cost_per_second": 0.021000000084000003,
+          "cost_per_second": 0.0042,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.000021000000000000002,
-          "detail": "scan 300000 samples; x 0.0167/s; holds 32 bytes for 1.260 ms; keeps 9600000 bytes of raw data on disk",
+          "cpu_core_seconds_per_second": 4.2e-6,
+          "detail": "scan 1000 samples; x 1.0000/s",
           "multiplier": 1,
           "operator": "Scan",
-          "timing": "query_time"
+          "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 0.00500000002,
+          "cost_per_second": 1.15266666667,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 5e-6,
-          "detail": "time range 300s: keep 300000 of 300000 rows; x 0.0167/s; holds 32 bytes for 0.300 ms",
+          "cpu_core_seconds_per_second": 0.000156666666667,
+          "detail": "build Kll in tumbling windows of 60000 ms for 1000 groups: 1000 rows x 84 ops, 100 group visits, 16.7 states emitted; x 1.0000/s; keeps 7968000 bytes",
+          "multiplier": 1,
+          "operator": "SummaryTumblingWindowChain",
+          "timing": "ingestion_time"
+        },
+        "2": {
+          "cost_per_second": 0.000916666818833,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 9.16666666667e-7,
+          "detail": "time range 300s: 5 tumbling windows of states; x 0.0167/s; holds 1328 bytes for 0.055 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
-        "2": {
-          "cost_per_second": 0.005003025,
+        "3": {
+          "cost_per_second": 0.5492370246,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 5e-6,
-          "detail": "build Kll into 1000 states: 300000 rows x depth 1; x 0.0167/s; holds 4840000 bytes for 0.300 ms",
+          "cpu_core_seconds_per_second": 0.0005489,
+          "detail": "merge 5000 states into 1000; x 0.0167/s; holds 4912000 bytes for 32.934 ms",
           "multiplier": 1,
-          "operator": "SummaryAgg",
+          "operator": "SummaryMerge",
           "timing": "query_time"
         },
-        "3": {
-          "cost_per_second": 0.000016666666666666667,
+        "4": {
+          "cost_per_second": 0.114266666667,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.6666666666666667e-8,
+          "cpu_core_seconds_per_second": 0.000114266666667,
           "detail": "estimate 1000 groups x 1; x 0.0167/s",
           "multiplier": 1,
           "operator": "SummaryEstimate",
           "timing": "query_time"
         },
-        "4": {
-          "cost_per_second": 0.000016666666733333334,
+        "5": {
+          "cost_per_second": 0.0000166666667333,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.6666666666666667e-8,
+          "cpu_core_seconds_per_second": 1.66666666667e-8,
           "detail": "operator: pass 1000 rows; x 0.0167/s; holds 32 bytes for 0.001 ms",
           "multiplier": 1,
           "operator": "Project",
@@ -4393,27 +3849,42 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 24.200832533333333,
-        "cpu_ops_per_second": 15033.333333333332,
-        "disk_bytes": 9600000,
-        "peak_cpu_cores": 1,
-        "peak_memory_bytes": 4840096,
-        "scanned_bytes_per_second": 160000.0
+        "average_memory_bytes": 7970696.19802,
+        "cpu_ops_per_second": 821766.666667,
+        "disk_bytes": 0,
+        "peak_cpu_cores": 2,
+        "peak_memory_bytes": 12881392,
+        "scanned_bytes_per_second": 32000.0
       }
     },
-    "materialized_views": [],
-    "milp_constraints": 162,
-    "milp_construction_ms": 0,
-    "milp_objective_cost_per_second": 0.031036358437400005,
-    "milp_solve_ms": 41,
-    "milp_variables": 117,
+    "materialized_views": [
+      {
+        "coverage": {
+          "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+          "selection": [
+            {
+              "columns": []
+            }
+          ]
+        },
+        "inputs": {
+          "materialized_views": []
+        },
+        "node_id": 1,
+        "refresh": "at_ingestion",
+        "retention_ms": 300000
+      }
+    ],
+    "milp_constraints": 74,
+    "milp_objective_cost_per_second": 1.82130369142,
+    "milp_variables": 54,
     "plan": {
       "edges": [
         {
           "consumer": 1,
           "data_state": {
             "primitive": "Raw",
-            "timing": "query_time"
+            "timing": "ingestion_time"
           },
           "grouping": "NotApplicable",
           "intermediate_schema": {
@@ -4456,8 +3927,8 @@
         {
           "consumer": 2,
           "data_state": {
-            "primitive": "Raw",
-            "timing": "query_time"
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
           },
           "grouping": "NotApplicable",
           "intermediate_schema": {
@@ -4467,14 +3938,14 @@
                 "dtype": {
                   "Plain": "timestamp"
                 },
-                "name": "ts",
+                "name": "window_end",
                 "nullable": false
               },
               {
                 "dtype": {
-                  "Plain": "float64"
+                  "Sketch": "Kll"
                 },
-                "name": "value",
+                "name": "state",
                 "nullable": false
               },
               {
@@ -4488,8 +3959,8 @@
             "time_index": 0,
             "unique_keys": [
               [
-                2,
-                0
+                0,
+                2
               ]
             ]
           },
@@ -4499,6 +3970,50 @@
         },
         {
           "consumer": 3,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "window_end",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Sketch": "Kll"
+                },
+                "name": "state",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                0,
+                2
+              ]
+            ]
+          },
+          "producer": 2,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 4,
           "data_state": {
             "primitive": "SummaryState",
             "timing": "query_time"
@@ -4537,12 +4052,12 @@
               ]
             ]
           },
-          "producer": 2,
+          "producer": 3,
           "role": "Input",
           "window": "NotApplicable"
         },
         {
-          "consumer": 4,
+          "consumer": 5,
           "data_state": {
             "primitive": "Raw",
             "timing": "query_time"
@@ -4581,7 +4096,7 @@
               ]
             ]
           },
-          "producer": 3,
+          "producer": 4,
           "role": "Input",
           "window": "NotApplicable"
         }
@@ -4625,7 +4140,7 @@
           },
           "output_state": {
             "primitive": "Raw",
-            "timing": "query_time"
+            "timing": "ingestion_time"
           },
           "payload": {
             "NonASAP": {
@@ -4671,12 +4186,13 @@
                 }
               }
             }
-          },
-          "retention_ms": 300000
+          }
         },
         {
           "id": 1,
-          "lifetime": "None",
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
+          },
           "output_schema": {
             "closed": true,
             "fields": [
@@ -4684,14 +4200,14 @@
                 "dtype": {
                   "Plain": "timestamp"
                 },
-                "name": "ts",
+                "name": "window_end",
                 "nullable": false
               },
               {
                 "dtype": {
-                  "Plain": "float64"
+                  "Sketch": "Kll"
                 },
-                "name": "value",
+                "name": "state",
                 "nullable": false
               },
               {
@@ -4705,19 +4221,98 @@
             "time_index": 0,
             "unique_keys": [
               [
-                2,
-                0
+                0,
+                2
               ]
             ]
           },
           "output_state": {
-            "primitive": "Raw",
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "parameters": {
+            "Kll": {
+              "k": 547
+            }
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryTumblingWindowChain": {
+                "child": 0,
+                "filter": null,
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": "SampleValue"
+                  }
+                },
+                "reduction": "PerEntity",
+                "summary_type": {
+                  "Sketch": "Kll"
+                },
+                "tumbling_window_width_ms": 60000
+              }
+            }
+          },
+          "retention_ms": 300000,
+          "view_coverage": {
+            "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+            "selection": [
+              {
+                "columns": []
+              }
+            ]
+          }
+        },
+        {
+          "id": 2,
+          "lifetime": "None",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "window_end",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Sketch": "Kll"
+                },
+                "name": "state",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                0,
+                2
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
             "timing": "query_time"
+          },
+          "parameters": {
+            "Kll": {
+              "k": 547
+            }
           },
           "payload": {
             "NonASAP": {
               "TimeRange": {
-                "child": 0,
+                "child": 1,
                 "kind": "range",
                 "range": {
                   "nanos": 0,
@@ -4728,7 +4323,7 @@
           }
         },
         {
-          "id": 2,
+          "id": 3,
           "lifetime": {
             "OneEvaluation": "Memory"
           },
@@ -4771,30 +4366,21 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 547
             }
           },
           "payload": {
             "ASAP": {
-              "SummaryAgg": {
-                "child": 1,
-                "filter": null,
-                "input": {
-                  "item": null,
-                  "weight": {
-                    "Column": "SampleValue"
-                  }
-                },
-                "reduction": "PerEntity",
-                "summary_type": {
-                  "Sketch": "Kll"
-                }
+              "SummaryMerge": {
+                "children": [
+                  2
+                ]
               }
             }
           }
         },
         {
-          "id": 3,
+          "id": 4,
           "lifetime": "None",
           "output_schema": {
             "closed": true,
@@ -4841,13 +4427,13 @@
                     "q": 0.9
                   }
                 },
-                "summary_input": 2
+                "summary_input": 3
               }
             }
           }
         },
         {
-          "id": 4,
+          "id": 5,
           "lifetime": "None",
           "output_schema": {
             "closed": true,
@@ -4889,7 +4475,7 @@
           "payload": {
             "NonASAP": {
               "Project": {
-                "child": 3,
+                "child": 4,
                 "cols": [
                   {
                     "alias": "ts",
@@ -4916,11 +4502,12 @@
         }
       ],
       "roots": [
-        4
+        5
       ],
       "scalar_roots": []
     },
-    "pruned_candidates": []
+    "pruned_candidates": [],
+    "sharing_summary": []
   },
   "workload": {
     "data_workload": {

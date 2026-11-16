@@ -12,8 +12,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 0.965604137911,
-      "cpu_core_seconds_per_second": 0.0000416040666667,
+      "cost_per_second": 13.8167759738,
+      "cpu_core_seconds_per_second": 0.0113086658667,
       "per_node": {
         "0": {
           "cost_per_second": 0.0074,
@@ -25,28 +25,28 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 0.464,
+          "cost_per_second": 1.483,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 2e-6,
-          "detail": "build exact Rate accumulator in tumbling windows of 60000 ms for 1000 groups: 1000 rows x (1 + depth 1); x 1.0000/s; keeps 3696000 bytes",
+          "cpu_core_seconds_per_second": 0.000163,
+          "detail": "build exact Rate accumulator in tumbling windows of 60000 ms for 1000 groups: 1000 rows x 107 ops, 100 group visits, 16.7 states emitted; x 1.0000/s; keeps 10560000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
         },
         "10": {
-          "cost_per_second": 0.00101666666667,
+          "cost_per_second": 2.54166666667,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.01666666667e-6,
+          "cpu_core_seconds_per_second": 0.00254166666667,
           "detail": "finalize 1000 accumulators; x 1.0167/s",
           "multiplier": 1,
           "operator": "FinalizeExactAccumulator",
           "timing": "query_time"
         },
         "11": {
-          "cost_per_second": 0.00101666666972,
+          "cost_per_second": 0.00678116668701,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.01666666667e-6,
-          "detail": "hash aggregate 1000 rows into 1 groups; x 1.0167/s; holds 24 bytes for 0.001 ms",
+          "cpu_core_seconds_per_second": 6.78116666667e-6,
+          "detail": "hash aggregate 1000 rows into 1 groups: 4 ops per row, 1 group visits; x 1.0167/s; holds 24 bytes for 0.007 ms",
           "multiplier": 1,
           "operator": "Aggregate",
           "timing": "query_time"
@@ -70,46 +70,46 @@
           "timing": "query_time"
         },
         "14": {
-          "cost_per_second": 2.0333333435e-6,
+          "cost_per_second": 0.00273483334701,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 2.03333333333e-9,
-          "detail": "hash aggregate 1 rows into 1 groups; x 1.0167/s; holds 40 bytes for 0.000 ms",
+          "cpu_core_seconds_per_second": 2.73483333333e-6,
+          "detail": "hash aggregate 1 rows into 1 groups: 20 ops per row, 1 group visits; x 1.0167/s; holds 40 bytes for 0.003 ms",
           "multiplier": 1,
           "operator": "Aggregate",
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 0.00508333336892,
+          "cost_per_second": 0.055916667785,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 5.08333333333e-6,
-          "detail": "time range 300s: 5 tumbling windows of states; x 1.0167/s; holds 56 bytes for 0.005 ms",
+          "cpu_core_seconds_per_second": 0.0000559166666667,
+          "detail": "time range 300s: 5 tumbling windows of states; x 1.0167/s; holds 160 bytes for 0.055 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "3": {
-          "cost_per_second": 0.00508336891667,
+          "cost_per_second": 2.89755795,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 5.08333333333e-6,
-          "detail": "merge 5000 states into 1000; x 1.0167/s; holds 56000 bytes for 0.005 ms",
+          "cpu_core_seconds_per_second": 0.0028975,
+          "detail": "merge 5000 states into 1000; x 1.0167/s; holds 160000 bytes for 2.850 ms",
           "multiplier": 1,
           "operator": "SummaryMerge",
           "timing": "query_time"
         },
         "4": {
-          "cost_per_second": 0.00101666666667,
+          "cost_per_second": 2.54166666667,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.01666666667e-6,
+          "cpu_core_seconds_per_second": 0.00254166666667,
           "detail": "finalize 1000 accumulators; x 1.0167/s",
           "multiplier": 1,
           "operator": "FinalizeExactAccumulator",
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 0.00101666666972,
+          "cost_per_second": 0.00678116668701,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 1.01666666667e-6,
-          "detail": "hash aggregate 1000 rows into 1 groups; x 1.0167/s; holds 24 bytes for 0.001 ms",
+          "cpu_core_seconds_per_second": 6.78116666667e-6,
+          "detail": "hash aggregate 1000 rows into 1 groups: 4 ops per row, 1 group visits; x 1.0167/s; holds 24 bytes for 0.007 ms",
           "multiplier": 1,
           "operator": "Aggregate",
           "timing": "query_time"
@@ -124,28 +124,28 @@
           "timing": "ingestion_time"
         },
         "7": {
-          "cost_per_second": 0.464,
+          "cost_per_second": 1.314,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 2e-6,
-          "detail": "build exact Rate accumulator in tumbling windows of 60000 ms for 1000 groups: 1000 rows x (1 + depth 1); x 1.0000/s; keeps 3696000 bytes",
+          "cpu_core_seconds_per_second": 0.000126,
+          "detail": "build exact Rate accumulator in tumbling windows of 60000 ms for 1000 groups: 1000 rows x 70 ops, 100 group visits, 16.7 states emitted; x 1.0000/s; keeps 9504000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
         },
         "8": {
-          "cost_per_second": 0.00508333336892,
+          "cost_per_second": 0.0559166676732,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 5.08333333333e-6,
-          "detail": "time range 300s: 5 tumbling windows of states; x 1.0167/s; holds 56 bytes for 0.005 ms",
+          "cpu_core_seconds_per_second": 0.0000559166666667,
+          "detail": "time range 300s: 5 tumbling windows of states; x 1.0167/s; holds 144 bytes for 0.055 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "9": {
-          "cost_per_second": 0.00508336891667,
+          "cost_per_second": 2.897552155,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 5.08333333333e-6,
-          "detail": "merge 5000 states into 1000; x 1.0167/s; holds 56000 bytes for 0.005 ms",
+          "cpu_core_seconds_per_second": 0.0028975,
+          "detail": "merge 5000 states into 1000; x 1.0167/s; holds 144000 bytes for 2.850 ms",
           "multiplier": 1,
           "operator": "SummaryMerge",
           "timing": "query_time"
@@ -153,11 +153,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 7392000.56995,
-        "cpu_ops_per_second": 30404.0666667,
+        "average_memory_bytes": 20064880.8574,
+        "cpu_ops_per_second": 11297465.8667,
         "disk_bytes": 0,
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 7504328,
+        "peak_memory_bytes": 20368520,
         "scanned_bytes_per_second": 112000.0
       }
     },
@@ -1911,5 +1911,8 @@
       ],
       "scalar_roots": []
     }
-  }
+  },
+  "warnings": [
+    "assumed data fact: the data arrival declares no max_out_of_order_ms, so the samples of source http_requests_total that an ingestion-time rate, increase or irate state reads are taken to arrive in timestamp order; if this does not hold, answers may be wrong by an amount no accuracy target bounds (a late sample can be read as a counter reset), or ingestion may fail"
+  ]
 }
