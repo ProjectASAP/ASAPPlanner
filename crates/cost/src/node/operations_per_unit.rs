@@ -42,6 +42,14 @@
 //! `DDSKETCH_UPDATE_OPERATIONS_PER_ROW` (210) = 222 ns per row, about twice
 //! the exact plan, as measured (111 and 229).
 
+// Each rule lists every variant, as in `usage`: a wildcard arm would give a
+// new operator, summary type or sketch a default cost instead of failing
+// the build (under `-D warnings`).
+#![warn(
+    clippy::wildcard_enum_match_arm,
+    clippy::match_wildcard_for_single_variants
+)]
+
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::summary_type::SketchParams;
@@ -158,7 +166,19 @@ pub(crate) fn update_operations_per_row(
         (FieldDataType::ExactAggregate(..), _) => EXACT_UPDATE_OPERATIONS_PER_ROW,
         (_, Some(SketchParams::DDSketch { .. })) => DDSKETCH_UPDATE_OPERATIONS_PER_ROW,
         (_, Some(SketchParams::Kll { .. })) => KLL_UPDATE_OPERATIONS_PER_ROW,
-        (_, Some(parameters)) => {
+        (
+            _,
+            Some(
+                parameters @ (SketchParams::Hydra(_)
+                | SketchParams::Cms { .. }
+                | SketchParams::CountSketch { .. }
+                | SketchParams::CmsWithHeap { .. }
+                | SketchParams::CountSketchWithHeap { .. }
+                | SketchParams::UnivMon { .. }
+                | SketchParams::Hll { .. }
+                | SketchParams::Kmv { .. }),
+            ),
+        ) => {
             EXACT_UPDATE_OPERATIONS_PER_ROW
                 + SKETCH_UPDATE_OPERATIONS_PER_COUNTER * counters_updated_per_row(parameters)
         }
@@ -211,7 +231,16 @@ pub(crate) fn merge_operations_per_state(family: StateFamily<'_>, state_bytes: u
         StateFamily::Exact(_) | StateFamily::None => EXACT_MERGE_OPERATIONS_PER_STATE,
         StateFamily::Sketch(SketchParams::DDSketch { .. }) => DDSKETCH_MERGE_OPERATIONS_PER_STATE,
         StateFamily::Sketch(SketchParams::Kll { .. }) => KLL_MERGE_OPERATIONS_PER_STATE,
-        StateFamily::Sketch(_) => {
+        StateFamily::Sketch(
+            SketchParams::Hydra(_)
+            | SketchParams::Cms { .. }
+            | SketchParams::CountSketch { .. }
+            | SketchParams::CmsWithHeap { .. }
+            | SketchParams::CountSketchWithHeap { .. }
+            | SketchParams::UnivMon { .. }
+            | SketchParams::Hll { .. }
+            | SketchParams::Kmv { .. },
+        ) => {
             EXACT_MERGE_OPERATIONS_PER_STATE + SKETCH_MERGE_OPERATIONS_PER_BYTE * state_bytes as f64
         }
     }
@@ -222,7 +251,17 @@ pub(crate) fn merge_operations_per_state(family: StateFamily<'_>, state_bytes: u
 pub(crate) fn estimate_operations_per_group(family: StateFamily<'_>) -> f64 {
     match family {
         StateFamily::Sketch(SketchParams::Kll { .. }) => KLL_ESTIMATE_OPERATIONS_PER_GROUP,
-        StateFamily::Sketch(_) => SKETCH_ESTIMATE_OPERATIONS_PER_GROUP,
+        StateFamily::Sketch(
+            SketchParams::DDSketch { .. }
+            | SketchParams::Hydra(_)
+            | SketchParams::Cms { .. }
+            | SketchParams::CountSketch { .. }
+            | SketchParams::CmsWithHeap { .. }
+            | SketchParams::CountSketchWithHeap { .. }
+            | SketchParams::UnivMon { .. }
+            | SketchParams::Hll { .. }
+            | SketchParams::Kmv { .. },
+        ) => SKETCH_ESTIMATE_OPERATIONS_PER_GROUP,
         StateFamily::Exact(_) | StateFamily::None => FINALIZE_OPERATIONS_PER_GROUP,
     }
 }
@@ -268,6 +307,44 @@ fn aggregate_measure_operations_per_row(measure: &AggIntent, rows_per_group: u64
         | AggIntent::Increase
         | AggIntent::Deriv
         | AggIntent::PredictLinear { .. } => COUNTER_UPDATE_OPERATIONS_PER_ROW,
-        _ => AGGREGATE_MEASURE_OPERATIONS_PER_ROW,
+        AggIntent::Count
+        | AggIntent::Sum { .. }
+        | AggIntent::Min { .. }
+        | AggIntent::Max { .. }
+        | AggIntent::Avg { .. }
+        | AggIntent::StdDev { .. }
+        | AggIntent::Variance { .. }
+        | AggIntent::PearsonCorr { .. }
+        | AggIntent::TopK { .. }
+        | AggIntent::Cardinality { .. }
+        | AggIntent::FrequencyL2 { .. }
+        | AggIntent::FrequencyEntropy { .. }
+        | AggIntent::Changes
+        | AggIntent::Delta
+        | AggIntent::IDelta
+        | AggIntent::Resets
+        | AggIntent::DoubleExpSmoothing { .. }
+        | AggIntent::HistogramCount
+        | AggIntent::HistogramSum
+        | AggIntent::HistogramAvg
+        | AggIntent::HistogramStdDev
+        | AggIntent::HistogramStdVar
+        | AggIntent::HistogramFraction { .. }
+        | AggIntent::HistogramQuantile { .. }
+        | AggIntent::Math(_)
+        | AggIntent::Absent { .. }
+        | AggIntent::AbsentOverTime
+        | AggIntent::PresentOverTime
+        | AggIntent::TimeFn(_)
+        | AggIntent::Group
+        | AggIntent::CountValues { .. }
+        | AggIntent::LastOverTime
+        | AggIntent::FirstOverTime
+        | AggIntent::MadOverTime
+        | AggIntent::TsOfMinOverTime
+        | AggIntent::TsOfMaxOverTime
+        | AggIntent::TsOfFirstOverTime
+        | AggIntent::TsOfLastOverTime
+        | AggIntent::Extension { .. } => AGGREGATE_MEASURE_OPERATIONS_PER_ROW,
     }
 }

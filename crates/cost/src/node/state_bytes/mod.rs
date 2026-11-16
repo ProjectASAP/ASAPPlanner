@@ -159,8 +159,13 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
             let ValueMagnitudeRange { min_abs, max_abs } = input_rows
                 .value_magnitude_range
                 .unwrap_or(DDSKETCH_ASSUMED_MAGNITUDE_RANGE);
-            DdSketch::estimated_memory_bytes(*alpha, rows, min_abs, max_abs, !input_rows.non_negative)
-                as u64
+            DdSketch::estimated_memory_bytes(
+                *alpha,
+                rows,
+                min_abs,
+                max_abs,
+                !input_rows.non_negative,
+            ) as u64
         }
         SketchParams::Hll { precision, .. } => {
             HyperLogLog::<Classic>::estimated_memory_bytes(usize::from(*precision)) as u64
