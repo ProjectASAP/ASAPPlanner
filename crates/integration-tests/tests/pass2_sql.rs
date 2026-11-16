@@ -381,3 +381,15 @@ fn a_grouping_over_a_limit_returns_at_most_its_rows() {
     );
     assert_eq!(values_per_evaluation(&logical), Some(10));
 }
+
+/// A `LIMIT 5` above the grouping keeps at most 5 of its rows, so the
+/// result holds at most 5 `dst` values, not the 96 rows the window holds.
+#[test]
+fn a_limit_over_a_grouping_returns_at_most_n_values() {
+    let logical = whole_result_quantile(
+        "SELECT dst, approx_percentile_cont(bytes, 0.9) AS q FROM flows \
+         WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY dst ORDER BY q DESC LIMIT 5",
+        flows_and_six_hosts(),
+    );
+    assert_eq!(values_per_evaluation(&logical), Some(5));
+}
