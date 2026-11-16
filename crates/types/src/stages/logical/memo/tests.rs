@@ -542,3 +542,73 @@ fn max_values_per_evaluation_is_unbounded_for_a_computed_or_time_key() {
         );
     }
 }
+
+/// Keys copied from two scans of one source bound the values by the
+/// product of each scan's combinations, not by the source's alone: over
+/// the table `flows` with 20 declared `src` values, a self-join's readout
+/// grouped by both sides' `src` returns up to 20 × 20 = 400 values, and
+/// one grouped by the left side's `src` alone up to 20.
+#[test]
+fn max_values_per_evaluation_multiplies_the_keys_of_different_scans() {
+    use crate::ir::operator::arguments::{JoinKind, Source};
+    use crate::ir::scalar::ScalarValue;
+    use crate::ir::schema::{DataType, Field};
+    use crate::ir::{Predicate, ScalarExpr};
+    let data = crate::workload::DataWorkload {
+        sources: [(
+            "flows".to_string(),
+            crate::workload::SourceFacts {
+                series_count: Some(1000),
+                distinct_values_per_label: [("src".to_string(), 20)].into(),
+                ..Default::default()
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let mut memo = Memo::new(&data);
+    // `flows(ts, bytes, src)`.
+    let flows = memo
+        .find_or_add_group(Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::Table {
+                table_ref: "flows".into(),
+            },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                    Field::plain("src", DataType::Utf8, false),
+                ],
+                0,
+                vec![],
+            ),
+        }))
+        .unwrap();
+    // `[ts, value, src, ts, value, src]`.
+    let joined = memo
+        .find_or_add_group(Operator::NonASAP(NonASAPOp::Join {
+            kind: JoinKind::Cross,
+            pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
+            left: flows,
+            right: flows,
+        }))
+        .unwrap();
+    for (keys, values) in [(vec![2, 5], 400), (vec![2], 20)] {
+        let state = memo
+            .find_or_add_group(state_grouped_by(
+                FieldDataType::Sketch(SketchAlgorithm::Kll),
+                Reduction::by(keys.clone()),
+                joined,
+            ))
+            .unwrap();
+        let quantile = memo
+            .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.9 }, state))
+            .unwrap();
+        assert_eq!(
+            memo.max_values_per_evaluation(quantile),
+            Some(values),
+            "by {keys:?}"
+        );
+    }
+}
