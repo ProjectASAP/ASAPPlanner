@@ -284,12 +284,11 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
 /// window's range, as a `TimeRange` over the same rows does, besides
 /// updating the row's state. Example: a sum in 60 s windows over 36,000
 /// raw rows, retaining five windows of one group, costs 36,000 × (40
-/// update + 12 range) operations plus five emitted states × 2,500.
+/// update + 12 range) operations plus five emitted exact states × 1,500.
 #[test]
 fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
     use crate::node::operations_per_unit::{
-        CHAIN_EMIT_OPERATIONS_PER_STATE, EXACT_UPDATE_OPERATIONS_PER_ROW,
-        TIME_RANGE_OPERATIONS_PER_ROW,
+        EXACT_UPDATE_OPERATIONS_PER_ROW, TIME_RANGE_OPERATIONS_PER_ROW,
     };
     let settings = CostInputs::default();
     let data = DataWorkload::default();
@@ -330,7 +329,7 @@ fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
     assert_eq!(
         usage.cpu_ops_per_second,
         36_000.0 * (EXACT_UPDATE_OPERATIONS_PER_ROW + TIME_RANGE_OPERATIONS_PER_ROW)
-            + 5.0 * CHAIN_EMIT_OPERATIONS_PER_STATE
+            + 5.0 * 1_500.0
     );
 }
 
@@ -916,6 +915,13 @@ fn state_schema(state_type: FieldDataType, labels: &[&str]) -> Schema {
 /// (`quantile_over_time(0.99, latency[1h])` at a 1% rank target): CPU
 /// operations per second of the merge at KLL `k`.
 fn kll_merge_cpu_ops(k: u32) -> f64 {
+    kll_merge_cpu_ops_over(k, 10_000, 3_600)
+}
+
+/// [`kll_merge_cpu_ops`] over windows of `window_ms` and a `TimeRange` of
+/// `range_s` seconds: at one execution every 10 s, the CPU operations per
+/// second of a merge of `range_s` / `window_ms` states per series.
+fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
     use asap_types::ir::properties::ExecutionDataState;
     let settings = CostInputs::default();
     let data: DataWorkload = serde_json::from_value(serde_json::json!({
@@ -952,11 +958,11 @@ fn kll_merge_cpu_ops(k: u32) -> f64 {
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::PerEntity,
         filter: None,
-        tumbling_window_width_ms: 10_000,
+        tumbling_window_width_ms: window_ms,
     }));
     chain.output_state = ExecutionDataState::INGESTION_ROWS;
     chain.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
-    chain.retention_ms = Some(3_600_000);
+    chain.retention_ms = Some(range_s * 1_000);
     chain.parameters = Some(SketchParams::Kll { k });
     chain.output_schema = state_schema(
         FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
@@ -966,13 +972,13 @@ fn kll_merge_cpu_ops(k: u32) -> f64 {
         &chain,
         &[scan_output],
         (1, 1.0),
-        Some(10_000),
+        Some(window_ms),
         &data,
         &settings,
     )
     .unwrap();
     let mut windows = node(Payload::NonASAP(NonASAPOp::TimeRange {
-        range: Duration::from_secs(3_600),
+        range: Duration::from_secs(range_s),
         kind: TimeRangeKind::Range,
         child: 0,
     }));
@@ -986,7 +992,10 @@ fn kll_merge_cpu_ops(k: u32) -> f64 {
         &settings,
     )
     .unwrap();
-    assert_eq!(windows_usage.output.rows, 360_000);
+    assert_eq!(
+        windows_usage.output.rows,
+        1_000 * range_s * 1_000 / window_ms
+    );
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
         children: vec![0],
         group_by: None,
@@ -1143,5 +1152,123 @@ fn a_per_series_aggregate_charges_the_labels_it_carries() {
     assert!(
         (30.0..=45.0).contains(&carried_ns),
         "the carried job costs {carried_ns} ns per row, measured 37"
+    );
+}
+
+/// A merge of few KLL states per group pays more per group than its
+/// states' merges: `quantile_over_time(0.99, latency[5m])` at a 1% rank
+/// target over stored 60 s windows of 1,000 series at 1 Hz merges 5
+/// states of 60 rows per series, which the executor measures at 33 µs per
+/// series (32 at 10,000 series), where the states' merges alone are
+/// charged 14.
+#[test]
+fn a_kll_merge_of_few_states_charges_each_group_its_measured_time() {
+    // One merge every 10 s over 1,000 series, at 1e-6 ms per operation.
+    let us_per_series = kll_merge_cpu_ops_over(547, 60_000, 300) * 10.0 / 1_000.0 * 1e-3;
+    assert!(
+        (0.5..=2.0).contains(&(us_per_series / 33.0)),
+        "charged {us_per_series:.1} µs per series, measured 33"
+    );
+}
+
+/// Merging exact Max (or Min) states measures 113–153 ns per state over
+/// 100 to 10,000 groups (a fit of 125 per state and 0.86 µs per group);
+/// Sum and Count states measure about 230.
+#[test]
+fn a_max_merge_charges_its_measured_time_per_state() {
+    use crate::node::operations_per_unit::merge_operations_per_state;
+    for kind in [ExactKind::Max, ExactKind::Min] {
+        let max = merge_operations_per_state(StateFamily::Exact(&kind), 56, 56);
+        assert!((100.0..=150.0).contains(&max), "{kind:?}: {max} per state");
+    }
+    let sum = merge_operations_per_state(StateFamily::Exact(&ExactKind::Sum), 56, 56);
+    assert!((200.0..=260.0).contains(&sum), "Sum: {sum} per state");
+}
+
+/// A merge over several inputs sizes each group's merged state for the
+/// rows every input's states fold, not the first input's alone: over
+/// 1,000 series, one input gives each series 360 KLL windows of 10 rows
+/// and the other 60 windows of 100 rows, so its merged state folds
+/// 3,600 + 6,000 = 9,600 rows (sized from the first input alone, 420
+/// states of 10 rows: 4,200), at k = 4,000 more bytes than 4,200 rows
+/// take.
+#[test]
+fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
+    use crate::node::state_bytes::{sketch_state_bytes, StateInputRows};
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let k = 4_000;
+    let windows = PhysicalASAPDAGNode {
+        output_schema: state_schema(
+            FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+            &[asap_types::ir::schema::PROMQL_SERIES_IDENTITY],
+        ),
+        ..node(Payload::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(3_600),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        }))
+    };
+    let rows = StateInputRows {
+        rows_per_state: Some(10),
+        non_negative: true,
+        value_magnitude_range: None,
+    };
+    let input = ProducerOutput {
+        payload: &windows.payload,
+        output_schema: &windows.output_schema,
+        output: EdgeStatistics {
+            rows: 360_000,
+            bytes: 360_000 * 944,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::Sketch(&SketchParams::Kll { k }),
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 360,
+        chain_tumbling_window_width_ms: Some(10_000),
+        state_input_rows: Some(rows),
+    };
+    let wider = ProducerOutput {
+        output: EdgeStatistics {
+            rows: 60_000,
+            bytes: 60_000 * 1_328,
+        },
+        tumbling_windows: 60,
+        chain_tumbling_window_width_ms: Some(60_000),
+        state_input_rows: Some(StateInputRows {
+            rows_per_state: Some(100),
+            ..rows
+        }),
+        ..input.clone()
+    };
+    let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
+        children: vec![0, 1],
+        group_by: None,
+    }));
+    merge.parameters = Some(SketchParams::Kll { k });
+    merge.output_schema = windows.output_schema.clone();
+    let usage =
+        node_resource_usage_and_cost(&merge, &[input, wider], (1, 0.1), None, &data, &settings)
+            .unwrap();
+    assert_eq!(usage.output.rows, 1_000);
+    let merged = StateInputRows {
+        rows_per_state: Some(9_600),
+        ..rows
+    };
+    assert_eq!(
+        usage.state_input_rows.and_then(|rows| rows.rows_per_state),
+        Some(9_600)
+    );
+    let from_first_alone = StateInputRows {
+        rows_per_state: Some(4_200),
+        ..rows
+    };
+    assert!(
+        sketch_state_bytes(&SketchParams::Kll { k }, merged)
+            > sketch_state_bytes(&SketchParams::Kll { k }, from_first_alone)
+    );
+    assert!(
+        usage.output.bytes_per_row() > sketch_state_bytes(&SketchParams::Kll { k }, merged),
+        "merged state sized for 9,600 rows"
     );
 }

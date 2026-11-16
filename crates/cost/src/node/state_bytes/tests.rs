@@ -233,38 +233,64 @@ fn ddsketch_state_bytes_match_the_library_on_latency_like_values() {
     assert!(priced(Some(10), true) < priced(Some(3_000), true));
 }
 
-/// A DDSketch over a column declaring its value magnitudes is costed at
-/// the bins they span, not nine decades. At α = 0.01, γ = 1.01 / 0.99 and
-/// a value `v` falls in bin `floor(ln v / ln γ)`: magnitudes in
-/// [0.001, 10000] take bins -346 to 460, 807 bins, where the default
-/// [1, 1e9] takes 0 to 1036, 1,037. With three or more non-negative rows
-/// the library's bound is `2 (bins + 126)` 8-byte slots plus the struct.
+/// A DDSketch's span is the smallest of the exponential spread of its
+/// rows, its column's declared `column_magnitudes` and the assumed nine
+/// decades. At α = 0.01, non-negative values:
+/// - a narrow gauge declared within [90, 110] spans a ratio of 1.22, 11
+///   buckets: 1,248 bytes at any number of rows, where `asap_sketchlib`
+///   holds 1,168 (undeclared, 2,744 at 10 rows and 6,552 at 36,000);
+/// - a range wider than the rows' spread (the latency generator's
+///   [2.7e-8, 1104], 10.6 decades) leaves the spread's bytes unchanged;
+/// - with the rows unknown, a declared [0.001, 10000] spans seven decades
+///   instead of nine.
 #[test]
-fn ddsketch_state_bytes_follow_the_declared_value_magnitude_range() {
+fn ddsketch_state_bytes_are_capped_by_the_declared_value_magnitude_range() {
     let alpha = 0.01;
-    let costed = |value_magnitude_range| {
+    let costed = |rows_per_state, value_magnitude_range| {
         sketch_state_bytes(
             &SketchParams::DDSketch { alpha },
             StateInputRows {
-                rows_per_state: Some(600),
+                rows_per_state,
                 non_negative: true,
                 value_magnitude_range,
             },
         )
     };
-    let struct_bytes = std::mem::size_of::<asap_sketchlib::DdSketch>() as u64;
-    let bytes_for_bins = |bins: u64| struct_bytes + 8 * 2 * (bins + 126);
+    let gauge = ValueMagnitudeRange {
+        min_abs: 90.0,
+        max_abs: 110.0,
+    };
+    for n in [10_u32, 600, 36_000] {
+        let rows = Some(u64::from(n));
+        let charged = costed(rows, Some(gauge));
+        assert_eq!(charged, 1_248, "{n} gauge rows");
+        let held = library_ddsketch_mean_bytes(alpha, n, false, narrow_gauge);
+        assert!(
+            (1.0..=1.1).contains(&(charged as f64 / held as f64)),
+            "{n} gauge rows: {charged} charged, {held} held"
+        );
+    }
+    let wide = ValueMagnitudeRange {
+        min_abs: 2.687e-8,
+        max_abs: 1_104.2,
+    };
+    for n in [10, 600, 36_000] {
+        assert_eq!(
+            costed(Some(n), Some(wide)),
+            costed(Some(n), None),
+            "{n} rows"
+        );
+    }
     let latency = ValueMagnitudeRange {
         min_abs: 0.001,
         max_abs: 10_000.0,
     };
-    assert_eq!(costed(Some(latency)), bytes_for_bins(807));
-    assert_eq!(costed(None), bytes_for_bins(1_037));
-    // Values a narrower range holds fit the costed bytes.
+    assert!(costed(None, Some(latency)) < costed(None, None));
+    // Values the declared range holds fit the bytes for unknown rows.
     let values: Vec<f64> = (0..600)
         .map(|i| 10f64.powf(-3.0 + 7.0 * f64::from(i) / 599.0))
         .collect();
-    assert!(library_ddsketch_bytes(alpha, &values) <= costed(Some(latency)));
+    assert!(library_ddsketch_bytes(alpha, &values) <= costed(None, Some(latency)));
 }
 
 /// A KLL state is charged what `asap_sketchlib` allocates for the
