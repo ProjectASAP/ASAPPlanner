@@ -137,6 +137,14 @@ fn narrow_gauge(series: u64, n: u32) -> Vec<f64> {
         .collect()
 }
 
+/// `n` values of series `series` spread evenly in log over seven decades,
+/// [0.001, 10000], in random order, from a fixed hash of `(series, i)`.
+fn log_uniform_over_seven_decades(series: u64, n: u32) -> Vec<f64> {
+    (0..u64::from(n))
+        .map(|i| 0.001 * 10f64.powf(7.0 * uniform((series << 32) ^ i)))
+        .collect()
+}
+
 /// The mean bytes `asap_sketchlib`'s DDSketch holds over 20 series of `n`
 /// values each from `values`, of both signs when `signed`.
 fn library_ddsketch_mean_bytes(
@@ -286,19 +294,52 @@ fn ddsketch_state_bytes_are_capped_by_the_declared_value_magnitude_range() {
         max_abs: 10_000.0,
     };
     assert!(costed(None, Some(latency)) < costed(None, None));
-    // Values spread evenly in log over the whole declared range are
-    // under-charged: the library grows its dense store in blocks, so 600
-    // such values hold 12,432 bytes where their 807 buckets are charged
-    // 7,608 (a known limit of the expected size, within 2x).
-    let values: Vec<f64> = (0..600)
-        .map(|i| 10f64.powf(-3.0 + 7.0 * f64::from(i) / 599.0))
-        .collect();
-    let held = library_ddsketch_bytes(alpha, &values);
-    let charged = costed(None, Some(latency));
-    assert!(
-        (0.5..=1.0).contains(&(charged as f64 / held as f64)),
-        "{charged} charged, {held} held"
-    );
+}
+
+/// The planner knows a state's rows, and its expected span is the
+/// exponential spread of those rows, which a declared range only caps.
+/// Values spread evenly in log over the whole of a declared seven decades
+/// ([0.001, 10000]), in random order, span more than that and are
+/// under-charged, most at few rows per state: at α = 0.01 the library
+/// holds 8.2–9.5 KB from 10 rows on (the mean of 20 series), charged
+/// 2,744 bytes at 10 rows per state (0.33 of it), 3,648 at 60 (0.38),
+/// 4,728 at 600 (0.50), 5,536 at 3,600 (0.59) and 6,552 at 36,000 (0.70).
+/// A known limit: the declared range cannot raise the span, since it
+/// bounds the column, not one state's rows. Charging such a state the
+/// expected span of `n` log-uniform values over the declared range
+/// (`(n − 1) / (n + 1)` of its decades) would charge these 0.78–0.81 of
+/// what they hold, but the latency generator's states, declared over its
+/// 10.6 decades, 1.3x (36,000 rows) to 3.6x (10 rows) of theirs, where
+/// they are charged 0.88–1.07 now.
+#[test]
+fn ddsketch_state_bytes_under_charge_log_uniform_values_over_a_declared_range() {
+    let alpha = 0.01;
+    let declared = ValueMagnitudeRange {
+        min_abs: 0.001,
+        max_abs: 10_000.0,
+    };
+    for (n, band) in [
+        (10_u32, 0.30..=0.37),
+        (60, 0.35..=0.42),
+        (600, 0.46..=0.55),
+        (3_600, 0.54..=0.64),
+        (36_000, 0.64..=0.75),
+    ] {
+        let charged = sketch_state_bytes(
+            &SketchParams::DDSketch { alpha },
+            StateInputRows {
+                rows_per_state: Some(u64::from(n)),
+                non_negative: true,
+                value_magnitude_range: Some(declared),
+            },
+        );
+        let held = library_ddsketch_mean_bytes(alpha, n, false, log_uniform_over_seven_decades);
+        let ratio = charged as f64 / held as f64;
+        assert!(
+            band.contains(&ratio),
+            "{n} rows: {charged} charged, {held} held ({ratio:.2})"
+        );
+    }
 }
 
 /// A KLL state is charged what `asap_sketchlib` allocates for the
