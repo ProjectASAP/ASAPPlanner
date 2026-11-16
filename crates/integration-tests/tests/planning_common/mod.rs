@@ -75,15 +75,18 @@ pub fn cost(w: &FuzzWorkload) -> f64 {
 /// repeating every minute over the gauge `m` and the counter `c`, 1000
 /// series each.
 pub fn promql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
-    pass2_of(
-        json!("promql"),
+    promql_pass2_over(
         queries,
         json!({
             "m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000},
             "c": {"series_count": 1000, "metric_type": "counter", "sample_interval": 1000},
         }),
-        None,
     )
+}
+
+/// [`promql_pass2`] with the facts `sources` declares.
+pub fn promql_pass2_over(queries: &[(&str, Value)], sources: Value) -> LogicalASAPMemoCandidates {
+    pass2_of(json!("promql"), queries, sources, None)
 }
 
 /// Pass 2's output for SQL `queries` over the table
