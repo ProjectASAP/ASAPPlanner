@@ -5,9 +5,10 @@ use asap_planner::PlanningModels;
 
 use asap_types::{
     ir::{
-        schema::{DataType, Field, Schema},
+        schema::{DataType, Field, FieldDataType, Schema},
         ASAPOp, OperatorNode, QueryRoot,
     },
+    summary_type::SketchAlgorithm,
     workload::PlanningWorkload,
 };
 use std::rc::Rc;
@@ -42,20 +43,24 @@ fn nodes(roots: &[QueryRoot]) -> Vec<Rc<OperatorNode>> {
 }
 
 /// The viewer's distinct-count rollup workload, `COUNT(DISTINCT user_id)`
-/// by service and by (service, endpoint) over 5 min every 60 s: the
-/// production entrypoint counts both exactly, the measured-better plan. A
-/// KMV build compares each row with the hashes its state retains, and a
-/// rollup inserts each state's hashes the same way. The planner sees
-/// 600,000,000 rows per evaluation and 10,000 groups for each grouping,
-/// and sizes the KMV at k = 26,656. Measured on the executor at that
-/// shape (k = 26,656, 1,000,000 distinct users, grouped), a KMV build
-/// takes 7.8 µs per row and an exact count 0.59 µs, 13x apart. The
-/// planner charges the KMV plan 3.9x the exact counts (0.00154 against
-/// 0.00039 per second; 2.8x while the rollup by `service` was charged as
-/// passing one state per group through). Charged a fixed 48 per row and
-/// per byte merged, the KMV rollup was selected.
+/// by service and by (service, endpoint) over 5 min every 60 s, at 2,000,000
+/// rows per second: 600,000,000 rows per evaluation, 10,000 groups for each
+/// grouping and 1,000,000 users. The production entrypoint answers both
+/// queries from a KMV (k = 4,323), the plan that measures faster at the
+/// largest shape measured.
+///
+/// The better plan depends on the rows per state. Measured on the executor,
+/// both plans over the same data:
+/// - 60,000,000 rows (60,000 rows per state, scaled ×10 to one evaluation):
+///   exact 609.6 s, KMV 483.6 s. KMV is 1.26x faster.
+/// - 12,000,000 rows (12,000 rows per state): exact 12.79 s, KMV 17.84 s.
+///   Exact is 1.39x faster.
+///
+/// So the crossover lies between 12,000 and 60,000 rows per state. The
+/// planned shape (600,000,000 rows over 10,000 groups) has 60,000 rows per
+/// state, as the 60,000,000-row run does, so the test expects KMV.
 #[test]
-fn production_distinct_rollup_counts_exactly() {
+fn production_distinct_rollup_builds_kmv_at_600m_rows_per_evaluation() {
     let (workload, roots) = fixture();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
@@ -78,18 +83,21 @@ fn production_distinct_rollup_counts_exactly() {
     let accepted = &selection.accepted_accuracy_per_query;
     assert_eq!(accepted.len(), 2);
     assert!(
-        accepted.iter().all(|accuracy| accuracy.sketches.is_empty()),
-        "{accepted:?}"
+        accepted.iter().all(|accuracy| accuracy.sketches == ["Kmv"]),
+        "both queries read a KMV: {accepted:?}"
     );
     let roots = plan.query_roots().unwrap();
-    let builds = nodes(&roots)
+    let kmv_builds = nodes(&roots)
         .iter()
         .filter(|node| {
             matches!(
                 node.asap(),
-                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
+                Some(ASAPOp::SummaryAgg {
+                    summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+                    ..
+                })
             )
         })
         .count();
-    assert_eq!(builds, 0, "the selected plan builds no summary");
+    assert!(kmv_builds > 0, "the selected plan builds a KMV");
 }
