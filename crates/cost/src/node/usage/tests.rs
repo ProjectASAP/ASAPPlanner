@@ -280,60 +280,220 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
     );
 }
 
-/// An ingestion-time chain assigns each arriving row its window, the work
-/// a `TimeRange` does per row, besides updating the row's state: built per
-/// series carrying `job` over 1,000 series, a Rate chain measures 87 ns per
-/// row at 10 Hz and 106–111 at 1 Hz, where the same Rate built at query
-/// time measures 66–75 and 78–87, and its time range 11. Example: a sum in
-/// 300 s windows of one group, over one second of 10,000 arriving rows,
-/// costs 10,000 × (update + range) operations plus a 300th of an emitted
-/// exact state.
-#[test]
-fn an_ingestion_time_chain_assigns_each_row_its_window_as_a_time_range_does() {
-    use crate::node::operations_per_unit::{
-        EXACT_UPDATE_OPERATIONS_PER_ROW, TIME_RANGE_OPERATIONS_PER_ROW,
-    };
-    let settings = CostInputs::default();
-    let data = DataWorkload::default();
-    let scan = node(Payload::NonASAP(NonASAPOp::Scan {
-        source: Source::TimeSeries {
-            metric: "latency".to_string(),
-        },
-        predicates: vec![],
-        schema: Schema::default(),
-    }));
-    let rows = ProducerOutput {
-        payload: &scan.payload,
-        output_schema: &scan.output_schema,
+/// 1,000 series each of `latency` (a non-negative gauge) and
+/// `requests_total` (a counter), sampled every `sample_interval_ms`.
+fn thousand_series_sampled_every(sample_interval_ms: u64) -> DataWorkload {
+    serde_json::from_value(serde_json::json!({
+        "arrival": {"ingesting": {"rows_per_second": 2_000_000.0 / sample_interval_ms as f64}},
+        "sources": {
+            "latency": {"series_count": 1000, "metric_type": "gauge",
+                "column_signs": {"value": "non_negative"}, "sample_interval": sample_interval_ms},
+            "requests_total": {"series_count": 1000, "metric_type": "counter",
+                "sample_interval": sample_interval_ms}
+        }
+    }))
+    .unwrap()
+}
+
+/// `rows` raw rows of `metric`, as `producer` outputs them to a grouping.
+fn raw_rows<'a>(
+    producer: &'a PhysicalASAPDAGNode,
+    metric: &'static str,
+    rows: u64,
+) -> ProducerOutput<'a> {
+    ProducerOutput {
+        payload: &producer.payload,
+        output_schema: &producer.output_schema,
         output: EdgeStatistics {
-            rows: 10_000,
-            bytes: 10_000 * 16,
+            rows,
+            bytes: rows * 48,
         },
-        sources: BTreeSet::new(),
+        sources: BTreeSet::from([metric]),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         state_input_rows: None,
-    };
+    }
+}
+
+/// The output schema of a per-series grouping that carries `job` beside
+/// the series identity (its key), with a `state` column of `state_type`
+/// when it builds states.
+fn per_series_carrying_job(state_type: Option<FieldDataType>) -> Schema {
+    use asap_types::ir::schema::{DataType, PROMQL_SERIES_IDENTITY};
+    let mut fields = vec![Field::new(
+        "ts",
+        FieldDataType::Plain(DataType::Timestamp),
+        false,
+    )];
+    fields.extend(state_type.map(|state_type| Field::new("state", state_type, false)));
+    fields.extend(
+        ["job", PROMQL_SERIES_IDENTITY]
+            .map(|label| Field::new(label, FieldDataType::Plain(DataType::Utf8), false)),
+    );
+    Schema::new(fields)
+}
+
+/// A per-series Rate chain carrying `job` in 300 s windows at ingestion
+/// time over 1,000 series of `requests_total`: measured 125.6 ns per
+/// arriving row at 1 Hz and 85.7 at 10 Hz (a stored-only plan's ingestion
+/// CPU over its rows), 1.47x. Its per-row work is the same at both rates;
+/// what differs is how often it visits each series' state and splits its
+/// rows by window, once per 10 s raw batch, which holds 10 rows of a series
+/// at 1 Hz and 100 at 10 Hz. Charged a time range per row instead, the two
+/// rates differed by 5%, and the 1 Hz chain was 1.2x under-charged.
+#[test]
+fn an_ingestion_time_chain_costs_more_per_row_at_a_lower_sample_rate() {
+    let settings = CostInputs::default();
+    let rate = FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate);
+    let scan = node(metric_scan("requests_total"));
     let chain = PhysicalASAPDAGNode {
         retention_ms: Some(300_000),
         output_state: ExecutionDataState::INGESTION_SUMMARY,
+        output_schema: per_series_carrying_job(Some(rate.clone())),
         ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
             child: 0,
-            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            summary_type: rate.clone(),
             input: SummaryUpdate::column(ColumnRef::SampleValue),
-            reduction: Reduction::by(vec![]),
+            reduction: Reduction::PerEntity,
             filter: None,
             tumbling_window_width_ms: 300_000,
         }))
     };
-    let usage =
-        node_resource_usage_and_cost(&chain, &[rows], (1, 1.0), None, &data, &settings).unwrap();
-    assert_eq!(
-        usage.cpu_ops_per_second,
-        10_000.0 * (EXACT_UPDATE_OPERATIONS_PER_ROW + TIME_RANGE_OPERATIONS_PER_ROW)
-            + 1_500.0 / 300.0
+    // One second of arriving rows per execution, one execution per second.
+    let ns_per_row = |sample_interval_ms: u64| {
+        let rows_per_second = 1_000 * 1_000 / sample_interval_ms;
+        let usage = node_resource_usage_and_cost(
+            &chain,
+            &[raw_rows(&scan, "requests_total", rows_per_second)],
+            (1, 1.0),
+            None,
+            &thousand_series_sampled_every(sample_interval_ms),
+            &settings,
+        )
+        .unwrap();
+        usage.cpu_ops_per_second / rows_per_second as f64
+    };
+    let (one_hz, ten_hz) = (ns_per_row(1_000), ns_per_row(100));
+    for (charged, measured) in [(one_hz, 125.6), (ten_hz, 85.7)] {
+        assert!(
+            (0.8..=1.25).contains(&(charged / measured)),
+            "charged {charged:.1} ns per row, measured {measured}"
+        );
+    }
+    assert!(
+        (1.3..=1.7).contains(&(one_hz / ten_hz)),
+        "1 Hz charged {one_hz:.1} ns per row, 10 Hz {ten_hz:.1}; measured 1.47x"
+    );
+}
+
+/// A per-series `max_over_time(latency[5m])` hash aggregate at query time
+/// over 1,000 series measures 40.5 ns per row at 1 Hz (300,000 rows) and
+/// 20.9 at 10 Hz (3,000,000 rows), its output rows included. The executor
+/// visits each series' group once per 10 s raw batch, 10 rows of it at
+/// 1 Hz and 100 at 10 Hz. Charged per row alone, the 10 Hz aggregate was
+/// 1.33x over-charged, and at 1 Hz an exact scan looked cheaper than the
+/// stored plan it measured 1.24x more than.
+#[test]
+fn a_per_series_aggregate_costs_more_per_row_at_a_lower_sample_rate() {
+    use asap_types::ir::operator::AggIntent;
+    let settings = CostInputs::default();
+    let range = node(Payload::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_secs(300),
+        kind: TimeRangeKind::Range,
+        child: 0,
+    }));
+    let aggregate = PhysicalASAPDAGNode {
+        output_schema: {
+            use asap_types::ir::schema::{DataType, PROMQL_SERIES_IDENTITY};
+            Schema::new(vec![
+                Field::new("value", FieldDataType::Plain(DataType::Float64), false),
+                Field::new(
+                    PROMQL_SERIES_IDENTITY,
+                    FieldDataType::Plain(DataType::Utf8),
+                    false,
+                ),
+            ])
+        },
+        ..node(Payload::NonASAP(NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![AggIntent::Max { col: None }],
+            output_names: vec![String::new()],
+            filters: vec![],
+            having: None,
+            child: 0,
+        }))
+    };
+    let ns_per_row = |sample_interval_ms: u64| {
+        let rows = 300 * 1_000 * 1_000 / sample_interval_ms;
+        let usage = node_resource_usage_and_cost(
+            &aggregate,
+            &[raw_rows(&range, "latency", rows)],
+            (1, 1.0),
+            None,
+            &thousand_series_sampled_every(sample_interval_ms),
+            &settings,
+        )
+        .unwrap();
+        usage.work_ms_per_execution * 1e6 / rows as f64
+    };
+    for (sample_interval_ms, measured) in [(1_000, 40.5), (100, 20.9)] {
+        let charged = ns_per_row(sample_interval_ms);
+        assert!(
+            (0.85..=1.18).contains(&(charged / measured)),
+            "every {sample_interval_ms} ms: charged {charged:.1} ns per row, measured {measured}"
+        );
+    }
+}
+
+/// A per-series exact Rate carrying `job`, built at query time from 5 min
+/// of 1,000 series of `requests_total`, measures 85.9 ns per row at 1 Hz
+/// and 68.8 at 10 Hz (1.25x): its update is the same per row, and it visits
+/// each series' state once per 10 s raw batch. Charged per row alone, both
+/// were charged the same.
+#[test]
+fn a_query_time_rate_build_costs_more_per_row_at_a_lower_sample_rate() {
+    let settings = CostInputs::default();
+    let rate = FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate);
+    let range = node(Payload::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_secs(300),
+        kind: TimeRangeKind::Range,
+        child: 0,
+    }));
+    let build = PhysicalASAPDAGNode {
+        output_schema: per_series_carrying_job(Some(rate.clone())),
+        ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: rate.clone(),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+        }))
+    };
+    let ns_per_row = |sample_interval_ms: u64| {
+        let rows = 300 * 1_000 * 1_000 / sample_interval_ms;
+        let usage = node_resource_usage_and_cost(
+            &build,
+            &[raw_rows(&range, "requests_total", rows)],
+            (1, 1.0),
+            None,
+            &thousand_series_sampled_every(sample_interval_ms),
+            &settings,
+        )
+        .unwrap();
+        usage.work_ms_per_execution * 1e6 / rows as f64
+    };
+    let (one_hz, ten_hz) = (ns_per_row(1_000), ns_per_row(100));
+    for (charged, measured) in [(one_hz, 85.9), (ten_hz, 68.8)] {
+        assert!(
+            (0.8..=1.25).contains(&(charged / measured)),
+            "charged {charged:.1} ns per row, measured {measured}"
+        );
+    }
+    assert!(
+        (1.1..=1.4).contains(&(one_hz / ten_hz)),
+        "1 Hz charged {one_hz:.1} ns per row, 10 Hz {ten_hz:.1}; measured 1.25x"
     );
 }
 
@@ -1333,9 +1493,9 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
 }
 
 /// The KLL estimate of `quantile_over_time(0.99, latency[5m])` at a 1%
-/// rank target (k = 547) over 1,000 series at 1 Hz, per group, after
-/// `producer` outputs states of 300 rows each, charged 4,844 bytes.
-fn kll_estimate_us_per_group(producer: Payload) -> f64 {
+/// rank target (k = 547) over 1,000 series, per group, after `producer`
+/// outputs states of `rows_per_state` rows each, charged `state_bytes`.
+fn kll_estimate_us_per_group(producer: Payload, rows_per_state: u64, state_bytes: u64) -> f64 {
     use asap_types::summary_type::{SketchParams, SketchStatistic};
     let settings = CostInputs::default();
     let data = DataWorkload::default();
@@ -1346,14 +1506,18 @@ fn kll_estimate_us_per_group(producer: Payload) -> f64 {
         output_schema: &states.output_schema,
         output: EdgeStatistics {
             rows: 1_000,
-            bytes: 1_000 * 4_844,
+            bytes: 1_000 * state_bytes,
         },
         sources: BTreeSet::new(),
         family: StateFamily::Sketch(&kll),
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
-        state_input_rows: None,
+        state_input_rows: Some(StateInputRows {
+            rows_per_state: Some(rows_per_state),
+            non_negative: true,
+            value_magnitude_range: None,
+        }),
     };
     let estimate = node(Payload::ASAP(ASAPOp::SummaryEstimate {
         summary_input: 0,
@@ -1368,28 +1532,47 @@ fn kll_estimate_us_per_group(producer: Payload) -> f64 {
 /// A KLL quantile sorts the items its state holds. A merge leaves each
 /// level sorted, so reading a merged state measures 5.9 µs per group
 /// (300 rows per series at k = 547, 1,000 series); a state built by
-/// updates keeps its newest items unsorted and measures 13.4 (13.4–13.9
-/// over 100 to 10,000 series), where charged as a merged state it was
-/// 6.9.
+/// updates keeps its newest items unsorted, at most `k` of them, and
+/// measures nearly the same at 300 rows per state (13.1–14.3 µs over 100
+/// to 10,000 series) as at 3,000 (14.7–27.3, median 18.9). Charged per byte
+/// of the state (4,844 bytes at 300 rows, 17,000 at 3,000), the 3,000-row
+/// state was charged 33.1, 3x the 300-row one.
 #[test]
 fn a_kll_estimate_over_a_state_built_by_updates_charges_its_measured_time() {
-    let merged = kll_estimate_us_per_group(Payload::ASAP(ASAPOp::SummaryMerge {
-        children: vec![0],
-        group_by: None,
-    }));
+    let merged = kll_estimate_us_per_group(
+        Payload::ASAP(ASAPOp::SummaryMerge {
+            children: vec![0],
+            group_by: None,
+        }),
+        300,
+        4_844,
+    );
     assert!(
         (0.67..=1.5).contains(&(merged / 5.9)),
         "after a merge: charged {merged:.1} µs per group, measured 5.9"
     );
-    let built = kll_estimate_us_per_group(Payload::ASAP(ASAPOp::SummaryAgg {
-        child: 0,
-        summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
-        input: SummaryUpdate::column(ColumnRef::SampleValue),
-        reduction: Reduction::PerEntity,
-        filter: None,
-    }));
+    let built = |rows_per_state, state_bytes| {
+        kll_estimate_us_per_group(
+            Payload::ASAP(ASAPOp::SummaryAgg {
+                child: 0,
+                summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::PerEntity,
+                filter: None,
+            }),
+            rows_per_state,
+            state_bytes,
+        )
+    };
+    let (few, many) = (built(300, 4_844), built(3_000, 17_000));
+    for (rows, charged, measured) in [(300, few, 13.4), (3_000, many, 18.9)] {
+        assert!(
+            (0.67..=1.5).contains(&(charged / measured)),
+            "after updates of {rows} rows: charged {charged:.1} µs per group, measured {measured}"
+        );
+    }
     assert!(
-        (0.67..=1.5).contains(&(built / 13.4)),
-        "after updates: charged {built:.1} µs per group, measured 13.4"
+        many < 2.0 * few,
+        "3,000 rows charged {many:.1} µs, 300 rows {few:.1}; measured 1.4x"
     );
 }
