@@ -3,6 +3,7 @@
 //! statistics read from it, and each summary type's capabilities.
 
 mod capability;
+mod family;
 mod parameter_lists;
 mod parameters;
 mod statistic;
@@ -17,10 +18,12 @@ pub use asap_sketchlib::SketchAlgorithm;
 pub use capability::{
     MergeInputRule, MergedError, StatisticKind, SummaryTypeCapability, SupportedSummary,
 };
+pub use family::SummaryFamily;
 pub use parameter_lists::parameter_list;
 pub use parameters::{
-    ExactKind, ExactParams, HydraParams, SamplingKind, SamplingParams, SketchParams, StatModelKind,
-    StatModelParams, WaveletKind, WaveletParams, EXACT_ACCUMULATOR_STATE_BYTES, KLL_MAX_K,
+    ExactKind, ExactParams, HydraParams, SamplingKind, SamplingParams, SketchParameterRange,
+    SketchParams, StatModelKind, StatModelParams, WaveletKind, WaveletParams,
+    EXACT_ACCUMULATOR_STATE_BYTES, KLL_MAX_K,
 };
 pub use statistic::SketchStatistic;
 pub use update::{EntityIdentity, SummaryInputExpr, SummaryUpdate};

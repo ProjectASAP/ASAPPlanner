@@ -11,6 +11,7 @@
 //! type, so no reason names it.
 
 use crate::accuracy::AccuracyMetric;
+use crate::deployment_capabilities::ExclusionSource;
 use crate::stages::{CandidateForMemoGroupId, PhysicalCandidateId, RequiredAccuracy};
 
 /// A candidate eliminated by Pass 2.
@@ -140,6 +141,12 @@ pub enum PruneReason {
     /// weight column's `column_signs` is not `NonNegative`: its estimates are
     /// bounds only for non-negative weights.
     CountMinWeightsNotProvenNonNegative,
+    /// Stage 2: the deployment's capabilities exclude it
+    /// (`DeploymentCapabilities::exclusions`): the executor cannot run it,
+    /// or the caller ruled it out. Names the capability the matching
+    /// exclusion comes from, e.g. `RawDataNotRetained` for a query-time
+    /// scan when raw data is not retained.
+    ExcludedByDeployment(ExclusionSource),
     /// Stage 3: the candidate it names, in the same memo group with the
     /// same producers and consumers, is at least as good in every respect
     /// (guarantee, usage, latency, output, held state), so no optimal plan
