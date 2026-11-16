@@ -28,6 +28,7 @@ pub mod planner_layering_examples;
 pub mod planning_stages;
 pub mod planning_stages_text;
 pub mod rqe_atomic_costs;
+pub mod stable_output;
 
 use asap_frontend_promql::lower_promql_query_workload;
 pub use asap_frontend_promql::PromqlError;

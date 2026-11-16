@@ -76,8 +76,25 @@ pub struct PlanningStagesRun {
 /// Lower a PromQL workload, each series' identity as a column (the row
 /// representation per-series state needs at runtime).
 pub fn lower_promql_roots(workload: &PlanningWorkload) -> Result<Vec<QueryRoot>, String> {
-    asap_frontend_promql::lower_promql_query_workload(workload)
-        .map_err(|e| format!("lowering: {e}"))?
+    with_series_identity(
+        asap_frontend_promql::lower_promql_query_workload(workload)
+            .map_err(|e| format!("lowering: {e}"))?,
+    )
+}
+
+/// Lower a MetricsQL workload, each series' identity as a column, as
+/// [`lower_promql_roots`] does for PromQL.
+pub fn lower_metricsql_roots(workload: &PlanningWorkload) -> Result<Vec<QueryRoot>, String> {
+    with_series_identity(
+        asap_frontend_metricsql::lower_metricsql_query_workload(workload)
+            .map_err(|e| format!("lowering: {e}"))?,
+    )
+}
+
+/// `roots` (a PromQL-family frontend's) with each series' identity as a
+/// column.
+fn with_series_identity(roots: Vec<QueryRoot>) -> Result<Vec<QueryRoot>, String> {
+    roots
         .into_iter()
         .map(|root| match root {
             QueryRoot::Operator(node) => with_promql_series_identity(&node)

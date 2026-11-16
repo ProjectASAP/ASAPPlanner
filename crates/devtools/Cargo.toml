@@ -10,8 +10,8 @@ edition = "2021"
 # matching `asap-frontend-*` crate directly to avoid pulling the other parser.
 [dependencies]
 asap-frontend-promql = { path = "../frontend-promql" }
+asap-frontend-metricsql = { path = "../frontend-metricsql" }
 asap-frontend-sql = { path = "../frontend-sql" }
-asap-accuracy = { path = "../accuracy" }
 asap-stage0-memo = { path = "../stage0-memo" }
 asap-stage1-pass1-per-computation-candidates = { path = "../stage1-pass1-per-computation-candidates" }
 asap-stage1-pass2-reuse-candidates = { path = "../stage1-pass2-reuse-candidates" }
@@ -30,7 +30,7 @@ asap-executor = { path = "../executor" }
 # examples. Regular deps, not dev-deps: `[[bin]]` targets can't see dev-deps.
 asap-types = { path = "../types" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 

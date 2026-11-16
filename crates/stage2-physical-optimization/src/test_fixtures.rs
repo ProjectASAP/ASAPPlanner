@@ -95,6 +95,7 @@ pub fn logical(
         exact_only_groups_of_query: vec![BTreeSet::new(); memo.queries().len()],
         memo,
         edges,
+        failing_logical_edges: vec![],
         pruned: vec![],
         evaluation_grid_of_group,
     }

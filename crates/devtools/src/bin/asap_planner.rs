@@ -7,9 +7,13 @@
 // Runs the planner stages over a workload up to and including
 // `--run-until` (`stage0`, `stage1_pass1`, `stage1_pass2`, `stage2` or
 // `stage3`) and writes each stage's output, as text (`--format text`, the default;
-// `asap_devtools::planning_stages_text`) or as an `asap-stage-pipeline/v1`
+// `asap_devtools::planning_stages_text`) or as an `asap-stage-pipeline/v2`
 // document for the Stage Viewer (`--format json`), to `--out` or standard
-// output.
+// output. The text folds each memo group's candidates that differ only in
+// θ into one line (their indices, each θ parameter's values, how many Pass
+// 2 pruned by cause), printing in full only those Pass 2 kept, and counts
+// the pruned lists per cause; `--printing-full-candidates` prints every candidate, edge and
+// pruned candidate.
 //
 // The stages run as `run_planning` runs them
 // (`asap_devtools::planning_stages::run_stages_until`), so the selected plan
@@ -51,22 +55,30 @@
 //   - workload: the queries (`id`, `language`, `text`, `requirements`,
 //     `recurrence`, `predictability`) and the `data_workload` planned with;
 //   - stage0_query_language_frontends: the frontends' DAG, one root per query;
-//   - stage1_logical_asap_optimization (from `stage1_pass1`): `pruned_candidates`,
-//     the ways to compute a measure Pass 1 pruned (each on its aggregate's
-//     memo `group`, with `candidate` and `reason`); `error` when Pass 1
-//     failed;
-//   - stage2_physical_asap_optimization (from `stage2`): `pruned_candidates`,
-//     the physical candidates Stage 2 pruned (each with its memo `group`,
-//     `operator_node`, `operator`, `implementation_root`, `timing`,
-//     `lifetime` and `reason`);
+//   - stage1_logical_asap_optimization (from `stage1_pass1`): from
+//     `stage1_pass2`, `pruned_candidates`, the candidates Pass 2 eliminated
+//     (`group`, `index_in_group`, and `causes`: each with
+//     `through_pruned_candidates` and its `root` reason, a serialized
+//     `RootPruneReason`, and `text`); `error` when Pass 1 or Pass 2 failed;
+//   - stage2_physical_asap_optimization (from `stage2`):
+//     `physical_candidates`, Stage 2's candidates (`id`, the logical
+//     candidate's `group` and `index_in_group`, `properties` (`timing`,
+//     `lifetime`), and per input its `group` and `edges`: each physical
+//     edge whose logical edge holds, with `producer`,
+//     `satisfies_physical_requirement`, `rejection` (why
+//     $\alpha^{\mathrm{phys}} = 0$, null when it holds) and `selected` (an
+//     edge of the plan)); `pruned_candidates`, the physical candidates
+//     Stage 2 pruned (`group`, `index_in_group`, `properties`, `reason`, a
+//     serialized `PruneReason`); `error` when Stage 2 failed;
 //   - stage3_plan_selection (from `stage3`): the `plan` Stage 3 built (a
-//     `PhysicalASAPDAG`) and its `Selection`: `accepted_accuracy_per_query`,
-//     `pruned_candidates`, `milp_objective_cost_per_second` (the selected
-//     plan's cost per second), `milp_variables`, `milp_constraints`,
-//     `milp_construction_ms`, `milp_solve_ms` and `milp_solve_count` (2 when
-//     the solve at HiGHS's default tolerances missed an accuracy target and
-//     was repeated at 1e-10); `error` when no plan was
-//     selected.
+//     `PhysicalASAPDAG`), its `cost` (`asap_cost::plan_cost`:
+//     `cost_per_second`, `source`, `usage` and each node's charge), and its
+//     `Selection`: `accepted_accuracy_per_query`, `pruned_candidates` (as
+//     Stage 2's), `milp_variables`, `milp_constraints` and
+//     `milp_objective_cost_per_second` (the selected plan's cost per
+//     second); `error` when no plan was selected. `sharing_summary`: each
+//     plan node two or more queries read, by what it computes (`operator`,
+//     `parameters`, `timing`, `lifetime`) and the `queries` reading it.
 //     `materialized_views` are the plan's materialized views as
 //     `plan_installable` derives them; `materialized_views_error` when the
 //     plan is not installable. `warnings`: a PromQL query applying `rate`, `increase`
@@ -76,51 +88,76 @@
 //     saying whether answers may then be wrong beyond the accuracy target), and a peak
 //     memory over 10^12 bytes when the cost model declares no memory capacity;
 //     `assumed_data_facts`: those facts as records (`AssumedDataFact`), when there are any;
-//   - memo: `nodes`, one node table for the section (each distinct node
-//     once, children as indices before their parents), and `steps`, the
-//     memo after each step run (`stage0`: the frontends' DAG hash-consed,
-//     groups without candidates; `pass1`; `pass2`: Pass 2's output, the memo
-//     Stage 2 implements). Each
-//     step lists its groups (`id`, `label`, `children`, `parents`,
-//     `queries`, `roots_of`, `node`) and their candidates (`index`,
-//     `implements`, `children`, `origin`, `added`
-//     (not in the group at the step before), `label`, `node`,
-//     `group_of_node`). With `stage3`, `selected_choice` maps each group the
-//     plan uses to its candidate's index, or is null with
-//     `selected_choice_unavailable`;
+//   - memo: `steps`, the memo after each step run (`stage0`: the
+//     frontends' DAG hash-consed, groups without candidates; `pass1`;
+//     `pass2`: Pass 2's output, the memo Stage 2 expands). Each step lists
+//     its groups (`id`, `label`, `operator` (its expression, children as
+//     group ids), `children`, `parents`, the group properties
+//     `result_kind`, `column_lineage`, `column_signs`,
+//     `depends_on_evaluation_time`, `shareable_when_equal`,
+//     `aggregate_coverage` (as the text prints it, null for a group that
+//     is no aggregate), `scanned_sources` and, at `pass2`,
+//     `evaluation_grid`; `queries`, `roots_of`, `candidate_count`,
+//     `candidate_count_by_origin`) and their candidates
+//     (`index`, `origin`, `added` (Pass 2 added it), `label`, `operator`,
+//     `children` (its input groups), `fused_groups`, `parameters` (θ, null
+//     when exact) and `required_accuracy` per input); at `pass2` a
+//     candidate also has `pruned` and, per input, `inputs` (`group` and
+//     `edges`: the logical edge from each candidate of the input group,
+//     eliminated ones included, with its `producer` (index in the group),
+//     `satisfies_logical_requirement` and `rejection`, why
+//     $\alpha^{\log} = 0$ as Pass 2 recorded it). With a selected plan, `selected_candidates`
+//     maps each group the plan uses to the indices of its candidates there;
 //   - `search`, `accuracy_guarantees` (`"enforced"` or `"ignored"`),
 //     `deployment_capabilities` (as planned with) and `run_until`.
 // A section of a stage after `--run-until` is null.
+//
+// The document is stable, so it can be compared as text: memo group,
+// candidate and physical candidate ids are canonical (renumbered depth
+// first from the query roots, `asap_devtools::stable_output::CanonicalIds`),
+// lists are in canonical id order, every non-integer number is rounded to
+// 12 significant digits, and the MILP's times and solve count are left
+// out. The text output keeps the planner's own ids, as in logs and error
+// messages, and prints the times and solve count.
 
 use std::collections::btree_map::Entry;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use asap_cost::CostInputs;
-use asap_devtools::candidate_labels::node_label;
+use asap_cost::{CostInputs, PlanCost};
+use asap_devtools::candidate_labels::operator_label;
 use asap_devtools::planning_stages::{
-    lower_promql_roots, lower_sql_roots, run_stages_until, sql_catalog, PlanningStagesError,
-    PlanningStagesRun, RunUntil,
+    lower_metricsql_roots, lower_promql_roots, lower_sql_roots, run_stages_until, sql_catalog,
+    PlanningStagesError, PlanningStagesRun, RunUntil,
 };
-use asap_devtools::planning_stages_text::planning_stages_text;
+use asap_devtools::planning_stages_text::{
+    aggregate_coverage_text, column_lineage_text, edges_per_input, logical_edges_into,
+    physical_edge_rejection, planning_stages_text, root_prune_reason_text, selected_edges,
+};
+use asap_devtools::stable_output::{rounded_to_12_significant_digits, CanonicalIds};
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{metric_type_warnings, promql_metric_names};
 use asap_planner::{assumed_data_facts, installable_plan_of, PlanningModels, SelectionError};
 use asap_stage3_plan_selection::{large_peak_memory_warning, AcceptedAccuracy, Selection};
 use asap_types::accuracy::{default_metric_for_root, AccuracyTarget};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
-use asap_types::ir::flat::{flatten, FlatDag, FlatNode};
+use asap_types::ir::flat::{flatten, FlatDag};
+use asap_types::ir::operator::Source;
 use asap_types::ir::QueryRoot;
+use asap_types::ir::{NonASAPOp, Operator};
+use asap_types::plan::materialized_view::MaterializedView;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
-use asap_types::stages::PhysicalASAPMemoCandidates;
-use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
-use asap_types::stages::{MemoGroup, MemoGroupId};
+use asap_types::plan::physical_asap_dag::PhysicalASAPNodeId;
+use asap_types::stages::{
+    CandidateForMemoGroup, CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, MemoGroupId,
+    PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PrunedCandidate,
+};
 use asap_types::workload::{
     DataArrival, DataWorkload, PlanningWorkload, QueryLanguage, QueryWorkloadEntry,
 };
 use serde_json::{json, Value};
 
 const USAGE: &str = "usage: asap_planner (--workload <file>)... \
---run-until stage0|stage1_pass1|stage1_pass2|stage2|stage3 [--format text|json] [--out <file>] \
+--run-until stage0|stage1_pass1|stage1_pass2|stage2|stage3 [--format text|json] [--printing-full-candidates] [--out <file>] \
 [--sql-catalog-table <json>]... [--cost-inputs <file>] [--deployment-capabilities <file>] \
 [--ignore-accuracy-guarantees]";
 
@@ -166,6 +203,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut cost_inputs = CostInputs::default();
     let mut deployment_capabilities = DeploymentCapabilities::default();
     let mut ignore_accuracy_guarantees = false;
+    let mut printing_full_candidates = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let mut value = || {
@@ -189,6 +227,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--cost-inputs" => cost_inputs = read_json(&flag, &value()?)?,
             "--deployment-capabilities" => deployment_capabilities = read_json(&flag, &value()?)?,
             "--ignore-accuracy-guarantees" => ignore_accuracy_guarantees = true,
+            "--printing-full-candidates" => printing_full_candidates = true,
             other => return Err(Failure::Usage(format!("unknown argument {other}"))),
         }
     }
@@ -216,6 +255,19 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         .with_deployment_capabilities(&deployment_capabilities)
         .with_ignore_accuracy_guarantees(ignore_accuracy_guarantees);
     let result = run_stages_until(roots.clone(), &entries, &data, models, run_until);
+    // The selected plan's cost, as `plan_installable` reports it.
+    let plan_cost = result
+        .as_ref()
+        .ok()
+        .and_then(|run| run.run.selection.as_ref().ok())
+        .and_then(|(plan, _)| asap_cost::plan_cost(plan, &entries, &data, &cost_inputs).ok())
+        .map(|(cost, _)| cost);
+    // The selected plan's materialized views, as `plan_installable` derives them.
+    let materialized_views = result
+        .as_ref()
+        .ok()
+        .and_then(|run| run.run.selection.as_ref().ok())
+        .map(|(plan, _)| materialized_views_of(plan, &entries));
     // A stage that failed: the output is still written, then the run exits 1.
     let failure = match &result {
         Err(PlanningStagesError::Pass1(error)) => Some(format!("Pass 1: {error}")),
@@ -230,27 +282,26 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     // The selected plan's data facts assumed because the data workload
     // does not declare them, and its very large peak memory when the
     // deployment declares no memory capacity to check it against.
-    let selected_plan_cost = result
+    let assumed_facts = result
         .as_ref()
         .ok()
         .and_then(|run| run.run.selection.as_ref().ok())
-        .and_then(|(plan, _)| {
-            let (cost, _) = asap_cost::plan_cost(plan, &entries, &data, &cost_inputs).ok()?;
-            Some((plan, cost))
-        });
-    let assumed_facts = selected_plan_cost
-        .as_ref()
-        .map(|(plan, cost)| assumed_data_facts(plan, cost, &data))
+        .zip(plan_cost.as_ref())
+        .map(|((plan, _), cost)| assumed_data_facts(plan, cost, &data))
         .unwrap_or_default();
     warnings.extend(assumed_facts.iter().map(ToString::to_string));
-    if let Some((_, cost)) = &selected_plan_cost {
-        warnings.extend(large_peak_memory_warning(
-            cost.usage.peak_memory_bytes,
-            &cost_inputs.cost_model,
-        ));
-    }
+    warnings.extend(plan_cost.as_ref().and_then(|cost| {
+        large_peak_memory_warning(cost.usage.peak_memory_bytes, &cost_inputs.cost_model)
+    }));
     let text = if json_format {
-        let mut document = document_of(described, &roots, &entries, result, run_until)?;
+        let mut document = document_of(
+            described,
+            &roots,
+            result,
+            run_until,
+            plan_cost.as_ref(),
+            materialized_views.as_ref(),
+        )?;
         // Stage 3 is null when Pass 1 rejected a query.
         if let Some(stage3) = document["stage3_plan_selection"].as_object_mut() {
             if !warnings.is_empty() {
@@ -264,6 +315,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 );
             }
         }
+        // The planner's numbers; the inputs added below stay as given.
+        let mut document = rounded_to_12_significant_digits(document);
         document["workload"]["data_workload"] =
             serde_json::to_value(&data).map_err(|e| e.to_string())?;
         document["search"] = json!("candidate-connections");
@@ -278,7 +331,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         serde_json::to_string_pretty(&document).map_err(|e| e.to_string())? + "\n"
     } else {
         let mut text = match result {
-            Ok(run) => planning_stages_text(&run),
+            Ok(run) => planning_stages_text(
+                &run,
+                plan_cost.as_ref(),
+                materialized_views.as_ref(),
+                printing_full_candidates,
+            ),
             Err(PlanningStagesError::Pass1(error)) => format!("error: Pass 1: {error}\n"),
             Err(error) => return Err(error.to_string().into()),
         };
@@ -303,22 +361,20 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
 fn document_of(
     queries: Vec<Value>,
     roots: &[QueryRoot],
-    entries: &[QueryWorkloadEntry],
     result: Result<PlanningStagesRun, PlanningStagesError>,
     run_until: RunUntil,
+    plan_cost: Option<&PlanCost>,
+    materialized_views: Option<&Result<Vec<MaterializedView>, String>>,
 ) -> Result<Value, String> {
     let queries = with_default_metrics(queries, roots);
     match result {
-        Ok(run) => Ok(document(queries, entries, &run)),
+        Ok(run) => Ok(document(queries, &run, plan_cost, materialized_views)),
         Err(PlanningStagesError::Pass1(error)) => Ok(json!({
-            "format": "asap-stage-pipeline/v1",
+            "format": "asap-stage-pipeline/v2",
             "run_until": run_until.name(),
             "workload": { "queries": queries },
             "stage0_query_language_frontends": { "dag": export(roots) },
-            "stage1_logical_asap_optimization": {
-                "pruned_candidates": [],
-                "error": format!("Pass 1: {error}"),
-            },
+            "stage1_logical_asap_optimization": { "error": format!("Pass 1: {error}") },
             "stage2_physical_asap_optimization": null,
             "stage3_plan_selection": null,
         })),
@@ -327,27 +383,38 @@ fn document_of(
 }
 
 /// The document for `run`, whose workload queries are `queries`: each
-/// section of a stage `run` ran, the others null.
-fn document(queries: Vec<Value>, entries: &[QueryWorkloadEntry], run: &PlanningStagesRun) -> Value {
+/// section of a stage `run` ran, the others null. `plan_cost` is the
+/// plan's cost and `materialized_views` its materialized views.
+fn document(
+    queries: Vec<Value>,
+    run: &PlanningStagesRun,
+    plan_cost: Option<&PlanCost>,
+    materialized_views: Option<&Result<Vec<MaterializedView>, String>>,
+) -> Value {
     let until = run.run_until;
+    let plan = run.run.selection.as_ref().ok().map(|(plan, _)| plan);
+    let ids = canonical_ids_of(run);
     let stage1 = (until >= RunUntil::Pass1).then(|| {
         let mut stage1 = json!({});
-        // Pass 1 or Pass 2 failed, or the deployment's capabilities
-        // contradict the data workload.
-        if run.run.logical_asap_candidates.is_none() {
-            if let Err(error) = &run.run.selection {
-                if !matches!(error, SelectionError::NotRun) {
-                    stage1["error"] = json!(error.to_string());
-                }
+        if let Some(logical) = &run.run.logical_asap_candidates {
+            stage1["pruned_candidates"] = json!(pass2_pruned_json(logical, &ids));
+        } else if let Err(error) = &run.run.selection {
+            // Pass 1 or Pass 2 failed, or the deployment's capabilities
+            // contradict the data workload.
+            if !matches!(error, SelectionError::NotRun) {
+                stage1["error"] = json!(error.to_string());
             }
         }
         stage1
     });
     let stage2 = (until >= RunUntil::Stage2).then(|| {
-        let mut stage2 = json!({
-            "pruned": [],
-            "pruned_candidates": stage2_pruned_candidates_json(run.run.physical_asap_candidates.as_ref()),
-        });
+        let mut stage2 = match &run.run.physical_asap_candidates {
+            Some(physical) => json!({
+                "physical_candidates": physical_candidates_json(physical, plan, &ids),
+                "pruned_candidates": pruned_candidates_json(&physical.pruned_candidates, &ids),
+            }),
+            None => json!({ "physical_candidates": [], "pruned_candidates": [] }),
+        };
         // Stage 2 itself failed.
         if run.run.logical_asap_candidates.is_some() && run.run.physical_asap_candidates.is_none() {
             if let Err(error) = &run.run.selection {
@@ -356,61 +423,104 @@ fn document(queries: Vec<Value>, entries: &[QueryWorkloadEntry], run: &PlanningS
         }
         stage2
     });
-    let stage3 = (until == RunUntil::Stage3).then(|| stage3_json(run, entries));
+    let stage3 =
+        (until == RunUntil::Stage3).then(|| stage3_json(run, plan_cost, materialized_views, &ids));
     json!({
-        "format": "asap-stage-pipeline/v1",
+        "format": "asap-stage-pipeline/v2",
         "run_until": until.name(),
         "workload": { "queries": queries },
         "stage0_query_language_frontends": { "dag": export(&run.stage0_query_language_frontends) },
         "stage1_logical_asap_optimization": stage1,
         "stage2_physical_asap_optimization": stage2,
         "stage3_plan_selection": stage3,
-        "memo": memo_json(run),
+        "memo": memo_json(run, &ids),
     })
 }
 
-/// Stage 3's section: the plan, the selection and the plan's materialized
-/// views.
-fn stage3_json(run: &PlanningStagesRun, entries: &[QueryWorkloadEntry]) -> Value {
-    let mut stage3 = selection_json(&run.run.selection);
-    match &run.run.selection {
-        Ok((plan, _)) => match materialized_views_json(plan, entries) {
-            Ok(views) => stage3["materialized_views"] = Value::Array(views),
-            Err(error) => {
-                stage3["materialized_views"] = json!([]);
-                stage3["materialized_views_error"] = json!(error);
-            }
-        },
-        Err(_) => stage3["materialized_views"] = json!([]),
+/// The canonical ids of `run`'s last memo (Pass 2's, else Pass 1's, else
+/// Stage 0's) and of its physical candidates.
+fn canonical_ids_of(run: &PlanningStagesRun) -> CanonicalIds {
+    let logical = run.run.logical_asap_candidates.as_ref();
+    let memo = logical
+        .map(|logical| &logical.memo)
+        .or(run.run.pass1_memo.as_ref())
+        .or(run.stage0_memo_groups.as_ref())
+        .expect("run_stages_until builds Stage 0's memo");
+    CanonicalIds::of(memo, run.run.physical_asap_candidates.as_ref())
+}
+
+/// Stage 3's section: the plan, its cost, its sharing summary, the
+/// selection and the plan's materialized views.
+fn stage3_json(
+    run: &PlanningStagesRun,
+    plan_cost: Option<&PlanCost>,
+    materialized_views: Option<&Result<Vec<MaterializedView>, String>>,
+    ids: &CanonicalIds,
+) -> Value {
+    let mut stage3 = selection_json(&run.run.selection, ids);
+    if let Ok((plan, _)) = &run.run.selection {
+        stage3["cost"] = plan_cost.map_or(Value::Null, cost_json);
+        stage3["sharing_summary"] = json!(sharing_summary_json(plan));
+    }
+    stage3["materialized_views"] = json!([]);
+    match materialized_views {
+        Some(Ok(views)) => stage3["materialized_views"] = json!(views),
+        Some(Err(error)) => stage3["materialized_views_error"] = json!(error),
+        None => {}
     }
     stage3
 }
 
-/// The document's `memo` section: the memo after each step `run` ran.
-fn memo_json(run: &PlanningStagesRun) -> Value {
+/// The document's `memo` section: the memo after each step `run` ran,
+/// and, with a selected plan, `selected_candidates`: each memo group the
+/// plan uses, with the indices of its candidates there (a group may be
+/// used through several candidates). Ids are `ids`' canonical ones.
+fn memo_json(run: &PlanningStagesRun, ids: &CanonicalIds) -> Value {
     let stage0 = run
         .stage0_memo_groups
         .as_ref()
         .expect("run_stages_until builds Stage 0's memo");
-    let mut named = vec![("stage0", "Stage 0, the frontends' DAG hash-consed", stage0)];
+    let mut steps = vec![json!({
+        "step": "stage0",
+        "title": "Stage 0, the frontends' DAG hash-consed",
+        "groups": memo_groups_json(stage0, None, ids),
+    })];
     if let Some(pass1) = &run.run.pass1_memo {
-        named.push(("pass1", "Stage 1, Pass 1", pass1));
-    }
-    if let Some(logical) = &run.run.logical_asap_candidates {
-        named.push(("pass2", "Stage 1, Pass 2", &logical.memo));
-    }
-    let mut table = MemoNodes::default();
-    let mut previous: Option<&Memo> = None;
-    let mut json_steps = Vec::new();
-    for &(step, title, memo) in &named {
-        json_steps.push(json!({
-            "step": step,
-            "title": title,
-            "groups": memo_groups_json(&mut table, memo, previous),
+        steps.push(json!({
+            "step": "pass1",
+            "title": "Stage 1, Pass 1",
+            "groups": memo_groups_json(pass1, None, ids),
         }));
-        previous = Some(memo);
+        if let Some(logical) = &run.run.logical_asap_candidates {
+            steps.push(json!({
+                "step": "pass2",
+                "title": "Stage 1, Pass 2",
+                "groups": memo_groups_json(&logical.memo, Some((pass1, logical)), ids),
+            }));
+        }
     }
-    json!({ "nodes": table.nodes, "steps": json_steps })
+    let mut memo = json!({ "steps": steps });
+    if let (Ok((plan, _)), Some(physical)) = (
+        &run.run.selection,
+        run.run.physical_asap_candidates.as_ref(),
+    ) {
+        let mut selected: BTreeMap<u32, BTreeSet<usize>> = BTreeMap::new();
+        for candidate in plan
+            .nodes
+            .iter()
+            .filter_map(|node| node.selected_physical_candidate)
+        {
+            let logical = physical.physical_candidates[candidate.0].logical_candidate_id;
+            let (group, index_in_group) = ids.candidate(logical);
+            selected.entry(group).or_default().insert(index_in_group);
+        }
+        let selected: serde_json::Map<String, Value> = selected
+            .into_iter()
+            .map(|(group, indices)| (group.to_string(), json!(indices)))
+            .collect();
+        memo["selected_candidates"] = json!(selected);
+    }
+    memo
 }
 
 /// The [`metric_type_warnings`] of each PromQL query of `described` (the
@@ -448,6 +558,7 @@ type Lowered = (
 fn lowered(workload: &PlanningWorkload, catalog: &SqlCatalog) -> Result<Lowered, String> {
     let roots = match workload.query_workload.language {
         QueryLanguage::PromQL => lower_promql_roots(workload)?,
+        QueryLanguage::MetricsQL => lower_metricsql_roots(workload)?,
         _ => lower_sql_roots(workload, catalog)?,
     };
     let entries = workload.query_workload.entries().collect();
@@ -465,7 +576,7 @@ fn lowered(workload: &PlanningWorkload, catalog: &SqlCatalog) -> Result<Lowered,
 /// declared source, each metric a PromQL query reads and, when a file is
 /// SQL, each of `sql_tables` (the `--sql-catalog-table` names). Plan selection shares a
 /// workload's `rows_per_second` out over all its sources, so one file's
-/// rate would otherwise be priced on another file's sources.
+/// rate would otherwise be costed on another file's sources.
 fn lowered_together(
     workloads: &[(&str, PlanningWorkload)],
     catalog: &SqlCatalog,
@@ -476,6 +587,8 @@ fn lowered_together(
     // The sources the queries read, beside the declared ones.
     let mut read_sources: BTreeSet<String> = BTreeSet::new();
     for (path, workload) in workloads {
+        let (queries, more_roots, more_entries, more_data) =
+            lowered(workload, catalog).map_err(|e| format!("--workload {path}: {e}"))?;
         match workload.query_workload.language {
             QueryLanguage::PromQL => {
                 for entry in workload.query_workload.entries() {
@@ -485,10 +598,9 @@ fn lowered_together(
                     );
                 }
             }
+            QueryLanguage::MetricsQL => read_sources.extend(scanned_sources(&more_roots)),
             _ => read_sources.extend(sql_tables.iter().cloned()),
         }
-        let (queries, more_roots, more_entries, more_data) =
-            lowered(workload, catalog).map_err(|e| format!("--workload {path}: {e}"))?;
         described.extend(queries);
         roots.extend(more_roots);
         entries.extend(more_entries);
@@ -541,7 +653,7 @@ fn lowered_together(
     }
     data.validate().map_err(|e| e.to_string())?;
     for (index, query) in described.iter_mut().enumerate() {
-        query["id"] = json!(format!("q{}", index + 1));
+        query["id"] = json!(query_id(index));
     }
     Ok((described, roots, entries, data))
 }
@@ -585,29 +697,188 @@ fn arrival_together(earlier: DataArrival, later: DataArrival) -> Option<DataArri
 }
 
 /// The selected plan's materialized views, as the plan
-/// [`installable_plan_of`] (what `plan_installable` returns) derives them:
-/// each view's node id, `refresh`, `coverage`, `inputs` and `retention_ms`.
-fn materialized_views_json(
-    plan: &asap_types::plan::physical_asap_dag::PhysicalASAPDAG,
+/// [`installable_plan_of`] (what `plan_installable` returns) derives them
+/// (each view's node id, `refresh`, `coverage`, `inputs` and
+/// `retention_ms`), or why the plan is not installable.
+fn materialized_views_of(
+    plan: &PhysicalASAPDAG,
     entries: &[QueryWorkloadEntry],
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<MaterializedView>, String> {
     let plan = installable_plan_of(plan.clone(), entries).map_err(|e| e.to_string())?;
-    let views = plan.materialized_views().map_err(|e| e.to_string())?;
-    views
-        .iter()
-        .map(|view| serde_json::to_value(view).map_err(|e| e.to_string()))
-        .collect()
+    plan.materialized_views().map_err(|e| e.to_string())
 }
 
-/// The physical candidates Stage 2 pruned
-/// (`PhysicalASAPMemoCandidates::pruned_candidates`), in pruning order.
-/// Empty without memo steps.
-fn stage2_pruned_candidates_json(stage2: Option<&PhysicalASAPMemoCandidates>) -> Vec<Value> {
-    let Some(stage2) = stage2 else {
-        return Vec::new();
-    };
-    let _ = &stage2.pruned_candidates;
-    todo!("#1207 PR 9 (#1205): each pruned PhysicalCandidate with its reason")
+/// Stage 2's physical candidates $\mathcal C$: each with its logical
+/// candidate (`group`, `index_in_group`), its `properties` ($\tau$,
+/// $\ell$) and, per input $(c, i)$, the input `group` and, as `edges`,
+/// each physical edge whose logical edge holds: `producer`,
+/// `satisfies_physical_requirement` ($\alpha^{\mathrm{phys}}$), `rejection`
+/// (why it fails, null when it holds) and `selected` (an edge of `plan`).
+/// In canonical id order (`ids`), each input's edges by producer.
+fn physical_candidates_json(
+    physical: &PhysicalASAPMemoCandidates,
+    plan: Option<&PhysicalASAPDAG>,
+    ids: &CanonicalIds,
+) -> Vec<Value> {
+    let memo = &physical.logical_candidates.memo;
+    let selected = selected_edges(plan);
+    let mut listed: Vec<(usize, Value)> = physical
+        .physical_candidates
+        .iter()
+        .zip(edges_per_input(physical))
+        .enumerate()
+        .map(|(id, (candidate, edges_into))| {
+            let logical = candidate.logical_candidate_id;
+            let groups = memo.candidate(logical).expression.operator.children();
+            let inputs: Vec<Value> = groups
+                .into_iter()
+                .zip(edges_into)
+                .enumerate()
+                .map(|(input, (group, edges))| {
+                    let mut edges: Vec<(usize, Value)> = edges
+                        .iter()
+                        .filter(|edge| edge.satisfies_logical_requirement)
+                        .map(|edge| {
+                            let producer = edge.producer_candidate_id;
+                            let canonical_producer = ids.physical(producer);
+                            (canonical_producer, json!({
+                                "producer": canonical_producer,
+                                "satisfies_physical_requirement": edge.satisfies_physical_requirement,
+                                "rejection": physical_edge_rejection(physical, edge),
+                                "selected": selected.contains(&(producer, PhysicalCandidateId(id), input)),
+                            }))
+                        })
+                        .collect();
+                    edges.sort_by_key(|(producer, _)| *producer);
+                    let edges: Vec<Value> = edges.into_iter().map(|(_, edge)| edge).collect();
+                    json!({ "group": ids.group(*group), "edges": edges })
+                })
+                .collect();
+            let canonical_id = ids.physical(PhysicalCandidateId(id));
+            let (group, index_in_group) = ids.candidate(logical);
+            (canonical_id, json!({
+                "id": canonical_id,
+                "group": group,
+                "index_in_group": index_in_group,
+                "properties": candidate.physical_properties,
+                "inputs": inputs,
+            }))
+        })
+        .collect();
+    listed.sort_by_key(|(id, _)| *id);
+    listed.into_iter().map(|(_, candidate)| candidate).collect()
+}
+
+/// Candidates Stage 2 or Stage 3 pruned: each logical candidate (`group`,
+/// `index_in_group`), the `properties` it would have had and the `reason`;
+/// by canonical candidate id (`ids`), then in pruning order.
+fn pruned_candidates_json(
+    pruned: &[PrunedCandidate<PhysicalCandidate>],
+    ids: &CanonicalIds,
+) -> Vec<Value> {
+    let mut listed: Vec<((u32, usize), Value)> = pruned
+        .iter()
+        .map(|pruned| {
+            let (group, index_in_group) = ids.candidate(pruned.candidate.logical_candidate_id);
+            let reason = serde_json::to_value(pruned.reason).unwrap_or_default();
+            (
+                (group, index_in_group),
+                json!({
+                    "group": group,
+                    "index_in_group": index_in_group,
+                    "properties": pruned.candidate.physical_properties,
+                    "reason": ids.in_serialized(reason),
+                }),
+            )
+        })
+        .collect();
+    listed.sort_by_key(|(id, _)| *id);
+    listed.into_iter().map(|(_, pruned)| pruned).collect()
+}
+
+/// The candidates Pass 2 eliminated: each candidate (`group`,
+/// `index_in_group`) with its `causes`, each the eliminated consumers it
+/// comes through (`through_pruned_candidates`), the `root` reason and its
+/// `text`; by canonical candidate id (`ids`).
+fn pass2_pruned_json(logical: &LogicalASAPMemoCandidates, ids: &CanonicalIds) -> Vec<Value> {
+    let mut listed: Vec<((u32, usize), Value)> = logical
+        .pruned
+        .iter()
+        .map(|pruned| {
+            let causes: Vec<Value> = pruned
+                .causes
+                .iter()
+                .map(|cause| {
+                    let through: Vec<Value> = cause
+                        .through_pruned_candidates
+                        .iter()
+                        .map(|id| ids.candidate_json(*id))
+                        .collect();
+                    let root = serde_json::to_value(&cause.root).unwrap_or_default();
+                    json!({
+                        "through_pruned_candidates": through,
+                        "root": ids.in_serialized(root),
+                        "text": root_prune_reason_text(&cause.root),
+                    })
+                })
+                .collect();
+            let (group, index_in_group) = ids.candidate(pruned.candidate);
+            (
+                (group, index_in_group),
+                json!({
+                    "group": group,
+                    "index_in_group": index_in_group,
+                    "causes": causes,
+                }),
+            )
+        })
+        .collect();
+    listed.sort_by_key(|(id, _)| *id);
+    listed.into_iter().map(|(_, pruned)| pruned).collect()
+}
+
+/// One plan's cost: per second, its predicted CPU, its source, its usage
+/// and each node's charge.
+fn cost_json(cost: &PlanCost) -> Value {
+    let per_node: serde_json::Map<_, _> = cost
+        .per_node
+        .iter()
+        .map(|(node, charge)| {
+            (
+                node.to_string(),
+                json!({
+                    "operator": charge.operator,
+                    "timing": charge.timing,
+                    "cpu_core_seconds_per_second": charge.cpu_core_seconds_per_second,
+                    "cost_per_second": charge.cost_per_second,
+                    "multiplier": charge.multiplier,
+                    "detail": charge.detail,
+                    "cost_source": charge.cost_source,
+                }),
+            )
+        })
+        .collect();
+    let usage = &cost.usage;
+    json!({
+        "cost_per_second": cost.cost_per_second,
+        // Report-only: the nodes' predicted CPU, summed as
+        // `plan_installable`'s predicted usage sums it.
+        "cpu_core_seconds_per_second": cost
+            .per_node
+            .values()
+            .map(|node| node.cpu_core_seconds_per_second)
+            .sum::<f64>(),
+        "source": cost.source,
+        "usage": {
+            "cpu_ops_per_second": usage.cpu_ops_per_second,
+            "scanned_bytes_per_second": usage.scanned_bytes_per_second,
+            "average_memory_bytes": usage.average_memory_bytes,
+            "peak_memory_bytes": usage.peak_memory_bytes,
+            "disk_bytes": usage.disk_bytes,
+            "peak_cpu_cores": usage.peak_cpu_cores,
+        },
+        "per_node": per_node,
+    })
 }
 
 /// Per query, the accuracy Stage 3 accepted: the accepted metric, the
@@ -626,9 +897,14 @@ fn accepted_json(queries: &[AcceptedAccuracy]) -> Value {
 }
 
 /// Stage 3's plan and selection ([`Selection`]): the plan it built, the
-/// accuracy accepted per query, the candidates it pruned and the selection
-/// MILP's size and time; `error` when the facade selected no plan.
-fn selection_json(selection: &Result<(PhysicalASAPDAG, Selection), SelectionError>) -> Value {
+/// accuracy accepted per query, the candidates it pruned, the selection
+/// MILP's size and its objective; `error` when the facade selected no
+/// plan. Its times and solve count, which change from run to run or with
+/// the solver, are in the text output only.
+fn selection_json(
+    selection: &Result<(PhysicalASAPDAG, Selection), SelectionError>,
+    ids: &CanonicalIds,
+) -> Value {
     let (plan, selection) = match selection {
         Ok(selected) => selected,
         Err(error) => return json!({ "plan": null, "error": error.to_string() }),
@@ -636,17 +912,10 @@ fn selection_json(selection: &Result<(PhysicalASAPDAG, Selection), SelectionErro
     json!({
         "plan": plan,
         "accepted_accuracy_per_query": accepted_json(&selection.accepted_accuracy_per_query),
-        "pruned_candidates": selection
-            .pruned_candidates
-            .iter()
-            .map(|p| json!({ "candidate": format!("{:?}", p.candidate), "reason": format!("{:?}", p.reason) }))
-            .collect::<Vec<_>>(),
-        "milp_objective_cost_per_second": selection.selected_plan_cost_per_second,
+        "pruned_candidates": pruned_candidates_json(&selection.pruned_candidates, ids),
         "milp_variables": selection.milp_variable_count,
         "milp_constraints": selection.milp_constraint_count,
-        "milp_construction_ms": selection.milp_construction_ms,
-        "milp_solve_ms": selection.milp_solve_ms,
-        "milp_solve_count": selection.milp_solve_count,
+        "milp_objective_cost_per_second": selection.selected_plan_cost_per_second,
     })
 }
 
@@ -656,9 +925,26 @@ fn export(roots: &[QueryRoot]) -> FlatDag {
     flatten(roots).0
 }
 
+/// The sources the `Scan`s of `roots` read: metric names and table names.
+fn scanned_sources(roots: &[QueryRoot]) -> BTreeSet<String> {
+    flatten(roots)
+        .0
+        .nodes
+        .into_iter()
+        .filter_map(|node| match node.operator {
+            Operator::NonASAP(NonASAPOp::Scan { source, .. }) => Some(match source {
+                Source::TimeSeries { metric } => metric,
+                Source::Table { table_ref } => table_ref,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
     let language = match workload.query_workload.language {
         QueryLanguage::PromQL => "promql",
+        QueryLanguage::MetricsQL => "metricsql",
         _ => "sql",
     };
     workload
@@ -678,7 +964,7 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
                 requirements["range_evaluation"] = json!(range);
             }
             json!({
-                "id": format!("q{}", index + 1),
+                "id": query_id(index),
                 "language": language,
                 "text": entry.query.0,
                 "requirements": requirements,
@@ -708,69 +994,279 @@ fn with_default_metrics(mut queries: Vec<Value>, roots: &[QueryRoot]) -> Vec<Val
     queries
 }
 
-/// The `memo` section's node table (`memo.nodes`): each distinct node once,
-/// children before parents, its children as indices into the table.
-#[derive(Default)]
-struct MemoNodes {
-    nodes: Vec<FlatNode>,
-}
-
-/// `memo`'s groups, each with its candidates, their nodes added to
-/// `table`; a candidate is `added` when `previous` (the memo at the step
-/// before) has no such candidate.
-fn memo_groups_json(table: &mut MemoNodes, memo: &Memo, previous: Option<&Memo>) -> Vec<Value> {
-    let ids = |groups: &[MemoGroupId]| groups.iter().map(|g| g.0).collect::<Vec<_>>();
-    memo.groups()
+/// `memo`'s groups, each with its operator and its candidates, groups and
+/// candidates in canonical id order (`ids`). At Pass 2 (`pass2`: the memo
+/// at Pass 1 and Pass 2's output) a candidate is `added` when its index is
+/// past the group's Pass 1 candidates (the memo only appends), has
+/// `pruned`, and lists its logical edges per input, with the reasons Pass
+/// 2 recorded.
+fn memo_groups_json(
+    memo: &Memo,
+    pass2: Option<(&Memo, &LogicalASAPMemoCandidates)>,
+    ids: &CanonicalIds,
+) -> Vec<Value> {
+    let group_ids = |groups: Vec<&MemoGroupId>| {
+        groups
+            .into_iter()
+            .map(|g| ids.group(*g))
+            .collect::<Vec<_>>()
+    };
+    let pruned: BTreeSet<CandidateForMemoGroupId> = pass2
+        .map(|(_, logical)| logical.pruned.iter().map(|p| p.candidate).collect())
+        .unwrap_or_default();
+    let mut listed_groups: Vec<(u32, Value)> = memo
+        .groups()
         .iter()
         .enumerate()
         .map(|(id, group)| {
+            let group_id = MemoGroupId(id as u32);
             let candidates = &group.candidates;
-            let node = group_node(table, group);
             let mut by_origin = serde_json::Map::new();
             for candidate in candidates {
                 let count = by_origin
-                    .entry(origin_name(&candidate.origin))
+                    .entry(origin_name(candidate))
                     .or_insert(json!(0));
                 *count = json!(count.as_u64().unwrap_or(0) + 1);
             }
-            let listed: Vec<Value> = if candidates.is_empty() {
-                Vec::new()
-            } else {
-                let _ = previous;
-                todo!(
-                    "#1207 PR 9 (#1205): each candidate's expression, properties and requirements"
-                )
-            };
-            json!({
-                "id": id,
-                "label": node_label(&table.nodes[node]),
-                "children": group.expression.children().into_iter().map(|g| g.0).collect::<Vec<_>>(),
-                "parents": ids(group.parent_groups()),
+            let mut listed: Vec<(usize, Value)> = candidates
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| {
+                    let candidate_id = CandidateForMemoGroupId {
+                        group: group_id,
+                        index_in_group: index,
+                    };
+                    let (_, canonical_index) = ids.candidate(candidate_id);
+                    let mut value = candidate_json(canonical_index, candidate, ids);
+                    if let Some((pass1, logical)) = pass2 {
+                        value["added"] = json!(pass1
+                            .groups()
+                            .get(id)
+                            .is_none_or(|before| index >= before.candidates.len()));
+                        value["pruned"] = json!(pruned.contains(&candidate_id));
+                        value["inputs"] = json!(logical_inputs_json(logical, candidate_id, ids));
+                    }
+                    (canonical_index, value)
+                })
+                .collect();
+            listed.sort_by_key(|(index, _)| *index);
+            let listed: Vec<Value> = listed.into_iter().map(|(_, value)| value).collect();
+            let canonical_group = ids.group(group_id);
+            (canonical_group, json!({
+                "id": canonical_group,
+                "label": operator_label(&group.expression),
+                "operator": group.expression.map_children(|child| ids.group(*child)),
+                "children": group_ids(group.expression.children()),
+                "parents": group_ids(group.parent_groups().iter().collect()),
+                "result_kind": group.group_properties.result_kind,
+                "column_lineage": column_lineage_text(group, |group| ids.group(group)),
+                "column_signs": group.group_properties.column_signs,
+                "depends_on_evaluation_time": group.group_properties.depends_on_evaluation_time,
+                "shareable_when_equal": group.group_properties.shareable_when_equal,
+                "aggregate_coverage": group
+                    .group_properties
+                    .aggregate_coverage
+                    .as_ref()
+                    .map(|coverage| aggregate_coverage_text(coverage, |group| ids.group(group))),
+                "scanned_sources": group.group_properties.scanned_sources,
+                "evaluation_grid": pass2
+                    .and_then(|(_, logical)| logical.evaluation_grid_of_group[id].as_ref())
+                    .map(|grid| json!({"period_ms": grid.period_ms, "phase_ms": grid.phase_ms})),
                 "queries": group.reached_by_queries(),
-                "roots_of": memo.queries_rooted_at(MemoGroupId(id as u32)),
-                "node": node,
+                "roots_of": memo.queries_rooted_at(group_id),
                 "candidate_count": candidates.len(),
                 "candidate_count_by_origin": by_origin,
-                "candidates_capped": false,
                 "candidates": listed,
-            })
+            }))
+        })
+        .collect();
+    listed_groups.sort_by_key(|(id, _)| *id);
+    listed_groups.into_iter().map(|(_, group)| group).collect()
+}
+
+/// Per input of `consumer`, its `group` and, as `edges`, each candidate of
+/// the group ([`logical_edges_into`], eliminated ones included):
+/// `producer` (its index in the group), `satisfies_logical_requirement`
+/// ($\alpha^{\log}$) and `rejection` (why it fails, null when it holds).
+/// Ids are canonical (`ids`), edges by producer.
+fn logical_inputs_json(
+    logical: &LogicalASAPMemoCandidates,
+    consumer: CandidateForMemoGroupId,
+    ids: &CanonicalIds,
+) -> Vec<Value> {
+    let groups = logical
+        .memo
+        .candidate(consumer)
+        .expression
+        .operator
+        .children();
+    groups
+        .into_iter()
+        .zip(logical_edges_into(logical, consumer))
+        .map(|(group, edges)| {
+            let mut edges: Vec<(usize, Value)> = edges
+                .into_iter()
+                .enumerate()
+                .map(|(producer, status)| {
+                    let (_, producer) = ids.candidate(CandidateForMemoGroupId {
+                        group: *group,
+                        index_in_group: producer,
+                    });
+                    let rejection = status.rejection();
+                    (
+                        producer,
+                        json!({
+                            "producer": producer,
+                            "satisfies_logical_requirement": rejection.is_none(),
+                            "rejection": rejection,
+                        }),
+                    )
+                })
+                .collect();
+            edges.sort_by_key(|(producer, _)| *producer);
+            let edges: Vec<Value> = edges.into_iter().map(|(_, edge)| edge).collect();
+            json!({ "group": ids.group(*group), "edges": edges })
         })
         .collect()
 }
 
-/// The node of `group`'s own operator, added to `table`.
-fn group_node(table: &mut MemoNodes, group: &MemoGroup) -> usize {
-    let _ = (table, group);
-    todo!("#1207 PR 9: a group's node from its expression")
+/// One candidate $v = (e_v, p^{\log}_v)$ of a group: its `index`,
+/// `origin`, `label`, `operator` $e_v$ (children are its input groups),
+/// `children` (the input groups), `fused_groups`, `parameters` (θ) and
+/// `required_accuracy` (one per input, null without one). Group ids are
+/// canonical (`ids`).
+fn candidate_json(index: usize, candidate: &CandidateForMemoGroup, ids: &CanonicalIds) -> Value {
+    let operator = &candidate.expression.operator;
+    let group_ids = |groups: Vec<&MemoGroupId>| {
+        groups
+            .into_iter()
+            .map(|g| ids.group(*g))
+            .collect::<Vec<_>>()
+    };
+    json!({
+        "index": index,
+        "origin": origin_name(candidate),
+        "added": false,
+        "label": operator_label(operator),
+        "operator": operator.map_children(|child| ids.group(*child)),
+        "children": group_ids(operator.children()),
+        "fused_groups": group_ids(candidate.fused_groups.iter().collect()),
+        "parameters": candidate.logical_properties.parameters(),
+        "required_accuracy": candidate
+            .input_requirements
+            .iter()
+            .map(|requirement| requirement.required_accuracy)
+            .collect::<Vec<_>>(),
+    })
 }
 
-/// `OriginOfCandidateForMemoGroup` in snake case.
-fn origin_name(origin: &OriginOfCandidateForMemoGroup) -> String {
-    match origin {
-        OriginOfCandidateForMemoGroup::Pass1 => "pass1",
-        OriginOfCandidateForMemoGroup::TumblingWindows => "tumbling_windows",
-        OriginOfCandidateForMemoGroup::Rollup => "rollup",
-        OriginOfCandidateForMemoGroup::TopKReuse => "top_k_reuse",
+/// The plan's sharing summary: each node that two or more queries read,
+/// directly or through other nodes, with its `operator`, `parameters` (θ),
+/// `timing`, `lifetime` and the `queries` (`q1`, ...). Described by what
+/// it computes, not by node id, so it stays the same when other parts of
+/// the plan change; sorted by queries, then operator. Example: two
+/// quantiles over one metric sharing a scan give `{"operator": "Scan",
+/// "queries": ["q1", "q2"], ...}`.
+fn sharing_summary_json(plan: &PhysicalASAPDAG) -> Vec<Value> {
+    let position: BTreeMap<PhysicalASAPNodeId, usize> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(position, node)| (node.id, position))
+        .collect();
+    let mut queries_of_node: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); plan.nodes.len()];
+    for (query, root) in plan.root_nodes_per_query().iter().enumerate() {
+        let mut pending: Vec<PhysicalASAPNodeId> =
+            root.operator_refs().into_iter().copied().collect();
+        while let Some(id) = pending.pop() {
+            let node = position[&id];
+            if queries_of_node[node].insert(query) {
+                pending.extend(plan.nodes[node].payload.children());
+            }
+        }
     }
-    .into()
+    // Sort key: queries, then operator, then the entry's JSON text (computed
+    // once per entry, not per comparison).
+    let mut shared: Vec<(Vec<usize>, String, String, Value)> = plan
+        .nodes
+        .iter()
+        .zip(queries_of_node)
+        .filter(|(_, queries)| queries.len() > 1)
+        .map(|(node, queries)| {
+            let operator = operator_label(&node.payload);
+            let names: Vec<String> = queries.iter().map(|&q| query_id(q)).collect();
+            let entry = json!({
+                "operator": operator,
+                "parameters": node.parameters,
+                "timing": node.output_state.timing,
+                "lifetime": node.lifetime,
+                "queries": names,
+            });
+            let text = entry.to_string();
+            (queries.into_iter().collect(), operator, text, entry)
+        })
+        .collect();
+    shared.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+    shared.into_iter().map(|(_, _, _, entry)| entry).collect()
+}
+
+/// The workload query id the documents use for query index `index`
+/// (0-based): `0` gives `"q1"`, as in `workload.queries[].id`.
+fn query_id(index: usize) -> String {
+    format!("q{}", index + 1)
+}
+
+/// A candidate's origin, as `OriginOfCandidateForMemoGroup` serializes.
+fn origin_name(candidate: &CandidateForMemoGroup) -> String {
+    json!(candidate.origin)
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// When Pass 1 fails, the document still carries the Stage 0 DAG, with
+    /// the error under Stage 1 and no Stage 2 or Stage 3 section, so the
+    /// viewer can show both. (Pass 1 fails only on a rule bug, so no
+    /// workload reaches this path end to end.)
+    #[test]
+    fn a_pass1_failure_still_writes_stage0_and_the_error() {
+        let workload: PlanningWorkload = serde_json::from_value(json!({
+            "query_workload": {"language": "promql", "query_batch": [{
+                "query": "sum(rate(m[5m]))",
+                "requirements": {"accuracy": {"max_error": 0.0}},
+                "predictability": "unknown",
+                "invocations": 1,
+            }]},
+        }))
+        .unwrap();
+        let roots = lower_promql_roots(&workload).unwrap();
+        let document = document_of(
+            workload_queries(&workload),
+            &roots,
+            Err(PlanningStagesError::Pass1(
+                "a rule built a bad group".into(),
+            )),
+            RunUntil::Stage3,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            document["stage0_query_language_frontends"]["dag"]["roots"]
+                .as_array()
+                .map(Vec::len),
+            Some(1),
+            "{document}"
+        );
+        assert_eq!(
+            document["stage1_logical_asap_optimization"]["error"],
+            "Pass 1: a rule built a bad group"
+        );
+        assert_eq!(document["stage2_physical_asap_optimization"], Value::Null);
+        assert_eq!(document["stage3_plan_selection"], Value::Null);
+    }
 }

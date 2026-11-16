@@ -12,10 +12,6 @@ use asap_types::workload::PlanningWorkload;
 
 use serde_json::{json, Value};
 
-/// The id of the selected plan among the physical candidates: the
-/// selection is always shown as `P1`.
-const SELECTED: &str = "P1";
-
 /// A file under the system temp directory, removed when dropped.
 struct TempFile(PathBuf);
 
@@ -168,7 +164,7 @@ fn cost_inputs(inputs: &asap_cost::CostInputs) -> TempFile {
     TempFile::new(&serde_json::to_string(inputs).unwrap())
 }
 
-/// Cost model 1 at AWS Fargate's us-east-1 prices.
+/// Cost model 1 at AWS Fargate's us-east-1 costs.
 fn aws_fargate() -> asap_cost::CostInputs {
     let defaults = asap_cost::CostInputs::default();
     asap_cost::CostInputs {
@@ -179,11 +175,10 @@ fn aws_fargate() -> asap_cost::CostInputs {
     }
 }
 
-/// Stage 3 selected a plan: `stage3_plan_selection` is its `Selection`,
-/// whose plan is the physical candidate [`SELECTED`] with its `cost` and
-/// `accepted_accuracy_per_query`.
+/// Stage 3 selected a plan: `stage3_plan_selection` has its `plan` and the
+/// plan's `cost`.
 fn selects_a_plan(selection: &Value) -> bool {
-    selection["selected_dag"].is_object() && selection["cost"].is_object()
+    selection["plan"].is_object() && selection["cost"].is_object()
 }
 
 fn validated_dag(value: &Value, queries: usize) {
@@ -204,34 +199,14 @@ fn validated_dag(value: &Value, queries: usize) {
     }
 }
 
-/// The selected plan `P1`, validated, with one root per query.
+/// Stage 3's plan, validated, with one root per operator query of
+/// `queries`.
 fn selected_physical(document: &Value, queries: usize) -> PhysicalASAPDAG {
-    let candidate = document["stage2_physical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["id"] == SELECTED)
-        .expect("the selected plan is shown");
-    let dag: PhysicalASAPDAG = serde_json::from_value(candidate["dag"].clone()).unwrap();
+    let dag: PhysicalASAPDAG =
+        serde_json::from_value(document["stage3_plan_selection"]["plan"].clone()).unwrap();
     dag.validate().unwrap();
-    assert_eq!(dag.roots.len(), queries);
+    assert_eq!(dag.roots.len() + dag.scalar_roots.len(), queries);
     dag
-}
-
-/// Stage 1's `pruned_candidates`: each candidate Pass 1 pruned, with its
-/// reason, in pruning order.
-fn pass1_pruned(document: &Value) -> Vec<(String, String)> {
-    document["stage1_logical_asap_optimization"]["pruned_candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|pruned| {
-            (
-                pruned["candidate"].as_str().unwrap().to_string(),
-                pruned["reason"].as_str().unwrap().to_string(),
-            )
-        })
-        .collect()
 }
 
 /// Every candidate label of the memo step `step`.
@@ -250,57 +225,49 @@ fn memo_labels(document: &Value, step: &str) -> Vec<String> {
         .collect()
 }
 
-/// Example 1's document: every logical DAG is a well-formed flat DAG and
-/// every physical DAG validates; each has one root per query; ids are
-/// unique; Stage 2's candidates come from the shown logical ones and carry
-/// no cost; Stage 3 selects `P1`.
+/// Example 1's document: the frontends' DAG is a well-formed flat DAG with
+/// one root per query; each physical candidate names a candidate of the
+/// final memo, with unique ids and no cost; Stage 3's plan validates.
 #[test]
 fn example1_document_validates_its_stage_dags() {
     let document = example_document("example1", &["--run-until", "stage3"]);
-    assert_eq!(document["format"], "asap-stage-pipeline/v1");
+    assert_eq!(document["format"], "asap-stage-pipeline/v2");
     let queries = document["workload"]["queries"].as_array().unwrap().len();
     assert_eq!(queries, 2);
     validated_dag(&document["stage0_query_language_frontends"]["dag"], queries);
 
-    let logical = &document["stage1_logical_asap_optimization"];
-    let candidates = logical["candidates"].as_array().unwrap();
-    assert_eq!(logical["capped"], false);
-    assert_eq!(logical["combinations"], candidates.len());
-    let mut ids = HashSet::new();
-    let mut composed = HashSet::new();
-    for candidate in candidates {
-        let id = candidate["id"].as_str().unwrap();
-        assert!(ids.insert(id));
-        if candidate.get("dag").is_some() {
-            composed.insert(id);
-            validated_dag(&candidate["dag"], queries);
-        }
-    }
-
-    let physical = document["stage2_physical_asap_optimization"]["candidates"]
+    let pass2 = memo_step(&document, "pass2");
+    let physical = document["stage2_physical_asap_optimization"]["physical_candidates"]
         .as_array()
         .unwrap();
-    let sources: HashSet<_> = physical
-        .iter()
-        .map(|p| p["from_logical"].as_str().unwrap())
-        .collect();
-    assert_eq!(sources, composed);
-    for candidate in physical {
+    assert!(!physical.is_empty());
+    for (id, candidate) in physical.iter().enumerate() {
+        assert_eq!(candidate["id"], id);
         assert!(candidate.get("cost").is_none(), "Stage 2 has no cost");
-        let dag: PhysicalASAPDAG = serde_json::from_value(candidate["dag"].clone()).unwrap();
-        assert_eq!(dag.roots.len(), queries);
-        dag.validate().unwrap();
+        let group = &pass2["groups"][candidate["group"].as_u64().unwrap() as usize];
+        assert!(
+            group["candidates"][candidate["index_in_group"].as_u64().unwrap() as usize].is_object()
+        );
     }
     assert!(selects_a_plan(&document["stage3_plan_selection"]));
     selected_physical(&document, queries);
 }
 
+/// The memo step `step` of `document`.
+fn memo_step<'a>(document: &'a Value, step: &str) -> &'a Value {
+    document["memo"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["step"] == step)
+        .unwrap_or_else(|| panic!("no memo step {step}"))
+}
+
 /// A top-k partitioned by every label of its input has no item, so a heap
-/// over it could not be composed; such a heap reads one row per item and
-/// is pruned in Pass 1 (`TopKHeapOverOneRowPerItem`), listed under
-/// `pruned_candidates`, and the selected plan's logical DAG composes.
+/// over it could not be composed; Pass 1 offers no heap for it (a heap
+/// would read one row per item), and a plan is selected.
 #[test]
-fn a_topk_heap_over_one_row_per_item_is_pruned_with_its_reason() {
+fn a_topk_heap_over_one_row_per_item_is_not_offered() {
     let document = document(
         &adhoc(
             &["topk by (job) (3, sum by (job) (rate(m[5m])))"],
@@ -309,23 +276,12 @@ fn a_topk_heap_over_one_row_per_item_is_pruned_with_its_reason() {
         ),
         &["--run-until", "stage3", "--ignore-accuracy-guarantees"],
     );
-    assert_eq!(
-        pass1_pruned(&document),
-        [
-            ("CMS+heap".into(), "TopKHeapOverOneRowPerItem".into()),
-            (
-                "CountSketch+heap".into(),
-                "TopKHeapOverOneRowPerItem".into()
-            ),
-        ]
+    let labels = memo_labels(&document, "pass1");
+    assert!(
+        labels.iter().all(|label| !label.contains("WithHeap")),
+        "{labels:?}"
     );
-    let candidates = document["stage1_logical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap();
-    assert!(!candidates.is_empty());
-    for candidate in candidates {
-        validated_dag(&candidate["dag"], 1);
-    }
+    selected_physical(&document, 1);
 }
 
 /// Example 3a (243 Pass 1 candidates) selects a plan whose physical DAG
@@ -459,7 +415,8 @@ fn nine_quantile_queries() -> Value {
 
 /// Nine quantile queries plan with the candidate-connection search, which
 /// searches Stage 2's catalog without enumerating the combinations. The
-/// document holds the selected plan and the search's report.
+/// document holds Stage 2's candidates, the plan and the selection MILP's
+/// size.
 #[test]
 fn nine_queries_plan_without_cartesian_enumeration() {
     let document = document(
@@ -469,12 +426,14 @@ fn nine_queries_plan_without_cartesian_enumeration() {
     assert_eq!(document["search"], "candidate-connections");
     let selection = &document["stage3_plan_selection"];
     assert!(selects_a_plan(selection), "{selection}");
-    let physical = document["stage2_physical_asap_optimization"]["candidates"]
+    let physical = document["stage2_physical_asap_optimization"]["physical_candidates"]
         .as_array()
         .unwrap();
-    assert_eq!(physical.len(), 1);
-    assert_eq!(physical[0]["id"], SELECTED);
-    assert!(selection["search_report"].is_object(), "{selection}");
+    assert!(!physical.is_empty());
+    assert!(
+        selection["milp_variables"].as_u64().unwrap() > 0,
+        "{selection}"
+    );
 }
 
 /// A deployment that keeps neither raw data nor query-time results.
@@ -485,7 +444,7 @@ const NINE_QUERY_WORKLOAD: &str =
     "../../tools/dag-viewer/workloads/random-mixed-seed-862/workload-01.json";
 
 /// The nine-query workload's document up to `run_until`, planned as a
-/// deployment that keeps no raw data at AWS Fargate prices.
+/// deployment that keeps no raw data at AWS Fargate costs.
 fn nine_query_document(run_until: &str) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(NINE_QUERY_WORKLOAD);
     let capabilities = TempFile::new(NO_RAW);
@@ -503,7 +462,7 @@ fn nine_query_document(run_until: &str) -> Value {
 }
 
 /// The nine-query workload, planned as a deployment that keeps no raw data
-/// at AWS Fargate prices with guarantees enforced: `asap_planner` lowers it
+/// at AWS Fargate costs with guarantees enforced: `asap_planner` lowers it
 /// to one root per query, and installation returns a validated plan that
 /// accepts no query without its guarantee.
 #[test]
@@ -539,25 +498,16 @@ fn the_nine_query_workload_lowers_and_installs() {
 }
 
 /// `asap_planner` selects a validated plan for the nine-query workload
-/// (no raw data, AWS Fargate prices, guarantees enforced), with an
-/// accepted accuracy per query and a MILP search report.
+/// (no raw data, AWS Fargate costs, guarantees enforced), with an
+/// accepted accuracy per query and the selection MILP's size.
 #[test]
 fn the_nine_query_workload_selects_a_valid_plan() {
     let document = nine_query_document("stage3");
     let queries = 9;
     let selection = &document["stage3_plan_selection"];
     assert!(selects_a_plan(selection), "{selection}");
-    let physical = document["stage2_physical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap();
-    assert_eq!(physical.len(), 1);
     selected_physical(&document, queries);
-    assert!(
-        selection["search_report"]["milp_variables"]
-            .as_u64()
-            .unwrap()
-            > 0
-    );
+    assert!(selection["milp_variables"].as_u64().unwrap() > 0);
     assert_eq!(
         selection["accepted_accuracy_per_query"]
             .as_array()
@@ -607,63 +557,6 @@ fn table_declared_twice_is_rejected() {
     );
 }
 
-/// When Pass 1 fails, the document still carries the Stage 0 DAG, with the
-/// error under Stage 1 and no Stage 2 or Stage 3 section, so the viewer can
-/// show both, and the run exits 1.
-#[test]
-fn pass1_failure_still_writes_stage0_and_the_error() {
-    let document = document(
-        &adhoc(&["topk(5, rate(m[5m]))"], within(1.5, 0.1), &["m"]),
-        &["--run-until", "stage3", "--ignore-accuracy-guarantees"],
-    );
-    validated_dag(&document["stage0_query_language_frontends"]["dag"], 1);
-    let logical = &document["stage1_logical_asap_optimization"];
-    assert!(
-        logical["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("Pass 1: approximate accuracy"),
-        "{logical}"
-    );
-    assert_eq!(logical["combinations"], 0);
-    assert_eq!(logical["candidates"], json!([]));
-    assert_eq!(document["stage2_physical_asap_optimization"], Value::Null);
-    assert!(!selects_a_plan(&document["stage3_plan_selection"]));
-    // Text mode also prints the error and exits 1.
-    let file = TempFile::json(&adhoc(&["topk(5, rate(m[5m]))"], within(1.5, 0.1), &["m"]));
-    let output = planner(&["--workload", file.path(), "--run-until", "stage3"]);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8(output.stdout)
-        .unwrap()
-        .contains("error: Pass 1: "));
-}
-
-/// A query Pass 1 rejects is reported before deployment capabilities that
-/// contradict the data workload (as `run_planning` orders them), and a
-/// metric-type warning does not turn the null Stage 3 section into one.
-#[test]
-fn pass1_failure_comes_before_capabilities_and_keeps_stage3_null() {
-    let mut workload = adhoc(&["topk(5, rate(m[5m]))"], within(1.5, 0.1), &["m"]);
-    workload["data_workload"]["arrival"] = json!("at_rest");
-    workload["data_workload"]["sources"]["m"]["metric_type"] = json!("gauge");
-    let no_raw = TempFile::new(NO_RAW);
-    let document = document(
-        &workload,
-        &[
-            "--run-until",
-            "stage3",
-            "--ignore-accuracy-guarantees",
-            "--deployment-capabilities",
-            no_raw.path(),
-        ],
-    );
-    let error = document["stage1_logical_asap_optimization"]["error"]
-        .as_str()
-        .unwrap();
-    assert!(error.starts_with("Pass 1: approximate accuracy"), "{error}");
-    assert_eq!(document["stage3_plan_selection"], Value::Null);
-}
-
 /// Standalone scalar queries first, in the middle and last keep their
 /// query positions in the selected physical DAG's `scalar_roots` (the
 /// viewer's test_viewer.py draws this workload).
@@ -684,13 +577,7 @@ fn scalar_queries_keep_their_positions_in_scalar_roots() {
         &["--run-until", "stage3", "--ignore-accuracy-guarantees"],
     );
     assert!(selects_a_plan(&document["stage3_plan_selection"]));
-    let physical = document["stage2_physical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["id"] == SELECTED)
-        .unwrap();
-    let positions: Vec<_> = physical["dag"]["scalar_roots"]
+    let positions: Vec<_> = document["stage3_plan_selection"]["plan"]["scalar_roots"]
         .as_array()
         .unwrap()
         .iter()
@@ -741,9 +628,9 @@ fn a_target_without_a_metric_shows_the_query_default() {
 
 /// A quantile query's target may leave its metric unset: then Pass 1 keeps
 /// both KLL (rank) and DDSketch (relative) candidates, which compete on
-/// cost, and the selection reports the metric it accepted and that the
-/// target's metric was not set. With `accuracy_metric: rank`, Pass 1 prunes
-/// DDSketch and the selection accepts rank (or exact). The workload's
+/// cost, and the selection reports what it accepted. With
+/// `accuracy_metric: rank`, the metric rule leaves DDSketch no edge and the
+/// selection accepts rank (or exact). The workload's
 /// accuracy is the target's own JSON form. Guarantees are enforced (the
 /// default), since the test is about which guarantees meet the target.
 #[test]
@@ -784,11 +671,6 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
     assert!(unset["workload"]["queries"][0]["requirements"]
         .get("default_metric")
         .is_some_and(Value::is_null));
-    assert!(
-        pass1_pruned(&unset).is_empty(),
-        "{:?}",
-        pass1_pruned(&unset)
-    );
     let labels = memo_labels(&unset, "pass1");
     for family in ["Kll", "DDSketch"] {
         assert!(
@@ -797,31 +679,22 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
         );
     }
     let accepted = summary(&unset);
-    assert!(
-        accepted.starts_with("metric not set; accepted "),
-        "{accepted}"
-    );
-    assert!(
-        unset["stage3_plan_selection"]["accepted_accuracy_per_query"][0]["accepted_metric"]
-            .is_string()
-    );
+    assert!(accepted.starts_with("accepted "), "{accepted}");
 
+    // A DDSketch states a relative error, which a rank target cannot
+    // read (the metric rule): only KLL or an exact plan is accepted.
     let rank = query(Some("rank"));
-    assert_eq!(
-        pass1_pruned(&rank),
-        [("DDSketch".into(), "NoErrorBoundForQueryTarget".into())]
-    );
     let accepted = summary(&rank);
     assert!(
-        accepted == "metric rank; accepted rank (Kll)" || accepted == "metric rank; accepted exact",
+        accepted == "accepted rank (Kll)" || accepted == "accepted exact",
         "{accepted}"
     );
 }
 
 /// The `--cost-inputs` cost model decides how Example 4's candidates are
-/// compared: cost model 1 (the default) selects a priced plan, and Stage 3's
-/// selection MILP refuses cost models 2 and 3 with an error naming the
-/// model (#888).
+/// compared: cost model 1 (the default) selects a plan with a cost per
+/// second, and Stage 3's selection MILP refuses cost models 2 and 3 with
+/// an error saying it implements cost model 1 only (#888).
 #[test]
 fn the_cost_model_chooses_how_candidates_are_compared() {
     use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel, ResourceUnitCost};
@@ -836,34 +709,33 @@ fn the_cost_model_chooses_how_candidates_are_compared() {
     let usage = selected(CostModel::UsageOverTime(ResourceUnitCost::illustrative()));
     assert!(selects_a_plan(&usage), "{usage}");
     assert!(usage["cost"]["cost_per_second"].is_number());
-    for (cost_model, name) in [
-        (
-            CostModel::ProvisionedCapacity(ResourceUnitCost::illustrative()),
-            "ProvisionedCapacity (cost model 2)",
-        ),
-        (
-            CostModel::ClusterCapacity(ClusterLimits {
-                memory_bytes: 256_000_000_000,
-                disk_bytes: 1_000_000_000_000,
-                cpu_cores: None,
-                objective: ClusterObjective::LowestLatency,
-            }),
-            "ClusterCapacity (cost model 3)",
-        ),
+    for cost_model in [
+        CostModel::ProvisionedCapacity(ResourceUnitCost::illustrative()),
+        CostModel::ClusterCapacity(ClusterLimits {
+            memory_bytes: 256_000_000_000,
+            disk_bytes: 1_000_000_000_000,
+            cpu_cores: None,
+            objective: ClusterObjective::LowestLatency,
+        }),
     ] {
         let refused = selected(cost_model);
         assert!(!selects_a_plan(&refused), "{refused}");
         assert!(
-            refused["error"].as_str().unwrap().contains(name),
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("implements cost model 1 only"),
             "{refused}"
         );
     }
 }
 
-/// AWS Fargate's us-east-1 prices Example 4 under cost model 1 in US
-/// dollars per second: the selected plan costs no more than the
-/// whole-window KLL, $2.60278e-8/s (its 2.1 CPU-ms/s at $1.1244e-8 per
-/// CPU-ms, and its states held while the query runs).
+/// AWS Fargate's us-east-1 costs Example 4 under cost model 1 in US
+/// dollars per second: the selected plan's cost is its usage at the page's
+/// prices, $1.1244e-5 per vCPU-second (1.1244e-14 per CPU operation of
+/// 1 ns, 1.1244e-15 per scanned byte) and $1.235e-6 per GiB-second of
+/// memory. E.g. 1.17e8 CPU operations, 1.07e7 scanned bytes and 2.17e7
+/// average bytes held per second cost $1.3525e-6/s.
 #[test]
 fn aws_fargate_prices_example_4_in_dollars() {
     let fargate = cost_inputs(&aws_fargate());
@@ -877,20 +749,27 @@ fn aws_fargate_prices_example_4_in_dollars() {
             fargate.path(),
         ],
     );
-    let cost = document["stage3_plan_selection"]["cost"]["cost_per_second"]
-        .as_f64()
-        .unwrap();
-    assert!(cost.is_finite() && cost > 0.0);
-    assert!(cost <= 2.602778532914e-8 * (1.0 + 1e-6), "{cost}");
+    let cost = &document["stage3_plan_selection"]["cost"];
+    let cost_per_second = cost["cost_per_second"].as_f64().unwrap();
+    let usage = |field: &str| cost["usage"][field].as_f64().unwrap();
+    let at_page_prices = usage("cpu_ops_per_second") * 1.1244e-14
+        + usage("scanned_bytes_per_second") * 1.1244e-15
+        + usage("average_memory_bytes") * 1.235e-6 / (1u64 << 30) as f64;
+    assert!(cost_per_second > 0.0, "{cost}");
+    // 1e-9: the document's numbers are rounded to 12 significant digits.
+    assert!(
+        (cost_per_second - at_page_prices).abs() <= 1e-9 * at_page_prices,
+        "{cost_per_second} != {at_page_prices}: {cost}"
+    );
 }
 
 /// `--deployment-capabilities` declares the executor's capabilities, which
 /// the document's `deployment_capabilities` shows (defaults filled in;
 /// without the flag, every summary supported, raw data retained, no
 /// query-time result retained). For Pattern B with KLL only and query-time
-/// results retained: no DDSketch candidate is offered. Without raw data, a
-/// plan is still selected with guarantees enforced, from materialized
-/// views. A deployment with an unknown field is refused.
+/// results retained: Pass 1 offers no DDSketch candidate. Without raw data, a plan is still selected
+/// with guarantees enforced, from materialized views. A deployment with an
+/// unknown field is refused.
 #[test]
 fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
     let with_capabilities = |capabilities: &str, extra: &[&str]| {
@@ -929,14 +808,17 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
             "query_time_results_retained": true,
         })
     );
+    let has_ddsketch = |document: &Value| {
+        memo_labels(document, "pass1")
+            .iter()
+            .any(|l| l.contains("DDSketch"))
+    };
+    assert!(!has_ddsketch(&kll_kept));
+    assert!(has_ddsketch(&default));
     assert!(selects_a_plan(&kll_kept["stage3_plan_selection"]));
-    let physical = kll_kept["stage2_physical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap();
-    assert!(!physical.is_empty());
-    assert!(physical
-        .iter()
-        .all(|c| !c["dag"].to_string().contains("DDSketch")));
+    assert!(!kll_kept["stage3_plan_selection"]["plan"]
+        .to_string()
+        .contains("DDSketch"));
 
     let no_raw = with_capabilities(r#"{"raw_data_retained": false}"#, &[]);
     let selection = &no_raw["stage3_plan_selection"];
@@ -961,99 +843,12 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
     );
 }
 
-/// Two sums and two maxima over two metrics share each metric's scan and
-/// range between its own pair of queries: the selected logical candidate's
-/// label names which queries share each node.
-#[test]
-fn logical_candidate_labels_name_each_query() {
-    let document = document(
-        &adhoc(
-            &["sum(a)", "max(a)", "sum(b)", "max(b)"],
-            exact(),
-            &["a", "b"],
-        ),
-        &["--run-until", "stage3", "--ignore-accuracy-guarantees"],
-    );
-    let labels: Vec<&str> = document["stage1_logical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["display_name"].as_str().unwrap())
-        .collect();
-    assert!(!labels.is_empty());
-    assert!(labels
-        .iter()
-        .all(|label| (1..=4).all(|q| label.contains(&format!("Q{q} ")))));
-}
-
-/// The MILP search's reported lower bound never exceeds the selected
-/// plan's cost, and an optimal search reports a relative gap of at most
-/// 1e-4, on `topk(32, sum by (label_0) (sum_over_time(data[1h])))`, whose
-/// largest charge (the query-time top-k tumbling windows) is about 308 times the
-/// selected plan's.
-#[test]
-fn milp_lower_bound_is_consistent_with_the_selected_cost() {
-    let workload = json!({
-        "query_workload": {
-            "language": "promql",
-            "query_batch": null,
-            "repeating_queries": [{
-                "query": "topk(32, sum by (label_0) (sum_over_time(data[1h])))",
-                "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
-                "requirements": {
-                    "accuracy": {
-                        "max_error": 0.05,
-                        "failure_probability": 0.01,
-                        "accuracy_scope": "whole_result",
-                    },
-                    "max_latency_ms": null,
-                },
-                "predictability": {"predictable": {"known_at": null}},
-            }],
-        },
-        "data_workload": {
-            "arrival": {"ingesting": {"rows_per_second": 2000000.0}},
-            "sources": {"data": {
-                "series_count": 10000,
-                "metric_type": "gauge",
-                "column_signs": {"value": "non_negative"},
-                "sample_interval": 5,
-            }},
-        },
-    });
-    let capabilities =
-        TempFile::new(r#"{"raw_data_retained": true, "query_time_results_retained": false}"#);
-    let fargate = cost_inputs(&aws_fargate());
-    let document = document(
-        &workload,
-        &[
-            "--run-until",
-            "stage3",
-            "--deployment-capabilities",
-            capabilities.path(),
-            "--cost-inputs",
-            fargate.path(),
-        ],
-    );
-    let selection = &document["stage3_plan_selection"];
-    assert!(selects_a_plan(selection), "{selection}");
-    let report = &selection["search_report"];
-    let incumbent = selection["cost"]["cost_per_second"].as_f64().unwrap();
-    if let Some(lower_bound) = report["cost_lower_bound_per_second"].as_f64() {
-        assert!(lower_bound <= incumbent * (1.0 + 1e-9), "{report}");
-        if report["status"] == "optimal" {
-            let relative_gap = (incumbent - lower_bound).max(0.0) / incumbent;
-            assert!(relative_gap <= 1e-4, "{report}");
-        }
-    }
-}
-
-/// The default is to enforce accuracy guarantees: Pass 1 prunes every
-/// sketch candidate of an average of p99s, which has no guarantee
-/// (`NoErrorBoundForQueryTarget`). With `--ignore-accuracy-guarantees`, the
-/// selected sketch is accepted regardless of its guarantee and records why
-/// the guarantee check would have rejected it. The document says which
-/// mode it planned under, and a `--cost-inputs` file cannot carry the mode.
+/// The default is to enforce accuracy guarantees: an average of p99s has
+/// no guarantee from any sketch, so constraint (K) leaves only an exact
+/// plan (or none). With `--ignore-accuracy-guarantees`, no query has a
+/// target and a plan is selected on cost alone. The document says which
+/// mode it planned under, and a `--cost-inputs` file cannot carry the
+/// mode.
 #[test]
 fn accuracy_guarantees_are_enforced_by_default_and_ignored_on_request() {
     let workload = adhoc(
@@ -1061,32 +856,20 @@ fn accuracy_guarantees_are_enforced_by_default_and_ignored_on_request() {
         json!({"max_error": 0.01, "failure_probability": 0.01, "accuracy_metric": "rank"}),
         &["x"],
     );
-    let enforced = document(&workload, &["--run-until", "stage1_pass1"]);
+    let enforced = document(&workload, &["--run-until", "stage3"]);
     assert_eq!(enforced["accuracy_guarantees"], "enforced");
-    let no_bound: Vec<&str> = enforced["stage1_logical_asap_optimization"]["pruned_candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|pruned| pruned["reason"] == "NoErrorBoundForQueryTarget")
-        .map(|pruned| pruned["candidate"].as_str().unwrap())
-        .collect();
-    assert!(!no_bound.is_empty(), "{enforced}");
+    let selection = &enforced["stage3_plan_selection"];
+    if selects_a_plan(selection) {
+        let accepted = &selection["accepted_accuracy_per_query"][0];
+        assert_eq!(accepted["sketches"], json!([]), "{accepted}");
+    }
 
     let ignored = document(
         &workload,
         &["--run-until", "stage3", "--ignore-accuracy-guarantees"],
     );
     assert_eq!(ignored["accuracy_guarantees"], "ignored");
-    assert!(pass1_pruned(&ignored).is_empty());
-    let accepted = &ignored["stage3_plan_selection"]["accepted_accuracy_per_query"][0];
-    assert_eq!(
-        accepted["accepted_regardless_of_guarantee"], true,
-        "{accepted}"
-    );
-    assert_eq!(
-        accepted["guarantee_check_rejection"],
-        "no_accuracy_guarantee"
-    );
+    assert!(selects_a_plan(&ignored["stage3_plan_selection"]));
 
     let settings = TempFile::new(r#"{"ignore_accuracy_guarantees": true}"#);
     let file = TempFile::json(&workload);
@@ -1234,12 +1017,6 @@ fn check_workload_example(root: &Path, example: &Value) {
     let dag = selected_physical(&document, queries.len());
     let accepted = selection["accepted_accuracy_per_query"].as_array().unwrap();
     assert_eq!(accepted.len(), queries.len());
-    if document["accuracy_guarantees"] == "enforced" {
-        for query in accepted {
-            assert_eq!(query["accepted_regardless_of_guarantee"], false);
-            assert!(query["guarantee_check_rejection"].is_null());
-        }
-    }
     assert!(
         selection.get("materialized_views_error").is_none(),
         "{selection}"
@@ -1248,16 +1025,11 @@ fn check_workload_example(root: &Path, example: &Value) {
     for view in selection["materialized_views"].as_array().unwrap() {
         assert!(nodes.contains(&view["node_id"].as_u64().unwrap()));
     }
-    assert!(
-        selection["search_report"].is_object(),
-        "{}: {selection}",
-        example["id"]
-    );
 }
 
 /// With no supported summaries declared, `asap_planner` uses the executor's
 /// families, as `plan_installable` does. CountSketch cannot answer a total, so
-/// Pass 1 neither generates it for count nor reports it deployment-pruned.
+/// Pass 1 does not offer it for count.
 #[test]
 fn undeclared_supported_summaries_default_to_the_executors_families() {
     let document = document(
@@ -1276,7 +1048,6 @@ fn undeclared_supported_summaries_default_to_the_executors_families() {
         );
     }
     assert!(labels.iter().all(|label| !label.contains("CountSketch")));
-    assert!(pass1_pruned(&document).is_empty());
     assert_eq!(
         document["deployment_capabilities"]["supported_summaries"],
         serde_json::to_value(asap_executor::supported_summary_families()).unwrap()
@@ -1285,8 +1056,10 @@ fn undeclared_supported_summaries_default_to_the_executors_families() {
 
 /// Two windowed quantiles over one metric (Q1 over 1 m, Q2 over 5 m, both
 /// every 10 s): with a shared scan, Stage 2 also offers the scan built once
-/// per evaluation, which reads the 5 m window once (≈0.1364/s) instead of
-/// once per query (0.2203/s); the selected plan costs at most 0.143/s.
+/// per evaluation, which reads the 5 m window once instead of once per
+/// query. The selected plan has that one scan, and it is charged for the
+/// 5 m window's 10,000 series × 300 s / 15 s = 200,000 samples per
+/// evaluation.
 #[test]
 fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
     let workload = json!({
@@ -1307,18 +1080,38 @@ fn a_scan_two_queries_share_is_offered_built_once_per_evaluation() {
         &workload,
         &["--run-until", "stage3", "--ignore-accuracy-guarantees"],
     );
-    let physical = document["stage2_physical_asap_optimization"]["candidates"]
+    let selection = &document["stage3_plan_selection"];
+    // The plan's one scan, built once per evaluation.
+    let selected_scans: Vec<&Value> = selection["plan"]["nodes"]
         .as_array()
-        .unwrap();
-    assert!(physical.iter().any(|p| p["id"] == SELECTED));
-    let cost = document["stage3_plan_selection"]["cost"]["cost_per_second"]
-        .as_f64()
-        .unwrap();
-    assert!(cost <= 0.143, "{cost}");
+        .unwrap()
+        .iter()
+        .filter(|node| node["payload"]["NonASAP"]["Scan"].is_object())
+        .collect();
+    assert_eq!(selected_scans.len(), 1, "{selected_scans:?}");
+    assert_eq!(
+        selected_scans[0]["lifetime"],
+        json!({"OneEvaluation": "Memory"})
+    );
+    let scan_charges: Vec<&Value> = selection["cost"]["per_node"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|charge| charge["operator"] == "Scan")
+        .collect();
+    assert_eq!(scan_charges.len(), 1, "{scan_charges:?}");
+    assert!(
+        scan_charges[0]["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("scan 200000 samples;"),
+        "{scan_charges:?}"
+    );
 }
 
-/// The search is the candidate-connection search; its report has no
-/// legacy route.
+/// The search is the candidate-connection search, whose selection MILP's
+/// size Stage 3's section reports. Its times and solve count, which
+/// change from run to run, are left out of the document.
 #[test]
 fn the_search_reports_candidate_connections() {
     let document = document(
@@ -1326,44 +1119,109 @@ fn the_search_reports_candidate_connections() {
         &["--run-until", "stage3"],
     );
     assert_eq!(document["search"], "candidate-connections");
-    let report = &document["stage3_plan_selection"]["search_report"];
-    assert!(report.is_object(), "{report}");
-    assert!(report.get("routed_to_legacy").is_none());
-    assert!(report.get("algorithm").is_none(), "{report}");
+    let selection = &document["stage3_plan_selection"];
+    for field in ["milp_variables", "milp_constraints"] {
+        assert!(selection[field].is_u64(), "{field}: {selection}");
+    }
+    for field in ["milp_construction_ms", "milp_solve_ms", "milp_solve_count"] {
+        assert!(selection.get(field).is_none(), "{field}: {selection}");
+    }
 }
 
-/// The document names its selected plan's logical candidate under the id
-/// its physical candidates read (`from_logical`), as the viewer's
-/// validator requires.
+/// Memo ids are canonical: depth first from the query roots, so adding a
+/// query over another metric after `quantile_over_time(0.9, a[5m])` keeps
+/// every id of the first query's groups and candidates, at every step
+/// (the planner's own ids would interleave the two queries' groups).
 #[test]
-fn the_document_names_the_selected_logical_candidate() {
-    let document = document(
+fn memo_ids_of_a_query_do_not_move_when_another_query_is_added() {
+    let first = "quantile_over_time(0.9, a[5m])";
+    let target = json!({"max_error": 0.01, "failure_probability": 0.001});
+    let args = ["--run-until", "stage3"];
+    let alone = document(&adhoc(&[first], target.clone(), &["a"]), &args);
+    let with_another = document(
         &adhoc(
-            &[
-                "quantile_over_time(0.5, data[5m])",
-                "quantile_over_time(0.9, data[5m])",
-            ],
-            exact(),
-            &["data"],
+            &[first, "quantile_over_time(0.5, b[1m])"],
+            target,
+            &["a", "b"],
         ),
-        &["--run-until", "stage3", "--ignore-accuracy-guarantees"],
+        &args,
     );
-    let logical: HashSet<&str> = document["stage1_logical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c["id"].as_str().unwrap())
-        .collect();
-    let physical = document["stage2_physical_asap_optimization"]["candidates"]
-        .as_array()
-        .unwrap();
-    assert!(!physical.is_empty());
-    for candidate in physical {
-        let from = candidate["from_logical"].as_str().unwrap();
-        assert!(logical.contains(from), "{from} is not in {logical:?}");
+    // A group and its candidates by what they are, without the queries
+    // that reach them.
+    let shape = |group: &Value| {
+        let mut group = group.clone();
+        let object = group.as_object_mut().unwrap();
+        object.remove("queries");
+        object.remove("roots_of");
+        group
+    };
+    for step in ["stage0", "pass1", "pass2"] {
+        let groups_alone = memo_step(&alone, step)["groups"].as_array().unwrap();
+        let groups_with_another = memo_step(&with_another, step)["groups"].as_array().unwrap();
+        assert!(groups_with_another.len() > groups_alone.len(), "{step}");
+        for group in groups_alone {
+            let same = groups_with_another
+                .iter()
+                .find(|other| other["id"] == group["id"])
+                .unwrap_or_else(|| panic!("{step}: no group {}", group["id"]));
+            assert_eq!(shape(same), shape(group), "{step}");
+        }
     }
-    assert!(selects_a_plan(&document["stage3_plan_selection"]));
-    assert!(physical.iter().any(|c| c["id"] == SELECTED));
+    // The first query's root is group 0.
+    assert_eq!(
+        memo_step(&with_another, "stage0")["groups"][0]["roots_of"],
+        json!([0])
+    );
+}
+
+/// Stage 3 reports which plan nodes several queries read, by what they
+/// compute: the two windowed quantiles over one metric share their scan.
+/// One query shares nothing. Every number of the planner's output keeps
+/// at most 12 significant digits.
+#[test]
+fn the_sharing_summary_names_the_nodes_several_queries_read() {
+    let workload = json!({
+        "query_workload": {
+            "language": "promql",
+            "query_batch": null,
+            "repeating_queries": [
+                every_10s_within_1_percent("quantile_over_time(0.5, data[1m])"),
+                every_10s_within_1_percent("quantile_over_time(0.9, data[5m])"),
+            ],
+        },
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 666.67}},
+            "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}},
+        },
+    });
+    let args = ["--run-until", "stage3", "--ignore-accuracy-guarantees"];
+    let selection = &document(&workload, &args)["stage3_plan_selection"];
+    let shared = selection["sharing_summary"].as_array().unwrap();
+    assert!(
+        shared
+            .iter()
+            .any(|node| node["operator"] == "Scan" && node["queries"] == json!(["q1", "q2"])),
+        "{shared:?}"
+    );
+    assert!(shared.iter().all(|node| node.get("id").is_none()));
+    let alone = document(
+        &adhoc(&["quantile_over_time(0.9, m[5m])"], exact(), &["m"]),
+        &["--run-until", "stage3"],
+    );
+    assert_eq!(alone["stage3_plan_selection"]["sharing_summary"], json!([]));
+
+    fn assert_rounded(value: &Value) {
+        match value {
+            Value::Number(n) if n.is_f64() => {
+                let x = n.as_f64().unwrap();
+                assert_eq!(format!("{x:.11e}").parse::<f64>().unwrap(), x);
+            }
+            Value::Array(items) => items.iter().for_each(assert_rounded),
+            Value::Object(map) => map.values().for_each(assert_rounded),
+            _ => {}
+        }
+    }
+    assert_rounded(selection);
 }
 
 /// The selected plan's `per_node` entries carry the node's operator,
@@ -1476,17 +1334,20 @@ fn a_counter_function_over_a_declared_gauge_plans_with_a_warning() {
     assert!(counter["stage3_plan_selection"].get("warnings").is_none());
 }
 
-/// A relative-error quantile over `m` (1,000 series, non-negative values)
-/// whose `value` declares `column_magnitudes` when `magnitudes` is set.
+/// A relative-error quantile over `m` (1,000 series, non-negative values,
+/// ingesting) every 10 s, whose `value` declares `column_magnitudes` when
+/// `magnitudes` is set. Repeating, so a deployment without raw data can
+/// still answer it from a state built at ingestion.
 fn relative_quantile_over(magnitudes: Option<Value>) -> Value {
     let mut workload = json!({
-        "query_workload": {"language": "promql", "query_batch": [{
+        "query_workload": {"language": "promql", "query_batch": null, "repeating_queries": [{
             "query": "quantile_over_time(0.99, m[5m])",
+            "demand": {"fixed_interval_at": {"interval": 10000, "evaluation_phase": 0}},
             "requirements": {"accuracy": {"max_error": 0.01, "accuracy_metric": "relative"}},
-            "predictability": "unknown", "invocations": 1
+            "predictability": {"predictable": {"known_at": null}}
         }]},
-        "data_workload": {"arrival": "unknown", "sources": {"m": {
-            "sample_interval": 1000, "series_count": 1000, "rows_held": 600000,
+        "data_workload": {"arrival": {"ingesting": {"rows_per_second": 1000.0}}, "sources": {"m": {
+            "sample_interval": 1000, "series_count": 1000,
             "column_signs": {"value": "non_negative"}
         }}}
     });
@@ -1739,7 +1600,7 @@ fn several_workload_files_in_different_languages_are_planned_together() {
 /// source they both declare: a run is refused rather than picking one.
 /// While data arrives, each source must also declare its own rate: plan
 /// selection shares a workload's `rows_per_second` out over all its
-/// sources, so `flows` (10 groups, no sample interval) would be priced at
+/// sources, so `flows` (10 groups, no sample interval) would be costed at
 /// 1500 × 10 / 15010 ≈ 1 row/s instead of its file's 500.
 #[test]
 fn workload_files_that_disagree_on_the_data_are_refused() {
@@ -1820,13 +1681,13 @@ fn a_classic_histogram_quantile_gets_a_selected_plan() {
 const MEMO_RATIO_OF_QUANTILES: &str =
     "../../tools/dag-viewer/memo-examples/promql/ratio-of-quantiles-5m.json";
 
-/// The `memo` section: the memo after each step and its node table, on the
-/// issue's example with guarantees ignored (so Pass 1 keeps every sketch),
-/// and with guarantees enforced the selected choice.
+/// The `memo` section: the memo after each step, each candidate with its
+/// operator over its input groups, θ and one required accuracy per input,
+/// on the issue's example with guarantees ignored, and the selected
+/// candidates.
 #[test]
-fn memo_section_lists_each_step_and_the_selected_choice() {
+fn memo_section_lists_each_step_and_the_selected_candidates() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(MEMO_RATIO_OF_QUANTILES);
-    // Up to Stage 2: Stage 3 over every sketch candidate takes minutes.
     let document = document_of(&[
         "--workload",
         path.to_str().unwrap(),
@@ -1848,53 +1709,248 @@ fn memo_section_lists_each_step_and_the_selected_choice() {
     };
     // The PromQL frontend gives each series its identity as a column, so the
     // two `quantile_over_time(0.5, data[5m])` have a unique key and share one
-    // group: 7 groups (scan, range, two quantile groups, ratio, sum, avg),
-    // 5 + 5 + 5 Pass 1 candidates (each quantile group: exact, DDSketch and
-    // a KLL sized for the whole result for the whole budget, DDSketch and a
-    // KLL for half of it).
+    // group: 7 groups at Stage 0 (scan, range, two quantile groups, ratio,
+    // sum, avg). Pass 1 adds the summary-state and readout groups (19) and
+    // one candidate per θ of the lists.
     assert_eq!(steps[0]["groups"].as_array().unwrap().len(), 7);
     assert_eq!(candidates(&steps[0]), 0);
-    assert_eq!(steps[1]["groups"].as_array().unwrap().len(), 7);
-    assert_eq!(candidates(&steps[1]), 15);
-    // The node table is a valid FlatDag (children before parents) holding
-    // each node once; every group's and candidate's `node` names a node of
-    // it, and each boundary names a node and one of the candidate's child
-    // groups.
-    let nodes = memo["nodes"].as_array().unwrap();
-    validated_dag(&json!({ "nodes": nodes, "roots": [] }), 0);
-    let distinct: HashSet<String> = nodes.iter().map(Value::to_string).collect();
-    assert_eq!(distinct.len(), nodes.len());
-    let in_table = |id: &Value| (id.as_u64().unwrap() as usize) < nodes.len();
+    assert_eq!(steps[1]["groups"].as_array().unwrap().len(), 19);
+    assert_eq!(candidates(&steps[1]), 36);
+    // Every candidate is one operator over its input groups, with one
+    // requirement per input, and every group it reads is in the step.
     for step in steps {
-        for group in step["groups"].as_array().unwrap() {
-            assert!(in_table(&group["node"]) && group.get("dag").is_none());
+        let groups = step["groups"].as_array().unwrap();
+        for group in groups {
+            assert!(group.get("node").is_none() && group["operator"].is_object());
             for candidate in group["candidates"].as_array().unwrap() {
-                assert!(in_table(&candidate["node"]) && candidate.get("dag").is_none());
                 let children = candidate["children"].as_array().unwrap();
-                for (node, child) in candidate["group_of_node"].as_object().unwrap() {
-                    assert!(node.parse::<usize>().unwrap() < nodes.len());
-                    assert!(children.contains(child));
-                }
+                assert_eq!(
+                    candidate["required_accuracy"].as_array().unwrap().len(),
+                    children.len()
+                );
+                assert!(children
+                    .iter()
+                    .all(|child| groups.iter().any(|group| group["id"] == *child)));
+                assert!(candidate.get("parameters").is_some());
             }
         }
     }
-    assert!(memo.get("selected_choice").is_none());
-    // Every candidate of the selected choice exists in the last step.
-    let enforced = document_of(&[
+    assert!(memo.get("selected_candidates").is_none());
+    // Every selected candidate exists in the last step.
+    let selected = document_of(&[
         "--workload",
         path.to_str().unwrap(),
         "--run-until",
         "stage3",
+        "--ignore-accuracy-guarantees",
     ]);
-    let memo = &enforced["memo"];
+    let memo = &selected["memo"];
     let last = memo["steps"].as_array().unwrap().last().unwrap()["groups"]
         .as_array()
         .unwrap();
-    let choice = memo["selected_choice"].as_object().unwrap();
-    assert!(!choice.is_empty());
-    for (group, index) in choice {
+    let selected = memo["selected_candidates"].as_object().unwrap();
+    assert!(!selected.is_empty());
+    for (group, indices) in selected {
         let group = &last[group.parse::<usize>().unwrap()];
-        assert!(index.as_u64().unwrap() < group["candidate_count"].as_u64().unwrap());
+        for index in indices.as_array().unwrap() {
+            assert!(index.as_u64().unwrap() < group["candidate_count"].as_u64().unwrap());
+        }
+    }
+}
+
+/// Edges are listed by layer, on a p90 over 5 m within rank 0.01 every
+/// minute at phase 0 over arriving data: Pass 2's memo step lists, per
+/// input of each candidate, every producer of the input group with
+/// $\alpha^{\log}$ and the reason when it is 0 (KLL sizes too small for
+/// the readout's required accuracy), and Stage 1's `pruned_candidates` the
+/// candidates Pass 2 eliminated with their causes; Stage 2's
+/// `physical_candidates` list, per input, the physical edges whose logical
+/// edge holds, with $\alpha^{\mathrm{phys}}$ and the reason when it is 0
+/// (a query-time consumer of an ingestion-time result that is not
+/// materialized), the plan's edges marked; and Stage 2's pruned candidates
+/// carry their properties and reason.
+#[test]
+fn edges_are_listed_by_layer_with_their_alpha_and_rejection() {
+    let workload = json!({
+        "query_workload": {"language": "promql", "query_batch": null, "repeating_queries": [{
+            "query": "quantile_over_time(0.9, data[5m])",
+            "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
+            "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.01, "accuracy_metric": "rank"}},
+            "predictability": {"predictable": {"known_at": null}},
+        }]},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 1000.0}},
+            "sources": {"data": {"series_count": 1000, "sample_interval": 1000, "metric_type": "gauge"}},
+        },
+    });
+    let document = document(&workload, &["--run-until", "stage3"]);
+    let pruned = document["stage1_logical_asap_optimization"]["pruned_candidates"]
+        .as_array()
+        .unwrap();
+    assert!(!pruned.is_empty());
+    for candidate in pruned {
+        for cause in candidate["causes"].as_array().unwrap() {
+            assert!(
+                cause["root"].is_object() || cause["root"].is_string(),
+                "{cause}"
+            );
+            assert!(cause["text"].is_string(), "{cause}");
+        }
+    }
+    let pass2 = memo_step(&document, "pass2")["groups"].as_array().unwrap();
+    let (mut logical_holds, mut logical_fails) = (0, 0);
+    for group in pass2 {
+        for candidate in group["candidates"].as_array().unwrap() {
+            for input in candidate["inputs"].as_array().unwrap() {
+                let producers = pass2[input["group"].as_u64().unwrap() as usize]["candidate_count"]
+                    .as_u64()
+                    .unwrap();
+                for edge in input["edges"].as_array().unwrap() {
+                    assert!(edge["producer"].as_u64().unwrap() < producers, "{edge}");
+                    let holds = edge["satisfies_logical_requirement"] == true;
+                    assert_eq!(edge["rejection"].is_null(), holds, "{edge}");
+                    if holds {
+                        logical_holds += 1;
+                    } else {
+                        logical_fails += 1;
+                        // α^log fails, or the consumer reads only producers
+                        // of its own θ.
+                        let rejection = edge["rejection"].as_str().unwrap();
+                        assert!(
+                            rejection.starts_with("α^log = 0: ")
+                                || rejection == "no edge: the producer's θ differs",
+                            "{rejection}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(logical_holds > 0 && logical_fails > 0);
+    let stage2 = &document["stage2_physical_asap_optimization"];
+    let candidates = stage2["physical_candidates"].as_array().unwrap();
+    assert!(!candidates.is_empty());
+    let (mut physical_holds, mut physical_fails, mut selected) = (0, 0, 0);
+    for candidate in candidates {
+        assert!(candidate["properties"]["timing"].is_string());
+        for input in candidate["inputs"].as_array().unwrap() {
+            for edge in input["edges"].as_array().unwrap() {
+                assert!((edge["producer"].as_u64().unwrap() as usize) < candidates.len());
+                let holds = edge["satisfies_physical_requirement"] == true;
+                assert_eq!(edge["rejection"].is_null(), holds, "{edge}");
+                if holds {
+                    physical_holds += 1;
+                } else {
+                    physical_fails += 1;
+                    assert!(edge["rejection"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("α^phys = 0: "));
+                }
+                if edge["selected"] == true {
+                    assert!(holds, "a selected edge is admissible: {edge}");
+                    selected += 1;
+                }
+            }
+        }
+    }
+    assert!(physical_holds > 0 && physical_fails > 0);
+    let plan_edges = document["stage3_plan_selection"]["plan"]["edges"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(selected > 0 && selected <= plan_edges);
+    for pruned in stage2["pruned_candidates"].as_array().unwrap() {
+        assert!(
+            pruned["properties"]["lifetime"].is_string()
+                || pruned["properties"]["lifetime"].is_object()
+        );
+        assert!(pruned["reason"].is_string() || pruned["reason"].is_object());
+    }
+}
+
+/// Each failing logical edge shows the reason Pass 2 recorded for it,
+/// eliminated endpoints included. A q0.9 with δ over its whole result and
+/// no declared `series_count` (so $n_q$ is unknown) fails every edge into
+/// its readouts, the KLL one (G5[0] <- G4) and the DDSketch one (G7[0] <-
+/// G6), with `ValuesPerEvaluationUnknown`: Pass 2 checks that rule before
+/// the metric and accuracy rules, so the DDSketch edges do not show "no
+/// guarantee" and the KLL ones do not show `✓`.
+#[test]
+fn failing_logical_edges_show_the_reason_pass_2_recorded() {
+    let workload = json!({
+        "query_workload": {"language": "promql", "repeating_queries": [
+            {"query": "quantile_over_time(0.9, latency[5m])",
+             "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
+             "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.01, "accuracy_scope": "whole_result"}},
+             "predictability": {"predictable": {"known_at": null}}},
+            {"query": "quantile_over_time(0.5, latency[5m])",
+             "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
+             "requirements": {"accuracy": {"max_error": 0.01}},
+             "predictability": {"predictable": {"known_at": null}}},
+        ]},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 2000.0}},
+            "sources": {"latency": {"metric_type": "gauge", "sample_interval": 1000}},
+        },
+    });
+    const VALUES_PER_EVALUATION_UNKNOWN: &str = "α^log = 0: query 0: the query's failure \
+        probability covers its whole result, and the number of values one evaluation returns is \
+        unknown";
+    let args = ["--run-until", "stage1_pass2", "--printing-full-candidates"];
+    let document = document(&workload, &args);
+    let pass2 = memo_step(&document, "pass2")["groups"].as_array().unwrap();
+    let readouts: Vec<&Value> = pass2
+        .iter()
+        .filter(|group| group["label"] == "SummaryEstimate Quantile(q=0.9)")
+        .collect();
+    assert_eq!(readouts.len(), 2, "the KLL and the DDSketch readout");
+    for group in &readouts {
+        let candidate = &group["candidates"][0];
+        assert_eq!(candidate["pruned"], true, "{candidate}");
+        let edges = candidate["inputs"][0]["edges"].as_array().unwrap();
+        assert!(!edges.is_empty());
+        for edge in edges {
+            assert_eq!(edge["satisfies_logical_requirement"], false, "{edge}");
+            assert_eq!(edge["rejection"], VALUES_PER_EVALUATION_UNKNOWN, "{edge}");
+        }
+    }
+
+    let file = TempFile::json(&workload);
+    let mut text_args = vec!["--workload", file.path(), "--format", "text"];
+    text_args.extend(args);
+    let output = planner(&text_args);
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    let pass2 = text
+        .split("==================== Stage 1 Pass 2 output")
+        .nth(1)
+        .expect("a Pass 2 section");
+    // The text keeps the planner's group ids, so its readouts are found by
+    // label.
+    let blocks: Vec<&str> = pass2
+        .split("\nG")
+        .filter(|block| {
+            block
+                .lines()
+                .next()
+                .is_some_and(|header| header.contains("SummaryEstimate Quantile(q=0.9)"))
+        })
+        .collect();
+    assert_eq!(blocks.len(), 2, "{pass2}");
+    for block in blocks {
+        let edges: Vec<&str> = block
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| line.starts_with('G') && line.contains('['))
+            .collect();
+        assert!(!edges.is_empty(), "{block}");
+        for edge in edges {
+            assert!(
+                edge.ends_with(&format!("✗ {VALUES_PER_EVALUATION_UNKNOWN}")),
+                "{edge}"
+            );
+        }
     }
 }
 
@@ -1905,7 +1961,10 @@ fn text_output_shows_the_selected_plans_cost() {
     let output = planner(&["--workload", &example("example1"), "--run-until", "stage3"]);
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains("Stage 3 output: Selection"), "{text}");
+    assert!(
+        text.contains("Stage 3 output: PhysicalASAPDAG and Selection"),
+        "{text}"
+    );
     assert!(text.contains("\ncost_per_second: "), "{text}");
 }
 
@@ -1920,7 +1979,7 @@ fn memo_example(path: &str) -> String {
 }
 
 /// The arguments for raw data retained, query-time results not retained,
-/// AWS Fargate prices and enforced guarantees, with `capabilities` the
+/// AWS Fargate costs and enforced guarantees, with `capabilities` the
 /// temporary deployment capabilities file they name.
 fn milp_args(capabilities: &TempFile) -> Vec<String> {
     let aws = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1940,11 +1999,9 @@ fn raw_data_retained() -> TempFile {
 }
 
 /// #1095 C5: example 1 and the RangeHeavy T5 q0.5 + q0.9 workload select a
-/// plan whose `plan_cost` equals the MILP's objective (no
-/// `inexact_objective`), solved to optimality, and which passes every
-/// query's accuracy check.
+/// plan through the selection MILP, with an accepted accuracy per query.
 #[test]
-fn milp_search_objective_equals_plan_cost_on_example1_and_rangeheavy() {
+fn milp_search_selects_a_plan_on_example1_and_rangeheavy() {
     let capabilities = raw_data_retained();
     let rangeheavy = memo_example("promql/rangeheavy-t5-q05-q09-1h.json");
     let example1 = example("example1");
@@ -1960,19 +2017,10 @@ fn milp_search_objective_equals_plan_cost_on_example1_and_rangeheavy() {
         let document = document_of(&args);
         let selection = &document["stage3_plan_selection"];
         assert!(selects_a_plan(selection), "{args:?}: {selection}");
-        let report = &selection["search_report"];
-        assert_eq!(report["status"], "optimal", "{args:?}: {report}");
-        assert!(
-            report.get("inexact_objective").is_none(),
-            "{args:?}: {report}"
-        );
-        assert!(report["milp_variables"].as_u64().unwrap() > 0);
+        assert!(selection["milp_variables"].as_u64().unwrap() > 0);
         let queries = document["workload"]["queries"].as_array().unwrap().len();
         let accepted = selection["accepted_accuracy_per_query"].as_array().unwrap();
         assert_eq!(accepted.len(), queries);
-        for query in accepted {
-            assert_eq!(query["accepted_regardless_of_guarantee"], false, "{query}");
-        }
     }
 }
 
@@ -2005,7 +2053,6 @@ fn milp_search_selects_checked_plans_on_ratio_and_rollupheavy() {
         let accepted = selection["accepted_accuracy_per_query"].as_array().unwrap();
         assert_eq!(accepted.len(), queries);
         for query in accepted {
-            assert_eq!(query["accepted_regardless_of_guarantee"], false, "{query}");
             assert!(
                 !query["sketches"]
                     .as_array()
@@ -2015,12 +2062,6 @@ fn milp_search_selects_checked_plans_on_ratio_and_rollupheavy() {
                 "{workload}: {query}"
             );
         }
-        let pruned = pass1_pruned(&document);
-        assert!(
-            pruned.iter().any(|(family, reason)| family == pruned_family
-                && reason == "NoErrorBoundForQueryTarget"),
-            "{workload}: {pruned:?}"
-        );
     }
 }
 
@@ -2039,12 +2080,11 @@ fn milp_search_selects_a_checked_ddsketch_plan_for_a_ratio_and_its_operands() {
     let selection = &document["stage3_plan_selection"];
     assert!(selects_a_plan(selection), "{selection}");
     for query in selection["accepted_accuracy_per_query"].as_array().unwrap() {
-        assert_eq!(query["accepted_regardless_of_guarantee"], false, "{query}");
         assert_eq!(query["sketches"], json!(["DDSketch"]), "{query}");
     }
 }
 
-/// The viewer's cost-input files carry the prices of the presets they are
+/// The viewer's cost-input files carry the costs of the presets they are
 /// named after, so a change to `crates/cost`'s constants fails here instead
 /// of leaving the viewer and the snapshots on the old numbers.
 #[test]
@@ -2070,5 +2110,185 @@ fn cost_input_files_match_their_presets() {
         let expected: CostInputs =
             serde_json::from_str(&serde_json::to_string(&expected).unwrap()).unwrap();
         assert_eq!(loaded, expected, "{file}");
+    }
+}
+
+/// The text output's memo after Pass 2 is complete: every group has its
+/// operator and a properties line (each column's lineage and sign, whether
+/// the sources it scans, its evaluation grid); a sketch build shows
+/// its θ and a readout its required accuracy; Pass 2's and Stage 2's
+/// pruned candidates are listed with their causes; every `G<n>` named
+/// resolves to a printed group. Workload: two windowed quantiles every
+/// 10 s within 1 % (the shared-scan workload), printed with `--printing-full-candidates`.
+#[test]
+fn the_text_memo_after_pass_2_prints_every_group_with_its_properties() {
+    let workload = two_windowed_quantiles_within_1_percent();
+    let file = TempFile::json(&workload);
+    let output = planner(&[
+        "--workload",
+        file.path(),
+        "--run-until",
+        "stage3",
+        "--format",
+        "text",
+        "--printing-full-candidates",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    let pass2 = text
+        .split("==================== Stage 1 Pass 2 output")
+        .nth(1)
+        .and_then(|rest| rest.split("==================== Stage 2 output").next())
+        .expect("a Pass 2 section");
+    let lines: Vec<&str> = pass2.lines().collect();
+    let mut groups = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let Some(id) = line
+            .strip_prefix('G')
+            .and_then(|rest| rest.split(':').next())
+        else {
+            continue;
+        };
+        let Ok(id) = id.parse::<usize>() else {
+            continue;
+        };
+        groups.push(id);
+        let properties = lines[index + 1];
+        assert!(
+            properties.contains('=') && properties.contains(':'),
+            "G{id}'s columns with lineage and sign: {properties}"
+        );
+        assert!(properties.contains(" · scans "), "{properties}");
+        assert!(
+            properties.contains("evaluated every")
+                || properties.contains("no known evaluation grid"),
+            "{properties}"
+        );
+    }
+    assert_eq!(
+        groups,
+        (0..groups.len()).collect::<Vec<_>>(),
+        "groups in order"
+    );
+    for line in &lines {
+        let candidate = line.trim_start();
+        if candidate.contains("SummaryAgg") && candidate.starts_with('[') {
+            assert!(candidate.contains("θ="), "a build shows its θ: {candidate}");
+        }
+        if candidate.contains("SummaryEstimate")
+            && candidate.starts_with('[')
+            && !candidate.contains("pruned")
+        {
+            assert!(
+                candidate.contains("requires="),
+                "a readout shows its requirement: {candidate}"
+            );
+        }
+        for word in line.split(|c: char| !c.is_ascii_alphanumeric()) {
+            if let Some(id) = word
+                .strip_prefix('G')
+                .and_then(|id| id.parse::<usize>().ok())
+            {
+                assert!(id < groups.len(), "G{id} resolves: {line}");
+            }
+        }
+    }
+    assert!(
+        pass2.contains("pruned by Pass 2"),
+        "Pass 2's pruned candidates"
+    );
+    assert!(
+        text.contains("pruned by Stage 2"),
+        "Stage 2's pruned candidates"
+    );
+    assert!(text.contains("==================== Stage 3 output"));
+}
+
+/// Two windowed quantiles every 10 s within 1 % over 10,000 series every
+/// 15 s (the shared-scan workload).
+fn two_windowed_quantiles_within_1_percent() -> serde_json::Value {
+    json!({
+        "query_workload": {
+            "language": "promql",
+            "query_batch": null,
+            "repeating_queries": [
+                every_10s_within_1_percent("quantile_over_time(0.5, data[1m])"),
+                every_10s_within_1_percent("quantile_over_time(0.9, data[5m])"),
+            ],
+        },
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 666.67}},
+            "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}},
+        },
+    })
+}
+
+/// Without `--printing-full-candidates` the text folds the candidates of a group that differ
+/// only in θ: a line with their indices (`[0..39]`), one with each θ
+/// parameter's values (`θ: k ∈ {...}`) and one with how many Pass 2 pruned
+/// by cause and kept, whose counts add up; the candidates Pass 2 kept are
+/// still printed with their θ. The folded text is shorter than `--printing-full-candidates`.
+#[test]
+fn the_text_folds_candidates_that_differ_only_in_theta() {
+    let file = TempFile::json(&two_windowed_quantiles_within_1_percent());
+    let text = |extra: &[&str]| {
+        let mut args = vec![
+            "--workload",
+            file.path(),
+            "--run-until",
+            "stage3",
+            "--format",
+            "text",
+        ];
+        args.extend(extra);
+        let output = planner(&args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let (folded, printed_in_full) = (text(&[]), text(&["--printing-full-candidates"]));
+    assert!(folded.lines().count() < printed_in_full.lines().count());
+    let pass2 = folded
+        .split("==================== Stage 1 Pass 2 output")
+        .nth(1)
+        .and_then(|rest| rest.split("==================== Stage 2 output").next())
+        .expect("a Pass 2 section");
+    let lines: Vec<&str> = pass2.lines().map(str::trim_start).collect();
+    let mut folds = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let Some(counts) = line.split_once(" candidates: ") else {
+            continue;
+        };
+        folds += 1;
+        assert!(lines[index - 1].starts_with("θ: "), "{}", lines[index - 1]);
+        assert!(lines[index - 2].starts_with('['), "{}", lines[index - 2]);
+        let total: usize = counts.0.parse().unwrap();
+        let pruned: usize = counts.1.split(' ').next().unwrap().parse().unwrap();
+        let kept: usize = counts
+            .1
+            .rsplit(", ")
+            .next()
+            .and_then(|kept| kept.strip_suffix(" kept"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(pruned > 0, "{line}");
+        assert_eq!(pruned + kept, total, "{line}");
+    }
+    assert!(folds > 0, "a folded group:\n{pass2}");
+    for (index, line) in lines.iter().enumerate() {
+        let fold_line = lines
+            .get(index + 1)
+            .is_some_and(|next| next.starts_with("θ: "));
+        if line.starts_with('[') && line.contains("SummaryAgg") && !fold_line {
+            assert!(line.contains("θ="), "a kept build shows its θ: {line}");
+        }
     }
 }
