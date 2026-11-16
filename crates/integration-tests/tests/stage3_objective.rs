@@ -8,7 +8,9 @@ use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_ove
 use asap_planner::{DeploymentCapabilities, PlanningModels};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::NonASAPOp;
-use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use asap_types::plan::physical_asap_dag::{
+    PhysicalASAPDAG, PhysicalASAPNodeId, PhysicalASAPOperatorPayload,
+};
 use asap_types::stages::Lifetime;
 use asap_types::workload::PlanningWorkload;
 
@@ -87,6 +89,77 @@ fn assert_equal(name: &str, (objective, plan_cost): (f64, f64)) {
         (objective - plan_cost).abs() <= 1e-9 * plan_cost.abs().max(1e-12),
         "{name}: objective {objective} != plan_cost {plan_cost}"
     );
+}
+
+/// The ids of the plan's `Scan` nodes, each with how many of the plan's
+/// roots (queries) read it, directly or through other nodes: a `Scan` read
+/// by 2 of 2 queries is one scan they share.
+fn scans_and_their_reading_query_counts(
+    plan: &PhysicalASAPDAG,
+) -> Vec<(PhysicalASAPNodeId, usize)> {
+    let reads = |root: PhysicalASAPNodeId, target: PhysicalASAPNodeId| {
+        let mut pending = vec![root];
+        let mut seen = vec![root];
+        while let Some(node) = pending.pop() {
+            if node == target {
+                return true;
+            }
+            for edge in plan.edges.iter().filter(|edge| edge.consumer == node) {
+                if !seen.contains(&edge.producer) {
+                    seen.push(edge.producer);
+                    pending.push(edge.producer);
+                }
+            }
+        }
+        false
+    };
+    plan.nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
+            )
+        })
+        .map(|node| {
+            let readers = plan
+                .roots
+                .iter()
+                .filter(|&&root| reads(root, node.id))
+                .count();
+            (node.id, readers)
+        })
+        .collect()
+}
+
+/// Asserts that `plan` has one `Scan`, read by all `query_count` queries.
+fn assert_one_scan_read_by_every_query(plan: &PhysicalASAPDAG, query_count: usize) {
+    assert_eq!(
+        scans_and_their_reading_query_counts(plan)
+            .iter()
+            .map(|&(_, readers)| readers)
+            .collect::<Vec<_>>(),
+        vec![query_count],
+        "expected one Scan read by all {query_count} queries"
+    );
+}
+
+/// `plan_cost` per second of the plan Stage 3 selects for each of the
+/// `queries` planned alone.
+fn costs_of_queries_planned_alone(
+    queries: &[serde_json::Value],
+    workload_of: impl Fn(&[serde_json::Value]) -> PlanningWorkload,
+    models: impl Fn() -> PlanningModels<'static>,
+) -> Vec<f64> {
+    queries
+        .iter()
+        .map(|query| {
+            let alone = workload_of(std::slice::from_ref(query));
+            selected_plan_objective_and_plan_cost_with(&alone, models(), &CostInputs::default())
+                .1
+                 .1
+        })
+        .collect()
 }
 
 /// Unit costs that charge what the default ones leave at 0: 50 µs of
@@ -246,29 +319,43 @@ fn raw_data_on_disk_costing_less_than_the_solver_tolerance_still_steers_selectio
 /// Two windowed quantiles over one metric (1 m and 5 m, every 10 s; 10,000
 /// series every 15 s), accuracy not enforced: the selected plan shares one
 /// query-time scan, whose execution reads the 5 m window once and retains
-/// it ($h_v$, constraint (R)), at most 0.144/s.
+/// it ($h_v$, constraint (R)). It costs less than the two queries planned
+/// alone, which each read the metric once.
 #[test]
 fn the_objective_is_the_plan_cost_on_a_shared_scan() {
-    let w: PlanningWorkload = serde_json::from_value(serde_json::json!({
-        "query_workload": {
-            "language": "promql",
-            "query_batch": null,
-            "repeating_queries": [
-                every_10s("quantile_over_time(0.5, data[1m])"),
-                every_10s("quantile_over_time(0.9, data[5m])"),
-            ],
-        },
-        "data_workload": {
-            "arrival": {"ingesting": {"rows_per_second": 666.67}},
-            "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}},
-        },
-    }))
-    .unwrap();
-    let models = PlanningModels::builtin().with_ignore_accuracy_guarantees(true);
-    let (_, (objective, plan_cost)) =
-        selected_plan_objective_and_plan_cost_with(&w, models, &CostInputs::default());
+    let queries = [
+        every_10s("quantile_over_time(0.5, data[1m])"),
+        every_10s("quantile_over_time(0.9, data[5m])"),
+    ];
+    let workload_of = |queries: &[serde_json::Value]| -> PlanningWorkload {
+        serde_json::from_value(serde_json::json!({
+            "query_workload": {
+                "language": "promql",
+                "query_batch": null,
+                "repeating_queries": queries,
+            },
+            "data_workload": {
+                "arrival": {"ingesting": {"rows_per_second": 666.67}},
+                "sources": {"data": {"series_count": 10000, "metric_type": "gauge", "sample_interval": 15000}},
+            },
+        }))
+        .unwrap()
+    };
+    let models = || PlanningModels::builtin().with_ignore_accuracy_guarantees(true);
+    let (plan, (objective, plan_cost)) = selected_plan_objective_and_plan_cost_with(
+        &workload_of(&queries),
+        models(),
+        &CostInputs::default(),
+    );
     assert_equal("shared scan", (objective, plan_cost));
-    assert!(plan_cost <= 0.144, "{plan_cost}");
+    assert_one_scan_read_by_every_query(&plan, 2);
+    let alone: f64 = costs_of_queries_planned_alone(&queries, workload_of, models)
+        .iter()
+        .sum();
+    assert!(
+        plan_cost < alone,
+        "shared {plan_cost} is not below the two queries planned alone, {alone}"
+    );
 }
 
 /// The o11y benchmark's q21: `sum(rate(..[5m] offset 1h))`, a 1 h range
@@ -505,26 +592,63 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     let (objective, plan_cost) =
         selected_plan_objective_and_plan_cost_with(&w, models, &CostInputs::default()).1;
     assert_equal("one-off queries over years", (objective, plan_cost));
-    assert!(objective < 30_000.0, "objective {objective}");
+    // The same queries over arriving rows only, with no raw data kept (a
+    // deployment that stores nothing, as `mixed` arrival does): only
+    // ingestion-time views over the arriving rows can answer them, the
+    // kind of plan the objective's scale once led the solver to. Reading
+    // raw data at query time is cheaper.
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        ..Default::default()
+    };
+    let views_only = PlanningModels::builtin()
+        .with_ignore_accuracy_guarantees(true)
+        .with_deployment_capabilities(&capabilities);
+    let mut ingesting = serde_json::to_value(&w).unwrap();
+    ingesting["data_workload"]["arrival"] =
+        serde_json::json!({"ingesting": {"rows_per_second": 1_000_000.0 / 15.0}});
+    let ingesting: PlanningWorkload = serde_json::from_value(ingesting).unwrap();
+    let (_, (_, views_only_plan_cost)) =
+        selected_plan_objective_and_plan_cost_with(&ingesting, views_only, &CostInputs::default());
+    assert!(
+        plan_cost < views_only_plan_cost,
+        "selected {plan_cost} is not below the ingestion-time views plan, {views_only_plan_cost}"
+    );
 }
 
 /// `sum_over_time(m[5m] @ end())` and `sum_over_time(m[5m])`, both instant
 /// every 60 s: an instant query's `@ end()` is its evaluation time, so the
 /// anchored input runs in the evaluation context and shares `m[5m]` with
-/// the plain query, in the MILP and in `plan_cost` alike (0.0360/s; in a
-/// request context of its own it cost 0.0620/s).
+/// the plain query, in the MILP and in `plan_cost` alike. The two cost less
+/// than planned alone, which is what any plan that does not share `m[5m]`
+/// (such as one in a request context of its own) costs.
 #[test]
 fn an_instant_at_end_input_shares_the_evaluation_context() {
-    let w = over_m(vec![
+    let queries = [
         requested("sum_over_time(m[5m] @ end())", 60_000, None),
         requested("sum_over_time(m[5m])", 60_000, None),
-    ]);
-    let (objective, plan_cost) = objective_and_plan_cost(&w, &CostInputs::default(), true);
+    ];
+    let (plan, (objective, plan_cost)) = selected_plan_objective_and_plan_cost_with(
+        &over_m(queries.to_vec()),
+        PlanningModels::builtin(),
+        &CostInputs::default(),
+    );
     assert_equal(
         "instant @ end() beside a plain query",
         (objective, plan_cost),
     );
-    assert!(objective < 0.04, "objective {objective}");
+    assert_one_scan_read_by_every_query(&plan, 2);
+    let alone: f64 = costs_of_queries_planned_alone(
+        &queries,
+        |queries| over_m(queries.to_vec()),
+        PlanningModels::builtin,
+    )
+    .iter()
+    .sum();
+    assert!(
+        plan_cost < alone,
+        "shared {plan_cost} is not below the two queries planned alone, {alone}"
+    );
 }
 
 /// `sum_over_time(m[1m])` every 20 s at phase 10 s and

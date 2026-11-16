@@ -12,8 +12,11 @@ use asap_executor::{
     values::{Batch, Value},
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_integration_tests::planning::{logical_candidates_ignoring_guarantees, selected_dag};
+use asap_integration_tests::planning::{
+    logical_candidates_ignoring_guarantees, logical_candidates_ignoring_guarantees_on, selected_dag,
+};
 use asap_types::accuracy::AccuracyTarget;
+use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate};
@@ -267,11 +270,20 @@ async fn hand_filtered_kll_compiles_and_executes() {
 }
 
 /// The KLL candidates of `sql`, unchanged, every guarantee accepted (as
-/// [`hand_filtered`]).
+/// [`hand_filtered`]), on an executor that builds only KLL.
 async fn kll_candidates(sql: &str) -> Vec<Rc<OperatorNode>> {
     let target = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+    let kll_only = DeploymentCapabilities {
+        supported_summaries: Some(
+            asap_executor::supported_summary_families()
+                .into_iter()
+                .filter(|family| family.summary_type == SketchAlgorithm::Kll)
+                .collect(),
+        ),
+        ..DeploymentCapabilities::default()
+    };
     let roots: Vec<_> =
-        logical_candidates_ignoring_guarantees(lower(sql).await, target)
+        logical_candidates_ignoring_guarantees_on(lower(sql).await, target, &kll_only)
             .into_iter()
             .filter(|root| {
                 OperatorNode::reachable(root).iter().any(|n| {
