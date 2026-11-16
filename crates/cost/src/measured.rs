@@ -33,10 +33,6 @@
 //! (operations × `ms_per_cpu_op`) is the measured time, and every cost model
 //! prices it as it prices any operation.
 //!
-//! The table of earlier versions, a JSON array of [`MeasuredOperationCost`]
-//! (one sketch operation each), still loads: each entry becomes the
-//! [`OperatorCost`] of its operator at both phases.
-//!
 //! [`CostInputs::measured_operation_costs`]: crate::CostInputs::measured_operation_costs
 //! [`ResourceUsage`]: crate::ResourceUsage
 //! [`ResourceSpeed`]: crate::ResourceSpeed
@@ -53,32 +49,19 @@ use serde::{Deserialize, Serialize};
 use crate::node::analytical::AnalyticalCostError;
 
 /// The deployment's measured cost table
-/// ([`CostInputs::measured_operation_costs`]). In JSON, an object
-/// with these fields, or (the format of earlier versions) an array of
-/// [`MeasuredOperationCost`]. Default: empty, every node priced from the
-/// formulas.
+/// ([`CostInputs::measured_operation_costs`]). In JSON, an object with
+/// these fields; an omitted field takes its default, an unknown one is
+/// refused. Default: empty, every node priced from the formulas.
 ///
 /// [`CostInputs::measured_operation_costs`]: crate::CostInputs::measured_operation_costs
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct MeasuredOperationCosts {
     /// One entry per (operator, phase, family) the runtime measured.
     pub operators: Vec<OperatorCost>,
     /// CPU nanoseconds the runtime pays once per query request, whatever
     /// its plan: scheduling, request handling and result encoding. Default 0.
     pub ns_per_evaluation: f64,
-    /// Which executor and machine the numbers were measured with; the table
-    /// is re-measured when either changes. Recorded, not read.
-    pub provenance: Option<CostTableProvenance>,
-}
-
-/// Where a measured table's numbers come from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CostTableProvenance {
-    /// The executor build measured, e.g. a crate version or commit.
-    pub executor_version: String,
-    /// The machine it ran on, e.g. a CPU model or instance type.
-    pub machine: String,
 }
 
 /// The measured CPU time of one operator kind, at one phase, for one family.
@@ -420,99 +403,6 @@ pub(crate) fn validate(
         }
     }
     Ok(())
-}
-
-// ── The format of earlier versions ──────────────────────────────────────
-
-/// One operation on a sketch's state, as an entry of the earlier format
-/// ([`MeasuredOperationCost`]) names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SummaryOperation {
-    /// Insert one input row: a `SummaryAgg` or `SummaryTumblingWindowChain` entry.
-    Update,
-    /// Merge one input state into another: a `SummaryMerge` entry.
-    Merge,
-    /// Read one result out of one state: a `SummaryEstimate` entry.
-    Estimate,
-}
-
-/// An entry of the earlier format, still loadable: the measured CPU time of
-/// one operation on one sketch configuration. It becomes the
-/// [`OperatorCost`] of its operator (both `SummaryAgg` and `SummaryTumblingWindowChain` for
-/// an update) at both phases.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MeasuredOperationCost {
-    /// The sketch and its parameters, e.g. `{"Kll": {"k": 200}}`.
-    pub sketch: SketchParams,
-    /// Which operation was measured.
-    pub operation: SummaryOperation,
-    /// CPU nanoseconds one such operation takes on one core.
-    pub cpu_ns_per_operation: f64,
-}
-
-impl From<Vec<MeasuredOperationCost>> for MeasuredOperationCosts {
-    fn from(entries: Vec<MeasuredOperationCost>) -> Self {
-        let operators = entries
-            .into_iter()
-            .flat_map(|entry| {
-                let kinds: &[OperatorKind] = match entry.operation {
-                    SummaryOperation::Update => &[
-                        OperatorKind::SummaryAgg,
-                        OperatorKind::SummaryTumblingWindowChain,
-                    ],
-                    SummaryOperation::Merge => &[OperatorKind::SummaryMerge],
-                    SummaryOperation::Estimate => &[OperatorKind::SummaryEstimate],
-                };
-                kinds
-                    .iter()
-                    .map(|&operator| OperatorCost {
-                        operator,
-                        phase: None,
-                        sketch: Some(entry.sketch.clone()),
-                        exact: None,
-                        measure: None,
-                        ns_per_unit: entry.cpu_ns_per_operation,
-                        ns_per_invocation: 0.0,
-                        memory_bytes_per_state: None,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        Self {
-            operators,
-            ..Self::default()
-        }
-    }
-}
-
-/// Reads the table, or an array in the earlier format.
-impl<'de> Deserialize<'de> for MeasuredOperationCosts {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::Error;
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if value.is_array() {
-            return Vec::<MeasuredOperationCost>::deserialize(value)
-                .map(Self::from)
-                .map_err(D::Error::custom);
-        }
-        let fields = TableFields::deserialize(value).map_err(D::Error::custom)?;
-        Ok(Self {
-            operators: fields.operators,
-            ns_per_evaluation: fields.ns_per_evaluation,
-            provenance: fields.provenance,
-        })
-    }
-}
-
-/// The table's fields as JSON states them; omitted ones take their default.
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct TableFields {
-    operators: Vec<OperatorCost>,
-    ns_per_evaluation: f64,
-    provenance: Option<CostTableProvenance>,
 }
 
 /// Which costs one node's CPU operations came from. A node is one operator
