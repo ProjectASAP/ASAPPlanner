@@ -266,3 +266,23 @@ test('the upgrade keeps key order, never lets an old key overwrite a new one, an
   assert.deepEqual(call('upgradeTumblingWindowNames', report),
     { candidates_by_origin: { Pass1: 1, TumblingWindows: 3 }, chosen: { origin: 'TumblingWindows' } });
 });
+
+test('the deployment line names each capability left out and the caller exclusions', () => {
+  const text = call('deploymentText', {
+    raw_data_retained: true,
+    query_time_results_retained: false,
+    counter_semantics: { reset_handling: true, extrapolation: false },
+    state_not_mergeable_across_windows: [{ exact: 'Rate' }],
+    excluded_candidates: [
+      { timing: 'query_time', operator: 'Scan' },
+      { operator: 'Aggregate', per_entity_reduction: true },
+    ],
+  });
+  assert.match(text, /counter extrapolation not supported/);
+  assert.doesNotMatch(text, /counter resets not handled/);
+  assert.match(text, /not mergeable across windows: exact Rate/);
+  assert.match(text, /excluded candidates: 2/);
+  // The defaults leave nothing out, so the line names none of them.
+  const defaults = call('deploymentText', { raw_data_retained: true, query_time_results_retained: false });
+  assert.doesNotMatch(defaults, /counter|mergeable|excluded/);
+});

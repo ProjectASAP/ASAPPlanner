@@ -10,6 +10,7 @@ mod aggregate;
 mod binary_op;
 mod crate_graph;
 mod default_cost_plan_ranking;
+mod deployment_exclusions;
 mod exact_reduce_execution;
 mod filtered_aggregates;
 mod finer_aggregate_reuse;

@@ -318,7 +318,8 @@ fn wire_name<T: serde::Serialize>(value: T) -> String {
 /// The viewer knows every `MaterializedViewRefresh`
 /// (`materialized_views[].refresh`) and every Stage 3 `RejectionCause`, and
 /// splits the causes into failed checks and losses as
-/// `RejectionCause::failed_a_check` does.
+/// `RejectionCause::failed_a_check` does: `excluded_by_deployment` is not a
+/// failed check, since the excluded candidates were valid.
 #[test]
 fn viewer_knows_every_view_refresh_and_rejection_cause() {
     use asap_planner::MaterializedViewRefresh as R;
@@ -350,6 +351,7 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
         C::Slower,
         C::MoreMemory,
         C::TiedLostOnEnumerationOrder,
+        C::ExcludedByDeployment,
     ];
     for cause in causes {
         match cause {
@@ -363,7 +365,8 @@ fn viewer_knows_every_view_refresh_and_rejection_cause() {
             | C::Costlier
             | C::Slower
             | C::MoreMemory
-            | C::TiedLostOnEnumerationOrder => {}
+            | C::TiedLostOnEnumerationOrder
+            | C::ExcludedByDeployment => {}
         }
     }
     let failed: BTreeSet<String> = causes

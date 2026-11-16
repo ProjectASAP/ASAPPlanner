@@ -68,7 +68,10 @@ pub use asap_frontend_sql::SqlCatalog;
 pub use asap_stage3_plan_selection::{
     AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, Selection,
 };
-pub use asap_types::deployment_capabilities::{DeploymentCapabilities, SupportedSummary};
+pub use asap_types::deployment_capabilities::{
+    CandidateExclusion, CounterSemantics, CounterSemanticsSupport, DeploymentCapabilities,
+    ExclusionSource, SketchReadout, SupportedSummary,
+};
 pub use asap_types::ir::properties::selection::{
     Constraint, IntervalConstraintLimit, SelectionBox,
 };
@@ -79,7 +82,9 @@ pub use asap_types::plan::materialized_view::{
 };
 pub use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId, ViewCoverage};
 pub use asap_types::plan::TimeWindow;
-pub use asap_types::summary_type::{SketchAlgorithm, SketchParams, StatisticKind};
+pub use asap_types::summary_type::{
+    SketchAlgorithm, SketchParameterRange, SketchParams, StatisticKind, SummaryFamily,
+};
 pub use asap_types::workload::PlanningWorkload;
 
 // ── Input ────────────────────────────────────────────────────────────────
