@@ -322,7 +322,7 @@ pub fn plan_cost(
             || {
                 // A partial copy merges into a state of the same window.
                 let state_bytes = state_bytes_per_row(output[&id], &nodes[&id].output_schema);
-                merge_operations_per_state(family, state_bytes, state_bytes)
+                merge_operations_per_state(family, state_bytes, state_bytes, None, 1)
                     * speed.ms_per_cpu_op
                     * formula_scale
             },

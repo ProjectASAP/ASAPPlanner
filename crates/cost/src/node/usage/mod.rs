@@ -25,8 +25,8 @@ use crate::node::analytical::{
 use crate::node::operations_per_unit::{
     chain_emit_operations_per_state, estimate_operations_per_group,
     hash_aggregate_operations_per_row, merge_operations_per_state, merge_output_operations,
-    update_operations_per_row, StateLastWrittenBy, CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL,
-    CHAIN_OPERATIONS_PER_ARRIVING_ROW, CHAIN_WINDOW_OPERATIONS_PER_GROUP_PER_RAW_BATCH,
+    pass_through_merge_operations, update_operations_per_row, StateLastWrittenBy,
+    CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL, CHAIN_OPERATIONS_PER_ARRIVING_ROW,
     OPERATIONS_PER_GROUP_PER_RAW_BATCH, OUTPUT_ROW_OPERATIONS_PER_GROUP,
     TIME_RANGE_OPERATIONS_PER_ROW,
 };
@@ -42,7 +42,7 @@ use crate::{
     CalibrationFit, CostInputs, NodeCostSource, OperatorKind, COST_SOURCE, MEASURED_COST_SOURCE,
     MIXED_COST_SOURCE,
 };
-use asap_types::ir::operator::{GroupKeys, Reduction, Source};
+use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::resolve_column_ref;
 use asap_types::ir::schema::{FieldDataType, Schema};
@@ -225,6 +225,16 @@ pub struct ProducerOutput<'a> {
     /// windows of a 1 Hz series passes on 10 rows per state, and a merge
     /// over it outputs states of 3,600 rows.
     pub state_input_rows: Option<StateInputRows>,
+    /// The time, in ms, that the raw rows it outputs span: a scan's
+    /// lookback (one second of arriving rows at ingestion time, the
+    /// retained rows of raw data materialized at ingestion), narrowed by a
+    /// `TimeRange`, passed on by the operators that keep each row's window
+    /// (a `Filter` keeps the span of the rows it drops); `None` for any
+    /// other node, whose rows are not raw rows. A grouping counts the raw
+    /// batches its input arrives in from it. Example: `latency > 100` over
+    /// a 5 min scan spans 300,000 ms, 30 batches of 10 s, however few rows
+    /// it keeps.
+    pub raw_rows_span_ms: Option<u64>,
 }
 
 impl ProducerOutput<'_> {
@@ -274,6 +284,9 @@ pub struct NodeResourceUsageAndCost<'a> {
     /// What each summary state it outputs folds
     /// ([`ProducerOutput::state_input_rows`]).
     pub state_input_rows: Option<StateInputRows>,
+    /// The time its raw output rows span
+    /// ([`ProducerOutput::raw_rows_span_ms`]).
+    pub raw_rows_span_ms: Option<u64>,
     /// Work of one execution, in ms on one core.
     pub work_ms_per_execution: f64,
     /// CPU operations per second.
@@ -315,6 +328,7 @@ impl<'a> NodeResourceUsageAndCost<'a> {
             tumbling_windows: self.tumbling_windows,
             chain_tumbling_window_width_ms: self.chain_tumbling_window_width_ms,
             state_input_rows: self.state_input_rows,
+            raw_rows_span_ms: self.raw_rows_span_ms,
         }
     }
 }
@@ -390,6 +404,9 @@ pub fn node_resource_usage_and_cost<'a>(
     // What each summary state it outputs folds, when it builds or merges
     // states (else passed on below).
     let mut built_state_input_rows: Option<StateInputRows> = None;
+    // The time its raw output rows span, when it reads or narrows raw rows
+    // (else passed on below).
+    let mut read_raw_rows_span_ms: Option<u64> = None;
     let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
     // The outputs a node retains: its `retention_ms` over the time between
     // two outputs, at least one. A chain's outputs are its tumbling
@@ -566,6 +583,49 @@ pub fn node_resource_usage_and_cost<'a>(
                 (non_negative, range)
             })
     };
+    // The distinct values a source column passed on unchanged takes per
+    // evaluation, as every source declares them
+    // (`distinct_values_per_label`, summed over the sources); `None` for a
+    // computed column or when one does not.
+    let declared_distinct_values = |column: Option<&str>| -> Option<u64> {
+        let column = column?;
+        if sources.is_empty() {
+            return None;
+        }
+        sources.iter().try_fold(0_u64, |total, source| {
+            Some(
+                total.saturating_add(
+                    *data
+                        .sources
+                        .get(*source)?
+                        .distinct_values_per_label
+                        .get(column)?,
+                ),
+            )
+        })
+    };
+    // The distinct items one output row's state holds at most per
+    // evaluation (`max_distinct_per_evaluation`, summed over the sources).
+    let distinct_items_per_group = || -> Option<u64> {
+        if sources.is_empty() {
+            return None;
+        }
+        sources.iter().try_fold(0_u64, |total, source| {
+            Some(total.saturating_add(data.sources.get(*source)?.max_distinct_per_evaluation?))
+        })
+    };
+    // The values the column a summary built here folds takes in one state:
+    // the fewer of its declared distinct values and the sources' bound per
+    // output row; `None` when neither is declared.
+    let folded_distinct_values = |update: &SummaryUpdate| -> Option<u64> {
+        let column = producers
+            .first()
+            .and_then(|producer| producer.unchanged_column(&update.weight));
+        [declared_distinct_values(column), distinct_items_per_group()]
+            .into_iter()
+            .flatten()
+            .min()
+    };
     // The bytes of each summary state its first input holds.
     let input_state_bytes = || {
         producers.first().map_or(0, |producer| {
@@ -623,6 +683,10 @@ pub fn node_resource_usage_and_cost<'a>(
             (_, None) => rows_read(),
         },
     };
+    // The time its input's raw rows span, when its input is raw rows.
+    let input_raw_rows_span_ms = producers
+        .first()
+        .and_then(|producer| producer.raw_rows_span_ms);
     // The times a grouping into `group_count` groups visits a group's
     // state: once per group per batch of raw rows its input arrives in
     // (`group_raw_batch_visits`).
@@ -630,7 +694,7 @@ pub fn node_resource_usage_and_cost<'a>(
         group_raw_batch_visits(
             input.rows,
             group_count,
-            rows_per_ms,
+            input_raw_rows_span_ms,
             speed.raw_batch_width_ms,
             ingestion,
         )
@@ -692,6 +756,18 @@ pub fn node_resource_usage_and_cost<'a>(
                     true => edge(raw_retained_rows.ok_or(retained_without_a_bound(source))?)?,
                     false => out,
                 };
+                // The time those rows span: one second at ingestion time,
+                // the retention of raw data materialized there, at query
+                // time the rows read at the sources' rate (its lookback,
+                // less when fewer rows are held).
+                read_raw_rows_span_ms = match (ingestion, raw_rows_materialized_at_ingestion) {
+                    (_, true) => node.retention_ms,
+                    (true, false) => Some(ONE_SECOND_MS),
+                    (false, false) => rows_per_ms
+                        .filter(|rows_per_ms| *rows_per_ms > 0.0)
+                        .map(|rows_per_ms| (out.rows as f64 / rows_per_ms).round() as u64)
+                        .or(lookback),
+                };
                 (out, estimate, format!("scan {} samples", out.rows))
             }
             NonASAPOp::Aggregate {
@@ -703,8 +779,53 @@ pub fn node_resource_usage_and_cost<'a>(
                 let keys = grouping_key_count(reduction);
                 let out = edge(group_count)?;
                 let held = input.rows.div_ceil(group_count.max(1));
-                let operations_per_row = hash_aggregate_operations_per_row(keys, measures, held)
-                    + carried_label_operations_per_row(&node.output_schema, reduction);
+                // The values its distinct counts and frequency statistics
+                // read: the most any one's columns take together, as
+                // declared for source columns passed on unchanged, else
+                // every row's differs; at most each group's bound on
+                // distinct items, and the rows read.
+                let declared_together = |cols: &[usize]| -> Option<u64> {
+                    let unchanged = &producers.first()?.unchanged_columns;
+                    cols.iter().try_fold(1_u64, |product, &col| {
+                        let name = input_schema?.fields.get(col)?.name.as_str();
+                        let values =
+                            declared_distinct_values(unchanged.contains(name).then_some(name))?;
+                        Some(product.saturating_mul(values))
+                    })
+                };
+                let distinct_values = measures
+                    .iter()
+                    .filter_map(|measure| {
+                        if let AggIntent::Cardinality { cols } = measure {
+                            Some(cols.clone())
+                        } else if let AggIntent::FrequencyL2 { col }
+                        | AggIntent::FrequencyEntropy { col } = measure
+                        {
+                            Some(col.iter().copied().collect())
+                        } else {
+                            None
+                        }
+                    })
+                    .map(|cols| {
+                        (!cols.is_empty())
+                            .then(|| declared_together(&cols))
+                            .flatten()
+                            .unwrap_or(input.rows)
+                    })
+                    .max()
+                    .into_iter()
+                    .chain(distinct_items_per_group().map(|per| per.saturating_mul(group_count)))
+                    .chain([input.rows])
+                    .min()
+                    .unwrap_or(input.rows);
+                let operations_per_row =
+                    hash_aggregate_operations_per_row(
+                        keys,
+                        measures,
+                        input.rows,
+                        group_count,
+                        distinct_values,
+                    ) + carried_label_operations_per_row(&node.output_schema, reduction);
                 let group_visits = visits(group_count);
                 let estimate = estimate_operator(
                     PhysicalOperator::HashAggregate {
@@ -798,6 +919,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 // second of them.
                 let out = match raw_rows_materialized_at_ingestion {
                     true => {
+                        read_raw_rows_span_ms = node.retention_ms;
                         raw_retained_rows = raw_rows_back(node.retention_ms);
                         let source = sources.first().copied().unwrap_or("(none)");
                         edge(raw_retained_rows.ok_or(retained_without_a_bound(source))?)?
@@ -863,6 +985,11 @@ pub fn node_resource_usage_and_cost<'a>(
                     rows: out.rows,
                     bytes: out.bytes.min(input.bytes),
                 };
+                // The rows it keeps span its range, at most its input's.
+                let range_ms = u64::try_from(range.as_millis()).unwrap_or(u64::MAX);
+                read_raw_rows_span_ms = Some(
+                    input_raw_rows_span_ms.map_or(range_ms, |input_ms| input_ms.min(range_ms)),
+                );
                 let estimate = estimate_operator(
                     PhysicalOperator::TimeRange,
                     OperatorStatistics::PassThrough { edges: unary(out) },
@@ -925,8 +1052,12 @@ pub fn node_resource_usage_and_cost<'a>(
                 node.parameters.as_ref(),
                 input_rows,
             )?);
-            let update_ops = update_operations_per_row(family, node.parameters.as_ref())
-                + carried_label_operations_per_row(&node.output_schema, reduction);
+            let update_ops = update_operations_per_row(
+                family,
+                node.parameters.as_ref(),
+                input_rows.rows_per_state,
+                folded_distinct_values(update),
+            ) + carried_label_operations_per_row(&node.output_schema, reduction);
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
@@ -960,9 +1091,9 @@ pub fn node_resource_usage_and_cost<'a>(
             // One window's states: each input row updates the window its
             // time falls in. At ingestion time the rows of one window
             // arrive at the rate of one second's `input.rows`; at query
-            // time one window holds its width of the sources' rows (its
-            // input holds the rows of every retained window: without a
-            // declared rate, their share of one).
+            // time one window holds its width's share of the time its
+            // input's raw rows span (without a span, its share of the
+            // retained windows).
             let group_count = groups(reduction)?;
             let rows_per_tumbling_window = match ingestion {
                 true => u64::try_from(
@@ -970,12 +1101,13 @@ pub fn node_resource_usage_and_cost<'a>(
                         .div_ceil(u128::from(ONE_SECOND_MS)),
                 )
                 .map_err(|_| AnalyticalCostError::Overflow)?,
-                false => {
-                    rows_per_ms.map_or(input.rows.div_ceil(retained_output_count), |rows_per_ms| {
-                        ((rows_per_ms * *tumbling_window_width_ms as f64).round() as u64)
+                false => input_raw_rows_span_ms
+                    .filter(|span_ms| *span_ms > 0)
+                    .map_or(input.rows.div_ceil(retained_output_count), |span_ms| {
+                        ((input.rows as f64 * *tumbling_window_width_ms as f64 / span_ms as f64)
+                            .round() as u64)
                             .clamp(1, input.rows.max(1))
-                    })
-                }
+                    }),
             };
             let (non_negative, value_magnitude_range) = folded_values(update);
             let input_rows = StateInputRows {
@@ -989,8 +1121,12 @@ pub fn node_resource_usage_and_cost<'a>(
                 node.parameters.as_ref(),
                 input_rows,
             )?);
-            let update_ops = update_operations_per_row(family, node.parameters.as_ref())
-                + carried_label_operations_per_row(&node.output_schema, reduction);
+            let update_ops = update_operations_per_row(
+                family,
+                node.parameters.as_ref(),
+                input_rows.rows_per_state,
+                folded_distinct_values(update),
+            ) + carried_label_operations_per_row(&node.output_schema, reduction);
             // The states it completes in one execution: at ingestion time
             // one second's share of each group's window (a 10 s window: a
             // tenth of a state per group); at query time every retained
@@ -1004,13 +1140,13 @@ pub fn node_resource_usage_and_cost<'a>(
             // At query time each row of the scan's lookback is kept in its
             // window's range, the work a `TimeRange` over the same rows does
             // (11 per row); at ingestion time each arriving row is routed to
-            // its window's state (8 per row).
+            // its window's state (14 per row).
             let range_ops = input.rows as f64
                 * match ingestion {
                     true => CHAIN_OPERATIONS_PER_ARRIVING_ROW,
                     false => TIME_RANGE_OPERATIONS_PER_ROW,
                 };
-            // Each group's rows of each raw batch are split by window.
+            // Each group's state found once per raw batch.
             let group_visits = visits(group_count);
             let out = EdgeStatistics {
                 rows: group_count,
@@ -1023,9 +1159,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 Ok(ResourceEstimate::new(
                     input.rows as f64 * update_ops
                         + range_ops
-                        + group_visits
-                            * (OPERATIONS_PER_GROUP_PER_RAW_BATCH
-                                + CHAIN_WINDOW_OPERATIONS_PER_GROUP_PER_RAW_BATCH)
+                        + group_visits * OPERATIONS_PER_GROUP_PER_RAW_BATCH
                         + emitted_states * chain_emit_operations_per_state(family),
                     out.bytes,
                     0,
@@ -1082,19 +1216,29 @@ pub fn node_resource_usage_and_cost<'a>(
                 _ => producers.iter().map(input_state_bytes).max().unwrap_or(0),
             };
             // Each input state's merge, by the states' family and bytes,
-            // and each output group's state and row.
-            let merge_ops: f64 = producers
-                .iter()
-                .map(|producer| {
-                    producer.output.rows as f64
-                        * merge_operations_per_state(
-                            family,
-                            input_state_bytes(producer),
-                            merged_state_bytes,
-                        )
-                })
-                .sum::<f64>()
-                + merge_output_operations(family, group_count);
+            // and each output group's state and row; with one state per
+            // group, each state passes through to its group unmerged.
+            let merge_ops: f64 = match states <= group_count {
+                true => pass_through_merge_operations(group_count),
+                false => {
+                    producers
+                        .iter()
+                        .map(|producer| {
+                            producer.output.rows as f64
+                                * merge_operations_per_state(
+                                    family,
+                                    input_state_bytes(producer),
+                                    merged_state_bytes,
+                                    producer
+                                        .state_input_rows
+                                        .and_then(|rows| rows.rows_per_state),
+                                    states.div_ceil(group_count.max(1)),
+                                )
+                        })
+                        .sum::<f64>()
+                        + merge_output_operations(family, group_count)
+                }
+            };
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: (merged_state_bytes + state_row_bytes_beside_state(&node.output_schema))
@@ -1394,6 +1538,14 @@ pub fn node_resource_usage_and_cost<'a>(
             })
             .flatten()
     });
+    // A scan and a time range over raw rows say what their rows span; an
+    // operator keeping each row's window passes on its input's.
+    let raw_rows_span_ms = read_raw_rows_span_ms.or_else(|| {
+        node.payload
+            .keeps_input_window()
+            .then_some(input_raw_rows_span_ms)
+            .flatten()
+    });
     Ok(NodeResourceUsageAndCost {
         output: out,
         sources,
@@ -1402,6 +1554,7 @@ pub fn node_resource_usage_and_cost<'a>(
         tumbling_windows,
         chain_tumbling_window_width_ms,
         state_input_rows,
+        raw_rows_span_ms,
         work_ms_per_execution: node_ms,
         cpu_ops_per_second: estimate.cpu_ops() * per_second,
         scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
@@ -1459,23 +1612,25 @@ fn selected_tumbling_windows(
 /// The times a grouping into `group_count` groups visits a group's state
 /// while reading `input_rows` rows: once per group per batch of raw rows
 /// (`raw_batch_width_ms` each) its input arrives in, at most once per row.
-/// The batches are the input's rows over a batch's rows at the sources'
-/// `rows_per_ms`: at query time at least one; at ingestion time a share of
-/// one per execution, the rows of one second over a batch's. Unknown rate:
-/// one batch at query time, a second's share of one at ingestion time.
-/// Example: a 5 min window of 1,000 series at 1 Hz (300,000 rows) in 10 s
-/// batches of 10,000 rows spans 30 batches, 30,000 visits; at 10 Hz the
-/// same 30,000 visits for 3,000,000 rows.
+/// The batches are the time its input's raw rows span
+/// (`input_raw_rows_span_ms`) over a batch's: at query time at least one;
+/// at ingestion time a share of one per execution, one second over a
+/// batch's width. Input that is not raw rows: one batch at query time, a
+/// second's share of one at ingestion time. Example: a 5 min window of
+/// 1,000 series at 1 Hz (300,000 rows) in 10 s batches spans 30 batches,
+/// 30,000 visits; at 10 Hz the same 30,000 visits for 3,000,000 rows, and
+/// under a filter keeping a tenth of each series' rows the same 30,000
+/// for 30,000 rows.
 fn group_raw_batch_visits(
     input_rows: u64,
     group_count: u64,
-    rows_per_ms: Option<f64>,
+    input_raw_rows_span_ms: Option<u64>,
     raw_batch_width_ms: u64,
     ingestion: bool,
 ) -> f64 {
     let batch_width_ms = raw_batch_width_ms.max(1) as f64;
-    let batches = match rows_per_ms.filter(|rows_per_ms| *rows_per_ms > 0.0) {
-        Some(rows_per_ms) => input_rows as f64 / (rows_per_ms * batch_width_ms),
+    let batches = match input_raw_rows_span_ms {
+        Some(span_ms) => span_ms as f64 / batch_width_ms,
         None => match ingestion {
             true => ONE_SECOND_MS as f64 / batch_width_ms,
             false => 1.0,

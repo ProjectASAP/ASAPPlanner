@@ -10,7 +10,7 @@ use asap_types::{
     },
     workload::PlanningWorkload,
 };
-use std::{collections::HashSet, rc::Rc};
+use std::rc::Rc;
 
 fn fixture() -> (PlanningWorkload, Vec<QueryRoot>) {
     let workload: PlanningWorkload = serde_json::from_str(include_str!(
@@ -41,14 +41,19 @@ fn nodes(roots: &[QueryRoot]) -> Vec<Rc<OperatorNode>> {
         .collect()
 }
 
-// The production entrypoint must find a sketch rollup cheaper than
-// computing both distinct counts exactly from raw data at query time.
+/// The viewer's distinct-count rollup workload, `COUNT(DISTINCT user_id)`
+/// by service and by (service, endpoint) over 5 min every 60 s: the
+/// production entrypoint counts both exactly, the measured-better plan. A
+/// KMV build compares each row with the hashes its state retains, and a
+/// rollup inserts each state's hashes the same way: over 12,000,000 rows
+/// of this data's shape (1,000,000 distinct users, 1,000 groups of the
+/// finer grouping), the two exact counts measure 14.7 s per evaluation and
+/// one KMV build with a rollup 393 s
+/// (`production_sql_distinct_region_service_counts_exactly`). Charged a
+/// fixed 48 per row and per byte merged, the KMV rollup was selected.
 #[test]
-fn production_distinct_rollup_finds_shared_kmv() {
+fn production_distinct_rollup_counts_exactly() {
     let (workload, roots) = fixture();
-    let (exact_plan, _) =
-        asap_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&roots)
-            .unwrap();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
     let mut settings = CostInputs::default();
@@ -69,33 +74,19 @@ fn production_distinct_rollup_finds_shared_kmv() {
         .expect("validated plan within budget");
     let accepted = &selection.accepted_accuracy_per_query;
     assert_eq!(accepted.len(), 2);
-    assert!(accepted
-        .iter()
-        .all(|accuracy| accuracy.sketches.iter().any(|sketch| sketch == "Kmv")));
-    let cost_per_second =
-        asap_integration_tests::planning::plan_cost_per_second(plan, &entries, data, &settings);
-    let exact_cost_per_second = asap_integration_tests::planning::plan_cost_per_second(
-        &exact_plan,
-        &entries,
-        data,
-        &settings,
-    );
     assert!(
-        cost_per_second < exact_cost_per_second,
-        "KMV rollup {cost_per_second} vs exact {exact_cost_per_second}"
+        accepted.iter().all(|accuracy| accuracy.sketches.is_empty()),
+        "{accepted:?}"
     );
     let roots = plan.query_roots().unwrap();
-    let builds: HashSet<_> = nodes(&roots)
+    let builds = nodes(&roots)
         .iter()
-        .filter(|node| matches!(node.asap(), Some(ASAPOp::SummaryAgg { .. })))
-        .map(Rc::as_ptr)
-        .collect();
-    assert_eq!(builds.len(), 1, "both queries reuse a single state build");
-    let rollup = nodes(&roots)
-        .iter()
-        .any(|n| matches!(n.asap(), Some(ASAPOp::SummaryMerge { .. })));
-    assert!(
-        rollup,
-        "production search must select the cheaper legal rollup"
-    );
+        .filter(|node| {
+            matches!(
+                node.asap(),
+                Some(ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+        })
+        .count();
+    assert_eq!(builds, 0, "the selected plan builds no summary");
 }
