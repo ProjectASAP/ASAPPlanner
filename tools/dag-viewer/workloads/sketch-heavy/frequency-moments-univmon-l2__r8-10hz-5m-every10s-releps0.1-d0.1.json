@@ -1,0 +1,49 @@
+{
+ "query_workload": {
+  "language": "promql",
+  "repeating_queries": [
+   {
+    "query": "l2_over_time(dns_query_client[5m])",
+    "demand": {
+     "fixed_interval_at": {
+      "interval": 10000,
+      "evaluation_phase": 0
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "relative",
+      "max_error": 0.1,
+      "failure_probability": 0.1,
+      "accuracy_scope": "whole_result"
+     }
+    }
+   }
+  ]
+ },
+ "data_workload": {
+  "arrival": {
+   "ingesting": {
+    "rows_per_second": 80.0
+   }
+  },
+  "sources": {
+   "dns_query_client": {
+    "series_count": 8,
+    "metric_type": "gauge",
+    "sample_interval": 100,
+    "column_signs": {
+     "value": "non_negative"
+    },
+    "distinct_values_per_label": {
+     "resolver": 8
+    }
+   }
+  }
+ }
+}

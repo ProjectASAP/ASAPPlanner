@@ -492,6 +492,315 @@
       ],
       "cost_model": "aws-fargate-us-east-1",
       "accuracy_guarantees": "enforced"
+    },
+    {
+      "id": "sketch-heavy",
+      "name": "Sketch-heavy",
+      "description": "Workloads where a sketch family is the cheapest plan that meets the accuracy target, with controls next to them. heavy-hitters: topk(10, sum by (url) (rate(http_requests_total[W]))) over 100 to 10,000 URLs at L1- or L2-normalized targets (Count-Min or Count Sketch with a heap). frequency-moments: l2_over_time over 1 to 16 value streams (UnivMon). distinct: SQL COUNT(DISTINCT user_id) at 100,000 or 2,000,000 rows/s and PromQL distinct_over_time (KMV). mixed: several queries that could share one sketch. blocked: SQL top-k, L2, entropy, point counts and HLL-shaped distinct counts, which no sketch serves yet.",
+      "source": "Synthetic, written by gen.py in this directory (metric, table and label names are made up). Each workload declares only the data facts the shape implies: series count, sample interval, metric type, distinct values per grouping label and column signs; no stream norms. SQL workloads read the clicks table in tables.json. Planned with the default deployment (raw data retained) and cost model, accuracy guarantees enforced.",
+      "accuracy_guarantees": "enforced",
+      "workloads": [
+        {
+          "id": "heavy-hitters-cmsheap-topk10__u1000-i1-1hz-5m-every10s-l1eps0.01-d0.05",
+          "file": "sketch-heavy/heavy-hitters-cmsheap-topk10__u1000-i1-1hz-5m-every10s-l1eps0.01-d0.05.json"
+        },
+        {
+          "id": "heavy-hitters-cmsheap-topk10__u1000-i1-1hz-5m-every60s-l1eps0.01-d0.05",
+          "file": "sketch-heavy/heavy-hitters-cmsheap-topk10__u1000-i1-1hz-5m-every60s-l1eps0.01-d0.05.json"
+        },
+        {
+          "id": "heavy-hitters-cmsheap-topk10__u1000-i1-10hz-1h-every60s-l1eps0.01-d0.05",
+          "file": "sketch-heavy/heavy-hitters-cmsheap-topk10__u1000-i1-10hz-1h-every60s-l1eps0.01-d0.05.json"
+        },
+        {
+          "id": "heavy-hitters-cmsheap-topk10__u1000-i1-10hz-24h-every300s-l1eps0.002-d0.01",
+          "file": "sketch-heavy/heavy-hitters-cmsheap-topk10__u1000-i1-10hz-24h-every300s-l1eps0.002-d0.01.json"
+        },
+        {
+          "id": "heavy-hitters-cmsheap-topk10__u2500-i1-1hz-1h-every60s-l1eps0.01-d0.05",
+          "file": "sketch-heavy/heavy-hitters-cmsheap-topk10__u2500-i1-1hz-1h-every60s-l1eps0.01-d0.05.json"
+        },
+        {
+          "id": "heavy-hitters-cmsheap-topk10__u2500-i1-10hz-5m-every10s-l1eps0.002-d0.05",
+          "file": "sketch-heavy/heavy-hitters-cmsheap-topk10__u2500-i1-10hz-5m-every10s-l1eps0.002-d0.05.json"
+        },
+        {
+          "id": "heavy-hitters-cmsheap-topk10__u5000-i1-1hz-5m-every60s-l1eps0.01-d0.05",
+          "file": "sketch-heavy/heavy-hitters-cmsheap-topk10__u5000-i1-1hz-5m-every60s-l1eps0.01-d0.05.json"
+        },
+        {
+          "id": "heavy-hitters-cmsheap-topk10__u5000-i1-10hz-1h-every10s-l1eps0.01-d0.05",
+          "file": "sketch-heavy/heavy-hitters-cmsheap-topk10__u5000-i1-10hz-1h-every10s-l1eps0.01-d0.05.json"
+        },
+        {
+          "id": "heavy-hitters-cmsheap-topk10__u5000-i1-1hz-24h-every300s-l1eps0.002-d0.05",
+          "file": "sketch-heavy/heavy-hitters-cmsheap-topk10__u5000-i1-1hz-24h-every300s-l1eps0.002-d0.05.json"
+        },
+        {
+          "id": "heavy-hitters-cmsheap-topk10__u1000-i2-1hz-1h-every60s-l1eps0.01-d0.05",
+          "file": "sketch-heavy/heavy-hitters-cmsheap-topk10__u1000-i2-1hz-1h-every60s-l1eps0.01-d0.05.json"
+        },
+        {
+          "id": "heavy-hitters-cmsheap-topk10__u2500-i2-10hz-5m-every10s-l1eps0.01-d0.05",
+          "file": "sketch-heavy/heavy-hitters-cmsheap-topk10__u2500-i2-10hz-5m-every10s-l1eps0.01-d0.05.json"
+        },
+        {
+          "id": "heavy-hitters-cmsheap-topk10__u2500-i2-1hz-24h-every60s-l1eps0.002-d0.05",
+          "file": "sketch-heavy/heavy-hitters-cmsheap-topk10__u2500-i2-1hz-24h-every60s-l1eps0.002-d0.05.json"
+        },
+        {
+          "id": "heavy-hitters-csheap-topk10__u100-i1-1hz-5m-every60s-l2eps0.1-d0.1",
+          "file": "sketch-heavy/heavy-hitters-csheap-topk10__u100-i1-1hz-5m-every60s-l2eps0.1-d0.1.json"
+        },
+        {
+          "id": "heavy-hitters-csheap-topk10__u100-i1-10hz-5m-every10s-l2eps0.05-d0.1",
+          "file": "sketch-heavy/heavy-hitters-csheap-topk10__u100-i1-10hz-5m-every10s-l2eps0.05-d0.1.json"
+        },
+        {
+          "id": "heavy-hitters-csheap-topk10__u100-i1-1hz-1h-every60s-l2eps0.02-d0.1",
+          "file": "sketch-heavy/heavy-hitters-csheap-topk10__u100-i1-1hz-1h-every60s-l2eps0.02-d0.1.json"
+        },
+        {
+          "id": "heavy-hitters-csheap-topk10__u300-i1-1hz-5m-every60s-l2eps0.05-d0.1",
+          "file": "sketch-heavy/heavy-hitters-csheap-topk10__u300-i1-1hz-5m-every60s-l2eps0.05-d0.1.json"
+        },
+        {
+          "id": "heavy-hitters-csheap-topk10__u300-i1-10hz-1h-every60s-l2eps0.1-d0.1",
+          "file": "sketch-heavy/heavy-hitters-csheap-topk10__u300-i1-10hz-1h-every60s-l2eps0.1-d0.1.json"
+        },
+        {
+          "id": "heavy-hitters-csheap-topk10__u1000-i1-1hz-5m-every60s-l2eps0.05-d0.1",
+          "file": "sketch-heavy/heavy-hitters-csheap-topk10__u1000-i1-1hz-5m-every60s-l2eps0.05-d0.1.json"
+        },
+        {
+          "id": "heavy-hitters-control-topk10-10-instances-per-url__u1000-i10-10hz-1h-every60s-l1eps0.01-d0.05",
+          "file": "sketch-heavy/heavy-hitters-control-topk10-10-instances-per-url__u1000-i10-10hz-1h-every60s-l1eps0.01-d0.05.json"
+        },
+        {
+          "id": "heavy-hitters-control-topk10-sum-over-time__u1000-i1-1hz-1h-every60s-l1eps0.01-d0.05",
+          "file": "sketch-heavy/heavy-hitters-control-topk10-sum-over-time__u1000-i1-1hz-1h-every60s-l1eps0.01-d0.05.json"
+        },
+        {
+          "id": "heavy-hitters-control-topk10-delta-too-small__u5000-i1-1hz-1h-every60s-l1eps0.01-d0.01",
+          "file": "sketch-heavy/heavy-hitters-control-topk10-delta-too-small__u5000-i1-1hz-1h-every60s-l1eps0.01-d0.01.json"
+        },
+        {
+          "id": "heavy-hitters-control-topk10-10000-urls__u10000-i1-1hz-1h-every60s-l1eps0.01-d0.05",
+          "file": "sketch-heavy/heavy-hitters-control-topk10-10000-urls__u10000-i1-1hz-1h-every60s-l1eps0.01-d0.05.json"
+        },
+        {
+          "id": "frequency-moments-univmon-l2__r1-1hz-1h-every60s-releps0.1-d0.05",
+          "file": "sketch-heavy/frequency-moments-univmon-l2__r1-1hz-1h-every60s-releps0.1-d0.05.json"
+        },
+        {
+          "id": "frequency-moments-univmon-l2__r1-10hz-24h-every60s-releps0.05-d0.05",
+          "file": "sketch-heavy/frequency-moments-univmon-l2__r1-10hz-24h-every60s-releps0.05-d0.05.json"
+        },
+        {
+          "id": "frequency-moments-univmon-l2__r1-10hz-6h-every10s-releps0.2-d0.05",
+          "file": "sketch-heavy/frequency-moments-univmon-l2__r1-10hz-6h-every10s-releps0.2-d0.05.json"
+        },
+        {
+          "id": "frequency-moments-univmon-l2__r2-10hz-24h-every300s-releps0.1-d0.05",
+          "file": "sketch-heavy/frequency-moments-univmon-l2__r2-10hz-24h-every300s-releps0.1-d0.05.json"
+        },
+        {
+          "id": "frequency-moments-univmon-l2__r4-1hz-1h-every10s-releps0.1-d0.05",
+          "file": "sketch-heavy/frequency-moments-univmon-l2__r4-1hz-1h-every10s-releps0.1-d0.05.json"
+        },
+        {
+          "id": "frequency-moments-univmon-l2__r4-10hz-6h-every60s-releps0.05-d0.05",
+          "file": "sketch-heavy/frequency-moments-univmon-l2__r4-10hz-6h-every60s-releps0.05-d0.05.json"
+        },
+        {
+          "id": "frequency-moments-univmon-l2__r4-10hz-24h-every300s-releps0.1-d0.1",
+          "file": "sketch-heavy/frequency-moments-univmon-l2__r4-10hz-24h-every300s-releps0.1-d0.1.json"
+        },
+        {
+          "id": "frequency-moments-univmon-l2__r8-1hz-24h-every60s-releps0.1-d0.1",
+          "file": "sketch-heavy/frequency-moments-univmon-l2__r8-1hz-24h-every60s-releps0.1-d0.1.json"
+        },
+        {
+          "id": "frequency-moments-univmon-l2__r8-10hz-24h-every10s-releps0.2-d0.1",
+          "file": "sketch-heavy/frequency-moments-univmon-l2__r8-10hz-24h-every10s-releps0.2-d0.1.json"
+        },
+        {
+          "id": "frequency-moments-univmon-l2__r8-10hz-1h-every60s-releps0.05-d0.1",
+          "file": "sketch-heavy/frequency-moments-univmon-l2__r8-10hz-1h-every60s-releps0.05-d0.1.json"
+        },
+        {
+          "id": "frequency-moments-univmon-l2__r2-1hz-5m-every60s-releps0.1-d0.05",
+          "file": "sketch-heavy/frequency-moments-univmon-l2__r2-1hz-5m-every60s-releps0.1-d0.05.json"
+        },
+        {
+          "id": "frequency-moments-univmon-l2__r8-10hz-5m-every10s-releps0.1-d0.1",
+          "file": "sketch-heavy/frequency-moments-univmon-l2__r8-10hz-5m-every10s-releps0.1-d0.1.json"
+        },
+        {
+          "id": "frequency-moments-control-l2-16-resolvers__r16-10hz-24h-every60s-releps0.1-d0.1",
+          "file": "sketch-heavy/frequency-moments-control-l2-16-resolvers__r16-10hz-24h-every60s-releps0.1-d0.1.json"
+        },
+        {
+          "id": "distinct-sql-distinct-users__100000rps-3600s-every60s-releps0.05-d0.05",
+          "file": "sketch-heavy/distinct-sql-distinct-users__100000rps-3600s-every60s-releps0.05-d0.05.json"
+        },
+        {
+          "id": "distinct-sql-distinct-users__100000rps-86400s-every300s-releps0.02-d0.05",
+          "file": "sketch-heavy/distinct-sql-distinct-users__100000rps-86400s-every300s-releps0.02-d0.05.json"
+        },
+        {
+          "id": "distinct-sql-distinct-users__2000000rps-3600s-every10s-releps0.05-d0.05",
+          "file": "sketch-heavy/distinct-sql-distinct-users__2000000rps-3600s-every10s-releps0.05-d0.05.json"
+        },
+        {
+          "id": "distinct-sql-distinct-users__2000000rps-86400s-every60s-releps0.02-d0.05",
+          "file": "sketch-heavy/distinct-sql-distinct-users__2000000rps-86400s-every60s-releps0.02-d0.05.json"
+        },
+        {
+          "id": "distinct-sql-distinct-users-by-region__100000rps-3600s-every60s-releps0.05-d0.05",
+          "file": "sketch-heavy/distinct-sql-distinct-users-by-region__100000rps-3600s-every60s-releps0.05-d0.05.json"
+        },
+        {
+          "id": "distinct-sql-distinct-users-by-region__2000000rps-86400s-every300s-releps0.05-d0.05",
+          "file": "sketch-heavy/distinct-sql-distinct-users-by-region__2000000rps-86400s-every300s-releps0.05-d0.05.json"
+        },
+        {
+          "id": "distinct-sql-distinct-users-by-region__2000000rps-3600s-every60s-releps0.02-d0.05",
+          "file": "sketch-heavy/distinct-sql-distinct-users-by-region__2000000rps-3600s-every60s-releps0.02-d0.05.json"
+        },
+        {
+          "id": "distinct-sql-distinct-users-by-service__100000rps-86400s-every300s-releps0.05-d0.05",
+          "file": "sketch-heavy/distinct-sql-distinct-users-by-service__100000rps-86400s-every300s-releps0.05-d0.05.json"
+        },
+        {
+          "id": "distinct-sql-distinct-users-by-service__2000000rps-3600s-every60s-releps0.05-d0.05",
+          "file": "sketch-heavy/distinct-sql-distinct-users-by-service__2000000rps-3600s-every60s-releps0.05-d0.05.json"
+        },
+        {
+          "id": "distinct-promql-distinct-clients__r1-10hz-24h-every60s-releps0.05-d0.1",
+          "file": "sketch-heavy/distinct-promql-distinct-clients__r1-10hz-24h-every60s-releps0.05-d0.1.json"
+        },
+        {
+          "id": "distinct-promql-distinct-clients__r4-10hz-6h-every60s-releps0.05-d0.1",
+          "file": "sketch-heavy/distinct-promql-distinct-clients__r4-10hz-6h-every60s-releps0.05-d0.1.json"
+        },
+        {
+          "id": "distinct-promql-distinct-clients__r8-1hz-24h-every300s-releps0.02-d0.1",
+          "file": "sketch-heavy/distinct-promql-distinct-clients__r8-1hz-24h-every300s-releps0.02-d0.1.json"
+        },
+        {
+          "id": "mixed-topk-and-total__u1000-i1-1hz-1h-every60s",
+          "file": "sketch-heavy/mixed-topk-and-total__u1000-i1-1hz-1h-every60s.json"
+        },
+        {
+          "id": "mixed-topk-dashboard-and-alert__u1000-i1-1hz-1h-every10s-and-60s",
+          "file": "sketch-heavy/mixed-topk-dashboard-and-alert__u1000-i1-1hz-1h-every10s-and-60s.json"
+        },
+        {
+          "id": "mixed-topk-by-url-and-by-instance__u100-i10-1hz-1h-every60s",
+          "file": "sketch-heavy/mixed-topk-by-url-and-by-instance__u100-i10-1hz-1h-every60s.json"
+        },
+        {
+          "id": "mixed-control-topk10-and-topk50__u1000-i1-1hz-1h-every60s",
+          "file": "sketch-heavy/mixed-control-topk10-and-topk50__u1000-i1-1hz-1h-every60s.json"
+        },
+        {
+          "id": "mixed-topk-and-total__u5000-i1-1hz-1h-every60s",
+          "file": "sketch-heavy/mixed-topk-and-total__u5000-i1-1hz-1h-every60s.json"
+        },
+        {
+          "id": "mixed-topk-dashboard-and-alert__u5000-i1-1hz-1h-every10s-and-60s",
+          "file": "sketch-heavy/mixed-topk-dashboard-and-alert__u5000-i1-1hz-1h-every10s-and-60s.json"
+        },
+        {
+          "id": "mixed-topk-by-url-and-by-instance__u500-i10-1hz-1h-every60s",
+          "file": "sketch-heavy/mixed-topk-by-url-and-by-instance__u500-i10-1hz-1h-every60s.json"
+        },
+        {
+          "id": "mixed-control-topk10-and-topk50__u5000-i1-1hz-1h-every60s",
+          "file": "sketch-heavy/mixed-control-topk10-and-topk50__u5000-i1-1hz-1h-every60s.json"
+        },
+        {
+          "id": "mixed-l2-and-count__r1-10hz-24h-every60s",
+          "file": "sketch-heavy/mixed-l2-and-count__r1-10hz-24h-every60s.json"
+        },
+        {
+          "id": "mixed-l2-and-distinct__r1-10hz-24h-every60s",
+          "file": "sketch-heavy/mixed-l2-and-distinct__r1-10hz-24h-every60s.json"
+        },
+        {
+          "id": "mixed-l2-24h-and-15m__r1-10hz-every60s",
+          "file": "sketch-heavy/mixed-l2-24h-and-15m__r1-10hz-every60s.json"
+        },
+        {
+          "id": "mixed-repeat-rate-and-l2__r1-10hz-24h-every60s",
+          "file": "sketch-heavy/mixed-repeat-rate-and-l2__r1-10hz-24h-every60s.json"
+        },
+        {
+          "id": "mixed-l2-and-count__r4-10hz-24h-every60s",
+          "file": "sketch-heavy/mixed-l2-and-count__r4-10hz-24h-every60s.json"
+        },
+        {
+          "id": "mixed-l2-and-distinct__r4-10hz-24h-every60s",
+          "file": "sketch-heavy/mixed-l2-and-distinct__r4-10hz-24h-every60s.json"
+        },
+        {
+          "id": "mixed-l2-24h-and-15m__r4-10hz-every60s",
+          "file": "sketch-heavy/mixed-l2-24h-and-15m__r4-10hz-every60s.json"
+        },
+        {
+          "id": "mixed-repeat-rate-and-l2__r4-10hz-24h-every60s",
+          "file": "sketch-heavy/mixed-repeat-rate-and-l2__r4-10hz-24h-every60s.json"
+        },
+        {
+          "id": "mixed-l2-and-count__r8-10hz-24h-every60s",
+          "file": "sketch-heavy/mixed-l2-and-count__r8-10hz-24h-every60s.json"
+        },
+        {
+          "id": "mixed-l2-and-distinct__r8-10hz-24h-every60s",
+          "file": "sketch-heavy/mixed-l2-and-distinct__r8-10hz-24h-every60s.json"
+        },
+        {
+          "id": "mixed-l2-24h-and-15m__r8-10hz-every60s",
+          "file": "sketch-heavy/mixed-l2-24h-and-15m__r8-10hz-every60s.json"
+        },
+        {
+          "id": "mixed-repeat-rate-and-l2__r8-10hz-24h-every60s",
+          "file": "sketch-heavy/mixed-repeat-rate-and-l2__r8-10hz-24h-every60s.json"
+        },
+        {
+          "id": "mixed-edge-dashboard__u1000-i1-1hz-r4-10hz",
+          "file": "sketch-heavy/mixed-edge-dashboard__u1000-i1-1hz-r4-10hz.json"
+        },
+        {
+          "id": "blocked-sql-topk-count-urls__1000urls-100000rps-3600s-every60s-l1eps0.01-d0.05",
+          "file": "sketch-heavy/blocked-sql-topk-count-urls__1000urls-100000rps-3600s-every60s-l1eps0.01-d0.05.json"
+        },
+        {
+          "id": "blocked-sql-topk-bytes-urls__1000urls-100000rps-3600s-every60s-l1eps0.01-d0.05",
+          "file": "sketch-heavy/blocked-sql-topk-bytes-urls__1000urls-100000rps-3600s-every60s-l1eps0.01-d0.05.json"
+        },
+        {
+          "id": "blocked-sql-l2-client-ip__100000rps-3600s-every60s-releps0.1-d0.1",
+          "file": "sketch-heavy/blocked-sql-l2-client-ip__100000rps-3600s-every60s-releps0.1-d0.1.json"
+        },
+        {
+          "id": "blocked-sql-entropy-client-ip__100000rps-3600s-every60s-abseps0.1-d0.1",
+          "file": "sketch-heavy/blocked-sql-entropy-client-ip__100000rps-3600s-every60s-abseps0.1-d0.1.json"
+        },
+        {
+          "id": "blocked-promql-entropy__r4-10hz-24h-every60s-abseps0.1-d0.1",
+          "file": "sketch-heavy/blocked-promql-entropy__r4-10hz-24h-every60s-abseps0.1-d0.1.json"
+        },
+        {
+          "id": "blocked-sql-distinct-users-no-delta-hll-shape__2000000rps-86400s-every60s-releps0.02",
+          "file": "sketch-heavy/blocked-sql-distinct-users-no-delta-hll-shape__2000000rps-86400s-every60s-releps0.02.json"
+        },
+        {
+          "id": "blocked-sql-point-count-one-url__100000rps-3600s-every60s-l1eps0.001-d0.05",
+          "file": "sketch-heavy/blocked-sql-point-count-one-url__100000rps-3600s-every60s-l1eps0.001-d0.05.json"
+        }
+      ]
     }
   ]
 }

@@ -1,0 +1,53 @@
+{
+ "query_workload": {
+  "language": {
+   "sql": "datafusion_sql"
+  },
+  "repeating_queries": [
+   {
+    "query": "SELECT url, SUM(bytes) AS b FROM clicks WHERE ts >= now() - INTERVAL '3600 seconds' GROUP BY url ORDER BY b DESC LIMIT 10",
+    "demand": {
+     "fixed_interval_at": {
+      "interval": 60000,
+      "evaluation_phase": 0
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "absolute_stream_l1",
+      "max_error": 0.01,
+      "failure_probability": 0.05,
+      "accuracy_scope": "whole_result"
+     }
+    }
+   }
+  ]
+ },
+ "data_workload": {
+  "arrival": {
+   "ingesting": {
+    "rows_per_second": 100000.0
+   }
+  },
+  "sources": {
+   "clicks": {
+    "column_signs": {
+     "bytes": "non_negative"
+    },
+    "distinct_values_per_label": {
+     "url": 1000,
+     "user_id": 5000000,
+     "client_ip": 2000000,
+     "region": 8,
+     "service": 40
+    },
+    "series_count": 10000
+   }
+  }
+ }
+}
