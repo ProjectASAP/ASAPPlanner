@@ -77,28 +77,84 @@ const LARGE_SIZES: DatasetSizes = DatasetSizes {
     random_datasets: 40,
 };
 
-/// The default corpus's cases the executor cannot run yet, each with the
-/// operator it lacks. A case leaves this list once the executor runs it,
-/// so the corpus checks every shape the executor can run.
+/// The default corpus's bounds the executor cannot run yet (`case:what`,
+/// as [`Report::bounds`] names them), each with the operator it lacks. A
+/// bound leaves this list once the executor runs it, so the corpus checks
+/// every bound the executor can run.
 const EXECUTOR_GAPS: &[(&str, &str)] = &[
-    ("c_cast_num", "CAST to BIGINT"),
-    ("c_cast_ts", "CAST to BIGINT"),
-    ("c_sub_alias", "date_trunc"),
-    ("c_sub_upper", "upper"),
-    ("p_hist", "rate"),
-    ("p_hist_qot", "rate"),
-    ("p_hist_whole", "rate"),
-    ("p_labelrep_other", "label_replace"),
-    ("p_labelrep_same", "label_replace"),
-    ("p_labelrep_whole", "label_replace"),
-    ("p_subq", "a subquery"),
-    ("s1_bucket_nosc", "date_trunc"),
-    ("s1_bucket_sc", "date_trunc"),
-    ("s2_src_bucket_sc", "date_trunc"),
-    ("u_union_mixed", "UNION ALL below a grouping"),
-    ("u_union_same", "UNION ALL below a grouping"),
-    ("w_window_key", "row_number() as a key"),
+    ("c_cast_num:g3 Aggregate", "CAST to BIGINT"),
+    ("c_cast_num:g4 Project", "CAST to BIGINT"),
+    ("c_cast_num:n_q", "CAST to BIGINT"),
+    ("c_cast_ts:g3 Aggregate", "CAST to BIGINT"),
+    ("c_cast_ts:g4 Project", "CAST to BIGINT"),
+    ("c_cast_ts:n_q", "CAST to BIGINT"),
+    ("c_sub_alias:g3 Aggregate", "date_trunc"),
+    ("c_sub_alias:g4 Project", "date_trunc"),
+    ("c_sub_alias:n_q", "date_trunc"),
+    ("c_sub_upper:g3 Aggregate", "upper"),
+    ("c_sub_upper:g4 Project", "upper"),
+    ("c_sub_upper:n_q", "upper"),
+    ("d_distinct:g4 Dedup", "DISTINCT"),
+    ("d_distinct:n_q", "DISTINCT"),
+    (
+        "p11_scalar_pv:g5 Project",
+        "a binary operator over scalar()",
+    ),
+    ("p11_scalar_pv:n_q", "a binary operator over scalar()"),
+    ("p12_vector_or:n_q", "`or` over vector()"),
+    ("p_cv_by:g3 Aggregate", "a quantile over count_values"),
+    ("p_cv_by:n_q", "a quantile over count_values"),
+    ("p_cv_key:g3 Aggregate", "a quantile over count_values"),
+    ("p_cv_key:n_q", "a quantile over count_values"),
+    ("p_hist:g2 Aggregate", "rate"),
+    ("p_hist:g3 Aggregate", "rate"),
+    ("p_hist:g4 Aggregate", "rate"),
+    ("p_hist:n_q", "rate"),
+    ("p_hist_qot:g2 Aggregate", "rate"),
+    ("p_hist_qot:g3 Aggregate", "rate"),
+    ("p_hist_qot:n_q", "rate"),
+    ("p_hist_whole:g2 Aggregate", "rate"),
+    ("p_hist_whole:g3 Aggregate", "rate"),
+    ("p_hist_whole:g4 Aggregate", "rate"),
+    ("p_hist_whole:n_q", "rate"),
+    ("p_labelrep_other:g3 Aggregate", "label_replace"),
+    ("p_labelrep_other:n_q", "label_replace"),
+    ("p_labelrep_qot_whole:g4 Aggregate", "label_replace"),
+    ("p_labelrep_qot_whole:n_q", "label_replace"),
+    ("p_labelrep_same:g3 Aggregate", "label_replace"),
+    ("p_labelrep_same:n_q", "label_replace"),
+    ("p_labelrep_whole:g3 Aggregate", "label_replace"),
+    ("p_labelrep_whole:n_q", "label_replace"),
+    ("p_subq:g3 Aggregate", "a subquery"),
+    ("p_subq:g4 Aggregate", "a subquery"),
+    ("p_subq:n_q", "a subquery"),
+    ("p_subq_outer:g4 Aggregate", "a subquery"),
+    ("p_subq_outer:n_q", "a subquery"),
+    ("s1_bucket_nosc:g3 Aggregate", "date_trunc"),
+    ("s1_bucket_nosc:g4 Project", "date_trunc"),
+    ("s1_bucket_nosc:n_q", "date_trunc"),
+    ("s1_bucket_sc:g3 Aggregate", "date_trunc"),
+    ("s1_bucket_sc:g4 Project", "date_trunc"),
+    ("s1_bucket_sc:n_q", "date_trunc"),
+    ("s2_src_bucket_sc:g3 Aggregate", "date_trunc"),
+    ("s2_src_bucket_sc:g4 Project", "date_trunc"),
+    ("s2_src_bucket_sc:n_q", "date_trunc"),
+    ("u_union_mixed:g6 Aggregate", "UNION ALL below a grouping"),
+    ("u_union_mixed:g7 Project", "UNION ALL below a grouping"),
+    ("u_union_mixed:n_q", "UNION ALL below a grouping"),
+    ("u_union_same:g8 Aggregate", "UNION ALL below a grouping"),
+    ("u_union_same:g9 Project", "UNION ALL below a grouping"),
+    ("u_union_same:n_q", "UNION ALL below a grouping"),
+    ("w_window_key:g4 Aggregate", "row_number() as a key"),
+    ("w_window_key:g5 Project", "row_number() as a key"),
+    ("w_window_key:n_q", "row_number() as a key"),
 ];
+
+/// The default corpus's bounds the executor runs but that return no values
+/// on every dataset, so nothing tests them (`case:what`), each with why no
+/// dataset the facts allow fills them. Empty: every bound that runs is
+/// reached.
+const NEVER_REACHED: &[(&str, &str)] = &[];
 
 /// The default corpus's cases the frontend does not lower.
 const FRONTEND_GAPS: &[&str] = &[
@@ -109,19 +165,18 @@ const FRONTEND_GAPS: &[&str] = &[
 ];
 
 /// Every memo bound of the default corpus holds on every dataset; every
-/// case runs on at least one dataset, but for the executor's and the
-/// frontend's known gaps.
+/// bound runs on at least one dataset and returns values on one, but for
+/// the executor's and the frontend's known gaps.
 #[test]
 fn memo_value_bounds_hold_on_data_the_declared_facts_allow() {
     let report = check_corpus(&default_corpus(), DEFAULT_SIZES);
     report.assert_sound();
-    let never_run: Vec<&str> = report
-        .never_executed
-        .iter()
-        .map(|case| case.split(':').next().unwrap())
-        .collect();
-    let gaps: Vec<&str> = EXECUTOR_GAPS.iter().map(|(case, _)| *case).collect();
-    assert_eq!(never_run, gaps, "{:#?}", report.never_executed);
+    let never_executed = report.never_executed();
+    let never_run: Vec<&str> = never_executed.iter().map(|(bound, _)| *bound).collect();
+    let gaps: Vec<&str> = EXECUTOR_GAPS.iter().map(|(bound, _)| *bound).collect();
+    assert_eq!(never_run, gaps, "{never_executed:#?}");
+    let unreached: Vec<&str> = NEVER_REACHED.iter().map(|(bound, _)| *bound).collect();
+    assert_eq!(report.never_reached(), unreached);
     assert_eq!(report.not_lowered, FRONTEND_GAPS);
 }
 
@@ -275,27 +330,58 @@ struct Violation {
     observed: u64,
 }
 
+/// What the datasets showed of one bound.
+#[derive(Default)]
+struct BoundCoverage {
+    /// The most values any dataset returned; `None` when the executor ran
+    /// the bound on no dataset.
+    largest_observed: Option<u64>,
+    /// Why the executor last rejected the bound or a dataset for it.
+    last_rejection: String,
+}
+
 #[derive(Default)]
 struct Report {
     cases: usize,
-    bounds_checked: usize,
     executions: usize,
     rejected_datasets: usize,
-    never_executed: Vec<String>,
+    /// Each bound, as `case:what` (`p13_unless:n_q`, `d_distinct:g4
+    /// Dedup`), with what the datasets showed of it.
+    bounds: BTreeMap<String, BoundCoverage>,
     not_lowered: Vec<String>,
     violations: Vec<Violation>,
 }
 
 impl Report {
+    /// The bounds no dataset ran, with why, in `case:what` order.
+    fn never_executed(&self) -> Vec<(&str, &str)> {
+        self.bounds
+            .iter()
+            .filter(|(_, coverage)| coverage.largest_observed.is_none())
+            .map(|(bound, coverage)| (bound.as_str(), coverage.last_rejection.as_str()))
+            .collect()
+    }
+
+    /// The bounds every dataset ran returned no values for, so no dataset
+    /// tested them.
+    fn never_reached(&self) -> Vec<&str> {
+        self.bounds
+            .iter()
+            .filter(|(_, coverage)| coverage.largest_observed == Some(0))
+            .map(|(bound, _)| bound.as_str())
+            .collect()
+    }
+
     fn assert_sound(&self) {
         println!(
             "memo value bounds: {} cases, {} bounds, {} executions, {} datasets the executor \
-             rejected, {} cases never run, not lowered: {:?}, {} violations",
+             rejected, {} bounds never run, {} never reached, not lowered: {:?}, {} violations",
             self.cases,
-            self.bounds_checked,
+            self.bounds.len(),
             self.executions,
             self.rejected_datasets,
-            self.never_executed.len(),
+            self.never_executed().len(),
+            self.never_reached().len(),
             self.not_lowered,
             self.violations.len()
         );
@@ -352,14 +438,12 @@ fn check_corpus(corpus: &[Case], sizes: DatasetSizes) -> Report {
     let mut report = Report::default();
     for part in reports {
         report.cases += part.cases;
-        report.bounds_checked += part.bounds_checked;
         report.executions += part.executions;
         report.rejected_datasets += part.rejected_datasets;
-        report.never_executed.extend(part.never_executed);
+        report.bounds.extend(part.bounds);
         report.not_lowered.extend(part.not_lowered);
         report.violations.extend(part.violations);
     }
-    report.never_executed.sort();
     report.not_lowered.sort();
     report
 }
@@ -388,9 +472,6 @@ fn check_case(case: &Case, sizes: DatasetSizes, report: &mut Report) {
     };
     let mut memo = Memo::new(&data);
     let mut group_of_node = HashMap::new();
-    let mut ran_once = false;
-    let mut bounded = false;
-    let mut last_rejection = String::new();
     for (index, root) in roots.iter().enumerate() {
         let QueryRoot::Operator(root) = root else {
             continue;
@@ -404,23 +485,38 @@ fn check_case(case: &Case, sizes: DatasetSizes, report: &mut Report) {
         if bounds.is_empty() {
             continue;
         }
-        bounded = true;
         let query = QueryBounds {
             root: root.clone(),
             bounds,
         };
-        report.bounds_checked += query.bounds.len();
+        // Each bound's coverage entry: `case:what`, the query's index
+        // added when the case has several.
+        let keys: Vec<String> = query
+            .bounds
+            .iter()
+            .map(|(what, _, _)| match roots.len() {
+                1 => format!("{}:{what}", case.name),
+                _ => format!("{} query {index}:{what}", case.name),
+            })
+            .collect();
+        for key in &keys {
+            report.bounds.entry(key.clone()).or_default();
+        }
         // The bounds whose nodes the executor compiles: all together, else
         // each alone.
         let all: Vec<usize> = (0..query.bounds.len()).collect();
         let runnable: Vec<usize> = match compiles(&query, &all) {
             Ok(()) => all,
-            Err(reason) => {
-                last_rejection = reason;
-                all.into_iter()
-                    .filter(|&bound| compiles(&query, &[bound]).is_ok())
-                    .collect()
-            }
+            Err(_) => all
+                .into_iter()
+                .filter(|&bound| match compiles(&query, &[bound]) {
+                    Ok(()) => true,
+                    Err(reason) => {
+                        report.bounds.get_mut(&keys[bound]).unwrap().last_rejection = reason;
+                        false
+                    }
+                })
+                .collect(),
         };
         if runnable.is_empty() {
             continue;
@@ -428,9 +524,10 @@ fn check_case(case: &Case, sizes: DatasetSizes, report: &mut Report) {
         for dataset in datasets(case, &query.root, &data, sizes) {
             match execute_counts(&query, &runnable, &dataset) {
                 Ok(counts) => {
-                    ran_once = true;
                     report.executions += 1;
                     for (&bound_index, observed) in runnable.iter().zip(counts) {
+                        let coverage = report.bounds.get_mut(&keys[bound_index]).unwrap();
+                        coverage.largest_observed = coverage.largest_observed.max(Some(observed));
                         let (what, _, bound) = &query.bounds[bound_index];
                         if observed > *bound {
                             report.violations.push(Violation {
@@ -446,15 +543,16 @@ fn check_case(case: &Case, sizes: DatasetSizes, report: &mut Report) {
                 }
                 Err(reason) => {
                     report.rejected_datasets += 1;
-                    last_rejection = reason;
+                    for &bound_index in &runnable {
+                        report
+                            .bounds
+                            .get_mut(&keys[bound_index])
+                            .unwrap()
+                            .last_rejection = reason.clone();
+                    }
                 }
             }
         }
-    }
-    if bounded && !ran_once {
-        report
-            .never_executed
-            .push(format!("{}: {last_rejection}", case.name));
     }
 }
 
@@ -1009,7 +1107,7 @@ fn scanned_columns(root: &OperatorNode, out: &mut BTreeMap<String, (bool, BTreeS
     }
 }
 
-/// The datasets `query` runs over: three that seek the worst case and
+/// The datasets `query` runs over: four that seek the worst case and
 /// `sizes.random_datasets` random ones, each within the facts `data`
 /// declares.
 fn datasets(
@@ -1190,6 +1288,12 @@ fn source_data(
     let per_block = total_units.div_ceil(blocks).max(1);
     let mut block_width = total_units;
     let mut radix = 1u64;
+    // Cross the smallest declared components first, so every combination
+    // of the few-valued keys appears within the rows a window reads.
+    components.sort_by_key(|values| match values {
+        ValueSet::Declared { combinations, .. } => *combinations,
+        ValueSet::Literals { .. } | ValueSet::Free { .. } => 0,
+    });
     let components = components
         .into_iter()
         .map(|values| {
