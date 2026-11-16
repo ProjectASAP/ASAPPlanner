@@ -5,8 +5,8 @@
 //! Layout, under `ASAP_CALIBRATION_DIR` or `<repo>/calibration`:
 //! `<machine-key>/{machine.json, costs.json, accuracy.json,
 //! calibrate-run.json}`. Example: with `ASAP_CALIBRATION_DIR=/data/cal` on
-//! machine `xeon-gold-6142-56c-251g`, the cost table is
-//! `/data/cal/xeon-gold-6142-56c-251g/costs.json`, unless `--costs <path>`
+//! machine `x86_64-intel-xeon-gold-6142-56c-registered-ddr4`, the cost table is
+//! `/data/cal/x86_64-intel-xeon-gold-6142-56c-registered-ddr4/costs.json`, unless `--costs <path>`
 //! names another.
 
 use std::path::{Path, PathBuf};
