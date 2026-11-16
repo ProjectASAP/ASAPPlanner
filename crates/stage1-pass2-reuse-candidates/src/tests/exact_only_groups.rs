@@ -5,7 +5,6 @@ use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
 use asap_types::ir::{ExprSemantics, NonASAPOp, Operator, Predicate, ScalarExpr};
 use asap_types::stages::{ColumnLineage, Memo};
 use asap_types::summary_type::SketchAlgorithm;
-use asap_types::workload::DataWorkload;
 
 use crate::test_fixtures::*;
 use asap_types::test_support::memo_builders::*;
@@ -18,9 +17,11 @@ use asap_types::test_support::memo_fixtures::{arithmetic, range};
 /// division carries relative error); Q1's comparison has no contract, so
 /// Q1 reads the ratio and every group below it only exactly. (Both read
 /// the rows below a sketch build exactly: a build has no contract.)
+/// `latency` is declared non-negative, so DDSketch's quantile guarantee
+/// holds.
 #[test]
 fn a_query_comparing_a_shared_ratio_reads_it_only_exactly() {
-    let mut memo = Memo::new(&DataWorkload::default());
+    let mut memo = Memo::new(&with_non_negative_values("latency"));
     let input = scan_group(&mut memo, "latency", &["job"], vec![]);
     let window = group(&mut memo, range(300_000, input));
     let p99 = quantile_over_time_readouts(&mut memo, window, 0.99, &[SketchAlgorithm::DDSketch]);

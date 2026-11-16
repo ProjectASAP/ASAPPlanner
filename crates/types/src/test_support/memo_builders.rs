@@ -111,6 +111,23 @@ pub fn with_series(metric: &str, series_count: u64) -> DataWorkload {
     }
 }
 
+/// A data workload declaring only that `metric`'s `value` is non-negative
+/// (`SourceFacts::column_signs`), as a latency is: DDSketch's quantile
+/// guarantee holds over it.
+pub fn with_non_negative_values(metric: &str) -> DataWorkload {
+    DataWorkload {
+        sources: [(
+            metric.to_string(),
+            SourceFacts {
+                column_signs: [("value".to_string(), crate::stages::ValueSign::NonNegative)].into(),
+                ..SourceFacts::default()
+            },
+        )]
+        .into(),
+        ..DataWorkload::default()
+    }
+}
+
 /// The state group of a sketch build of `algorithm` over `child` grouped
 /// by `reduction`, one build candidate per listed θ
 /// (`listed_build_parameters`).

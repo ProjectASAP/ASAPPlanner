@@ -23,21 +23,29 @@ use binomial::binomial_upper_tail;
 /// `failure_probability`; where structural parameters set them apart (a
 /// Count-Min's width and depth, HLL's precision), the one θ fixes, whose
 /// failure probability may exceed `failure_probability` or be unknown
-/// (HLL's). A Hydra state reads each subpopulation's state, so it has
-/// that state's guarantee.
+/// (HLL's, unless the source declares its distinct bound
+/// `max_distinct_per_evaluation`: classic HLL's is then certified at
+/// `failure_probability`). A Hydra state reads each subpopulation's
+/// state, so it has that state's guarantee.
 fn guarantee_of_parameters(
     params: &SketchParams,
     query: &SketchStatistic,
     failure_probability: f64,
+    max_distinct_per_evaluation: Option<u64>,
 ) -> Option<AccuracyGuarantee> {
     match params {
         SketchParams::Kll { .. } => kll::guarantee(params, failure_probability),
         SketchParams::Kmv { .. } => cardinality::guarantee(params, failure_probability),
-        SketchParams::Hydra(hydra) => {
-            guarantee_of_parameters(&hydra.per_subpopulation(), query, failure_probability)
-        }
+        SketchParams::Hydra(hydra) => guarantee_of_parameters(
+            &hydra.per_subpopulation(),
+            query,
+            failure_probability,
+            max_distinct_per_evaluation,
+        ),
         SketchParams::DDSketch { .. } => ddsketch::guarantee(params),
-        SketchParams::Hll { .. } => hll::guarantee(params),
+        SketchParams::Hll { .. } => {
+            hll::guarantee(params, failure_probability, max_distinct_per_evaluation)
+        }
         SketchParams::Cms { .. } | SketchParams::CmsWithHeap { .. } => cms::guarantee(params),
         SketchParams::CountSketch { .. } | SketchParams::CountSketchWithHeap { .. } => {
             count_sketch::guarantee(params)
@@ -50,18 +58,26 @@ fn guarantee_of_parameters(
 /// fails at most `failure_probability` rarely: its metric, and whether its
 /// failure probability is known at all. `None` when the summary type does
 /// not answer `statistic` or has no error model for it.
+/// `max_distinct_per_evaluation` is the source's declared distinct bound
+/// (`Memo::max_distinct_per_evaluation`), which a distinct count reads.
 pub(crate) fn guarantee_before_failure_probability_check(
     summary_type: &FieldDataType,
     parameters: &SketchParams,
     statistic: &SketchStatistic,
     failure_probability: f64,
+    max_distinct_per_evaluation: Option<u64>,
 ) -> Option<AccuracyGuarantee> {
     if !matches!(summary_type, FieldDataType::Sketch(_))
         || !SummaryTypeCapability::of(summary_type).answers(statistic)
     {
         return None;
     }
-    guarantee_of_parameters(parameters, statistic, failure_probability)
+    guarantee_of_parameters(
+        parameters,
+        statistic,
+        failure_probability,
+        max_distinct_per_evaluation,
+    )
 }
 
 /// The guarantee of an error at most `bound` in `metric`, failing with
@@ -89,18 +105,23 @@ fn bounded_guarantee(
 /// that rarely. `None` when this θ cannot fail that rarely, when the
 /// summary type does not answer `statistic` (its capability row) or has no
 /// error model (`SummarySample`, `Wavelet`, `StatModel`, and sketch
-/// readouts without a certified bound).
+/// readouts without a certified bound). A distinct count from classic HLL
+/// is certified only over a source of at most `max_distinct_per_evaluation`
+/// distinct items (`Memo::max_distinct_per_evaluation`); `None` without that
+/// bound.
 pub fn theoretical_guarantee(
     summary_type: &FieldDataType,
     parameters: &SketchParams,
     statistic: &SketchStatistic,
     failure_probability: f64,
+    max_distinct_per_evaluation: Option<u64>,
 ) -> Option<AccuracyGuarantee> {
     guarantee_before_failure_probability_check(
         summary_type,
         parameters,
         statistic,
         failure_probability,
+        max_distinct_per_evaluation,
     )
     .filter(|guarantee| holds_at_failure_probability(guarantee, failure_probability))
 }
