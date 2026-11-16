@@ -337,7 +337,7 @@ fn exact_targets() {
 /// drops out of the `min`.
 #[test]
 fn failure_probability_splits_over_the_readout_values_covered() {
-    let read = |per_evaluation, per_output_value| ReadoutValuesRead {
+    let read = |per_evaluation, per_output_value| ReadoutValueCounts {
         per_evaluation,
         per_output_value,
     };
@@ -378,5 +378,25 @@ fn failure_probability_splits_over_the_readout_values_covered() {
         AccuracyTarget::max_error(0.05)
             .failure_probability_per_readout_value(None, read(None, None)),
         Some(1.0)
+    );
+}
+
+/// `larger` and `plus` combine counts field by field; an unknown count
+/// stays unknown.
+#[test]
+fn readout_value_counts_combine_count_by_count() {
+    let counts = |per_evaluation, per_output_value| ReadoutValueCounts {
+        per_evaluation,
+        per_output_value,
+    };
+    let (a, b) = (counts(Some(1000), Some(1)), counts(Some(8), Some(8)));
+    assert_eq!(a.larger(b), counts(Some(1000), Some(8)));
+    assert_eq!(a.plus(b), counts(Some(1008), Some(9)));
+    let unknown_fan_in = counts(Some(8), None);
+    assert_eq!(a.larger(unknown_fan_in), counts(Some(1000), None));
+    assert_eq!(a.plus(unknown_fan_in), counts(Some(1008), None));
+    assert_eq!(
+        counts(Some(u64::MAX), Some(1)).plus(a),
+        counts(None, Some(2))
     );
 }
