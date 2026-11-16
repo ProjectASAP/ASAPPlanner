@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use asap_cost::node::analytical::AnalyticalCostError;
 use asap_cost::{summary_type_name, CostModel};
 use asap_types::accuracy::AccuracyMetric;
-use asap_types::deployment_capabilities::ExclusionSource;
+use asap_types::deployment_capabilities::{DeploymentCapabilities, ExclusionSource};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::{
@@ -95,9 +95,10 @@ pub enum RejectionCause {
     Infeasible,
     /// No plan is left without the candidates the deployment excludes
     /// (`DeploymentCapabilities::exclusions`, which Stage 2 pruned as
-    /// `ExcludedByDeployment`). The reason names the query whose every
-    /// candidate was excluded, else says the selection MILP is infeasible;
-    /// then each exclusion source that pruned a candidate, by its JSON
+    /// `ExcludedByDeployment`) beyond the default deployment's own. The
+    /// reason names the query whose every candidate was excluded, else says
+    /// the selection MILP is infeasible; then each such exclusion source
+    /// that pruned a candidate, by its JSON
     /// name (`excluded_candidates[i]` for the caller's own), with how many
     /// it pruned, e.g. `counter_not_extrapolated (7 candidates)`; and that
     /// the workload may be infeasible without these exclusions too (telling
@@ -266,26 +267,39 @@ pub(crate) fn infeasible(costs: &ExecutionCosts) -> ErrorSelectingPlan {
 }
 
 /// When Stage 2 pruned some candidate as excluded by the deployment
-/// (`PruneReason::ExcludedByDeployment`), why no plan is left: one
+/// (`PruneReason::ExcludedByDeployment`) for a source the default
+/// deployment does not have, why no plan is left: one
 /// [`RejectionCause::ExcludedByDeployment`] whose reason names `query`, the
 /// first query with no candidate left to answer it (else the infeasible
 /// selection MILP), then each exclusion source with how many candidates it
 /// pruned, in the order Stage 2 first recorded it. E.g. "query 0 has no
 /// candidate left to answer it; excluded by the deployment:
 /// counter_not_extrapolated (7 candidates); the workload may be infeasible
-/// without these exclusions too". `None` when no candidate was excluded:
-/// the selection is infeasible on its own ([`infeasible`]). Telling
+/// without these exclusions too". `None` when no candidate was excluded
+/// beyond the default deployment's exclusions: the selection is infeasible
+/// on its own ([`infeasible`]). Telling
 /// whether the workload has a plan without the exclusions would take a
 /// second solve, so the reason says it may not.
 pub(crate) fn excluded_by_deployment(
-    physical: &PhysicalASAPMemoCandidates,
+    stage2_pruned_candidates: &[PrunedCandidate<PhysicalCandidate>],
     query: Option<usize>,
 ) -> Option<ErrorSelectingPlan> {
+    // The default deployment's own exclusions (query-time results not
+    // kept across evaluations) are planning as it always was, so they
+    // neither cause this rejection nor appear in it.
+    let default_sources: Vec<ExclusionSource> = DeploymentCapabilities::default()
+        .exclusions()
+        .into_iter()
+        .map(|exclusion| exclusion.source)
+        .collect();
     let mut pruned_per_source: Vec<(ExclusionSource, usize)> = Vec::new();
-    for pruned in &physical.pruned_candidates {
+    for pruned in stage2_pruned_candidates {
         let PruneReason::ExcludedByDeployment(source) = pruned.reason else {
             continue;
         };
+        if default_sources.contains(&source) {
+            continue;
+        }
         match pruned_per_source
             .iter_mut()
             .find(|(seen, _)| *seen == source)
@@ -303,7 +317,14 @@ pub(crate) fn excluded_by_deployment(
     };
     let sources: Vec<String> = pruned_per_source
         .iter()
-        .map(|(source, count)| format!("{} ({count} candidates)", exclusion_source_name(*source)))
+        .map(|(source, count)| {
+            let noun = if *count == 1 {
+                "candidate"
+            } else {
+                "candidates"
+            };
+            format!("{} ({count} {noun})", exclusion_source_name(*source))
+        })
         .collect();
     Some(ErrorSelectingPlan::NoValidCandidate(vec![Rejection {
         id: "workload".into(),
