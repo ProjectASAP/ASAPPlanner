@@ -320,7 +320,9 @@ pub fn plan_cost(
         )
         .map_or_else(
             || {
-                merge_operations_per_state(family, output[&id].bytes_per_row())
+                // A partial copy merges into a state of the same window.
+                let state_bytes = output[&id].bytes_per_row();
+                merge_operations_per_state(family, state_bytes, state_bytes)
                     * speed.ms_per_cpu_op
                     * formula_scale
             },

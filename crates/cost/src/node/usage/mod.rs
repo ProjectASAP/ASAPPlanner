@@ -8,13 +8,15 @@ use crate::node::analytical::{
 };
 use crate::node::operations_per_unit::{
     estimate_operations_per_group, hash_aggregate_operations_per_row, merge_operations_per_state,
-    update_operations_per_row, CHAIN_EMIT_OPERATIONS_PER_STATE, TIME_RANGE_OPERATIONS_PER_ROW,
+    update_operations_per_row, CARRIED_LABEL_OPERATIONS_PER_ROW, CHAIN_EMIT_OPERATIONS_PER_STATE,
+    MERGE_OPERATIONS_PER_OUTPUT_GROUP, TIME_RANGE_OPERATIONS_PER_ROW,
 };
 use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
 use crate::node::state_bytes::{
-    keeps_every_value, row_bytes, sketch_state_bytes, summary_state_bytes, StateInputRows,
+    keeps_every_value, row_bytes, sketch_state_bytes, state_row_label_bytes, summary_state_bytes,
+    StateInputRows,
 };
 use crate::{aggregate_lookup, lookup, StateFamily};
 use crate::{
@@ -159,6 +161,14 @@ pub struct ProducerOutput<'a> {
     /// `Filter`, `Project`), so a `TimeRange` over them selects windows;
     /// `None` for any other node.
     pub chain_tumbling_window_width_ms: Option<u64>,
+    /// What each summary state it outputs folds: the rows a `SummaryAgg`
+    /// or chain folds per state, a `SummaryMerge`'s input rows times the
+    /// states it merges per group, passed on by a `TimeRange` and the
+    /// operators that keep each row's window; `None` for any other node
+    /// or when unknown. Example: a 1h `TimeRange` over a chain of 10 s
+    /// windows of a 1 Hz series passes on 10 rows per state, and a merge
+    /// over it outputs states of 3,600 rows.
+    pub state_input_rows: Option<StateInputRows>,
 }
 
 /// What one node uses and outputs ([`node_resource_usage_and_cost`]): its
@@ -189,6 +199,9 @@ pub struct NodeResourceUsageAndCost<'a> {
     /// `Filter`, `Project`), so a `TimeRange` over them selects windows;
     /// `None` for any other node.
     pub chain_tumbling_window_width_ms: Option<u64>,
+    /// What each summary state it outputs folds
+    /// ([`ProducerOutput::state_input_rows`]).
+    pub state_input_rows: Option<StateInputRows>,
     /// Work of one execution, in ms on one core.
     pub work_ms_per_execution: f64,
     /// CPU operations per second.
@@ -229,6 +242,7 @@ impl<'a> NodeResourceUsageAndCost<'a> {
             unchanged_columns: self.unchanged_columns.clone(),
             tumbling_windows: self.tumbling_windows,
             chain_tumbling_window_width_ms: self.chain_tumbling_window_width_ms,
+            state_input_rows: self.state_input_rows,
         }
     }
 }
@@ -304,6 +318,9 @@ pub fn node_resource_usage_and_cost<'a>(
     let mut raw_scan = None;
     // A query-time scan's raw rows retained.
     let mut raw_retained_rows = None;
+    // What each summary state it outputs folds, when it builds or merges
+    // states (else passed on below).
+    let mut built_state_input_rows: Option<StateInputRows> = None;
     let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
     // The outputs a node retains: its `retention_ms` over the time between
     // two outputs, at least one. A chain's outputs are its tumbling
@@ -439,6 +456,15 @@ pub fn node_resource_usage_and_cost<'a>(
             .iter()
             .all(|source| declared_non_negative(data, source))
     };
+    // The bytes of each summary state its first input holds, without the
+    // row's labels.
+    let input_state_bytes = || {
+        input.bytes_per_row().saturating_sub(
+            producers
+                .first()
+                .map_or(0, |producer| state_row_label_bytes(producer.output_schema)),
+        )
+    };
     let unary = |output| UnaryEdgeStatistics {
         input,
         output,
@@ -555,13 +581,12 @@ pub fn node_resource_usage_and_cost<'a>(
                 ..
             } => {
                 let group_count = groups(reduction)?;
-                let keys = match reduction {
-                    Reduction::Reduce(keys) => keys.keys().len() as u64,
-                    _ => 1,
-                };
+                let keys = grouping_key_count(reduction);
                 let out = edge(group_count)?;
                 let held = input.rows.div_ceil(group_count.max(1));
-                let operations_per_row = hash_aggregate_operations_per_row(keys, measures, held);
+                let operations_per_row = hash_aggregate_operations_per_row(keys, measures, held)
+                    + carried_label_columns(&node.output_schema, keys) as f64
+                        * CARRIED_LABEL_OPERATIONS_PER_ROW;
                 let estimate = estimate_operator(
                     PhysicalOperator::HashAggregate {
                         grouping_key_count: keys,
@@ -752,16 +777,19 @@ pub fn node_resource_usage_and_cost<'a>(
                 rows_per_state: (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
                 non_negative: raw_data_samples_non_negative(),
             };
+            built_state_input_rows = Some(input_rows);
             let state_bytes = measured_state_bytes.unwrap_or(summary_state_bytes(
                 family,
                 node.parameters.as_ref(),
                 input_rows,
             )?);
-            let update_ops = update_operations_per_row(family, node.parameters.as_ref());
+            let update_ops = update_operations_per_row(family, node.parameters.as_ref())
+                + carried_label_columns(&node.output_schema, grouping_key_count(reduction)) as f64
+                    * CARRIED_LABEL_OPERATIONS_PER_ROW;
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
-                    .checked_mul(state_bytes)
+                    .checked_mul(state_bytes + state_row_label_bytes(&node.output_schema))
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             (
@@ -801,12 +829,15 @@ pub fn node_resource_usage_and_cost<'a>(
                 rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
                 non_negative: raw_data_samples_non_negative(),
             };
+            built_state_input_rows = Some(input_rows);
             let state_bytes = measured_state_bytes.unwrap_or(summary_state_bytes(
                 family,
                 node.parameters.as_ref(),
                 input_rows,
             )?);
-            let update_ops = update_operations_per_row(family, node.parameters.as_ref());
+            let update_ops = update_operations_per_row(family, node.parameters.as_ref())
+                + carried_label_columns(&node.output_schema, grouping_key_count(reduction)) as f64
+                    * CARRIED_LABEL_OPERATIONS_PER_ROW;
             // The states it completes in one execution: at ingestion time
             // one second's share of each group's window (a 10 s window: a
             // tenth of a state per group); at query time every retained
@@ -828,7 +859,7 @@ pub fn node_resource_usage_and_cost<'a>(
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
-                    .checked_mul(state_bytes)
+                    .checked_mul(state_bytes + state_row_label_bytes(&node.output_schema))
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             (
@@ -866,21 +897,50 @@ pub fn node_resource_usage_and_cost<'a>(
                 );
             }
             let states = merged_states(producers)?;
-            // Each input state's merge, by the states' family and bytes.
+            if let Some(keys) = group_by {
+                group_count = group_count.min(groups(&Reduction::by(keys.clone()))?);
+            }
+            // The merged state: each group's input states folded into one,
+            // sized for the rows they fold together when known (a KLL
+            // grows towards its `k`), else as one input state.
+            let states_per_group = states.div_ceil(group_count.max(1));
+            let input_state_bytes = |producer: &ProducerOutput<'_>| {
+                producer
+                    .output
+                    .bytes_per_row()
+                    .saturating_sub(state_row_label_bytes(producer.output_schema))
+            };
+            let merged_input_rows = producers
+                .first()
+                .and_then(|producer| producer.state_input_rows)
+                .map(|rows| StateInputRows {
+                    rows_per_state: rows
+                        .rows_per_state
+                        .map(|per_state| per_state.saturating_mul(states_per_group)),
+                    ..rows
+                });
+            built_state_input_rows = merged_input_rows;
+            let merged_state_bytes = match (family, merged_input_rows) {
+                (StateFamily::Sketch(params), Some(rows)) => sketch_state_bytes(params, rows),
+                _ => producers.first().map_or(0, input_state_bytes),
+            };
+            // Each input state's merge, by the states' family and bytes,
+            // and each output group's state and row.
             let merge_ops: f64 = producers
                 .iter()
                 .map(|producer| {
                     producer.output.rows as f64
-                        * merge_operations_per_state(family, producer.output.bytes_per_row())
+                        * merge_operations_per_state(
+                            family,
+                            input_state_bytes(producer),
+                            merged_state_bytes,
+                        )
                 })
-                .sum();
-            if let Some(keys) = group_by {
-                group_count = group_count.min(groups(&Reduction::by(keys.clone()))?);
-            }
+                .sum::<f64>()
+                + group_count as f64 * MERGE_OPERATIONS_PER_OUTPUT_GROUP;
             let out = EdgeStatistics {
                 rows: group_count,
-                bytes: input
-                    .bytes_per_row()
+                bytes: (merged_state_bytes + state_row_label_bytes(&node.output_schema))
                     .checked_mul(group_count)
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
@@ -904,7 +964,7 @@ pub fn node_resource_usage_and_cost<'a>(
             (
                 out,
                 Ok(ResourceEstimate::new(
-                    input.rows as f64 * estimate_operations_per_group(family),
+                    input.rows as f64 * estimate_operations_per_group(family, input_state_bytes()),
                     0,
                     0,
                 )),
@@ -914,7 +974,7 @@ pub fn node_resource_usage_and_cost<'a>(
         Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => (
             edge(input.rows)?,
             Ok(ResourceEstimate::new(
-                input.rows as f64 * estimate_operations_per_group(family),
+                input.rows as f64 * estimate_operations_per_group(family, input_state_bytes()),
                 0,
                 0,
             )),
@@ -1103,6 +1163,21 @@ pub fn node_resource_usage_and_cost<'a>(
                 .then(|| chain_tumbling_window_width_ms(producers))
                 .flatten()
         });
+    // A node that builds or merges states says what they fold; a time
+    // range and an operator keeping each row's window pass on their
+    // input's.
+    let state_input_rows = built_state_input_rows.or_else(|| {
+        let passes_states_on =
+            matches!(node.payload, Payload::NonASAP(NonASAPOp::TimeRange { .. }))
+                || node.payload.keeps_input_window();
+        passes_states_on
+            .then(|| {
+                producers
+                    .first()
+                    .and_then(|producer| producer.state_input_rows)
+            })
+            .flatten()
+    });
     Ok(NodeResourceUsageAndCost {
         output: out,
         sources,
@@ -1110,6 +1185,7 @@ pub fn node_resource_usage_and_cost<'a>(
         unchanged_columns,
         tumbling_windows,
         chain_tumbling_window_width_ms,
+        state_input_rows,
         work_ms_per_execution: node_ms,
         cpu_ops_per_second: estimate.cpu_ops() * per_second,
         scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
@@ -1162,6 +1238,29 @@ fn selected_tumbling_windows(
     Ok(u64::try_from(range.as_millis() / u128::from(width_ms))
         .map_err(|_| AnalyticalCostError::Overflow)?
         .max(1))
+}
+
+/// The grouping keys `reduction` hashes per row: its keys, or the entity
+/// (one) when it keeps one row per entity.
+fn grouping_key_count(reduction: &Reduction) -> u64 {
+    match reduction {
+        Reduction::Reduce(keys) => keys.keys().len() as u64,
+        Reduction::PerEntity => 1,
+    }
+}
+
+/// The label columns a grouping by `grouping_key_count` keys carries per
+/// group beside them, which each input row copies: the string columns of
+/// its `output_schema` that are not keys. Example: the per-series sum
+/// under `sum by (job) (sum_over_time(latency[5m]))` outputs the series
+/// identity (its key) and `job`, so it carries 1.
+fn carried_label_columns(output_schema: &Schema, grouping_key_count: u64) -> u64 {
+    let label_columns = output_schema
+        .fields
+        .iter()
+        .filter(|field| field.dtype == FieldDataType::Plain(asap_types::ir::schema::DataType::Utf8))
+        .count() as u64;
+    label_columns.saturating_sub(grouping_key_count)
 }
 
 /// The input states a `SummaryMerge` over `producers` reads: every row of
