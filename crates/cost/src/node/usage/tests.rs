@@ -660,6 +660,87 @@ fn a_grouping_counts_raw_batches_from_the_time_its_input_spans() {
     );
 }
 
+/// A sort, a limit and a dedup pass raw rows on as they are, so they pass
+/// on the time those rows span, as a `Filter` does; a concat of raw rows
+/// spans the longest of its inputs'. Example: a 5 min scan of 1,000 series
+/// at 1 Hz sorted spans 300,000 ms, 30 batches of 10 s, so a per-series
+/// grouping over it visits each group 30 times: 30,000 visits, where
+/// without a span it counted one batch, 1,000.
+#[test]
+fn a_sort_limit_dedup_and_concat_pass_on_the_time_their_raw_rows_span() {
+    use asap_types::ir::operator::GroupKeys;
+    use asap_types::ir::scalar::{ScalarExpr, ScalarValue, SortKey};
+    let settings = CostInputs::default();
+    let data = thousand_series_sampled_every(1_000);
+    let scan = node(metric_scan("latency"));
+    let scan_usage =
+        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), &data, &settings)
+            .unwrap();
+    let short_scan_usage =
+        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(60_000), &data, &settings).unwrap();
+    let span_of = |payload: Payload, producers: Vec<ProducerOutput<'_>>| {
+        node_resource_usage_and_cost(&node(payload), &producers, (1, 1.0), None, &data, &settings)
+            .unwrap()
+            .raw_rows_span_ms
+    };
+    let raw = || produced(&scan, &scan_usage);
+    for payload in [
+        Payload::NonASAP(NonASAPOp::Sort {
+            keys: vec![SortKey {
+                expr: ScalarExpr::Literal(ScalarValue::Float64(1.0)),
+                ascending: true,
+                nulls_first: false,
+            }],
+            partition_by: GroupKeys::default(),
+            child: 0,
+        }),
+        Payload::NonASAP(NonASAPOp::Limit {
+            n: Some(10),
+            offset: 0,
+            partition_by: GroupKeys::default(),
+            child: 0,
+        }),
+        Payload::NonASAP(NonASAPOp::Dedup {
+            cols: vec![],
+            child: 0,
+        }),
+    ] {
+        assert_eq!(
+            span_of(payload.clone(), vec![raw()]),
+            Some(300_000),
+            "{payload:?}"
+        );
+    }
+    let concat = || {
+        Payload::NonASAP(NonASAPOp::Concat {
+            children: vec![0, 1],
+        })
+    };
+    assert_eq!(
+        span_of(concat(), vec![raw(), produced(&scan, &short_scan_usage)]),
+        Some(300_000)
+    );
+    // A concat with an input that is not raw rows outputs no raw rows.
+    let aggregate = node(Payload::NonASAP(NonASAPOp::Aggregate {
+        reduction: Reduction::PerEntity,
+        measures: vec![asap_types::ir::operator::AggIntent::Max { col: None }],
+        output_names: vec![String::new()],
+        filters: vec![],
+        having: None,
+        child: 0,
+    }));
+    let aggregate_usage =
+        node_resource_usage_and_cost(&aggregate, &[raw()], (1, 1.0), None, &data, &settings)
+            .unwrap();
+    assert_eq!(
+        span_of(
+            concat(),
+            vec![raw(), produced(&aggregate, &aggregate_usage)]
+        ),
+        None
+    );
+}
+
 /// A query-time chain of 60 s windows over the same filtered scan (30,000
 /// rows over 5 min): each window holds the rows of its 60 s, 6,000, so
 /// each of its 1,000 per-series states folds 6 rows. Sized by the sources'
@@ -870,11 +951,12 @@ fn a_hash_aggregate_pays_each_further_key_and_measure_as_measured() {
 /// in a table of every distinct value read, then keeps each group's
 /// (group, value) pairs: its time per row grows with the distinct values.
 /// Measured on the executor with one group: 115 ns per row over 10,000
-/// distinct values and 589 over 259,000; charged 18 at both.
+/// distinct users and 589 over 1,000,000 (259,000 of them among the rows);
+/// charged 18 at both.
 #[test]
 fn an_exact_distinct_count_costs_more_per_row_with_more_distinct_values() {
     use asap_types::ir::operator::AggIntent;
-    for (user_ids, measured) in [(10_000, 115.0), (259_000, 589.0)] {
+    for (user_ids, measured) in [(10_000, 115.0), (1_000_000, 589.0)] {
         let charged = sql_aggregate_operations_per_row(
             vec![],
             vec![AggIntent::Cardinality { cols: vec![4] }],
@@ -883,6 +965,28 @@ fn an_exact_distinct_count_costs_more_per_row_with_more_distinct_values() {
         assert!(
             (0.75..=1.33).contains(&(charged / measured)),
             "{user_ids} distinct: charged {charged:.1} ns per row, measured {measured}"
+        );
+    }
+}
+
+/// A grouped exact `COUNT(DISTINCT user_id)` pays its grouping key and its
+/// group visits once: its own terms were fitted with them fixed at their
+/// constants. Measured on the executor over 300,000 rows by `job` (10
+/// groups): 60.2 ns per row of 100 distinct users and 81.3 of 1,000. With
+/// the key and the visits also inside the count's fitted constant, they
+/// were charged 83 and 97, 1.38x and 1.19x.
+#[test]
+fn a_grouped_exact_distinct_count_pays_its_key_and_visits_once() {
+    use asap_types::ir::operator::AggIntent;
+    for (user_ids, measured) in [(100, 60.2), (1_000, 81.3)] {
+        let charged = sql_aggregate_operations_per_row(
+            vec![1],
+            vec![AggIntent::Cardinality { cols: vec![4] }],
+            user_ids,
+        );
+        assert!(
+            (0.8..=1.25).contains(&(charged / measured)),
+            "by job of {user_ids} users: charged {charged:.1} ns per row, measured {measured}"
         );
     }
 }
@@ -1000,6 +1104,89 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
     assert!(
         (0.75..=1.33).contains(&(352.0 / charged_s)),
         "charged {charged_s:.1} s, measured 352"
+    );
+}
+
+/// A rollup merges every state its keys put in one group, even when the
+/// estimates give it as many groups as states: with no declared label
+/// values, KMV states by (region, service) and their rollup by `service`
+/// both estimate 1,000 groups, yet each service's states merge into one.
+/// Only a merge that keeps its input's groups (no `group_by`, or the
+/// input's own keys) passes one state per group through.
+#[test]
+fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
+    use asap_types::ir::schema::DataType;
+    use asap_types::summary_type::SketchAlgorithm;
+    let settings = CostInputs::default();
+    let data: DataWorkload = serde_json::from_value(serde_json::json!({
+        "arrival": {"ingesting": {"rows_per_second": 2_000_000.0}},
+        "sources": {"http": {}}
+    }))
+    .unwrap();
+    let parameters = SketchParams::Kmv { k: 26_656 };
+    let rows = StateInputRows {
+        rows_per_state: Some(12_000),
+        non_negative: false,
+        value_magnitude_range: None,
+    };
+    let state_bytes = crate::node::state_bytes::sketch_state_bytes(&parameters, rows);
+    let build = PhysicalASAPDAGNode {
+        parameters: Some(parameters.clone()),
+        output_schema: Schema::new(vec![
+            Field::new("region", FieldDataType::Plain(DataType::Utf8), false),
+            Field::new("service", FieldDataType::Plain(DataType::Utf8), false),
+            Field::new("state", FieldDataType::Sketch(SketchAlgorithm::Kmv), false),
+        ]),
+        ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+            input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
+            reduction: Reduction::by(vec![0, 1]),
+            filter: None,
+        }))
+    };
+    let states = ProducerOutput {
+        payload: &build.payload,
+        output_schema: &build.output_schema,
+        output: EdgeStatistics {
+            rows: 1_000,
+            bytes: 1_000 * (state_bytes + 32),
+        },
+        sources: BTreeSet::from(["http"]),
+        family: StateFamily::Sketch(&parameters),
+        unchanged_columns: ["region", "service"].into(),
+        tumbling_windows: 1,
+        chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
+        state_input_rows: Some(rows),
+    };
+    let merge_ms = |group_by: Option<Vec<usize>>| {
+        let merge = PhysicalASAPDAGNode {
+            parameters: Some(parameters.clone()),
+            ..node(Payload::ASAP(ASAPOp::SummaryMerge {
+                children: vec![0],
+                group_by,
+            }))
+        };
+        let usage = node_resource_usage_and_cost(
+            &merge,
+            std::slice::from_ref(&states),
+            (1, 1.0),
+            None,
+            &data,
+            &settings,
+        )
+        .unwrap();
+        assert_eq!(usage.output.rows, 1_000, "{}", usage.cost.detail);
+        usage.work_ms_per_execution
+    };
+    let kept_groups_ms = merge_ms(None);
+    assert_eq!(merge_ms(Some(vec![0, 1])), kept_groups_ms);
+    assert_eq!(merge_ms(Some(vec![1, 0])), kept_groups_ms);
+    let rollup_ms = merge_ms(Some(vec![1]));
+    assert!(
+        rollup_ms > 100.0 * kept_groups_ms,
+        "rollup charged {rollup_ms:.3} ms, a pass-through {kept_groups_ms:.3} ms"
     );
 }
 
