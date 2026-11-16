@@ -1,0 +1,12 @@
+{
+  "raw_data_retained": true,
+  "query_time_results_retained": false,
+  "supported_summaries": [
+    {
+      "summary_type": "Kll",
+      "readouts": [
+        "Quantile"
+      ]
+    }
+  ]
+}

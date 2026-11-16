@@ -28,6 +28,10 @@ mod tests;
 
 use std::collections::BTreeSet;
 
+/// Pass 2's chain rule, which `asap_planner` reads to say why a logical
+/// edge fails.
+pub use evaluation_grids::chain_off_the_evaluation_grid;
+
 use asap_accuracy::{AccuracyEvidence, ErrorMetricsOfMemo};
 use asap_types::stages::{
     CandidateError, CandidateForMemoGroupId, LogicalASAPMemoCandidates, LogicalEdge, Memo,
