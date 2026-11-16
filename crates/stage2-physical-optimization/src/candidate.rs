@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use asap_types::deployment_capabilities::DeploymentCapabilities;
+use asap_types::deployment_capabilities::{CandidateDescription, DeploymentExclusion};
 use asap_types::ir::operator::arguments::Source;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::FieldDataType;
@@ -59,16 +59,29 @@ pub(super) struct OfferedPhysicalProperties {
 ///   between batches, so it is materialized.
 ///
 /// A value not offered is not returned, and neither is the invalid
-/// (IngestionTime, OneEvaluation).
+/// (IngestionTime, OneEvaluation). The prune rules, in order: a Count-Min
+/// build whose weights are not proven non-negative, ingestion-time work
+/// without an ingestion pipeline, then the first of the deployment's
+/// `exclusions` (`DeploymentCapabilities::exclusions`) that matches it.
 pub(super) fn offered_physical_properties(
     memo: &Memo,
     candidate: CandidateForMemoGroupId,
     ingestion_time_offered_for_group: bool,
     across_evaluations_offered_for_group: bool,
     data: &DataWorkload,
-    capabilities: &DeploymentCapabilities,
+    exclusions: &[DeploymentExclusion],
 ) -> Vec<OfferedPhysicalProperties> {
-    let operator = &memo.candidate(candidate).expression.operator;
+    let logical_candidate = memo.candidate(candidate);
+    let operator = &logical_candidate.expression.operator;
+    // For a readout, the summary type of the state it reads.
+    let read_summary_type = match operator {
+        Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => memo.groups()
+            [summary_input.0 as usize]
+            .group_properties
+            .schema
+            .summary_state_type(),
+        _ => None,
+    };
     let build = summary_build(operator);
     let ingestion_time_offered = ingestion_time_offered_for_group
         && build.is_none_or(|(summary_type, child)| {
@@ -82,7 +95,6 @@ pub(super) fn offered_physical_properties(
         count_min_weights_not_proven_non_negative(memo, candidate.group, summary_type)
     });
     let has_ingestion_pipeline = data.arrival.rows_per_second().is_some();
-    let scans_raw_data = matches!(operator, Operator::NonASAP(NonASAPOp::Scan { .. }));
     let builds_summary =
         build.is_some() || matches!(operator, Operator::ASAP(ASAPOp::MaintainPopulation { .. }));
     let mut offered = Vec::new();
@@ -104,21 +116,21 @@ pub(super) fn offered_physical_properties(
             let Ok(physical_properties) = PhysicalProperties::new(timing, lifetime) else {
                 continue;
             };
-            let query_time = timing == ExecutionTiming::QueryTime;
+            let description = CandidateDescription {
+                operator,
+                parameters: logical_candidate.logical_properties.parameters(),
+                physical_properties,
+                read_summary_type,
+            };
             let prune_reason = if count_min_weights_not_proven_non_negative {
                 Some(PruneReason::CountMinWeightsNotProvenNonNegative)
-            } else if !query_time && !has_ingestion_pipeline {
+            } else if timing == ExecutionTiming::IngestionTime && !has_ingestion_pipeline {
                 Some(PruneReason::NoIngestionPipeline)
-            } else if (query_time || across_evaluations)
-                && scans_raw_data
-                && !capabilities.raw_data_retained
-            {
-                Some(PruneReason::RawDataNotRetained)
-            } else if query_time && across_evaluations && !capabilities.query_time_results_retained
-            {
-                Some(PruneReason::QueryTimeResultsNotRetained)
             } else {
-                None
+                exclusions
+                    .iter()
+                    .find(|exclusion| exclusion.candidates.matches(&description))
+                    .map(|exclusion| PruneReason::ExcludedByDeployment(exclusion.source))
             };
             offered.push(OfferedPhysicalProperties {
                 physical_properties,

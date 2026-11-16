@@ -189,8 +189,8 @@ test('a node shared by several queries says so; a query keeps its own nodes and 
   assert.equal(cytoscape(elements).nodes().length, nodesOf(elements).length);
 });
 
-test('the deployment line names each capability left out and the caller exclusions', () => {
-  const text = call('deploymentText', {
+test('the deployment settings name each capability left out and the caller exclusions', () => {
+  const text = call('capabilityLimitsText', {
     raw_data_retained: true,
     query_time_results_retained: false,
     counter_semantics: { reset_handling: true, extrapolation: false },
@@ -205,6 +205,6 @@ test('the deployment line names each capability left out and the caller exclusio
   assert.match(text, /not mergeable across windows: exact Rate/);
   assert.match(text, /excluded candidates: 2/);
   // The defaults leave nothing out, so the line names none of them.
-  const defaults = call('deploymentText', { raw_data_retained: true, query_time_results_retained: false });
-  assert.doesNotMatch(defaults, /counter|mergeable|excluded/);
+  const defaults = call('capabilityLimitsText', { raw_data_retained: true, query_time_results_retained: false });
+  assert.equal(defaults, '');
 });

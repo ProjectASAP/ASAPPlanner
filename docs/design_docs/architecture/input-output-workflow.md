@@ -264,7 +264,7 @@ latter cannot be fabricated by one.
 | Accuracy evidence | `PlanningModels` (`AccuracyEvidence`; none by default) | Measured guarantees per summary configuration, read before the theoretical guarantee. Missing measurements leave the theoretical guarantee. |
 | Cost model | `CostInputs.cost_model` (cost model 1 by default) | Turns each valid candidate's resource usage into a choice. The illustrative unit costs are not a measured deployment cost. |
 | Measured cost evidence | `CostInputs.measured_operation_costs` | Measured CPU time per unit of each operator kind, at ingestion or query time, replaces the formulas for the nodes it prices (a sketch interpolated between measured sizes); the other nodes' formulas are scaled by one calibration factor fitted from the measured ones. |
-| Runtime capabilities | `DeploymentCapabilities` (`supported_summaries`, `raw_data_retained`, `query_time_results_retained`) | Prevents choosing a summary, raw-data scan or kept state the intended executor cannot provide. |
+| Runtime capabilities | `DeploymentCapabilities` (`supported_summaries`, `raw_data_retained`, `query_time_results_retained`, `counter_semantics`, `state_not_mergeable_across_windows`, `excluded_candidates`) | Prevents choosing a summary, raw-data scan, kept state, counter function or state merge the intended executor cannot provide, or a candidate the caller excludes. |
 
 For example, the query `quantile_over_time(0.9, data[5m]) /
 quantile_over_time(0.5, data[5m])` does not tell Planner whether the windows

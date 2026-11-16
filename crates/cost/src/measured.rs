@@ -234,7 +234,7 @@ pub(crate) fn aggregate_lookup(
         memory_bytes_per_state: None,
     };
     for measure in measures {
-        let name = measure_name(measure);
+        let name = measure.kind_name();
         let find = |for_phase: Option<ExecutionTiming>| {
             table.operators.iter().find(|e| {
                 e.operator == OperatorKind::Aggregate
@@ -247,14 +247,6 @@ pub(crate) fn aggregate_lookup(
         total.ns_per_invocation += entry.ns_per_invocation;
     }
     (!measures.is_empty()).then_some(total)
-}
-
-/// An aggregate measure's name as an entry states it: its JSON `kind`.
-fn measure_name(measure: &AggIntent) -> String {
-    serde_json::to_value(measure)
-        .ok()
-        .and_then(|value| value.get("kind")?.as_str().map(str::to_owned))
-        .unwrap_or_else(|| format!("{measure:?}"))
 }
 
 fn price_of(entry: &OperatorCost) -> UnitPrice {

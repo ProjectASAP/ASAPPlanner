@@ -95,15 +95,17 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
   `PhysicalASAPMemoCandidates::pruned_candidates` as
   `PrunedCandidate<PhysicalCandidate>` with a `PruneReason`: an
   ingestion-time alternative without an ingestion pipeline
-  (`NoIngestionPipeline`); a scan of raw data the deployment does not
-  retain, at query time or materialized across evaluations
-  (`RawDataNotRetained`); a query-time result materialized across
-  evaluations the deployment does not retain
-  (`QueryTimeResultsNotRetained`); a Count-Min build whose weights are not
-  proven non-negative (`CountMinWeightsNotProvenNonNegative`); then an
-  alternative no buildable input or query output can use
-  (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`). The planner does
-  not check executor support. Stage 2 makes no execution-scope copies.
+  (`NoIngestionPipeline`); a Count-Min build whose weights are not
+  proven non-negative (`CountMinWeightsNotProvenNonNegative`); an
+  alternative one of the deployment's exclusions matches
+  (`ExcludedByDeployment(source)`, from
+  `DeploymentCapabilities::exclusions`: an unsupported summary type or
+  readout, a scan of raw data the deployment does not retain, a query-time
+  result kept across evaluations it does not retain, a counter semantics
+  or a state merge its executor lacks, or a candidate the caller excludes);
+  then an alternative no buildable input or query output can use
+  (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`). Stage 2 makes no
+  execution-scope copies.
 
 ## 5. Stage 3
 

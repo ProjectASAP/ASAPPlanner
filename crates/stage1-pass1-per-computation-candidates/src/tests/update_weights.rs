@@ -24,14 +24,14 @@ fn update_weights_follow_the_measure() {
         None,
     );
     query(&mut memo, counts, None);
-    let memo = pass1_memo(memo, None).unwrap();
+    let memo = pass1_memo(memo).unwrap();
     let (_, update) = state_group(&memo, SketchAlgorithm::Cms);
     assert_eq!(update.weight, SummaryInputExpr::Constant(1.0));
     let mut memo = Memo::new(&DataWorkload::default());
     let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);
     let sums = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![sum()], None);
     query(&mut memo, sums, None);
-    let memo = pass1_memo(memo, None).unwrap();
+    let memo = pass1_memo(memo).unwrap();
     let state = groups_where(
         &memo,
         |e| matches!(e, Operator::ASAP(ASAPOp::SummaryAgg { input, .. }) if input.weight == SummaryInputExpr::Column(ColumnRef::SampleValue)),

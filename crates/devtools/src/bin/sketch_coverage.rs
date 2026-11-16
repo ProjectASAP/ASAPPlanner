@@ -57,7 +57,7 @@ fn analyze_corpus(
             rejected += 1;
             continue;
         };
-        let Ok(pass1) = pass1_memo(memo, None) else {
+        let Ok(pass1) = pass1_memo(memo) else {
             rejected += 1;
             continue;
         };

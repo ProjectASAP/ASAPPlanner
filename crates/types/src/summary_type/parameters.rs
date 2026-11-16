@@ -300,15 +300,58 @@ impl SketchParameterRange {
     /// The algorithm whose parameter it ranges over (`Kll`, `Kmv`,
     /// `DDSketch`).
     pub fn algorithm(&self) -> super::SketchAlgorithm {
-        todo!("tests-only PR: SketchParameterRange::algorithm")
+        use super::SketchAlgorithm;
+        match self {
+            Self::KllK { .. } => SketchAlgorithm::Kll,
+            Self::KmvK { .. } => SketchAlgorithm::Kmv,
+            Self::DDSketchAlpha { .. } => SketchAlgorithm::DDSketch,
+        }
     }
 
     /// Whether `parameters` are that algorithm's and the parameter is in
     /// range, both ends included: `KllK { at_most: Some(547) }` contains
     /// `Kll { k: 547 }`, not `Kll { k: 1404 }` nor any `Kmv`.
     pub fn contains(&self, parameters: &SketchParams) -> bool {
-        let _ = parameters;
-        todo!("tests-only PR: SketchParameterRange::contains")
+        fn within<T: PartialOrd>(value: T, at_least: Option<T>, at_most: Option<T>) -> bool {
+            at_least.is_none_or(|low| value >= low) && at_most.is_none_or(|high| value <= high)
+        }
+        match (*self, parameters) {
+            (Self::KllK { at_least, at_most }, SketchParams::Kll { k })
+            | (Self::KmvK { at_least, at_most }, SketchParams::Kmv { k }) => {
+                within(*k, at_least, at_most)
+            }
+            (Self::DDSketchAlpha { at_least, at_most }, SketchParams::DDSketch { alpha }) => {
+                within(*alpha, at_least, at_most)
+            }
+            _ => false,
+        }
+    }
+
+    /// Why the range is bad input, or `None` when it is valid: `at_least`
+    /// is above `at_most`, so it contains no value (`KllK { at_least: 1404,
+    /// at_most: 547 }`), or a DDSketch α bound is not a number in (0, 1).
+    pub fn invalid_reason(&self) -> Option<String> {
+        let (at_least, at_most) = match *self {
+            Self::KllK { at_least, at_most } | Self::KmvK { at_least, at_most } => {
+                (at_least.map(f64::from), at_most.map(f64::from))
+            }
+            Self::DDSketchAlpha { at_least, at_most } => {
+                if let Some(alpha) = [at_least, at_most]
+                    .into_iter()
+                    .flatten()
+                    .find(|alpha| !(*alpha > 0.0 && *alpha < 1.0))
+                {
+                    return Some(format!("a DDSketch alpha of {alpha} is not in (0, 1)"));
+                }
+                (at_least, at_most)
+            }
+        };
+        match (at_least, at_most) {
+            (Some(low), Some(high)) if low > high => Some(format!(
+                "the range is empty: at_least {low} is above at_most {high}"
+            )),
+            _ => None,
+        }
     }
 }
 

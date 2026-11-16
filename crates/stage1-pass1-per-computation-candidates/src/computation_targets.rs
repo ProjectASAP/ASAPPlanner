@@ -26,8 +26,6 @@ use asap_types::summary_type::{
     ExactKind, SketchAlgorithm, SketchStatistic, StatisticKind, SummaryInputExpr, SummaryUpdate,
 };
 
-use asap_types::deployment_capabilities::{summary_supported, SupportedSummary};
-
 use crate::candidates::having::has_having;
 use crate::summary_realization::{realize_keyed_additive_summary_input, summary_candidates};
 use crate::{expression, schema, PerComputationCandidateError};
@@ -142,15 +140,11 @@ fn nullable_avg_input(input: &Schema, intent: &AggIntent) -> bool {
 /// Pass 1 walks the groups, so an aggregate several queries read is one
 /// target per measure. An aggregate measure is eligible when it has a
 /// realization besides exact execution, even if every such realization is
-/// pruned. The summaries the deployment does not support
-/// (`supported_summaries`, the deployment's
-/// `DeploymentCapabilities::supported_summaries`; `None` supports every
-/// one) are dropped: a target's own, and a fused computation's (with all
-/// of them dropped, the fusion is not offered). Measure filters and
-/// `HAVING` keep every candidate.
+/// pruned. Every summary the planner can build is offered: Stage 2 prunes
+/// those the deployment does not support. Measure filters and `HAVING`
+/// keep every candidate.
 pub(crate) fn computation_targets(
     memo: &Memo,
-    supported_summaries: Option<&[SupportedSummary]>,
 ) -> Result<Vec<ComputationTarget>, PerComputationCandidateError> {
     if memo
         .groups()
@@ -199,39 +193,7 @@ pub(crate) fn computation_targets(
     prune_topk_heaps_over_one_row_per_item(memo, &mut targets);
     add_nested_distributive_targets(memo, &mut targets);
     close_absorptions(&mut targets);
-    without_unsupported_summaries(memo, &mut targets, supported_summaries);
     Ok(targets)
-}
-
-/// Drops from `targets` the summary candidates the executor does not
-/// support (`supported_summaries`; `None` supports every one): a target's
-/// own, and its fused computation's. The readout is the statistic the
-/// measure's estimate reads (the outer measure's for a fused computation).
-fn without_unsupported_summaries(
-    memo: &Memo,
-    targets: &mut [ComputationTarget],
-    supported_summaries: Option<&[SupportedSummary]>,
-) {
-    for target in targets.iter_mut() {
-        let Operator::NonASAP(NonASAPOp::Aggregate { measures, .. }) =
-            expression(memo, target.aggregate_group)
-        else {
-            continue;
-        };
-        let Some(readout) =
-            SketchStatistic::for_intent(&measures[target.measure_index]).map(|s| s.kind())
-        else {
-            continue;
-        };
-        let unsupported = |candidate: &HowToComputeAggregateMeasure| {
-            matches!(candidate, HowToComputeAggregateMeasure::Summary(algorithm)
-                if !summary_supported(supported_summaries, algorithm, readout))
-        };
-        target.ways_to_compute.retain(|way| !unsupported(way));
-        if let Some(fused) = &mut target.fused_computation {
-            fused.ways_to_compute.retain(|way| !unsupported(way));
-        }
-    }
 }
 
 /// Adds to each fused computation's `absorbed_groups` the groups its

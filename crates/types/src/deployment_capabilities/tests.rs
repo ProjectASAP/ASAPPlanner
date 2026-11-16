@@ -11,8 +11,8 @@ use crate::ir::schema::{FieldDataType, Schema};
 use crate::ir::{ASAPOp, NonASAPOp, Operator};
 use crate::stages::{Lifetime, PhysicalProperties, StorageMedium};
 use crate::summary_type::{
-    ExactKind, ExactParams, SketchParameterRange, SketchParams, SketchStatistic, SummaryFamily,
-    SummaryTypeCapability, SummaryUpdate,
+    ExactKind, ExactParams, SketchParameterRange, SketchParams, SketchStatistic, StatisticKind,
+    SummaryFamily, SummaryTypeCapability, SummaryUpdate,
 };
 
 // ---------------------------------------------------------------------------

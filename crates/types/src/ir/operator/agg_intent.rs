@@ -372,6 +372,29 @@ pub enum MathFunc {
 // `asap_frontend_promql::promql::reduction_for`) — so they stay generic
 // alongside `input_col`, in one `impl<C>` block.
 impl AggIntent<ColumnId> {
+    /// The measure's kind as its JSON `kind` names it, without its
+    /// arguments: `"rate"` for `Rate`, `"quantile"` for `Quantile { q: 0.99,
+    /// .. }`. Measured operation costs and deployment exclusions name
+    /// measures by it.
+    pub fn kind_name(&self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|value| value.get("kind")?.as_str().map(str::to_owned))
+            .unwrap_or_else(|| format!("{self:?}"))
+    }
+
+    /// Whether `name` is the JSON `kind` of some measure: `"rate"` is,
+    /// `"rte"` is not. A kind whose measure has arguments (`"quantile"`)
+    /// counts, although `{"kind": "quantile"}` alone is not a measure.
+    pub fn is_kind_name(name: &str) -> bool {
+        match serde_json::from_value::<Self>(serde_json::json!({ "kind": name })) {
+            Ok(_) => true,
+            // Serde names an unknown tag `unknown variant`; any other error
+            // is a known kind missing its arguments.
+            Err(error) => !error.to_string().starts_with("unknown variant"),
+        }
+    }
+
     /// This intent with every column renumbered by `column`: the value
     /// columns of [`input_cols`](AggIntent::input_cols) and
     /// `histogram_quantile`'s `le`. `Sum { col: Some(1) }` under a renumbering
