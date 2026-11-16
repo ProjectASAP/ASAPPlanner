@@ -267,13 +267,15 @@ fn offset_windows_without_raw_data_select_installable_plans_costed_for_their_ret
 /// Unit costs with a disk price like a cloud block volume's (3.1e-17 per
 /// byte-second): what keeping raw data on disk costs per second is below
 /// 1e-9, where the solver drops a constraint coefficient as zero. CPU is
-/// priced at half AWS Fargate's vCPU-second (`cost_per_cpu_op` 5.622e-15),
-/// so that disk decides between the plans below.
+/// priced at 1.125 times AWS Fargate's vCPU-second (`cost_per_cpu_op`
+/// 1.265e-14): there the plans below differ by less than their raw data
+/// on disk, so disk decides between them (at half or 1.5 times that, the
+/// same plan is selected with disk free or priced).
 fn small_disk_costs() -> CostInputs {
     CostInputs {
         cost_model: CostModel::UsageOverTime(ResourceUnitCost {
-            cost_per_cpu_op: 5.622e-15,
-            cost_per_scanned_byte: 5.622e-16,
+            cost_per_cpu_op: 1.265e-14,
+            cost_per_scanned_byte: 1.265e-15,
             cost_per_memory_byte_second: 1.150183379650116e-15,
             cost_per_disk_byte_second: 3.1e-17,
             ..ResourceUnitCost::illustrative()
@@ -287,7 +289,7 @@ fn small_disk_costs() -> CostInputs {
 /// charged at 3.1e-17 per byte-second: raw data on disk costs about 2e-9
 /// per second. Its row carries the objective's scale, so the solver keeps
 /// it, and the plan selected costs less than the one selected when disk
-/// is free, costed at the disk price (that one is 50% dearer). With the
+/// is free, costed at the disk price (that one is 17% dearer). With the
 /// scale on the raw-data variable's objective coefficient instead, the
 /// solver dropped the unscaled coefficients and selected that plan.
 #[test]

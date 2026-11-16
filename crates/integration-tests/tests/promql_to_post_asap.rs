@@ -105,6 +105,24 @@ fn lower_and_realize(query: &str) -> Rc<OperatorNode> {
     realize(&pre, AccuracyTarget::exact())
 }
 
+/// `query` lowered at an exact target, planned with summaries' CPU costed
+/// free ([`logical_candidates_ignoring_guarantees`]), and its candidate
+/// reading a summary taken: for tests of a summary plan's shape. Under the
+/// default unit costs a query-time exact accumulator pays its finalize
+/// (2.5 µs per group) and can lose to the plain exact plan.
+fn lower_and_realize_summaries(query: &str) -> Rc<OperatorNode> {
+    let pre = lower_promql(query, AccuracyTarget::exact()).expect("lowering failed");
+    let candidates = logical_candidates_ignoring_guarantees(pre, AccuracyTarget::exact());
+    let node = candidates
+        .iter()
+        .find(|candidate| candidate.contains_asap())
+        .cloned()
+        .expect("a candidate reads a summary");
+    node.validate_structure()
+        .expect("planned dag satisfies the unified IR contract");
+    node
+}
+
 #[test]
 fn instant_topk_and_unsupported_child_remain_local_residuals() {
     for query in ["topk(3, memory_bytes)", "topk(3, deriv(memory_bytes[5m]))"] {
@@ -134,7 +152,7 @@ fn dtype<'a>(schema: &'a Schema, name: &str) -> &'a FieldDataType {
 #[test]
 fn promql_binary_arithmetic_retains_two_summary_leaves() {
     for op in ["+", "-", "*", "/", "%", "^", "atan2"] {
-        let root = lower_and_realize(&format!("rate(a[1m]) {op} rate(b[1m])"));
+        let root = lower_and_realize_summaries(&format!("rate(a[1m]) {op} rate(b[1m])"));
         let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = root.non_asap() else {
             panic!("expected BinaryOp for {op}, got {:?}", root.operator);
         };
@@ -222,7 +240,7 @@ fn promql_binary_arithmetic_preserves_both_scalar_operand_orders() {
 /// the other arm still binds its exact accumulator.
 #[test]
 fn promql_binary_arithmetic_keeps_an_unsupported_arm_exact() {
-    let root = lower_and_realize("rate(a[1m]) + stddev_over_time(b[1m])");
+    let root = lower_and_realize_summaries("rate(a[1m]) + stddev_over_time(b[1m])");
     let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = root.non_asap() else {
         panic!("expected BinaryOp, got {:?}", root.operator);
     };
@@ -235,7 +253,7 @@ fn promql_binary_arithmetic_keeps_an_unsupported_arm_exact() {
 
 #[test]
 fn promql_binary_arithmetic_preserves_nested_structure_and_vector_matching() {
-    let nested = lower_and_realize("(rate(a[1m]) + rate(b[1m])) / 2");
+    let nested = lower_and_realize_summaries("(rate(a[1m]) + rate(b[1m])) / 2");
     let Some(NonASAPOp::Project { child: lhs, .. }) = nested.non_asap() else {
         panic!("expected outer BinaryOp, got {:?}", nested.operator);
     };
@@ -243,7 +261,7 @@ fn promql_binary_arithmetic_preserves_nested_structure_and_vector_matching() {
 
     // A vector-matching modifier stays on the BinaryOp over the two
     // finalized rates.
-    let modified = lower_and_realize("rate(a[1m]) + on(job) rate(b[1m])");
+    let modified = lower_and_realize_summaries("rate(a[1m]) + on(job) rate(b[1m])");
     let Some(NonASAPOp::BinaryOp {
         operator, lhs, rhs, ..
     }) = modified.non_asap()
