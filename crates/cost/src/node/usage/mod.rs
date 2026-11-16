@@ -25,10 +25,10 @@ use crate::node::analytical::{
 use crate::node::operations_per_unit::{
     chain_emit_operations_per_state, estimate_operations_per_group,
     hash_aggregate_operations_per_row, merge_operations_per_state, merge_output_operations,
-    pass_through_merge_operations, update_operations_per_row, StateLastWrittenBy,
-    CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL, CHAIN_OPERATIONS_PER_ARRIVING_ROW,
-    OPERATIONS_PER_GROUP_PER_RAW_BATCH, OUTPUT_ROW_OPERATIONS_PER_GROUP,
-    TIME_RANGE_OPERATIONS_PER_ROW,
+    pass_through_merge_operations, state_allocation_operations, update_operations_per_row,
+    StateLastWrittenBy, CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL,
+    CHAIN_OPERATIONS_PER_ARRIVING_ROW, OPERATIONS_PER_GROUP_PER_RAW_BATCH,
+    OUTPUT_ROW_OPERATIONS_PER_GROUP, TIME_RANGE_OPERATIONS_PER_ROW,
 };
 use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
@@ -621,13 +621,15 @@ pub fn node_resource_usage_and_cost<'a>(
             Some(total.saturating_add(data.sources.get(*source)?.max_distinct_per_evaluation?))
         })
     };
-    // The values the column a summary built here folds takes in one state:
-    // the fewer of its declared distinct values and the sources' bound per
-    // output row; `None` when neither is declared.
+    // The values the column a summary built here folds takes in one state
+    // (a keyed summary's item column, e.g. the `url` a top-k heap counts;
+    // else its weight column): the fewer of its declared distinct values
+    // and the sources' bound per output row; `None` when neither is
+    // declared.
     let folded_distinct_values = |update: &SummaryUpdate| -> Option<u64> {
-        let column = producers
-            .first()
-            .and_then(|producer| producer.unchanged_column(&update.weight));
+        let column = producers.first().and_then(|producer| {
+            producer.unchanged_column(update.item.as_ref().unwrap_or(&update.weight))
+        });
         [declared_distinct_values(column), distinct_items_per_group()]
             .into_iter()
             .flatten()
@@ -1102,17 +1104,21 @@ pub fn node_resource_usage_and_cost<'a>(
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             let group_visits = visits(group_count);
+            // Each group's state allocated and zeroed (a counter-matrix
+            // sketch's counters), before its first row.
+            let allocation_ops = state_allocation_operations(node.parameters.as_ref());
             (
                 out,
                 Ok(ResourceEstimate::new(
                     input.rows as f64 * update_ops
-                        + group_visits * OPERATIONS_PER_GROUP_PER_RAW_BATCH,
+                        + group_visits * OPERATIONS_PER_GROUP_PER_RAW_BATCH
+                        + group_count as f64 * allocation_ops,
                     out.bytes,
                     0,
                 )),
                 format!(
                     "build {} into {group_count} states: {} rows x {update_ops} ops, \
-                     {group_visits:.0} group visits",
+                     {group_visits:.0} group visits, {allocation_ops} ops to allocate each state",
                     summary_type_name(family),
                     input.rows
                 ),
@@ -1165,7 +1171,8 @@ pub fn node_resource_usage_and_cost<'a>(
                 input_rows.rows_per_state,
                 folded_distinct_values(update),
             ) + carried_label_operations_per_row(&node.output_schema, reduction);
-            // The states it completes in one execution: at ingestion time
+            // The states it completes in one execution, each allocated
+            // when its window opens: at ingestion time
             // one second's share of each group's window (a 10 s window: a
             // tenth of a state per group); at query time every retained
             // window's.
@@ -1198,7 +1205,9 @@ pub fn node_resource_usage_and_cost<'a>(
                     input.rows as f64 * update_ops
                         + range_ops
                         + group_visits * OPERATIONS_PER_GROUP_PER_RAW_BATCH
-                        + emitted_states * chain_emit_operations_per_state(family),
+                        + emitted_states
+                            * (chain_emit_operations_per_state(family)
+                                + state_allocation_operations(node.parameters.as_ref())),
                     out.bytes,
                     0,
                 )),
