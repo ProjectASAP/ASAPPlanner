@@ -78,12 +78,22 @@ unknown (HLL without a distinct bound) serves no query with an accuracy target
 heap size and its value guarantee alone (the contracts table).
 
 Pass 2 gives each sketch readout the error and per-value failure probability
-`δ / max(V, R)` it must meet, with `R` the readout values the query's output
-can depend on (the values per evaluation of every readout group below it,
-summed: the series their scans read): a `max` over 1000 readouts returns
-one value yet fails when any readout does, so the union bound gives δ over
-every readout read, and `max by (job) (q or r)` reads those of both sides;
-Pass 1's candidate takes the first requirement level and Pass 2 adds a copy
+`δ / min(R, V · fan_in)` it must meet (`AccuracyTarget::failure_probability_per_readout_value`):
+the statement fails only when a readout value one of its `V` covered output
+values depends on does. `R` is the readout values the query reads per
+evaluation (the values per evaluation of every readout group below it,
+summed: the series their scans read), and `fan_in` the most readout values
+one output value depends on: 1 when no reduction lies above the readout,
+the reduction's input values under one (all of `R` for a global `max`; for
+`sum by (job)` too, since the declared facts bound how many jobs there are,
+not how many series one job holds), the sum over the sides of a binary
+operator, the larger side of `or`. An unknown term drops out of the `min`;
+with both unknown no per-value failure probability follows. At δ = 0.01,
+`quantile_over_time(0.99, m[5m])` over 8 series per value keeps 0.01
+(min(8, 1 · 1)), and over its whole result gets 0.01 / 8; a `max` over 1000
+readouts returns one value yet fails when any readout does, so it gets
+0.01 / 1000 in any scope; and `max by (job) (q or r)` splits over the
+readouts of both sides. Pass 1's candidate takes the first requirement level and Pass 2 adds a copy
 per further level. A readout several queries reach gets the union of their
 levels. Pass 2 sizes nothing: a state has one build per listed θ, and each
 edge checks the guarantee of its producer's θ at the required failure
@@ -91,8 +101,8 @@ probability, so a build several readers share serves the readers whose
 levels its θ meets. Stage 3 only checks the guarantee; it never resizes. At equal
 δ, the scope covering the most values is the strictest: every group (`G`,
 when `G` is above 100), then a 1% share (100), then a 5% share (20), then a
-single value (1). A whole-result target with an unbound `G`
-enlarges nothing and stays unmet. A grouped result's `G` is bound by the
+single value (1). A whole-result target with an unbound `G` splits
+over `R` alone, and stays unmet when `R` is unbound too. A grouped result's `G` is bound by the
 distinct values its sources declare for its group keys
 (`SourceFacts.distinct_values_per_label`, and
 `distinct_values_per_label_set` for labels that depend on each other): the
@@ -297,17 +307,17 @@ largest error the readout's output may have for that query.
 
 - A query whose path reads one readout gives one requirement level: the
   target divided by the path's factor, at the target's failure probability per
-  value: a whole-result δ split over the larger of `n_q` and the readout
-  values the query's output can depend on, summed over every readout group
-  below it (`Memo::max_values_per_evaluation` each: at most the series
+  value: δ split over `min(R, V · fan_in)`, the readout values the output
+  values the scope covers depend on (`R` summed over every readout group
+  below it, `Memo::max_values_per_evaluation` each: at most the series
   scanned below it, the declared distinct values of its state's keys, one
   without keys), since a reduction such as `max` fails when any readout it
   reads does. `SELECT count(DISTINCT dst) FROM flows` at δ = 0.01 reads
   one distinct count, so its readout keeps 0.01. `max by (job) (q or r)`
-  with 3 series per side reads 6 readout values, so each gets δ / 6; a
-  bare `q or r` copies each output value from one readout value, but its
-  whole result still fails when any of them does, so it too splits δ over
-  the readout values of both sides.
+  with 3 series per side reads 6 readout values, and one job's value may
+  depend on all, so each gets δ / 6; a bare `q or r` copies each output
+  value from one readout value, so per value it keeps δ and over a whole
+  result of `n_q` values gets δ / `n_q`.
 - A composed query (several readouts whose errors reach its output, `β > 0`,
   such as a ratio; `q and r` reads one, since `r`'s values are not read, and
   `q or r` combines none, since each output value is copied from one side

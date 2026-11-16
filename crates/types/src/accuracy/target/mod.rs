@@ -167,9 +167,10 @@ impl AccuracyScope {
     /// when unbound: one for [`Self::PerValue`], `G` for
     /// [`Self::WholeResult`], and `min(⌊1 / share⌋, G)` for
     /// [`Self::GroupsWithRecordShareAtLeast`], which is bound even when `G`
-    /// is not. Sizing divides a target's failure probability by it, and the
-    /// guarantee check multiplies a per-value one by it, so the strictest of
-    /// several scopes is the one that covers the most values.
+    /// is not. A target's failure probability splits over the readout values
+    /// these values depend on
+    /// ([`AccuracyTarget::failure_probability_per_readout_value`]), so the
+    /// strictest of several scopes is the one that covers the most values.
     pub fn max_values_covered(self, values_per_result: Option<u64>) -> Option<u64> {
         match self {
             Self::PerValue => Some(1),
@@ -303,8 +304,8 @@ impl AccuracyTarget {
     /// `values_per_evaluation` ($n_q$; [`AccuracyScope::max_values_covered`]).
     /// `None` when the target sets no δ, and when that count is not known
     /// for a δ over the whole result. A readout value's failure probability
-    /// splits δ further over the readout values an output value depends
-    /// on, and is built on this one.
+    /// splits δ over the readout values the covered output values depend
+    /// on instead ([`Self::failure_probability_per_readout_value`]).
     ///
     /// Example: δ = 0.01 over the whole result of a query returning 100
     /// series gives 0.0001 per output value; with the number of series
@@ -329,6 +330,62 @@ impl AccuracyTarget {
             .filter(|&metric| self.accuracy_metric.is_none_or(|named| named == metric))
             .collect()
     }
+
+    /// The failure probability each readout value below the query must
+    /// meet: δ split by the union bound over the readout values the output
+    /// values one statement covers depend on, `readout_values`, when one
+    /// evaluation returns `values_per_evaluation` ($n_q$). 1 when the
+    /// target sets no δ; `None` when no bound on that count is known.
+    ///
+    /// The statement covers at most `V` output values
+    /// ([`AccuracyScope::max_values_covered`]), each depending on at most
+    /// `fan_in` readout values, and the query reads `R` in all, so it fails
+    /// only when one of at most `min(R, V · fan_in)` readout values does,
+    /// whatever their dependence. An unknown term drops out of the `min`.
+    ///
+    /// Examples at δ = 0.01:
+    /// - `quantile_over_time(0.99, m[5m])` over 8 series per value:
+    ///   min(8, 1 · 1) = 1, so 0.01; over the whole result min(8, 8 · 1) = 8.
+    /// - `max(quantile_over_time(0.9, m[5m]))` over 1000 series, any scope:
+    ///   min(1000, 1 · 1000) = 1000, so 1e-5.
+    /// - Per value over series of unknown count without a reduction:
+    ///   min(unknown, 1 · 1) = 1.
+    pub fn failure_probability_per_readout_value(
+        &self,
+        values_per_evaluation: Option<u64>,
+        readout_values: ReadoutValuesRead,
+    ) -> Option<f64> {
+        let Some(delta) = self.failure_probability else {
+            return Some(1.0);
+        };
+        let readout_values_covered = self
+            .accuracy_scope
+            .max_values_covered(values_per_evaluation)
+            .zip(readout_values.per_output_value)
+            .map(|(values, fan_in)| values.saturating_mul(fan_in));
+        let split_over = match (readout_values.per_evaluation, readout_values_covered) {
+            (Some(all), Some(covered)) => all.min(covered),
+            (all, covered) => all.or(covered)?,
+        };
+        Some(delta / split_over.max(1) as f64)
+    }
+}
+
+/// The readout values (sketch estimates) a query's output depends on, per
+/// evaluation: what its failure probability splits over
+/// ([`AccuracyTarget::failure_probability_per_readout_value`]). `None` is
+/// unknown.
+///
+/// Example: `sum by (job) (quantile_over_time(0.9, m[5m]))` over 1000
+/// series reads 1000 readout values per evaluation, and one output value
+/// may depend on all of them (a job's series are not bounded), so both are
+/// 1000; without the `sum`, 1000 and 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadoutValuesRead {
+    /// `R`: every readout value one evaluation reads.
+    pub per_evaluation: Option<u64>,
+    /// The fan-in: the most readout values one output value depends on.
+    pub per_output_value: Option<u64>,
 }
 
 #[cfg(test)]
