@@ -28,10 +28,10 @@ consumer), as its `Lifetime` and the run's scope say:
   one consumer: the node runs once, to the end, before any consumer reads
   it, and every consumer reads its finished output independently, as the
   planner charges one run whose output is held. Likewise a computed
-  `AcrossEvaluations` node with more than one consumer, which only a
-  hand-built DAG has at query time (a compiled plan reads it through its
-  view slot). For example, a `OneEvaluation` scan read by three queries
-  is one store read. The output is charged to the run's byte budget until
+  `AcrossEvaluations` node with more than one consumer: an unbound view
+  (a compile with its view slot not bound computes it for its readers in
+  the query run), or a node of a hand-built DAG. For example, a
+  `OneEvaluation` scan read by three queries is one store read. The output is charged to the run's byte budget until
   every consumer has read it; over the budget the run fails with
   `MemoryLimit` (nothing spills). With one consumer the node streams to it,
   since no sibling can wait on that consumer.
