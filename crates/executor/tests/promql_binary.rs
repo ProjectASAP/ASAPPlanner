@@ -248,7 +248,6 @@ fn binary_obeys_memory_and_cancellation() {
             },
             Limits {
                 max_bytes: if cancel { 10000 } else { 1 },
-                ..Limits::default()
             },
         )
         .unwrap();

@@ -517,10 +517,15 @@ An **input slot** is a position in a compiled DAG where data is read at run
 time, together with that position's schema, which is the DAG node's
 `output_schema`. There are two kinds:
 
-| Slot | Where | Holds | Read by |
-| --- | --- | --- | --- |
-| **Raw data slot** | every `Scan` leaf | the `Scan`'s `Source`, schema, compiled predicates, and the window its consumers read (from the `TimeRange`, `TimeShift` and chain nodes above it) | `Source` |
-| **Materialized view slot** | each view the DAG reads | the `MaterializedView`, its schema, and the rows a read selects: a chain's, the windows the `TimeRange`s above it select; any other view's, the window its state summarizes (the union of the windows of every `TimeRange` below it) | `MaterializedView` |
+| Slot | Where | Holds | Lifetime | Read by |
+| --- | --- | --- | --- | --- |
+| **Raw data slot** | every `Scan` leaf | the `Scan`'s `Source`, schema, compiled predicates, and the window its consumers read (from the `TimeRange`, `TimeShift` and chain nodes above it) | the `Scan` node's | `Source` |
+| **Materialized view slot** | each view the DAG reads | the `MaterializedView`, its schema, and the rows a read selects: a chain's, the windows the `TimeRange`s above it select; any other view's, the window its state summarizes (the union of the windows of every `TimeRange` below it) | the view node's, `AcrossEvaluations` | `MaterializedView` |
+
+The compiled DAG keeps each Planner node's `Lifetime` in one map, and the
+runtime runs every node, slots included, by it: how a slot is read at
+query time (by each consumer, or once and held) is the read rule in
+[the executor README](../../crates/executor/README.md).
 
 ```rust
 pub fn compile(dag: &PhysicalASAPDAG, views: &[MaterializedView], roots: &[NodeId])

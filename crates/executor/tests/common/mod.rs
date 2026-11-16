@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+use asap_executor::runtime::{RunContext, Scope};
+use asap_executor::values::{Batch, SchemaRef};
+use futures::TryStreamExt;
 use planner_types::ir::{OperatorNode, QueryRoot};
 use std::rc::Rc;
 
@@ -50,4 +53,30 @@ fn run_all_stages(
         asap_planner::PlanSearchSettings::default(),
     )
     .expect("Pass 1 accepts the query")
+}
+
+/// Every root's batches in one run of `dag`, in `roots` order: through
+/// `execute` at query time (each root drained in turn) and
+/// `execute_ingestion` at ingestion time.
+pub fn run_roots(
+    dag: &asap_executor::plan::PhysicalDAG<'_, Batch, SchemaRef>,
+    roots: &[u64],
+    context: RunContext,
+) -> Result<Vec<Vec<Batch>>, asap_executor::Error> {
+    futures::executor::block_on(async {
+        let outputs = match context.scope {
+            Scope::Ingestion { .. } => dag.execute_ingestion(roots, context)?.await?,
+            Scope::Query { .. } => {
+                let mut outputs = Vec::new();
+                for output in dag.execute(roots, context)? {
+                    outputs.push(output.try_collect::<Vec<_>>().await?);
+                }
+                outputs
+            }
+        };
+        Ok(outputs
+            .into_iter()
+            .map(|batches| batches.iter().map(|batch| (**batch).clone()).collect())
+            .collect())
+    })
 }

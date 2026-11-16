@@ -183,7 +183,11 @@ fn compile_internal(
         consumers: &consumers,
         roots: &compile_roots,
     };
-    let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec());
+    let lifetimes = ordered
+        .iter()
+        .map(|&id| (id, nodes[&id].lifetime))
+        .collect();
+    let mut physical_dag = CompiledPhysicalDAG::new(roots.to_vec(), lifetimes);
     for id in ordered {
         let node = nodes[&id];
         let auxiliary = helper_id(id, 0)?;

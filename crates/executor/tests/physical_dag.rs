@@ -17,6 +17,7 @@ use planner_types::plan::physical_asap_dag::{
     EdgeRole, GroupingEdgeCompatibility, PhysicalASAPDAG, PhysicalASAPDAGEdge, PhysicalASAPDAGNode,
     PhysicalASAPOperatorPayload, WindowEdgeCompatibility,
 };
+use planner_types::stages::{Lifetime, StorageMedium};
 use planner_types::summary_type::{ExactKind, ExactParams};
 use std::sync::Arc;
 fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
@@ -72,23 +73,12 @@ fn with_table(
 }
 
 fn run(dag: &PhysicalDAG<'_, Batch, SchemaRef>, root: u64, scope: Scope) -> Vec<Vec<Value>> {
-    let context = RunContext::new(
-        scope,
-        Limits {
-            max_buffered_batches: 1,
-            ..Limits::default()
-        },
-    )
-    .unwrap();
-    block_on(async {
-        let mut stream = dag.execute(&[root], context.clone()).unwrap().remove(0);
-        let mut rows = vec![];
-        while let Some(batch) = stream.next().await {
-            rows.extend(batch.unwrap().to_rows().iter().cloned());
-        }
-        assert_eq!(context.retained_bytes(), 0);
-        rows
-    })
+    let context = RunContext::new(scope, Limits::default()).unwrap();
+    let batches = crate::common::run_roots(dag, &[root], context.clone())
+        .unwrap()
+        .remove(0);
+    assert_eq!(context.retained_bytes(), 0);
+    batches.iter().flat_map(Batch::to_rows).collect()
 }
 fn query() -> Scope {
     Scope::Query {
@@ -134,6 +124,7 @@ fn grouped_sort_limit_across_batches() {
         0,
         vec![],
         Operator::source(schema.clone(), batches).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     dag.add(
@@ -150,10 +141,16 @@ fn grouped_sort_limit_across_batches() {
             None,
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
-    dag.add(2, vec![1], Operator::limit(schema, 1, 1, vec![0]).unwrap())
-        .unwrap();
+    dag.add(
+        2,
+        vec![1],
+        Operator::limit(schema, 1, 1, vec![0]).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
     assert_eq!(floats(&run(&dag, 2, query()), 1), vec![5., 4.]);
 }
 
@@ -169,15 +166,32 @@ fn summary_construction_merge_and_evaluation_at_both_phases() {
         Operator::per_group_summary_build(schema.clone(), family, None, 0, None, vec![]).unwrap();
     let state = build.schema();
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], Operator::source(schema, batches).unwrap())
-        .unwrap();
-    dag.add(1, vec![0], build).unwrap();
-    dag.add(2, vec![1, 1], Operator::union(state.clone(), 2).unwrap())
-        .unwrap();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(schema, batches).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
+    dag.add(
+        1,
+        vec![0],
+        build,
+        Lifetime::OneEvaluation(StorageMedium::Memory),
+    )
+    .unwrap();
+    dag.add(
+        2,
+        vec![1, 1],
+        Operator::union(state.clone(), 2).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
     dag.add(
         3,
         vec![2],
         Operator::summary_merge(state.clone(), 0, vec![]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     dag.add(
@@ -195,6 +209,7 @@ fn summary_construction_merge_and_evaluation_at_both_phases() {
             ),
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     for scope in [
@@ -232,13 +247,15 @@ fn diamond_semijoin_preserves_left_values_and_multiplicity() {
         0,
         vec![],
         Operator::source(schema.clone(), batches).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
-    dag.add(1, vec![0], filter).unwrap();
+    dag.add(1, vec![0], filter, Lifetime::None).unwrap();
     dag.add(
         2,
         vec![0, 1],
         Operator::semi_join(schema.clone(), schema, vec![(0, 0)]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let rows = run(&dag, 2, query());
@@ -270,19 +287,26 @@ fn exact_integer_and_empty_extrema() {
             .unwrap()],
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
-    dag.add(1, vec![0], aggregate).unwrap();
+    dag.add(1, vec![0], aggregate, Lifetime::None).unwrap();
     assert!(matches!(run(&dag,1,query())[0][0],Value::Int64(v) if v==value+2));
     let mut empty = PhysicalDAG::default();
     empty
-        .add(0, vec![], Operator::source(schema.clone(), vec![]).unwrap())
+        .add(
+            0,
+            vec![],
+            Operator::source(schema.clone(), vec![]).unwrap(),
+            Lifetime::None,
+        )
         .unwrap();
     empty
         .add(
             1,
             vec![0],
             Operator::aggregate(schema, vec![], vec![("min".into(), Reduction::Min(0))]).unwrap(),
+            Lifetime::None,
         )
         .unwrap();
     assert!(matches!(run(&empty, 1, query())[0][0], Value::Null));
@@ -302,9 +326,9 @@ fn scalar_negation_and_vector_conversion() {
     .unwrap();
     let convert = Operator::vector_to_scalar(project.schema(), 0).unwrap();
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], scalar).unwrap();
-    dag.add(1, vec![0], project).unwrap();
-    dag.add(2, vec![1], convert).unwrap();
+    dag.add(0, vec![], scalar, Lifetime::None).unwrap();
+    dag.add(1, vec![0], project, Lifetime::None).unwrap();
+    dag.add(2, vec![1], convert, Lifetime::None).unwrap();
     assert_eq!(floats(&run(&dag, 2, query()), 0), vec![-7.]);
     let scalar = Operator::scalar(Value::Float64(f64::NAN), DataType::Float64).unwrap();
     let predicate = Expression::Equal(
@@ -313,8 +337,8 @@ fn scalar_negation_and_vector_conversion() {
     );
     let filter = Operator::filter(scalar.schema(), predicate).unwrap();
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], scalar).unwrap();
-    dag.add(1, vec![0], filter).unwrap();
+    dag.add(0, vec![], scalar, Lifetime::None).unwrap();
+    dag.add(1, vec![0], filter, Lifetime::None).unwrap();
     assert!(run(&dag, 1, query()).is_empty());
 }
 
@@ -381,9 +405,10 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
             0,
             vec![],
             Operator::source(input.clone(), vec![batch]).unwrap(),
+            Lifetime::None,
         )
         .unwrap();
-        dag.add(1, vec![0], build.clone()).unwrap();
+        dag.add(1, vec![0], build.clone(), Lifetime::None).unwrap();
         run(
             &dag,
             1,
@@ -407,6 +432,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
                     vec![Batch::try_new(state.clone(), rows).unwrap()],
                 )
                 .unwrap(),
+                Lifetime::None,
             )
             .unwrap();
             states.push(0);
@@ -426,21 +452,24 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
                     .unwrap()],
                 )
                 .unwrap(),
+                Lifetime::None,
             )
             .unwrap();
-            dag.add(2, vec![1], build.clone()).unwrap();
+            dag.add(2, vec![1], build.clone(), Lifetime::None).unwrap();
             states.push(2);
         }
         dag.add(
             3,
             states.clone(),
             Operator::union(state.clone(), states.len()).unwrap(),
+            Lifetime::None,
         )
         .unwrap();
         dag.add(
             4,
             vec![3],
             Operator::summary_merge(state.clone(), 0, vec![]).unwrap(),
+            Lifetime::None,
         )
         .unwrap();
         dag.add(
@@ -454,6 +483,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
                 ),
             )
             .unwrap(),
+            Lifetime::None,
         )
         .unwrap();
         floats(&run(&dag, 5, query()), 0)[0]
@@ -496,6 +526,7 @@ fn exact_state_and_family_validation() {
             vec![Batch::try_new(schema.clone(), vec![vec![value]]).unwrap()],
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     dag.add(
@@ -513,6 +544,7 @@ fn exact_state_and_family_validation() {
             ),
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     assert_eq!(floats(&run(&dag, 1, query()), 0), vec![7.]);
@@ -640,10 +672,15 @@ fn empty_exact_count_is_an_integer_state_evaluation() {
     )
     .unwrap();
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], Operator::source(input, vec![]).unwrap())
-        .unwrap();
-    dag.add(1, vec![0], build).unwrap();
-    dag.add(2, vec![1], read).unwrap();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(input, vec![]).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
+    dag.add(1, vec![0], build, Lifetime::None).unwrap();
+    dag.add(2, vec![1], read, Lifetime::None).unwrap();
     assert!(matches!(run(&dag, 2, query())[0][0], Value::Int64(0)));
 }
 
@@ -664,6 +701,7 @@ fn extrema_preserve_numeric_values_in_the_presence_of_nan() {
             .unwrap()],
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     dag.add(
@@ -678,6 +716,7 @@ fn extrema_preserve_numeric_values_in_the_presence_of_nan() {
             ],
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let rows = run(&dag, 1, query());
@@ -866,10 +905,11 @@ fn planner_expressions_preserve_collection_and_nullable_types() {
             .unwrap()],
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let projected = project.schema();
-    dag.add(1, vec![0], project).unwrap();
+    dag.add(1, vec![0], project, Lifetime::None).unwrap();
     let predicate = ScalarExpr::Compare {
         semantics: planner_types::ir::ExprSemantics::Sql,
         left: Box::new(ScalarExpr::Column(0)),
@@ -884,6 +924,7 @@ fn planner_expressions_preserve_collection_and_nullable_types() {
             Expression::planner(CompiledExpression::compile(&predicate, &projected).unwrap()),
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let rows = run(&dag, 2, query());
@@ -953,6 +994,7 @@ fn native_relational_join_kinds_preserve_unmatched_rows() {
                     vec![Batch::try_new(input.clone(), rows).unwrap()],
                 )
                 .unwrap(),
+                Lifetime::None,
             )
             .unwrap();
         }
@@ -967,6 +1009,7 @@ fn native_relational_join_kinds_preserve_unmatched_rows() {
                 output,
             )
             .unwrap(),
+            Lifetime::None,
         )
         .unwrap();
         assert_eq!(run(&dag, 2, query()).len(), count, "{kind:?}");
@@ -1058,11 +1101,12 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         0,
         vec![],
         Operator::source(raw.clone(), vec![Batch::try_new(raw, rows).unwrap()]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
-    dag.add(1, vec![0], rates).unwrap();
-    dag.add(2, vec![1], build).unwrap();
-    dag.add(3, vec![2], evaluation).unwrap();
+    dag.add(1, vec![0], rates, Lifetime::None).unwrap();
+    dag.add(2, vec![1], build, Lifetime::None).unwrap();
+    dag.add(3, vec![2], evaluation, Lifetime::None).unwrap();
     dag.add(
         4,
         vec![3],
@@ -1077,10 +1121,16 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
             None,
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
-    dag.add(5, vec![4], Operator::limit(output, 2, 0, vec![0]).unwrap())
-        .unwrap();
+    dag.add(
+        5,
+        vec![4],
+        Operator::limit(output, 2, 0, vec![0]).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
     for scope in [
         query(),
         Scope::Ingestion {

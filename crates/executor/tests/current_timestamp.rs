@@ -8,7 +8,7 @@ use asap_executor::{
     sources::InMemoryDataStore,
     values::{Batch, Value},
 };
-use futures::{executor::block_on, StreamExt};
+
 use planner_types::ir::operator::Source;
 use planner_types::ir::properties::ExecutionDataState;
 use planner_types::ir::scalar::{ArithmeticOpKind, CompareOpKind, ExprSemantics, ScalarValue};
@@ -110,22 +110,17 @@ fn kept_users(scope: Scope) -> Result<Vec<i64>, String> {
         .instantiate(Arc::new(data_store()))
         .unwrap();
     let context = RunContext::new(scope, Limits::default()).unwrap();
-    block_on(async {
-        let mut output = bound
-            .execute(&[0], context)
-            .map_err(|e| e.to_string())?
-            .remove(0);
-        let mut users = Vec::new();
-        while let Some(batch) = output.next().await {
-            for row in batch.map_err(|e| e.to_string())?.to_rows() {
-                let Value::Int64(user) = row[1] else {
-                    panic!("user {:?}", row[1])
-                };
-                users.push(user);
-            }
-        }
-        Ok(users)
-    })
+    let batches = crate::common::run_roots(&bound, &[0], context)
+        .map_err(|e| e.to_string())?
+        .remove(0);
+    let mut users = Vec::new();
+    for row in batches.iter().flat_map(Batch::to_rows) {
+        let Value::Int64(user) = row[1] else {
+            panic!("user {:?}", row[1])
+        };
+        users.push(user);
+    }
+    Ok(users)
 }
 
 #[test]

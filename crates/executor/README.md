@@ -6,12 +6,50 @@ a storage implementation nor DataFusion. Batches are Arrow columns
 (`values::Batch`); DataFusion informed the design, it is not the execution
 framework.
 
-`plan::PhysicalDAG` binds typed operator inputs to node IDs. Each execution starts
-one producer per reachable node, shares output batches among its consumers, and
-bounds buffering. Dropping one consumer does not cancel other consumers. A
-`RunContext` carries query or ingestion scope, cancellation and byte accounting.
-Executions use the caller's worker and worker-local streams, with no internal
-thread pool. Poll multiple root streams concurrently when they share inputs.
+`plan::PhysicalDAG` binds typed operator inputs to node IDs, each node with the
+plan's `Lifetime`. A `RunContext` carries query or ingestion scope,
+cancellation and byte accounting. Executions use the caller's worker and
+worker-local streams, with no internal thread pool.
+
+A node runs once per evaluation time in a run (an `@` anchor evaluates the
+nodes below it at another time; a leaf read per consumer runs once per
+consumer), as its `Lifetime` and the run's scope say:
+
+- Query time, a leaf with `None` or `AcrossEvaluations` (rows a store or
+  the operator keeps): `None` (a raw data scan the plan does not
+  materialize, or any other leaf such as a constant, which holds its own
+  rows) or `AcrossEvaluations` (a materialized view slot, or raw data kept
+  at ingestion). Each consumer reads it on its own, and
+  nothing is held. Stage 3 never gives a query-time `None` result more than
+  one consumer; a view slot, or a leaf in a hand-built DAG, may have
+  several. For example, an `AcrossEvaluations` scan read by two queries is
+  two store reads.
+- Query time, `OneEvaluation` (a computed node or a leaf) with more than
+  one consumer: the node runs once, to the end, before any consumer reads
+  it, and every consumer reads its finished output independently, as the
+  planner charges one run whose output is held. Likewise a computed
+  `AcrossEvaluations` node with more than one consumer, which only a
+  hand-built DAG has at query time (a compiled plan reads it through its
+  view slot). For example, a `OneEvaluation` scan read by three queries
+  is one store read. The output is charged to the run's byte budget until
+  every consumer has read it; over the budget the run fails with
+  `MemoryLimit` (nothing spills). With one consumer the node streams to it,
+  since no sibling can wait on that consumer.
+- Query time, `None` computed node: streamed to its one consumer. More than
+  one consumer is a planner bug; `execute` returns an error naming the node
+  before any operator starts.
+- Ingestion time: every node streams, whatever its lifetime. A node with
+  several consumers (one per-row node feeding several chain builds or views)
+  runs once and each batch reaches every consumer's own queue. The queues
+  are bounded only by the run's byte budget: a consumer that lags holds what
+  the others have read. `execute_ingestion` polls every root itself and
+  returns one future that resolves to each root's batches, for the caller to
+  write.
+
+`execute` runs a query and returns one stream per root; the caller may drain
+them in any order. It rejects an ingestion scope, which `execute_ingestion`
+runs, and `execute_ingestion` rejects a query scope. Dropping one consumer
+does not cancel other consumers.
 
 `operators::Operator` implements native batch sources, scalar values,
 projection, filtering, grouped exact aggregation, semi-join, grouped Sort and
@@ -28,6 +66,7 @@ use asap_executor::{
     plan::PhysicalDAG,
     runtime::{Limits, RunContext, Scope},
 };
+use asap_executor::planner::stages::Lifetime;
 use asap_executor::planner::ir::schema::DataType;
 use futures::{executor::block_on, StreamExt};
 
@@ -36,8 +75,8 @@ let negate = Operator::project(source.schema(), vec![
     ("value".into(), Expression::Negate(Box::new(Expression::Column(0)))),
 ])?;
 let mut plan = PhysicalDAG::default();
-plan.add(0, vec![], source)?;
-plan.add(1, vec![0], negate)?;
+plan.add(0, vec![], source, Lifetime::None)?;
+plan.add(1, vec![0], negate, Lifetime::None)?;
 let run = RunContext::new(
     Scope::Query { evaluation_time_ms: 1000 },
     Limits::default(),
@@ -76,7 +115,7 @@ See [the design](../../docs/design_docs/physical-planning-and-deployment.md).
 ## Module boundaries
 
 - `plan`: immutable DAG, operator interface, schemas and execution properties.
-- `runtime`: per-run streams, shared producers, memory reservations and cancellation.
+- `runtime`: per-run streams, how each node runs by its `Lifetime`, memory reservations and cancellation.
 - `expressions`: scalar evaluation; typed builders and the Planner expression adapter.
 - `operators`: projection, filter, joins, aggregate/window, sort, limit and summary implementations.
 - `sources`: the `DataStore` data interface, `Scan` and the in-memory store.

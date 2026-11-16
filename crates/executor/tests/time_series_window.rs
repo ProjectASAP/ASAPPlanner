@@ -6,7 +6,7 @@ use asap_executor::physical_planner::{compile, promql_rows};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
-use futures::{executor::block_on, StreamExt};
+
 use planner_types::ir::operator::{Source, TimeShift};
 use planner_types::ir::scalar::{CompareOpKind, ScalarValue};
 use planner_types::ir::schema::{DataType, Field, Schema, PROMQL_SERIES_IDENTITY};
@@ -136,19 +136,17 @@ fn points_of(dag: &PhysicalASAPDAG, store: InMemoryDataStore, scope: Scope) -> V
         .instantiate(Arc::new(store))
         .unwrap();
     let context = RunContext::new(scope, Limits::default()).unwrap();
-    block_on(async {
-        let mut output = bound.execute(&roots, context).unwrap().remove(0);
-        let mut points = Vec::new();
-        while let Some(batch) = output.next().await {
-            for row in batch.unwrap().to_rows() {
-                match (&row[1], &row[2]) {
-                    (Value::Timestamp(ts), Value::Float64(v)) => points.push((*ts, *v)),
-                    other => panic!("{other:?}"),
-                }
-            }
+    let mut points = Vec::new();
+    let batches = crate::common::run_roots(&bound, &roots, context)
+        .unwrap()
+        .remove(0);
+    for row in batches.iter().flat_map(Batch::to_rows) {
+        match (&row[1], &row[2]) {
+            (Value::Timestamp(ts), Value::Float64(v)) => points.push((*ts, *v)),
+            other => panic!("{other:?}"),
         }
-        points
-    })
+    }
+    points
 }
 
 fn at(evaluation_time_ms: i64) -> Scope {

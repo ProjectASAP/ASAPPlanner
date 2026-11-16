@@ -10,6 +10,7 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, BatchColumn};
 use asap_executor::Error;
 use futures::{executor::block_on, StreamExt};
+use planner_types::stages::Lifetime;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -47,22 +48,21 @@ fn aggregate(
         0,
         vec![],
         Operator::source(input.clone(), vec![batch]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     dag.add(
         1,
         vec![0],
         Operator::aggregate(input, groups, measures).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
         },
-        Limits {
-            max_bytes,
-            ..Limits::default()
-        },
+        Limits { max_bytes },
     )
     .unwrap();
     let baseline = ALLOCATED.load(Ordering::Relaxed);

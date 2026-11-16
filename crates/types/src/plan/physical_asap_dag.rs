@@ -27,7 +27,7 @@ use crate::ir::properties::execution_data_state::{ExecutionDataState, ExecutionT
 use crate::ir::properties::selection::SelectionBox;
 use crate::ir::schema::Schema;
 use crate::stages::PhysicalCandidateId;
-use crate::stages::{Lifetime, PhysicalPropertiesError};
+use crate::stages::{Lifetime, PhysicalPropertiesError, StorageMedium};
 use crate::summary_type::SketchParams;
 
 /// A node's operator, with each child replaced by its node id.
@@ -673,10 +673,16 @@ impl PhysicalASAPDAG {
     }
 }
 
-/// Test-only: `roots` exported as one DAG with every node at query time and
-/// not materialized, and no θ (every `parameters` is `None`), with each
-/// exported node's operator node by node id. Executor tests hand-build DAGs
-/// this way; planning builds the plan in Stage 3.
+/// Test-only: `roots` exported as one DAG with every node at query time, and
+/// no θ (every `parameters` is `None`), with each exported node's operator
+/// node by node id. A node with more than one consumer (edges and root
+/// positions), a leaf included, is held for one evaluation
+/// (`OneEvaluation(Memory)`), as Stage 3 selects for a shared query-time
+/// output; every other node is not materialized. Example: a scan read by two
+/// queries is `OneEvaluation`, read once and held for both. Consumers are
+/// counted per node, not per evaluation time, so a node read at two times
+/// under an `@` anchor is conservatively held too. Executor tests hand-build
+/// DAGs this way; planning builds the plan in Stage 3.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
     roots: &[crate::ir::QueryRoot],
@@ -716,10 +722,22 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
             view_coverage: None,
         })
         .collect();
-    Ok((
-        PhysicalASAPDAG::new(nodes, roots, scalar_roots)?,
-        nodes_by_id,
-    ))
+    let mut dag = PhysicalASAPDAG::new(nodes, roots, scalar_roots)?;
+    let mut consumers = vec![0usize; dag.nodes.len()];
+    for producer in dag
+        .edges
+        .iter()
+        .map(|edge| edge.producer)
+        .chain(dag.roots.iter().copied())
+    {
+        consumers[producer] += 1;
+    }
+    for node in &mut dag.nodes {
+        if consumers[node.id] > 1 {
+            node.lifetime = Lifetime::OneEvaluation(StorageMedium::Memory);
+        }
+    }
+    Ok((dag, nodes_by_id))
 }
 
 fn grouping_compatibility<C>(

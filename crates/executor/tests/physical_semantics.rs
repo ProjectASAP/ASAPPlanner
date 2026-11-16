@@ -16,6 +16,7 @@ use planner_types::ir::NonASAPOp;
 use planner_types::ir::Predicate;
 use planner_types::ir::ScalarExpr;
 use planner_types::plan::physical_asap_dag::{PhysicalASAPDAGNode, PhysicalASAPOperatorPayload};
+use planner_types::stages::{Lifetime, StorageMedium};
 use std::sync::Arc;
 
 fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
@@ -38,10 +39,7 @@ fn context() -> RunContext {
         Scope::Query {
             evaluation_time_ms: 0,
         },
-        Limits {
-            max_buffered_batches: 1,
-            ..Limits::default()
-        },
+        Limits::default(),
     )
     .unwrap()
 }
@@ -64,9 +62,14 @@ fn unary(input: SchemaRef, batches: Vec<Vec<Vec<Value>>>, op: Operator) -> Vec<V
         .into_iter()
         .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
         .collect();
-    dag.add(0, vec![], Operator::source(input, batches).unwrap())
-        .unwrap();
-    dag.add(1, vec![0], op).unwrap();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(input, batches).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
+    dag.add(1, vec![0], op, Lifetime::None).unwrap();
     collect(&dag, 1)
 }
 fn keys(rows: &[Vec<Value>]) -> Vec<Vec<Vec<u8>>> {
@@ -108,10 +111,11 @@ fn join(left: Vec<Value>, right: Vec<Value>, kind: JoinKind, keyed: bool) -> Vec
             id,
             vec![],
             Operator::source(input.clone(), batches).unwrap(),
+            Lifetime::None,
         )
         .unwrap();
     }
-    dag.add(2, vec![0, 1], op).unwrap();
+    dag.add(2, vec![0, 1], op, Lifetime::None).unwrap();
     collect(&dag, 2)
 }
 
@@ -258,18 +262,25 @@ fn sort_with_fetch_over_ascending_input_equals_sort_then_limit() {
                     .into_iter()
                     .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
                     .collect();
-                dag.add(0, vec![], Operator::source(input.clone(), source).unwrap())
-                    .unwrap();
+                dag.add(
+                    0,
+                    vec![],
+                    Operator::source(input.clone(), source).unwrap(),
+                    Lifetime::None,
+                )
+                .unwrap();
                 dag.add(
                     1,
                     vec![0],
                     Operator::sort(input.clone(), key.clone(), groups.clone(), None).unwrap(),
+                    Lifetime::None,
                 )
                 .unwrap();
                 dag.add(
                     2,
                     vec![1],
                     Operator::limit(input.clone(), fetch, 0, groups.clone()).unwrap(),
+                    Lifetime::None,
                 )
                 .unwrap();
                 assert_eq!(
@@ -359,18 +370,25 @@ fn sort_with_fetch_equals_sort_then_limit() {
                     .into_iter()
                     .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
                     .collect();
-                dag.add(0, vec![], Operator::source(input.clone(), source).unwrap())
-                    .unwrap();
+                dag.add(
+                    0,
+                    vec![],
+                    Operator::source(input.clone(), source).unwrap(),
+                    Lifetime::None,
+                )
+                .unwrap();
                 dag.add(
                     1,
                     vec![0],
                     Operator::sort(input.clone(), key.clone(), groups.clone(), None).unwrap(),
+                    Lifetime::None,
                 )
                 .unwrap();
                 dag.add(
                     2,
                     vec![1],
                     Operator::limit(input.clone(), fetch, 0, groups.clone()).unwrap(),
+                    Lifetime::None,
                 )
                 .unwrap();
                 let limited = collect(&dag, 2);
@@ -392,11 +410,17 @@ fn try_chain(
     ops: Vec<Operator>,
 ) -> Result<Vec<Vec<Value>>, String> {
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], Operator::source(input.clone(), batches).unwrap())
-        .unwrap();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(input.clone(), batches).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
     let root = ops.len() as u64;
     for (index, op) in ops.into_iter().enumerate() {
-        dag.add(index as u64 + 1, vec![index as u64], op).unwrap();
+        dag.add(index as u64 + 1, vec![index as u64], op, Lifetime::None)
+            .unwrap();
     }
     block_on(async {
         let mut stream = dag
@@ -587,13 +611,19 @@ fn identities_equal_but_for_an_excluded_label_aggregate_in_one_group() {
         .into_iter()
         .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
         .collect();
-    dag.add(0, vec![], Operator::source(input.clone(), source).unwrap())
-        .unwrap();
-    dag.add(1, vec![0], project).unwrap();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(input.clone(), source).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
+    dag.add(1, vec![0], project, Lifetime::None).unwrap();
     dag.add(
         2,
         vec![1],
         Operator::aggregate(projected, vec![0], vec![("sum".into(), Reduction::Sum(1))]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     let mut sums = collect(&dag, 2)
@@ -836,47 +866,59 @@ fn planner_comparisons_handle_nan_without_execution_errors() {
     }
 }
 
-// A bounded LIMIT branch must unsubscribe so another branch can drain the producer.
+// At ingestion time a LIMIT consumer of a fan-out node drops its read once it
+// has its rows: the node's later batches are not queued for it, and the
+// sibling reading the same node still gets every batch.
 #[test]
-fn limit_branch_finishes_without_blocking_shared_sibling() {
+fn limit_consumer_of_an_ingestion_fan_out_drops_its_read() {
     let input = schema(&[("v", DataType::Int64, false)]);
     let mut dag = PhysicalDAG::default();
-    let batches = (0..100)
+    let batches: Vec<_> = (0..100)
         .map(|v| Batch::try_new(input.clone(), vec![vec![Value::Int64(v)]]).unwrap())
         .collect();
-    dag.add(0, vec![], Operator::source(input.clone(), batches).unwrap())
-        .unwrap();
+    let batch_bytes = batches[0].memory_bytes();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(input.clone(), batches).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
     dag.add(
         1,
         vec![0],
         Operator::limit(input.clone(), 1, 0, vec![]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
-    dag.add(2, vec![0, 1], Operator::union(input, 2).unwrap())
-        .unwrap();
-    // Bound polls as well as rows so a backpressure regression cannot hang the suite.
-    use futures::{task::noop_waker_ref, Stream};
-    use std::{
-        pin::Pin,
-        task::{Context, Poll},
-    };
-    let run = context();
-    let mut stream = dag.execute(&[2], run.clone()).unwrap().remove(0);
-    let mut cx = Context::from_waker(noop_waker_ref());
-    let mut count = 0;
-    for _ in 0..2000 {
-        match Pin::new(&mut stream).poll_next(&mut cx) {
-            Poll::Ready(Some(batch)) => count += batch.unwrap().to_rows().len(),
-            Poll::Ready(None) => {
-                assert_eq!(count, 101);
-                drop(stream);
-                assert_eq!(run.retained_bytes(), 0);
-                return;
-            }
-            Poll::Pending => {}
-        }
-    }
-    panic!("shared LIMIT/Union failed to make progress");
+    dag.add(
+        2,
+        vec![0, 1],
+        Operator::union(input, 2).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
+    let run = RunContext::new(
+        Scope::Ingestion {
+            window_start_ms: 0,
+            window_end_ms: 1,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let outputs = block_on(dag.execute_ingestion(&[2], run.clone()).unwrap()).unwrap();
+    let rows: usize = outputs[0].iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(rows, 101);
+    // The run holds the 101 output batches it returns and no more: had the
+    // LIMIT kept its read, its queue would hold the 99 source batches it
+    // never reads.
+    assert!(
+        run.peak_bytes() <= (101 + 2) * batch_bytes,
+        "{}",
+        run.peak_bytes()
+    );
+    drop(outputs);
+    assert_eq!(run.retained_bytes(), 0);
 }
 
 // Mixed numeric comparisons must not round Int64 values through f64 before comparing.
@@ -977,6 +1019,7 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
                 vec![Batch::try_new(input.clone(), rows).unwrap()],
             )
             .unwrap(),
+            Lifetime::None,
         )
         .unwrap();
         dag.add(
@@ -991,18 +1034,25 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
                 vec![],
             )
             .unwrap(),
+            Lifetime::OneEvaluation(StorageMedium::Memory),
         )
         .unwrap();
     }
     let state = Operator::per_group_summary_build(input, family, Some(kll_512()), 0, None, vec![])
         .unwrap()
         .schema();
-    dag.add(6, vec![3, 4], Operator::union(state.clone(), 2).unwrap())
-        .unwrap();
+    dag.add(
+        6,
+        vec![3, 4],
+        Operator::union(state.clone(), 2).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
     dag.add(
         7,
         vec![6],
         Operator::summary_merge(state.clone(), 0, vec![]).unwrap(),
+        Lifetime::OneEvaluation(StorageMedium::Memory),
     )
     .unwrap();
     let mut roots = vec![];
@@ -1020,6 +1070,7 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
                     ),
                 )
                 .unwrap(),
+                Lifetime::None,
             )
             .unwrap();
             roots.push(id);
@@ -1097,12 +1148,14 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
                 vec![Batch::try_new(input.clone(), rows).unwrap()],
             )
             .unwrap(),
+            Lifetime::None,
         )
         .unwrap();
         dag.add(
             TUMBLING_WINDOW_COUNT + tumbling_window,
             vec![tumbling_window],
             build(),
+            Lifetime::None,
         )
         .unwrap();
     }
@@ -1111,12 +1164,14 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
         union,
         (TUMBLING_WINDOW_COUNT..2 * TUMBLING_WINDOW_COUNT).collect(),
         Operator::union(state.clone(), TUMBLING_WINDOW_COUNT as usize).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     dag.add(
         union + 1,
         vec![union],
         Operator::summary_merge(state.clone(), 0, vec![]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     for (i, q) in [0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99]
@@ -1135,6 +1190,7 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
                 }),
             )
             .unwrap(),
+            Lifetime::None,
         )
         .unwrap();
         let Value::Float64(estimate) = collect(&dag, id)[0][0] else {
@@ -1193,16 +1249,23 @@ fn counter_tumbling_windows_merge_in_any_order() {
             id,
             vec![],
             Operator::source(input.clone(), vec![batch]).unwrap(),
+            Lifetime::None,
         )
         .unwrap();
-        dag.add(id + 4, vec![id], build()).unwrap();
+        dag.add(id + 4, vec![id], build(), Lifetime::None).unwrap();
     }
-    dag.add(8, vec![4, 5, 6], Operator::union(state.clone(), 3).unwrap())
-        .unwrap();
+    dag.add(
+        8,
+        vec![4, 5, 6],
+        Operator::union(state.clone(), 3).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
     dag.add(
         9,
         vec![8],
         Operator::summary_merge(state, 0, vec![]).unwrap(),
+        Lifetime::None,
     )
     .unwrap();
     assert_eq!(increase(&dag, 9), increase(&dag, 7));
@@ -1215,16 +1278,18 @@ fn zero_column_output_obeys_memory_limit() {
     let input = schema(&[]);
     let batch = Batch::try_new(input.clone(), vec![vec![]; 200]).unwrap();
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], Operator::source(input, vec![batch]).unwrap())
-        .unwrap();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(input, vec![batch]).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
     let run = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
         },
-        Limits {
-            max_bytes: 1024,
-            ..Limits::default()
-        },
+        Limits { max_bytes: 1024 },
     )
     .unwrap();
     let mut stream = dag.execute(&[0], run.clone()).unwrap().remove(0);
@@ -1257,9 +1322,14 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
         .unwrap();
         let state = build.schema();
         let mut dag = PhysicalDAG::default();
-        dag.add(0, vec![], Operator::source(input.clone(), vec![]).unwrap())
-            .unwrap();
-        dag.add(1, vec![0], build).unwrap();
+        dag.add(
+            0,
+            vec![],
+            Operator::source(input.clone(), vec![]).unwrap(),
+            Lifetime::None,
+        )
+        .unwrap();
+        dag.add(1, vec![0], build, Lifetime::None).unwrap();
         dag.add(
             2,
             vec![1],
@@ -1275,6 +1345,7 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
                 ),
             )
             .unwrap(),
+            Lifetime::None,
         )
         .unwrap();
         let rows = collect(&dag, 2);
@@ -1491,10 +1562,11 @@ fn filtered_summary_build_keeps_empty_groups() {
                 vec![Batch::try_new(input.clone(), rows.clone()).unwrap()],
             )
             .unwrap(),
+            Lifetime::None,
         )
         .unwrap();
-        dag.add(1, vec![0], build).unwrap();
-        dag.add(2, vec![1], read).unwrap();
+        dag.add(1, vec![0], build, Lifetime::None).unwrap();
+        dag.add(2, vec![1], read, Lifetime::None).unwrap();
         assert_eq!(printed(&collect(&dag, 2)), expected);
     }
 }
@@ -1711,9 +1783,10 @@ fn exact_frequency_rejects_non_finite_identities() {
             vec![Batch::try_new(input, vec![vec![Value::Float64(f64::INFINITY)]]).unwrap()],
         )
         .unwrap(),
+        Lifetime::None,
     )
     .unwrap();
-    dag.add(1, vec![0], operator).unwrap();
+    dag.add(1, vec![0], operator, Lifetime::None).unwrap();
     let run = context();
     let result = block_on(async {
         let mut stream = dag.execute(&[1], run.clone()).unwrap().remove(0);

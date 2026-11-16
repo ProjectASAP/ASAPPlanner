@@ -2,6 +2,7 @@
 use super::*;
 use crate::sources::{DataStore, Scan};
 use planner_types::plan::materialized_view::MaterializedView;
+use planner_types::stages::Lifetime;
 
 #[derive(Clone)]
 #[cfg_attr(any(test, feature = "test-support"), derive(serde::Serialize))]
@@ -52,26 +53,36 @@ pub(super) struct RawDataSlot {
 pub struct CompiledPhysicalDAG {
     nodes: BTreeMap<NodeId, Node>,
     roots: Vec<NodeId>,
+    /// The plan lifetime of each compiled Planner node, which the runtime
+    /// runs it by (see `NodeRun` in the runtime). A helper node the lowering
+    /// adds is not in it and has `Lifetime::None`. Example: node 1, a stored view,
+    /// maps to `AcrossEvaluations(Memory)`, and node 3, a query-time output
+    /// two queries read, to `OneEvaluation(Memory)`.
+    lifetimes: BTreeMap<NodeId, Lifetime>,
 }
 
 impl CompiledPhysicalDAG {
     /// Assemble already-lowered operators; leaves read no data store (for
-    /// example [`Operator::source`] holds its rows).
+    /// example [`Operator::source`] holds its rows). Every node runs as
+    /// `Lifetime::None`, so at query time a computed node may have at most
+    /// one consumer; for a shared one, build a [`PhysicalDAG`] with
+    /// `add(…, lifetime)`.
     pub fn from_operators(
         operators: BTreeMap<NodeId, (Vec<NodeId>, Operator)>,
         roots: Vec<NodeId>,
     ) -> Result<Self, Error> {
-        let mut result = Self::new(roots);
+        let mut result = Self::new(roots, BTreeMap::new());
         for (id, (inputs, operator)) in operators {
             result.add(id, inputs, operator)?;
         }
         result.validate()?;
         Ok(result)
     }
-    pub(super) fn new(roots: Vec<NodeId>) -> Self {
+    pub(super) fn new(roots: Vec<NodeId>, lifetimes: BTreeMap<NodeId, Lifetime>) -> Self {
         Self {
             nodes: BTreeMap::new(),
             roots,
+            lifetimes,
         }
     }
     pub(super) fn add_materialized_view(
@@ -157,13 +168,14 @@ impl CompiledPhysicalDAG {
     fn unbound(&self) -> Result<PhysicalDAG<'_, Batch, SchemaRef>, Error> {
         let mut dag = PhysicalDAG::default();
         for (&id, node) in &self.nodes {
+            let lifetime = self.lifetime(id);
             match node {
                 Node::MaterializedView(MaterializedViewSlot { schema, .. })
                 | Node::RawData(RawDataSlot { schema, .. }) => {
-                    dag.add(id, vec![], UnboundInput(schema.clone()))?
+                    dag.add(id, vec![], UnboundInput(schema.clone()), lifetime)?
                 }
                 Node::Operator { inputs, operator } => {
-                    dag.add(id, inputs.clone(), operator.clone())?
+                    dag.add(id, inputs.clone(), operator.clone(), lifetime)?
                 }
             }
         }
@@ -180,6 +192,7 @@ impl CompiledPhysicalDAG {
     ) -> Result<PhysicalDAG<'static, Batch, SchemaRef>, Error> {
         let mut dag = PhysicalDAG::default();
         for (&id, node) in &self.nodes {
+            let lifetime = self.lifetime(id);
             match node {
                 Node::MaterializedView(slot) => {
                     let scan = Scan::materialized_view(
@@ -188,7 +201,7 @@ impl CompiledPhysicalDAG {
                         slot.schema.clone(),
                         slot.read_window,
                     );
-                    dag.add(id, vec![], scan)?;
+                    dag.add(id, vec![], scan, lifetime)?;
                 }
                 Node::RawData(slot) => {
                     let scan = Scan::raw_data(
@@ -198,15 +211,18 @@ impl CompiledPhysicalDAG {
                         slot.predicates.clone(),
                         slot.read_window,
                     );
-                    dag.add(id, vec![], scan)?;
+                    dag.add(id, vec![], scan, lifetime)?;
                 }
                 Node::Operator { inputs, operator } => {
-                    dag.add(id, inputs.clone(), operator.clone())?;
+                    dag.add(id, inputs.clone(), operator.clone(), lifetime)?
                 }
             }
         }
         dag.validate(&self.roots)?;
         Ok(dag)
+    }
+    fn lifetime(&self, id: NodeId) -> Lifetime {
+        self.lifetimes.get(&id).copied().unwrap_or_default()
     }
 }
 /// Stands in for an input slot when validating or deriving properties.

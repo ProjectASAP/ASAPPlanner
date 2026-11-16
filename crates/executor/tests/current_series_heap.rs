@@ -258,7 +258,6 @@ fn current_series_observes_resource_limits() {
             },
             Limits {
                 max_bytes: if cancelled { 1 << 20 } else { 1 },
-                ..Limits::default()
             },
         )
         .unwrap();

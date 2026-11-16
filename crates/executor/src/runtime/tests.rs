@@ -1,6 +1,7 @@
 use super::*;
 use crate::plan::PhysicalOperator;
 use futures::{executor::block_on, stream, StreamExt};
+use planner_types::stages::StorageMedium;
 use std::cell::Cell;
 
 struct Source {
@@ -61,15 +62,13 @@ impl PhysicalOperator<u64, ()> for Identity {
             .boxed_local())
     }
 }
-fn context() -> RunContext {
+/// A query run at time 100 with a byte budget of `max_bytes`.
+fn query_context(max_bytes: usize) -> RunContext {
     RunContext::new(
         Scope::Query {
             evaluation_time_ms: 100,
         },
-        Limits {
-            max_buffered_batches: 1,
-            max_bytes: 1024,
-        },
+        Limits { max_bytes },
     )
     .unwrap()
 }
@@ -88,80 +87,115 @@ fn source(fail: bool) -> (Source, Rc<Cell<usize>>, Rc<Cell<usize>>) {
     )
 }
 
-// A shared producer runs once, and the slow reader bounds producer progress.
+const ONE_EVALUATION: Lifetime = Lifetime::OneEvaluation(StorageMedium::Memory);
+
+// At query time each consumer of a not-materialized store read (a
+// `Lifetime::None` leaf) reads it on its own, so one consumer never waits for
+// another.
 #[test]
-fn shared_source_backpressure_and_reader_drop() {
+fn not_materialized_leaf_is_read_per_consumer() {
     let (source, starts, polls) = source(false);
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], source).unwrap();
-    let context = context();
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    let context = query_context(1024);
     let mut readers = dag.execute(&[0, 0], context.clone()).unwrap();
-    let mut slow = readers.pop().unwrap();
-    let mut fast = readers.pop().unwrap();
-    assert_eq!(starts.get(), 1);
-    let first = block_on(fast.next()).unwrap().unwrap();
-    assert_eq!(*first, 0);
-    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-    assert!(Pin::new(&mut fast).poll_next(&mut cx).is_pending());
-    assert_eq!(polls.get(), 1);
-    let same = block_on(slow.next()).unwrap().unwrap();
-    assert!(Arc::ptr_eq(&first.value, &same.value));
-    drop(same);
-    drop(first);
-    assert_eq!(context.retained_bytes(), 0);
-    assert_eq!(*block_on(fast.next()).unwrap().unwrap(), 1);
-    drop(slow);
-    assert_eq!(*block_on(fast.next()).unwrap().unwrap(), 2);
-    assert_eq!(*block_on(fast.next()).unwrap().unwrap(), 3);
-    assert!(block_on(fast.next()).is_none());
+    let second = readers.pop().unwrap();
+    let mut first = readers.pop().unwrap();
+    assert_eq!(starts.get(), 2);
+    assert_eq!(*block_on(first.next()).unwrap().unwrap(), 0);
+    drop(second);
+    for expected in 1..4 {
+        assert_eq!(*block_on(first.next()).unwrap().unwrap(), expected);
+    }
+    assert!(block_on(first.next()).is_none());
     assert_eq!(polls.get(), 4);
-    drop(fast);
+    drop(first);
     assert_eq!(context.retained_bytes(), 0);
 }
 
-// Independent branches consume a common node concurrently without duplicate work.
+// A leaf whose rows the store keeps across evaluations (an
+// `AcrossEvaluations` raw data scan) is read from the store by each
+// consumer on its own: nothing is held in the run. Example: two queries over
+// one retained scan are two store reads, and the first query's first batch
+// is the only one charged while it reads it.
 #[test]
-fn diamond_and_run_isolation() {
+fn stored_leaf_is_read_per_consumer() {
     let (source, starts, polls) = source(false);
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], source).unwrap();
-    dag.add(1, vec![0], Identity).unwrap();
-    dag.add(2, vec![0], Identity).unwrap();
+    dag.add(
+        0,
+        vec![],
+        source,
+        Lifetime::AcrossEvaluations(StorageMedium::Memory),
+    )
+    .unwrap();
+    let context = query_context(1024);
+    let mut readers = dag.execute(&[0, 0], context.clone()).unwrap();
+    let second = readers.pop().unwrap();
+    let mut first = readers.pop().unwrap();
+    let batch = block_on(first.next()).unwrap().unwrap();
+    assert_eq!(*batch, 0);
+    assert_eq!(context.retained_bytes(), 8);
+    drop(batch);
+    assert_eq!(
+        values(block_on(first.collect::<Vec<_>>())),
+        vec![Ok(1), Ok(2), Ok(3)]
+    );
+    assert_eq!(
+        values(block_on(second.collect::<Vec<_>>())),
+        vec![Ok(0), Ok(1), Ok(2), Ok(3)]
+    );
+    assert_eq!((starts.get(), polls.get()), (2, 8));
+    assert_eq!(context.retained_bytes(), 0);
+}
+
+// A materialized node runs once per run, to the end, and every consumer
+// reads its finished output, charged to the run until all have read it.
+#[test]
+fn materialized_node_runs_once_and_is_held() {
+    let (source, starts, polls) = source(false);
+    let mut dag = PhysicalDAG::default();
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    dag.add(1, vec![0], Identity, ONE_EVALUATION).unwrap();
+    dag.add(2, vec![1], Identity, Lifetime::None).unwrap();
+    dag.add(3, vec![1], Identity, Lifetime::None).unwrap();
     for _ in 0..2 {
-        let mut outputs = dag.execute(&[1, 2], context()).unwrap();
-        let a = outputs.pop().unwrap();
-        let b = outputs.pop().unwrap();
-        let (a, b) =
-            block_on(async { futures::join!(a.collect::<Vec<_>>(), b.collect::<Vec<_>>()) });
-        assert_eq!(
-            a.iter().map(|v| **v.as_ref().unwrap()).collect::<Vec<_>>(),
-            vec![0, 1, 2, 3]
-        );
-        assert_eq!(
-            b.iter().map(|v| **v.as_ref().unwrap()).collect::<Vec<_>>(),
-            vec![0, 1, 2, 3]
-        );
+        let run = query_context(1024);
+        let outputs = dag.execute(&[2, 3], run.clone()).unwrap();
+        for output in outputs {
+            assert_eq!(
+                values(block_on(output.collect::<Vec<_>>())),
+                vec![Ok(0), Ok(1), Ok(2), Ok(3)]
+            );
+        }
+        // The held output, and the first root's batches collected while the
+        // second root has not read it yet.
+        assert_eq!(run.peak_bytes(), 2 * 4 * 8);
+        assert_eq!(run.retained_bytes(), 0);
     }
     assert_eq!(starts.get(), 2);
     assert_eq!(polls.get(), 8);
 }
 
-// Failure reaches every subscriber; cancellation stops further producer work.
+// Failure reaches every consumer, and a held node that fails partway is not
+// read in part: each consumer gets only the error, so none reports success
+// after its first batch. Cancellation stops further producer work.
 #[test]
 fn broadcast_error_and_cancel() {
     let (source, _, polls) = source(true);
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], source).unwrap();
-    let mut outputs = dag.execute(&[0, 0], context()).unwrap();
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    dag.add(1, vec![0], Identity, ONE_EVALUATION).unwrap();
+    let mut outputs = dag.execute(&[1, 1], query_context(1024)).unwrap();
     let a = outputs.pop().unwrap();
     let b = outputs.pop().unwrap();
     let (a, b) = block_on(async { futures::join!(a.collect::<Vec<_>>(), b.collect::<Vec<_>>()) });
     for values in [a, b] {
-        assert_eq!(values.len(), 2);
-        assert!(matches!(values[1], Err(Error::AtNode { node: 0, .. })));
+        assert_eq!(values.len(), 1);
+        assert!(matches!(values[0], Err(Error::AtNode { node: 0, .. })));
     }
     assert_eq!(polls.get(), 2);
-    let run = context();
+    let run = query_context(1024);
     let mut output = dag.execute(&[0], run.clone()).unwrap().remove(0);
     run.cancel();
     assert!(matches!(
@@ -172,22 +206,13 @@ fn broadcast_error_and_cancel() {
     assert_eq!(polls.get(), 2);
 }
 
-// Retaining a consumer output retains its budget lease after queue eviction.
+// Retaining a consumer output retains its budget lease after it is read.
 #[test]
 fn retained_outputs_count_against_budget() {
     let (source, _, _) = source(false);
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], source).unwrap();
-    let run = RunContext::new(
-        Scope::Query {
-            evaluation_time_ms: 0,
-        },
-        Limits {
-            max_buffered_batches: 1,
-            max_bytes: 8,
-        },
-    )
-    .unwrap();
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    let run = query_context(8);
     let mut input = dag.execute(&[0], run.clone()).unwrap().remove(0);
     let held = block_on(input.next()).unwrap().unwrap();
     assert_eq!(run.retained_bytes(), 8);
@@ -206,16 +231,16 @@ fn retained_outputs_count_against_budget() {
 fn invalid_dags_do_not_start_sources() {
     let (source, starts, _) = source(false);
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], source).unwrap();
-    dag.add(1, vec![2], Identity).unwrap();
-    dag.add(2, vec![1], Identity).unwrap();
-    assert!(dag.execute(&[0, 1], context()).is_err());
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    dag.add(1, vec![2], Identity, Lifetime::None).unwrap();
+    dag.add(2, vec![1], Identity, Lifetime::None).unwrap();
+    assert!(dag.execute(&[0, 1], query_context(1024)).is_err());
     assert_eq!(starts.get(), 0);
     let mut missing = PhysicalDAG::default();
-    missing.add(1, vec![9], Identity).unwrap();
+    missing.add(1, vec![9], Identity, Lifetime::None).unwrap();
     assert!(missing.validate(&[1]).is_err());
     let mut arity = PhysicalDAG::default();
-    arity.add(1, vec![], Identity).unwrap();
+    arity.add(1, vec![], Identity, Lifetime::None).unwrap();
     assert!(arity.validate(&[1]).is_err());
 }
 
@@ -225,8 +250,8 @@ fn ready_sources_cooperate_with_cancellation() {
     let (mut source, _, polls) = source(false);
     source.end = 10_000;
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], source).unwrap();
-    let context = context();
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    let context = query_context(1024);
     let mut input = dag.execute(&[0], context.clone()).unwrap().remove(0);
     block_on(async {
         let drain = async {
@@ -252,9 +277,423 @@ fn ready_sources_cooperate_with_cancellation() {
 fn depth_limit_covers_shared_paths() {
     let (source, _, _) = source(false);
     let mut dag = PhysicalDAG::default();
-    dag.add(0, vec![], source).unwrap();
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
     for id in 1..129 {
-        dag.add(id, vec![id - 1], Identity).unwrap();
+        dag.add(id, vec![id - 1], Identity, Lifetime::None).unwrap();
     }
     assert!(dag.validate(&(0..129).collect::<Vec<_>>()).is_err());
+}
+
+// Reads its left input to the end before its right, as `SeriesBinary` does.
+struct LeftThenRight;
+impl PhysicalOperator<u64, ()> for LeftThenRight {
+    fn name(&self) -> &str {
+        "LeftThenRight"
+    }
+    fn input_schemas(&self) -> Vec<()> {
+        vec![(), ()]
+    }
+    fn output_schema(&self) {}
+    fn output_bytes(&self, _: &u64) -> usize {
+        8
+    }
+    fn start<'a>(
+        &'a self,
+        inputs: Vec<Input<'a, u64>>,
+        _: RunContext,
+    ) -> Result<OutputStream<'a, u64>, Error> {
+        Ok(stream::iter(inputs)
+            .flatten()
+            .map(|value| value.map(|v| *v))
+            .boxed_local())
+    }
+}
+
+// Reads its input one minute before the run's evaluation time, like a
+// `TimeShift` with an `@` anchor.
+struct MinuteEarlier;
+impl PhysicalOperator<u64, ()> for MinuteEarlier {
+    fn name(&self) -> &str {
+        "MinuteEarlier"
+    }
+    fn input_context(&self, context: &RunContext) -> Result<RunContext, Error> {
+        Ok(context.at_evaluation_time(context.evaluation_time_ms().unwrap() - 60_000))
+    }
+    fn input_schemas(&self) -> Vec<()> {
+        vec![()]
+    }
+    fn output_schema(&self) {}
+    fn output_bytes(&self, _: &u64) -> usize {
+        8
+    }
+    fn start<'a>(
+        &'a self,
+        mut inputs: Vec<Input<'a, u64>>,
+        _: RunContext,
+    ) -> Result<OutputStream<'a, u64>, Error> {
+        Ok(inputs
+            .remove(0)
+            .map(|value| value.map(|v| *v))
+            .boxed_local())
+    }
+}
+
+/// Runs `run` on its own thread and fails the test if it does not return in
+/// time, so a deadlocked run fails instead of hanging the test binary.
+fn within_timeout<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sender.send(run()).unwrap());
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the run did not finish")
+}
+
+/// More batches than any queue bound the runtime ever had (8 by default).
+const MANY_BATCHES: u64 = 20;
+/// Node 0, with plan lifetime `leaf`, emits `MANY_BATCHES` batches; nodes 1
+/// and 2 each read it.
+fn two_readers_of_one_leaf(
+    dag: &mut PhysicalDAG<'static, u64, ()>,
+    leaf: Lifetime,
+) -> Rc<Cell<usize>> {
+    let (mut source, starts, _) = source(false);
+    source.end = MANY_BATCHES;
+    dag.add(0, vec![], source, leaf).unwrap();
+    dag.add(1, vec![0], Identity, Lifetime::None).unwrap();
+    dag.add(2, vec![0], Identity, Lifetime::None).unwrap();
+    starts
+}
+fn ingestion_context(max_bytes: usize) -> RunContext {
+    RunContext::new(
+        Scope::Ingestion {
+            window_start_ms: 0,
+            window_end_ms: 10,
+        },
+        Limits { max_bytes },
+    )
+    .unwrap()
+}
+fn values(results: Vec<Result<SharedValue<u64>, Error>>) -> Vec<Result<u64, Error>> {
+    results.into_iter().map(|r| r.map(|v| *v)).collect()
+}
+fn all_batches() -> Vec<Result<u64, Error>> {
+    (0..MANY_BATCHES).map(Ok).collect()
+}
+
+// Two roots reading one leaf: draining them one after another gives the
+// same answers as polling them together. A leaf whose rows the store keeps
+// (`None` or `AcrossEvaluations`) is read once per consumer (2 reads per
+// run); a `OneEvaluation` leaf is read once and held for both (1 read per
+// run).
+#[test]
+fn roots_reading_one_leaf_drain_in_order() {
+    for (leaf, reads_per_run) in [
+        (Lifetime::None, 2),
+        (Lifetime::AcrossEvaluations(StorageMedium::Memory), 2),
+        (ONE_EVALUATION, 1),
+    ] {
+        let reads = within_timeout(move || {
+            let mut dag = PhysicalDAG::default();
+            let starts = two_readers_of_one_leaf(&mut dag, leaf);
+            let outputs = dag.execute(&[1, 2], query_context(1024)).unwrap();
+            let joined: Vec<_> = block_on(futures::future::join_all(
+                outputs.into_iter().map(|output| output.collect::<Vec<_>>()),
+            ))
+            .into_iter()
+            .map(values)
+            .collect();
+            assert_eq!(joined, vec![all_batches(), all_batches()]);
+            let run = query_context(1024);
+            let outputs = dag.execute(&[1, 2], run.clone()).unwrap();
+            let drained: Vec<_> = outputs
+                .into_iter()
+                .map(|output| values(block_on(output.collect::<Vec<_>>())))
+                .collect();
+            assert_eq!(drained, joined);
+            assert_eq!(run.retained_bytes(), 0);
+            starts.get()
+        });
+        assert_eq!(reads, 2 * reads_per_run, "{leaf:?}");
+    }
+}
+
+// One root with two branches over one leaf, combined by an operator that
+// reads its left branch to the end first.
+#[test]
+fn one_root_with_two_branches_over_one_leaf() {
+    for (leaf, reads) in [(Lifetime::None, 2), (ONE_EVALUATION, 1)] {
+        let starts = within_timeout(move || {
+            let mut dag = PhysicalDAG::default();
+            let starts = two_readers_of_one_leaf(&mut dag, leaf);
+            dag.add(3, vec![1, 2], LeftThenRight, Lifetime::None)
+                .unwrap();
+            let output = dag.execute(&[3], query_context(1024)).unwrap().remove(0);
+            let both: Vec<_> = all_batches().into_iter().chain(all_batches()).collect();
+            assert_eq!(values(block_on(output.collect::<Vec<_>>())), both);
+            starts.get()
+        });
+        assert_eq!(starts, reads, "{leaf:?}");
+    }
+}
+
+// A materialized node with one consumer streams to it: no sibling can wait
+// on that consumer, so nothing is held. Its first batch arrives after one
+// source batch, not after the whole output.
+#[test]
+fn one_evaluation_node_with_one_consumer_streams() {
+    let (source, _, polls) = source(false);
+    let mut dag = PhysicalDAG::default();
+    dag.add(0, vec![], source, ONE_EVALUATION).unwrap();
+    dag.add(1, vec![0], Identity, ONE_EVALUATION).unwrap();
+    let run = query_context(1024);
+    let mut output = dag.execute(&[1], run.clone()).unwrap().remove(0);
+    assert_eq!(*block_on(output.next()).unwrap().unwrap(), 0);
+    assert_eq!(polls.get(), 1);
+    assert_eq!(run.peak_bytes(), 8);
+}
+
+// At ingestion time one read of a source feeds several chain builds: the
+// runtime polls every root itself and each batch reaches every consumer.
+#[test]
+fn ingestion_fan_out_reads_the_source_once() {
+    within_timeout(|| {
+        let mut dag = PhysicalDAG::default();
+        let starts = two_readers_of_one_leaf(&mut dag, Lifetime::None);
+        dag.add(3, vec![0], Identity, Lifetime::None).unwrap();
+        dag.add(4, vec![1, 2], LeftThenRight, Lifetime::None)
+            .unwrap();
+        let run = ingestion_context(1024);
+        let outputs = block_on(dag.execute_ingestion(&[3, 4], run.clone()).unwrap()).unwrap();
+        let outputs: Vec<Vec<Result<u64, Error>>> = outputs
+            .into_iter()
+            .map(|batches| batches.into_iter().map(|v| Ok(*v)).collect())
+            .collect();
+        let both: Vec<_> = all_batches().into_iter().chain(all_batches()).collect();
+        assert_eq!(outputs, vec![all_batches(), both]);
+        assert_eq!(starts.get(), 1);
+        assert_eq!(run.retained_bytes(), 0);
+    });
+}
+
+// Each entry point runs one scope and names the other for the other scope.
+#[test]
+fn execute_rejects_ingestion_scope_and_vice_versa() {
+    let mut dag = PhysicalDAG::default();
+    two_readers_of_one_leaf(&mut dag, Lifetime::None);
+    let Err(error) = dag.execute(&[1], ingestion_context(1024)) else {
+        panic!("`execute` ran an ingestion scope");
+    };
+    assert_eq!(
+        error,
+        Error::Invalid(
+            "`execute` takes a query scope; run an ingestion scope with `execute_ingestion`".into()
+        )
+    );
+    let Err(error) = dag.execute_ingestion(&[1], query_context(1024)) else {
+        panic!("`execute_ingestion` ran a query scope");
+    };
+    assert_eq!(
+        error,
+        Error::Invalid(
+            "`execute_ingestion` takes an ingestion scope; run a query scope with `execute`".into()
+        )
+    );
+}
+
+// A computed node that is not materialized has exactly one consumer at
+// query time; two mean a planner bug, reported before any operator starts.
+#[test]
+fn query_time_fan_out_of_a_not_materialized_node_is_an_error() {
+    let (source, starts, _) = source(false);
+    let mut dag = PhysicalDAG::default();
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    dag.add(1, vec![0], Identity, Lifetime::None).unwrap();
+    dag.add(2, vec![1], Identity, Lifetime::None).unwrap();
+    dag.add(3, vec![1], Identity, Lifetime::None).unwrap();
+    let Err(error) = dag.execute(&[2, 3], query_context(1024)) else {
+        panic!("a not-materialized node with two consumers ran");
+    };
+    assert_eq!(
+        error,
+        Error::Invalid(
+            "node 1 (Identity) at evaluation time 100 has 2 consumers but Lifetime::None; \
+             a shared query-time output must be OneEvaluation (planner bug)"
+                .into()
+        )
+    );
+    assert_eq!(starts.get(), 0);
+    // Read at two evaluation times, it runs once per time, each with one consumer.
+    dag.add(4, vec![1], MinuteEarlier, Lifetime::None).unwrap();
+    let outputs = dag.execute(&[2, 4], query_context(1024)).unwrap();
+    for output in outputs {
+        assert_eq!(values(block_on(output.collect::<Vec<_>>())).len(), 4);
+    }
+}
+
+// A one-evaluation output over the run's byte budget fails with
+// `MemoryLimit`; it is not spilled.
+#[test]
+fn one_evaluation_output_over_budget_is_a_memory_limit() {
+    within_timeout(|| {
+        let mut dag = PhysicalDAG::default();
+        let (mut source, _, _) = source(false);
+        source.end = MANY_BATCHES;
+        dag.add(0, vec![], source, Lifetime::None).unwrap();
+        dag.add(1, vec![0], Identity, ONE_EVALUATION).unwrap();
+        let run = query_context(5 * 8);
+        let output = dag.execute(&[1], run.clone()).unwrap().remove(0);
+        let read = values(block_on(output.collect::<Vec<_>>()));
+        assert_eq!(read.last(), Some(&Err(Error::MemoryLimit)));
+        assert_eq!(run.retained_bytes(), 0);
+    });
+}
+
+// Ignores its input: drops it in `start` and emits nothing.
+struct DropsInput;
+impl PhysicalOperator<u64, ()> for DropsInput {
+    fn name(&self) -> &str {
+        "DropsInput"
+    }
+    fn input_schemas(&self) -> Vec<()> {
+        vec![()]
+    }
+    fn output_schema(&self) {}
+    fn output_bytes(&self, _: &u64) -> usize {
+        8
+    }
+    fn start<'a>(
+        &'a self,
+        _: Vec<Input<'a, u64>>,
+        _: RunContext,
+    ) -> Result<OutputStream<'a, u64>, Error> {
+        Ok(stream::empty().boxed_local())
+    }
+}
+
+// A consumer that drops its input in `start`, before the node's other
+// consumer subscribes, leaves the node running for that one.
+#[test]
+fn an_input_dropped_at_start_leaves_the_node_to_later_consumers() {
+    let (source, _, _) = source(false);
+    let mut dag = PhysicalDAG::default();
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    dag.add(1, vec![0], Identity, ONE_EVALUATION).unwrap();
+    dag.add(2, vec![1], DropsInput, Lifetime::None).unwrap();
+    dag.add(3, vec![1], Identity, Lifetime::None).unwrap();
+    let run = query_context(1024);
+    let outputs = dag.execute(&[2, 3], run.clone()).unwrap();
+    let drained: Vec<_> = outputs
+        .into_iter()
+        .map(|output| values(block_on(output.collect::<Vec<_>>())))
+        .collect();
+    assert_eq!(drained, vec![vec![], vec![Ok(0), Ok(1), Ok(2), Ok(3)]]);
+    assert_eq!(run.retained_bytes(), 0);
+}
+
+// A cancellation seen by one root releases what a held node keeps for a
+// root nobody polls, and every root then ends with `Cancelled`.
+#[test]
+fn cancellation_releases_held_batches_of_unpolled_roots() {
+    let (mut source, _, _) = source(false);
+    source.end = MANY_BATCHES;
+    let mut dag = PhysicalDAG::default();
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    dag.add(1, vec![0], Identity, ONE_EVALUATION).unwrap();
+    dag.add(2, vec![1], Identity, Lifetime::None).unwrap();
+    dag.add(3, vec![1], Identity, Lifetime::None).unwrap();
+    let run = query_context(1024);
+    let mut outputs = dag.execute(&[2, 3], run.clone()).unwrap();
+    let first = block_on(outputs[0].next()).unwrap().unwrap();
+    assert_eq!(*first, 0);
+    drop(first);
+    assert!(run.retained_bytes() > 0);
+    run.cancel();
+    assert!(matches!(
+        block_on(outputs[0].next()),
+        Some(Err(Error::Cancelled))
+    ));
+    assert_eq!(run.retained_bytes(), 0);
+    assert!(matches!(
+        block_on(outputs[1].next()),
+        Some(Err(Error::Cancelled))
+    ));
+}
+
+/// Passes its input through and cancels the run from inside its own poll
+/// once it has passed `after` batches, as an operator that hits a run-wide
+/// stop condition would.
+struct CancelsAfter {
+    after: usize,
+}
+impl PhysicalOperator<u64, ()> for CancelsAfter {
+    fn name(&self) -> &str {
+        "CancelsAfter"
+    }
+    fn input_schemas(&self) -> Vec<()> {
+        vec![()]
+    }
+    fn output_schema(&self) {}
+    fn output_bytes(&self, _: &u64) -> usize {
+        8
+    }
+    fn start<'a>(
+        &'a self,
+        mut inputs: Vec<Input<'a, u64>>,
+        context: RunContext,
+    ) -> Result<OutputStream<'a, u64>, Error> {
+        let mut passed = 0;
+        Ok(inputs
+            .remove(0)
+            .map(move |value| {
+                passed += 1;
+                if passed == self.after {
+                    context.cancel();
+                }
+                value.map(|value| *value)
+            })
+            .boxed_local())
+    }
+}
+/// A source, node 1 (`CancelsAfter` 3 batches, with lifetime `shared`) and
+/// two `Identity` roots 2 and 3 over node 1.
+fn cancelled_inside_a_shared_node(shared: Lifetime) -> PhysicalDAG<'static, u64, ()> {
+    let (mut source, _, _) = source(false);
+    source.end = MANY_BATCHES;
+    let mut dag = PhysicalDAG::default();
+    dag.add(0, vec![], source, Lifetime::None).unwrap();
+    dag.add(1, vec![0], CancelsAfter { after: 3 }, shared)
+        .unwrap();
+    dag.add(2, vec![1], Identity, Lifetime::None).unwrap();
+    dag.add(3, vec![1], Identity, Lifetime::None).unwrap();
+    dag
+}
+
+// An operator that cancels the run inside its own poll, while another
+// consumer of its node is not being polled, ends every root with
+// `Cancelled`: stopping the other producers does not drop their streams,
+// whose inputs would borrow the producer being polled.
+#[test]
+fn cancel_inside_a_held_node_ends_every_root() {
+    let dag = cancelled_inside_a_shared_node(ONE_EVALUATION);
+    let run = query_context(1 << 20);
+    let outputs = dag.execute(&[2, 3], run.clone()).unwrap();
+    let drained: Vec<_> = outputs
+        .into_iter()
+        .map(|output| values(block_on(output.collect::<Vec<_>>())))
+        .collect();
+    assert_eq!(
+        drained,
+        vec![vec![Err(Error::Cancelled)], vec![Err(Error::Cancelled)]]
+    );
+    assert_eq!(run.retained_bytes(), 0);
+}
+
+// The same at ingestion time, over a streamed fan-out node.
+#[test]
+fn cancel_inside_an_ingestion_fan_out_ends_the_run() {
+    let dag = cancelled_inside_a_shared_node(Lifetime::None);
+    let run = ingestion_context(1 << 20);
+    let outputs = block_on(dag.execute_ingestion(&[2, 3], run.clone()).unwrap());
+    assert!(matches!(outputs, Err(Error::Cancelled)));
+    assert_eq!(run.retained_bytes(), 0);
 }
