@@ -167,16 +167,15 @@ pub fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, 
             1.0,
             kll_fixed_bytes() + 8 * kll_buffer_items(*k, input_rows),
         ),
-        // The executor builds no DDSketch outside α in (0, 1), where
-        // sketchlib's estimate panics: priced as an empty one.
-        SketchParams::DDSketch { alpha } if !(*alpha > 0.0 && *alpha < 1.0) => {
-            (1.0, std::mem::size_of::<DdSketch>() as u64)
-        }
-        SketchParams::DDSketch { alpha } => {
-            let ValueMagnitudeRange { min_abs, max_abs } = input_rows
-                .value_magnitude_range
-                .unwrap_or(DDSKETCH_ASSUMED_MAGNITUDE_RANGE);
-            (
+        // Over the declared magnitude range, or the one assumed when none
+        // is declared (`assumed_magnitude_range`). The executor builds no
+        // DDSketch outside α in (0, 1), where sketchlib's estimate panics:
+        // priced as an empty one.
+        SketchParams::DDSketch { alpha } => match input_rows
+            .value_magnitude_range
+            .or_else(|| assumed_magnitude_range(params, input_rows))
+        {
+            Some(ValueMagnitudeRange { min_abs, max_abs }) if *alpha > 0.0 && *alpha < 1.0 => (
                 1.0,
                 DdSketch::estimated_memory_bytes(
                     *alpha,
@@ -185,8 +184,9 @@ pub fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, 
                     max_abs,
                     !input_rows.non_negative,
                 ) as u64,
-            )
-        }
+            ),
+            _ => (1.0, std::mem::size_of::<DdSketch>() as u64),
+        },
         SketchParams::Hll { precision, .. } => (
             1.0,
             HyperLogLog::<Classic>::estimated_memory_bytes(usize::from(*precision)) as u64,
@@ -288,16 +288,20 @@ fn univmon_expected_layers(layers: u8) -> f64 {
 }
 
 /// The magnitude range [`sketch_shape`] assumes for a state of `params`
-/// over `input_rows`: [`DDSKETCH_ASSUMED_MAGNITUDE_RANGE`] for a DDSketch
-/// whose values declare no range; `None` for a declared range or any other
-/// sketch, whose bytes assume none. E.g. a DDSketch at α = 0.01 over a
-/// `value` without `column_magnitudes` gives `Some([1, 1e9])`.
+/// over `input_rows`, the one place that default is applied:
+/// [`DDSKETCH_ASSUMED_MAGNITUDE_RANGE`] for a DDSketch with α in (0, 1)
+/// whose values declare no range; `None` for a declared range, an α
+/// costed as an empty sketch, or any other sketch, whose bytes assume
+/// none. E.g. a DDSketch at α = 0.01 over a `value` without
+/// `column_magnitudes` gives `Some([1, 1e9])`.
 pub fn assumed_magnitude_range(
     params: &SketchParams,
     input_rows: StateInputRows,
 ) -> Option<ValueMagnitudeRange> {
     match params {
-        SketchParams::DDSketch { .. } if input_rows.value_magnitude_range.is_none() => {
+        SketchParams::DDSketch { alpha }
+            if *alpha > 0.0 && *alpha < 1.0 && input_rows.value_magnitude_range.is_none() =>
+        {
             Some(DDSKETCH_ASSUMED_MAGNITUDE_RANGE)
         }
         _ => None,

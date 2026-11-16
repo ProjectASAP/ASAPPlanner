@@ -71,8 +71,9 @@
 //     or `irate` to a declared gauge or combining a declared summary's
 //     quantile series across series (`metric_type_warnings`), each data fact the selected
 //     plan assumed because the data workload does not declare it (`assumed_data_facts`,
-//     saying whether the plan may then miss its accuracy target), and a peak memory over
-//     10^12 bytes when the cost model declares no memory capacity;
+//     saying whether answers may then be wrong beyond the accuracy target), and a peak
+//     memory over 10^12 bytes when the cost model declares no memory capacity;
+//     `assumed_data_facts`: those facts as records (`AssumedDataFact`), when there are any;
 //   - memo: `nodes`, one node table for the section (each distinct node
 //     once, children as indices before their parents), and `steps`, the
 //     memo after each step run (`stage0`: the frontends' DAG hash-consed,
@@ -235,12 +236,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             let (cost, _) = asap_cost::plan_cost(plan, &entries, &data, &cost_inputs).ok()?;
             Some((plan, cost))
         });
-    if let Some((plan, cost)) = &selected_plan_cost {
-        warnings.extend(
-            assumed_data_facts(plan, cost, &data)
-                .iter()
-                .map(ToString::to_string),
-        );
+    let assumed_facts = selected_plan_cost
+        .as_ref()
+        .map(|(plan, cost)| assumed_data_facts(plan, cost, &data))
+        .unwrap_or_default();
+    warnings.extend(assumed_facts.iter().map(ToString::to_string));
+    if let Some((_, cost)) = &selected_plan_cost {
         warnings.extend(large_peak_memory_warning(
             cost.usage.peak_memory_bytes,
             &cost_inputs.cost_model,
@@ -252,6 +253,13 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         if let Some(stage3) = document["stage3_plan_selection"].as_object_mut() {
             if !warnings.is_empty() {
                 stage3.insert("warnings".into(), json!(warnings));
+            }
+            // The same assumed facts as records, for a machine reader.
+            if !assumed_facts.is_empty() {
+                stage3.insert(
+                    "assumed_data_facts".into(),
+                    serde_json::to_value(&assumed_facts).map_err(|e| e.to_string())?,
+                );
             }
         }
         document["workload"]["data_workload"] =

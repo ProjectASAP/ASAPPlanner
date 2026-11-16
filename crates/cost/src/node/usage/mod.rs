@@ -504,36 +504,35 @@ pub fn node_resource_usage_and_cost<'a>(
                 .ok_or(AnalyticalCostError::Overflow)?,
         })
     };
-    // What the sources declare about the values a summary built here folds:
-    // whether every one is non-negative, and their magnitude range, both
-    // from the one source column it folds
-    // (`ProducerOutput::unchanged_column`).
+    // The one source column a summary built here folds
+    // (`ProducerOutput::unchanged_column`; `None` for computed values), and
+    // what the sources declare about its values: whether every one is
+    // non-negative, and their magnitude range.
     let folded_values = |update: &SummaryUpdate| {
-        producers
+        let column = producers
             .first()
-            .and_then(|producer| producer.unchanged_column(&update.weight))
-            .map_or((false, None), |column| {
-                let non_negative = !sources.is_empty()
-                    && sources
-                        .iter()
-                        .all(|source| declared_non_negative(data, source, column));
-                let range = declared_value_magnitude_range(data, sources.iter().copied(), column);
-                (non_negative, range)
-            })
+            .and_then(|producer| producer.unchanged_column(&update.weight));
+        let (non_negative, range) = column.map_or((false, None), |column| {
+            let non_negative = !sources.is_empty()
+                && sources
+                    .iter()
+                    .all(|source| declared_non_negative(data, source, column));
+            let range = declared_value_magnitude_range(data, sources.iter().copied(), column);
+            (non_negative, range)
+        });
+        (column, non_negative, range)
     };
-    // The magnitude range a summary built here over `input_rows` is costed
-    // for when its values declare none (`assumed_magnitude_range`), named
-    // with the sources that declare no range for the column it folds (every
-    // source when it folds computed values). None when the measured table
-    // gives its bytes, which assume no range.
-    let assumed_magnitude_range_fact = |update: &SummaryUpdate, input_rows: StateInputRows| {
+    // The magnitude range a summary built here over `input_rows` of
+    // `column` is costed for when its values declare none
+    // (`assumed_magnitude_range`), named with the sources that declare no
+    // range for that column (every source when it folds computed values,
+    // `column` `None`). None when the measured table gives its bytes, which
+    // assume no range.
+    let assumed_magnitude_range_fact = |column: Option<&str>, input_rows: StateInputRows| {
         if measured_state_bytes.is_some() {
             return None;
         }
         let assumed_range = assumed_magnitude_range(node.parameters.as_ref()?, input_rows)?;
-        let column = producers
-            .first()
-            .and_then(|producer| producer.unchanged_column(&update.weight));
         let undeclared = sources
             .iter()
             .copied()
@@ -873,7 +872,7 @@ pub fn node_resource_usage_and_cost<'a>(
             // At query time, each state sees its group's input rows; at
             // ingestion time, the rows of a window one second of
             // arriving rows does not bound.
-            let (non_negative, value_magnitude_range) = folded_values(update);
+            let (column, non_negative, value_magnitude_range) = folded_values(update);
             let input_rows = StateInputRows {
                 rows_per_state: (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
                 non_negative,
@@ -881,7 +880,7 @@ pub fn node_resource_usage_and_cost<'a>(
             };
             let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
-            assumed_data_facts.extend(assumed_magnitude_range_fact(update, input_rows));
+            assumed_data_facts.extend(assumed_magnitude_range_fact(column, input_rows));
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
@@ -922,7 +921,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 .map_err(|_| AnalyticalCostError::Overflow)?,
                 false => input.rows.div_ceil(retained_output_count),
             };
-            let (non_negative, value_magnitude_range) = folded_values(update);
+            let (column, non_negative, value_magnitude_range) = folded_values(update);
             let input_rows = StateInputRows {
                 rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
                 non_negative,
@@ -930,7 +929,7 @@ pub fn node_resource_usage_and_cost<'a>(
             };
             let (depth, state_bytes) = summary_shape(family, node.parameters.as_ref(), input_rows)?;
             let state_bytes = measured_state_bytes.unwrap_or(state_bytes);
-            assumed_data_facts.extend(assumed_magnitude_range_fact(update, input_rows));
+            assumed_data_facts.extend(assumed_magnitude_range_fact(column, input_rows));
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count

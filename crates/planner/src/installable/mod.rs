@@ -74,7 +74,9 @@ pub struct SelectedPlanReport {
     /// against what it measures.
     pub predicted_usage: PredictedUsage,
     /// The data facts the data workload does not declare that the plan
-    /// assumed, each once ([`assumed_data_facts`]).
+    /// assumed, each once ([`assumed_data_facts`]); omitted when empty, and
+    /// empty in a report written without it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assumed_data_facts: Vec<AssumedDataFact>,
 }
 
@@ -549,7 +551,6 @@ fn executor_refreshes(
         )
 }
 
-/// The report of the selected plan's `cost`.
 /// The data facts the selected `plan` (costed as `cost`) assumed because
 /// `data` does not declare them, each once: those its nodes' costs assumed
 /// ([`PlanCost::assumed_data_facts`]), then the in-order arrival Stage 2
@@ -570,6 +571,7 @@ pub fn assumed_data_facts(
     facts
 }
 
+/// The report of the selected plan's `cost` and the data facts it assumed.
 fn report_of(cost: &PlanCost, assumed_data_facts: Vec<AssumedDataFact>) -> SelectedPlanReport {
     SelectedPlanReport {
         cost_per_second: cost.cost_per_second,

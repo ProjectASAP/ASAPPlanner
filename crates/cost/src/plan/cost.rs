@@ -29,9 +29,7 @@ use asap_types::plan::physical_asap_dag::{
 };
 use asap_types::stages::Lifetime;
 use asap_types::summary_type::SketchParams;
-use asap_types::workload::{
-    add_assumed_data_fact, AssumedDataFact, DataWorkload, QueryWorkloadEntry,
-};
+use asap_types::workload::{AssumedDataFact, DataWorkload, QueryWorkloadEntry};
 
 /// One candidate's usage and cost over the whole workload: `usage` is
 /// the whole candidate's, `per_node` one cost per operator node of its
@@ -63,7 +61,11 @@ impl PlanCost {
             .values()
             .flat_map(|node| &node.assumed_data_facts)
         {
-            add_assumed_data_fact(&mut facts, fact.clone());
+            // A plan names each assumption once, however many of its nodes
+            // rest on it.
+            if !facts.contains(fact) {
+                facts.push(fact.clone());
+            }
         }
         facts
     }
