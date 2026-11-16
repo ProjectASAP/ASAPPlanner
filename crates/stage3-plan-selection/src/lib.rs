@@ -153,6 +153,7 @@ pub fn select_plan(
         milp_constraint_count: solved.constraint_count,
         milp_construction_ms: solved.construction_ms,
         milp_solve_ms: solved.solve_ms,
+        milp_solve_count: solved.solve_count,
     };
     Ok((plan, selection))
 }

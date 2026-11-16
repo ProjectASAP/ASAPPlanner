@@ -423,18 +423,23 @@ above the target.
 
 **Solver tolerance.** HiGHS's feasibility tolerances are absolute, 1e-7 by
 default, while a per-value δ is often far smaller: δ = 0.01 over a whole
-result of 1e4 values is 1e-6 per value, of which 1e-7 is a tenth. Whenever
-(K) has rows, HiGHS solves at primal and MIP feasibility tolerance 1e-10, the
-least it accepts. A row may still pass its limit by up to 1e-10, which for a
-per-value δ near or below 1e-10 can be orders of magnitude: at δ = 1e-12 per
-value (δ = 0.01 over 1e10 values) the solver may select readouts failing with
-1.08e-12 in all. So after the solve, the selection is checked exactly
-(`AccuracyRules::selection_meets_targets`, in f64), and a selection that
-misses a target is an error naming the query and its per-value δ ("an
-accuracy target is below the solver's precision"); planning never returns a
-plan that may not meet its target. Deriving the tolerance from the smallest
-limit instead solved RollupHeavy-8users about 2.8× slower, and scaling (K)'s
-rows by their limits solved RangeHeavy-8users about 4× slower.
+result of 1e4 values is 1e-6 per value, of which 1e-7 is a tenth: two
+readouts failing with 5.4e-7 each compose to 1.08e-6 and pass that limit
+within the default tolerance. So HiGHS first solves at its defaults, and the
+selection is then checked exactly (`AccuracyRules::selection_meets_targets`,
+in f64). A selection that misses a target is solved once more at primal and
+MIP feasibility tolerance 1e-10, the least HiGHS accepts, and checked again.
+A row may still pass its limit by up to 1e-10, which for a per-value δ near
+or below 1e-10 can be orders of magnitude: at δ = 1e-12 per value (δ = 0.01
+over 1e10 values) the solver may select readouts failing with 1.08e-12 in
+all. A selection that misses a target after the second solve is an error
+naming the query and its per-value δ ("an accuracy target is below the
+solver's precision"); planning never returns a plan that may not meet its
+target. The stricter tolerance is paid for only when the check needs it:
+solving every (K) at 1e-10 made RangeHeavy-8users about 6× slower, deriving
+the tolerance from the smallest limit solved RollupHeavy-8users about 2.8×
+slower, and scaling (K)'s rows by their limits solved RangeHeavy-8users
+about 4× slower.
 
 **Context copies.** A copy of an equivalent evaluation context shares its
 original's variables and has no rows of its own. Two contexts are copies only

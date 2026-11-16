@@ -364,7 +364,13 @@ pub(crate) struct SolvedSelection {
     pub(crate) variable_count: usize,
     pub(crate) constraint_count: usize,
     pub(crate) construction_ms: u64,
+    /// The time of every HiGHS solve, summed.
     pub(crate) solve_ms: u64,
+    /// How many times HiGHS solved the MILP: 1, or 2 when the selection at
+    /// HiGHS's default tolerances missed an accuracy target when checked
+    /// exactly and the MILP was solved again at
+    /// [`LEAST_HIGHS_FEASIBILITY_TOLERANCE`].
+    pub(crate) solve_count: usize,
 }
 
 /// A selected $y_{\kappa,u,c,i}$: edge `edge` from execution `producer`
@@ -386,13 +392,21 @@ pub(crate) enum SelectionMilpError {
     /// The solver's selection misses `query`'s accuracy target when
     /// checked exactly: its limits, such as a failure probability of
     /// 1e-12 per output value (δ = 0.01 over 1e10 values), are below the
-    /// solver's feasibility tolerance 1e-10, so (K) cannot be trusted.
+    /// solver's least feasibility tolerance,
+    /// [`LEAST_HIGHS_FEASIBILITY_TOLERANCE`], so (K) cannot be trusted.
     TargetBelowSolverPrecision {
         query: QueryId,
         /// The target's δ per output value; `None` without a δ.
         failure_probability_per_output_value: Option<f64>,
     },
 }
+
+/// The smallest primal and MIP feasibility tolerance HiGHS accepts, 1e-10
+/// (absolute; HiGHS's default is 1e-7). A second solve uses it when the
+/// selection at the default tolerances misses an accuracy target: a
+/// per-value δ of 1e-6 (δ = 0.01 over 1e4 values) may be passed by up to
+/// 1e-7 at the default, but only by 1e-10 here.
+const LEAST_HIGHS_FEASIBILITY_TOLERANCE: f64 = 1e-10;
 
 /// Builds and solves the MILP: minimize
 /// $\sum_v W^{\mathrm{mat}}_v x^{\mathrm{mat}}_v + \sum_{\kappa,v}
@@ -407,10 +421,12 @@ pub(crate) enum SelectionMilpError {
 /// [`copies_in_equivalent_contexts`]), with
 /// the $h_v$ of a candidate whose
 /// executions are all left out, then the coefficients kept are scaled so
-/// the largest is 1,000 (HiGHS's tolerances are absolute). With (K),
-/// HiGHS solves at feasibility tolerance 1e-10 and the selection is then
-/// checked exactly ([`AccuracyRules::selection_meets_targets`]): one that
-/// misses a target is [`SelectionMilpError::TargetBelowSolverPrecision`].
+/// the largest is 1,000 (HiGHS's tolerances are absolute). HiGHS solves
+/// at its default tolerances and the selection is then checked exactly
+/// ([`AccuracyRules::selection_meets_targets`]); a selection that misses a
+/// target is solved once more at [`LEAST_HIGHS_FEASIBILITY_TOLERANCE`],
+/// and if that one misses too, the error is
+/// [`SelectionMilpError::TargetBelowSolverPrecision`].
 pub(crate) fn solve_selection(
     inputs: &SelectionInputs<'_>,
 ) -> Result<SolvedSelection, SelectionMilpError> {
@@ -444,7 +460,6 @@ pub(crate) fn solve_selection(
             )
         })
         .unwrap_or_default();
-    let k_has_rows = !accuracy_rows.is_empty();
     // The objective's terms per second, unscaled: (cost, variable). A
     // query-time scan's retention is in its source's r_s.
     let terms: Vec<(f64, Variable)> = costs
@@ -533,80 +548,91 @@ pub(crate) fn solve_selection(
     model.set_option("mip_abs_gap", 0.0);
     model.set_option("output_flag", false);
     model.set_option("threads", 1);
-    if k_has_rows {
-        // HiGHS's tolerances are absolute: its default 1e-7 is a tenth of a
-        // per-value δ of 1e-6 (δ = 0.01 over 1e4 values), so (K) solves at
-        // 1e-10, the least HiGHS accepts. The selection is checked exactly
-        // after the solve.
-        model.set_option("primal_feasibility_tolerance", 1e-10);
-        model.set_option("mip_feasibility_tolerance", 1e-10);
-    }
     let construction_ms = started.elapsed().as_millis() as u64;
-    let started = Instant::now();
-    let solved = model
-        .try_solve()
-        .map_err(|status| SelectionMilpError::Solver(format!("{status:?}")))?;
-    let solve_ms = started.elapsed().as_millis() as u64;
-    use highs::{HighsModelStatus, HighsSolutionStatus};
-    let columns: Vec<f64> = match solved.status() {
-        // No constraint: no query reads an operator (literal-only scalar
-        // roots), so nothing is selected.
-        HighsModelStatus::ModelEmpty => vec![0.0; variable_count],
-        HighsModelStatus::Optimal
-            if solved.primal_solution_status() == HighsSolutionStatus::Feasible =>
-        {
-            solved.get_solution().columns().to_vec()
-        }
-        HighsModelStatus::Infeasible | HighsModelStatus::UnboundedOrInfeasible => {
-            return Err(SelectionMilpError::Infeasible)
-        }
-        other => return Err(SelectionMilpError::Solver(format!("{other:?}"))),
-    };
-    let chosen = |variable: Variable| columns[column_of[&variable]] > 0.5;
     let selectable = inputs.selectable;
     let executions = selectable.executions();
-    let selected: Vec<usize> = (0..variables.x.len())
-        .filter(|&index| chosen(variables.x[index]))
-        .collect();
-    let selected_edges: Vec<usize> = variables
-        .y
-        .iter()
-        .filter(|&(_, &y)| chosen(y))
-        .map(|(&position, _)| position)
-        .collect();
-    let answering: Vec<(QueryId, usize)> = selectable
-        .answering()
-        .iter()
-        .map(|(query, answering)| {
-            let execution = answering
-                .iter()
-                .copied()
-                .find(|&execution| chosen(variables.z[&(*query, execution)]))
-                .expect("(C): one output per query output reference");
-            (*query, execution)
-        })
-        .collect();
-    // (K) holds only to the solver's tolerance, 1e-10: a per-value δ near
-    // or below it may be missed by orders of magnitude. The exact check
-    // refuses such a selection rather than return a plan that may not
-    // meet its target.
-    if let Some(Err(query)) = rules
-        .as_ref()
-        .map(|rules| rules.selection_meets_targets(inputs, &selected_edges, &answering))
-    {
-        let memo = &inputs.physical.logical_candidates.memo;
-        let memo_query = &memo.queries()[query.0];
-        return Err(SelectionMilpError::TargetBelowSolverPrecision {
-            query,
-            failure_probability_per_output_value: memo_query.accuracy_target.as_ref().and_then(
-                |target| {
-                    target.failure_probability_per_output_value(
-                        memo_query.number_of_values_per_query_evaluation,
-                    )
-                },
-            ),
-        });
-    }
+    let mut solve_ms = 0;
+    let mut solve_count = 0;
+    let (selected, selected_edges, answering) = loop {
+        let started = Instant::now();
+        let solved = model
+            .try_solve()
+            .map_err(|status| SelectionMilpError::Solver(format!("{status:?}")))?;
+        solve_ms += started.elapsed().as_millis() as u64;
+        solve_count += 1;
+        use highs::{HighsModelStatus, HighsSolutionStatus};
+        let columns: Vec<f64> = match solved.status() {
+            // No constraint: no query reads an operator (literal-only scalar
+            // roots), so nothing is selected.
+            HighsModelStatus::ModelEmpty => vec![0.0; variable_count],
+            HighsModelStatus::Optimal
+                if solved.primal_solution_status() == HighsSolutionStatus::Feasible =>
+            {
+                solved.get_solution().columns().to_vec()
+            }
+            HighsModelStatus::Infeasible | HighsModelStatus::UnboundedOrInfeasible => {
+                return Err(SelectionMilpError::Infeasible)
+            }
+            other => return Err(SelectionMilpError::Solver(format!("{other:?}"))),
+        };
+        let chosen = |variable: Variable| columns[column_of[&variable]] > 0.5;
+        let selected: Vec<usize> = (0..variables.x.len())
+            .filter(|&index| chosen(variables.x[index]))
+            .collect();
+        let selected_edges: Vec<usize> = variables
+            .y
+            .iter()
+            .filter(|&(_, &y)| chosen(y))
+            .map(|(&position, _)| position)
+            .collect();
+        let answering: Vec<(QueryId, usize)> = selectable
+            .answering()
+            .iter()
+            .map(|(query, answering)| {
+                let execution = answering
+                    .iter()
+                    .copied()
+                    .find(|&execution| chosen(variables.z[&(*query, execution)]))
+                    .expect("(C): one output per query output reference");
+                (*query, execution)
+            })
+            .collect();
+        // (K) holds only to the solver's tolerance: at the default 1e-7, a
+        // per-value δ of 1e-6 may be missed by a tenth, and at 1e-10 a δ
+        // near or below 1e-10 by orders of magnitude. The exact check sends
+        // a selection that misses a target to a second solve at
+        // LEAST_HIGHS_FEASIBILITY_TOLERANCE, and refuses one that misses
+        // after it rather than return a plan that may not meet its target.
+        let Some(Err(query)) = rules
+            .as_ref()
+            .map(|rules| rules.selection_meets_targets(inputs, &selected_edges, &answering))
+        else {
+            break (selected, selected_edges, answering);
+        };
+        if solve_count == 2 {
+            let memo = &inputs.physical.logical_candidates.memo;
+            let memo_query = &memo.queries()[query.0];
+            return Err(SelectionMilpError::TargetBelowSolverPrecision {
+                query,
+                failure_probability_per_output_value: memo_query.accuracy_target.as_ref().and_then(
+                    |target| {
+                        target.failure_probability_per_output_value(
+                            memo_query.number_of_values_per_query_evaluation,
+                        )
+                    },
+                ),
+            });
+        }
+        model = solved.into();
+        model.set_option(
+            "primal_feasibility_tolerance",
+            LEAST_HIGHS_FEASIBILITY_TOLERANCE,
+        );
+        model.set_option(
+            "mip_feasibility_tolerance",
+            LEAST_HIGHS_FEASIBILITY_TOLERANCE,
+        );
+    };
     let (cost_per_second_without_request_overhead, retention_ms) =
         selection_cost_per_second(inputs, &selected, &selected_edges, &answering);
     Ok(SolvedSelection {
@@ -633,6 +659,7 @@ pub(crate) fn solve_selection(
         constraint_count,
         construction_ms,
         solve_ms,
+        solve_count,
     })
 }
 

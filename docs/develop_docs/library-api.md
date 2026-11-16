@@ -202,7 +202,7 @@ asap_stage3_plan_selection::select_plan(
 | `CostModel::ProvisionedCapacity(ResourceUnitCost)` | Cost model 2: unit cost × peak memory, peak CPU cores and disk; the cheapest valid candidate wins |
 | `CostModel::ClusterCapacity(ClusterLimits)` | Cost model 3: memory, disk and optional CPU cores are hard limits; `ClusterObjective::{LowestLatency, LeastMemory}` chooses among the candidates that fit |
 | `PlanOutput.plan` | The selected plan, one `PhysicalASAPDAG`: `roots` answer the operator queries and `scalar_roots` the standalone scalar queries, in `QueryWorkload::entries()` order; each materialized node carries its `retention_ms`. Its cost is `asap_cost::plan_cost` of it |
-| `PlanningRun` | `pass1_memo`, `logical_asap_candidates`, `physical_asap_candidates`, `selection` (the plan and Stage 3's `Selection`: `accepted_accuracy_per_query`, `pruned_candidates`, `milp_variables`, `milp_constraints`, `milp_construction_ms`, `milp_solve_ms`) and `report` (Pass 2's and Stage 2's counts and each stage's time); `pass1_memo` is kept only with `PlanSearchSettings::inspect` |
+| `PlanningRun` | `pass1_memo`, `logical_asap_candidates`, `physical_asap_candidates`, `selection` (the plan and Stage 3's `Selection`: `accepted_accuracy_per_query`, `pruned_candidates`, `milp_variables`, `milp_constraints`, `milp_construction_ms`, `milp_solve_ms`, `milp_solve_count`) and `report` (Pass 2's and Stage 2's counts and each stage's time); `pass1_memo` is kept only with `PlanSearchSettings::inspect` |
 
 Each candidate's `ResourceUsage` holds its usage without prices:
 `cpu_ops_per_second`, `scanned_bytes_per_second`, `average_memory_bytes`,

@@ -1597,12 +1597,13 @@ fn contexts_whose_queries_differ_only_in_values_not_split_by_k_are_copies() {
 
 /// p99 / p50 at relative 0.03 with δ = 0.01 over a whole result of
 /// `values` values, over readouts at relative 0.01 failing with
-/// `failure_probabilities` (cheap at cost 1, dear at cost 3) each: the
-/// solved selection, with which readout levels it selects (cheap, dear).
+/// `failure_probabilities` (cheap at cost 1, dear at cost 3) each: how
+/// many readouts of each level the selection reads (cheap, dear) and how
+/// many times HiGHS solved the MILP.
 fn solve_ratio_over_values(
     values: u64,
     failure_probabilities: [f64; 2],
-) -> Result<(usize, usize), SelectionMilpError> {
+) -> Result<(usize, usize, usize), SelectionMilpError> {
     let mut memo = empty_memo();
     let levels = [
         (0.01, failure_probabilities[0]),
@@ -1623,33 +1624,49 @@ fn solve_ratio_over_values(
         w[physical_of(&physical, readouts[1])] = 3.0;
     }
     let (solved, _) = solve(&physical, &every_10s(1), &w, &[], &[]);
-    let selected = candidates(&solved?);
+    let solved = solved?;
+    let selected = candidates(&solved);
     let count = |level: usize| {
         [&p99_readouts, &p50_readouts]
             .iter()
             .filter(|readouts| selected.contains(&physical_of(&physical, readouts[level])))
             .count()
     };
-    Ok((count(0), count(1)))
+    Ok((count(0), count(1), solved.solve_count))
 }
 
 /// p99 / p50 at relative 0.03 with δ = 0.01 over a whole result of 1e4
 /// values, 1e-6 per value, over readouts at relative 0.01 failing with
 /// 5.4e-7 (cost 1) or 4e-7 (cost 3) each: two at 5.4e-7 fail together with
 /// up to 1.08e-6, above 1e-6 by 8e-8, within HiGHS's default feasibility
-/// tolerance 1e-7; one of each, 9.4e-7, is within it. (K) solves at 1e-10,
-/// so it selects one of each.
+/// tolerance 1e-7, so the first solve selects the two cheap readouts. The
+/// exact check finds the miss, and the second solve, at tolerance 1e-10,
+/// selects one of each (9.4e-7, within the limit).
 #[test]
-fn k_bounds_a_per_value_failure_probability_below_the_default_solver_tolerance() {
-    assert_eq!(solve_ratio_over_values(10_000, [5.4e-7, 4e-7]), Ok((1, 1)));
+fn a_selection_missing_its_target_at_the_default_tolerance_is_solved_again_at_the_least_tolerance()
+{
+    assert_eq!(
+        solve_ratio_over_values(10_000, [5.4e-7, 4e-7]),
+        Ok((1, 1, 2))
+    );
+}
+
+/// The same ratio over readouts failing with 4e-7 (cost 1) or 3e-7
+/// (cost 3) each: two cheap readouts fail with up to 8e-7, within 1e-6,
+/// so the solve at HiGHS's default tolerances meets the target and is
+/// the only solve.
+#[test]
+fn a_selection_meeting_its_target_at_the_default_tolerance_is_solved_once() {
+    assert_eq!(solve_ratio_over_values(10_000, [4e-7, 3e-7]), Ok((2, 0, 1)));
 }
 
 /// The same ratio over 1e8 values (1e-10 per value) and 1e10 values
 /// (1e-12 per value), with readouts failing at 5.4e-11 / 4e-11 and
 /// 5.4e-13 / 4e-13: two cheap readouts miss the limit by 8e-12 and 8e-14,
-/// within HiGHS's least feasibility tolerance 1e-10, so the solver selects
-/// them. The exact check after the solve finds the miss, and selection
-/// fails rather than return a plan that may not meet the target.
+/// within HiGHS's least feasibility tolerance 1e-10, so both solves, at
+/// the default tolerances and again at 1e-10, select them. The exact check
+/// after the second solve finds the miss, and selection fails rather than
+/// return a plan that may not meet the target.
 #[test]
 fn a_per_value_failure_probability_below_the_solver_precision_is_an_error() {
     for (values, failure_probabilities, per_value) in [
