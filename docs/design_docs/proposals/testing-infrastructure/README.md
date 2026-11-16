@@ -402,9 +402,14 @@ solver setup written in #1207 PR 6.
   order. Raw ids would bring the churn back, so they are printed only
   outside goldens (e.g. behind a debug flag), to match output to logs and
   error messages.
-- **D2 Numbers. Decided: round, compare as text.** The printer rounds
-  costs and ε/δ to 12 significant digits (as corpus snapshots do); goldens
-  are compared as plain text, not with a numeric tolerance.
+- **D2 Numbers. Decided: 5 significant digits, compared with a relative
+  tolerance** (revised in #1354). The printer rounds costs and ε/δ to 5
+  significant digits, the precision of AWS cloud prices. The runner parses
+  both files and compares numbers with a relative tolerance of about one
+  unit in the 5th digit (1e-4), so a value near a rounding boundary does
+  not flip the golden; everything else compares exactly. Refactors alone
+  moved costs by up to 3e-11 relative (#1239), which a 12-digit text
+  comparison would flag.
 - **D3 Exclusions. Decided:** goldens leave out timings, solver statistics
   (gap, node counts), absolute paths and raw ids (D1), as corpus snapshots
   do.
