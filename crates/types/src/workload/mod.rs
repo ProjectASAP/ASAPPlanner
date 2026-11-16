@@ -11,7 +11,7 @@ pub mod parsed_workload;
 mod planning;
 mod query;
 
-pub use assumed_data_fact::{add_assumed_data_fact, AssumedDataFact, DataFactAssumption};
+pub use assumed_data_fact::{AssumedDataFact, DataFactAssumption};
 pub(crate) use data::series_facts;
 pub use data::{
     DataArrival, DataWorkload, LabelSetDistinctValues, PrometheusMetricType, Rate, SourceFacts,

@@ -931,38 +931,60 @@ async fn sum_rate_at_10_hz_with_unknown_arrival_installs_and_answers() {
 /// A deployment that keeps no raw samples computes a repeating `rate` at
 /// ingestion time; the arrival declares no `max_out_of_order_ms`, so the
 /// samples are taken to arrive in order. The report beside the plan names
-/// that assumed fact and that the accuracy target depends on it.
+/// that assumed fact and that the accuracy target depends on it. Declaring
+/// `max_out_of_order_ms` (5 s) removes the fact and leaves the plan as it
+/// was; the report then serializes without the empty list, and a report
+/// written without the field still reads.
 #[tokio::test]
 async fn the_report_names_the_data_facts_the_plan_assumed() {
     use asap_types::workload::{AssumedDataFact, DataFactAssumption};
-    let workload: PlanningWorkload = serde_json::from_str(
-        r#"{"query_workload": {"language": "promql", "repeating_queries": [{
-              "query": "sum(rate(requests_total[1m]))",
-              "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
-              "requirements": {},
-              "predictability": {"predictable": {"known_at": null}}}]},
-            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 1000.0}},
-              "sources": {"requests_total": {"series_count": 1000, "sample_interval": 1000,
-                "metric_type": "counter"}}}}"#,
-    )
-    .unwrap();
+    let workload = |max_out_of_order: &str| -> PlanningWorkload {
+        serde_json::from_str(&format!(
+            r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
+                  "query": "sum(rate(requests_total[1m]))",
+                  "demand": {{"fixed_interval_at": {{"interval": 60000, "evaluation_phase": 0}}}},
+                  "requirements": {{}},
+                  "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
+                "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 1000.0{max_out_of_order}}}}},
+                  "sources": {{"requests_total": {{"series_count": 1000, "sample_interval": 1000,
+                    "metric_type": "counter"}}}}}}}}"#
+        ))
+        .unwrap()
+    };
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..DeploymentCapabilities::default()
     };
-    let (_, report) = plan_with_report_for(workload, &capabilities).await;
+    let (plan, report) = plan_with_report_for(workload(""), &capabilities).await;
     let in_order = AssumedDataFact {
         sources: vec!["requests_total".into()],
         assumption: DataFactAssumption::InOrderArrival,
     };
     assert_eq!(report.assumed_data_facts, vec![in_order.clone()]);
     assert!(in_order.accuracy_target_depends_on_it());
+    let (declared_plan, declared) =
+        plan_with_report_for(workload(r#", "max_out_of_order_ms": 5000"#), &capabilities).await;
+    assert!(declared.assumed_data_facts.is_empty());
+    assert_eq!(
+        declared_plan, plan,
+        "the declared bound leaves the plan as it was"
+    );
+    let declared_json = serde_json::to_value(&declared).unwrap();
+    assert!(
+        declared_json.get("assumed_data_facts").is_none(),
+        "{declared_json}"
+    );
+    assert_eq!(
+        serde_json::from_value::<SelectedPlanReport>(declared_json).unwrap(),
+        declared
+    );
 }
 
 /// A repeating relative-error p99 over non-negative latencies on a
 /// deployment that keeps no raw samples is served by a DDSketch, whose
 /// `value` declares no `column_magnitudes`: the report names the assumed
-/// range, which affects cost only. Declaring the range removes it.
+/// range, which affects cost only. Declaring the range removes it, and the
+/// plan is still a DDSketch.
 #[tokio::test]
 async fn the_report_names_a_ddsketch_s_assumed_magnitude_range() {
     use asap_types::workload::{AssumedDataFact, DataFactAssumption, ValueMagnitudeRange};
@@ -1002,10 +1024,16 @@ async fn the_report_names_a_ddsketch_s_assumed_magnitude_range() {
     };
     assert_eq!(report.assumed_data_facts, vec![assumed.clone()]);
     assert!(!assumed.accuracy_target_depends_on_it());
-    let (_, declared) = plan_with_report_for(
+    let (declared_plan, declared) = plan_with_report_for(
         workload(r#", "column_magnitudes": {"value": {"min_abs": 0.1, "max_abs": 100000.0}}"#),
         &capabilities,
     )
     .await;
+    assert!(
+        serde_json::to_string(&declared_plan.dag)
+            .unwrap()
+            .contains("DDSketch"),
+        "still a DDSketch plan"
+    );
     assert!(declared.assumed_data_facts.is_empty());
 }

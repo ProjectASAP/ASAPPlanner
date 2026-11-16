@@ -1505,7 +1505,8 @@ const DDSKETCH_ASSUMED_RANGE_WARNING: &str = "assumed data fact: source m declar
 
 /// A selected DDSketch over a column that declares no `column_magnitudes`
 /// is costed over an assumed range, and the plan output names that
-/// assumption under `stage3_plan_selection.warnings` and in the text
+/// assumption under `stage3_plan_selection.warnings` (and as a record
+/// under `stage3_plan_selection.assumed_data_facts`) and in the text
 /// output, once. Declaring the range removes it.
 #[test]
 fn a_selected_ddsketch_over_undeclared_magnitudes_is_warned_about() {
@@ -1528,6 +1529,12 @@ fn a_selected_ddsketch_over_undeclared_magnitudes_is_warned_about() {
         selection["warnings"],
         json!([DDSKETCH_ASSUMED_RANGE_WARNING])
     );
+    assert_eq!(
+        selection["assumed_data_facts"],
+        json!([{"sources": ["m"], "assumption": {"ddsketch_value_magnitude_range": {
+            "column": "value", "assumed_range": {"min_abs": 1.0, "max_abs": 1e9}
+        }}}])
+    );
     let file = TempFile::json(&relative_quantile_over(None));
     let mut text_args = vec!["--workload", file.path()];
     text_args.extend_from_slice(&args);
@@ -1546,6 +1553,9 @@ fn a_selected_ddsketch_over_undeclared_magnitudes_is_warned_about() {
     );
     assert!(selects_a_plan(&declared["stage3_plan_selection"]));
     assert!(declared["stage3_plan_selection"].get("warnings").is_none());
+    assert!(declared["stage3_plan_selection"]
+        .get("assumed_data_facts")
+        .is_none());
 }
 
 /// `sum by (job) (rate(http_requests_total[1m]))` every minute over
@@ -1579,14 +1589,15 @@ fn repeating_rate_over_ingesting(max_out_of_order_ms: Option<u64>) -> Value {
 /// `http_requests_total` carries when the arrival declares no
 /// `max_out_of_order_ms`.
 const IN_ORDER_ARRIVAL_WARNING: &str = "assumed data fact: the data arrival declares no \
-     max_out_of_order_ms, so the samples of source http_requests_total an ingestion-time rate, \
-     increase or irate state folds are taken to arrive in timestamp order; the plan may not \
-     meet its accuracy target if this does not hold";
+     max_out_of_order_ms, so the samples of source http_requests_total that an ingestion-time \
+     rate, increase or irate state reads are taken to arrive in timestamp order; if this does \
+     not hold, answers may be wrong by an amount no accuracy target bounds (a late sample can \
+     be read as a counter reset), or ingestion may fail";
 
 /// A deployment that keeps no raw data computes a repeating `rate` at
 /// ingestion time. Without a declared `max_out_of_order_ms` its samples are
 /// taken to arrive in order, which the exact answer depends on, so the plan
-/// output warns that it may not meet its accuracy target. A declared bound
+/// output warns that answers may be wrong beyond any accuracy target. A declared bound
 /// removes the warning and leaves the plan as it was.
 #[test]
 fn an_ingestion_time_rate_over_undeclared_arrival_order_is_warned_about() {
@@ -1601,12 +1612,17 @@ fn an_ingestion_time_rate_over_undeclared_arrival_order_is_warned_about() {
     let selection = &undeclared["stage3_plan_selection"];
     assert!(selects_a_plan(selection), "{selection}");
     assert_eq!(selection["warnings"], json!([IN_ORDER_ARRIVAL_WARNING]));
+    assert_eq!(
+        selection["assumed_data_facts"],
+        json!([{"sources": ["http_requests_total"], "assumption": "in_order_arrival"}])
+    );
     let declared = document(&repeating_rate_over_ingesting(Some(5_000)), &args);
     let declared_selection = &declared["stage3_plan_selection"];
     assert!(
         declared_selection.get("warnings").is_none(),
         "{declared_selection}"
     );
+    assert!(declared_selection.get("assumed_data_facts").is_none());
     assert_eq!(
         declared_selection["selected_dag"],
         selection["selected_dag"]

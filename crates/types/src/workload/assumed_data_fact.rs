@@ -19,7 +19,8 @@ use super::ValueMagnitudeRange;
 #[serde(deny_unknown_fields)]
 pub struct AssumedDataFact {
     /// The sources (PromQL metrics or SQL tables) the assumption is about,
-    /// those that do not declare the fact, in name order.
+    /// those that do not declare the fact, in name order; empty when the
+    /// state reads no source (the warning then names the data workload).
     pub sources: Vec<String>,
     /// What was assumed in place of the undeclared fact.
     pub assumption: DataFactAssumption,
@@ -43,15 +44,18 @@ pub enum DataFactAssumption {
         assumed_range: ValueMagnitudeRange,
     },
     /// The data arrival declares no `max_out_of_order_ms`, so the PromQL
-    /// samples an ingestion-time `rate`, `increase` or `irate` state folds
-    /// are taken to arrive in timestamp order. A sample arriving late is
-    /// read as a counter reset, so the exact answer may be wrong.
+    /// samples an ingestion-time `rate`, `increase` or `irate` state reads
+    /// are taken to arrive in timestamp order. If one arrives late, answers
+    /// may be wrong by an amount no accuracy target bounds (read in arrival
+    /// order, a counter at 100 after 120 looks like a reset and adds 100
+    /// to an `increase`), or ingestion may reject the sample and fail.
     InOrderArrival,
 }
 
 impl AssumedDataFact {
-    /// Whether the selected plan may miss a query's accuracy target when
-    /// the assumption does not hold; otherwise only its cost is assumed.
+    /// Whether the selected plan's answers may be wrong beyond its accuracy
+    /// target when the assumption does not hold; otherwise only its cost is
+    /// assumed.
     pub fn accuracy_target_depends_on_it(&self) -> bool {
         match self.assumption {
             DataFactAssumption::DDSketchValueMagnitudeRange { .. } => false,
@@ -67,6 +71,7 @@ impl AssumedDataFact {
 impl fmt::Display for AssumedDataFact {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let sources = match self.sources.as_slice() {
+            [] => "the data workload".to_string(),
             [one] => format!("source {one}"),
             many => format!("sources {}", many.join(", ")),
         };
@@ -97,14 +102,15 @@ impl fmt::Display for AssumedDataFact {
             DataFactAssumption::InOrderArrival => write!(
                 f,
                 "the data arrival declares no max_out_of_order_ms, so the samples of {sources} \
-                 an ingestion-time rate, increase or irate state folds are taken to arrive in \
-                 timestamp order"
+                 that an ingestion-time rate, increase or irate state reads are taken to arrive \
+                 in timestamp order"
             )?,
         }
         if self.accuracy_target_depends_on_it() {
             write!(
                 f,
-                "; the plan may not meet its accuracy target if this does not hold"
+                "; if this does not hold, answers may be wrong by an amount no accuracy target \
+                 bounds (a late sample can be read as a counter reset), or ingestion may fail"
             )
         } else {
             write!(
@@ -115,20 +121,13 @@ impl fmt::Display for AssumedDataFact {
     }
 }
 
-/// Adds `fact` to `facts` unless an equal one is there: a plan names each
-/// assumption once, however many of its nodes rest on it.
-pub fn add_assumed_data_fact(facts: &mut Vec<AssumedDataFact>, fact: AssumedDataFact) {
-    if !facts.contains(&fact) {
-        facts.push(fact);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// One source is named alone, several in a list; an accuracy-affecting
-    /// assumption says the plan may miss its target.
+    /// One source is named alone, several in a list, none as the data
+    /// workload; an accuracy-affecting assumption says answers may be wrong
+    /// beyond any accuracy target.
     #[test]
     fn the_warning_names_the_sources_the_default_and_the_accuracy_effect() {
         let ddsketch = AssumedDataFact {
@@ -171,13 +170,27 @@ mod tests {
         assert_eq!(
             in_order.to_string(),
             "assumed data fact: the data arrival declares no max_out_of_order_ms, so the \
-             samples of sources a_total, b_total an ingestion-time rate, increase or irate \
-             state folds are taken to arrive in timestamp order; the plan may not meet its \
-             accuracy target if this does not hold"
+             samples of sources a_total, b_total that an ingestion-time rate, increase or irate \
+             state reads are taken to arrive in timestamp order; if this does not hold, answers \
+             may be wrong by an amount no accuracy target bounds (a late sample can be read as \
+             a counter reset), or ingestion may fail"
         );
-        let mut facts = vec![];
-        add_assumed_data_fact(&mut facts, in_order.clone());
-        add_assumed_data_fact(&mut facts, in_order);
-        assert_eq!(facts.len(), 1);
+        // A state whose producer scans no source names the data workload.
+        let no_source = AssumedDataFact {
+            sources: vec![],
+            assumption: DataFactAssumption::DDSketchValueMagnitudeRange {
+                column: None,
+                assumed_range: ValueMagnitudeRange {
+                    min_abs: 1.0,
+                    max_abs: 1e9,
+                },
+            },
+        };
+        assert_eq!(
+            no_source.to_string(),
+            "assumed data fact: a DDSketch state folds values computed from the data workload, \
+             whose magnitudes no source declares, so it is costed for magnitudes in \
+             [1, 1000000000]; this affects cost only, the accuracy guarantee does not depend on it"
+        );
     }
 }

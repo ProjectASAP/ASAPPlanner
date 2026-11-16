@@ -50,7 +50,7 @@ pub(super) struct OfferedPhysicalProperties {
 /// - `IngestionTime` only when `ingestion_time_offered_for_group` (the
 ///   candidate's group is time-independent or an input of one) and, for a
 ///   counter state, when its rows arrive in timestamp order or within a
-///   known bound ([`counter_state_rows_ordered`]);
+///   known bound ([`ingestion_row_order`] is not `Unordered`);
 /// - `AcrossEvaluations` only when `across_evaluations_offered_for_group`
 ///   (a chain, a group on a known grid or a time-independent group, not
 ///   read under an absolute `@ T`);
@@ -72,7 +72,11 @@ pub(super) fn offered_physical_properties(
     let build = summary_build(operator);
     let ingestion_time_offered = ingestion_time_offered_for_group
         && build.is_none_or(|(summary_type, child)| {
-            counter_state_rows_ordered(memo, summary_type, child, data)
+            let scanned_sources = &memo.groups()[child.0 as usize]
+                .group_properties
+                .scanned_sources;
+            ingestion_row_order(summary_type, scanned_sources.iter(), data)
+                != IngestionRowOrder::Unordered
         });
     let count_min_weights_not_proven_non_negative = build.is_some_and(|(summary_type, _)| {
         count_min_weights_not_proven_non_negative(memo, candidate.group, summary_type)
@@ -145,80 +149,106 @@ fn summary_build<C: Copy>(operator: &Operator<C>) -> Option<(&FieldDataType, C)>
     }
 }
 
-/// Whether a build of `summary_type` over group `child`, when it is a
-/// counter state (`rate`, `increase`, `irate`), gets its rows in timestamp
-/// order at ingestion time: the data declares how late a row may arrive
-/// (`max_out_of_order_ms`), so a reorder buffer restores the order, or its
-/// rows are PromQL samples, taken to arrive in order (an assumed data fact,
-/// [`assumed_in_order_arrival`]). True for any other summary type.
-fn counter_state_rows_ordered(
-    memo: &Memo,
-    summary_type: &FieldDataType,
-    child: MemoGroupId,
-    data: &DataWorkload,
-) -> bool {
-    !is_counter_state(summary_type)
-        || data.arrival.max_out_of_order_ms().is_some()
-        || memo.groups()[child.0 as usize]
-            .group_properties
-            .scanned_sources
-            .iter()
-            .all(Source::is_time_series)
+/// How an ingestion-time build of a summary state gets its rows in the
+/// timestamp order it needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngestionRowOrder {
+    /// It needs no order (not a counter state), or the data declares how
+    /// late a row may arrive (`max_out_of_order_ms`), so a reorder buffer
+    /// restores the order.
+    Ordered,
+    /// A counter state over PromQL samples whose arrival declares no
+    /// `max_out_of_order_ms`: the samples are taken to arrive in timestamp
+    /// order, an assumed data fact ([`assumed_in_order_arrival`]).
+    AssumedOrdered,
+    /// A counter state over SQL rows whose arrival declares no
+    /// `max_out_of_order_ms`: nothing orders its rows, so it is not offered
+    /// at ingestion time.
+    Unordered,
 }
 
-/// Whether a state of `summary_type` is a counter state (`rate`,
-/// `increase`, `irate`), which reads a late sample as a counter reset.
-fn is_counter_state(summary_type: &FieldDataType) -> bool {
-    matches!(
+/// The row order an ingestion-time build of `summary_type` over rows of
+/// `scanned_sources` gets: the one rule both the Stage 2 offer
+/// ([`offered_physical_properties`]) and the report of what the selected
+/// plan assumed ([`assumed_in_order_arrival`]) read. E.g. a `rate` state
+/// over the PromQL metric `requests_total` with no `max_out_of_order_ms`
+/// is `AssumedOrdered`; over an SQL table it is `Unordered`.
+fn ingestion_row_order<'a>(
+    summary_type: &FieldDataType,
+    mut scanned_sources: impl Iterator<Item = &'a Source>,
+    data: &DataWorkload,
+) -> IngestionRowOrder {
+    let counter_state = matches!(
         summary_type,
         FieldDataType::ExactAggregate(kind, _) if kind.tracks_counter_increase()
-    )
+    );
+    if !counter_state || data.arrival.max_out_of_order_ms().is_some() {
+        IngestionRowOrder::Ordered
+    } else if scanned_sources.all(Source::is_time_series) {
+        IngestionRowOrder::AssumedOrdered
+    } else {
+        IngestionRowOrder::Unordered
+    }
 }
 
-/// The data fact `plan` assumed by [`counter_state_rows_ordered`]: when
-/// the arrival declares no `max_out_of_order_ms`, each ingestion-time
-/// counter state it builds was offered only because its PromQL samples are
+/// The data fact `plan` assumed by [`ingestion_row_order`]: each
+/// ingestion-time counter state it builds without a declared
+/// `max_out_of_order_ms` was offered only because its PromQL samples are
 /// taken to arrive in timestamp order. One fact naming the metrics those
 /// states read, in name order; none when there is no such state. E.g. an
 /// ingestion-time `rate(requests_total[1m])` state gives `InOrderArrival`
-/// over `requests_total`.
+/// over `requests_total`. One walk from those states down to their scans,
+/// O(nodes + edges); every such state in a selected plan was offered by
+/// the same rule, so the sources they scan together are PromQL samples.
 pub fn assumed_in_order_arrival(
     plan: &PhysicalASAPDAG,
     data: &DataWorkload,
 ) -> Option<AssumedDataFact> {
-    if data.arrival.max_out_of_order_ms().is_some() {
-        return None;
-    }
     let nodes: HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode> =
         plan.nodes.iter().map(|node| (node.id, node)).collect();
-    let mut metrics = BTreeSet::new();
+    // The ingestion-time builds whose row order depends on the sources
+    // they scan (counter states with no declared `max_out_of_order_ms`,
+    // not `Ordered` whatever they scan), and the nodes below them.
+    let mut builds = Vec::new();
+    let mut below = Vec::new();
     for node in &plan.nodes {
         let Some((summary_type, _)) = summary_build(&node.payload) else {
             continue;
         };
-        if node.output_state.timing != ExecutionTiming::IngestionTime
-            || !is_counter_state(summary_type)
+        if node.output_state.timing == ExecutionTiming::IngestionTime
+            && ingestion_row_order(summary_type, std::iter::empty(), data)
+                != IngestionRowOrder::Ordered
         {
-            continue;
-        }
-        // The metrics its samples come from: the scans below it.
-        let mut below = node.producers();
-        let mut seen = HashSet::new();
-        while let Some(id) = below.pop() {
-            if !seen.insert(id) {
-                continue;
-            }
-            let producer = nodes[&id];
-            match &producer.payload {
-                Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
-                    metrics.insert(source_name(source).to_string());
-                }
-                _ => below.extend(producer.producers()),
-            }
+            builds.push(summary_type);
+            below.extend(node.producers());
         }
     }
-    (!metrics.is_empty()).then(|| AssumedDataFact {
-        sources: metrics.into_iter().collect(),
+    // The sources their samples come from: the scans below them.
+    let mut scanned_sources = BTreeSet::new();
+    let mut seen = HashSet::new();
+    while let Some(id) = below.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let producer = nodes[&id];
+        match &producer.payload {
+            Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
+                scanned_sources.insert(source);
+            }
+            _ => below.extend(producer.producers()),
+        }
+    }
+    let assumed = builds.iter().any(|summary_type| {
+        ingestion_row_order(summary_type, scanned_sources.iter().copied(), data)
+            == IngestionRowOrder::AssumedOrdered
+    });
+    assumed.then(|| AssumedDataFact {
+        sources: scanned_sources
+            .into_iter()
+            .map(|source| source_name(source).to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         assumption: DataFactAssumption::InOrderArrival,
     })
 }

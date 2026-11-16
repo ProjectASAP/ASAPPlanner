@@ -241,6 +241,49 @@ fn ddsketch_state_bytes_match_the_library_on_latency_like_values() {
     assert!(priced(Some(10), true) < priced(Some(3_000), true));
 }
 
+/// The range a DDSketch is costed for when its values declare none is the
+/// one `assumed_magnitude_range` names, and only when the sketch is costed
+/// over a range: at α = 0.01 with no declared range it is [1, 1e9]; a
+/// declared range, another sketch, or α = 1.5 (costed as an empty sketch)
+/// assumes none.
+#[test]
+fn the_assumed_ddsketch_range_is_named_only_when_the_bytes_use_it() {
+    let rows = |value_magnitude_range| StateInputRows {
+        rows_per_state: Some(600),
+        non_negative: true,
+        value_magnitude_range,
+    };
+    let declared = ValueMagnitudeRange {
+        min_abs: 0.001,
+        max_abs: 10_000.0,
+    };
+    let ddsketch = |alpha| SketchParams::DDSketch { alpha };
+    assert_eq!(
+        assumed_magnitude_range(&ddsketch(0.01), rows(None)),
+        Some(DDSKETCH_ASSUMED_MAGNITUDE_RANGE)
+    );
+    assert_eq!(
+        sketch_state_bytes(&ddsketch(0.01), rows(None)),
+        sketch_state_bytes(
+            &ddsketch(0.01),
+            rows(Some(DDSKETCH_ASSUMED_MAGNITUDE_RANGE))
+        )
+    );
+    assert_eq!(
+        assumed_magnitude_range(&ddsketch(0.01), rows(Some(declared))),
+        None
+    );
+    assert_eq!(assumed_magnitude_range(&ddsketch(1.5), rows(None)), None);
+    assert_eq!(
+        sketch_state_bytes(&ddsketch(1.5), rows(None)),
+        std::mem::size_of::<asap_sketchlib::DdSketch>() as u64
+    );
+    assert_eq!(
+        assumed_magnitude_range(&SketchParams::Kll { k: 200 }, rows(None)),
+        None
+    );
+}
+
 /// A DDSketch's span is the smallest of the exponential spread of its
 /// rows, its column's declared `column_magnitudes` and the assumed nine
 /// decades. At α = 0.01, non-negative values:
