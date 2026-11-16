@@ -11,8 +11,17 @@
 // Each rule here answers per operator (or per expression, measure or
 // operator kind) and lists every variant: a wildcard arm would give a new
 // operator a default lineage, which bounds and coverage then trust,
-// instead of failing the build (under `-D warnings`). `matches!` and `let
-// ... else` stay only for a check of one variant's identity.
+// instead of failing the build (under `-D warnings`). Clippy does not
+// check `if let`, `matches!` or a match on a tuple, so they stay only for
+// a check of one variant's identity, where every other variant's answer
+// is "no" by definition: "is it a source column" (only a copied source
+// column has a scan to shift or a lineage to keep), "is it one top-k
+// measure" (only a top-k returns its input's ranked rows), "is it `or`"
+// (only `or` keeps both sides' rows), and "is it a merge of one
+// `SummaryTumblingWindowChain`" (only a chain's windows merge into its
+// build over a range). The tuple match in `arithmetic_sign` ends in `_ =>
+// Unknown`, unchecked, where `Unknown` is the safe answer for any
+// operator or sign it does not list.
 #![warn(
     clippy::wildcard_enum_match_arm,
     clippy::match_wildcard_for_single_variants
@@ -303,7 +312,12 @@ fn non_asap_columns(
                 JoinKind::Semi | JoinKind::Anti => (false, false, false),
             };
             let mut columns = columns_of(left);
-            let mut right = after_left_scans(&columns, columns_of(right));
+            // A semi or anti join keeps only the left side's columns.
+            let mut right = if right_kept {
+                after_left_scans(&columns, columns_of(right))
+            } else {
+                Vec::new()
+            };
             for (side, nullable) in [(&mut columns, left_nullable), (&mut right, right_nullable)] {
                 if nullable {
                     for column in side.iter_mut() {
@@ -311,9 +325,7 @@ fn non_asap_columns(
                     }
                 }
             }
-            if right_kept {
-                columns.extend(right);
-            }
+            columns.extend(right);
             columns
         }
         SetOp { left, right, .. } => agreed(&[columns_of(left), columns_of(right)]),
