@@ -1223,6 +1223,36 @@ fn a_kmv_build_charges_its_measured_time_per_row() {
     }
 }
 
+/// A KMV merge's time per input state, measured on the executor's
+/// `SummaryMerge` over stored KMV states (median of 3 runs on one pinned
+/// core): states of `user_id`s drawn from 1,000,000 values, merged 5 per
+/// group (a 5-minute range of 1-minute windows) and 10 to 200 per group (a
+/// rollup), at k = 1,081 to 106,263. Charged 65 per hash and 0.5 per
+/// compared hash, these merges were charged 1.35x to 4.9x their time: 200
+/// states per group of 1,200 rows each at k = 1,081 were charged 88,151 ns
+/// per state and measure 18,109.
+#[test]
+fn a_kmv_merge_charges_its_measured_time_per_state() {
+    use crate::node::operations_per_unit::merge_operations_per_state;
+    // (k, input states per group, rows each state folds, measured ns per state)
+    for (k, states, rows, measured) in [
+        (4_323, 5, 12_000, 3_115_412.0),
+        (1_081, 200, 1_200, 18_109.0),
+        (26_656, 50, 12_000, 22_587_600.0),
+        (106_263, 10, 12_000, 299_052_000.0),
+        (4_323, 200, 60_000, 361_479.0),
+    ] {
+        let parameters = SketchParams::Kmv { k };
+        let charged =
+            merge_operations_per_state(StateFamily::Sketch(&parameters), 0, 0, Some(rows), states);
+        assert!(
+            (0.8..=1.25).contains(&(charged / measured)),
+            "k = {k}, {states} states per group of {rows} rows: charged {charged:.0} ns per \
+             state, measured {measured}"
+        );
+    }
+}
+
 /// A rollup merge of KMV states updates each group's state with every hash
 /// each input state retains (`asap_sketchlib`'s merge), so it compares
 /// those hashes with the ones the group's state already retains. Measured
