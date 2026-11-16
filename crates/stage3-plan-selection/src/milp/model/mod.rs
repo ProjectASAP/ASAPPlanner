@@ -7,11 +7,9 @@
 //! | baseline (section 3) over execution contexts (section 5) | $x_{\kappa,v}$ (with $x^{\mathrm{mat}}_v = x_{\mathrm{Materialized}(v),v}$), $y_{\kappa,u,c,i}$, $z_{q,v}$, $t$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) and one consumer per context of a query-time result that is not materialized [`use_constraints`], each source's raw data on disk once [`raw_data_disk_rows`]; (G), (H): $y$ exists only on admissible edges where the producer delivers on the consumer's context |
 //! | retention (section 5) | $h_v$ | (R) [`super::retention::retention_constraints`] |
 //! | exact-only reads per query | $a_{q,e}$ | (X) [`super::exact_only::exact_only_constraints`] |
-//! | accuracy (section 4) | $E_{c,m}$, $F_{c,i,m}$, $D_c$, $H_{c,i}$ (`AccuracyVariables`) | (K) `accuracy_constraints` |
+//! | accuracy (section 4), per execution | $E_{\kappa,c,m}$, $D_{\kappa,c}$ ([`AccuracyVariables`]); $F_{\kappa,c,i,m}$, $H_{\kappa,c,i}$ | (K) [`accuracy_constraints`], over [`ErrorModel`] |
 //!
-//! [`solve_selection`] solves it without (K), whose variables and
-//! constraint are in [`super::accuracy`], `todo!()` until it is added. The
-//! strongly connected components (E) needs are in [`super::graph`]; the
+//! The strongly connected components (E) needs are in [`super::graph`]; the
 //! executions left out before scaling, those dearer than a feasible plan
 //! and those their `OneEvaluation` twin dominates, in
 //! [`super::upper_bound`] and [`super::dominance`].
@@ -28,6 +26,7 @@ use asap_types::ir::operator::Source;
 use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId};
 use asap_types::workload::QueryWorkloadEntry;
 
+use super::accuracy::{accuracy_constraints, AccuracyRules, AccuracyVariables, ErrorModel};
 use super::dominance::dominated_by_one_evaluation_twin;
 use super::equivalent_contexts::{copies_in_equivalent_contexts, SharedVariables};
 use super::exact_only::{exact_only_constraints, exact_only_variables};
@@ -60,9 +59,9 @@ pub(crate) struct SelectionVariables {
     x: Vec<Variable>,
     /// $y_{\kappa,u,c,i}$, by edge, on the edges costed between executions
     /// kept, in edge order.
-    y: BTreeMap<usize, Variable>,
+    pub(super) y: BTreeMap<usize, Variable>,
     /// $z_{q,v}$, by query and the execution answering it, in key order.
-    z: BTreeMap<(QueryId, usize), Variable>,
+    pub(super) z: BTreeMap<(QueryId, usize), Variable>,
     /// $t$, by execution: only for executions on a cycle of selectable
     /// edges (a strongly connected component); `None` elsewhere.
     t: Vec<Option<Variable>>,
@@ -82,11 +81,12 @@ pub(crate) struct SelectionVariables {
 /// fixed at 0 for an execution that is not `kept` (not costed, or dearer
 /// than a feasible plan), and no $y$ on an edge of one. The executions,
 /// edges and queries of a copy of an equivalent evaluation context take the
-/// original's $x$, $y$ and $z$ ([`copies_in_equivalent_contexts`]), so
-/// their costs add up on one variable.
+/// original's $x$, $y$ and $z$ (`shared`, [`copies_in_equivalent_contexts`]),
+/// so their costs add up on one variable.
 fn selection_variables(
     inputs: &SelectionInputs<'_>,
     kept: &[bool],
+    shared: &SharedVariables,
     components: &Components,
     problem: &mut ProblemVariables,
 ) -> SelectionVariables {
@@ -95,7 +95,7 @@ fn selection_variables(
         original_of_execution,
         original_of_edge,
         original_of_query,
-    } = copies_in_equivalent_contexts(inputs, kept);
+    } = shared;
     let mut x: Vec<Variable> = Vec::with_capacity(kept.len());
     for (index, &kept) in kept.iter().enumerate() {
         let variable = match (original_of_execution[index], kept) {
@@ -390,7 +390,7 @@ pub(crate) enum SelectionMilpError {
 /// \rho_\kappa c_{\kappa,v} x_{\kappa,v} + \sum \rho_\kappa c_{\kappa,u,c,i}
 /// y_{\kappa,u,c,i} + \sum_v \pi_v h_v + \sum_s r_s$ ($\pi_v h_v$ of a
 /// query-time scan is in $r_s$) under (A)–(F), [`use_constraints`],
-/// [`raw_data_disk_rows`], (R) and (X), with HiGHS at gap 0 on one
+/// [`raw_data_disk_rows`], (R), (X) and (K), with HiGHS at gap 0 on one
 /// thread. The executions dearer than a feasible plan
 /// ([`dearer_than_a_feasible_plan`]) or dominated by their `OneEvaluation`
 /// twin ([`dominated_by_one_evaluation_twin`]) are left out first (and a
@@ -404,15 +404,28 @@ pub(crate) fn solve_selection(
 ) -> Result<SolvedSelection, SelectionMilpError> {
     let started = Instant::now();
     let costs = inputs.costs;
-    let kept: Vec<bool> = dearer_than_a_feasible_plan(inputs)
+    let rules = AccuracyRules::of(inputs);
+    let kept: Vec<bool> = dearer_than_a_feasible_plan(inputs, rules.as_ref())
         .iter()
         .zip(dominated_by_one_evaluation_twin(inputs))
         .zip(&costs.per_execution)
         .map(|((&dearer, dominated), cost)| cost.is_ok() && !dearer && !dominated)
         .collect();
     let components = Components::of(inputs);
+    let shared = copies_in_equivalent_contexts(inputs, &kept);
     let mut problem = ProblemVariables::new();
-    let variables = selection_variables(inputs, &kept, &components, &mut problem);
+    let variables = selection_variables(inputs, &kept, &shared, &components, &mut problem);
+    let error_model = ErrorModel::new(inputs, rules.as_ref(), &variables.y, &shared);
+    let accuracy = AccuracyVariables::new(&error_model, &mut problem);
+    let accuracy_rows = accuracy_constraints(
+        inputs,
+        &error_model,
+        &accuracy,
+        &variables.y,
+        &variables.z,
+        &shared,
+        &mut problem,
+    );
     // The objective's terms per second, unscaled: (cost, variable). A
     // query-time scan's retention is in its source's r_s.
     let terms: Vec<(f64, Variable)> = costs
@@ -467,6 +480,7 @@ pub(crate) fn solve_selection(
             &variables.z,
         ),
         exact_only_constraints(inputs, &variables.read_by_query, &variables.y, &variables.z),
+        accuracy_rows,
     ]
     .into_iter()
     .flatten()
@@ -500,6 +514,13 @@ pub(crate) fn solve_selection(
     model.set_option("mip_abs_gap", 0.0);
     model.set_option("output_flag", false);
     model.set_option("threads", 1);
+    if !accuracy.is_empty() {
+        // Errors and failure probabilities are small (1e-3, 1e-7): the
+        // default feasibility tolerance 1e-7 would let (K) pass a bound
+        // above its limit.
+        model.set_option("primal_feasibility_tolerance", 1e-10);
+        model.set_option("mip_feasibility_tolerance", 1e-10);
+    }
     let construction_ms = started.elapsed().as_millis() as u64;
     let started = Instant::now();
     let solved = model

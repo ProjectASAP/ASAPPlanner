@@ -8,7 +8,6 @@ use asap_types::ir::{ASAPOp, Operator};
 use asap_types::stages::{CandidateForMemoGroupId, Memo, RootPruneReason};
 use asap_types::summary_type::parameter_list;
 use asap_types::summary_type::{SketchAlgorithm, SketchParams};
-use asap_types::workload::DataWorkload;
 
 use crate::test_fixtures::*;
 use asap_types::test_support::memo_builders::*;
@@ -21,10 +20,11 @@ use asap_types::test_support::memo_fixtures::{arithmetic, range};
 /// pruned by the metric rule and every KLL build through it. The readouts
 /// of DDSketch get the levels 0.02 … 0.001 (cap 0.045), so the builds with
 /// alpha 0.1 and 0.05 miss every level they could serve. Chain groups are
-/// added only for the surviving builds.
+/// added only for the surviving builds. `m`'s values are declared
+/// non-negative, so DDSketch's quantile guarantee holds.
 #[test]
 fn dead_candidates_are_pruned_and_listed_before_chain_groups() {
-    let mut memo = Memo::new(&DataWorkload::default());
+    let mut memo = Memo::new(&with_non_negative_values("m"));
     let input = scan_group(&mut memo, "m", &["job"], vec![]);
     let window = group(&mut memo, range(300_000, input));
     let algorithms = [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch];

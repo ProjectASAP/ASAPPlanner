@@ -73,7 +73,7 @@ over a scope, a per-value failure probability `δ` becomes `V · δ` by the unio
 bound, without assuming independence, so a sketch shared by several groups
 (Hydra, a keyed Count-Min) is covered the same way
 (`AccuracyScope::max_values_covered` gives `V`). A guarantee whose own failure probability is
-unknown (generic HLL) serves no query with an accuracy target
+unknown (HLL without a distinct bound) serves no query with an accuracy target
 (`RootPruneReason::NoGuarantee`), and a top-k readout is admitted on its
 heap size and its value guarantee alone (the contracts table).
 
@@ -182,8 +182,8 @@ The built-in models currently include:
 |---|---|
 | Exact computation | Exact over exact inputs under the supported operation's semantics; approximate inputs still require error propagation |
 | KLL | Normalized rank error from the empirical 99% calibration `2.296 / k^0.9723`, fitted on Apache DataSketches' C++ KLL (`a9b42755072b`); below a failure probability of 0.01 that error is scaled by the Gaussian quantile ratio `z(1 − δ/2) / z(1 − 0.01/2)`, a model rather than a measurement, and the guarantee names that contract apart |
-| DDSketch | Relative value error from alpha under the supported estimator/domain contract; operators sensitive to sign or range require additional domain evidence |
-| Generic HLL | RSE magnitude with unknown failure probability; not a general confidence theorem |
+| DDSketch | Relative value error from alpha under the supported estimator/domain contract; a quantile's bound holds only over values of one sign (the state column's `column_signs` non-negative or non-positive), else the readout has no guarantee |
+| Classic HLL | Relative error certified at the required failure probability over a source declaring at most `max_distinct_per_evaluation` distinct items (summed over the sources scanned below the state), from the linear-counting collision bound under independent uniform bucket hashes; without such a bound, or above the contract's range (`m/2` items at precision `p`), only the RSE magnitude with unknown failure probability |
 | CMS | L1-normalized frequency bound from width and depth; does not by itself certify TopK membership |
 | CountSketch | L2-normalized frequency bound and median concentration bound, requiring valid odd depth |
 | KMV | Provable distinct-count bound from the `k` smallest hashes |
@@ -362,14 +362,19 @@ an observation into a guarantee.
 
 ### Example: HLL distinct counts
 
-HLL's guarantee is its relative standard error, `1.04 / √m` for `m` buckets,
-with an unknown failure probability. Its readout's metric is relative error,
-but no failure probability can be evaluated, so a distinct count read from
-HLL serves no query with an accuracy target
-(`RootPruneReason::NoGuarantee`); KMV's distinct count, whose bound does not
-depend on the number of distinct items, serves such a query. Missing evidence
-leaves generic HLL confidence unknown. Invalid or infeasible contracts cannot
-authorize the result.
+HLL's generic guarantee is its relative standard error, `1.04 / √m` for `m`
+buckets, with an unknown failure probability. Its readout's metric is relative
+error, but no failure probability can be evaluated, so without more a distinct
+count read from HLL serves no query with an accuracy target
+(`RootPruneReason::NoGuarantee`). When the data workload bounds the distinct
+items one evaluation counts (`SourceFacts::max_distinct_per_evaluation`,
+summed over the sources scanned below the state), classic HLL's
+linear-counting branch is certified: `COUNT(DISTINCT user_id)` within relative
+0.05 at δ = 0.01 holds at precision 18 over at most 9,636 distinct users, and
+over 1,000,000 (above the contract's `m/2`) it does not. KMV's distinct count,
+whose bound does not depend on the number of distinct items, serves such a
+query without a bound. Missing evidence leaves generic HLL confidence unknown.
+Invalid or infeasible contracts cannot authorize the result.
 
 ## Sharing across consumers
 
@@ -443,14 +448,17 @@ accuracy/src/
 │                       # the error contracts, each readout's required-accuracy
 │                       # levels; MAX_ERROR_LEVELS
 ├── logical_edge/       # ErrorMetricsOfMemo::edge_meets_logical_requirements
-│                       # (α^log); within_limit, the requirement comparison
+│                       # (α^log), with DDSketch's sign condition;
+│                       # within_limit and tolerated_limit, the requirement
+│                       # comparison
 └── guarantee/
     ├── mod.rs          # theoretical_guarantee (one lookup at a failure
     │                   # probability per algorithm)
     ├── binomial.rs     # binomial_upper_tail
     ├── kll/
     ├── ddsketch.rs
-    ├── hll.rs          # HLL (unknown failure probability)
+    ├── hll/            # HLL: classic certificate over a distinct bound, else
+    │                   # RSE (unknown failure probability)
     ├── cms/
     ├── count_sketch/
     ├── cardinality/    # KMV model
