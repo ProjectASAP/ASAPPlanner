@@ -567,6 +567,15 @@ fn the_objective_is_the_plan_cost_on_anchored_and_plain_queries_on_one_grid() {
 /// per second instead, $\pi_v h_v$ of a view kept for years was 6.6e12/s,
 /// its $W^{\mathrm{mat}}_v$ as negative, and the objective's scale left the
 /// solver at a plan costing 4.68e7/s instead of 2.17e4/s.
+///
+/// The data store here keeps raw rows in batches of 30 min
+/// (`raw_batch_width_ms`), which the second check depends on: a per-series
+/// grouping visits each series once per batch, and a 15 s series has at
+/// most one row in a batch narrower than 15 s, so at the 10 s default every
+/// row is a visit, the raw scan costs more than the views and the two
+/// plans are the same. With 30 min batches, a series has 120 rows in a
+/// batch, and the plan selected with raw data kept costs 4.7e5/s against
+/// 7.1e5/s for the views.
 #[test]
 fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     let query = |query: &str| {
@@ -590,33 +599,36 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
         },
     }))
     .unwrap();
-    let models = PlanningModels::builtin().with_ignore_accuracy_guarantees(true);
+    let mut settings = CostInputs::default();
+    settings.resource_speed.raw_batch_width_ms = 1_800_000;
+    let models = PlanningModels::builtin()
+        .with_ignore_accuracy_guarantees(true)
+        .with_cost_inputs(&settings);
     let (objective, plan_cost) =
-        selected_plan_objective_and_plan_cost_with(&w, models, &CostInputs::default()).1;
+        selected_plan_objective_and_plan_cost_with(&w, models, &settings).1;
     assert_equal("one-off queries over years", (objective, plan_cost));
     // The same queries over arriving rows only, with no raw data kept (a
     // deployment that stores nothing, as `mixed` arrival does): only
     // ingestion-time views over the arriving rows can answer them, the
     // kind of plan the objective's scale once led the solver to at 2,000x
-    // the cost of the best. With raw data kept the selection costs no more:
-    // here it is that views plan, since reading 5 y of raw rows at query
-    // time visits each series' state once per row (one sample per 15 s, at
-    // most one per 10 s raw batch).
+    // the cost of the best. With raw data kept in 30 min batches, reading
+    // them at query time is cheaper, so the selection costs less.
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..Default::default()
     };
     let views_only = PlanningModels::builtin()
         .with_ignore_accuracy_guarantees(true)
+        .with_cost_inputs(&settings)
         .with_deployment_capabilities(&capabilities);
     let mut ingesting = serde_json::to_value(&w).unwrap();
     ingesting["data_workload"]["arrival"] =
         serde_json::json!({"ingesting": {"rows_per_second": 1_000_000.0 / 15.0}});
     let ingesting: PlanningWorkload = serde_json::from_value(ingesting).unwrap();
     let (_, (_, views_only_plan_cost)) =
-        selected_plan_objective_and_plan_cost_with(&ingesting, views_only, &CostInputs::default());
+        selected_plan_objective_and_plan_cost_with(&ingesting, views_only, &settings);
     assert!(
-        plan_cost <= views_only_plan_cost,
+        plan_cost < views_only_plan_cost,
         "selected {plan_cost} is above the ingestion-time views plan, {views_only_plan_cost}"
     );
 }

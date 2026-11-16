@@ -598,6 +598,401 @@ fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
     );
 }
 
+/// A query-time scan of 5 min of `latency` (1,000 series at 1 Hz, 300,000
+/// rows) under a filter that keeps a tenth of each series' rows, e.g.
+/// `latency > 100`: the 30,000 rows left still span 5 min, 30 raw batches
+/// of 10 s, so a per-series grouping visits each of its 1,000 groups 30
+/// times, at most once per row: 30,000 visits. Counted from its input rows
+/// over the sources' rate, the rows spanned 30 s, 3 batches, 3,000 visits.
+/// A `Filter` passes its input's span on, as a `TimeRange` and the
+/// operators that keep each row's window do.
+#[test]
+fn a_grouping_counts_raw_batches_from_the_time_its_input_spans() {
+    use asap_types::ir::operator::AggIntent;
+    use asap_types::ir::scalar::{Predicate, ScalarExpr, ScalarValue};
+    let settings = CostInputs::default();
+    let data = thousand_series_sampled_every(1_000);
+    let scan = node(metric_scan("latency"));
+    let scan_usage =
+        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), &data, &settings)
+            .unwrap();
+    assert_eq!(scan_usage.output.rows, 300_000);
+    let filter = node(Payload::NonASAP(NonASAPOp::Filter {
+        pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
+        child: 0,
+    }));
+    let filter_usage = node_resource_usage_and_cost(
+        &filter,
+        &[produced(&scan, &scan_usage)],
+        (1, 1.0),
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
+    // The filter keeps a tenth of the rows; the cost model passes every
+    // row on, so the test sets what it keeps.
+    let mut kept = produced(&filter, &filter_usage);
+    kept.output.rows = 30_000;
+    kept.output.bytes /= 10;
+    let aggregate = node(Payload::NonASAP(NonASAPOp::Aggregate {
+        reduction: Reduction::PerEntity,
+        measures: vec![AggIntent::Max { col: None }],
+        output_names: vec![String::new()],
+        filters: vec![],
+        having: None,
+        child: 0,
+    }));
+    let usage = node_resource_usage_and_cost(&aggregate, &[kept], (1, 1.0), None, &data, &settings)
+        .unwrap();
+    assert!(
+        usage.cost.detail.contains(", 30000 group visits"),
+        "{}",
+        usage.cost.detail
+    );
+}
+
+/// A query-time chain of 60 s windows over the same filtered scan (30,000
+/// rows over 5 min): each window holds the rows of its 60 s, 6,000, so
+/// each of its 1,000 per-series states folds 6 rows. Sized by the sources'
+/// rate, a window held 60,000 rows (all 30,000 read), 30 per state.
+#[test]
+fn a_query_time_chain_sizes_its_windows_from_the_time_its_input_spans() {
+    let settings = CostInputs::default();
+    let data = thousand_series_sampled_every(1_000);
+    let scan = node(metric_scan("latency"));
+    let scan_usage =
+        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), &data, &settings)
+            .unwrap();
+    let mut kept = produced(&scan, &scan_usage);
+    kept.output.rows = 30_000;
+    kept.output.bytes /= 10;
+    let chain = PhysicalASAPDAGNode {
+        retention_ms: Some(300_000),
+        ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: 0,
+            summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+            tumbling_window_width_ms: 60_000,
+        }))
+    };
+    let chain = PhysicalASAPDAGNode {
+        parameters: Some(SketchParams::Kll { k: 547 }),
+        ..chain
+    };
+    let usage =
+        node_resource_usage_and_cost(&chain, &[kept], (1, 1.0), None, &data, &settings).unwrap();
+    assert_eq!(
+        usage.state_input_rows.and_then(|rows| rows.rows_per_state),
+        Some(6)
+    );
+}
+
+/// A merge that reads one state per group passes each state through: the
+/// executor moves a group's first state into its slot without merging it
+/// (`merge_objects`), so it pays only each group's row. Merging the one
+/// 10 s window a time range selects from a KLL chain (k = 547, 1,000
+/// series at 10 Hz, 100 rows per state) measures 1.0 ms, and from a
+/// DDSketch chain 0.97 ms; charged as merges, they were 29.3 and 3.45 ms.
+#[test]
+fn a_merge_reading_one_state_per_group_passes_it_through() {
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let window = node(Payload::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_secs(10),
+        kind: TimeRangeKind::Range,
+        child: 0,
+    }));
+    for (parameters, measured_ms) in [
+        (SketchParams::Kll { k: 547 }, 1.0),
+        (SketchParams::DDSketch { alpha: 0.01 }, 0.97),
+    ] {
+        let state_bytes = crate::node::state_bytes::sketch_state_bytes(
+            &parameters,
+            StateInputRows {
+                rows_per_state: Some(100),
+                non_negative: true,
+                value_magnitude_range: None,
+            },
+        );
+        let one_window = ProducerOutput {
+            payload: &window.payload,
+            output_schema: &window.output_schema,
+            output: EdgeStatistics {
+                rows: 1_000,
+                bytes: 1_000 * state_bytes,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::None,
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1,
+            chain_tumbling_window_width_ms: None,
+            state_input_rows: Some(StateInputRows {
+                rows_per_state: Some(100),
+                non_negative: true,
+                value_magnitude_range: None,
+            }),
+        };
+        let merge = PhysicalASAPDAGNode {
+            parameters: Some(parameters.clone()),
+            ..node(Payload::ASAP(ASAPOp::SummaryMerge {
+                children: vec![0],
+                group_by: None,
+            }))
+        };
+        let usage =
+            node_resource_usage_and_cost(&merge, &[one_window], (1, 1.0), None, &data, &settings)
+                .unwrap();
+        let charged_ms = usage.work_ms_per_execution;
+        assert!(
+            (0.8..=1.25).contains(&(measured_ms / charged_ms)),
+            "{parameters:?}: charged {charged_ms:.3} ms, measured {measured_ms}"
+        );
+    }
+}
+
+/// A SQL table `t` of 1,000 groups of rows (`instance`) sampled every
+/// second, 10 `job`s and 4 `region`s, whose `user_id` takes
+/// `user_ids` distinct values; 300,000 of its rows, as a time range
+/// passes them to a grouping.
+fn sql_rows_of_t(user_ids: u64) -> (DataWorkload, Schema) {
+    use asap_types::ir::schema::DataType;
+    let data = serde_json::from_value(serde_json::json!({
+        "arrival": {"ingesting": {"rows_per_second": 1000.0}},
+        "sources": {"t": {"series_count": 1000, "sample_interval": 1000,
+            "distinct_values_per_label": {"job": 10, "region": 4, "instance": 1000,
+                "user_id": user_ids}}}
+    }))
+    .unwrap();
+    let schema = Schema::new(vec![
+        Field::new("ts", FieldDataType::Plain(DataType::Timestamp), false),
+        Field::new("job", FieldDataType::Plain(DataType::Utf8), false),
+        Field::new("region", FieldDataType::Plain(DataType::Utf8), false),
+        Field::new("instance", FieldDataType::Plain(DataType::Utf8), false),
+        Field::new("user_id", FieldDataType::Plain(DataType::Float64), false),
+        Field::new("value", FieldDataType::Plain(DataType::Float64), false),
+    ]);
+    (data, schema)
+}
+
+/// The CPU operations per input row a query-time hash aggregate of
+/// `measures` grouped by `keys` charges over [`sql_rows_of_t`]'s 300,000
+/// rows.
+fn sql_aggregate_operations_per_row(
+    keys: Vec<usize>,
+    measures: Vec<asap_types::ir::operator::AggIntent>,
+    user_ids: u64,
+) -> f64 {
+    let settings = CostInputs::default();
+    let (data, schema) = sql_rows_of_t(user_ids);
+    let range = PhysicalASAPDAGNode {
+        output_schema: schema,
+        ..node(Payload::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(300),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        }))
+    };
+    let mut rows = raw_rows(&range, "t", 300_000);
+    rows.output_schema = &range.output_schema;
+    rows.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
+    let names = measures.iter().map(|_| String::new()).collect();
+    let aggregate = node(Payload::NonASAP(NonASAPOp::Aggregate {
+        reduction: Reduction::by(keys),
+        measures,
+        output_names: names,
+        filters: vec![],
+        having: None,
+        child: 0,
+    }));
+    let usage = node_resource_usage_and_cost(&aggregate, &[rows], (1, 1.0), None, &data, &settings)
+        .unwrap();
+    usage.cpu_ops_per_second / 300_000.0
+}
+
+/// A SQL hash aggregate pays per row for each grouping key beyond the
+/// first and for each measure, as measured on the executor (300,000 rows
+/// of 1,000 groups, 100 rows per group per raw batch, so the group visits
+/// are negligible): `GROUP BY job, instance` costs 34.0 ns per row more
+/// than `GROUP BY instance`, `GROUP BY job, region, instance` 50.4 more,
+/// and `MAX, MIN, SUM, COUNT` 11.9 more than `MAX` alone. Charged 15 per
+/// key and 3 per measure, the second and third keys were 0.44x and 0.60x
+/// their measured cost.
+#[test]
+fn a_hash_aggregate_pays_each_further_key_and_measure_as_measured() {
+    use asap_types::ir::operator::AggIntent;
+    let max = || vec![AggIntent::Max { col: Some(5) }];
+    let four = || {
+        vec![
+            AggIntent::Max { col: Some(5) },
+            AggIntent::Min { col: Some(5) },
+            AggIntent::Sum { col: Some(5) },
+            AggIntent::Count,
+        ]
+    };
+    let one_key = sql_aggregate_operations_per_row(vec![3], max(), 1);
+    for (charged, measured, what) in [
+        (
+            sql_aggregate_operations_per_row(vec![1, 3], max(), 1) - one_key,
+            34.0,
+            "a second key",
+        ),
+        (
+            sql_aggregate_operations_per_row(vec![1, 2, 3], max(), 1) - one_key,
+            50.4,
+            "two more keys",
+        ),
+        (
+            sql_aggregate_operations_per_row(vec![3], four(), 1) - one_key,
+            11.9,
+            "three more measures",
+        ),
+    ] {
+        assert!(
+            (0.8..=1.25).contains(&(charged / measured)),
+            "{what}: charged {charged:.1} ns per row more, measured {measured}"
+        );
+    }
+}
+
+/// An exact `COUNT(DISTINCT user_id)` over 300,000 rows interns each value
+/// in a table of every distinct value read, then keeps each group's
+/// (group, value) pairs: its time per row grows with the distinct values.
+/// Measured on the executor with one group: 115 ns per row over 10,000
+/// distinct values and 589 over 259,000; charged 18 at both.
+#[test]
+fn an_exact_distinct_count_costs_more_per_row_with_more_distinct_values() {
+    use asap_types::ir::operator::AggIntent;
+    for (user_ids, measured) in [(10_000, 115.0), (259_000, 589.0)] {
+        let charged = sql_aggregate_operations_per_row(
+            vec![],
+            vec![AggIntent::Cardinality { cols: vec![4] }],
+            user_ids,
+        );
+        assert!(
+            (0.75..=1.33).contains(&(charged / measured)),
+            "{user_ids} distinct: charged {charged:.1} ns per row, measured {measured}"
+        );
+    }
+}
+
+/// A KMV state compares each row's hash with the hashes it retains until
+/// it holds `k` of them, then only hashes below its largest
+/// (`asap_sketchlib`'s duplicate check). Over 300,000 rows of 100,000
+/// distinct `user_id`s, one state at k = 4,323 fills early and measures
+/// 191 ns per row; four states by `region` at k = 26,656 (75,000 rows
+/// each) stay below `k` for most rows and measure 7,410. Charged a fixed
+/// 48 per row, the grouped build looked cheaper than an exact distinct
+/// count it measures 25x more than.
+#[test]
+fn a_kmv_build_costs_per_retained_hash_it_compares() {
+    use asap_types::summary_type::SketchAlgorithm;
+    let settings = CostInputs::default();
+    let (data, schema) = sql_rows_of_t(100_000);
+    let range = PhysicalASAPDAGNode {
+        output_schema: schema,
+        ..node(Payload::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(300),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        }))
+    };
+    for (keys, k, measured) in [(vec![], 4_323, 191.0), (vec![2], 26_656, 7_410.0)] {
+        let mut rows = raw_rows(&range, "t", 300_000);
+        rows.output_schema = &range.output_schema;
+        rows.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
+        let build = PhysicalASAPDAGNode {
+            parameters: Some(SketchParams::Kmv { k }),
+            ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+                child: 0,
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+                input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
+                reduction: Reduction::by(keys.clone()),
+                filter: None,
+            }))
+        };
+        let usage = node_resource_usage_and_cost(&build, &[rows], (1, 1.0), None, &data, &settings)
+            .unwrap();
+        let charged = usage.cpu_ops_per_second / 300_000.0;
+        assert!(
+            (0.75..=1.33).contains(&(charged / measured)),
+            "k = {k}, keys {keys:?}: charged {charged:.1} ns per row, measured {measured}"
+        );
+    }
+}
+
+/// A rollup merge of KMV states updates each group's state with every hash
+/// each input state retains (`asap_sketchlib`'s merge), so it compares
+/// those hashes with the ones the group's state already retains. Measured
+/// on the executor: 1,000 states by (region, service) at k = 106,263, each
+/// built from 12,000 rows of 1,000,000 distinct users, merged into 100
+/// groups by service take 352 s (the plan's 393 s less its 40 s build).
+/// Charged per byte of state, they were 0.1 s.
+#[test]
+fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
+    use asap_types::ir::schema::DataType;
+    use asap_types::summary_type::SketchAlgorithm;
+    let settings = CostInputs::default();
+    let data: DataWorkload = serde_json::from_value(serde_json::json!({
+        "arrival": {"ingesting": {"rows_per_second": 2_000_000.0}},
+        "sources": {"http": {"distinct_values_per_label": {"service": 100, "region": 10}}}
+    }))
+    .unwrap();
+    let parameters = SketchParams::Kmv { k: 106_263 };
+    let rows = StateInputRows {
+        rows_per_state: Some(12_000),
+        non_negative: false,
+        value_magnitude_range: None,
+    };
+    let state_bytes = crate::node::state_bytes::sketch_state_bytes(&parameters, rows);
+    let build = PhysicalASAPDAGNode {
+        parameters: Some(parameters.clone()),
+        output_schema: Schema::new(vec![
+            Field::new("region", FieldDataType::Plain(DataType::Utf8), false),
+            Field::new("service", FieldDataType::Plain(DataType::Utf8), false),
+            Field::new("state", FieldDataType::Sketch(SketchAlgorithm::Kmv), false),
+        ]),
+        ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+            input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
+            reduction: Reduction::by(vec![0, 1]),
+            filter: None,
+        }))
+    };
+    let states = ProducerOutput {
+        payload: &build.payload,
+        output_schema: &build.output_schema,
+        output: EdgeStatistics {
+            rows: 1_000,
+            bytes: 1_000 * (state_bytes + 32),
+        },
+        sources: BTreeSet::from(["http"]),
+        family: StateFamily::Sketch(&parameters),
+        unchanged_columns: ["region", "service"].into(),
+        tumbling_windows: 1,
+        chain_tumbling_window_width_ms: None,
+        state_input_rows: Some(rows),
+    };
+    let rollup = PhysicalASAPDAGNode {
+        parameters: Some(parameters.clone()),
+        ..node(Payload::ASAP(ASAPOp::SummaryMerge {
+            children: vec![0],
+            group_by: Some(vec![1]),
+        }))
+    };
+    let usage =
+        node_resource_usage_and_cost(&rollup, &[states], (1, 1.0), None, &data, &settings).unwrap();
+    assert_eq!(usage.output.rows, 100);
+    let charged_s = usage.work_ms_per_execution / 1_000.0;
+    assert!(
+        (0.75..=1.33).contains(&(352.0 / charged_s)),
+        "charged {charged_s:.1} s, measured 352"
+    );
+}
+
 /// A query-time node holds its state only
 /// while it computes: bytes × its work per execution × its executions
 /// per second, with no query latency. A KLL state of 2 MB whose own
