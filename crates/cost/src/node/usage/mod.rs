@@ -34,8 +34,8 @@ use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
 use crate::node::state_bytes::{
-    keeps_every_value, row_bytes, sketch_state_bytes, state_bytes_per_row,
-    state_row_bytes_beside_state, summary_state_bytes, StateInputRows,
+    assumed_magnitude_range, keeps_every_value, row_bytes, sketch_state_bytes,
+    state_bytes_per_row, state_row_bytes_beside_state, summary_state_bytes, StateInputRows,
 };
 use crate::{aggregate_lookup, lookup, StateFamily};
 use crate::{
@@ -56,7 +56,7 @@ use asap_types::workload::bounds::{
     declared_non_negative, declared_series, declared_value_magnitude_range, group_count_bound,
     source_name, source_rows_per_ms, unchanged_source_columns,
 };
-use asap_types::workload::{DataWorkload, ONE_SECOND_MS};
+use asap_types::workload::{AssumedDataFact, DataFactAssumption, DataWorkload, ONE_SECOND_MS};
 
 /// One node's cost per second of wall time, with how it was measured. A
 /// node is one operator node of the candidate's physical plan DAG
@@ -90,6 +90,9 @@ pub struct NodeCost {
     /// Whether its CPU operations were costed from the measured table or
     /// from the formulas.
     pub cost_source: NodeCostSource,
+    /// The data facts the data workload does not declare that its cost
+    /// assumed, each once, e.g. a DDSketch's value magnitude range.
+    pub assumed_data_facts: Vec<AssumedDataFact>,
 }
 
 /// The state family of `node` whose first producer has `producer_family`:
@@ -554,6 +557,8 @@ pub fn node_resource_usage_and_cost<'a>(
         .and_then(|p| p.memory_bytes_per_state)
         .map(|bytes| bytes.round() as u64);
     let mut cost_source = NodeCostSource::Analytical;
+    // The undeclared data facts its cost assumed.
+    let mut assumed_data_facts = Vec::new();
     let input = inputs
         .first()
         .copied()
@@ -631,6 +636,37 @@ pub fn node_resource_usage_and_cost<'a>(
     let input_state_bytes = || {
         producers.first().map_or(0, |producer| {
             state_bytes_per_row(producer.output, producer.output_schema)
+        })
+    };
+    // The magnitude range a summary built here over `input_rows` is costed
+    // for when its values declare none (`assumed_magnitude_range`), named
+    // with the sources that declare no range for the column it folds (every
+    // source when it folds computed values). None when the measured table
+    // gives its bytes, which assume no range.
+    let assumed_magnitude_range_fact = |update: &SummaryUpdate, input_rows: StateInputRows| {
+        if measured_state_bytes.is_some() {
+            return None;
+        }
+        let assumed_range = assumed_magnitude_range(node.parameters.as_ref()?, input_rows)?;
+        let column = producers
+            .first()
+            .and_then(|producer| producer.unchanged_column(&update.weight));
+        let undeclared = sources
+            .iter()
+            .copied()
+            .filter(|&source| {
+                column.is_none_or(|column| {
+                    declared_value_magnitude_range(data, [source], column).is_none()
+                })
+            })
+            .map(|source| source.to_string())
+            .collect();
+        Some(AssumedDataFact {
+            sources: undeclared,
+            assumption: DataFactAssumption::DDSketchValueMagnitudeRange {
+                column: column.map(str::to_string),
+                assumed_range,
+            },
         })
     };
     let unary = |output| UnaryEdgeStatistics {
@@ -1053,6 +1089,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 node.parameters.as_ref(),
                 input_rows,
             )?);
+            assumed_data_facts.extend(assumed_magnitude_range_fact(update, input_rows));
             let update_ops = update_operations_per_row(
                 family,
                 node.parameters.as_ref(),
@@ -1122,6 +1159,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 node.parameters.as_ref(),
                 input_rows,
             )?);
+            assumed_data_facts.extend(assumed_magnitude_range_fact(update, input_rows));
             let update_ops = update_operations_per_row(
                 family,
                 node.parameters.as_ref(),
@@ -1599,6 +1637,7 @@ pub fn node_resource_usage_and_cost<'a>(
             multiplier,
             detail,
             cost_source,
+            assumed_data_facts,
         },
     })
 }

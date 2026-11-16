@@ -52,9 +52,9 @@ pub use run::{
 
 mod installable;
 pub use installable::{
-    installable_plan_of, plan_installable, InstallablePlan, InstallablePlanError,
-    PredictedNodeUsage, PredictedQueryUsage, PredictedUsage, SelectedPlanReport,
-    INSTALLABLE_PLAN_WIRE_VERSION,
+    assumed_data_facts, installable_plan_of, plan_installable, InstallablePlan,
+    InstallablePlanError, PredictedNodeUsage, PredictedQueryUsage, PredictedUsage,
+    SelectedPlanReport, INSTALLABLE_PLAN_WIRE_VERSION,
 };
 
 // What a deployment runtime needs to build a `UserInput` and read an

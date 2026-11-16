@@ -1512,6 +1512,17 @@ fn ddsketch_state_bytes(
     column: &str,
     unchanged_columns: BTreeSet<&str>,
 ) -> u64 {
+    ddsketch_build_cost(data, producer, source, column, unchanged_columns).0
+}
+
+/// [`ddsketch_state_bytes`] and the build's [`NodeCost`].
+fn ddsketch_build_cost(
+    data: &DataWorkload,
+    producer: Payload,
+    source: &str,
+    column: &str,
+    unchanged_columns: BTreeSet<&str>,
+) -> (u64, NodeCost) {
     use asap_types::ir::schema::{DataType, Field};
     use asap_types::summary_type::SketchAlgorithm;
     let producer = PhysicalASAPDAGNode {
@@ -1547,10 +1558,10 @@ fn ddsketch_state_bytes(
         state_input_rows: None,
     };
     let settings = CostInputs::default();
-    node_resource_usage_and_cost(&build, &[producer_output], (1, 1.0), None, data, &settings)
-        .unwrap()
-        .output
-        .bytes
+    let usage =
+        node_resource_usage_and_cost(&build, &[producer_output], (1, 1.0), None, data, &settings)
+            .unwrap();
+    (usage.output.bytes, usage.cost)
 }
 
 /// The bytes `sketch_state_bytes` gives a DDSketch state at α = 0.01 over 600
@@ -1638,6 +1649,133 @@ fn a_ddsketch_over_a_scan_is_costed_at_its_declared_value_magnitude_range() {
     // 600 rows span less than the declared seven decades, so the declared
     // range does not lower their bytes; it never raises them.
     assert!(ddsketch_costed_bytes(false, Some(latency)) <= ddsketch_costed_bytes(false, None));
+}
+
+/// A DDSketch over a scan of `latency` whose `value` declares no
+/// `column_magnitudes` is costed over the assumed nine decades, and its
+/// node cost names that assumption: the source, the column and the range
+/// [1, 1e9]. The DDSketch store grows without collapsing buckets, so its α
+/// holds whatever the range and the assumption is about cost only.
+/// Declared, there is none.
+#[test]
+fn a_ddsketch_over_an_undeclared_magnitude_range_names_the_assumed_range() {
+    use asap_types::workload::ValueMagnitudeRange;
+    use asap_types::workload::{AssumedDataFact, DataFactAssumption, SourceFacts};
+    let unchanged = || BTreeSet::from(["ts", "value"]);
+    let (_, undeclared) = ddsketch_build_cost(
+        &DataWorkload::default(),
+        metric_scan("latency"),
+        "latency",
+        "value",
+        unchanged(),
+    );
+    let assumed = AssumedDataFact {
+        sources: vec!["latency".to_string()],
+        assumption: DataFactAssumption::DDSketchValueMagnitudeRange {
+            column: Some("value".to_string()),
+            assumed_range: ValueMagnitudeRange {
+                min_abs: 1.0,
+                max_abs: 1e9,
+            },
+        },
+    };
+    assert_eq!(undeclared.assumed_data_facts, vec![assumed.clone()]);
+    assert!(!assumed.accuracy_target_depends_on_it());
+    let declared = declaring(
+        "latency",
+        SourceFacts {
+            column_magnitudes: BTreeMap::from([(
+                "value".to_string(),
+                ValueMagnitudeRange {
+                    min_abs: 0.001,
+                    max_abs: 10_000.0,
+                },
+            )]),
+            ..SourceFacts::default()
+        },
+    );
+    let (_, declared) = ddsketch_build_cost(
+        &declared,
+        metric_scan("latency"),
+        "latency",
+        "value",
+        unchanged(),
+    );
+    assert!(declared.assumed_data_facts.is_empty());
+}
+
+/// Two sources folded into one DDSketch, one declaring its `value`'s
+/// magnitudes and one not: the assumption names only the source that
+/// declares none, since the union of their ranges is unknown.
+#[test]
+fn a_ddsketch_assumption_names_only_the_sources_that_declare_no_range() {
+    use asap_types::workload::{DataFactAssumption, SourceFacts, ValueMagnitudeRange};
+    let declared_range = ValueMagnitudeRange {
+        min_abs: 0.001,
+        max_abs: 10.0,
+    };
+    let data = DataWorkload {
+        sources: BTreeMap::from([(
+            "a".to_string(),
+            SourceFacts {
+                column_magnitudes: BTreeMap::from([("value".to_string(), declared_range)]),
+                ..SourceFacts::default()
+            },
+        )]),
+        ..DataWorkload::default()
+    };
+    let facts = ddsketch_assumed_facts_over_sources(&data, &["a", "b"]);
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].sources, vec!["b".to_string()]);
+    assert!(matches!(
+        facts[0].assumption,
+        DataFactAssumption::DDSketchValueMagnitudeRange { .. }
+    ));
+}
+
+/// The assumed facts of a DDSketch build over `value` of a producer that
+/// reads every source of `sources` and passes `value` on unchanged.
+fn ddsketch_assumed_facts_over_sources(
+    data: &DataWorkload,
+    sources: &[&str],
+) -> Vec<asap_types::workload::AssumedDataFact> {
+    use asap_types::ir::schema::{DataType, Field};
+    use asap_types::summary_type::SketchAlgorithm;
+    let producer = PhysicalASAPDAGNode {
+        output_schema: Schema::new(vec![
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+        ]),
+        ..node(metric_scan(sources[0]))
+    };
+    let build = PhysicalASAPDAGNode {
+        parameters: Some(SketchParams::DDSketch { alpha: 0.01 }),
+        ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::DDSketch),
+            input: SummaryUpdate::column(ColumnRef::Named("value".to_string())),
+            reduction: Reduction::Reduce(GroupKeys::default()),
+            filter: None,
+        }))
+    };
+    let producer_output = ProducerOutput {
+        payload: &producer.payload,
+        output_schema: &producer.output_schema,
+        output: EdgeStatistics {
+            rows: 600,
+            bytes: 9_600,
+        },
+        sources: sources.iter().copied().collect(),
+        family: StateFamily::None,
+        unchanged_columns: BTreeSet::from(["ts", "value"]),
+        tumbling_windows: 1,
+        chain_tumbling_window_width_ms: None,
+    };
+    let settings = CostInputs::default();
+    node_resource_usage_and_cost(&build, &[producer_output], (1, 1.0), None, data, &settings)
+        .unwrap()
+        .cost
+        .assumed_data_facts
 }
 
 /// A DDSketch over a SQL table's `latency` column that the table declares

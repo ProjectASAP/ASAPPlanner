@@ -5,17 +5,23 @@
 //! the reason a prune rule removes it. Each prune rule reads only the value
 //! it removes and the values decided above it.
 
+use std::collections::{BTreeSet, HashMap, HashSet};
+
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::operator::arguments::Source;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
+use asap_types::plan::physical_asap_dag::{
+    PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
+};
 use asap_types::stages::{
     CandidateForMemoGroupId, Lifetime, Memo, MemoGroupId, PhysicalProperties, PruneReason,
     StorageMedium, ValueSign,
 };
 use asap_types::summary_type::SketchAlgorithm;
-use asap_types::workload::{DataArrival, DataWorkload};
+use asap_types::workload::bounds::source_name;
+use asap_types::workload::{AssumedDataFact, DataFactAssumption, DataWorkload};
 
 /// Level 3's values, $\tau$.
 const TIMINGS: [ExecutionTiming; 2] = [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime];
@@ -121,7 +127,7 @@ pub(super) fn offered_physical_properties(
 
 /// The summary type and input group of `operator` when it builds a
 /// summary state from rows (`SummaryAgg`, `SummaryTumblingWindowChain`).
-fn summary_build(operator: &Operator<MemoGroupId>) -> Option<(&FieldDataType, MemoGroupId)> {
+fn summary_build<C: Copy>(operator: &Operator<C>) -> Option<(&FieldDataType, C)> {
     match operator {
         Operator::ASAP(
             ASAPOp::SummaryAgg {
@@ -143,35 +149,78 @@ fn summary_build(operator: &Operator<MemoGroupId>) -> Option<(&FieldDataType, Me
 /// counter state (`rate`, `increase`, `irate`), gets its rows in timestamp
 /// order at ingestion time: the data declares how late a row may arrive
 /// (`max_out_of_order_ms`), so a reorder buffer restores the order, or its
-/// rows are PromQL samples, taken to arrive in order. True for any other
-/// summary type.
+/// rows are PromQL samples, taken to arrive in order (an assumed data fact,
+/// [`assumed_in_order_arrival`]). True for any other summary type.
 fn counter_state_rows_ordered(
     memo: &Memo,
     summary_type: &FieldDataType,
     child: MemoGroupId,
     data: &DataWorkload,
 ) -> bool {
-    let counter_state = matches!(
-        summary_type,
-        FieldDataType::ExactAggregate(kind, _) if kind.tracks_counter_increase()
-    );
-    let out_of_order_bound_known = matches!(
-        data.arrival,
-        DataArrival::Ingesting {
-            max_out_of_order_ms: Some(_),
-            ..
-        } | DataArrival::Mixed {
-            max_out_of_order_ms: Some(_),
-            ..
-        }
-    );
-    !counter_state
-        || out_of_order_bound_known
+    !is_counter_state(summary_type)
+        || data.arrival.max_out_of_order_ms().is_some()
         || memo.groups()[child.0 as usize]
             .group_properties
             .scanned_sources
             .iter()
             .all(Source::is_time_series)
+}
+
+/// Whether a state of `summary_type` is a counter state (`rate`,
+/// `increase`, `irate`), which reads a late sample as a counter reset.
+fn is_counter_state(summary_type: &FieldDataType) -> bool {
+    matches!(
+        summary_type,
+        FieldDataType::ExactAggregate(kind, _) if kind.tracks_counter_increase()
+    )
+}
+
+/// The data fact `plan` assumed by [`counter_state_rows_ordered`]: when
+/// the arrival declares no `max_out_of_order_ms`, each ingestion-time
+/// counter state it builds was offered only because its PromQL samples are
+/// taken to arrive in timestamp order. One fact naming the metrics those
+/// states read, in name order; none when there is no such state. E.g. an
+/// ingestion-time `rate(requests_total[1m])` state gives `InOrderArrival`
+/// over `requests_total`.
+pub fn assumed_in_order_arrival(
+    plan: &PhysicalASAPDAG,
+    data: &DataWorkload,
+) -> Option<AssumedDataFact> {
+    if data.arrival.max_out_of_order_ms().is_some() {
+        return None;
+    }
+    let nodes: HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode> =
+        plan.nodes.iter().map(|node| (node.id, node)).collect();
+    let mut metrics = BTreeSet::new();
+    for node in &plan.nodes {
+        let Some((summary_type, _)) = summary_build(&node.payload) else {
+            continue;
+        };
+        if node.output_state.timing != ExecutionTiming::IngestionTime
+            || !is_counter_state(summary_type)
+        {
+            continue;
+        }
+        // The metrics its samples come from: the scans below it.
+        let mut below = node.producers();
+        let mut seen = HashSet::new();
+        while let Some(id) = below.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let producer = nodes[&id];
+            match &producer.payload {
+                Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
+                    metrics.insert(source_name(source).to_string());
+                }
+                _ => below.extend(producer.producers()),
+            }
+        }
+    }
+    (!metrics.is_empty()).then(|| AssumedDataFact {
+        sources: metrics.into_iter().collect(),
+        assumption: DataFactAssumption::InOrderArrival,
+    })
 }
 
 /// Whether a build of `summary_type` in group `group` is a Count-Min state

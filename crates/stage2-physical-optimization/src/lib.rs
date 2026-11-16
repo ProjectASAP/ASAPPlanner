@@ -31,6 +31,7 @@ use asap_types::stages::{
 };
 use asap_types::workload::DataWorkload;
 
+pub use candidate::assumed_in_order_arrival;
 use candidate::{offered_physical_properties, OfferedPhysicalProperties};
 
 /// Stage 2: expand every logical candidate of `logical` that survived Pass 2
