@@ -4,6 +4,7 @@
 //! separate. Plan selection (Stage 3) turns them into one objective with
 //! [`crate::ResourceUnitCost`].
 
+use crate::node::operations_per_unit::TIME_RANGE_OPERATIONS_PER_ROW;
 use crate::resources::ModeledCpu;
 use asap_types::summary_type::{SketchAlgorithm, SketchParams};
 use serde::{Deserialize, Serialize};
@@ -96,7 +97,11 @@ pub(crate) enum PhysicalOperator {
     },
     HashAggregate {
         grouping_key_count: u64,
-        accumulator_count: u64,
+        /// CPU operations one input row costs, its grouping keys and
+        /// measures together
+        /// (`operations_per_unit::hash_aggregate_operations_per_row`):
+        /// 27 for a per-series `max_over_time` (one key, one measure).
+        operations_per_row: u64,
     },
     InMemoryComparisonSort {
         ordering_key_count: u64,
@@ -443,7 +448,7 @@ pub(crate) fn estimate_operator(
         ),
         (PhysicalOperator::TimeShift, _) => ResourceEstimate::new(0.0, 0, 0),
         (PhysicalOperator::TimeRange, _) => ResourceEstimate::new(
-            output.rows as f64,
+            output.rows as f64 * TIME_RANGE_OPERATIONS_PER_ROW,
             per_row_width(output.rows, output.bytes)?,
             0,
         ),
@@ -454,8 +459,7 @@ pub(crate) fn estimate_operator(
         ),
         (
             PhysicalOperator::HashAggregate {
-                grouping_key_count,
-                accumulator_count,
+                operations_per_row, ..
             },
             OperatorStatistics::HashAggregate {
                 group_count,
@@ -464,12 +468,7 @@ pub(crate) fn estimate_operator(
                 ..
             },
         ) => ResourceEstimate::new(
-            checked_cpu_product(
-                left.rows,
-                grouping_key_count
-                    .checked_add(accumulator_count)
-                    .ok_or(AnalyticalCostError::Overflow)?,
-            )?,
+            checked_cpu_product(left.rows, operations_per_row)?,
             checked_bytes(&[
                 *group_count,
                 key_bytes
@@ -842,7 +841,7 @@ pub(crate) fn validate_operator_semantics(
         (
             PhysicalOperator::HashAggregate {
                 grouping_key_count,
-                accumulator_count,
+                operations_per_row,
             },
             OperatorStatistics::HashAggregate {
                 group_count,
@@ -856,7 +855,7 @@ pub(crate) fn validate_operator_semantics(
                     "PromQL cross-series aggregation needs an explicit physical operator",
                 );
             }
-            if accumulator_count == 0 || *accumulator_bytes_per_group == 0 {
+            if operations_per_row == 0 || *accumulator_bytes_per_group == 0 {
                 return inconsistent("HashAggregate accumulator work and width must be positive");
             }
             if grouping_key_count == 0 {
@@ -1578,8 +1577,8 @@ mod tests {
     }
 
     /// A time shift only moves when its input is evaluated: it costs
-    /// nothing. A time range is priced by the rows it keeps, and keeps no
-    /// more than it reads.
+    /// nothing. A time range is priced by the rows it keeps (12 measured
+    /// operations each), and keeps no more than it reads.
     #[test]
     fn time_shift_is_free_and_time_range_is_priced_by_the_rows_it_keeps() {
         let shift = estimate_operator(
@@ -1598,7 +1597,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(range.cpu_ops(), 200.0);
+        assert_eq!(range.cpu_ops(), 200.0 * TIME_RANGE_OPERATIONS_PER_ROW);
         assert!(estimate_operator(
             PhysicalOperator::TimeRange,
             OperatorStatistics::PassThrough {
@@ -1630,7 +1629,7 @@ mod tests {
     fn aggregate_operator() -> PhysicalOperator {
         PhysicalOperator::HashAggregate {
             grouping_key_count: 1,
-            accumulator_count: 1,
+            operations_per_row: 1,
         }
     }
 
@@ -1792,7 +1791,7 @@ mod tests {
             estimate_operator(
                 PhysicalOperator::HashAggregate {
                     grouping_key_count: 0,
-                    accumulator_count: 1,
+                    operations_per_row: 1,
                 },
                 statistics,
             ),
@@ -2126,7 +2125,7 @@ mod tests {
         let ungrouped = estimate_operator(
             PhysicalOperator::HashAggregate {
                 grouping_key_count: 0,
-                accumulator_count: 1,
+                operations_per_row: 1,
             },
             OperatorStatistics::HashAggregate {
                 edges: unary_edges(empty, EdgeStatistics { rows: 1, bytes: 8 }),
@@ -2142,7 +2141,7 @@ mod tests {
         let grouped = estimate_operator(
             PhysicalOperator::HashAggregate {
                 grouping_key_count: 1,
-                accumulator_count: 1,
+                operations_per_row: 1,
             },
             OperatorStatistics::HashAggregate {
                 edges: unary_edges(empty, empty),

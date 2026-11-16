@@ -35,8 +35,11 @@ A new sketch that Pass 1 can offer for an intent.
    rejected.
 5. **Cost.** Give it a state size (the library's `estimated_memory_bytes`
    for the type the executor builds; KLL keeps the planner's own formula)
-   and per-operation CPU in `sketch_shape`
-   (`crates/cost/src/node/state_bytes.rs`), and accept its parameters in
+   in `sketch_state_bytes` (`crates/cost/src/node/state_bytes/mod.rs`),
+   its per-row and per-merge CPU in
+   `crates/cost/src/node/operations_per_unit.rs`
+   (`update_operations_per_row`, `counters_updated_per_row`,
+   `merge_operations_per_state`), and accept its parameters in
    `crates/cost/src/measured.rs` if deployments measure it.
 6. **Executor.** Wrap the `asap_sketchlib` implementation in
    `crates/executor/src/summary_kernels/` and register it in

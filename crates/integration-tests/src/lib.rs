@@ -245,12 +245,152 @@ pub mod planning {
     /// For tests of a rewrite's structure or execution over a summary whose
     /// output has no guarantee that meets `accuracy` (e.g. a value filter
     /// over an estimate), not of accuracy acceptance.
+    ///
+    /// Summaries' CPU is costed free ([`summary_cpu_free`]), so the plan reads
+    /// the summary candidate wherever Stage 1 offers one, whether or not the
+    /// default unit costs make it cheaper than the exact plan on these
+    /// tests' small data.
     pub fn logical_candidates_ignoring_guarantees(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
-        let models = asap_planner::PlanningModels::builtin().with_ignore_accuracy_guarantees(true);
+        logical_candidates_ignoring_guarantees_on(
+            root,
+            accuracy,
+            &asap_types::deployment_capabilities::DeploymentCapabilities::default(),
+        )
+    }
+
+    /// [`logical_candidates_ignoring_guarantees`] on a deployment with
+    /// `capabilities`. For a test of one sketch's execution: with every
+    /// summary's CPU free, Stage 3 picks among sketches serving the same
+    /// readout by memory alone, e.g. a DDSketch over a KLL for a global
+    /// quantile, so a KLL test declares an executor that builds only KLL.
+    pub fn logical_candidates_ignoring_guarantees_on(
+        root: Rc<OperatorNode>,
+        accuracy: AccuracyTarget,
+        capabilities: &asap_types::deployment_capabilities::DeploymentCapabilities,
+    ) -> Vec<Rc<OperatorNode>> {
+        let settings = summary_cpu_free();
+        let models = asap_planner::PlanningModels::builtin()
+            .with_ignore_accuracy_guarantees(true)
+            .with_cost_inputs(&settings)
+            .with_deployment_capabilities(capabilities);
         selected_operator_roots(&run_all_stages_with(root, accuracy, models))
+    }
+
+    /// Default cost inputs with a measured table that prices the CPU of
+    /// every summary operator (build, chain, merge, estimate, finalize) of
+    /// every sketch family, every exact accumulator and no family at 0 ns;
+    /// memory is still charged. For tests of a summary plan's shape,
+    /// execution or reuse, which need Stage 3 to select the summary.
+    pub fn summary_cpu_free() -> asap_cost::CostInputs {
+        use asap_cost::{OperatorCost, OperatorKind};
+        use asap_types::summary_type::{ExactKind, HydraParams, SketchParams};
+        // One instance of each sketch family: the table matches an entry by
+        // family. A new family fails to compile in the exhaustive match
+        // below; add an instance of it to this array too.
+        let sketches = [
+            SketchParams::Kll { k: 200 },
+            SketchParams::DDSketch { alpha: 0.01 },
+            SketchParams::Cms {
+                width: 1024,
+                depth: 3,
+            },
+            SketchParams::CmsWithHeap {
+                width: 1024,
+                depth: 3,
+                heap_size: 32,
+            },
+            SketchParams::CountSketch {
+                width: 1024,
+                depth: 3,
+            },
+            SketchParams::CountSketchWithHeap {
+                width: 1024,
+                depth: 3,
+                heap_size: 32,
+            },
+            SketchParams::Hll { precision: 12 },
+            SketchParams::Kmv { k: 1024 },
+            SketchParams::UnivMon {
+                heap_size: 32,
+                sketch_rows: 3,
+                sketch_cols: 1024,
+                layers: 8,
+            },
+            SketchParams::Hydra(HydraParams::HydraCms {
+                width: 1024,
+                depth: 3,
+                shared_rows: 3,
+                shared_columns: 1024,
+            }),
+        ];
+        for sketch in &sketches {
+            match sketch {
+                SketchParams::Kll { .. }
+                | SketchParams::DDSketch { .. }
+                | SketchParams::Cms { .. }
+                | SketchParams::CmsWithHeap { .. }
+                | SketchParams::CountSketch { .. }
+                | SketchParams::CountSketchWithHeap { .. }
+                | SketchParams::Hll { .. }
+                | SketchParams::Kmv { .. }
+                | SketchParams::UnivMon { .. }
+                | SketchParams::Hydra(_) => {}
+            }
+        }
+        // Every exact accumulator; as above, a new kind fails to compile in
+        // the match below, and needs adding to this array too.
+        let exact = [
+            ExactKind::Sum,
+            ExactKind::Count,
+            ExactKind::Min,
+            ExactKind::Max,
+            ExactKind::Increase,
+            ExactKind::Rate,
+            ExactKind::IRate,
+        ];
+        for kind in &exact {
+            match kind {
+                ExactKind::Sum
+                | ExactKind::Count
+                | ExactKind::Min
+                | ExactKind::Max
+                | ExactKind::Increase
+                | ExactKind::Rate
+                | ExactKind::IRate => {}
+            }
+        }
+        // Every family, and no family (`sketch` and `exact` both `None`).
+        let families = sketches
+            .into_iter()
+            .map(|sketch| (Some(sketch), None))
+            .chain(exact.into_iter().map(|kind| (None, Some(kind))))
+            .chain([(None, None)]);
+        let mut settings = asap_cost::CostInputs::default();
+        settings.measured_operation_costs.operators = families
+            .flat_map(|(sketch, exact)| {
+                [
+                    OperatorKind::SummaryAgg,
+                    OperatorKind::SummaryTumblingWindowChain,
+                    OperatorKind::SummaryMerge,
+                    OperatorKind::SummaryEstimate,
+                    OperatorKind::FinalizeExactAccumulator,
+                ]
+                .map(|operator| OperatorCost {
+                    operator,
+                    phase: None,
+                    sketch: sketch.clone(),
+                    exact,
+                    measure: None,
+                    ns_per_unit: 0.0,
+                    ns_per_invocation: 0.0,
+                    memory_bytes_per_state: None,
+                })
+            })
+            .collect();
+        settings
     }
 
     /// Whether `node` builds a summary.

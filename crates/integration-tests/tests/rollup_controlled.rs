@@ -41,10 +41,14 @@ fn nodes(roots: &[QueryRoot]) -> Vec<Rc<OperatorNode>> {
         .collect()
 }
 
-// The production entrypoint must find a sketch rollup under the viewer budget.
+// The production entrypoint must find a sketch rollup cheaper than
+// computing both distinct counts exactly from raw data at query time.
 #[test]
 fn production_distinct_rollup_finds_shared_kmv() {
     let (workload, roots) = fixture();
+    let (exact_plan, _) =
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&roots)
+            .unwrap();
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.as_ref().unwrap();
     let mut settings = CostInputs::default();
@@ -68,9 +72,17 @@ fn production_distinct_rollup_finds_shared_kmv() {
     assert!(accepted
         .iter()
         .all(|accuracy| accuracy.sketches.iter().any(|sketch| sketch == "Kmv")));
+    let cost_per_second =
+        asap_integration_tests::planning::plan_cost_per_second(plan, &entries, data, &settings);
+    let exact_cost_per_second = asap_integration_tests::planning::plan_cost_per_second(
+        &exact_plan,
+        &entries,
+        data,
+        &settings,
+    );
     assert!(
-        asap_integration_tests::planning::plan_cost_per_second(plan, &entries, data, &settings)
-            < 2.0e-6
+        cost_per_second < exact_cost_per_second,
+        "KMV rollup {cost_per_second} vs exact {exact_cost_per_second}"
     );
     let roots = plan.query_roots().unwrap();
     let builds: HashSet<_> = nodes(&roots)

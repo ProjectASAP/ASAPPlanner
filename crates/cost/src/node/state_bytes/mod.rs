@@ -34,7 +34,7 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
     )
 }
 
-/// Update operations per input row and bytes per state, from the sketch's
+/// Bytes per state, from the summary's family, its
 /// parameters and `input_rows` (the rows one state folds). The bytes are
 /// `asap_sketchlib`'s `estimated_memory_bytes` for the type the executor
 /// builds (Count-Min and Count Sketch over `f64` counters), given what the
@@ -59,24 +59,19 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
 /// An exact accumulator's state is the executor's per-group state,
 /// [`EXACT_ACCUMULATOR_STATE_BYTES`] for every kind.
 ///
-/// Update operations per input row: one counter per row of depth for
-/// Count-Min and Count-Sketch, plus one heap update for their top-k variants;
-/// for UnivMon, the same per layer it updates (`univmon_expected_layers`);
-/// 1 for every other sketch.
-///
 /// `parameters` is the build's θ (`PhysicalASAPDAGNode::parameters`). Err
 /// [`AnalyticalCostError::UnsupportedCandidate`] for a sketch without θ: a
 /// planner bug, since every sketch build carries its θ.
-pub fn summary_shape(
+pub fn summary_state_bytes(
     family: &FieldDataType,
     parameters: Option<&SketchParams>,
     input_rows: StateInputRows,
-) -> Result<(f64, u64), AnalyticalCostError> {
+) -> Result<u64, AnalyticalCostError> {
     Ok(match (family, parameters) {
-        (FieldDataType::Sketch(..), Some(parameters)) => sketch_shape(parameters, input_rows),
+        (FieldDataType::Sketch(..), Some(parameters)) => sketch_state_bytes(parameters, input_rows),
         (FieldDataType::Sketch(..), None) => return Err(AnalyticalCostError::UnsupportedCandidate),
-        (FieldDataType::ExactAggregate(..), _) => (1.0, EXACT_ACCUMULATOR_STATE_BYTES),
-        _ => (1.0, 8),
+        (FieldDataType::ExactAggregate(..), _) => EXACT_ACCUMULATOR_STATE_BYTES,
+        _ => 8,
     })
 }
 
@@ -111,11 +106,10 @@ impl StateInputRows {
     };
 }
 
-/// [`summary_shape`] of one sketch: its update operations per row and its
-/// bytes per state. With [`StateInputRows::UNKNOWN`], the bytes are also the
+/// [`summary_state_bytes`] of one sketch. With [`StateInputRows::UNKNOWN`], the bytes are also the
 /// size the measured table interpolates between
 /// (`crate::measured`).
-pub fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, u64) {
+pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> u64 {
     use asap_sketchlib::{
         Classic, CountMinF64, CountMinSketchWithHeap, CountSketch, CountSketchWithHeap, DataInput,
         DdSketch, HyperLogLog, Kmv, RegularPath, UnivMon, Vector2D,
@@ -125,89 +119,71 @@ pub fn sketch_shape(params: &SketchParams, input_rows: StateInputRows) -> (f64, 
         usize::try_from(rows.max(1)).unwrap_or(usize::MAX)
     });
     match params {
-        SketchParams::Hydra(hydra) => sketch_shape(&hydra.per_subpopulation(), input_rows),
-        SketchParams::Cms { width, depth } => (
-            f64::from(*depth),
-            CountMinF64::estimated_memory_bytes(*depth as usize, *width as usize) as u64,
-        ),
-        SketchParams::CountSketch { width, depth } => (
-            f64::from(*depth),
+        SketchParams::Hydra(hydra) => sketch_state_bytes(&hydra.per_subpopulation(), input_rows),
+        SketchParams::Cms { width, depth } => {
+            CountMinF64::estimated_memory_bytes(*depth as usize, *width as usize) as u64
+        }
+        SketchParams::CountSketch { width, depth } => {
             CountSketch::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
                 *depth as usize,
                 *width as usize,
-            ) as u64,
-        ),
+            ) as u64
+        }
         SketchParams::CmsWithHeap {
             width,
             depth,
             heap_size,
-        } => (
-            f64::from(*depth) + 1.0,
-            CountMinSketchWithHeap::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
-                *depth as usize,
-                *width as usize,
-                *heap_size as usize,
-                &heap_key,
-            ) as u64,
-        ),
+        } => CountMinSketchWithHeap::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
+            *depth as usize,
+            *width as usize,
+            *heap_size as usize,
+            &heap_key,
+        ) as u64,
         SketchParams::CountSketchWithHeap {
             width,
             depth,
             heap_size,
-        } => (
-            f64::from(*depth) + 1.0,
-            CountSketchWithHeap::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
-                *depth as usize,
-                *width as usize,
-                *heap_size as usize,
-                &heap_key,
-            ) as u64,
-        ),
-        SketchParams::Kll { k, .. } => (
-            1.0,
-            kll_fixed_bytes() + 8 * kll_buffer_items(*k, input_rows),
-        ),
+        } => CountSketchWithHeap::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
+            *depth as usize,
+            *width as usize,
+            *heap_size as usize,
+            &heap_key,
+        ) as u64,
+        SketchParams::Kll { k, .. } => kll_fixed_bytes() + 8 * kll_buffer_items(*k, input_rows),
         // The executor builds no DDSketch outside α in (0, 1), where
         // sketchlib's estimate panics: priced as an empty one.
         SketchParams::DDSketch { alpha } if !(*alpha > 0.0 && *alpha < 1.0) => {
-            (1.0, std::mem::size_of::<DdSketch>() as u64)
+            std::mem::size_of::<DdSketch>() as u64
         }
         SketchParams::DDSketch { alpha } => {
             let ValueMagnitudeRange { min_abs, max_abs } = input_rows
                 .value_magnitude_range
                 .unwrap_or(DDSKETCH_ASSUMED_MAGNITUDE_RANGE);
-            (
-                1.0,
-                DdSketch::estimated_memory_bytes(
-                    *alpha,
-                    rows,
-                    min_abs,
-                    max_abs,
-                    !input_rows.non_negative,
-                ) as u64,
-            )
+            DdSketch::estimated_memory_bytes(
+                *alpha,
+                rows,
+                min_abs,
+                max_abs,
+                !input_rows.non_negative,
+            ) as u64
         }
-        SketchParams::Hll { precision, .. } => (
-            1.0,
-            HyperLogLog::<Classic>::estimated_memory_bytes(usize::from(*precision)) as u64,
-        ),
-        SketchParams::Kmv { k, .. } => (1.0, Kmv::estimated_memory_bytes(*k as usize, rows) as u64),
+        SketchParams::Hll { precision, .. } => {
+            HyperLogLog::<Classic>::estimated_memory_bytes(usize::from(*precision)) as u64
+        }
+        SketchParams::Kmv { k, .. } => Kmv::estimated_memory_bytes(*k as usize, rows) as u64,
         SketchParams::UnivMon {
             heap_size,
             sketch_rows,
             sketch_cols,
             layers,
             ..
-        } => (
-            univmon_expected_layers(*layers) * (f64::from(*sketch_rows) + 1.0),
-            UnivMon::estimated_memory_bytes(
-                *heap_size as usize,
-                *sketch_rows as usize,
-                *sketch_cols as usize,
-                usize::from(*layers),
-                &DataInput::Bytes(&[0; ASSUMED_VALUE_KEY_BYTES]),
-            ) as u64,
-        ),
+        } => UnivMon::estimated_memory_bytes(
+            *heap_size as usize,
+            *sketch_rows as usize,
+            *sketch_cols as usize,
+            usize::from(*layers),
+            &DataInput::Bytes(&[0; ASSUMED_VALUE_KEY_BYTES]),
+        ) as u64,
     }
 }
 
@@ -277,15 +253,6 @@ const ASSUMED_HEAP_KEY_BYTES: usize = 3 * (1 + 4 + 16);
 /// value is assumed to be 16 bytes, the size [`row_bytes`] gives a string.
 /// A sample value's key owns no bytes, so this bounds it too.
 const ASSUMED_VALUE_KEY_BYTES: usize = 1 + 16;
-
-/// Layers a UnivMon row updates in expectation. `asap_sketchlib` updates
-/// layers `0..=b`, with bottom layer `b` the index of the first zero among
-/// hash bits `1..layers`, capped at `layers - 1`; so it reaches layer `j`
-/// with probability `2^-j`, and the expectation is
-/// `sum_{j < layers} 2^-j = 2 - 2^(1 - layers)`.
-fn univmon_expected_layers(layers: u8) -> f64 {
-    2.0 - 2f64.powi(1 - i32::from(layers.max(1)))
-}
 
 /// The range of value magnitudes a DDSketch is assumed to see when its
 /// column declares no `column_magnitudes`: nine decades, e.g. latencies from 1 ns

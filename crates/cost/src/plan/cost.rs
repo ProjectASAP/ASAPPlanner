@@ -9,8 +9,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::node::analytical::AnalyticalCostError;
+use crate::node::operations_per_unit::merge_operations_per_state;
 use crate::node::operator_statistics::EdgeStatistics;
-use crate::node::state_bytes::{sketch_shape, StateInputRows};
+use crate::node::state_bytes::{sketch_state_bytes, StateInputRows};
 use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
 use crate::plan::read_back::read_back_ms;
@@ -57,7 +58,8 @@ pub struct PlanCost {
 pub struct QueryLatency {
     /// Milliseconds to merge the ingest workers' partial copies of the
     /// newest window of the largest ingestion-time state the query reads;
-    /// 0 when ingestion fits on one core or the query reads none.
+    /// 0 when ingestion fits on one core or the query reads no state (only
+    /// raw rows or an exact `Aggregate`'s values kept at ingestion time).
     pub compaction_ms: f64,
     /// Milliseconds of the query-time work the query reaches, each node
     /// once.
@@ -190,7 +192,7 @@ pub fn plan_cost(
     // finalizations over it.
     let mut family_of: HashMap<PhysicalASAPNodeId, StateFamily<'_>> = HashMap::new();
     let sketch_size =
-        |params: &SketchParams| sketch_shape(params, StateInputRows::UNKNOWN).1 as f64;
+        |params: &SketchParams| sketch_state_bytes(params, StateInputRows::UNKNOWN) as f64;
     for node in &dag.nodes {
         let node_costed = &costed[&node.id];
         usage.cpu_ops_per_second += node_costed.cpu_ops_per_second;
@@ -294,29 +296,35 @@ pub fn plan_cost(
         measured.detail +=
             &format!("; {copies} partial copies of its newest window, {bytes} bytes");
     }
-    // Milliseconds of one merge of each state with a measured query-time
-    // merge entry (measured ns · 10⁻⁶), for the newest window's compaction.
-    let merge_ms: HashMap<PhysicalASAPNodeId, f64> = family_of
-        .iter()
-        .filter_map(|(id, family)| {
-            lookup(
-                table,
-                OperatorKind::SummaryMerge,
-                ExecutionTiming::QueryTime,
-                *family,
-                sketch_size,
-            )
-            .map(|unit| (*id, (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6))
-        })
-        .collect();
-    let mut latency = query_latencies(
-        dag,
-        nodes,
-        &output,
-        &work_ms,
-        &merge_ms,
-        speed.ms_per_cpu_op * formula_scale,
-    );
+    // Milliseconds of one merge of a node's state when the newest window's
+    // partial copies are compacted: its measured query-time merge entry
+    // (ns · 10⁻⁶) when the table has one, else the merge formula of its
+    // family and bytes per state, as a `SummaryMerge` over it is costed (a
+    // DDSketch state: 2,500 operations). 0 for a node holding no states,
+    // such as the raw rows a `Filter` or `TimeRange` keeps or an exact
+    // `Aggregate`'s values: the executor merges ingest shards only of
+    // summary state columns, and partial copies of rows are concatenated.
+    let merge_ms = |id: PhysicalASAPNodeId| {
+        let Some(&family) = family_of.get(&id) else {
+            return 0.0;
+        };
+        lookup(
+            table,
+            OperatorKind::SummaryMerge,
+            ExecutionTiming::QueryTime,
+            family,
+            sketch_size,
+        )
+        .map_or_else(
+            || {
+                merge_operations_per_state(family, output[&id].bytes_per_row())
+                    * speed.ms_per_cpu_op
+                    * formula_scale
+            },
+            |unit| (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6,
+        )
+    };
+    let mut latency = query_latencies(dag, nodes, &output, &work_ms, merge_ms);
     for (latency, evaluation_ms) in latency.iter_mut().zip(evaluation_ms_per_query) {
         latency.query_ms += evaluation_ms;
     }
@@ -472,15 +480,14 @@ fn peak_cpu_cores(
 /// state's newest window merges, for each of its `I` states per window,
 /// the `k` ingest workers' partial copies, `(k − 1)·I` merges, where `k`
 /// is the cores its ingestion work takes, at least one. Each merge takes
-/// the state's measured merge time (`merge_ms`) when the measured table has
-/// one, and one operation otherwise.
+/// `merge_ms` of the state: measured, or its family's merge formula, 0 for
+/// a node holding no states (its partial copies are concatenated).
 fn query_latencies(
     dag: &PhysicalASAPDAG,
     nodes: &HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode>,
     output: &HashMap<PhysicalASAPNodeId, EdgeStatistics>,
     work_ms: &HashMap<PhysicalASAPNodeId, f64>,
-    merge_ms: &HashMap<PhysicalASAPNodeId, f64>,
-    formula_merge_ms: f64,
+    merge_ms: impl Fn(PhysicalASAPNodeId) -> f64,
 ) -> Vec<QueryLatency> {
     let inputs = |id: PhysicalASAPNodeId| {
         dag.edges
@@ -493,8 +500,7 @@ fn query_latencies(
     let compaction_ms = |state: PhysicalASAPNodeId| {
         let workers = ingest_workers(dag, work_ms, state) as f64;
         let states = output[&state].rows as f64;
-        let per_merge_ms = merge_ms.get(&state).copied().unwrap_or(formula_merge_ms);
-        (workers - 1.0) * states * per_merge_ms
+        (workers - 1.0) * states * merge_ms(state)
     };
     query_starts(dag)
         .into_iter()

@@ -13,12 +13,12 @@ fn exact_state_is_priced_at_the_executors_state_size() {
         (ExactKind::Rate, ExactParams::Rate),
     ] {
         assert_eq!(
-            summary_shape(
+            summary_state_bytes(
                 &FieldDataType::ExactAggregate(kind, params),
                 None,
                 StateInputRows::UNKNOWN
             ),
-            Ok((1.0, 56))
+            Ok(56)
         );
     }
     assert_eq!(asap_types::summary_type::EXACT_ACCUMULATOR_STATE_BYTES, 56);
@@ -103,7 +103,7 @@ fn library_ddsketch_bytes(alpha: f64, values: &[f64]) -> u64 {
 fn ddsketch_state_bytes_bound_the_library() {
     let alpha = 0.05;
     let priced = |rows_per_state, non_negative| {
-        sketch_shape(
+        sketch_state_bytes(
             &SketchParams::DDSketch { alpha },
             StateInputRows {
                 rows_per_state,
@@ -111,7 +111,6 @@ fn ddsketch_state_bytes_bound_the_library() {
                 value_magnitude_range: None,
             },
         )
-        .1
     };
     // Ten Pareto(2) samples (scale 1), one 1 s tumbling window of a 10 Hz series.
     let pareto: Vec<f64> = (0..10)
@@ -156,7 +155,7 @@ fn ddsketch_state_bytes_bound_the_library() {
 fn ddsketch_state_bytes_follow_the_declared_value_magnitude_range() {
     let alpha = 0.01;
     let costed = |value_magnitude_range| {
-        sketch_shape(
+        sketch_state_bytes(
             &SketchParams::DDSketch { alpha },
             StateInputRows {
                 rows_per_state: Some(600),
@@ -164,7 +163,6 @@ fn ddsketch_state_bytes_follow_the_declared_value_magnitude_range() {
                 value_magnitude_range,
             },
         )
-        .1
     };
     let struct_bytes = std::mem::size_of::<asap_sketchlib::DdSketch>() as u64;
     let bytes_for_bins = |bins: u64| struct_bytes + 8 * 2 * (bins + 126);
@@ -199,7 +197,7 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
         sketch.memory_bytes() as u64
     };
     let model_bytes = |rows_per_state| {
-        sketch_shape(
+        sketch_state_bytes(
             &SketchParams::Kll { k },
             StateInputRows {
                 rows_per_state,
@@ -207,7 +205,6 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
                 value_magnitude_range: None,
             },
         )
-        .1
     };
     // An empty sketch holds its fixed bytes; one sample adds 16 items.
     assert_eq!(library_bytes(0), kll_fixed_bytes());
@@ -416,15 +413,14 @@ fn state_bytes_bound_the_executors_charge() {
             let state = updater.into_accumulator();
             let charged = state.approx_memory_bytes();
             let priced = fields
-                + sketch_shape(
+                + sketch_state_bytes(
                     params,
                     StateInputRows {
                         rows_per_state: Some(u64::from(n)),
                         non_negative: false,
                         value_magnitude_range: None,
                     },
-                )
-                .1 as usize;
+                ) as usize;
             let context = format!("{algorithm:?} after {n} rows: {priced} priced");
             match priced_as {
                 Priced::Exact => assert_eq!(charged, priced, "{context}"),
@@ -499,7 +495,7 @@ fn next_uniform(state: &mut u64) -> f64 {
 /// non-negative), or 1,000 rows of 1,000 distinct label values or label
 /// sets. Its charge
 /// (`approx_memory_bytes`; for HydraCms its shared grid over its 10
-/// groups) is compared with `summary_shape` for the same rows. Priced ÷
+/// groups) is compared with `summary_state_bytes` for the same rows. Priced ÷
 /// charged lies within [`BYTES_AGREEMENT_FACTOR`], or the family's row
 /// carries its [`KnownBytesGap`].
 ///
@@ -657,9 +653,7 @@ fn priced_bytes_agree_with_the_executor() {
             }
         }
         let charged = updater.into_accumulator().approx_memory_bytes() as u64;
-        let priced = summary_shape(&family, params.as_ref(), input_rows(rows_fed))
-            .unwrap()
-            .1;
+        let priced = summary_state_bytes(&family, params.as_ref(), input_rows(rows_fed)).unwrap();
         measured.push((family, priced, charged, known_gap));
     }
     // HydraCms: one grid for every group, priced as one Count-Min per
@@ -682,7 +676,7 @@ fn priced_bytes_agree_with_the_executor() {
     }
     measured.push((
         hydra_family,
-        sketch_shape(&hydra, input_rows(hydra_rows_fed / HYDRA_GROUPS)).1,
+        sketch_state_bytes(&hydra, input_rows(hydra_rows_fed / HYDRA_GROUPS)),
         (grid.approx_memory_bytes() / HYDRA_GROUPS as usize) as u64,
         gap(947, 0.104),
     ));

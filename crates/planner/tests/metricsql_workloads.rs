@@ -34,17 +34,28 @@ const QUERIES: [&str; 4] = [
     r#"sum(latency{job="j1"})"#,
 ];
 
+/// Data arriving at 2,000 rows per second: the plans the Planner selects
+/// for these queries in production.
+const INGESTING: &str = r#"{"ingesting": {"rows_per_second": 2000.0}}"#;
+
+/// Data at rest: what [`query_answers`] runs over, since it answers each
+/// root at query time from the raw samples alone. With data arriving,
+/// `increase` selects windows maintained at ingestion time, which this
+/// harness never fills.
+const AT_REST: &str = r#""at_rest""#;
+
 /// `query` written in `language` ("promql" or "metricsql"), every 10 s
 /// within relative error 0.01, over 1,000 `requests_total` counter series
-/// and 1,000 `latency` gauge series, each sampled every second.
-fn workload(language: &str, query: &str) -> PlanningWorkload {
+/// and 1,000 `latency` gauge series, each sampled every second, with the
+/// data `arrival` ([`INGESTING`] or [`AT_REST`]).
+fn workload(language: &str, query: &str, arrival: &str) -> PlanningWorkload {
     serde_json::from_str(&format!(
         r#"{{"query_workload": {{"language": "{language}", "repeating_queries": [{{
               "query": {query:?},
               "demand": {{"fixed_interval_at": {{"interval": 10000, "evaluation_phase": 0}}}},
               "requirements": {{"accuracy": {{"max_error": 0.01}}}},
               "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
-            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 2000.0}}}},
+            "data_workload": {{"arrival": {arrival},
               "sources": {{
                 "requests_total": {{"series_count": 1000, "metric_type": "counter",
                     "sample_interval": 1000}},
@@ -54,10 +65,10 @@ fn workload(language: &str, query: &str) -> PlanningWorkload {
     .unwrap()
 }
 
-/// The built-in plan of `query` written in MetricsQL, or the error the
-/// Planner returned.
-async fn plan_metricsql(query: &str) -> Result<InstallablePlan, String> {
-    let workload = workload("metricsql", query);
+/// The built-in plan of `query` written in MetricsQL, with the data
+/// `arrival`, or the error the Planner returned.
+async fn plan_metricsql(query: &str, arrival: &str) -> Result<InstallablePlan, String> {
+    let workload = workload("metricsql", query, arrival);
     plan_installable(UserInput::new(
         &workload,
         FrontendInput::Metricsql,
@@ -68,9 +79,9 @@ async fn plan_metricsql(query: &str) -> Result<InstallablePlan, String> {
     .map_err(|e| e.to_string())
 }
 
-/// The built-in plan of `query` written in PromQL.
-async fn plan_promql(query: &str) -> InstallablePlan {
-    let workload = workload("promql", query);
+/// The built-in plan of `query` written in PromQL, with the data `arrival`.
+async fn plan_promql(query: &str, arrival: &str) -> InstallablePlan {
+    let workload = workload("promql", query, arrival);
     plan_installable(UserInput::new(
         &workload,
         FrontendInput::Promql,
@@ -118,7 +129,7 @@ fn query_answers(plan: &InstallablePlan, samples: &[RawDataSample]) -> Vec<Answe
 async fn metricsql_queries_plan_and_install() {
     let mut failures = Vec::new();
     for query in QUERIES {
-        let installed = plan_metricsql(query)
+        let installed = plan_metricsql(query, INGESTING)
             .await
             .and_then(|plan| plan.check_compiles());
         if let Err(error) = installed {
@@ -133,10 +144,10 @@ async fn metricsql_queries_plan_and_install() {
 #[tokio::test]
 async fn metricsql_queries_select_the_promql_plan() {
     for query in QUERIES {
-        let metricsql = plan_metricsql(query)
+        let metricsql = plan_metricsql(query, INGESTING)
             .await
             .unwrap_or_else(|e| panic!("{query} as MetricsQL: {e}"));
-        let promql = plan_promql(query).await;
+        let promql = plan_promql(query, INGESTING).await;
         assert_eq!(metricsql.dag, promql.dag, "{query}");
     }
 }
@@ -178,13 +189,13 @@ async fn metricsql_queries_answer_as_promql_does() {
     ];
     let samples = samples();
     for (query, expected) in QUERIES.into_iter().zip(expected) {
-        let metricsql = plan_metricsql(query)
+        let metricsql = plan_metricsql(query, AT_REST)
             .await
             .unwrap_or_else(|e| panic!("{query} as MetricsQL: {e}"));
         let metricsql_answers = query_answers(&metricsql, &samples);
         assert_eq!(
             metricsql_answers,
-            query_answers(&plan_promql(query).await, &samples),
+            query_answers(&plan_promql(query, AT_REST).await, &samples),
             "{query}"
         );
         let Some(expected) = expected else { continue };
@@ -204,13 +215,13 @@ async fn metricsql_grouped_average_averages_every_series_of_each_group() {
     let job = |name: &str| BTreeMap::from([("job".to_string(), name.to_string())]);
     let expected = vec![(job("j1"), 9.0), (job("j2"), 29.0)];
     let samples = samples();
-    let metricsql = plan_metricsql(query)
+    let metricsql = plan_metricsql(query, AT_REST)
         .await
         .unwrap_or_else(|e| panic!("{query} as MetricsQL: {e}"));
     let metricsql_answers = query_answers(&metricsql, &samples);
     assert_answers_near_relative(&metricsql_answers, &expected, 1e-9);
     assert_eq!(
         metricsql_answers,
-        query_answers(&plan_promql(query).await, &samples)
+        query_answers(&plan_promql(query, AT_REST).await, &samples)
     );
 }

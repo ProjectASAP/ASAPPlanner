@@ -7,6 +7,7 @@ use asap_devtools::planning_stages::{
     lower_promql_roots, lower_sql_roots, run_search_over, run_stages_until, sql_catalog, RunUntil,
 };
 use asap_planner::{PlanSearchSettings, PlanningModels};
+use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::LogicalASAPMemoCandidates;
 use asap_types::workload::PlanningWorkload;
 use serde_json::{json, Value};
@@ -48,13 +49,28 @@ pub fn with_queries(mut w: FuzzWorkload, queries: &[String]) -> FuzzWorkload {
 
 /// The selected plan's cost per second for `w`.
 pub fn cost(w: &FuzzWorkload) -> f64 {
+    cost_with(w, &CostInputs::default())
+}
+
+/// [`cost`] under `settings`.
+pub fn cost_with(w: &FuzzWorkload, settings: &CostInputs) -> f64 {
+    let plan = selected_plan(w, settings);
+    let planning = w.planning_workload();
+    let entries: Vec<_> = planning.query_workload.entries().collect();
+    let value =
+        asap_integration_tests::planning::plan_cost_per_second(&plan, &entries, &w.data, settings);
+    println!("cost={value}");
+    value
+}
+
+/// The plan the production stages select for `w` under `settings`.
+pub fn selected_plan(w: &FuzzWorkload, settings: &CostInputs) -> PhysicalASAPDAG {
     let roots = Planner::new(FuzzSettings::default()).lower(w).unwrap();
     let planning = w.planning_workload();
     let entries: Vec<_> = planning.query_workload.entries().collect();
-    let settings = CostInputs::default();
     let deployment = w.deployment();
     let models = PlanningModels::builtin()
-        .with_cost_inputs(&settings)
+        .with_cost_inputs(settings)
         .with_deployment_capabilities(&deployment);
     let run = run_search_over(
         roots,
@@ -65,10 +81,7 @@ pub fn cost(w: &FuzzWorkload) -> f64 {
     )
     .unwrap();
     let (plan, _) = run.run.selection.as_ref().unwrap();
-    let value =
-        asap_integration_tests::planning::plan_cost_per_second(plan, &entries, &w.data, &settings);
-    println!("cost={value}");
-    value
+    plan.clone()
 }
 
 /// Pass 2's output for PromQL `queries`, each with its accuracy target,

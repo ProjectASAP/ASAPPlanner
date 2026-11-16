@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use asap_types::ir::properties::ExecutionDataState;
 use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::Field;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode;
 use asap_types::plan::time_window::{InputTimeAccess, TimeIndexedPlan};
 use asap_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
@@ -181,6 +182,149 @@ fn an_operator_keeping_its_input_window_over_a_chain_or_its_windows_selects_what
             assert_eq!(merge_over(&path), direct, "{:?}", keeping.payload);
         }
     }
+}
+
+/// A merge over a time range of a DDSketch chain's windows reads DDSketch
+/// states, though the time range itself has no family: the merge's θ names
+/// it, so each of the 5,000 states read costs a DDSketch merge (2,500
+/// operations), not an exact accumulator's (230).
+#[test]
+fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let windows = node(Payload::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_secs(300),
+        kind: TimeRangeKind::Range,
+        child: 0,
+    }));
+    let windows_output = ProducerOutput {
+        payload: &windows.payload,
+        output_schema: &windows.output_schema,
+        output: EdgeStatistics {
+            rows: 5_000,
+            bytes: 5_000 * 4_096,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::None,
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 5,
+        chain_tumbling_window_width_ms: None,
+    };
+    let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
+        children: vec![0],
+        group_by: None,
+    }));
+    merge.parameters = Some(SketchParams::DDSketch { alpha: 0.01 });
+    let merge_usage =
+        node_resource_usage_and_cost(&merge, &[windows_output], (1, 1.0), None, &data, &settings)
+            .unwrap();
+    assert!(matches!(
+        merge_usage.family,
+        StateFamily::Sketch(SketchParams::DDSketch { .. })
+    ));
+    assert_eq!(
+        merge_usage.cpu_ops_per_second,
+        5_000.0 * crate::node::operations_per_unit::DDSKETCH_MERGE_OPERATIONS_PER_STATE
+    );
+}
+
+/// A merge over a time range of a Rate chain's windows reads Rate
+/// accumulator states, though the time range has no family and the merge
+/// no θ: its output's state column names the family, so each of the 5,000
+/// states read costs a counter-increase merge (350 operations), not a
+/// plain exact accumulator's (230).
+#[test]
+fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let windows = node(Payload::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_secs(300),
+        kind: TimeRangeKind::Range,
+        child: 0,
+    }));
+    let windows_output = ProducerOutput {
+        payload: &windows.payload,
+        output_schema: &windows.output_schema,
+        output: EdgeStatistics {
+            rows: 5_000,
+            bytes: 5_000 * asap_types::summary_type::EXACT_ACCUMULATOR_STATE_BYTES,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::None,
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 5,
+        chain_tumbling_window_width_ms: None,
+    };
+    let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
+        children: vec![0],
+        group_by: None,
+    }));
+    merge.output_schema = Schema::new(vec![Field::new(
+        "state",
+        FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+        false,
+    )]);
+    let merge_usage =
+        node_resource_usage_and_cost(&merge, &[windows_output], (1, 1.0), None, &data, &settings)
+            .unwrap();
+    assert_eq!(merge_usage.family, StateFamily::Exact(&ExactKind::Rate));
+    assert_eq!(
+        merge_usage.cpu_ops_per_second,
+        5_000.0 * crate::node::operations_per_unit::COUNTER_MERGE_OPERATIONS_PER_STATE
+    );
+}
+
+/// A query-time chain reads its scan's lookback and keeps each row in its
+/// window's range, as a `TimeRange` over the same rows does, besides
+/// updating the row's state. Example: a sum in 60 s windows over 36,000
+/// raw rows, retaining five windows of one group, costs 36,000 × (40
+/// update + 12 range) operations plus five emitted states × 2,500.
+#[test]
+fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
+    use crate::node::operations_per_unit::{
+        CHAIN_EMIT_OPERATIONS_PER_STATE, EXACT_UPDATE_OPERATIONS_PER_ROW,
+        TIME_RANGE_OPERATIONS_PER_ROW,
+    };
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let scan = node(Payload::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries {
+            metric: "latency".to_string(),
+        },
+        predicates: vec![],
+        schema: Schema::default(),
+    }));
+    let rows = ProducerOutput {
+        payload: &scan.payload,
+        output_schema: &scan.output_schema,
+        output: EdgeStatistics {
+            rows: 36_000,
+            bytes: 36_000 * 16,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::None,
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 1,
+        chain_tumbling_window_width_ms: None,
+    };
+    let chain = PhysicalASAPDAGNode {
+        retention_ms: Some(300_000),
+        ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: 0,
+            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::by(vec![]),
+            filter: None,
+            tumbling_window_width_ms: 60_000,
+        }))
+    };
+    let usage =
+        node_resource_usage_and_cost(&chain, &[rows], (1, 1.0), None, &data, &settings).unwrap();
+    assert_eq!(
+        usage.cpu_ops_per_second,
+        36_000.0 * (EXACT_UPDATE_OPERATIONS_PER_ROW + TIME_RANGE_OPERATIONS_PER_ROW)
+            + 5.0 * CHAIN_EMIT_OPERATIONS_PER_STATE
+    );
 }
 
 /// A query-time node holds its state only
@@ -536,14 +680,14 @@ fn ddsketch_state_bytes(
         .bytes
 }
 
-/// The bytes `sketch_shape` gives a DDSketch state at α = 0.01 over 600
+/// The bytes `sketch_state_bytes` gives a DDSketch state at α = 0.01 over 600
 /// rows of the given sign and magnitude range.
 fn ddsketch_costed_bytes(
     non_negative: bool,
     value_magnitude_range: Option<asap_types::workload::ValueMagnitudeRange>,
 ) -> u64 {
-    use crate::node::state_bytes::{sketch_shape, StateInputRows};
-    sketch_shape(
+    use crate::node::state_bytes::{sketch_state_bytes, StateInputRows};
+    sketch_state_bytes(
         &SketchParams::DDSketch { alpha: 0.01 },
         StateInputRows {
             rows_per_state: Some(600),
@@ -551,7 +695,6 @@ fn ddsketch_costed_bytes(
             value_magnitude_range,
         },
     )
-    .1
 }
 
 /// A scan of PromQL metric `metric`.
