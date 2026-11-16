@@ -14,8 +14,7 @@ use asap_planner::DeploymentCapabilities;
 
 use super::common::{exact, facts, plan, workload, TempDir};
 
-const XEON_CPUINFO: &str = "processor\t: 0\nvendor_id\t: GenuineIntel\n\
-model name\t: Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz\n\n";
+const E5_MODEL: &str = "Intel(R) Xeon(R) CPU E5-2683 v3 @ 2.00GHz";
 
 /// `/proc/cpuinfo` of `cores` logical cores of `model`.
 fn cpuinfo(model: &str, cores: u32) -> String {
@@ -28,40 +27,54 @@ fn meminfo(kib: u64) -> String {
     format!("MemTotal:       {kib} kB\nMemFree:        1000 kB\n")
 }
 
-fn xeon(memory_kib: u64) -> MachineDescription {
+/// 56 logical cores of the E5-2683 v3 on x86_64 with `memory_kib` of memory,
+/// DIMM types `dimm_types` (EDAC) and an optional override.
+fn e5(
+    memory_kib: u64,
+    dimm_types: &[&str],
+    memory_type_override: Option<&str>,
+) -> MachineDescription {
     MachineDescription::from_proc(
-        &cpuinfo("Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz", 56),
+        "x86_64",
+        &cpuinfo(E5_MODEL, 56),
         &meminfo(memory_kib),
+        dimm_types,
+        memory_type_override,
         "Linux 5.15",
     )
     .unwrap()
 }
 
-/// 56 logical cores of a Xeon Gold 6142 with 263,724,000 KiB:
-/// 263,724,000 / 2^20 = 251.5 GiB, floored to 251.
-// provisional answer 16
+const E5_MEMORY_KIB: u64 = 263_724_000;
+const E5_KEY: &str = "x86_64-intel-xeon-e5-2683-v3-56c-registered-ddr4";
+
+/// Architecture, model, cores and memory type give the slug: `(R)`, `CPU`
+/// and `@ 2.00GHz` are dropped from the model, the rest is lowercased and
+/// dash-joined.
+// decided 2026-11-16: key = architecture + model + logical cores + memory type
 #[test]
 fn machine_key_from_cpu_cores_memory() {
-    assert!(XEON_CPUINFO.contains("6142"));
-    let machine = xeon(263_724_000);
+    let machine = e5(E5_MEMORY_KIB, &["Registered-DDR4", "Registered-DDR4"], None);
+    assert_eq!(machine.cpu_architecture, "x86_64");
     assert_eq!(machine.logical_cores, 56);
-    assert_eq!(machine.memory_kib, 263_724_000);
-    assert_eq!(machine.machine_key(), "xeon-gold-6142-56c-251g");
+    assert_eq!(machine.memory_type, "Registered-DDR4");
+    assert_eq!(machine.memory_kib, E5_MEMORY_KIB);
+    assert_eq!(machine.machine_key(), E5_KEY);
 }
 
-/// The key is a function of CPU model, cores and memory only: this
-/// machine's detected key contains no token of its hostname that the CPU
-/// model does not also contain, and the description has no hostname to
-/// change.
+/// The key is a function of architecture, CPU model, cores and memory type
+/// only: this machine's detected key contains no token of its hostname that
+/// the CPU model does not also contain, and the description has no hostname
+/// to change.
 #[test]
 fn machine_key_ignores_hostname() {
-    let fixture = xeon(263_724_000).machine_key();
-    for hostname in ["a", "xeon-gold-6142", "node-17"] {
+    let fixture = e5(E5_MEMORY_KIB, &["Registered-DDR4"], None).machine_key();
+    for hostname in ["a", "xeon-e5-2683", "node-17"] {
         // The fixture's inputs do not include a hostname, so every
         // hostname gives the same key, and it is never the hostname.
         assert_ne!(fixture, hostname);
     }
-    let detected = MachineDescription::detect().unwrap();
+    let detected = MachineDescription::detect(None).unwrap();
     let key = detected.machine_key();
     let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
     let model = detected.cpu_model.to_lowercase();
@@ -79,23 +92,71 @@ fn machine_key_ignores_hostname() {
     }
 }
 
-/// `MemTotal` jitters by about ±0.5% across boots: the key does not change.
-// provisional answer 16: GiB rounding cannot hold this for the 251.5 GiB
-// fixture (+0.5% is 252.8 GiB, −0.5% is 250.2 GiB); the test is written
-// as the plan states it so the conflict is visible.
+/// Total memory is not part of the key: 64 GiB and 256 GiB of the same
+/// DIMM type give the same key, and `MemTotal` jitter across boots too.
 #[test]
-fn machine_key_stable_under_memtotal_jitter() {
-    let key = xeon(263_724_000).machine_key();
-    assert_eq!(xeon(263_724_000 * 1005 / 1000).machine_key(), key);
-    assert_eq!(xeon(263_724_000 * 995 / 1000).machine_key(), key);
+fn machine_key_ignores_memory_size() {
+    let dimms = ["Registered-DDR4"];
+    let key = e5(E5_MEMORY_KIB, &dimms, None).machine_key();
+    assert_eq!(key, E5_KEY);
+    assert_eq!(e5(64 * 1024 * 1024, &dimms, None).machine_key(), key);
+    assert_eq!(e5(256 * 1024 * 1024, &dimms, None).machine_key(), key);
+    assert_eq!(
+        e5(E5_MEMORY_KIB * 1005 / 1000, &dimms, None).machine_key(),
+        key
+    );
+}
+
+/// A VM without EDAC and without an override: `unknown-memory` ends the
+/// key, and the warning names it and the override.
+#[test]
+fn machine_key_without_edac_is_unknown_memory() {
+    let machine = e5(E5_MEMORY_KIB, &[], None);
+    assert_eq!(
+        machine.machine_key(),
+        "x86_64-intel-xeon-e5-2683-v3-56c-unknown-memory"
+    );
+    let warning = machine.warning().expect("a warning for unknown memory");
+    assert!(warning.contains("unknown-memory"), "{warning}");
+    assert!(warning.contains("ASAP_MEMORY_TYPE"), "{warning}");
+    assert!(e5(E5_MEMORY_KIB, &["Registered-DDR4"], None)
+        .warning()
+        .is_none());
+}
+
+/// `--memory-type` / `ASAP_MEMORY_TYPE` supplies the type when EDAC has
+/// none, and no warning is given.
+#[test]
+fn machine_key_memory_type_override() {
+    let machine = e5(E5_MEMORY_KIB, &[], Some("Registered-DDR4"));
+    assert_eq!(machine.machine_key(), E5_KEY);
+    assert!(machine.warning().is_none());
+}
+
+/// DIMMs of different types: the sorted unique values joined, whatever the
+/// DIMM order.
+#[test]
+fn machine_key_mixed_dimm_types() {
+    for dimms in [
+        ["Registered-DDR4", "LRDIMM-DDR4", "Registered-DDR4"],
+        ["LRDIMM-DDR4", "Registered-DDR4", "LRDIMM-DDR4"],
+    ] {
+        assert_eq!(
+            e5(E5_MEMORY_KIB, &dimms, None).machine_key(),
+            "x86_64-intel-xeon-e5-2683-v3-56c-lrdimm-ddr4-registered-ddr4"
+        );
+    }
 }
 
 /// Only `[a-z0-9-]`, no leading, trailing or double dashes.
 #[test]
 fn machine_key_slug_charset() {
     let machine = MachineDescription::from_proc(
+        "aarch64",
         &cpuinfo("AMD EPYC(TM) 7452 32-Core Processor  @ 2.35GHz (R)", 8),
         &meminfo(16_000_000),
+        &["Registered-DDR4"],
+        None,
         "Linux",
     )
     .unwrap();
@@ -111,7 +172,7 @@ fn machine_key_slug_charset() {
     );
 }
 
-const KEY: &str = "xeon-gold-6142-56c-251g";
+const KEY: &str = E5_KEY;
 
 /// `--costs` first, then `ASAP_CALIBRATION_DIR`, then `<repo>/calibration`,
 /// then nothing (the formulas).
