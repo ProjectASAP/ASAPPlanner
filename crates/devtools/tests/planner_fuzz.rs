@@ -39,6 +39,9 @@ fn check(relation: Relation, workload: FuzzWorkload, target: usize) -> Outcome {
 /// issue's ungrouped case and closed #902; this grouped variant
 /// (`… AND city = 'city1' GROUP BY city`) holds only since #952's
 /// finer-aggregate reuse (#950), and is now its regression test.
+/// After the current cost refits it fails again: the planner's plan costs
+/// about 0.080/s more than the witness's (which adds about 0.00001/s), past
+/// the tolerance. That gap is the one #891 tracks.
 #[test]
 fn finds_issue_902_filter_on_group_key_not_reading_the_grouped_result() {
     let mut workload = seed("issue902.json");
@@ -67,7 +70,10 @@ fn finds_issue_902_filter_on_group_key_not_reading_the_grouped_result() {
 /// witness filters the finished result instead, adding 0.000035/s. The
 /// gap that remains, open in #891, is pinned here: the planner's plan
 /// (0.008600/s) costs 0.000065/s more than the witness's (0.008535/s), at
-/// most the tolerance (1% of W, 0.000086/s).
+/// most the tolerance (1% of W, 0.000086/s). After the current cost refits
+/// it fails: the planner's plan costs about 0.0925/s more than the
+/// witness's (which adds about 0.00004/s), past the tolerance. Tracked in
+/// #891.
 #[test]
 fn issue_891_filtered_rate_reads_the_grouped_rate() {
     let mut workload = seed("issue891.workload.json");

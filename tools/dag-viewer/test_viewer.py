@@ -29,7 +29,7 @@ EXAMPLE1 = WORKLOADS / "planner-layering" / "example1.json"
 # shares one tumbling-window chain among the five queries.
 EXAMPLE3A = WORKLOADS / "planner-layering" / "example3a.json"
 # The document asap_planner writes for test-fixtures/p90-workload.json under
-# test-fixtures/kll-only-capabilities.json: one p90 query with accuracy
+# test-fixtures/kll-only-no-raw-data-capabilities.json: one p90 query with accuracy
 # enforced, KLL only and no raw data kept, so the plan reads a KLL
 # tumbling-window chain; Pass 2 prunes G4's four smallest KLL sketches
 # (memo.js tests).

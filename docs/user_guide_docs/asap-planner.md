@@ -114,6 +114,11 @@ Sections of stages that were not run are `null`. In
 document alone does not mean planning succeeded. Costs are model predictions, not measured execution times or a
 cloud bill.
 
+The JSON document numbers memo groups and candidates canonically (depth
+first from the query roots, in query order), while `--format text` prints
+the planner's own ids, so one group can be `G2` in the JSON and `G5` in the
+text.
+
 ## Troubleshooting
 
 - **`asap_planner: command not found`:** use `cargo run ... -- ...`, or the

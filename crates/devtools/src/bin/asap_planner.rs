@@ -653,7 +653,7 @@ fn lowered_together(
     }
     data.validate().map_err(|e| e.to_string())?;
     for (index, query) in described.iter_mut().enumerate() {
-        query["id"] = json!(format!("q{}", index + 1));
+        query["id"] = json!(query_id(index));
     }
     Ok((described, roots, entries, data))
 }
@@ -964,7 +964,7 @@ fn workload_queries(workload: &PlanningWorkload) -> Vec<Value> {
                 requirements["range_evaluation"] = json!(range);
             }
             json!({
-                "id": format!("q{}", index + 1),
+                "id": query_id(index),
                 "language": language,
                 "text": entry.query.0,
                 "requirements": requirements,
@@ -1174,16 +1174,10 @@ fn sharing_summary_json(plan: &PhysicalASAPDAG) -> Vec<Value> {
         .enumerate()
         .map(|(position, node)| (node.id, position))
         .collect();
-    // Query `i` is the scalar root keyed `i` when there is one, else the
-    // next operator root.
-    let mut operator_roots = plan.roots.iter();
     let mut queries_of_node: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); plan.nodes.len()];
-    for query in 0..plan.roots.len() + plan.scalar_roots.len() {
+    for (query, root) in plan.root_nodes_per_query().iter().enumerate() {
         let mut pending: Vec<PhysicalASAPNodeId> =
-            match plan.scalar_roots.iter().find(|(index, _)| *index == query) {
-                Some((_, expr)) => expr.operator_refs().into_iter().copied().collect(),
-                None => operator_roots.next().into_iter().copied().collect(),
-            };
+            root.operator_refs().into_iter().copied().collect();
         while let Some(id) = pending.pop() {
             let node = position[&id];
             if queries_of_node[node].insert(query) {
@@ -1191,14 +1185,16 @@ fn sharing_summary_json(plan: &PhysicalASAPDAG) -> Vec<Value> {
             }
         }
     }
-    let mut shared: Vec<(Vec<usize>, String, Value)> = plan
+    // Sort key: queries, then operator, then the entry's JSON text (computed
+    // once per entry, not per comparison).
+    let mut shared: Vec<(Vec<usize>, String, String, Value)> = plan
         .nodes
         .iter()
         .zip(queries_of_node)
         .filter(|(_, queries)| queries.len() > 1)
         .map(|(node, queries)| {
             let operator = operator_label(&node.payload);
-            let names: Vec<String> = queries.iter().map(|q| format!("q{}", q + 1)).collect();
+            let names: Vec<String> = queries.iter().map(|&q| query_id(q)).collect();
             let entry = json!({
                 "operator": operator,
                 "parameters": node.parameters,
@@ -1206,11 +1202,18 @@ fn sharing_summary_json(plan: &PhysicalASAPDAG) -> Vec<Value> {
                 "lifetime": node.lifetime,
                 "queries": names,
             });
-            (queries.into_iter().collect(), operator, entry)
+            let text = entry.to_string();
+            (queries.into_iter().collect(), operator, text, entry)
         })
         .collect();
-    shared.sort_by(|a, b| (&a.0, &a.1, a.2.to_string()).cmp(&(&b.0, &b.1, b.2.to_string())));
-    shared.into_iter().map(|(_, _, entry)| entry).collect()
+    shared.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+    shared.into_iter().map(|(_, _, _, entry)| entry).collect()
+}
+
+/// The workload query id the documents use for query index `index`
+/// (0-based): `0` gives `"q1"`, as in `workload.queries[].id`.
+fn query_id(index: usize) -> String {
+    format!("q{}", index + 1)
 }
 
 /// A candidate's origin, as `OriginOfCandidateForMemoGroup` serializes.

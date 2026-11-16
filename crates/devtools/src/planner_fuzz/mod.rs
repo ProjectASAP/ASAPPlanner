@@ -409,18 +409,15 @@ fn operator_trees(
         .enumerate()
         .map(|(id, tree)| (Rc::as_ptr(tree), id))
         .collect();
-    let mut operator_roots = plan.roots.iter();
-    let roots = (0..plan.roots.len() + plan.scalar_roots.len())
-        .map(
-            |query| match plan.scalar_roots.iter().find(|(index, _)| *index == query) {
-                Some((_, expression)) => QueryRoot::Scalar(
-                    expression.map_operator_refs(&mut |&id| Rc::clone(&tree_of[id])),
-                ),
-                None => QueryRoot::Operator(Rc::clone(
-                    &tree_of[*operator_roots.next().expect("one operator root per query")],
-                )),
-            },
-        )
+    let roots = plan
+        .root_nodes_per_query()
+        .into_iter()
+        .map(|root| match root {
+            QueryRoot::Operator(id) => QueryRoot::Operator(Rc::clone(&tree_of[id])),
+            QueryRoot::Scalar(expression) => {
+                QueryRoot::Scalar(expression.map_operator_refs(&mut |&id| Rc::clone(&tree_of[id])))
+            }
+        })
         .collect();
     (roots, node_of)
 }

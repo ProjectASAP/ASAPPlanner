@@ -302,26 +302,42 @@ pub enum PhysicalASAPDAGValidationError {
 }
 
 impl PhysicalASAPDAG {
-    /// The plan's query roots as IR, in entry order: each operator root's
-    /// node, or the standalone scalar query keyed by its entry. Shared nodes
-    /// stay shared. For tests that inspect a plan as operator trees.
+    /// Each query's root in node ids, in workload order: query `i` is the
+    /// scalar root keyed `i` when there is one, and otherwise the next entry
+    /// of `roots`. Example: `roots = [n4]`, `scalar_roots = [(0, n2 / n3)]`
+    /// gives `[Scalar(n2 / n3), Operator(n4)]`.
+    pub fn root_nodes_per_query(&self) -> Vec<crate::ir::QueryRoot<PhysicalASAPNodeId>> {
+        use crate::ir::QueryRoot;
+        let mut operator_roots = self.roots.iter();
+        (0..self.roots.len() + self.scalar_roots.len())
+            .map(
+                |query| match self.scalar_roots.iter().find(|(index, _)| *index == query) {
+                    Some((_, expr)) => QueryRoot::Scalar(expr.clone()),
+                    None => QueryRoot::Operator(
+                        *operator_roots.next().expect("one operator root per query"),
+                    ),
+                },
+            )
+            .collect()
+    }
+
+    /// The plan's query roots as IR, in workload order
+    /// ([`Self::root_nodes_per_query`] with each node id replaced by its
+    /// operator tree). Shared nodes stay shared. For tests that inspect a
+    /// plan as operator trees.
     #[cfg(any(test, feature = "test-support"))]
     pub fn query_roots(&self) -> Result<Vec<crate::ir::QueryRoot>, PhysicalASAPDAGValidationError> {
         use crate::ir::QueryRoot;
         let nodes = self.operator_nodes()?;
-        let mut operator_roots = self.roots.iter();
-        let count = self.roots.len() + self.scalar_roots.len();
-        Ok((0..count)
-            .map(
-                |entry| match self.scalar_roots.iter().find(|(index, _)| *index == entry) {
-                    Some((_, expr)) => {
-                        QueryRoot::Scalar(expr.map_operator_refs(&mut |id| Rc::clone(&nodes[id])))
-                    }
-                    None => QueryRoot::Operator(Rc::clone(
-                        &nodes[operator_roots.next().expect("one operator root per entry")],
-                    )),
-                },
-            )
+        Ok(self
+            .root_nodes_per_query()
+            .into_iter()
+            .map(|root| match root {
+                QueryRoot::Operator(id) => QueryRoot::Operator(Rc::clone(&nodes[&id])),
+                QueryRoot::Scalar(expr) => {
+                    QueryRoot::Scalar(expr.map_operator_refs(&mut |id| Rc::clone(&nodes[id])))
+                }
+            })
             .collect())
     }
 

@@ -207,6 +207,6 @@ p90 query with accuracy enforced; write it again when the document changes:
 
 ```bash
 asap_planner --workload test-fixtures/p90-workload.json \
-  --deployment-capabilities test-fixtures/kll-only-capabilities.json \
+  --deployment-capabilities test-fixtures/kll-only-no-raw-data-capabilities.json \
   --run-until stage3 --format json --out test-fixtures/p90-kll.json
 ```

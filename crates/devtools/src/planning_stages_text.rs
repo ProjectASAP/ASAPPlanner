@@ -1188,12 +1188,17 @@ fn write_selection(
     let _ = writeln!(
         out,
         "selection MILP: {} variables, {} constraints, {} ms building, {} ms solving \
-         ({} solves), objective {:.6e}/s",
+         ({} {}), objective {:.6e}/s",
         selection.milp_variable_count,
         selection.milp_constraint_count,
         selection.milp_construction_ms,
         selection.milp_solve_ms,
         selection.milp_solve_count,
+        if selection.milp_solve_count == 1 {
+            "solve"
+        } else {
+            "solves"
+        },
         selection.selected_plan_cost_per_second
     );
     let physical = run.physical_asap_candidates.as_ref();

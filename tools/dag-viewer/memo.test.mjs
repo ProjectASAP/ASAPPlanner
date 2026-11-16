@@ -4,7 +4,7 @@
 // θ and required accuracy, its logical edges, its physical candidates'
 // edges and the pruned candidates of Pass 2, Stage 2 and Stage 3, over
 // test-fixtures/p90-kll.json: the document asap_planner writes for
-// test-fixtures/p90-workload.json under test-fixtures/kll-only-capabilities.json
+// test-fixtures/p90-workload.json under test-fixtures/kll-only-no-raw-data-capabilities.json
 // (one p90 query with accuracy enforced, KLL only and no raw data kept, so
 // the plan reads a KLL tumbling-window chain; Pass 2 prunes G4's four
 // smallest KLL sketches). Group and candidate ids are the document's

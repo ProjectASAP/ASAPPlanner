@@ -99,7 +99,7 @@
           "timing": "query_time"
         },
         "7": {
-          "cost_per_second": 5.622000013799999e-15,
+          "cost_per_second": 5.6220000138e-15,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 5e-10,
           "detail": "operator: pass 5 rows; x 0.1000/s; holds 24 bytes for 0.000 ms",
