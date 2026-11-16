@@ -72,8 +72,9 @@ pub fn cost(w: &FuzzWorkload) -> f64 {
 }
 
 /// Pass 2's output for PromQL `queries`, each with its accuracy target,
-/// repeating every minute over the gauge `m` and the counter `c`, 1000
-/// series each.
+/// repeating every minute over the gauge `m`, the counter `c` and the
+/// gauge `latency` whose values are declared non-negative (so DDSketch's
+/// quantile guarantee holds over it), 1000 series each.
 pub fn promql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
     pass2_of(
         json!("promql"),
@@ -81,6 +82,8 @@ pub fn promql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
         json!({
             "m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000},
             "c": {"series_count": 1000, "metric_type": "counter", "sample_interval": 1000},
+            "latency": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000,
+                "column_signs": {"value": "non_negative"}},
         }),
         None,
     )

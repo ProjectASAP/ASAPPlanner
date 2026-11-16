@@ -5,7 +5,9 @@
 //! ([`AccuracyEvidence`], in `evidence`), each operator's error contract
 //! ([`ErrorContract`], in `error_contract`), the error metrics of a memo
 //! and the metric rule ([`ErrorMetricsOfMemo`], in `metric_rule`, with the
-//! metric of a readout's error from `readout`), each readout's required
+//! metrics each query root allows, [`query_roots_with_target`], and the
+//! metric of a readout's error, [`readout_error_metric`], from `readout`),
+//! each readout's required
 //! accuracy ([`readout_levels`], in `readout_caps`), and $\alpha^{\log}$ of
 //! a logical edge ([`ErrorMetricsOfMemo::edge_meets_logical_requirements`],
 //! in `logical_edge`, with a bound's comparison to a limit
@@ -26,6 +28,7 @@ mod readout_caps;
 pub use error_contract::ErrorContract;
 pub use evidence::{AccuracyEvidence, NoMeasuredGuarantees};
 pub use guarantee::theoretical_guarantee;
-pub use logical_edge::within_limit;
-pub use metric_rule::ErrorMetricsOfMemo;
+pub use logical_edge::{tolerated_limit, within_limit};
+pub use metric_rule::{query_roots_with_target, ErrorMetricsOfMemo};
+pub use readout::readout_error_metric;
 pub use readout_caps::{readout_levels, ReadoutRequiredAccuracy};

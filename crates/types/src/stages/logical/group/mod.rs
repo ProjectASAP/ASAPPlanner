@@ -105,6 +105,21 @@ pub struct GroupProperties {
 }
 
 impl GroupProperties {
+    /// The `column_signs` entry of a state group's state column (its first
+    /// field that is not plain): the sign of the values its states were
+    /// updated with. `None` for a group without a state column.
+    ///
+    /// Example: a DDSketch state over `latency`, declared non-negative,
+    /// is `NonNegative`; over a gauge with no declared sign, `Unknown`.
+    pub fn state_column_sign(&self) -> Option<ValueSign> {
+        let state = self
+            .schema
+            .fields
+            .iter()
+            .position(|field| !field.is_plain())?;
+        self.column_signs.get(state).copied()
+    }
+
     /// The sketch algorithm of the state the group outputs; `None` for
     /// rows, values and exact states.
     pub fn sketch_algorithm_of_state(&self) -> Option<SketchAlgorithm> {
