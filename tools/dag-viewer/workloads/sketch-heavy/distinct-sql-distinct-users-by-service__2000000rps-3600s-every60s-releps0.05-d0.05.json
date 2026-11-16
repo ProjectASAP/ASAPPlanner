@@ -1,0 +1,52 @@
+{
+ "query_workload": {
+  "language": {
+   "sql": "datafusion_sql"
+  },
+  "repeating_queries": [
+   {
+    "query": "SELECT service, COUNT(DISTINCT user_id) FROM clicks WHERE ts >= now() - INTERVAL '3600 seconds' GROUP BY service",
+    "demand": {
+     "fixed_interval_at": {
+      "interval": 60000,
+      "evaluation_phase": 0
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "relative",
+      "max_error": 0.05,
+      "failure_probability": 0.05,
+      "accuracy_scope": "whole_result"
+     }
+    }
+   }
+  ]
+ },
+ "data_workload": {
+  "arrival": {
+   "ingesting": {
+    "rows_per_second": 2000000.0
+   }
+  },
+  "sources": {
+   "clicks": {
+    "column_signs": {
+     "bytes": "non_negative"
+    },
+    "distinct_values_per_label": {
+     "url": 1000000,
+     "user_id": 5000000,
+     "client_ip": 2000000,
+     "region": 8,
+     "service": 40
+    }
+   }
+  }
+ }
+}

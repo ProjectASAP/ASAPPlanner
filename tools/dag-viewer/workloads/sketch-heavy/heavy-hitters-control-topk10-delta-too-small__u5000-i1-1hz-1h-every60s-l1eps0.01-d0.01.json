@@ -1,0 +1,47 @@
+{
+ "query_workload": {
+  "language": "promql",
+  "repeating_queries": [
+   {
+    "query": "topk(10, sum by (url) (rate(http_requests_total[1h])))",
+    "demand": {
+     "fixed_interval_at": {
+      "interval": 60000,
+      "evaluation_phase": 0
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "absolute_stream_l1",
+      "max_error": 0.01,
+      "failure_probability": 0.01,
+      "accuracy_scope": "whole_result"
+     }
+    }
+   }
+  ]
+ },
+ "data_workload": {
+  "arrival": {
+   "ingesting": {
+    "rows_per_second": 5000.0
+   }
+  },
+  "sources": {
+   "http_requests_total": {
+    "series_count": 5000,
+    "metric_type": "counter",
+    "sample_interval": 1000,
+    "distinct_values_per_label": {
+     "url": 5000,
+     "instance": 1
+    }
+   }
+  }
+ }
+}

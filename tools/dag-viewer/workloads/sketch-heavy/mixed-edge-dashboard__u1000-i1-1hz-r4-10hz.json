@@ -1,0 +1,117 @@
+{
+ "query_workload": {
+  "language": "promql",
+  "repeating_queries": [
+   {
+    "query": "topk(10, sum by (url) (rate(http_requests_total[1h])))",
+    "demand": {
+     "fixed_interval_at": {
+      "interval": 60000,
+      "evaluation_phase": 0
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "absolute_stream_l1",
+      "max_error": 0.01,
+      "failure_probability": 0.05,
+      "accuracy_scope": "whole_result"
+     }
+    }
+   },
+   {
+    "query": "sum(rate(http_requests_total[5m]))",
+    "demand": {
+     "fixed_interval_at": {
+      "interval": 10000,
+      "evaluation_phase": 0
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    },
+    "requirements": {}
+   },
+   {
+    "query": "l2_over_time(dns_query_client[24h])",
+    "demand": {
+     "fixed_interval_at": {
+      "interval": 60000,
+      "evaluation_phase": 0
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "relative",
+      "max_error": 0.1,
+      "failure_probability": 0.1,
+      "accuracy_scope": "whole_result"
+     }
+    }
+   },
+   {
+    "query": "distinct_over_time(dns_query_client[24h])",
+    "demand": {
+     "fixed_interval_at": {
+      "interval": 300000,
+      "evaluation_phase": 0
+     }
+    },
+    "predictability": {
+     "predictable": {
+      "known_at": null
+     }
+    },
+    "requirements": {
+     "accuracy": {
+      "accuracy_metric": "relative",
+      "max_error": 0.02,
+      "failure_probability": 0.1,
+      "accuracy_scope": "whole_result"
+     }
+    }
+   }
+  ]
+ },
+ "data_workload": {
+  "arrival": {
+   "ingesting": {
+    "rows_per_second": 1040.0
+   }
+  },
+  "sources": {
+   "http_requests_total": {
+    "series_count": 1000,
+    "metric_type": "counter",
+    "sample_interval": 1000,
+    "distinct_values_per_label": {
+     "url": 1000,
+     "instance": 1
+    }
+   },
+   "dns_query_client": {
+    "series_count": 4,
+    "metric_type": "gauge",
+    "sample_interval": 100,
+    "column_signs": {
+     "value": "non_negative"
+    },
+    "distinct_values_per_label": {
+     "resolver": 4
+    }
+   }
+  }
+ }
+}

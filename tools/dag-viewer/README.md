@@ -179,6 +179,13 @@ planned as the MVP deployment: raw data not retained, Fargate costs,
 accuracy guarantees enforced. Stage 3 searches exactly, so planning one of
 them can take several minutes.
 
+The sketch-heavy set (75 workloads, PromQL and SQL) is synthetic. Each
+workload is built so that one sketch family is the cheapest plan that
+meets its accuracy target (UnivMon, Count-Min or Count Sketch with a heap,
+KMV), or sits next to such a workload as a control. The `blocked-*`
+workloads are shapes no sketch serves yet. `workloads/sketch-heavy/gen.py`
+writes the files, their `tables.json` and the set's index entry.
+
 `memo-examples/` holds smaller `PlanningWorkload` files, each the smallest
 subset of an ASAPQuery paper workload template that shows one kind of
 sharing; open one with **Open stage document or workload…**.
