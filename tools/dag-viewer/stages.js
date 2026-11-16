@@ -174,10 +174,19 @@ const isPlainObject = (value) => !!value && typeof value === 'object' && !Array.
 // A pruning reason of Stage 2 or Stage 3 (a serialized `PruneReason`): a
 // snake_case string, e.g. "usage_not_costable" as "usage not costable", or
 // `{"dominated_by": id}` as "dominated by C<id>", the physical candidate
-// that dominates it.
+// that dominates it, or `{"excluded_by_deployment": source}` as "excluded by
+// the deployment: raw data not retained" (the caller's own exclusion `i` as
+// "excluded_candidates[i]").
 function prunedReasonText(reason) {
   if (typeof reason === 'string') return reason.replace(/_/g, ' ');
   if (isPlainObject(reason) && 'dominated_by' in reason) return `dominated by C${reason.dominated_by}`;
+  if (isPlainObject(reason) && 'excluded_by_deployment' in reason) {
+    const source = reason.excluded_by_deployment;
+    const named = typeof source === 'string' ? source.replace(/_/g, ' ')
+      : isPlainObject(source) && isPlainObject(source.excluded_candidate) ? `excluded_candidates[${source.excluded_candidate.index}]`
+        : compactWire(source);
+    return `excluded by the deployment: ${named}`;
+  }
   return compactWire(reason);
 }
 

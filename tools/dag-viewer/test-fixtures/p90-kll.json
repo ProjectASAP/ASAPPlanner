@@ -1,8 +1,14 @@
 {
   "accuracy_guarantees": "enforced",
   "deployment_capabilities": {
+    "counter_semantics": {
+      "extrapolation": true,
+      "reset_handling": true
+    },
+    "excluded_candidates": [],
     "query_time_results_retained": false,
     "raw_data_retained": false,
+    "state_not_mergeable_across_windows": [],
     "supported_summaries": [
       {
         "readouts": [
@@ -237,9 +243,9 @@
         "groups": [
           {
             "aggregate_coverage": "covers G2 through [Aggregate quantile(q=0.9)] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
-            "candidate_count": 2,
+            "candidate_count": 3,
             "candidate_count_by_origin": {
-              "pass1": 2
+              "pass1": 3
             },
             "candidates": [
               {
@@ -288,6 +294,47 @@
                   "NonASAP": {
                     "Project": {
                       "child": 3,
+                      "cols": [
+                        {
+                          "alias": "ts",
+                          "expr": {
+                            "Column": 0
+                          }
+                        },
+                        {
+                          "alias": "value",
+                          "expr": {
+                            "Column": 1
+                          }
+                        },
+                        {
+                          "alias": "$promql_series_identity",
+                          "expr": {
+                            "Column": 2
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": null,
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  7
+                ],
+                "fused_groups": [],
+                "index": 2,
+                "label": "Project",
+                "operator": {
+                  "NonASAP": {
+                    "Project": {
+                      "child": 7,
                       "cols": [
                         {
                           "alias": "ts",
@@ -437,7 +484,8 @@
             },
             "parents": [
               0,
-              4
+              4,
+              8
             ],
             "queries": [
               0
@@ -984,6 +1032,398 @@
               }
             ],
             "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": null,
+            "candidate_count": 1,
+            "candidate_count_by_origin": {
+              "pass1": 1
+            },
+            "candidates": [
+              {
+                "added": false,
+                "children": [
+                  8
+                ],
+                "fused_groups": [],
+                "index": 0,
+                "label": "SummaryEstimate Quantile(q=0.9)",
+                "operator": {
+                  "ASAP": {
+                    "SummaryEstimate": {
+                      "query": {
+                        "Quantile": {
+                          "q": 0.9
+                        }
+                      },
+                      "summary_input": 8
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": null,
+                "required_accuracy": [
+                  null
+                ]
+              }
+            ],
+            "children": [
+              8
+            ],
+            "column_lineage": [
+              "data.ts",
+              "G7.1",
+              "data.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": null,
+            "id": 7,
+            "label": "SummaryEstimate Quantile(q=0.9)",
+            "operator": {
+              "ASAP": {
+                "SummaryEstimate": {
+                  "query": {
+                    "Quantile": {
+                      "q": 0.9
+                    }
+                  },
+                  "summary_input": 8
+                }
+              }
+            },
+            "parents": [
+              0
+            ],
+            "queries": [
+              0
+            ],
+            "result_kind": "instant_vector",
+            "roots_of": [],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "data"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": "covers G2 through [SummaryAgg DDSketch] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
+            "candidate_count": 7,
+            "candidate_count_by_origin": {
+              "pass1": 7
+            },
+            "candidates": [
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 0,
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.1
+                  }
+                },
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 1,
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.05
+                  }
+                },
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 2,
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.02
+                  }
+                },
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 3,
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.01
+                  }
+                },
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 4,
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.005
+                  }
+                },
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 5,
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.002
+                  }
+                },
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 6,
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.001
+                  }
+                },
+                "required_accuracy": [
+                  null
+                ]
+              }
+            ],
+            "children": [
+              1
+            ],
+            "column_lineage": [
+              "data.ts",
+              "G8.1",
+              "data.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": null,
+            "id": 8,
+            "label": "SummaryAgg DDSketch",
+            "operator": {
+              "ASAP": {
+                "SummaryAgg": {
+                  "child": 1,
+                  "filter": null,
+                  "input": {
+                    "item": null,
+                    "weight": {
+                      "Column": "SampleValue"
+                    }
+                  },
+                  "reduction": "PerEntity",
+                  "summary_type": {
+                    "Sketch": "DDSketch"
+                  }
+                }
+              }
+            },
+            "parents": [
+              7
+            ],
+            "queries": [
+              0
+            ],
+            "result_kind": "state",
+            "roots_of": [],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "data"
+                }
+              }
+            ],
+            "shareable_when_equal": true
           }
         ],
         "step": "pass1",
@@ -993,9 +1433,9 @@
         "groups": [
           {
             "aggregate_coverage": "covers G2 through [Aggregate quantile(q=0.9)] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
-            "candidate_count": 2,
+            "candidate_count": 3,
             "candidate_count_by_origin": {
-              "pass1": 2
+              "pass1": 3
             },
             "candidates": [
               {
@@ -1095,6 +1535,60 @@
                 "origin": "pass1",
                 "parameters": null,
                 "pruned": false,
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  7
+                ],
+                "fused_groups": [],
+                "index": 2,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": "α^log = 0: metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+                        "satisfies_logical_requirement": false
+                      }
+                    ],
+                    "group": 7
+                  }
+                ],
+                "label": "Project",
+                "operator": {
+                  "NonASAP": {
+                    "Project": {
+                      "child": 7,
+                      "cols": [
+                        {
+                          "alias": "ts",
+                          "expr": {
+                            "Column": 0
+                          }
+                        },
+                        {
+                          "alias": "value",
+                          "expr": {
+                            "Column": 1
+                          }
+                        },
+                        {
+                          "alias": "$promql_series_identity",
+                          "expr": {
+                            "Column": 2
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": null,
+                "pruned": true,
                 "required_accuracy": [
                   null
                 ]
@@ -1238,7 +1732,8 @@
             },
             "parents": [
               0,
-              4
+              4,
+              8
             ],
             "queries": [
               0
@@ -2531,6 +3026,538 @@
               }
             ],
             "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": null,
+            "candidate_count": 1,
+            "candidate_count_by_origin": {
+              "pass1": 1
+            },
+            "candidates": [
+              {
+                "added": false,
+                "children": [
+                  8
+                ],
+                "fused_groups": [],
+                "index": 0,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": "α^log = 0: metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+                        "satisfies_logical_requirement": false
+                      },
+                      {
+                        "producer": 1,
+                        "rejection": "α^log = 0: metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+                        "satisfies_logical_requirement": false
+                      },
+                      {
+                        "producer": 2,
+                        "rejection": "α^log = 0: metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+                        "satisfies_logical_requirement": false
+                      },
+                      {
+                        "producer": 3,
+                        "rejection": "α^log = 0: metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+                        "satisfies_logical_requirement": false
+                      },
+                      {
+                        "producer": 4,
+                        "rejection": "α^log = 0: metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+                        "satisfies_logical_requirement": false
+                      },
+                      {
+                        "producer": 5,
+                        "rejection": "α^log = 0: metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+                        "satisfies_logical_requirement": false
+                      },
+                      {
+                        "producer": 6,
+                        "rejection": "α^log = 0: metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+                        "satisfies_logical_requirement": false
+                      }
+                    ],
+                    "group": 8
+                  }
+                ],
+                "label": "SummaryEstimate Quantile(q=0.9)",
+                "operator": {
+                  "ASAP": {
+                    "SummaryEstimate": {
+                      "query": {
+                        "Quantile": {
+                          "q": 0.9
+                        }
+                      },
+                      "summary_input": 8
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": null,
+                "pruned": true,
+                "required_accuracy": [
+                  null
+                ]
+              }
+            ],
+            "children": [
+              8
+            ],
+            "column_lineage": [
+              "data.ts",
+              "G7.1",
+              "data.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": {
+              "period_ms": 60000,
+              "phase_ms": 0
+            },
+            "id": 7,
+            "label": "SummaryEstimate Quantile(q=0.9)",
+            "operator": {
+              "ASAP": {
+                "SummaryEstimate": {
+                  "query": {
+                    "Quantile": {
+                      "q": 0.9
+                    }
+                  },
+                  "summary_input": 8
+                }
+              }
+            },
+            "parents": [
+              0
+            ],
+            "queries": [
+              0
+            ],
+            "result_kind": "instant_vector",
+            "roots_of": [],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "data"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": "covers G2 through [SummaryAgg DDSketch] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
+            "candidate_count": 7,
+            "candidate_count_by_origin": {
+              "pass1": 7
+            },
+            "candidates": [
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 0,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      }
+                    ],
+                    "group": 1
+                  }
+                ],
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.1
+                  }
+                },
+                "pruned": true,
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 1,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      }
+                    ],
+                    "group": 1
+                  }
+                ],
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.05
+                  }
+                },
+                "pruned": true,
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 2,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      }
+                    ],
+                    "group": 1
+                  }
+                ],
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.02
+                  }
+                },
+                "pruned": true,
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 3,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      }
+                    ],
+                    "group": 1
+                  }
+                ],
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.01
+                  }
+                },
+                "pruned": true,
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 4,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      }
+                    ],
+                    "group": 1
+                  }
+                ],
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.005
+                  }
+                },
+                "pruned": true,
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 5,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      }
+                    ],
+                    "group": 1
+                  }
+                ],
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.002
+                  }
+                },
+                "pruned": true,
+                "required_accuracy": [
+                  null
+                ]
+              },
+              {
+                "added": false,
+                "children": [
+                  1
+                ],
+                "fused_groups": [],
+                "index": 6,
+                "inputs": [
+                  {
+                    "edges": [
+                      {
+                        "producer": 0,
+                        "rejection": null,
+                        "satisfies_logical_requirement": true
+                      }
+                    ],
+                    "group": 1
+                  }
+                ],
+                "label": "SummaryAgg DDSketch",
+                "operator": {
+                  "ASAP": {
+                    "SummaryAgg": {
+                      "child": 1,
+                      "filter": null,
+                      "input": {
+                        "item": null,
+                        "weight": {
+                          "Column": "SampleValue"
+                        }
+                      },
+                      "reduction": "PerEntity",
+                      "summary_type": {
+                        "Sketch": "DDSketch"
+                      }
+                    }
+                  }
+                },
+                "origin": "pass1",
+                "parameters": {
+                  "DDSketch": {
+                    "alpha": 0.001
+                  }
+                },
+                "pruned": true,
+                "required_accuracy": [
+                  null
+                ]
+              }
+            ],
+            "children": [
+              1
+            ],
+            "column_lineage": [
+              "data.ts",
+              "G8.1",
+              "data.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": {
+              "period_ms": 60000,
+              "phase_ms": 0
+            },
+            "id": 8,
+            "label": "SummaryAgg DDSketch",
+            "operator": {
+              "ASAP": {
+                "SummaryAgg": {
+                  "child": 1,
+                  "filter": null,
+                  "input": {
+                    "item": null,
+                    "weight": {
+                      "Column": "SampleValue"
+                    }
+                  },
+                  "reduction": "PerEntity",
+                  "summary_type": {
+                    "Sketch": "DDSketch"
+                  }
+                }
+              }
+            },
+            "parents": [
+              7
+            ],
+            "queries": [
+              0
+            ],
+            "result_kind": "state",
+            "roots_of": [],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "data"
+                }
+              }
+            ],
+            "shareable_when_equal": true
           }
         ],
         "step": "pass2",
@@ -2742,6 +3769,29 @@
         "causes": [
           {
             "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 0,
+                  "index_in_group": 2
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          }
+        ],
+        "group": 0,
+        "index_in_group": 2
+      },
+      {
+        "causes": [
+          {
+            "root": {
               "below_required_accuracy": {
                 "consumer": {
                   "group": 3,
@@ -2833,6 +3883,292 @@
         ],
         "group": 4,
         "index_in_group": 3
+      },
+      {
+        "causes": [
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          },
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          },
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          },
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          },
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          },
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          },
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          }
+        ],
+        "group": 7,
+        "index_in_group": 0
+      },
+      {
+        "causes": [
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          }
+        ],
+        "group": 8,
+        "index_in_group": 0
+      },
+      {
+        "causes": [
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          }
+        ],
+        "group": 8,
+        "index_in_group": 1
+      },
+      {
+        "causes": [
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          }
+        ],
+        "group": 8,
+        "index_in_group": 2
+      },
+      {
+        "causes": [
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          }
+        ],
+        "group": 8,
+        "index_in_group": 3
+      },
+      {
+        "causes": [
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          }
+        ],
+        "group": 8,
+        "index_in_group": 4
+      },
+      {
+        "causes": [
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          }
+        ],
+        "group": 8,
+        "index_in_group": 5
+      },
+      {
+        "causes": [
+          {
+            "root": {
+              "metric_rule": {
+                "accepted_metrics": [
+                  "rank"
+                ],
+                "consumer": {
+                  "group": 7,
+                  "index_in_group": 0
+                },
+                "input": 0,
+                "producer_metric": "relative"
+              }
+            },
+            "text": "metric rule: the consumer accepts [Rank] on this input, not the producer's Relative",
+            "through_pruned_candidates": []
+          }
+        ],
+        "group": 8,
+        "index_in_group": 6
       }
     ]
   },
@@ -3407,7 +4743,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 0,
@@ -3438,7 +4776,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 1,
@@ -3449,7 +4789,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 1,
@@ -3478,7 +4820,9 @@
           "lifetime": "None",
           "timing": "query_time"
         },
-        "reason": "raw_data_not_retained"
+        "reason": {
+          "excluded_by_deployment": "raw_data_not_retained"
+        }
       },
       {
         "group": 2,
@@ -3489,7 +4833,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "raw_data_not_retained"
+        "reason": {
+          "excluded_by_deployment": "raw_data_not_retained"
+        }
       },
       {
         "group": 2,
@@ -3500,7 +4846,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "raw_data_not_retained"
+        "reason": {
+          "excluded_by_deployment": "raw_data_not_retained"
+        }
       },
       {
         "group": 2,
@@ -3511,7 +4859,9 @@
           },
           "timing": "ingestion_time"
         },
-        "reason": "raw_data_not_retained"
+        "reason": {
+          "excluded_by_deployment": "raw_data_not_retained"
+        }
       },
       {
         "group": 3,
@@ -3522,7 +4872,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 4,
@@ -3533,7 +4885,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 4,
@@ -3564,7 +4918,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 4,
@@ -3595,7 +4951,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 4,
@@ -3626,7 +4984,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 4,
@@ -3637,7 +4997,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 4,
@@ -3648,7 +5010,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 5,
@@ -3659,7 +5023,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 5,
@@ -3670,7 +5036,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 5,
@@ -3681,7 +5049,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 6,
@@ -3692,7 +5062,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 6,
@@ -3723,7 +5095,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 6,
@@ -3754,7 +5128,9 @@
           },
           "timing": "query_time"
         },
-        "reason": "query_time_results_not_retained"
+        "reason": {
+          "excluded_by_deployment": "query_time_results_not_retained"
+        }
       },
       {
         "group": 6,
