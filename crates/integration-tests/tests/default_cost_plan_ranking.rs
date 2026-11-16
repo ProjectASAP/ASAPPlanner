@@ -267,6 +267,120 @@ fn sum_rate_at_1_hz_every_300_s_keeps_stored_rate_states() {
     assert_eq!(plan_kind(&plan), PlanKind::StoredStates);
 }
 
+/// 10 Hz, every 10 s.
+const TEN_HZ_EVERY_10_S: Setting = Setting {
+    sample_interval_ms: 100,
+    evaluation_interval_ms: 10_000,
+};
+/// 1 Hz, every 60 s.
+const ONE_HZ_EVERY_60_S: Setting = Setting {
+    sample_interval_ms: 1_000,
+    evaluation_interval_ms: 60_000,
+};
+
+/// 10 Hz, every 300 s.
+const TEN_HZ_EVERY_300_S: Setting = Setting {
+    sample_interval_ms: 100,
+    evaluation_interval_ms: 300_000,
+};
+
+/// `quantile_over_time(0.99, latency[1h])`, 1% relative, at 10 Hz, raw data
+/// kept. Measured cost per second (cost model 1's default prices on the
+/// measured CPU and memory), exact plan against stored DDSketch windows:
+/// 417.8 against 287.0 every 10 s, 71.3 against 44.0 every 60 s, 13.9
+/// against 11.0 every 300 s; the stored plan answers 4–80x faster. Each
+/// stored state holds 4.3–5.4 KB (`DdSketch::memory_bytes`); charged the
+/// 18.8 KB bound for values over nine decades, the stored plan was
+/// predicted 2x more expensive than exact and never selected.
+#[test]
+fn quantile_at_10_hz_with_raw_data_keeps_stored_ddsketch_windows() {
+    for setting in [TEN_HZ_EVERY_10_S, TEN_HZ_EVERY_60_S, TEN_HZ_EVERY_300_S] {
+        let (plan, _) = selected(&workload(QUANTILE, setting), true);
+        assert_eq!(plan_kind(&plan), PlanKind::StoredStates, "{setting:?}");
+        assert!(has_sketch(&plan), "{setting:?}");
+    }
+}
+
+/// `plan` with every KLL it keeps or builds at `k`.
+fn with_kll_k(plan: &PhysicalASAPDAG, k: u32) -> PhysicalASAPDAG {
+    use asap_types::summary_type::SketchParams;
+    let mut plan = plan.clone();
+    for node in &mut plan.nodes {
+        if let Some(SketchParams::Kll { k: old }) = &mut node.parameters {
+            *old = k;
+        }
+    }
+    plan
+}
+
+/// `quantile_over_time(0.99, latency[1h])`, 1% rank, at 1 Hz every 10 s and
+/// every 60 s, raw data not kept. Stage 2 offers stored KLL windows at
+/// k = 1,404 and at k = 547; merging 360 windows of 10 rows per series
+/// measures 4.8 ms per series at k = 1,404 and 1.7 ms at k = 547 (the
+/// merged sketch grows towards its `k`). Measured cost per second, k =
+/// 1,404 against k = 547: 589 against 240 every 10 s, 31.4 against 19.4
+/// every 60 s. Charged a flat merge per state, both cost the same to the
+/// last digit and the MILP picked either. It now selects the smaller `k`.
+#[test]
+fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
+    use asap_types::summary_type::SketchParams;
+    for setting in [ONE_HZ_EVERY_10_S, ONE_HZ_EVERY_60_S] {
+        let w = workload(QUANTILE_RANK, setting);
+        let (plan, _) = selected(&w, false);
+        assert_eq!(plan_kind(&plan), PlanKind::StoredStates, "{setting:?}");
+        let kll_ks: Vec<u32> = plan
+            .nodes
+            .iter()
+            .filter_map(|node| match node.parameters {
+                Some(SketchParams::Kll { k }) => Some(k),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !kll_ks.is_empty() && kll_ks.iter().all(|&k| k == 547),
+            "{setting:?}: selected KLL k {kll_ks:?}, the smallest offered is 547"
+        );
+        let entries: Vec<_> = w.query_workload.entries().collect();
+        let data = w.data_workload.clone().unwrap();
+        let cost = |k| {
+            let (cost, _) = asap_cost::plan_cost(
+                &with_kll_k(&plan, k),
+                &entries,
+                &data,
+                &CostInputs::default(),
+            )
+            .unwrap();
+            cost.cost_per_second.unwrap()
+        };
+        let (large, small) = (cost(1_404), cost(547));
+        assert!(
+            large > 1.25 * small,
+            "{setting:?}: k = 1,404 predicted {large}/s, k = 547 {small}/s; measured 1.6-2.5x"
+        );
+    }
+}
+
+/// `sum by (job) (sum_over_time(latency[5m]))` at 1 Hz, raw data kept.
+/// Measured cost per second, the query-time Sum accumulator grouped by
+/// `job` against the selected plan: 1.44 against 1.73 (stored 10 s Sum
+/// windows) every 10 s, 0.047 against 0.094 (the exact per-series
+/// aggregate) every 300 s. The stored plan
+/// pays a finalize of 2.5 µs per series (charged 40 ns), and the exact plan
+/// carries each row's `job` label through its per-series aggregate (37 ns
+/// per row, uncharged).
+#[test]
+fn sum_over_time_5m_at_1_hz_with_raw_data_builds_the_sum_at_query_time() {
+    let query = relative("sum by (job) (sum_over_time(latency[5m]))");
+    for setting in [ONE_HZ_EVERY_10_S, ONE_HZ_EVERY_300_S] {
+        let (plan, _) = selected(&workload(query, setting), true);
+        assert_eq!(
+            plan_kind(&plan),
+            PlanKind::QueryTimeExactAccumulator,
+            "{setting:?}"
+        );
+    }
+}
+
 /// A plan measured against the exact plan: the stored-state plan (Stage 3's
 /// selection without raw data), or a plan built at query time from raw data
 /// that Stage 3 selected before the measured unit costs, kept as a fixture
@@ -567,4 +681,71 @@ fn compaction_latency_is_zero_for_ingestion_time_nodes_holding_no_states() {
             "{kept} kept at ingestion time"
         );
     }
+}
+
+/// `max_over_time(latency[5m])` at 1 Hz, raw data kept, every 10 s and
+/// every 60 s. Measured cost per second, stored Max windows against the
+/// exact plan: 1.44 against 1.62–1.66 every 10 s, 0.240 against about
+/// 0.27 every 60 s (regret 1.13–1.24 when exact was selected). The stored
+/// plan was over-charged 29%: a Max state's merge measures 125 ns, not a
+/// Sum's 230, and a chain emits an exact state in 1.3–2.1 µs, not 2.5.
+#[test]
+fn max_over_time_5m_at_1_hz_with_raw_data_keeps_stored_max_windows() {
+    let query = relative("max_over_time(latency[5m])");
+    for setting in [ONE_HZ_EVERY_10_S, ONE_HZ_EVERY_60_S] {
+        let (plan, _) = selected(&workload(query, setting), true);
+        assert_eq!(plan_kind(&plan), PlanKind::StoredStates, "{setting:?}");
+    }
+}
+
+/// `sum by (job) (rate(requests_total[5m]))` and the same `increase` at
+/// 10 Hz every 300 s, raw data kept. Measured cost per second (cost model
+/// 1's default prices on the measured usage), the Rate or Increase built at
+/// query time from raw rows against stored 300 s windows: 0.86 against
+/// 0.95 for both. A grouping's cost per row depends on the sample rate:
+/// the executor visits each group's state once per 10 s raw batch, which
+/// holds 100 rows of a series at 10 Hz and 10 at 1 Hz, and a chain also
+/// splits each group's rows of a batch by window. Charged one per-row
+/// constant fitted across both rates, the query-time build was
+/// over-charged at 10 Hz (69 ns per row measured, 82 charged) while the
+/// stored chain was charged about right, so the stored plan was predicted
+/// cheaper (regret 1.08–1.10 in every run).
+#[test]
+fn sum_rate_and_increase_over_5m_at_10_hz_every_300_s_with_raw_data_build_at_query_time() {
+    for query in [
+        relative("sum by (job) (rate(requests_total[5m]))"),
+        relative("sum by (job) (increase(requests_total[5m]))"),
+    ] {
+        let (plan, _) = selected(&workload(query, TEN_HZ_EVERY_300_S), true);
+        assert_eq!(
+            plan_kind(&plan),
+            PlanKind::QueryTimeExactAccumulator,
+            "{query:?}"
+        );
+    }
+}
+
+/// Two identical `sum_over_time(m[5m])` every 60 s over 1,000 series of a
+/// gauge at 1 Hz, raw data kept, no accuracy target. Measured cost per
+/// evaluation (cost model 1's default prices on the measured usage), the
+/// exact scan against stored 10 s Sum windows: 0.323 against 0.261. The
+/// exact plan's per-series hash aggregate measures 46 ns per row where it
+/// was charged 35: at 1 Hz a 10 s raw batch holds 10 rows of a series, and
+/// the executor visits each series' group once per batch. Charged per row
+/// alone, the two plans were predicted within 0.4% (0.2527 against 0.2538)
+/// and the exact scan was selected.
+#[test]
+fn identical_sum_over_time_pair_at_1_hz_keeps_stored_sum_windows() {
+    let entry = r#"{"query": "sum_over_time(m[5m])", "demand": {"fixed_interval_at": {"interval": 60000, "evaluation_phase": 0}},
+        "requirements": {"max_latency_ms": null}, "predictability": {"predictable": {"known_at": null}}}"#;
+    let workload: PlanningWorkload = serde_json::from_str(&format!(
+        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{entry}, {entry}]}},
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 2000.0}}}},
+              "sources": {{
+                "m": {{"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000}},
+                "c": {{"series_count": 1000, "metric_type": "counter", "sample_interval": 1000}}}}}}}}"#
+    ))
+    .unwrap();
+    let (plan, _) = selected(&workload, true);
+    assert_eq!(plan_kind(&plan), PlanKind::StoredStates);
 }

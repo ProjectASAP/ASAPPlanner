@@ -28,6 +28,8 @@ fn exact_state_is_priced_at_the_executors_state_size() {
 enum Rows {
     /// One sample value a row.
     Values,
+    /// One latency-like sample value a row ([`latency_like`]).
+    LatencyLike,
     /// One label value a row, as Pass 1 feeds UnivMon a column.
     Labels,
     /// A label set and a weight a row.
@@ -44,7 +46,7 @@ impl Rows {
     /// with a heap alone took about 22 s in a debug build.
     fn fed(&self) -> u32 {
         match self {
-            Rows::Values => 10_000,
+            Rows::Values | Rows::LatencyLike => 10_000,
             Rows::Labels | Rows::Keyed => 1_000,
         }
     }
@@ -57,7 +59,7 @@ impl Rows {
         use asap_types::summary_type::{SummaryInputExpr, SummaryUpdate};
         let item = Some(SummaryInputExpr::Column(ColumnRef::Named("item".into())));
         match self {
-            Rows::Values => SummaryUpdate::column(ColumnRef::SampleValue),
+            Rows::Values | Rows::LatencyLike => SummaryUpdate::column(ColumnRef::SampleValue),
             Rows::Labels => SummaryUpdate {
                 item,
                 weight: SummaryInputExpr::Constant(1.0),
@@ -95,13 +97,123 @@ fn library_ddsketch_bytes(alpha: f64, values: &[f64]) -> u64 {
     sketch.memory_bytes() as u64
 }
 
-/// A DDSketch is priced for what `asap_sketchlib` can hold after its
-/// rows: at least what it holds for a few samples, for samples of either
-/// sign, and for many samples over nine decades; a store less for values
-/// declared non-negative. Many rows are priced as unknown ones.
+/// A uniform draw in [0, 1) from a fixed hash of `x`.
+fn uniform(mut x: u64) -> f64 {
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    x ^= x >> 33;
+    (x >> 11) as f64 / (1_u64 << 53) as f64
+}
+
+/// `n` latency-like values of series `series`: draws of an exponential
+/// distribution of mean 10, from a fixed hash of `(series, i)`.
+fn latency_like(series: u64, n: u32) -> Vec<f64> {
+    (0..u64::from(n))
+        .map(|i| -(1.0 - uniform((series << 32) ^ i)).ln() * 10.0)
+        .collect()
+}
+
+/// `n` values of series `series` with a floor, as measured latencies have:
+/// draws of a lognormal distribution of median 10 ms and σ = 1 (half of
+/// them within 5–20 ms), from a fixed hash of `(series, i)`.
+fn lognormal(series: u64, n: u32) -> Vec<f64> {
+    (0..u64::from(n))
+        .map(|i| {
+            // Box–Muller over two hashed uniforms.
+            let u1 = 1.0 - uniform((series << 32) ^ (2 * i));
+            let u2 = uniform((series << 32) ^ (2 * i + 1));
+            let normal = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+            10.0 * normal.exp()
+        })
+        .collect()
+}
+
+/// `n` values of series `series` of a narrow gauge: uniform in 100 ± 10.
+fn narrow_gauge(series: u64, n: u32) -> Vec<f64> {
+    (0..u64::from(n))
+        .map(|i| 90.0 + 20.0 * uniform((series << 32) ^ i))
+        .collect()
+}
+
+/// `n` values of series `series` spread evenly in log over seven decades,
+/// [0.001, 10000], in random order, from a fixed hash of `(series, i)`.
+fn log_uniform_over_seven_decades(series: u64, n: u32) -> Vec<f64> {
+    (0..u64::from(n))
+        .map(|i| 0.001 * 10f64.powf(7.0 * uniform((series << 32) ^ i)))
+        .collect()
+}
+
+/// The mean bytes `asap_sketchlib`'s DDSketch holds over 20 series of `n`
+/// values each from `values`, of both signs when `signed`.
+fn library_ddsketch_mean_bytes(
+    alpha: f64,
+    n: u32,
+    signed: bool,
+    values: fn(u64, u32) -> Vec<f64>,
+) -> u64 {
+    let series = 20;
+    (0..series)
+        .map(|s| {
+            let values: Vec<f64> = values(s, n)
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| if signed && i % 2 == 0 { -v } else { v })
+                .collect();
+            library_ddsketch_bytes(alpha, &values)
+        })
+        .sum::<u64>()
+        / series
+}
+
+/// DDSketch states are charged as if their values spread like an
+/// exponential's ([`exponential_values_magnitude_ratio`]); these pin how
+/// far that assumption is from other value shapes, so a change to it shows
+/// here. At α = 0.01, non-negative values, 10 to 36,000 per state:
+/// lognormal latencies with a floor (σ = 1) are over-charged 1.08–1.13x; a
+/// narrow gauge of 100 ± 10, whose states hold one first block of buckets
+/// (1,168 bytes), 2.4x at 10 values to 5.6x at 36,000.
 #[test]
-fn ddsketch_state_bytes_bound_the_library() {
-    let alpha = 0.05;
+fn ddsketch_state_bytes_over_charge_narrower_values_within_their_bands() {
+    let alpha = 0.01;
+    let charged = |n: u32| {
+        sketch_state_bytes(
+            &SketchParams::DDSketch { alpha },
+            StateInputRows {
+                rows_per_state: Some(u64::from(n)),
+                non_negative: true,
+                value_magnitude_range: None,
+            },
+        ) as f64
+    };
+    for n in [10, 100, 600, 3_000, 36_000] {
+        let lognormal_held = library_ddsketch_mean_bytes(alpha, n, false, lognormal) as f64;
+        let ratio = charged(n) / lognormal_held;
+        assert!(
+            (1.0..=1.25).contains(&ratio),
+            "{n} lognormal values: charged {} for {lognormal_held} held, {ratio:.2}x",
+            charged(n)
+        );
+        let gauge_held = library_ddsketch_mean_bytes(alpha, n, false, narrow_gauge) as f64;
+        let ratio = charged(n) / gauge_held;
+        assert!(
+            (2.0..=6.0).contains(&ratio),
+            "{n} gauge values: charged {} for {gauge_held} held, {ratio:.2}x",
+            charged(n)
+        );
+    }
+}
+
+/// A DDSketch state is charged what `asap_sketchlib` holds on average for
+/// latency-like values, not the most it could hold over nine decades. At
+/// α = 0.01 the executor's stored states of 1,000 latency series hold
+/// 2.9 KB at 10 rows per state and 5.8 KB at 3,000, where the library's
+/// worst case charged 18.8 KB for both, so stored quantile windows looked
+/// 4x more expensive than they are.
+#[test]
+fn ddsketch_state_bytes_match_the_library_on_latency_like_values() {
+    let alpha = 0.01;
     let priced = |rows_per_state, non_negative| {
         sketch_state_bytes(
             &SketchParams::DDSketch { alpha },
@@ -112,71 +224,122 @@ fn ddsketch_state_bytes_bound_the_library() {
             },
         )
     };
-    // Ten Pareto(2) samples (scale 1), one 1 s tumbling window of a 10 Hz series.
-    let pareto: Vec<f64> = (0..10)
-        .map(|i| (1.0 - (f64::from(i) + 0.5) / 10.0).powf(-0.5))
-        .collect();
-    let signed: Vec<f64> = pareto.iter().map(|v| -v).chain(pareto.clone()).collect();
-    let decades: Vec<f64> = (0..10_000)
-        .map(|i| 10f64.powf(9.0 * f64::from((i * 7_919) % 10_000) / 10_000.0))
-        .collect();
-    let signed_decades: Vec<f64> = decades
-        .iter()
-        .enumerate()
-        .map(|(i, v)| if i % 2 == 0 { -v } else { *v })
-        .collect();
-    for (values, non_negative) in [
-        (&pareto[..], true),
-        (&[-2.0][..], false),
-        (&[2.0][..], false),
-        (&[-2.0, 2.0][..], false),
-        (&signed[..], false),
-        (&decades[..], true),
-        (&signed_decades[..], false),
-    ] {
-        let rows = Some(values.len() as u64);
-        assert!(
-            library_ddsketch_bytes(alpha, values) <= priced(rows, non_negative),
-            "{} values, non-negative: {non_negative}",
-            values.len()
-        );
+    for n in [1, 10, 100, 600, 3_000, 36_000] {
+        for signed in [false, true] {
+            let held = library_ddsketch_mean_bytes(alpha, n, signed, latency_like);
+            let charged = priced(Some(u64::from(n)), !signed);
+            assert!(
+                (1.0 / 1.5..=1.5).contains(&(charged as f64 / held as f64)),
+                "{n} values, signed {signed}: charged {charged}, held {held} on average"
+            );
+        }
     }
+    // Unknown rows span the assumed nine decades, more than any number of
+    // latency-like values does.
+    assert!(priced(None, true) > priced(Some(1_000_000), true));
     assert!(priced(Some(10_000), true) < priced(Some(10_000), false));
-    assert_eq!(priced(Some(10_000), false), priced(None, false));
+    assert!(priced(Some(10), true) < priced(Some(3_000), true));
 }
 
-/// A DDSketch over a column declaring its value magnitudes is costed at
-/// the bins they span, not nine decades. At α = 0.01, γ = 1.01 / 0.99 and
-/// a value `v` falls in bin `floor(ln v / ln γ)`: magnitudes in
-/// [0.001, 10000] take bins -346 to 460, 807 bins, where the default
-/// [1, 1e9] takes 0 to 1036, 1,037. With three or more non-negative rows
-/// the library's bound is `2 (bins + 126)` 8-byte slots plus the struct.
+/// A DDSketch's span is the smallest of the exponential spread of its
+/// rows, its column's declared `column_magnitudes` and the assumed nine
+/// decades. At α = 0.01, non-negative values:
+/// - a narrow gauge declared within [90, 110] spans a ratio of 1.22, 11
+///   buckets: 1,248 bytes at any number of rows, where `asap_sketchlib`
+///   holds 1,168 (undeclared, 2,744 at 10 rows and 6,552 at 36,000);
+/// - a range wider than the rows' spread (the latency generator's
+///   [2.7e-8, 1104], 10.6 decades) leaves the spread's bytes unchanged;
+/// - with the rows unknown, a declared [0.001, 10000] spans seven decades
+///   instead of nine.
 #[test]
-fn ddsketch_state_bytes_follow_the_declared_value_magnitude_range() {
+fn ddsketch_state_bytes_are_capped_by_the_declared_value_magnitude_range() {
     let alpha = 0.01;
-    let costed = |value_magnitude_range| {
+    let costed = |rows_per_state, value_magnitude_range| {
         sketch_state_bytes(
             &SketchParams::DDSketch { alpha },
             StateInputRows {
-                rows_per_state: Some(600),
+                rows_per_state,
                 non_negative: true,
                 value_magnitude_range,
             },
         )
     };
-    let struct_bytes = std::mem::size_of::<asap_sketchlib::DdSketch>() as u64;
-    let bytes_for_bins = |bins: u64| struct_bytes + 8 * 2 * (bins + 126);
+    let gauge = ValueMagnitudeRange {
+        min_abs: 90.0,
+        max_abs: 110.0,
+    };
+    for n in [10_u32, 600, 36_000] {
+        let rows = Some(u64::from(n));
+        let charged = costed(rows, Some(gauge));
+        assert_eq!(charged, 1_248, "{n} gauge rows");
+        let held = library_ddsketch_mean_bytes(alpha, n, false, narrow_gauge);
+        assert!(
+            (1.0..=1.1).contains(&(charged as f64 / held as f64)),
+            "{n} gauge rows: {charged} charged, {held} held"
+        );
+    }
+    let wide = ValueMagnitudeRange {
+        min_abs: 2.687e-8,
+        max_abs: 1_104.2,
+    };
+    for n in [10, 600, 36_000] {
+        assert_eq!(
+            costed(Some(n), Some(wide)),
+            costed(Some(n), None),
+            "{n} rows"
+        );
+    }
     let latency = ValueMagnitudeRange {
         min_abs: 0.001,
         max_abs: 10_000.0,
     };
-    assert_eq!(costed(Some(latency)), bytes_for_bins(807));
-    assert_eq!(costed(None), bytes_for_bins(1_037));
-    // Values a narrower range holds fit the costed bytes.
-    let values: Vec<f64> = (0..600)
-        .map(|i| 10f64.powf(-3.0 + 7.0 * f64::from(i) / 599.0))
-        .collect();
-    assert!(library_ddsketch_bytes(alpha, &values) <= costed(Some(latency)));
+    assert!(costed(None, Some(latency)) < costed(None, None));
+}
+
+/// The planner knows a state's rows, and its expected span is the
+/// exponential spread of those rows, which a declared range only caps.
+/// Values spread evenly in log over the whole of a declared seven decades
+/// ([0.001, 10000]), in random order, span more than that and are
+/// under-charged, most at few rows per state: at α = 0.01 the library
+/// holds 8.2–9.5 KB from 10 rows on (the mean of 20 series), charged
+/// 2,744 bytes at 10 rows per state (0.33 of it), 3,648 at 60 (0.38),
+/// 4,728 at 600 (0.50), 5,536 at 3,600 (0.59) and 6,552 at 36,000 (0.70).
+/// A known limit: the declared range cannot raise the span, since it
+/// bounds the column, not one state's rows. Charging such a state the
+/// expected span of `n` log-uniform values over the declared range
+/// (`(n − 1) / (n + 1)` of its decades) would charge these 0.78–0.81 of
+/// what they hold, but the latency generator's states, declared over its
+/// 10.6 decades, 1.3x (36,000 rows) to 3.6x (10 rows) of theirs, where
+/// they are charged 0.88–1.07 now.
+#[test]
+fn ddsketch_state_bytes_under_charge_log_uniform_values_over_a_declared_range() {
+    let alpha = 0.01;
+    let declared = ValueMagnitudeRange {
+        min_abs: 0.001,
+        max_abs: 10_000.0,
+    };
+    for (n, band) in [
+        (10_u32, 0.30..=0.37),
+        (60, 0.35..=0.42),
+        (600, 0.46..=0.55),
+        (3_600, 0.54..=0.64),
+        (36_000, 0.64..=0.75),
+    ] {
+        let charged = sketch_state_bytes(
+            &SketchParams::DDSketch { alpha },
+            StateInputRows {
+                rows_per_state: Some(u64::from(n)),
+                non_negative: true,
+                value_magnitude_range: Some(declared),
+            },
+        );
+        let held = library_ddsketch_mean_bytes(alpha, n, false, log_uniform_over_seven_decades);
+        let ratio = charged as f64 / held as f64;
+        assert!(
+            band.contains(&ratio),
+            "{n} rows: {charged} charged, {held} held ({ratio:.2})"
+        );
+    }
 }
 
 /// A KLL state is charged what `asap_sketchlib` allocates for the
@@ -231,14 +394,16 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
 /// Plan selection prices each state the executor builds per group at
 /// what the executor charges for it (#947). Each family is built
 /// through the executor's factory and fed `n` rows shaped as the
-/// pricing assumes: signed values over [`DDSKETCH_ASSUMED_MAGNITUDE_RANGE`],
-/// label values of [`ASSUMED_VALUE_KEY_BYTES`] keys for UnivMon, or
+/// pricing assumes: signed values over [`DDSKETCH_ASSUMED_MAGNITUDE_RANGE`]
+/// (signed latency-like values for DDSketch), label values of
+/// [`ASSUMED_VALUE_KEY_BYTES`] keys for UnivMon, or
 /// keyed rows whose tuple keys are [`ASSUMED_HEAP_KEY_BYTES`] long. The
 /// heap families' shapes are dominated by their heaps. The charge is
 /// the sketch's bytes plus the accumulator's own fields, named per
 /// family. It equals the priced bytes where `asap_sketchlib`'s estimate
 /// is exact (Count-Min, Count Sketch, HLL, KMV at `n` distinct items) and
-/// for KLL up to `k` rows. For DDSketch, the heap sketches and UnivMon
+/// for KLL up to `k` rows. DDSketch is priced at what it is expected to
+/// hold, within 1.5 times either way. For the heap sketches and UnivMon
 /// the price bounds it, by at most [`BYTES_AGREEMENT_FACTOR`] times once
 /// the state is full;
 /// UnivMon's price also bounds the bytes its sketch holds.
@@ -269,6 +434,8 @@ fn state_bytes_bound_the_executors_charge() {
         /// At least, and at most [`BYTES_AGREEMENT_FACTOR`] times once the
         /// state is full.
         Bound,
+        /// Within 1.5 times either way.
+        Expected,
     }
     // (family, parameters, rows fed, how it is priced, the
     // accumulator's own fields, rows at which the state is full: four
@@ -295,8 +462,8 @@ fn state_bytes_bound_the_executors_charge() {
         (
             A::DDSketch,
             SketchParams::DDSketch { alpha: 0.01 },
-            Rows::Values,
-            Priced::Bound,
+            Rows::LatencyLike,
+            Priced::Expected,
             0,
             10_000,
         ),
@@ -394,6 +561,7 @@ fn state_bytes_bound_the_executors_charge() {
             let family = FieldDataType::Sketch(*algorithm);
             let mut updater =
                 create_planner_accumulator(&family, Some(params), &rows.update()).unwrap();
+            let latency = latency_like(0, n);
             for i in 0..n {
                 match rows {
                     // Distinct magnitudes over the assumed range, in a
@@ -401,6 +569,11 @@ fn state_bytes_bound_the_executors_charge() {
                     Rows::Values => {
                         let at = f64::from(i * 7_919 % n) / f64::from(n);
                         let magnitude = DDSKETCH_ASSUMED_MAGNITUDE_RANGE.max_abs.powf(at);
+                        let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                        updater.update_single(sign * magnitude, 0).unwrap();
+                    }
+                    Rows::LatencyLike => {
+                        let magnitude = latency[i as usize];
                         let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
                         updater.update_single(sign * magnitude, 0).unwrap();
                     }
@@ -429,6 +602,12 @@ fn state_bytes_bound_the_executors_charge() {
                 // 2 (k - 1) items.
                 Priced::Kll { k } => assert!(
                     charged <= priced + 8 * 2 * (*k as usize - 1),
+                    "{context}, {charged} charged"
+                ),
+                // One value can be a zero, which no store holds.
+                Priced::Expected if n == 1 => assert!(charged <= priced, "{context}"),
+                Priced::Expected => assert!(
+                    (1.0 / 1.5..=1.5).contains(&(priced as f64 / charged as f64)),
                     "{context}, {charged} charged"
                 ),
                 Priced::Bound => {
@@ -543,13 +722,13 @@ fn priced_bytes_agree_with_the_executor() {
             Rows::Values,
             None,
         ),
-        // Priced for values over nine decades
-        // (`DDSKETCH_ASSUMED_VALUE_RANGE`); these span three.
+        // Priced for the spread its 10,000 rows are expected to span
+        // (`exponential_values_magnitude_ratio`); these span three decades.
         (
             sketch(A::DDSketch),
             Some(SketchParams::DDSketch { alpha: 0.01 }),
             Rows::Values,
-            gap(1313, 2.982),
+            None,
         ),
         (
             sketch(A::Hll),
@@ -636,6 +815,7 @@ fn priced_bytes_agree_with_the_executor() {
         let mut updater =
             create_planner_accumulator(&family, params.as_ref(), &rows.update()).unwrap();
         let mut seed = 0x5EED_u64;
+        let latency = latency_like(0, rows_fed);
         for i in 0..rows_fed {
             let key = (next_uniform(&mut seed) * f64::from(DISTINCT_KEYS)) as u32;
             match rows {
@@ -646,6 +826,9 @@ fn priced_bytes_agree_with_the_executor() {
                         .update_single(latency_ms, i64::from(i) * 1_000)
                         .unwrap();
                 }
+                Rows::LatencyLike => updater
+                    .update_single(latency[i as usize], i64::from(i) * 1_000)
+                    .unwrap(),
                 Rows::Labels => updater
                     .update_value(&Value::Utf8(label(key).into()), 0)
                     .unwrap(),
@@ -707,4 +890,34 @@ fn priced_bytes_agree_with_the_executor() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A summary state's row holds its labels, its window's time and its
+/// series identity beside the state; the state's own bytes, which a merge
+/// is costed by, leave them out. A stored per-series Sum carrying `job`:
+/// 144 bytes per row, 56 of them its state.
+#[test]
+fn state_bytes_per_row_leave_out_what_the_row_holds_beside_its_state() {
+    use asap_types::ir::schema::{Field, PROMQL_SERIES_IDENTITY};
+    use asap_types::summary_type::{ExactKind, ExactParams};
+    let schema = Schema::new(vec![
+        Field::new("ts", FieldDataType::Plain(DataType::Int64), false),
+        Field::new(
+            "state",
+            FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            false,
+        ),
+        Field::new("job", FieldDataType::Plain(DataType::Utf8), false),
+        Field::new(
+            PROMQL_SERIES_IDENTITY,
+            FieldDataType::Plain(DataType::Utf8),
+            false,
+        ),
+    ]);
+    assert_eq!(state_row_bytes_beside_state(&schema), 88);
+    let edge = EdgeStatistics {
+        rows: 1_000,
+        bytes: 144_000,
+    };
+    assert_eq!(state_bytes_per_row(edge, &schema), 56);
 }
