@@ -83,7 +83,7 @@ probability `δ / min(R, V · fan_in)` it must meet
 fails only when a readout value one of its `V` covered output values
 depends on does. `R` is the readout values the query reads per evaluation
 (the values per evaluation of every readout group below it, summed: the
-series their scans read), and `fan_in` the most readout values one output
+series their scans read, for readouts keyed by the sources' labels), and `fan_in` the most readout values one output
 value depends on: 1 when no reduction lies above the readout, the
 reduction's input values under one (all of `R` for a global `max`; for
 `sum by (job)` too, since the declared facts bound how many jobs there are,
@@ -110,8 +110,12 @@ build several readers share serves the readers whose levels its θ meets.
 Stage 3 only checks the guarantee; it never resizes. At equal δ, the scope
 covering the most values is the strictest: every group (`G`, when `G` is
 above 100), then a 1% share (100), then a 5% share (20), then a single
-value (1). A whole-result target with an unbound `G` splits over `R` alone,
-and stays unmet when `R` is unbound too. A grouped result's `G` is bound by
+value (1). A whole-result target with an unbound `G` splits over `R`, which
+bounds every readout value read only when each readout is keyed by the
+sources' labels or columns: grouped by a computed key or a time, one value
+per bucket of `GROUP BY date_trunc('minute', ts)` is about 16 values over the
+last 15 minutes however few groups of rows the table declares, so `R` is
+unbound there. With both unbound the target stays unmet. A grouped result's `G` is bound by
 the distinct values its sources declare for its group keys
 (`SourceFacts.distinct_values_per_label`, and
 `distinct_values_per_label_set` for labels that depend on each other): the
@@ -320,7 +324,8 @@ largest error the readout's output may have for that query.
   values the scope covers depend on (`R` summed over every readout group
   below it, `Memo::max_values_per_evaluation` each: at most the series
   scanned below it, the declared distinct values of its state's keys, one
-  without keys), since a reduction such as `max` fails when any readout it
+  without keys, when the keys are the sources' labels or columns; unbound
+  for a computed key or a time), since a reduction such as `max` fails when any readout it
   reads does. `SELECT count(DISTINCT dst) FROM flows` at δ = 0.01 reads
   one distinct count, so its readout keeps 0.01. `max by (job) (q or r)`
   with 3 series per side reads 6 readout values, and one job's value may
