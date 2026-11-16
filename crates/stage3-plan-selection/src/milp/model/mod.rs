@@ -383,6 +383,15 @@ pub(crate) enum SelectionMilpError {
     Infeasible,
     /// The solver failed.
     Solver(String),
+    /// The solver's selection misses `query`'s accuracy target when
+    /// checked exactly: its limits, such as a failure probability of
+    /// 1e-12 per output value (δ = 0.01 over 1e10 values), are below the
+    /// solver's feasibility tolerance 1e-10, so (K) cannot be trusted.
+    TargetBelowSolverPrecision {
+        query: QueryId,
+        /// The target's δ per output value; `None` without a δ.
+        failure_probability_per_output_value: Option<f64>,
+    },
 }
 
 /// Builds and solves the MILP: minimize
@@ -398,7 +407,10 @@ pub(crate) enum SelectionMilpError {
 /// [`copies_in_equivalent_contexts`]), with
 /// the $h_v$ of a candidate whose
 /// executions are all left out, then the coefficients kept are scaled so
-/// the largest is 1,000 (HiGHS's tolerances are absolute).
+/// the largest is 1,000 (HiGHS's tolerances are absolute). With (K),
+/// HiGHS solves at feasibility tolerance 1e-10 and the selection is then
+/// checked exactly ([`AccuracyRules::selection_meets_targets`]): one that
+/// misses a target is [`SelectionMilpError::TargetBelowSolverPrecision`].
 pub(crate) fn solve_selection(
     inputs: &SelectionInputs<'_>,
 ) -> Result<SolvedSelection, SelectionMilpError> {
@@ -432,6 +444,7 @@ pub(crate) fn solve_selection(
             )
         })
         .unwrap_or_default();
+    let k_has_rows = !accuracy_rows.is_empty();
     // The objective's terms per second, unscaled: (cost, variable). A
     // query-time scan's retention is in its source's r_s.
     let terms: Vec<(f64, Variable)> = costs
@@ -520,13 +533,13 @@ pub(crate) fn solve_selection(
     model.set_option("mip_abs_gap", 0.0);
     model.set_option("output_flag", false);
     model.set_option("threads", 1);
-    if let Some(tolerance) = rules
-        .as_ref()
-        .and_then(|rules| rules.feasibility_tolerance())
-    {
-        // (K)'s limits can be far below HiGHS's absolute default 1e-7.
-        model.set_option("primal_feasibility_tolerance", tolerance);
-        model.set_option("mip_feasibility_tolerance", tolerance);
+    if k_has_rows {
+        // HiGHS's tolerances are absolute: its default 1e-7 is a tenth of a
+        // per-value δ of 1e-6 (δ = 0.01 over 1e4 values), so (K) solves at
+        // 1e-10, the least HiGHS accepts. The selection is checked exactly
+        // after the solve.
+        model.set_option("primal_feasibility_tolerance", 1e-10);
+        model.set_option("mip_feasibility_tolerance", 1e-10);
     }
     let construction_ms = started.elapsed().as_millis() as u64;
     let started = Instant::now();
@@ -573,6 +586,27 @@ pub(crate) fn solve_selection(
             (*query, execution)
         })
         .collect();
+    // (K) holds only to the solver's tolerance, 1e-10: a per-value δ near
+    // or below it may be missed by orders of magnitude. The exact check
+    // refuses such a selection rather than return a plan that may not
+    // meet its target.
+    if let Some(Err(query)) = rules
+        .as_ref()
+        .map(|rules| rules.selection_meets_targets(inputs, &selected_edges, &answering))
+    {
+        let memo = &inputs.physical.logical_candidates.memo;
+        let memo_query = &memo.queries()[query.0];
+        return Err(SelectionMilpError::TargetBelowSolverPrecision {
+            query,
+            failure_probability_per_output_value: memo_query.accuracy_target.as_ref().and_then(
+                |target| {
+                    target.failure_probability_per_output_value(
+                        memo_query.number_of_values_per_query_evaluation,
+                    )
+                },
+            ),
+        });
+    }
     let (cost_per_second_without_request_overhead, retention_ms) =
         selection_cost_per_second(inputs, &selected, &selected_edges, &answering);
     Ok(SolvedSelection {

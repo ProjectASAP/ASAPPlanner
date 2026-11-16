@@ -4,7 +4,8 @@
 //! per error metric, over the error each execution adds and passes on
 //! ([`AccuracyRules`], [`ErrorModel`]), and the same rule checked on one
 //! selection ([`AccuracyRules::selection_meets_targets`]), which the greedy
-//! upper bound needs to be a feasible plan of (K). One composition rule,
+//! upper bound needs to be a feasible plan of (K) and which checks the
+//! solver's selection exactly. One composition rule,
 //! [`AccuracyRules::compose`], gives both that check and the ceilings of
 //! (K)'s big-M rows; [`accuracy_constraints`] writes the same rule as rows.
 
@@ -91,11 +92,6 @@ pub(super) struct AccuracyRules {
     /// Per (query, output group its root reads), what its root check
     /// bounds the output by.
     roots: HashMap<(QueryId, MemoGroupId), RootLimits>,
-    /// The smallest positive limit a target sets (an ε, a δ per output
-    /// value), before [`tolerated_limit`] widens it; `None` when none does
-    /// (exact targets only). The solver's feasibility tolerance is set
-    /// from it ([`Self::feasibility_tolerance`]).
-    smallest_positive_limit: Option<f64>,
 }
 
 /// What a root check of (K) bounds one query output by, each limit
@@ -209,13 +205,6 @@ impl AccuracyRules {
             (0..candidate_of_execution.len()).collect();
         executions_producers_first
             .sort_by_key(|&c| position_in_order[candidate_of_execution[c].group.0 as usize]);
-        let mut smallest_positive_limit: Option<f64> = None;
-        let mut see_limit = |limit: f64| {
-            if limit > 0.0 {
-                smallest_positive_limit =
-                    Some(smallest_positive_limit.map_or(limit, |smallest| smallest.min(limit)));
-            }
-        };
         let roots = query_roots_with_target(memo)
             .into_iter()
             .map(|(query, root, target, allowed_metrics)| {
@@ -225,10 +214,6 @@ impl AccuracyRules {
                 let mut tolerated_error_per_metric = [0.0; AccuracyMetric::COUNT];
                 for metric in allowed_metrics {
                     tolerated_error_per_metric[metric.index()] = tolerated_limit(target.max_error);
-                    see_limit(target.max_error);
-                }
-                if let Some(limit) = failure_probability {
-                    see_limit(limit);
                 }
                 let limits = RootLimits {
                     tolerated_error_per_metric,
@@ -245,26 +230,7 @@ impl AccuracyRules {
             reached_by_query_with_target,
             executions_producers_first,
             roots,
-            smallest_positive_limit,
         })
-    }
-
-    /// The primal and MIP feasibility tolerance HiGHS solves (K) at:
-    /// $\min(10^{-7}, 10^{-3} \cdot \ell)$ for the smallest positive limit
-    /// $\ell$ a target sets, so a row may pass its limit by at most a
-    /// thousandth of the smallest one, but not below 1e-10, the least
-    /// HiGHS accepts (a per-value δ under 1e-7 is then checked only to
-    /// 1e-10); `None` (HiGHS's defaults) when it is not below 1e-7.
-    /// HiGHS's tolerances are absolute: δ = 0.01 over a whole result of 1e4
-    /// values is 1e-6 per value, of which the default 1e-7 is a tenth.
-    /// Scaling (K)'s rows by their limits instead kept the defaults but
-    /// solved RangeHeavy-8users about 4× slower (larger big-M
-    /// coefficients).
-    ///
-    /// Example: relative 0.05 with δ = 0.01 over 1e4 values: 1e-9.
-    pub(super) fn feasibility_tolerance(&self) -> Option<f64> {
-        let tolerance = (1e-3 * self.smallest_positive_limit?).max(1e-10);
-        (tolerance < 1e-7).then_some(tolerance)
     }
 
     /// What the root check of `query`'s output reading `group` bounds it
@@ -335,19 +301,21 @@ impl AccuracyRules {
     /// Whether the selection `edges` (by position in
     /// `SelectableExecutions::edges`) with the outputs `answering` (query,
     /// execution answering it, in `SelectableExecutions::answering` order)
-    /// meets (K): each execution a query with a target reaches, composed
-    /// ([`Self::compose`]) from the producers selected on its inputs,
-    /// admits its inputs' errors and, at each output of a query with a
-    /// target, is within the root's limits.
+    /// meets (K), exactly in f64: each execution a query with a target
+    /// reaches, composed ([`Self::compose`]) from the producers selected
+    /// on its inputs, admits its inputs' errors and, at each output of a
+    /// query with a target, is within the root's limits. `Err` names the
+    /// first query (in `answering` order) whose output misses its target.
     ///
     /// Example: p99 / p50 at relative 0.03 over two readouts at 0.02 does
-    /// not meet it (1.111 · 0.04 = 0.044); over two at 0.01 it does.
+    /// not meet it (1.111 · 0.04 = 0.044), so it is `Err` with the ratio's
+    /// query; over two at 0.01 it does.
     pub(super) fn selection_meets_targets(
         &self,
         inputs: &SelectionInputs<'_>,
         edges: &[usize],
         answering: &[(QueryId, usize)],
-    ) -> bool {
+    ) -> Result<(), QueryId> {
         let selectable = inputs.selectable;
         let count = selectable.executions().len();
         let mut reads: Vec<Vec<(usize, usize)>> = vec![Vec::new(); count];
@@ -358,47 +326,48 @@ impl AccuracyRules {
         }
         let mut composed: Vec<Option<ExecutionError>> = vec![None; count];
         let mut on_walk = vec![false; count];
-        let mut pending: Vec<(usize, bool)> = answering.iter().map(|&(_, v)| (v, false)).collect();
-        while let Some((c, producers_done)) = pending.pop() {
-            if composed[c].is_some() {
-                continue;
-            }
-            if !producers_done {
-                if on_walk[c] {
-                    // A cycle, which (E) forbids.
-                    return false;
-                }
-                on_walk[c] = true;
-                pending.push((c, true));
-                pending.extend(
-                    reads[c]
-                        .iter()
-                        .filter(|&&(_, u)| composed[u].is_none())
-                        .map(|&(_, u)| (u, false)),
-                );
-                continue;
-            }
-            if !self.reached_by_query_with_target[c] {
-                // No query with a target reaches it: (K) has no rows for
-                // it, nor for its producers.
-                composed[c] = Some(ExecutionError::default());
-                continue;
-            }
-            let Some(inputs_read) = reads[c]
-                .iter()
-                .map(|&(i, u)| Some((i, composed[u]?)))
-                .collect::<Option<Vec<_>>>()
-            else {
-                return false;
-            };
-            let composition = self.compose(c, inputs_read);
-            if !composition.inputs_admitted {
-                return false;
-            }
-            composed[c] = Some(composition.error);
-        }
         let memo = &inputs.physical.logical_candidates.memo;
         for (&(_, group), &(query, v)) in memo.output_groups().iter().zip(answering) {
+            // Compose `v` and every execution below it, producers first.
+            let mut pending: Vec<(usize, bool)> = vec![(v, false)];
+            while let Some((c, producers_done)) = pending.pop() {
+                if composed[c].is_some() {
+                    continue;
+                }
+                if !producers_done {
+                    if on_walk[c] {
+                        // A cycle, which (E) forbids.
+                        return Err(query);
+                    }
+                    on_walk[c] = true;
+                    pending.push((c, true));
+                    pending.extend(
+                        reads[c]
+                            .iter()
+                            .filter(|&&(_, u)| composed[u].is_none())
+                            .map(|&(_, u)| (u, false)),
+                    );
+                    continue;
+                }
+                if !self.reached_by_query_with_target[c] {
+                    // No query with a target reaches it: (K) has no rows
+                    // for it, nor for its producers.
+                    composed[c] = Some(ExecutionError::default());
+                    continue;
+                }
+                let Some(inputs_read) = reads[c]
+                    .iter()
+                    .map(|&(i, u)| Some((i, composed[u]?)))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return Err(query);
+                };
+                let composition = self.compose(c, inputs_read);
+                if !composition.inputs_admitted {
+                    return Err(query);
+                }
+                composed[c] = Some(composition.error);
+            }
             let Some(limits) = self.root_limits(query, group) else {
                 continue;
             };
@@ -408,17 +377,14 @@ impl AccuracyRules {
                 .iter()
                 .zip(limits.tolerated_error_per_metric)
                 .any(|(&error, limit)| error > limit)
+                || limits
+                    .tolerated_failure_probability_per_output_value
+                    .is_some_and(|limit| error.failure_probability > limit)
             {
-                return false;
-            }
-            if limits
-                .tolerated_failure_probability_per_output_value
-                .is_some_and(|limit| error.failure_probability > limit)
-            {
-                return false;
+                return Err(query);
             }
         }
-        true
+        Ok(())
     }
 }
 

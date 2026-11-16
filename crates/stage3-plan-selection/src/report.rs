@@ -198,6 +198,18 @@ pub enum ErrorSelectingPlan {
     /// The memo search's MILP solver failed.
     #[error("MILP solver: {0}")]
     Solver(String),
+    /// Query `query`'s accuracy target is below the solver's precision:
+    /// the MILP's selection misses it when checked exactly, so no plan is
+    /// returned rather than one that may not meet the target. Example: a
+    /// failure probability of 1e-12 per output value (δ = 0.01 over 1e10
+    /// values), below the solver's feasibility tolerance 1e-10.
+    #[error(
+        "query {query}: an accuracy target is below the solver's precision (failure probability per output value {failure_probability_per_output_value:?}); the solver's plan misses it, so no plan is returned"
+    )]
+    AccuracyTargetBelowSolverPrecision {
+        query: usize,
+        failure_probability_per_output_value: Option<f64>,
+    },
     /// The selection MILP implements cost model 1 only (#1095 §3).
     #[error("the selection MILP does not support {0}")]
     UnsupportedCostModel(String),

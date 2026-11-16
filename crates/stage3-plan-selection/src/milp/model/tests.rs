@@ -1595,23 +1595,26 @@ fn contexts_whose_queries_differ_only_in_values_not_split_by_k_are_copies() {
     }
 }
 
-/// p99 / p50 at relative 0.03 with δ = 0.01 over a whole result of 1e4
-/// values, 1e-6 per value, over readouts at relative 0.01 failing with
-/// 5.4e-7 (cost 1) or 4e-7 (cost 3) each: two at 5.4e-7 fail together with
-/// up to 1.08e-6, above 1e-6 by 8e-8, within HiGHS's default feasibility
-/// tolerance 1e-7; one of each, 9.4e-7, is within it. (K) solves at 1e-9
-/// (`AccuracyRules::feasibility_tolerance`), so it selects one of each.
-#[test]
-fn k_bounds_a_per_value_failure_probability_below_the_default_solver_tolerance() {
+/// p99 / p50 at relative 0.03 with δ = 0.01 over a whole result of
+/// `values` values, over readouts at relative 0.01 failing with
+/// `failure_probabilities` (cheap at cost 1, dear at cost 3) each: the
+/// solved selection, with which readout levels it selects (cheap, dear).
+fn solve_ratio_over_values(
+    values: u64,
+    failure_probabilities: [f64; 2],
+) -> Result<(usize, usize), SelectionMilpError> {
     let mut memo = empty_memo();
-    let levels = [(0.01, 5.4e-7), (0.01, 4e-7)];
+    let levels = [
+        (0.01, failure_probabilities[0]),
+        (0.01, failure_probabilities[1]),
+    ];
     let (p99, p99_readouts) = ddsketch_readouts(&mut memo, 0.99, &levels);
     let (p50, p50_readouts) = ddsketch_readouts(&mut memo, 0.5, &levels);
     let ratio = group(&mut memo, arithmetic(ArithmeticOpKind::Div, p99, p50));
     memo.add_query(MemoQuery {
         root: QueryRoot::Operator(ratio),
         accuracy_target: Some(relative(0.03).failure_probability(0.01)),
-        number_of_values_per_query_evaluation: Some(10_000),
+        number_of_values_per_query_evaluation: Some(values),
     });
     let physical = physical(memo.clone(), &every_candidate(&memo));
     let mut w = vec![0.0; physical.physical_candidates.len()];
@@ -1620,12 +1623,48 @@ fn k_bounds_a_per_value_failure_probability_below_the_default_solver_tolerance()
         w[physical_of(&physical, readouts[1])] = 3.0;
     }
     let (solved, _) = solve(&physical, &every_10s(1), &w, &[], &[]);
-    let selected = candidates(&solved.unwrap());
+    let selected = candidates(&solved?);
     let count = |level: usize| {
         [&p99_readouts, &p50_readouts]
             .iter()
             .filter(|readouts| selected.contains(&physical_of(&physical, readouts[level])))
             .count()
     };
-    assert_eq!((count(0), count(1)), (1, 1), "{selected:?}");
+    Ok((count(0), count(1)))
+}
+
+/// p99 / p50 at relative 0.03 with δ = 0.01 over a whole result of 1e4
+/// values, 1e-6 per value, over readouts at relative 0.01 failing with
+/// 5.4e-7 (cost 1) or 4e-7 (cost 3) each: two at 5.4e-7 fail together with
+/// up to 1.08e-6, above 1e-6 by 8e-8, within HiGHS's default feasibility
+/// tolerance 1e-7; one of each, 9.4e-7, is within it. (K) solves at 1e-10,
+/// so it selects one of each.
+#[test]
+fn k_bounds_a_per_value_failure_probability_below_the_default_solver_tolerance() {
+    assert_eq!(solve_ratio_over_values(10_000, [5.4e-7, 4e-7]), Ok((1, 1)));
+}
+
+/// The same ratio over 1e8 values (1e-10 per value) and 1e10 values
+/// (1e-12 per value), with readouts failing at 5.4e-11 / 4e-11 and
+/// 5.4e-13 / 4e-13: two cheap readouts miss the limit by 8e-12 and 8e-14,
+/// within HiGHS's least feasibility tolerance 1e-10, so the solver selects
+/// them. The exact check after the solve finds the miss, and selection
+/// fails rather than return a plan that may not meet the target.
+#[test]
+fn a_per_value_failure_probability_below_the_solver_precision_is_an_error() {
+    for (values, failure_probabilities, per_value) in [
+        (100_000_000, [5.4e-11, 4e-11], 1e-10),
+        (10_000_000_000, [5.4e-13, 4e-13], 1e-12),
+    ] {
+        let solved = solve_ratio_over_values(values, failure_probabilities);
+        let Err(SelectionMilpError::TargetBelowSolverPrecision {
+            query,
+            failure_probability_per_output_value: Some(delta),
+        }) = solved
+        else {
+            panic!("{values}: {solved:?}");
+        };
+        assert_eq!(query, QueryId(0));
+        assert!((delta - per_value).abs() <= 1e-6 * per_value, "{delta}");
+    }
 }

@@ -147,9 +147,11 @@ fn feasible_plan_cost_per_second(
                 continue 'repair;
             }
         }
-        if rules
-            .is_some_and(|rules| !rules.selection_meets_targets(inputs, &plan.edges, &answering))
-        {
+        if rules.is_some_and(|rules| {
+            rules
+                .selection_meets_targets(inputs, &plan.edges, &answering)
+                .is_err()
+        }) {
             return None;
         }
         let (cost, _) =

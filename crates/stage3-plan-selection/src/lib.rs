@@ -119,6 +119,13 @@ pub fn select_plan(
     .map_err(|error| match error {
         SelectionMilpError::Infeasible => infeasible(&costs),
         SelectionMilpError::Solver(reason) => ErrorSelectingPlan::Solver(reason),
+        SelectionMilpError::TargetBelowSolverPrecision {
+            query,
+            failure_probability_per_output_value,
+        } => ErrorSelectingPlan::AccuracyTargetBelowSolverPrecision {
+            query: query.0,
+            failure_probability_per_output_value,
+        },
     })?;
     let plan = plan_of(physical, &solved, &outputs).map_err(|error| {
         ErrorSelectingPlan::Solver(format!("the selected plan is invalid: {error}"))
