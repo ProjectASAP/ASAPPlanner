@@ -760,9 +760,11 @@ fn kll_merge_cpu_ops(k: u32) -> f64 {
 /// Stage 2 offers stored KLL windows of the same shape at k = 1,404 and
 /// k = 547 for `quantile_over_time(0.99, latency[1h])` at a 1% rank
 /// target. Merging each series' 360 windows of 10 rows measures 4.8 ms per
-/// series at k = 1,404 and 1.7 ms at k = 547, since each window is merged
-/// into the group's state, which grows towards its `k`. A merge charged
-/// per state alone cost both the same.
+/// series at k = 1,404 and 1.7 ms at k = 547 in the executor, since each
+/// window is merged into the group's state, which grows towards its `k`. A
+/// merge charged per state alone cost both the same. The charge per series
+/// is within 2x of each measurement, the merged state charged at the bytes
+/// the planner gives it (17.0 KB at k = 547, where the library holds 8.9).
 #[test]
 fn a_kll_merge_costs_more_at_a_larger_k() {
     let small = kll_merge_cpu_ops(547);
@@ -771,6 +773,16 @@ fn a_kll_merge_costs_more_at_a_larger_k() {
         large > 1.5 * small,
         "k = 1,404: {large} ops/s, k = 547: {small}; measured 2.8x"
     );
+    // Operations per second at one merge every 10 s, over 1,000 series, at
+    // the default 1e-6 ms per operation.
+    let ms_per_series = |ops_per_second: f64| ops_per_second * 10.0 / 1_000.0 * 1e-6;
+    for (k, ops_per_second, measured_ms) in [(547, small, 1.7), (1_404, large, 4.8)] {
+        let charged_ms = ms_per_series(ops_per_second);
+        assert!(
+            (0.5..=2.0).contains(&(charged_ms / measured_ms)),
+            "k = {k}: charged {charged_ms:.2} ms per series, measured {measured_ms}"
+        );
+    }
 }
 
 /// Finalizing 1,000 exact accumulators into their output rows measures

@@ -320,13 +320,26 @@ fn with_kll_k(plan: &PhysicalASAPDAG, k: u32) -> PhysicalASAPDAG {
 /// merged sketch grows towards its `k`). Measured cost per second, k =
 /// 1,404 against k = 547: 589 against 240 every 10 s, 31.4 against 19.4
 /// every 60 s. Charged a flat merge per state, both cost the same to the
-/// last digit and the MILP picked either.
+/// last digit and the MILP picked either. It now selects the smaller `k`.
 #[test]
 fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
+    use asap_types::summary_type::SketchParams;
     for setting in [ONE_HZ_EVERY_10_S, ONE_HZ_EVERY_60_S] {
         let w = workload(QUANTILE_RANK, setting);
         let (plan, _) = selected(&w, false);
         assert_eq!(plan_kind(&plan), PlanKind::StoredStates, "{setting:?}");
+        let kll_ks: Vec<u32> = plan
+            .nodes
+            .iter()
+            .filter_map(|node| match node.parameters {
+                Some(SketchParams::Kll { k }) => Some(k),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !kll_ks.is_empty() && kll_ks.iter().all(|&k| k == 547),
+            "{setting:?}: selected KLL k {kll_ks:?}, the smallest offered is 547"
+        );
         let entries: Vec<_> = w.query_workload.entries().collect();
         let data = w.data_workload.clone().unwrap();
         let cost = |k| {
