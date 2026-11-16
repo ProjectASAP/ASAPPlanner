@@ -353,7 +353,9 @@ pub fn node_resource_usage_and_cost<'a>(
         payload if payload.keeps_input_window() => producers
             .first()
             .map_or(1, |producer| producer.tumbling_windows),
-        _ => 1,
+        // Any other operator spans one window: `keeps_input_window`
+        // answers per operator, so listing them here would decide nothing.
+        Payload::NonASAP(_) | Payload::ASAP(_) => 1,
     };
     let sources: BTreeSet<&str> =
         if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {

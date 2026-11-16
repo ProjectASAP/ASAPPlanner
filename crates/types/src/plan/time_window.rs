@@ -361,14 +361,13 @@ pub fn shift_back_ms_below<P: TimeIndexedPlan>(plan: &P, node: P::Node) -> Optio
         // shift.
         let mut path_ends = inputs.is_empty();
         for input in inputs {
-            match plan.operator_of(input) {
-                Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) => {
-                    if shift.at.is_some() {
-                        return None;
-                    }
-                    pending.push((input, walked_ms.checked_add(shift.offset_ms)?));
+            if let Operator::NonASAP(NonASAPOp::TimeShift { shift, .. }) = plan.operator_of(input) {
+                if shift.at.is_some() {
+                    return None;
                 }
-                _ => path_ends = true,
+                pending.push((input, walked_ms.checked_add(shift.offset_ms)?));
+            } else {
+                path_ends = true;
             }
         }
         if path_ends {
