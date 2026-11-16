@@ -854,3 +854,71 @@ fn scalar_arithmetic_follows_its_operands_signs() {
         assert_eq!(signs(&memo, group), [Unknown, value, Unknown], "{group:?}");
     }
 }
+
+/// Finalizing an exact accumulator gives its value the sign the logical
+/// aggregate it computes has (`measure_sign`), per accumulator kind: a sum,
+/// min or max keeps the sign of the values it was updated with, a count is
+/// non-negative, and a counter's increase, rate or irate is non-negative
+/// only over non-negative values. Over `neg` (declared non-positive) a
+/// counter-reset-aware delta can have either sign: samples -5 then -3 are
+/// an increase of 2, samples -3 then -5 a reset and an increase of -5.
+///
+/// | Group | Expression | value sign |
+/// |---|---|---|
+/// | G4 | `Finalize(SummaryAgg[Rate](neg[1m]))` | `Unknown` (was the weight's `NonPositive`) |
+/// | G4 | `Finalize(SummaryAgg[Increase](neg[1m]))` | `Unknown` |
+/// | G4 | `Finalize(SummaryAgg[IRate](neg[1m]))` | `Unknown` |
+/// | G4 | `Finalize(SummaryAgg[Sum](neg[1m]))` | `NonPositive` |
+/// | G4 | `Finalize(SummaryAgg[Min](neg[1m]))` | `NonPositive` |
+/// | G4 | `Finalize(SummaryAgg[Count](neg[1m]))` | `NonNegative` |
+/// | G4 | `Finalize(SummaryAgg[Rate](latency[1m]))` | `NonNegative` |
+#[test]
+fn a_finalized_exact_accumulator_has_its_aggregates_sign() {
+    use asap_types::summary_type::ExactKind;
+    let mut memo = Memo::new(&DataWorkload {
+        sources: BTreeMap::from([
+            (
+                "latency".to_string(),
+                SourceFacts {
+                    column_signs: BTreeMap::from([("value".to_string(), NonNegative)]),
+                    ..SourceFacts::default()
+                },
+            ),
+            (
+                "neg".to_string(),
+                SourceFacts {
+                    column_signs: BTreeMap::from([("value".to_string(), NonPositive)]),
+                    ..SourceFacts::default()
+                },
+            ),
+        ]),
+        ..DataWorkload::default()
+    });
+    let mut finalized_value_sign = |metric: &str, kind: ExactKind| {
+        let g1 = add(&mut memo, series(metric));
+        let g2 = add(&mut memo, range(MINUTE_MS, g1));
+        let g3 = add(&mut memo, state(FieldDataType::exact(kind), g2));
+        let g4 = add(
+            &mut memo,
+            Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: g3 }),
+        );
+        signs(&memo, g4)[VALUE]
+    };
+    for (metric, kind, expected) in [
+        ("neg", ExactKind::Rate, Unknown),
+        ("neg", ExactKind::Increase, Unknown),
+        ("neg", ExactKind::IRate, Unknown),
+        ("neg", ExactKind::Sum, NonPositive),
+        ("neg", ExactKind::Min, NonPositive),
+        ("neg", ExactKind::Max, NonPositive),
+        ("neg", ExactKind::Count, NonNegative),
+        ("latency", ExactKind::Rate, NonNegative),
+        ("latency", ExactKind::Sum, NonNegative),
+    ] {
+        assert_eq!(
+            finalized_value_sign(metric, kind),
+            expected,
+            "{kind:?} over {metric}"
+        );
+    }
+}

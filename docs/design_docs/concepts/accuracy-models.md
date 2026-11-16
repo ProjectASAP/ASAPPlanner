@@ -78,10 +78,11 @@ unknown (generic HLL) serves no query with an accuracy target
 heap size and its value guarantee alone (the contracts table).
 
 Pass 2 gives each sketch readout the error and per-value failure probability
-`δ / max(V, R)` it must meet, with `R` the readout group's values per
-evaluation (the series its scans read): a `max` over 1000 readouts returns
+`δ / max(V, R)` it must meet, with `R` the readout values the query's output
+can depend on (the values per evaluation of every readout group below it,
+summed: the series their scans read): a `max` over 1000 readouts returns
 one value yet fails when any readout does, so the union bound gives δ over
-every readout read;
+every readout read, and `max by (job) (q or r)` reads those of both sides;
 Pass 1's candidate takes the first requirement level and Pass 2 adds a copy
 per further level. A readout several queries reach gets the union of their
 levels. Pass 2 sizes nothing: a state has one build per listed θ, and each
@@ -227,7 +228,8 @@ within its validity cap `b_i` (`ErrorContract::error_factor_per_input` and
 |---|---|
 | Sort, TimeRange, TimeShift, Concat, a readout, a finalize, a summary merge | `β = 1` in any metric |
 | Filter on columns copied from a source (labels and keys) | `β = 1` in any metric; a filter comparing a computed value has none |
-| Project | Judged on the items reading a computed value (labels, the time and the series identity are copied): `β = 1` in any metric for a copied column; absolute error, `β = 1`, for `abs`, `clamp`, `clamp_min`, `clamp_max` (also PromQL's `promql_` functions) and a negation; relative error, `β = 1`, for a product with or quotient by a nonzero constant |
+| PromQL `and`, `unless`, `or`; `label_replace`, `label_join` of labels | `β = 1` in any metric on each input whose values are copied; `β = 0` on the right input of `and` and `unless`, whose values are not read. This needs each side's series to be exact: no operator with a contract drops a row by its value, and a readout emits the series the exact evaluation does. A relabel reading a computed value has none |
+| Project | Judged on the items reading a computed value (labels, the time and the series identity are copied): `β = 1` in any metric for a copied column; absolute error, `β = 1`, for `abs`, `clamp`, `clamp_min`, `clamp_max` (also PromQL's `promql_` functions) and a negation; relative error, `β = 1`, for `abs` and a negation (`\|−x̂ − (−x)\| = \|x̂ − x\|`, `\|\|x̂\| − \|x\|\| ≤ \|x̂ − x\|`, and `\|−x\| = \|\|x\|\| = \|x\|`) and for a product with or quotient by a nonzero constant |
 | Aggregate or exact-accumulator build of counts, min, max, avg, sum | Counts `β = 0`; min and max absolute or relative with `β = 1`; avg absolute with `β = 1`; sum and avg relative with `β = 1` when the values they aggregate are of one sign (the input column's `column_signs` is non-negative or non-positive): `\|Σ (x̂_i − x_i)\| ≤ ε Σ \|x_i\| = ε \|Σ x_i\|`; only when every group-by key is copied from a source (a `by` key as listed; for `without`, every column but the time, the sample value and the excluded ones); none with measure filters or `HAVING`, or with a key reading an estimate |
 | `+`, `-` | Absolute error, `β = 1` |
 | `/` | Relative error, `β = 1/(1 − b)` on both operands, the denominator capped at `b` |
@@ -240,9 +242,11 @@ algorithm's list, so it never excludes a listed θ. For relative errors `x`
 and `y` with `y ≤ b`, `(1 + x)(1 + y) − 1 ≤ (1 + b)·x + y`, and a ratio of
 relative errors `a` over `b` is within `(a + b)/(1 − b)`. A relative bound
 below 1 keeps zero at zero and keeps the sign, so a zero denominator gives the
-same non-finite answer exactly and approximately. The ratio rule relies on
-each operand's own relative guarantee (for DDSketch, its estimator contract:
-one-signed values within the mapping's range). A sum or difference of
+same non-finite answer exactly and approximately, except the sign of a zero:
+an exact −0.0 may be read as +0.0, which flips the infinity's sign. The ratio
+rule relies on each operand's own relative guarantee (for DDSketch, its
+estimator contract: one-signed values within the mapping's range). A sum or
+difference of
 relative errors has no relative bound (cancellation), and a rank error (KLL)
 has no value bound, so neither passes through division. Likewise, an exact
 sum above approximate values retains their uncertainty: exact arithmetic does
@@ -269,23 +273,33 @@ largest error the readout's output may have for that query.
 
 - A query whose path reads one readout gives one requirement level: the
   target divided by the path's factor, at the target's failure probability per
-  value: a whole-result δ split over the larger of `n_q` and the readout's
-  own values per evaluation (`Memo::max_values_per_evaluation`: at most the
-  series scanned below it, the declared distinct values of its state's keys,
-  one without keys), since a reduction such as `max` fails when any readout
-  it reads does. `SELECT count(DISTINCT dst) FROM flows` at δ = 0.01 reads
-  one distinct count, so its readout keeps 0.01.
-- A composed query (several readouts, such as a ratio) gives every level of
-  the error grid (10%, 5%, 2%, 1%, 0.5%, 0.2%, 0.1%) and the failure-probability
-  grid (powers of ten from 1e-2 down to 1e-5, continued down to the first
-  one at or below a tenth of the query's per-value failure probability) not
-  looser than the cap. The logical-edge check then
-  keeps the levels a producer's θ meets.
+  value: a whole-result δ split over the larger of `n_q` and the readout
+  values the query's output can depend on, summed over every readout group
+  below it (`Memo::max_values_per_evaluation` each: at most the series
+  scanned below it, the declared distinct values of its state's keys, one
+  without keys), since a reduction such as `max` fails when any readout it
+  reads does. `SELECT count(DISTINCT dst) FROM flows` at δ = 0.01 reads
+  one distinct count, so its readout keeps 0.01. `max by (job) (q or r)`
+  with 3 series per side reads 6 readout values, so each gets δ / 6; a
+  bare `q or r` copies each output value from one readout value, but its
+  whole result still fails when any of them does, so it too splits δ over
+  the readout values of both sides.
+- A composed query (several readouts whose errors reach its output, `β > 0`,
+  such as a ratio; `q and r` reads one, since `r`'s values are not read, and
+  `q or r` combines none, since each output value is copied from one side
+  and its error is that side's) gives every level of the error grid (10%,
+  5%, 2%, 1%, 0.5%, 0.2%, 0.1%) and the failure-probability grid (powers of
+  ten from 1e-2 down to 1e-5, continued down to the first one at or below a
+  tenth of the query's per-value failure probability) not looser than the
+  cap. The logical-edge check then keeps the levels a producer's θ meets.
 - A readout reached by several queries gets the union of their levels.
-- A count reads no value (`β = 0`): the readouts below it get no level
-  through it.
+- A count reads no value (`β = 0`), and neither does the right input of
+  `and` and `unless`: the readouts below it get no level through it, and
+  an operator above it combines no error of them (`q / count(r)` reads
+  one readout's error).
 - A query whose target sets a failure probability with no per-value one
-  (`n_q` or the readout's values per evaluation unknown) gives no level. A
+  (`n_q` or the values per evaluation of a readout below it unknown) gives
+  no level. A
   readout no query gives a level is pruned
   (`RootPruneReason::ValuesPerEvaluationUnknown`); one another query gives a
   level stays, and the query reads its group only exactly.

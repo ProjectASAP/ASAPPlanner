@@ -1,5 +1,5 @@
 use super::*;
-use asap_types::ir::operator::arguments::Reduction;
+use asap_types::ir::operator::arguments::{PromQLVectorSetOpKind, Reduction};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::QueryRoot;
@@ -9,7 +9,7 @@ use asap_types::test_support::memo_builders::{
     estimate, group, own_candidate, quantile_over_time, query, scan_group, sketch_state,
     with_series,
 };
-use asap_types::test_support::memo_fixtures::{aggregate, arithmetic};
+use asap_types::test_support::memo_fixtures::{aggregate, arithmetic, set_operator};
 
 /// The levels [`readout_levels`] gives the readout candidate `readout`.
 fn levels_of(memo: &Memo, readout: MemoGroupId) -> Vec<RequiredAccuracy> {
@@ -151,6 +151,156 @@ fn a_readout_of_one_value_keeps_the_whole_failure_probability() {
     };
     assert!(
         (required.failure_probability - 0.01).abs() < 1e-12,
+        "{required:?}"
+    );
+}
+
+/// `quantile_over_time(0.9, m[5m]) and quantile_over_time(0.5, m[5m])`
+/// copies the left values and reads only which series the right has
+/// (β = 0), so it combines no errors: the left readout gets the single
+/// level of its cap, 0.05 at δ = 0.01 over 100 series (1e-4), not the
+/// composed grid, and the right one gets none.
+#[test]
+fn an_and_combines_no_readout_errors() {
+    let target = AccuracyTarget::max_error(0.05)
+        .failure_probability(0.01)
+        .accuracy_metric(AccuracyMetric::Relative);
+    let readouts_under = |kind| {
+        let mut memo = Memo::new(&with_series("m", 100));
+        let (_, state, p90) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
+        let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
+        let root = group(&mut memo, set_operator(kind, p90, p50));
+        memo.add_query(MemoQuery {
+            root: QueryRoot::Operator(root),
+            accuracy_target: Some(target.clone()),
+            number_of_values_per_query_evaluation: Some(100),
+        });
+        (levels_of(&memo, p90), levels_of(&memo, p50))
+    };
+    let (left, right) = readouts_under(PromQLVectorSetOpKind::And);
+    let [required] = left[..] else {
+        panic!("one level for the left readout: {left:?}");
+    };
+    assert!((required.max_error - 0.05).abs() < 1e-12, "{required:?}");
+    assert!(
+        (required.failure_probability - 1e-4).abs() < 1e-12,
+        "{required:?}"
+    );
+    assert_eq!(right, vec![]);
+}
+
+/// `quantile_over_time(0.9, m[5m]) or quantile_over_time(0.5, m[5m])`
+/// copies each output value from one side, so its error is the larger of
+/// the two readouts' errors, not their sum: each readout gets the single
+/// level of its cap, 0.05. Its whole result still fails when any of the
+/// 200 readout values it can return does, so δ = 0.01 splits over all of
+/// them: 5e-5 per value, not 1e-4 over its 100 output values. A ratio of
+/// the same readouts combines both errors and keeps the composed grid.
+#[test]
+fn an_or_takes_each_value_from_one_readout() {
+    let target = AccuracyTarget::max_error(0.05)
+        .failure_probability(0.01)
+        .accuracy_metric(AccuracyMetric::Relative);
+    let readouts_under = |operator: fn(MemoGroupId, MemoGroupId) -> _| {
+        let mut memo = Memo::new(&with_series("m", 100));
+        let (_, state, p90) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
+        let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
+        let root = group(&mut memo, operator(p90, p50));
+        memo.add_query(MemoQuery {
+            root: QueryRoot::Operator(root),
+            accuracy_target: Some(target.clone()),
+            number_of_values_per_query_evaluation: Some(100),
+        });
+        [levels_of(&memo, p90), levels_of(&memo, p50)]
+    };
+    for levels in readouts_under(|q, r| set_operator(PromQLVectorSetOpKind::Or, q, r)) {
+        let [required] = levels[..] else {
+            panic!("one level for each readout of `or`: {levels:?}");
+        };
+        assert!((required.max_error - 0.05).abs() < 1e-12, "{required:?}");
+        assert!(
+            (required.failure_probability - 5e-5).abs() < 1e-12,
+            "{required:?}"
+        );
+    }
+    for levels in readouts_under(|q, r| arithmetic(ArithmeticOpKind::Div, q, r)) {
+        assert!(
+            levels.len() > 1,
+            "the composed grid for a ratio: {levels:?}"
+        );
+    }
+}
+
+/// A reduction above an `or` reads every readout value of both sides:
+/// `max by (job) (quantile_over_time(0.9, m[5m]) or
+/// quantile_over_time(0.5, m[5m]))` over 3 series returns 3 values, but
+/// fails when any of the 6 readout values below it does, so each readout
+/// gets δ = 0.01 / 6, not 0.01 / 3 (one side's values), which would let
+/// the union bound reach 2δ.
+#[test]
+fn a_reduction_above_an_or_splits_the_failure_probability_over_both_sides() {
+    let mut memo = Memo::new(&with_series("m", 3));
+    let (_, state, p90) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
+    let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
+    let either = group(&mut memo, set_operator(PromQLVectorSetOpKind::Or, p90, p50));
+    let max = group(
+        &mut memo,
+        aggregate(Reduction::by(vec![0]), AggIntent::Max { col: None }, either),
+    );
+    memo.add_query(MemoQuery {
+        root: QueryRoot::Operator(max),
+        accuracy_target: Some(
+            AccuracyTarget::max_error(0.05)
+                .failure_probability(0.01)
+                .accuracy_metric(AccuracyMetric::Relative),
+        ),
+        number_of_values_per_query_evaluation: Some(3),
+    });
+    for readout in [p90, p50] {
+        let levels = levels_of(&memo, readout);
+        let [required] = levels[..] else {
+            panic!("one level for each readout: {levels:?}");
+        };
+        assert!(
+            (required.failure_probability - 0.01 / 6.0).abs() < 1e-12,
+            "{required:?}"
+        );
+    }
+}
+
+/// A count reads which readouts exist, not their values (β = 0), so an
+/// operator above it combines no error of them:
+/// `quantile_over_time(0.9, m[5m]) / count(quantile_over_time(0.5, m[5m]))`
+/// over 100 series at relative error 0.05 and δ = 0.01 reads one
+/// readout's error. The p90 readout gets the single level of its cap,
+/// 0.05 · (1 − 0.1) = 0.045 (the division's factor 1 / (1 − 0.1)) at
+/// 1e-4 per value, not the composed grid.
+#[test]
+fn an_operator_above_a_count_of_readouts_combines_one_readout_error() {
+    let mut memo = Memo::new(&with_series("m", 100));
+    let (_, state, p90) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
+    let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
+    let count = group(
+        &mut memo,
+        aggregate(Reduction::by(vec![]), AggIntent::Count, p50),
+    );
+    let ratio = group(&mut memo, arithmetic(ArithmeticOpKind::Div, p90, count));
+    memo.add_query(MemoQuery {
+        root: QueryRoot::Operator(ratio),
+        accuracy_target: Some(
+            AccuracyTarget::max_error(0.05)
+                .failure_probability(0.01)
+                .accuracy_metric(AccuracyMetric::Relative),
+        ),
+        number_of_values_per_query_evaluation: Some(100),
+    });
+    let levels = levels_of(&memo, p90);
+    let [required] = levels[..] else {
+        panic!("one level for the p90 readout: {levels:?}");
+    };
+    assert!((required.max_error - 0.045).abs() < 1e-12, "{required:?}");
+    assert!(
+        (required.failure_probability - 1e-4).abs() < 1e-12,
         "{required:?}"
     );
 }

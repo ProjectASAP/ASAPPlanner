@@ -14,6 +14,17 @@ pub(crate) use state_column::StateStorage;
 /// Shared ownership of schema metadata; the field model is identical at planning
 /// and execution time.
 pub type SchemaRef = Arc<Schema>;
+
+/// The bits of the Prometheus stale marker, a NaN that Remote Write
+/// carries when a series ends. It is not a sample.
+pub(crate) const STALE_MARKER: u64 = 0x7ff0_0000_0000_0002;
+
+/// Whether `value` is the Prometheus stale marker ([`STALE_MARKER`]),
+/// not a sample: `f64::from_bits(0x7ff0_0000_0000_0002)` is one, while an
+/// ordinary NaN such as `0.0 / 0.0` is a sample.
+pub(crate) fn is_stale_marker(value: f64) -> bool {
+    value.to_bits() == STALE_MARKER
+}
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Null,

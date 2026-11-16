@@ -113,9 +113,12 @@ keeps the metric: an input's error and the output's are in the same one.
 | --- | --- | --- | --- |
 | `Sort`, `TimeRange`, `TimeShift`, `Concat`, a readout, a finalize, `SummaryMerge` | any | 1 | none |
 | `Filter` whose predicate reads only columns copied from a source (labels, keys) | any | 1 | none |
+| PromQL `and`, `unless` (the right side's series are exact: no operator with a contract drops a row by its value) | any | 1 on the left, 0 on the right | none |
+| PromQL `or` (each side's series are exact, as for `and`: `or` keeps the right side's series the left side lacks) | any | 1 on both | none |
+| `PromqlRelabel` (`label_replace`, `label_join`) whose new label reads no computed value | any | 1 | none |
 | `Project` whose items reading a computed value (not a copied label, the time or the series identity) are copies | any | 1 | none |
 | the same, with items computing `abs`, `clamp`, `clamp_min`, `clamp_max` (or PromQL's `promql_abs`, …) or a negation of a column | absolute | 1 | none |
-| the same, with items multiplying or dividing a column by a nonzero literal | relative | 1 | none |
+| the same, with items computing `abs` or a negation of a column, or multiplying or dividing a column by a nonzero literal | relative | 1 | none |
 | `Aggregate` (or exact accumulator build) by keys copied from a source, without measure filters or `HAVING`: `count` | any | 0 | none |
 | the same: `min`, `max` | absolute, relative | 1 | none |
 | the same: `avg` | absolute | 1 | none |
@@ -153,14 +156,19 @@ The contracts are used in three places:
   and metric. A query that reads one readout gives it one level, its cap
   at the target's failure probability per value (a whole-result δ split
   over the larger of the values one evaluation returns and the readout
-  group's values per evaluation, `Memo::max_values_per_evaluation`, since a
-  `max` over many readouts fails
-  when any of them does); a count passes no cap down; a query that combines several
-  readouts (a ratio of two quantiles) gives every level of the grid
+  values the query's output can depend on, summed over every readout group
+  below it, `Memo::max_values_per_evaluation` each, since a `max` over many
+  readouts fails when any of them does, and `max by (job) (q or r)` reads
+  the readouts of both sides); a count, and the right input of `and` and
+  `unless`, read no value and pass no cap down; a query that combines
+  several readouts whose errors reach its output (β > 0: a ratio of two
+  quantiles; `q and r` reads one, since `r`'s values are not read, and so
+  does `q / count(r)`; `q or r` combines none, since each output value is
+  copied from one side) gives every level of the grid
   `MAX_ERROR_LEVELS` × a failure-probability grid (powers of ten from 1e-2
   down to 1e-5, continued to the first at or below a tenth of the per-value
-  δ) that is not looser than the cap and the per-value δ. Pass 2 writes each level on a readout
-  candidate of its own.
+  δ) that is not looser than the cap and the per-value δ. Pass 2 writes
+  each level on a readout candidate of its own.
 - **$\alpha^{\log}$** (`ErrorMetricsOfMemo::edge_meets_logical_requirements`,
   `accuracy/src/logical_edge/mod.rs`): an edge into a readout holds when the
   producer's θ has a guarantee (measured, else `theoretical_guarantee`)

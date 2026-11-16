@@ -1,5 +1,6 @@
 //! PromQL per-series evaluation over the samples before an evaluation instant.
 use super::*;
+use crate::values::is_stale_marker;
 use planner_types::ir::operator::{AggIntent, AtModifier};
 
 /// A PromQL subquery grid: every multiple of `step_ms` in
@@ -13,9 +14,6 @@ pub struct SubquerySteps {
     pub at_ms: Option<i64>,
 }
 
-/// The bits of the Prometheus stale marker, a NaN that Remote Write
-/// carries when a series ends. It is not a sample.
-pub(crate) const STALE_MARKER: u64 = 0x7ff0_0000_0000_0002;
 const MAX_SUBQUERY_STEPS: i64 = 100_000;
 
 impl Operator {
@@ -294,13 +292,13 @@ pub(super) fn execute<'a>(
                 let result = match function {
                     None => samples
                         .last()
-                        .filter(|p| p.1.to_bits() != STALE_MARKER)
+                        .filter(|p| !is_stale_marker(p.1))
                         .map(|p| p.1),
                     Some(intent) => {
                         let fresh = samples
                             .iter()
                             .copied()
-                            .filter(|p| p.1.to_bits() != STALE_MARKER)
+                            .filter(|p| !is_stale_marker(p.1))
                             .collect::<Vec<_>>();
                         if fresh.is_empty() {
                             None

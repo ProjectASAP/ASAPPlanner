@@ -540,7 +540,12 @@ fn compile_internal(
                     .ok_or_else(|| invalid("a tumbling-window chain reads a time column"))?;
                 let width_ms = i64::try_from(*tumbling_window_width_ms)
                     .map_err(|_| invalid("tumbling-window width exceeds Int64"))?;
-                // A time series' stale markers are not samples.
+                // A time series' stale markers are not samples: the
+                // `TimeRange` drops them only when the chain reads the
+                // series' `Scan` (through shifts). Over a `Filter` or a
+                // `Project` it keeps them, and an exact accumulator then
+                // rejects a stale marker passed on unchanged by a `Filter`
+                // or a value-copying `Project` (`factory::not_a_stale_marker`).
                 let below =
                     node_below_shifts(first_input(id, &dependencies), &nodes, &dependencies);
                 let sample_value = match below.map(|below| &nodes[&below].payload) {
