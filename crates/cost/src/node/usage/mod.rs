@@ -34,8 +34,8 @@ use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
 use crate::node::state_bytes::{
-    assumed_magnitude_range, keeps_every_value, row_bytes, sketch_state_bytes,
-    state_bytes_per_row, state_row_bytes_beside_state, summary_state_bytes, StateInputRows,
+    assumed_magnitude_range, keeps_every_value, row_bytes, sketch_state_bytes, state_bytes_per_row,
+    state_row_bytes_beside_state, summary_state_bytes, StateInputRows,
 };
 use crate::{aggregate_lookup, lookup, StateFamily};
 use crate::{

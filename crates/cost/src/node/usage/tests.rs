@@ -1770,6 +1770,8 @@ fn ddsketch_assumed_facts_over_sources(
         unchanged_columns: BTreeSet::from(["ts", "value"]),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        state_input_rows: None,
+        raw_rows_span_ms: None,
     };
     let settings = CostInputs::default();
     node_resource_usage_and_cost(&build, &[producer_output], (1, 1.0), None, data, &settings)
