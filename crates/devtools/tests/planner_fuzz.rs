@@ -219,20 +219,48 @@ fn witness_of(relation: Relation, workload: FuzzWorkload) -> Witness {
 }
 
 /// The sketch rollup witness builds and costs for a grouped quantile:
-/// a `SummaryMerge` with `group_by` over the finer per-group KLL.
+/// a `SummaryMerge` with `group_by` over the finer per-group KLL. The
+/// query must select a KLL, or there is no sketch to roll up. A quantile
+/// selects a sketch only over many rows per group and evaluation: the
+/// generated PromQL `quantile by (job, instance)` reads 40 latest samples
+/// per group, and #902's p90 per city over 5 min at 666.67 rows/s, so
+/// both plan exact. p90 per (city, host) over 1 h at 100,000 rows/s
+/// (4 cities x 5 hosts, ε 0.05, δ 0.01) reads a KLL tumbling-window
+/// chain (k = 132), and p90 per city rolls up from it.
 #[test]
 fn sketch_rollup_witness_costs_for_a_grouped_quantile() {
-    let q = promql(
-        "m_gauge",
-        None,
-        Some((OuterOp::Quantile(0.9), &["job", "instance"])),
-    );
-    assert_eq!(
-        witness_of(Relation::CoarserGrouping, generated(q, true)),
-        Witness::SketchRollup {
-            labels: vec!["job".into()]
+    use asap_types::accuracy::AccuracyTarget;
+    let mut workload = seed("issue902.json");
+    let per_city_and_host = SqlSpec {
+        table: "metrics".into(),
+        aggregate: SqlAggregate::Quantile(0.9),
+        group_by: vec!["city".into(), "host".into()],
+        filters: vec![],
+        window_ms: 3_600_000,
+    };
+    workload.queries = vec![workload.queries[2]
+        .with_spec(QuerySpec::Sql(per_city_and_host))
+        .with_accuracy(AccuracyTarget::max_error(0.05).failure_probability(0.01))];
+    workload.data = serde_json::from_value(serde_json::json!({
+        "arrival": {"ingesting": {"rows_per_second": 100_000.0}},
+        "sources": {"metrics": {
+            "series_count": 100,
+            "distinct_values_per_label": {"city": 4, "host": 5},
+        }},
+    }))
+    .expect("the data facts deserialize");
+    match check(Relation::CoarserGrouping, workload, 0) {
+        Outcome::Holds(m) | Outcome::Violated(m) => {
+            assert!(m.base_plan.contains("Kll"), "{}", m.base_plan);
+            assert_eq!(
+                m.witness.and_then(|w| w.derivation),
+                Some(Witness::SketchRollup {
+                    labels: vec!["city".into()]
+                })
+            );
         }
-    );
+        Outcome::Inconclusive { reason } => panic!("CoarserGrouping is inconclusive: {reason}"),
+    }
 }
 
 /// The exact rollup witness builds and costs for a grouped count (a sum
