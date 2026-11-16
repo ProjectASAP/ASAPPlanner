@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Pass2RuleError;
-use asap_accuracy::{readout_levels, ErrorMetricsOfMemo};
+use asap_accuracy::{readout_levels, AccuracyEvidence, ErrorMetricsOfMemo};
 use asap_types::stages::{
     CandidateForMemoGroupId, LogicalRequirements, Memo, MemoGroupId, RequiredAccuracy,
 };
@@ -29,17 +29,20 @@ pub(crate) struct ReadoutRequirementsOutcome {
 /// required accuracy, one readout candidate per requirement level
 /// ([`readout_levels`]): Pass 1's candidate takes the first level and a
 /// copy is added per further level. A readout without a level keeps no
-/// requirement. `order` is the memo's topological order.
+/// requirement. `order` is the memo's topological order; `evidence` the
+/// deployment's measured accuracy, which decides the builds that meet a
+/// level.
 pub(crate) fn set_readout_requirements(
     memo: &mut Memo,
     order: &[MemoGroupId],
+    evidence: &dyn AccuracyEvidence,
 ) -> Result<ReadoutRequirementsOutcome, Pass2RuleError> {
     let mut outcome = ReadoutRequirementsOutcome {
         readouts_without_per_value_failure_probability: BTreeMap::new(),
         exact_only_readout_groups_of_query: BTreeMap::new(),
     };
     let error_metrics = ErrorMetricsOfMemo::of(memo, order);
-    for (readout, required) in readout_levels(memo, &error_metrics, order) {
+    for (readout, required) in readout_levels(memo, &error_metrics, order, evidence) {
         for &query in &required.queries_without_per_value_failure_probability {
             outcome
                 .exact_only_readout_groups_of_query

@@ -11,5 +11,5 @@ mod target;
 pub use default_metric::default_metric_for_root;
 pub use guarantee::{AccuracyGuarantee, BoundExpr, ProbabilityExpr};
 pub use target::{
-    AccuracyMetric, AccuracyScope, AccuracySpec, AccuracyTarget, NormScale, ReadoutValuesRead,
+    AccuracyMetric, AccuracyScope, AccuracySpec, AccuracyTarget, NormScale, ReadoutValueCounts,
 };
