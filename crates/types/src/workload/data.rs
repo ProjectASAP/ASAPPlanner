@@ -226,6 +226,14 @@ pub struct ValueMagnitudeRange {
     pub max_abs: f64,
 }
 
+impl ValueMagnitudeRange {
+    /// The ratio of the largest to the smallest magnitude, at least 1: 1e7
+    /// for `{"min_abs": 0.001, "max_abs": 10000.0}`.
+    pub fn magnitude_ratio(&self) -> f64 {
+        (self.max_abs / self.min_abs).max(1.0)
+    }
+}
+
 /// The distinct combinations of values a set of labels (or columns) of one
 /// source takes together, an upper bound.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

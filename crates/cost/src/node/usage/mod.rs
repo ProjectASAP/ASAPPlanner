@@ -23,9 +23,10 @@ use crate::node::analytical::{
     estimate_operator, AnalyticalCostError, PhysicalOperator, ResourceEstimate,
 };
 use crate::node::operations_per_unit::{
-    estimate_operations_per_group, hash_aggregate_operations_per_row, merge_operations_per_state,
-    merge_output_operations, update_operations_per_row, CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL,
-    CHAIN_EMIT_OPERATIONS_PER_STATE, TIME_RANGE_OPERATIONS_PER_ROW,
+    chain_emit_operations_per_state, estimate_operations_per_group,
+    hash_aggregate_operations_per_row, merge_operations_per_state, merge_output_operations,
+    update_operations_per_row, CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL,
+    TIME_RANGE_OPERATIONS_PER_ROW,
 };
 use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
@@ -987,7 +988,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 Ok(ResourceEstimate::new(
                     input.rows as f64 * update_ops
                         + range_ops
-                        + emitted_states * CHAIN_EMIT_OPERATIONS_PER_STATE,
+                        + emitted_states * chain_emit_operations_per_state(family),
                     out.bytes,
                     0,
                 )),
@@ -1023,23 +1024,19 @@ pub fn node_resource_usage_and_cost<'a>(
             // The merged state: each group's input states folded into one,
             // sized for the rows they fold together when known (a KLL
             // grows towards its `k`), else as one input state.
-            let states_per_group = states.div_ceil(group_count.max(1));
             let input_state_bytes = |producer: &ProducerOutput<'_>| {
                 state_bytes_per_row(producer.output, producer.output_schema)
             };
-            let merged_input_rows = producers
-                .first()
-                .and_then(|producer| producer.state_input_rows)
-                .map(|rows| StateInputRows {
-                    rows_per_state: rows
-                        .rows_per_state
-                        .map(|per_state| per_state.saturating_mul(states_per_group)),
-                    ..rows
-                });
+            // Each input's states per group, every one folding its rows.
+            let merged_input_rows = StateInputRows::merged(producers.iter().map(|producer| {
+                producer
+                    .state_input_rows
+                    .map(|rows| (rows, producer.output.rows.div_ceil(group_count.max(1))))
+            }));
             built_state_input_rows = merged_input_rows;
             let merged_state_bytes = match (family, merged_input_rows) {
                 (StateFamily::Sketch(params), Some(rows)) => sketch_state_bytes(params, rows),
-                _ => producers.first().map_or(0, input_state_bytes),
+                _ => producers.iter().map(input_state_bytes).max().unwrap_or(0),
             };
             // Each input state's merge, by the states' family and bytes,
             // and each output group's state and row.
@@ -1054,7 +1051,7 @@ pub fn node_resource_usage_and_cost<'a>(
                         )
                 })
                 .sum::<f64>()
-                + merge_output_operations(group_count);
+                + merge_output_operations(family, group_count);
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: (merged_state_bytes + state_row_bytes_beside_state(&node.output_schema))
