@@ -89,8 +89,7 @@ pub fn selected_plan(w: &FuzzWorkload, settings: &CostInputs) -> PhysicalASAPDAG
 /// gauge `latency` whose values are declared non-negative (so DDSketch's
 /// quantile guarantee holds over it), 1000 series each.
 pub fn promql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
-    pass2_of(
-        json!("promql"),
+    promql_pass2_over(
         queries,
         json!({
             "m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000},
@@ -98,8 +97,12 @@ pub fn promql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
             "latency": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000,
                 "column_signs": {"value": "non_negative"}},
         }),
-        None,
     )
+}
+
+/// [`promql_pass2`] with the facts `sources` declares.
+pub fn promql_pass2_over(queries: &[(&str, Value)], sources: Value) -> LogicalASAPMemoCandidates {
+    pass2_of(json!("promql"), queries, sources, None)
 }
 
 /// Pass 2's output for SQL `queries` over the table
