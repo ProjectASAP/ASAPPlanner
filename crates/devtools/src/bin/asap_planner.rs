@@ -63,7 +63,9 @@
 //     `PhysicalASAPDAG`) and its `Selection`: `accepted_accuracy_per_query`,
 //     `pruned_candidates`, `milp_objective_cost_per_second` (the selected
 //     plan's cost per second), `milp_variables`, `milp_constraints`,
-//     `milp_construction_ms` and `milp_solve_ms`; `error` when no plan was
+//     `milp_construction_ms`, `milp_solve_ms` and `milp_solve_count` (2 when
+//     the solve at HiGHS's default tolerances missed an accuracy target and
+//     was repeated at 1e-10); `error` when no plan was
 //     selected.
 //     `materialized_views` are the plan's materialized views as
 //     `plan_installable` derives them; `materialized_views_error` when the
@@ -644,6 +646,7 @@ fn selection_json(selection: &Result<(PhysicalASAPDAG, Selection), SelectionErro
         "milp_constraints": selection.milp_constraint_count,
         "milp_construction_ms": selection.milp_construction_ms,
         "milp_solve_ms": selection.milp_solve_ms,
+        "milp_solve_count": selection.milp_solve_count,
     })
 }
 

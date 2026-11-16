@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use asap_types::accuracy::AccuracyTarget;
 use asap_types::stages::{ExecutionContextId, MemoGroupId, PhysicalCandidateId, PhysicalEdgeId};
 
+use super::accuracy::{AccuracyRules, RootLimits};
 use super::model::SelectionInputs;
 use super::COST_RELATIVE_TOLERANCE;
 use crate::selectable::QueryId;
@@ -73,6 +74,13 @@ struct QuerySignature<'a> {
     /// Its accuracy target, by index among the workload's distinct targets
     /// ([`AccuracyTarget`] holds floats: metric, ε, δ and scope all equal).
     accuracy_target_index: usize,
+    /// Per output, what (K)'s root check bounds it by
+    /// ([`AccuracyRules::root_limits`]); `None` without a target. Equal
+    /// limits give equal root rows: two queries at δ = 0.01 per value
+    /// returning 10 and 100 values have equal limits, over a whole result
+    /// they do not; an operator root and an operand of `scalar(...) * 2`
+    /// allow different metrics.
+    root_limits_per_output: Vec<Option<&'a RootLimits>>,
 }
 
 /// Which executions, edges and queries share variables
@@ -82,8 +90,9 @@ struct QuerySignature<'a> {
 /// they have the same [`ContextKey`] (the same candidates, kept alike, the
 /// same memo edges from producers that correspond, in the context or the
 /// same execution outside every evaluation context, and queries that pair
-/// up with the same output executions, exact-only groups, span and
-/// accuracy target, so the accuracy constraint holds alike in both) and
+/// up with the same output executions, exact-only groups, span, accuracy
+/// target and root limits of (K) at each output (`rules`), so the accuracy
+/// constraint (K) has the same rows in both) and
 /// every cost the MILP reads in one (of a kept execution, or of an edge
 /// between two kept ones) is the same multiple $\alpha > 0$ of the
 /// other's, to [`COST_RELATIVE_TOLERANCE`] of the copy's largest such
@@ -107,9 +116,10 @@ struct QuerySignature<'a> {
 /// Example: the same queries every 60 s and every 300 s (one user each):
 /// the 300 s context's executions cost 1/5 of the 60 s ones' and share
 /// their variables.
-pub(crate) fn copies_in_equivalent_contexts(
-    inputs: &SelectionInputs<'_>,
+pub(crate) fn copies_in_equivalent_contexts<'a>(
+    inputs: &SelectionInputs<'a>,
     kept: &[bool],
+    rules: Option<&'a AccuracyRules>,
 ) -> SharedVariables {
     let selectable = inputs.selectable;
     let costs = inputs.costs;
@@ -131,9 +141,18 @@ pub(crate) fn copies_in_equivalent_contexts(
             own.push(index);
         }
     }
-    let mut outputs_of: BTreeMap<QueryId, Vec<&[usize]>> = BTreeMap::new();
-    for (query, answering) in selectable.answering() {
-        outputs_of.entry(*query).or_default().push(answering);
+    let memo = &inputs.physical.logical_candidates.memo;
+    // Per query, each output's answering executions and its root limits.
+    let mut outputs_of: BTreeMap<QueryId, Vec<_>> = BTreeMap::new();
+    for (&(query, group), (query_id, answering)) in
+        memo.output_groups().iter().zip(selectable.answering())
+    {
+        debug_assert_eq!(query, query_id.0, "answering is in output_groups order");
+        let limits = rules.and_then(|rules| rules.root_limits(*query_id, group));
+        outputs_of
+            .entry(*query_id)
+            .or_default()
+            .push((answering, limits));
     }
     // Each evaluation context's queries; a query without an output has
     // none.
@@ -172,11 +191,11 @@ pub(crate) fn copies_in_equivalent_contexts(
                 })
         })
         .collect();
-    let signature = |context: ExecutionContextId, query: QueryId| -> Option<QuerySignature<'_>> {
+    let signature = |context: ExecutionContextId, query: QueryId| -> Option<QuerySignature<'a>> {
         // A query has an evaluation context exactly when it has an output reference.
         let outputs = outputs_of[&query]
             .iter()
-            .map(|answering| {
+            .map(|(answering, _)| {
                 answering
                     .iter()
                     .map(|&index| in_context(context, index))
@@ -185,6 +204,10 @@ pub(crate) fn copies_in_equivalent_contexts(
             .collect::<Option<Vec<_>>>()?;
         Some(QuerySignature {
             answering_executions_per_output: outputs,
+            root_limits_per_output: outputs_of[&query]
+                .iter()
+                .map(|&(_, limits)| limits)
+                .collect(),
             exact_only_groups: inputs
                 .physical
                 .logical_candidates
@@ -196,7 +219,7 @@ pub(crate) fn copies_in_equivalent_contexts(
     };
     // `context`'s key, and its queries in the order of their signatures in
     // it.
-    let key_of = |context: ExecutionContextId| -> Option<(ContextKey<'_>, Vec<QueryId>)> {
+    let key_of = |context: ExecutionContextId| -> Option<(ContextKey<'a>, Vec<QueryId>)> {
         let executions = executions_of[&context]
             .iter()
             .map(|&index| {
@@ -297,7 +320,7 @@ pub(crate) fn copies_in_equivalent_contexts(
             .all(|&(a, b)| (b - alpha * a).abs() <= tolerance)
     };
     // Per key, the originals, each with its queries in signature order.
-    let mut originals_of_key: HashMap<ContextKey<'_>, Vec<(ExecutionContextId, Vec<QueryId>)>> =
+    let mut originals_of_key: HashMap<ContextKey<'a>, Vec<(ExecutionContextId, Vec<QueryId>)>> =
         HashMap::new();
     for &copy in executions_of.keys() {
         let Some((key, copy_queries)) = key_of(copy) else {

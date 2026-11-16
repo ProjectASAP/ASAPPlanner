@@ -24,9 +24,16 @@ pub(crate) fn readout_error_metric(
     };
     let parameters = parameter_list(*algorithm).first()?;
     Some(
-        guarantee_before_failure_probability_check(summary_type, parameters, statistic, 1.0)?
-            .spec
-            .accuracy_metric,
+        guarantee_before_failure_probability_check(
+            summary_type,
+            parameters,
+            statistic,
+            1.0,
+            None,
+            None,
+        )?
+        .spec
+        .accuracy_metric,
     )
 }
 

@@ -67,7 +67,10 @@ pub enum RootPruneReason {
     /// evaluable at the required failure probability (an HLL distinct
     /// count, whose failure probability is unknown), or with no guarantee
     /// at all (UnivMon's distinct count), read by a query with an accuracy
-    /// target: its error has no bound.
+    /// target: its error has no bound. Two more cases: a DDSketch quantile
+    /// over values of unknown sign (its relative guarantee holds only over
+    /// values of one sign), and any sketch readout under an exact target
+    /// (δ 0), which no probabilistic guarantee meets.
     NoGuarantee {
         consumer: CandidateForMemoGroupId,
         input: usize,

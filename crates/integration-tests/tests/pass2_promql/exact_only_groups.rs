@@ -44,14 +44,14 @@ fn live(logical: &LogicalASAPMemoCandidates, group: MemoGroupId) -> bool {
     })
 }
 
-/// `quantile_over_time(0.9, m[5m])` twice, Q0 at rank error 0.01 and Q1 at
-/// relative error 0.05: both share the quantile group and both the KLL
-/// (rank) and DDSketch (relative) readouts survive, but Q0 reads only the
-/// KLL readout and Q1 only the DDSketch one; each reads the other's
-/// readout groups only exactly.
+/// `quantile_over_time(0.9, latency[5m])` twice (values non-negative), Q0
+/// at rank error 0.01 and Q1 at relative error 0.05: both share the
+/// quantile group and both the KLL (rank) and DDSketch (relative) readouts
+/// survive, but Q0 reads only the KLL readout and Q1 only the DDSketch
+/// one; each reads the other's readout groups only exactly.
 #[test]
 fn each_query_reads_only_the_readouts_in_its_targets_metric() {
-    let query = "quantile_over_time(0.9, m[5m])";
+    let query = "quantile_over_time(0.9, latency[5m])";
     let logical = promql_pass2(&[
         (query, json!({"max_error": 0.01, "accuracy_metric": "rank"})),
         (
@@ -84,7 +84,7 @@ fn each_query_reads_only_the_readouts_in_its_targets_metric() {
     }
 }
 
-/// `count(quantile_over_time(0.9, m[5m]))` at relative error 0.05: the
+/// `count(quantile_over_time(0.9, latency[5m]))` at relative error 0.05: the
 /// count reads the quantiles through an exact count, whose contract
 /// passes every metric, while Pass 1's Count-Min and UnivMon builds over
 /// the quantiles (no contract) are dead. A dead candidate makes no group
@@ -92,7 +92,7 @@ fn each_query_reads_only_the_readouts_in_its_targets_metric() {
 #[test]
 fn a_dead_candidate_makes_no_group_exact_only() {
     let logical = promql_pass2(&[(
-        "count(quantile_over_time(0.9, m[5m]))",
+        "count(quantile_over_time(0.9, latency[5m]))",
         json!({"max_error": 0.05, "failure_probability": 0.01, "accuracy_metric": "relative"}),
     )]);
     let memo = &logical.memo;

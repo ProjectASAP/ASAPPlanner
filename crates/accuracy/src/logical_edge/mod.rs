@@ -21,7 +21,16 @@ const SATISFACTION_TOLERANCE: f64 = 1e-9;
 /// `limit`: at most `limit` widened by [`SATISFACTION_TOLERANCE`], so a
 /// bound equal to it up to floating-point noise meets it.
 pub fn within_limit(evaluated: f64, limit: f64) -> bool {
-    evaluated <= limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON
+    evaluated <= tolerated_limit(limit)
+}
+
+/// The largest value [`within_limit`] admits for `limit`: `limit` widened
+/// by [`SATISFACTION_TOLERANCE`]. Stage 3's root checks of constraint (K)
+/// bound a composed error by it, so they accept what an edge accepts.
+///
+/// Example: a limit of 0.01 admits up to 0.01 · (1 + 1e-9) + 2.2e-16.
+pub fn tolerated_limit(limit: f64) -> f64 {
+    limit * (1.0 + SATISFACTION_TOLERANCE) + f64::EPSILON
 }
 
 impl ErrorMetricsOfMemo {
@@ -37,7 +46,11 @@ impl ErrorMetricsOfMemo {
     ///   guarantee of the producer's θ for the readout's statistic, at the
     ///   required failure probability, is within the required error
     ///   ([`within_limit`]) and in its metric: the deployment's measurement
-    ///   (`evidence`) when it has one, else the theoretical guarantee; a
+    ///   (`evidence`) when it has one, else the theoretical guarantee over
+    ///   the sign of the state's values (`GroupProperties::state_column_sign`,
+    ///   DDSketch's sign condition) and, for a distinct count, the scanned
+    ///   sources' declared distinct bound
+    ///   (`Memo::max_distinct_per_evaluation`); a
     ///   merged state (any producer but a build) must keep the guarantee
     ///   (`MergedError::Exact` or `AsIfBuiltOverUnion`). A top-k's heap
     ///   holds its `k` whatever the requirement.
@@ -68,7 +81,8 @@ impl ErrorMetricsOfMemo {
                 })
             }
         };
-        let Operator::ASAP(ASAPOp::SummaryEstimate { .. }) = consumer_candidate.expression.operator
+        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) =
+            consumer_candidate.expression.operator
         else {
             let Some(producer_metric) = self.readout_error_metric(producer) else {
                 return Ok(());
@@ -102,7 +116,8 @@ impl ErrorMetricsOfMemo {
             evidence.measured_guarantee(summary_type, parameters, statistic, failure_probability);
         let allowed = self.error_metrics_allowed_on_input_edge(consumer, input);
         // The theoretical guarantee before its failure-probability check,
-        // computed once for both checks below.
+        // computed once for both checks below, over the sign of the values
+        // the read states were updated with.
         let theoretical = (measured.is_none() && (allowed.is_some() || required.is_some()))
             .then(|| {
                 guarantee_before_failure_probability_check(
@@ -110,6 +125,10 @@ impl ErrorMetricsOfMemo {
                     parameters,
                     statistic,
                     failure_probability,
+                    memo.groups()[summary_input.0 as usize]
+                        .group_properties
+                        .state_column_sign(),
+                    memo.max_distinct_per_evaluation(summary_input),
                 )
             })
             .flatten();

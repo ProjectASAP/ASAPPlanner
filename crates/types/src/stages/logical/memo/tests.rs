@@ -463,3 +463,39 @@ fn max_values_per_evaluation_bounds_a_readout_by_its_states_keys() {
         assert_eq!(memo.max_values_per_evaluation(quantile), Some(values));
     }
 }
+
+/// A distinct count over `events`, bounded at 9,636 distinct items per
+/// evaluation, counts at most 9,636 in every group above the scan; a join
+/// of two bounded sources counts at most their sum; a source without a
+/// bound bounds nothing.
+#[test]
+fn max_distinct_per_evaluation_sums_the_scanned_sources_bounds() {
+    let bounded = |bound: Option<u64>| crate::workload::SourceFacts {
+        max_distinct_per_evaluation: bound,
+        ..Default::default()
+    };
+    let data = crate::workload::DataWorkload {
+        sources: [
+            ("events".to_string(), bounded(Some(9_636))),
+            ("clicks".to_string(), bounded(Some(364))),
+            ("logs".to_string(), bounded(None)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut memo = Memo::new(&data);
+    let mut scan_of = |source: &str| memo.find_or_add_group(scan(source, &[], vec![])).unwrap();
+    let (events, clicks, logs) = (scan_of("events"), scan_of("clicks"), scan_of("logs"));
+    let state = memo
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Hll), events))
+        .unwrap();
+    assert_eq!(memo.max_distinct_per_evaluation(events), Some(9_636));
+    assert_eq!(memo.max_distinct_per_evaluation(state), Some(9_636));
+    assert_eq!(memo.max_distinct_per_evaluation(logs), None);
+    let both = memo
+        .find_or_add_group(Operator::NonASAP(NonASAPOp::Concat {
+            children: vec![events, clicks],
+        }))
+        .unwrap();
+    assert_eq!(memo.max_distinct_per_evaluation(both), Some(10_000));
+}

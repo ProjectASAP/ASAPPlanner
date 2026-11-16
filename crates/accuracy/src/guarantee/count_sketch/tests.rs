@@ -36,6 +36,8 @@ fn count_sketch_uses_an_l2_guarantee() {
             value: Some("1".into()),
         },
         1.0,
+        None,
+        None,
     )
     .expect("CountSketch has a parameter-derived L2 guarantee");
     assert_eq!(

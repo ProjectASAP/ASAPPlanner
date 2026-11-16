@@ -169,10 +169,10 @@ fn group_levels(
 /// depend on does, so by the union bound δ splits over all of them,
 /// `readout_values` ([`ReadoutsReadByQueries::readout_values`], summed over
 /// every readout group below the query), and over the values its scope
-/// covers, $V$ (`AccuracyScope::max_values_covered`, $n_q$ for a whole
-/// result): the per-value failure probability is
-/// $\delta / \max(V, \text{readout values})$, and needs both known when the
-/// target sets a δ.
+/// covers, $V$ (`AccuracyTarget::failure_probability_per_output_value`,
+/// $\delta / V$ with $V = n_q$ for a whole result): the per-value failure
+/// probability is $\min(\delta / V, \delta / \text{readout values})$, and
+/// needs both known when the target sets a δ.
 /// - `max(quantile_over_time(0.9, m[5m]))` over 1000 series at δ = 0.01
 ///   returns one value but reads 1000 readout values: 1e-5.
 /// - `max by (job) (q{host="h0"} or q{host="h1"})` with 3 series per side
@@ -192,12 +192,9 @@ fn query_levels(
 ) -> Option<Vec<RequiredAccuracy>> {
     let per_value_failure_probability = match target.failure_probability {
         None => 1.0,
-        Some(delta) => {
-            let values_covered = target
-                .accuracy_scope
-                .max_values_covered(number_of_values_per_query_evaluation)?;
-            delta / values_covered.max(readout_values?).max(1) as f64
-        }
+        Some(delta) => target
+            .failure_probability_per_output_value(number_of_values_per_query_evaluation)?
+            .min(delta / readout_values?.max(1) as f64),
     };
     let level = |max_error, failure_probability| RequiredAccuracy {
         metric,

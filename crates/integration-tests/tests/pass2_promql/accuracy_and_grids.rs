@@ -47,7 +47,8 @@ fn live_sketch_readouts(logical: &LogicalASAPMemoCandidates) -> usize {
 /// `promql_drop_metric_name`. Its contract judges only the value: `abs`
 /// and the negation keep an absolute error, scaling by a constant a
 /// relative one, so a sketch readout below each still serves the query, as
-/// it does for the bare readout.
+/// it does for the bare readout (DDSketch's quantile over `latency`, whose
+/// values are declared non-negative).
 #[test]
 fn a_function_of_the_value_keeps_the_readouts_below_it() {
     let absolute = json!({"max_error": 0.05, "accuracy_metric": "absolute"});
@@ -56,8 +57,8 @@ fn a_function_of_the_value_keeps_the_readouts_below_it() {
         ("count_over_time(m[1m])", &absolute),
         ("abs(count_over_time(m[1m]))", &absolute),
         ("-count_over_time(m[1m])", &absolute),
-        ("quantile_over_time(0.9, m[5m]) / 2", &relative),
-        ("quantile_over_time(0.9, m[5m]) * 2", &relative),
+        ("quantile_over_time(0.9, latency[5m]) / 2", &relative),
+        ("quantile_over_time(0.9, latency[5m]) * 2", &relative),
     ] {
         let logical = pass2(query, accuracy.clone());
         assert!(live_sketch_readouts(&logical) > 0, "{query}");

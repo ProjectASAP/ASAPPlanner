@@ -22,7 +22,7 @@ use crate::stages::{
     LogicalRequirements, MemoGroup, MemoGroupId,
 };
 use crate::summary_type::SketchStatistic;
-use crate::workload::bounds::source_name;
+use crate::workload::bounds::{declared_max_distinct_per_evaluation, source_name};
 use crate::workload::{series_facts, DataArrival, DataWorkload, SourceFacts};
 use hash_consing::{
     expression_hash, same_candidate, same_serialized_expression, serialized_expression,
@@ -123,6 +123,26 @@ impl Memo {
             (Some(series), Some(groups)) => Some(series.min(groups)),
             (series, groups) => series.or(groups),
         }
+    }
+
+    /// The most distinct items one distinct-count summary over `group`'s
+    /// rows counts in one evaluation: the sum of the bounds the data
+    /// workload declares for the sources scanned below it
+    /// (`GroupProperties::scanned_sources`,
+    /// [`declared_max_distinct_per_evaluation`]); `None` when one of them
+    /// declares none.
+    ///
+    /// Example: `count(distinct user_id)` over `Scan events` with `events`
+    /// bounded at 9,636 gives 9,636 for every group above the scan.
+    pub fn max_distinct_per_evaluation(&self, group: MemoGroupId) -> Option<u64> {
+        declared_max_distinct_per_evaluation(
+            &self.source_facts,
+            self.groups[group.0 as usize]
+                .group_properties
+                .scanned_sources
+                .iter()
+                .map(source_name),
+        )
     }
 
     /// The groups the `by` keys of the state `group` is, or reads, form

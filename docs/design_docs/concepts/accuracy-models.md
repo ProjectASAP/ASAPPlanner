@@ -73,7 +73,7 @@ over a scope, a per-value failure probability `δ` becomes `V · δ` by the unio
 bound, without assuming independence, so a sketch shared by several groups
 (Hydra, a keyed Count-Min) is covered the same way
 (`AccuracyScope::max_values_covered` gives `V`). A guarantee whose own failure probability is
-unknown (generic HLL) serves no query with an accuracy target
+unknown (HLL without a distinct bound) serves no query with an accuracy target
 (`RootPruneReason::NoGuarantee`), and a top-k readout is admitted on its
 heap size and its value guarantee alone (the contracts table).
 
@@ -182,8 +182,8 @@ The built-in models currently include:
 |---|---|
 | Exact computation | Exact over exact inputs under the supported operation's semantics; approximate inputs still require error propagation |
 | KLL | Normalized rank error from the empirical 99% calibration `2.296 / k^0.9723`, fitted on Apache DataSketches' C++ KLL (`a9b42755072b`); below a failure probability of 0.01 that error is scaled by the Gaussian quantile ratio `z(1 − δ/2) / z(1 − 0.01/2)`, a model rather than a measurement, and the guarantee names that contract apart |
-| DDSketch | Relative value error from alpha under the supported estimator/domain contract; operators sensitive to sign or range require additional domain evidence |
-| Generic HLL | RSE magnitude with unknown failure probability; not a general confidence theorem |
+| DDSketch | Relative value error from alpha under the supported estimator/domain contract; a quantile's bound holds only over values of one sign (the state column's `column_signs` non-negative or non-positive, "Sign conditions"), else its failure probability is unknown and the readout serves no query with an accuracy target |
+| Classic HLL | Relative error certified at the required failure probability over a source declaring at most `max_distinct_per_evaluation` distinct items (summed over the sources scanned below the state), from the linear-counting collision bound under independent uniform bucket hashes; without such a bound, or above the contract's range (`m/2` items at precision `p`), only the RSE magnitude with unknown failure probability |
 | CMS | L1-normalized frequency bound from width and depth; does not by itself certify TopK membership |
 | CountSketch | L2-normalized frequency bound and median concentration bound, requiring valid odd depth |
 | KMV | Provable distinct-count bound from the `k` smallest hashes |
@@ -264,6 +264,30 @@ them, and sharing does not justify reducing the failure budget. Per-result
 guarantees also do not imply a simultaneous guarantee across every query or
 evaluation time in a dashboard.
 
+### Sign conditions
+
+Two rules hold only over values of one sign. Both read the group property
+`column_signs` (declared per source column in `SourceFacts::column_signs`, a
+counter's value non-negative, and derived through each operator: a negation
+flips it, `abs` makes it non-negative) and test it with
+`ValueSign::is_one_sign`, non-negative or non-positive:
+
+- DDSketch's relative bound on a quantile. The state column's sign
+  (`GroupProperties::state_column_sign`, the sign of the values the states
+  were updated with) must be one sign; otherwise the guarantee
+  (`guarantee/ddsketch.rs`) keeps its metric, relative error, with an unknown
+  failure probability, so the readout serves no query with an accuracy target
+  (`RootPruneReason::NoGuarantee`) and `theoretical_guarantee` returns none.
+  `quantile_over_time(0.99, latency[1h])` with `latency` declared
+  non-negative holds at α; over a gauge of unknown sign it does not.
+- A sum's or an average's relative error (the contracts table): the input
+  column's sign must be one sign, as `|Σ (x̂_i − x_i)| ≤ ε Σ |x_i| =
+  ε |Σ x_i|` holds then, while values of unknown sign may cancel.
+
+The cost model reads whether a DDSketch state's values are non-negative from
+the sources' declared signs instead, so it can disagree with this rule where
+an operator changes the sign (DDSketch over `-latency`).
+
 ## Readout requirements for composed queries
 
 Pass 2 gives each readout the accuracy it is required to meet. A query's
@@ -340,6 +364,108 @@ An exact target gets no approximate level. A model with only a fixed 1%
 failure contract cannot meet a level that needs a smaller failure probability;
 another supported configuration or candidate is needed.
 
+## Checking each query's target in selection: constraint (K)
+
+Pass 2 gives each readout requirement levels, and the logical-edge check keeps
+the producers that meet them. A composed query reads several readouts, each
+at one of its levels, and only the selection decides which: Stage 3's
+selection MILP checks that the readouts a selection combines compose within
+each query's target. This is constraint (K).
+
+**Variables.** Per execution `c` (a candidate in one evaluation context)
+that a query with a target reaches, and that is its own original (not in a
+copy of an equivalent context): its error bound `E_{c,m}` per metric `m` and
+its failure probability `D_c`, continuous; per input `i`, `F_{c,i,m}` and
+`H_{c,i}`, what it reads from the producer selected on `i`.
+
+**Rows.** With `y_{u,c,i}` the edge variables and `z_{q,v}` the choice of
+execution `v` answering query `q`:
+
+- `E_{c,m} ≥ ε_c[m = m_c] + Σ_i β_{c,i,m} F_{c,i,m}`, with
+  `F_{c,i,m} ≥ E_{u,m} − M_{u,m}(1 − y_{u,c,i})` per selectable producer `u`;
+  `ε_c` is a readout's own error, its required accuracy
+  (`CandidateForMemoGroup::required_accuracy`), 0 for any other candidate.
+- The metric rule on the selected path: `E_{u,m} ≤ M_{u,m}(1 − y_{u,c,i})`
+  when `c` has no contract in `m`. An input with `β = 0` passes none.
+- The validity cap: `F_{c,i,m} ≤ b_{c,i}` where the contract's linear bound
+  holds only up to `b` (a ratio's denominator).
+- `D_c ≥ δ_c + Σ_i H_{c,i}`, `H_{c,i} ≥ D_u − M_u(1 − y_{u,c,i})`: a union
+  bound over the producers selected.
+- At each output of a query with a target: `E_{v,m} ≤ ε_q + M(1 − z_{q,v})`
+  in each metric the root allows (the target's at an operator root, none for
+  the operands of a scalar expression no contract covers, 0 elsewhere), and
+  `D_v ≤ δ_q / V + M(1 − z_{q,v})` with `V` the values the target's scope
+  covers (`AccuracyTarget::failure_probability_per_output_value`, `n_q` for a
+  whole result); no `D` row without a δ. Each limit is widened as the edge
+  check widens it (`tolerated_limit`).
+
+`D` adds each selected producer's δ once, not once per readout value an
+output value depends on: `max(q)` over 1,000 series reads 1,000 readout
+values. That is sound because Pass 2's levels already split the query's δ
+over the readout values its output can depend on, so each readout's δ is the
+query's over 1,000.
+
+**Constant errors.** A readout's state is exact, so its error is its own
+requirement under every selection: it has no `E` or `D` variable, and its
+consumers read `Σ_u ε_u y_{u,c,i}` (at most one `y` of an input is 1). This is
+exactly the variable form with `E_u = ε_u`, and it removes the big-M rows of
+every readout.
+
+**Ceilings.** `M` is the largest error any selection gives an execution,
+computed in one pass in the memo's topological order (every selectable edge
+reads a group ordered before the consumer's), each input taking its largest
+producer's ceiling, by the same composition rule as the rows. The rule is
+written once (`AccuracyRules::compose`), and also checks a whole selection
+(`AccuracyRules::selection_meets_targets`): the greedy upper bound that prunes
+executions dearer than a feasible plan uses its plan only when it meets (K),
+since the cheapest readouts of a ratio may each meet their level and compose
+above the target.
+
+**Solver tolerance.** HiGHS's feasibility tolerances are absolute, 1e-7 by
+default, while a per-value δ is often far smaller: δ = 0.01 over a whole
+result of 1e4 values is 1e-6 per value, of which 1e-7 is a tenth: two
+readouts failing with 5.4e-7 each compose to 1.08e-6 and pass that limit
+within the default tolerance. So HiGHS first solves at its defaults, and the
+selection is then checked exactly (`AccuracyRules::selection_meets_targets`,
+in f64). A selection that misses a target is solved once more at primal and
+MIP feasibility tolerance 1e-10, the least HiGHS accepts, and checked again.
+A row may still pass its limit by up to 1e-10, which for a per-value δ near
+or below 1e-10 can be orders of magnitude: at δ = 1e-12 per value (δ = 0.01
+over 1e10 values) the solver may select readouts failing with 1.08e-12 in
+all. A selection that misses a target after the second solve is an error
+naming the query and its per-value δ ("an accuracy target is below the
+solver's precision"); planning never returns a plan that may not meet its
+target. The stricter tolerance is paid for only when the check needs it:
+solving every (K) at 1e-10 made RangeHeavy-8users about 6× slower, deriving
+the tolerance from the smallest limit solved RollupHeavy-8users about 2.8×
+slower, and scaling (K)'s rows by their limits solved RangeHeavy-8users
+about 4× slower.
+
+**Context copies.** A copy of an equivalent evaluation context shares its
+original's variables and has no rows of its own. Two contexts are copies only
+when each output's root limits (the tolerated error per metric and failure
+probability per output value) are equal, so the copy's rows would repeat the
+original's: queries at δ = 0.01 per value returning 10 and 100 values are
+copies; over a whole result they are not.
+
+### Example: allocation in a ratio
+
+A is `quantile_over_time(0.95, latency[1h])` at rank error 0.01, and B is
+`quantile_over_time(0.99, latency[1h]) / quantile_over_time(0.5, latency[1h])`
+at relative error 0.03, over non-negative `latency`. A reads a KLL readout at
+rank 0.01. B's ratio passes each operand's relative error on with factor
+`1/(1 − 0.1) = 1.111`, so Pass 2 gives each DDSketch readout below it the
+levels of the grid up to its cap; with levels 0.02 (cost 1) and 0.01 (cost 3):
+
+| p99 readout | p50 readout | B's composed error | meets 0.03 |
+|---|---|---|---|
+| 0.02 | 0.02 | 1.111 · 0.04 = 0.044 | no |
+| 0.02 | 0.01 | 1.111 · 0.03 = 0.033 | no |
+| 0.01 | 0.01 | 1.111 · 0.02 = 0.022 | yes |
+
+(K) selects both 0.01 readouts, cost 6. A greedy plan reading the two
+cheapest readouts (cost 2) misses B's target, so it bounds nothing.
+
 ## Evidence and trust boundaries
 
 `AccuracyEvidence` supplies the deployment's measured guarantees. The evidence must cover the population to which the
@@ -362,14 +488,19 @@ an observation into a guarantee.
 
 ### Example: HLL distinct counts
 
-HLL's guarantee is its relative standard error, `1.04 / √m` for `m` buckets,
-with an unknown failure probability. Its readout's metric is relative error,
-but no failure probability can be evaluated, so a distinct count read from
-HLL serves no query with an accuracy target
-(`RootPruneReason::NoGuarantee`); KMV's distinct count, whose bound does not
-depend on the number of distinct items, serves such a query. Missing evidence
-leaves generic HLL confidence unknown. Invalid or infeasible contracts cannot
-authorize the result.
+HLL's generic guarantee is its relative standard error, `1.04 / √m` for `m`
+buckets, with an unknown failure probability. Its readout's metric is relative
+error, but no failure probability can be evaluated, so without more a distinct
+count read from HLL serves no query with an accuracy target
+(`RootPruneReason::NoGuarantee`). When the data workload bounds the distinct
+items one evaluation counts (`SourceFacts::max_distinct_per_evaluation`,
+summed over the sources scanned below the state), classic HLL's
+linear-counting branch is certified: `COUNT(DISTINCT user_id)` within relative
+0.05 at δ = 0.01 holds at precision 18 over at most 9,636 distinct users, and
+over 1,000,000 (above the contract's `m/2`) it does not. KMV's distinct count,
+whose bound does not depend on the number of distinct items, serves such a
+query without a bound. Missing evidence leaves generic HLL confidence unknown.
+Invalid or infeasible contracts cannot authorize the result.
 
 ## Sharing across consumers
 
@@ -443,14 +574,16 @@ accuracy/src/
 │                       # the error contracts, each readout's required-accuracy
 │                       # levels; MAX_ERROR_LEVELS
 ├── logical_edge/       # ErrorMetricsOfMemo::edge_meets_logical_requirements
-│                       # (α^log); within_limit, the requirement comparison
+│                       # (α^log); within_limit and tolerated_limit, the
+│                       # requirement comparison
 └── guarantee/
     ├── mod.rs          # theoretical_guarantee (one lookup at a failure
     │                   # probability per algorithm)
     ├── binomial.rs     # binomial_upper_tail
     ├── kll/
-    ├── ddsketch.rs
-    ├── hll.rs          # HLL (unknown failure probability)
+    ├── ddsketch.rs     # relative error α; its sign condition
+    ├── hll/            # HLL: classic certificate over a distinct bound, else
+    │                   # RSE (unknown failure probability)
     ├── cms/
     ├── count_sketch/
     ├── cardinality/    # KMV model

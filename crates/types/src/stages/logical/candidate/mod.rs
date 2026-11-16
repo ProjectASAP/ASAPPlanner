@@ -4,7 +4,7 @@
 use crate::ir::operator::asap::summary_type_of_operator;
 use crate::ir::schema::FieldDataType;
 use crate::ir::Operator;
-use crate::stages::{LogicalRequirements, MemoGroupError, MemoGroupId};
+use crate::stages::{LogicalRequirements, MemoGroupError, MemoGroupId, RequiredAccuracy};
 use crate::summary_type::{parameter_list, SketchAlgorithm, SketchParams};
 
 /// One candidate: position `index_in_group` in group `group`'s candidates
@@ -57,6 +57,19 @@ impl CandidateForMemoGroup {
             fused_groups,
             origin,
         }
+    }
+
+    /// The accuracy a readout requires of the state it reads, which is
+    /// also the error the readout adds: its input's `required_accuracy`.
+    /// `None` for any other candidate, and for a readout no query with an
+    /// accuracy target gives a level.
+    ///
+    /// Example: a DDSketch quantile readout Pass 2 gives relative 0.01 at
+    /// δ = 1e-3 returns that requirement; a scan returns `None`.
+    pub fn required_accuracy(&self) -> Option<RequiredAccuracy> {
+        self.input_requirements
+            .iter()
+            .find_map(|requirements| requirements.required_accuracy)
     }
 }
 

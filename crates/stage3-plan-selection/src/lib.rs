@@ -17,9 +17,12 @@
 //! exact candidates only, $a_{q,e}$ marking what its selected path reads. It
 //! builds the plan (`PhysicalASAPDAG`) from the selected executions and
 //! edges as its last step ([`plan`], each node retaining its candidate's
-//! $h_v$, the needs from [`retention`]). Accuracy at each query root,
-//! constraint (K), with per-candidate error bounds $E_c$ and $D_c$
-//! (section 4), is the remaining extension. Costs come from `asap-cost`.
+//! $h_v$, the needs from [`retention`]). Accuracy at each query root is
+//! constraint (K) (`accuracy-models.md`, "Checking each query's target in
+//! selection"): error bounds $E_{\kappa,c,m}$ per execution
+//! and metric and failure probabilities $D_{\kappa,c}$, composed along the
+//! selected edges and checked at each query's root. Costs come from
+//! `asap-cost`.
 
 mod cost;
 mod milp;
@@ -116,6 +119,13 @@ pub fn select_plan(
     .map_err(|error| match error {
         SelectionMilpError::Infeasible => infeasible(&costs),
         SelectionMilpError::Solver(reason) => ErrorSelectingPlan::Solver(reason),
+        SelectionMilpError::TargetBelowSolverPrecision {
+            query,
+            failure_probability_per_output_value,
+        } => ErrorSelectingPlan::AccuracyTargetBelowSolverPrecision {
+            query: query.0,
+            failure_probability_per_output_value,
+        },
     })?;
     let plan = plan_of(physical, &solved, &outputs).map_err(|error| {
         ErrorSelectingPlan::Solver(format!("the selected plan is invalid: {error}"))
@@ -143,6 +153,7 @@ pub fn select_plan(
         milp_constraint_count: solved.constraint_count,
         milp_construction_ms: solved.construction_ms,
         milp_solve_ms: solved.solve_ms,
+        milp_solve_count: solved.solve_count,
     };
     Ok((plan, selection))
 }

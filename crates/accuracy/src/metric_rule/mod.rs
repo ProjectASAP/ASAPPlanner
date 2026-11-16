@@ -15,12 +15,9 @@ use crate::error_contract::{error_contract, ErrorContract};
 use crate::readout::sketch_readout_error_metric;
 use crate::readout_caps::caps;
 
-/// How many error metrics there are: `AccuracyMetric::ALL`'s length.
-pub(crate) const METRIC_COUNT: usize = AccuracyMetric::ALL.len();
-
 /// Per metric, in `AccuracyMetric::ALL` order: a candidate's error
 /// contract in it; `None` = no contract.
-pub(crate) type ErrorContractPerMetric = [Option<ErrorContract>; METRIC_COUNT];
+pub(crate) type ErrorContractPerMetric = [Option<ErrorContract>; AccuracyMetric::COUNT];
 
 /// The error metrics of one memo state, built once per memo state before
 /// an edge pass; Stage 3 reads the same contracts.
@@ -103,9 +100,8 @@ impl ErrorMetricsOfMemo {
         candidate: CandidateForMemoGroupId,
         metric: AccuracyMetric,
     ) -> Option<&ErrorContract> {
-        self.error_contract[candidate.group.0 as usize][candidate.index_in_group]
-            [metric_index(metric)]
-        .as_ref()
+        self.error_contract[candidate.group.0 as usize][candidate.index_in_group][metric.index()]
+            .as_ref()
     }
 
     /// The error metric of `candidate` when it is a sketch readout.
@@ -272,20 +268,14 @@ impl ErrorMetricsOfMemo {
     }
 }
 
-/// The index of `metric` in `AccuracyMetric::ALL`.
-fn metric_index(metric: AccuracyMetric) -> usize {
-    AccuracyMetric::ALL
-        .iter()
-        .position(|&listed| listed == metric)
-        .expect("AccuracyMetric::ALL lists every metric")
-}
-
 /// Each query with a target, with the groups its root reads and the metrics
 /// each allows: an operator root, `scalar(v)` and an SQL scalar subquery
 /// (which return the value they read) allow the target's metrics
 /// (`AccuracyTarget::metrics`); any other scalar expression's operands
 /// allow none, as no error contract covers it, so they are read exactly.
-pub(crate) fn query_roots_with_target(
+/// Pass 2's readout caps and Stage 3's root checks of constraint (K) read
+/// it.
+pub fn query_roots_with_target(
     memo: &Memo,
 ) -> Vec<(usize, MemoGroupId, &AccuracyTarget, Vec<AccuracyMetric>)> {
     let mut roots = Vec::new();
