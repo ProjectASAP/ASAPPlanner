@@ -41,7 +41,7 @@ asap_planner (--workload <file>)... --run-until stage0|stage1_pass1|stage1_pass2
 
 | Option | Meaning |
 | --- | --- |
-| `--workload <file>` | A `PlanningWorkload` JSON file: the queries, their requirements and recurrence, and the data-source facts. Repeat it to plan several files together, including PromQL and SQL files; sources they share must have the same facts. Required. |
+| `--workload <file>` | A `PlanningWorkload` JSON file: the queries, their requirements and recurrence, and the data-source facts. Repeat it to plan several files together, including PromQL, MetricsQL and SQL files; sources they share must have the same facts. Required. |
 | `--run-until <stage>` | The last stage to run. Every stage up to and including it is printed. Required. |
 | `--format text\|json` | `text` (the default) for reading; `json` for an `asap-stage-pipeline/v2` document. |
 | `--printing-full-candidates` | Text only: print every candidate, edge and pruned candidate. By default the candidates of a memo group that differ only in θ are folded into one line (their indices, each θ parameter's values, and how many Pass 2 pruned, by cause), the candidates Pass 2 kept are printed in full with their edges, and the pruned lists of Pass 2 and Stage 2 are counts per cause. |
@@ -65,7 +65,7 @@ under the stage that failed.
 | `stage1_pass1` | Stage 1 Pass 1: each computation's candidates. |
 | `stage1_pass2` | Stage 1 Pass 2: the memo after its rules (with a chain group for every legal tumbling-window width), each candidate's logical edges with $\alpha^{\log}$ and why an edge fails, and the candidates Pass 2 eliminated with their causes. |
 | `stage2` | Stage 2: the physical candidates, their physical edges with $\alpha^{\mathrm{phys}}$ and why an edge fails, and the candidates pruned with their reasons. |
-| `stage3` | Stage 3: the selected plan, its cost per node, each query's accepted accuracy, the candidates Stage 3 pruned and the selection MILP's size. |
+| `stage3` | Stage 3: the selected plan, its cost per node, its materialized views (node, refresh, retention), each query's accepted accuracy, the candidates Stage 3 pruned and the selection MILP's size. |
 
 Every stage sees every legal tumbling-window width at once, so the selected
 plan is the best over all of them.

@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 
 use crate::stages::{
     CandidateForMemoGroupId, LogicalEdge, Memo, MemoGroupId, PrunedLogicalCandidate,
+    RootPruneReason,
 };
 
 /// The times `phase_ms + k · period_ms`: the evaluation times of a
@@ -29,6 +30,14 @@ pub struct LogicalASAPMemoCandidates {
     /// Every $(u, c, i)$ with $u \in G_{c,i}$ between candidates that
     /// survive dead-candidate elimination, grouped by $(c, i)$.
     pub edges: Vec<LogicalEdge>,
+    /// Every $(u, c, i)$ with $\alpha^{\log} = 0$, eliminated candidates'
+    /// edges included, with the rule that failed, as Pass 2 decided it (the
+    /// chain grid, then values per evaluation, then the metric and accuracy
+    /// rules), sorted by consumer, then input, then producer. E.g. a KLL
+    /// readout G5[0] of a query with δ over its whole result and $n_q$
+    /// unknown: `(G4[3] → G5[0], input 0, ValuesPerEvaluationUnknown {
+    /// consumer: G5[0], query: 0 })`. A possible edge not listed holds.
+    pub failing_logical_edges: Vec<(LogicalEdge, RootPruneReason)>,
     /// The candidates dead-candidate elimination removed: no logical edge
     /// names them, and Stage 2 does not expand them.
     pub pruned: Vec<PrunedLogicalCandidate>,
