@@ -109,7 +109,8 @@ pub fn sql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
     sql_pass2_over(queries, json!({"flows": {"series_count": 1000}}))
 }
 
-/// [`sql_pass2`] with the facts `sources` declares for `flows`.
+/// [`sql_pass2`] with the facts `sources` declares for `flows` and for
+/// `hosts(ts, host, region)`, which a query may join with `flows`.
 pub fn sql_pass2_over(queries: &[(&str, Value)], sources: Value) -> LogicalASAPMemoCandidates {
     let flows = json!({"name": "flows", "time_index": 0, "columns": [
         {"name": "ts", "type": "timestamp"},
@@ -117,11 +118,16 @@ pub fn sql_pass2_over(queries: &[(&str, Value)], sources: Value) -> LogicalASAPM
         {"name": "dst", "type": "utf8"},
         {"name": "bytes", "type": "float64"},
     ]});
+    let hosts = json!({"name": "hosts", "time_index": 0, "columns": [
+        {"name": "ts", "type": "timestamp"},
+        {"name": "host", "type": "utf8"},
+        {"name": "region", "type": "utf8"},
+    ]});
     pass2_of(
         json!({"sql": "datafusion_sql"}),
         queries,
         sources,
-        Some(&[flows.to_string()]),
+        Some(&[flows.to_string(), hosts.to_string()]),
     )
 }
 
