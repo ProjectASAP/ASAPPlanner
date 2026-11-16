@@ -142,3 +142,48 @@ fn a_promql_result_returns_at_most_its_keys_declared_values_or_its_series() {
     assert_eq!(values_per_evaluation(by_job, None), Some(1000));
     assert_eq!(values_per_evaluation("rate(m[5m])", None), Some(1000));
 }
+
+/// A many-to-one match between two selectors of one metric pairs labels of
+/// different series: `m{side="l"} * on(x) group_left(instance)
+/// m{side="r"}` keeps each left series' `job` and copies `instance` from
+/// the right series with the same `x`. `m` declares 200 series, 10 `job`
+/// and 10 `instance` values, and 10 (`job`, `instance`) pairs; the left
+/// series `(job_a, instance_a, x = 10a + b)` and the right series
+/// `(job_b, instance_b, x = 10a + b)` give the output pairs
+/// `(job_a, instance_b)`: 100, not the 10 pairs one series holds.
+/// `group_right(job)` and an `offset` on one side pair them the same way.
+#[test]
+fn a_many_to_one_match_within_one_metric_returns_up_to_the_product_of_both_sides_labels() {
+    let values_per_evaluation = |query: &str| {
+        promql_pass2_over(
+            &[(
+                query,
+                json!({"max_error": 0.05, "failure_probability": 0.01, "accuracy_metric": "relative"}),
+            )],
+            json!({"m": {
+                "series_count": 200,
+                "metric_type": "gauge",
+                "sample_interval": 15_000,
+                "distinct_values_per_label": {"job": 10, "instance": 10},
+                "distinct_values_per_label_set": [
+                    {"labels": ["job", "instance"], "distinct_values": 10},
+                ],
+            }}),
+        )
+        .memo
+        .queries()[0]
+            .number_of_values_per_query_evaluation
+    };
+    for query in [
+        r#"quantile by (job, instance) (0.5, m{side="l"} * on(x) group_left(instance) m{side="r"})"#,
+        r#"quantile by (job, instance) (0.5, m{side="l"} * on(x) group_right(job) m{side="r"})"#,
+        r#"quantile by (job, instance) (0.5, m * on(x) group_left(instance) m offset 1h)"#,
+    ] {
+        assert_eq!(values_per_evaluation(query), Some(100), "{query}");
+    }
+    // One series' own labels still count once: 10 pairs.
+    assert_eq!(
+        values_per_evaluation("quantile by (job, instance) (0.5, m)"),
+        Some(10)
+    );
+}
