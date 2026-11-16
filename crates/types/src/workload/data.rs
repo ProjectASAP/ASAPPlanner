@@ -135,12 +135,14 @@ pub struct SourceFacts {
     /// 0.001, "max_abs": 10000.0}}` for a latency in seconds. Read per
     /// series name: a histogram or summary family's range does not apply to
     /// its `_sum`, `_count` or `_bucket` series. A DDSketch state built from
-    /// the column unchanged is costed at the bins those magnitudes span (the
-    /// bucket indices from ⌊log_γ min_abs⌋ to ⌊log_γ max_abs⌋, at least one)
-    /// instead of an assumed range of nine decades. The deployment must
-    /// ensure it: a range that is too narrow can make Stage 3 pick a finer
-    /// and much larger sketch than the default range would. Omitted from
-    /// JSON when empty.
+    /// the column unchanged is costed at the buckets its own rows are
+    /// expected to span, and the declared range only caps that span: a
+    /// gauge declared within [90, 110] is charged 11 buckets however many
+    /// rows a state folds, while a range wider than the rows' expected
+    /// spread changes nothing. It never raises the charge. The deployment
+    /// must ensure it: a range that is too narrow under-charges the states,
+    /// so Stage 3 may pick a sketch that holds more than it was charged.
+    /// Omitted from JSON when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub column_magnitudes: BTreeMap<String, ValueMagnitudeRange>,
     /// How often each series of the metric (or group of rows of a SQL

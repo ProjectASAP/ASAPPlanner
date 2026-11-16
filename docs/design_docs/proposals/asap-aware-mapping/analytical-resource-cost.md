@@ -797,10 +797,18 @@ groups of its keys, estimated like any `by (keys)` and at most the input's
 groups. The merged state is sized for the rows its group's input states fold
 together: 360 stored KLL windows of 10 rows each merge into a state sized for
 3,600 rows. A readout (estimate or finalize) costs each group's output row,
-plus reading its state (a KLL's per byte). A state's row on any edge holds
+plus reading its state (a KLL's per byte, twice that when no merge has
+sorted its levels since its updates). A tumbling-window chain keeps each row
+it reads in its window's range at either timing, at a time range's cost per
+row: at query time over its scan's lookback, at ingestion time as it assigns
+each arriving row its window. A state's row on any edge holds
 its labels, its window's time and its series identity beside the state; a
 DDSketch state is sized for the values it is expected to hold, spread like
-latencies, not for the most it could hold. A grouping that carries label
+latencies, not for the most it could hold; a column's declared
+`column_magnitudes` caps that spread and never raises it. Merging exact Min or
+Max states costs about half a Sum's or Count's per state, and a
+tumbling-window chain emits a fixed-size exact state for less than a sketch
+state. A grouping that carries label
 columns beside its keys (a per-series sum keeping `job` for a later
 `sum by (job)`) costs per row and carried label. A plan
 using one of these operations is unavailable until the corresponding formula
