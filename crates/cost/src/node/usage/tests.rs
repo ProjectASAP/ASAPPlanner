@@ -60,6 +60,7 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: Some(60_000),
+        raw_rows_span_ms: None,
         state_input_rows: None,
     };
     let windows = node(Payload::NonASAP(NonASAPOp::TimeRange {
@@ -160,6 +161,7 @@ fn an_operator_keeping_its_input_window_over_a_chain_or_its_windows_selects_what
             unchanged_columns: BTreeSet::new(),
             tumbling_windows: 1,
             chain_tumbling_window_width_ms: Some(60_000),
+            raw_rows_span_ms: None,
             state_input_rows: None,
         };
         for &step in path {
@@ -211,6 +213,7 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 5,
         chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
         state_input_rows: None,
     };
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
@@ -258,6 +261,7 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 5,
         chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
         state_input_rows: None,
     };
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
@@ -295,11 +299,13 @@ fn thousand_series_sampled_every(sample_interval_ms: u64) -> DataWorkload {
     .unwrap()
 }
 
-/// `rows` raw rows of `metric`, as `producer` outputs them to a grouping.
+/// `rows` raw rows of `metric` spanning `span_ms`, as `producer` outputs
+/// them to a grouping.
 fn raw_rows<'a>(
     producer: &'a PhysicalASAPDAGNode,
     metric: &'static str,
     rows: u64,
+    span_ms: u64,
 ) -> ProducerOutput<'a> {
     ProducerOutput {
         payload: &producer.payload,
@@ -313,6 +319,7 @@ fn raw_rows<'a>(
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: Some(span_ms),
         state_input_rows: None,
     }
 }
@@ -336,13 +343,14 @@ fn per_series_carrying_job(state_type: Option<FieldDataType>) -> Schema {
 }
 
 /// A per-series Rate chain carrying `job` in 300 s windows at ingestion
-/// time over 1,000 series of `requests_total`: measured 125.6 ns per
-/// arriving row at 1 Hz and 85.7 at 10 Hz (a stored-only plan's ingestion
-/// CPU over its rows), 1.47x. Its per-row work is the same at both rates;
-/// what differs is how often it visits each series' state and splits its
-/// rows by window, once per 10 s raw batch, which holds 10 rows of a series
-/// at 1 Hz and 100 at 10 Hz. Charged a time range per row instead, the two
-/// rates differed by 5%, and the 1 Hz chain was 1.2x under-charged.
+/// time over 1,000 series of `requests_total`: measured 106.3 ns per
+/// arriving row at 1 Hz and 87.6 at 10 Hz (a stored-only plan's ingestion
+/// CPU over its rows), 1.21x; an earlier run measured 125.6 and 85.7, as 1 Hz
+/// ingestion varies between runs. Its per-row work is the same at both
+/// rates; what differs is how often it visits each series' state, once per
+/// 10 s raw batch, which holds 10 rows of a series at 1 Hz and 100 at
+/// 10 Hz. Charged a time range per row instead, the two rates differed by
+/// 5%.
 #[test]
 fn an_ingestion_time_chain_costs_more_per_row_at_a_lower_sample_rate() {
     let settings = CostInputs::default();
@@ -366,7 +374,7 @@ fn an_ingestion_time_chain_costs_more_per_row_at_a_lower_sample_rate() {
         let rows_per_second = 1_000 * 1_000 / sample_interval_ms;
         let usage = node_resource_usage_and_cost(
             &chain,
-            &[raw_rows(&scan, "requests_total", rows_per_second)],
+            &[raw_rows(&scan, "requests_total", rows_per_second, 1_000)],
             (1, 1.0),
             None,
             &thousand_series_sampled_every(sample_interval_ms),
@@ -376,15 +384,15 @@ fn an_ingestion_time_chain_costs_more_per_row_at_a_lower_sample_rate() {
         usage.cpu_ops_per_second / rows_per_second as f64
     };
     let (one_hz, ten_hz) = (ns_per_row(1_000), ns_per_row(100));
-    for (charged, measured) in [(one_hz, 125.6), (ten_hz, 85.7)] {
+    for (charged, measured) in [(one_hz, 106.3), (ten_hz, 87.6)] {
         assert!(
             (0.8..=1.25).contains(&(charged / measured)),
             "charged {charged:.1} ns per row, measured {measured}"
         );
     }
     assert!(
-        (1.3..=1.7).contains(&(one_hz / ten_hz)),
-        "1 Hz charged {one_hz:.1} ns per row, 10 Hz {ten_hz:.1}; measured 1.47x"
+        (1.1..=1.4).contains(&(one_hz / ten_hz)),
+        "1 Hz charged {one_hz:.1} ns per row, 10 Hz {ten_hz:.1}; measured 1.21x"
     );
 }
 
@@ -429,7 +437,7 @@ fn a_per_series_aggregate_costs_more_per_row_at_a_lower_sample_rate() {
         let rows = 300 * 1_000 * 1_000 / sample_interval_ms;
         let usage = node_resource_usage_and_cost(
             &aggregate,
-            &[raw_rows(&range, "latency", rows)],
+            &[raw_rows(&range, "latency", rows, 300_000)],
             (1, 1.0),
             None,
             &thousand_series_sampled_every(sample_interval_ms),
@@ -450,7 +458,7 @@ fn a_per_series_aggregate_costs_more_per_row_at_a_lower_sample_rate() {
 /// A grouping visits each group's state once per raw batch of the
 /// deployment's `raw_batch_width_ms`: the per-series aggregate over 5 min
 /// of 1,000 series at 1 Hz visits each series 30 times in 10 s batches and
-/// 300 times in 1 s batches (one row each), 270,000 visits × 140
+/// 300 times in 1 s batches (one row each), 270,000 visits × 170
 /// operations more.
 #[test]
 fn a_grouping_visits_each_group_once_per_raw_batch_of_the_declared_width() {
@@ -474,7 +482,7 @@ fn a_grouping_visits_each_group_once_per_raw_batch_of_the_declared_width() {
         settings.resource_speed.raw_batch_width_ms = raw_batch_width_ms;
         node_resource_usage_and_cost(
             &aggregate,
-            &[raw_rows(&range, "latency", 300_000)],
+            &[raw_rows(&range, "latency", 300_000, 300_000)],
             (1, 1.0),
             None,
             &thousand_series_sampled_every(1_000),
@@ -518,7 +526,7 @@ fn a_query_time_rate_build_costs_more_per_row_at_a_lower_sample_rate() {
         let rows = 300 * 1_000 * 1_000 / sample_interval_ms;
         let usage = node_resource_usage_and_cost(
             &build,
-            &[raw_rows(&range, "requests_total", rows)],
+            &[raw_rows(&range, "requests_total", rows, 300_000)],
             (1, 1.0),
             None,
             &thousand_series_sampled_every(sample_interval_ms),
@@ -544,14 +552,14 @@ fn a_query_time_rate_build_costs_more_per_row_at_a_lower_sample_rate() {
 /// window's range, as a `TimeRange` over the same rows does, besides
 /// updating the row's state and visiting its group once per raw batch.
 /// Example: a sum in 60 s windows over 36,000 raw rows of unknown rate (one
-/// batch), retaining five windows of one group, costs 36,000 × 41
-/// operations (30 to update, 11 to keep in range), one group visit × 330
-/// (140 plus the chain's 190) and five emitted exact states × 1,500.
+/// batch), retaining five windows of one group, costs 36,000 × 40
+/// operations (29 to update, 11 to keep in range), one group visit × 170
+/// and five emitted exact states × 1,500.
 #[test]
 fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
     use crate::node::operations_per_unit::{
-        CHAIN_WINDOW_OPERATIONS_PER_GROUP_PER_RAW_BATCH, EXACT_UPDATE_OPERATIONS_PER_ROW,
-        OPERATIONS_PER_GROUP_PER_RAW_BATCH, TIME_RANGE_OPERATIONS_PER_ROW,
+        EXACT_UPDATE_OPERATIONS_PER_ROW, OPERATIONS_PER_GROUP_PER_RAW_BATCH,
+        TIME_RANGE_OPERATIONS_PER_ROW,
     };
     let settings = CostInputs::default();
     let data = DataWorkload::default();
@@ -574,6 +582,7 @@ fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
         state_input_rows: None,
     };
     let chain = PhysicalASAPDAGNode {
@@ -593,7 +602,6 @@ fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
         usage.cpu_ops_per_second,
         36_000.0 * (EXACT_UPDATE_OPERATIONS_PER_ROW + TIME_RANGE_OPERATIONS_PER_ROW)
             + OPERATIONS_PER_GROUP_PER_RAW_BATCH
-            + CHAIN_WINDOW_OPERATIONS_PER_GROUP_PER_RAW_BATCH
             + 5.0 * 1_500.0
     );
 }
@@ -729,6 +737,7 @@ fn a_merge_reading_one_state_per_group_passes_it_through() {
             unchanged_columns: BTreeSet::new(),
             tumbling_windows: 1,
             chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
             state_input_rows: Some(StateInputRows {
                 rows_per_state: Some(100),
                 non_negative: true,
@@ -795,7 +804,7 @@ fn sql_aggregate_operations_per_row(
             child: 0,
         }))
     };
-    let mut rows = raw_rows(&range, "t", 300_000);
+    let mut rows = raw_rows(&range, "t", 300_000, 300_000);
     rows.output_schema = &range.output_schema;
     rows.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
     let names = measures.iter().map(|_| String::new()).collect();
@@ -900,7 +909,7 @@ fn a_kmv_build_costs_per_retained_hash_it_compares() {
         }))
     };
     for (keys, k, measured) in [(vec![], 4_323, 191.0), (vec![2], 26_656, 7_410.0)] {
-        let mut rows = raw_rows(&range, "t", 300_000);
+        let mut rows = raw_rows(&range, "t", 300_000, 300_000);
         rows.output_schema = &range.output_schema;
         rows.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
         let build = PhysicalASAPDAGNode {
@@ -974,6 +983,7 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
         unchanged_columns: ["region", "service"].into(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
         state_input_rows: Some(rows),
     };
     let rollup = PhysicalASAPDAGNode {
@@ -1020,6 +1030,7 @@ fn query_time_memory_is_held_only_while_the_node_computes() {
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
         state_input_rows: None,
     };
     let merge = PhysicalASAPDAGNode {
@@ -1151,6 +1162,7 @@ fn an_ingestion_time_view_of_raw_rows_keeps_the_rows_its_retention_covers() {
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
         state_input_rows: None,
     };
     let row_schema = Schema::new(vec![
@@ -1214,6 +1226,7 @@ fn a_view_without_retention_is_not_costed() {
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
         state_input_rows: None,
     };
     let shift = PhysicalASAPDAGNode {
@@ -1287,6 +1300,7 @@ fn a_view_over_an_ingestion_time_chain_keeps_one_output_per_chain_window() {
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: Some(60_000),
+        raw_rows_span_ms: None,
         state_input_rows: None,
     };
     let usage = node_resource_usage_and_cost(
@@ -1342,6 +1356,7 @@ fn ddsketch_state_bytes(
         unchanged_columns,
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
         state_input_rows: None,
     };
     let settings = CostInputs::default();
@@ -1612,6 +1627,7 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
         state_input_rows: None,
     };
     let mut chain = node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -1729,6 +1745,7 @@ fn a_finalize_charges_each_group_its_measured_time() {
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
         state_input_rows: None,
     };
     let finalize = node(Payload::ASAP(ASAPOp::FinalizeExactAccumulator { child: 0 }));
@@ -1775,6 +1792,7 @@ fn a_per_series_aggregate_charges_the_labels_it_carries() {
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
         state_input_rows: None,
     };
     let ms_per_row = |labels: &[&str]| {
@@ -1840,10 +1858,10 @@ fn a_kll_merge_of_few_states_charges_each_group_its_measured_time() {
 fn a_max_merge_charges_its_measured_time_per_state() {
     use crate::node::operations_per_unit::merge_operations_per_state;
     for kind in [ExactKind::Max, ExactKind::Min] {
-        let max = merge_operations_per_state(StateFamily::Exact(&kind), 56, 56);
+        let max = merge_operations_per_state(StateFamily::Exact(&kind), 56, 56, None, 1);
         assert!((100.0..=150.0).contains(&max), "{kind:?}: {max} per state");
     }
-    let sum = merge_operations_per_state(StateFamily::Exact(&ExactKind::Sum), 56, 56);
+    let sum = merge_operations_per_state(StateFamily::Exact(&ExactKind::Sum), 56, 56, None, 1);
     assert!((200.0..=260.0).contains(&sum), "Sum: {sum} per state");
 }
 
@@ -1888,6 +1906,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 360,
         chain_tumbling_window_width_ms: Some(10_000),
+        raw_rows_span_ms: None,
         state_input_rows: Some(rows),
     };
     let wider = ProducerOutput {
@@ -1897,6 +1916,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         },
         tumbling_windows: 60,
         chain_tumbling_window_width_ms: Some(60_000),
+        raw_rows_span_ms: None,
         state_input_rows: Some(StateInputRows {
             rows_per_state: Some(100),
             ..rows
@@ -1956,6 +1976,7 @@ fn kll_estimate_us_per_group(producer: Payload, rows_per_state: u64, state_bytes
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
         state_input_rows: Some(StateInputRows {
             rows_per_state: Some(rows_per_state),
             non_negative: true,

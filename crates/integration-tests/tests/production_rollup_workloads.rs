@@ -12,6 +12,7 @@ use asap_planner::{run_planning, PlanSearchSettings, PlanningModels, PlanningRun
 use asap_types::accuracy::{AccuracyMetric, AccuracyScope, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::{ASAPOp, OperatorNode, QueryRoot};
+use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
 use asap_types::workload::{
     DataWorkload, Predictability, QueryRecurrence, QueryRequirements, QueryWorkloadEntry,
     RepeatedDemand, RepetitionInterval, TimestampMs,
@@ -151,14 +152,49 @@ async fn production_three_sql_groupings_share_kll() {
     check(&sql(&queries, accuracy).await, 3, 2, "Kll");
 }
 
+/// `COUNT(DISTINCT user_id)` by (region, service) and by service: the two
+/// exact distinct counts cost less than one KMV build by (region, service)
+/// with a rollup to service, so the planner counts exactly. Both plans as
+/// the planner sizes them, executed over 12,000,000 rows of this shape
+/// (1,000 (region, service) groups, 1,000,000 distinct users), measure
+/// 14.7 s per evaluation for the exact counts and 393 s for the KMV plan at
+/// k = 106,263: its build compares each row with the hashes each state
+/// retains (40.0 s, charged 36.5), and its rollup inserts each state's
+/// hashes the same way (the rest). Charged a fixed 48 per row, the KMV
+/// plan was selected.
 #[tokio::test]
-async fn production_sql_distinct_region_service_rollup() {
+async fn production_sql_distinct_region_service_counts_exactly() {
     let accuracy = AccuracyTarget::max_error(0.05)
         .failure_probability(0.05)
         .accuracy_metric(AccuracyMetric::Relative)
         .accuracy_scope(AccuracyScope::PerValue);
     let queries: Vec<_> = ["region, service", "service"].iter().map(|keys| format!("SELECT {keys}, COUNT(DISTINCT user_id) AS value FROM http WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY {keys}")).collect();
-    check(&sql(&queries, accuracy).await, 2, 1, "Kmv");
+    let run = sql(&queries, accuracy).await;
+    let (plan, selection) = run
+        .selection
+        .as_ref()
+        .expect("validated production plan within 30s");
+    assert!(
+        selection
+            .accepted_accuracy_per_query
+            .iter()
+            .all(|accepted| accepted.sketches.is_empty()),
+        "{:?}",
+        selection.accepted_accuracy_per_query
+    );
+    let builds = plan
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::ASAP(
+                    ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }
+                )
+            )
+        })
+        .count();
+    assert_eq!(builds, 0, "the selected plan builds no summary");
 }
 
 // Exercise multi-input operators through the production route under more than

@@ -640,14 +640,14 @@ fn reads_one_batch_of(
 }
 
 /// An input's logical output over its readable costed candidates' `usages`: the most
-/// rows and bytes any outputs, the state family and the rows each state
-/// folds of the one with the most bytes, the sources any reads and the
-/// columns every one leaves unchanged; `payload` and `schema` the group's
-/// own. `None` without a costed candidate. Example: of two KLL candidates,
-/// one at k = 547 whose states fold 10 rows and one at k = 1,404 whose
-/// states fold 3,600, the larger gives both its family and its rows, so a
-/// merge over the input never sizes one candidate's `k` for the other's
-/// rows.
+/// rows and bytes any outputs and the longest time their raw rows span, the
+/// state family and the rows each state folds of the one with the most
+/// bytes, the sources any reads and the columns every one leaves unchanged;
+/// `payload` and `schema` the group's own. `None` without a costed
+/// candidate. Example: of two KLL candidates, one at k = 547 whose states
+/// fold 10 rows and one at k = 1,404 whose states fold 3,600, the larger
+/// gives both its family and its rows, so a merge over the input never
+/// sizes one candidate's `k` for the other's rows.
 fn logical_output<'a: 'b, 'b>(
     payload: &'a PhysicalASAPOperatorPayload,
     schema: &'a asap_types::ir::schema::Schema,
@@ -663,6 +663,7 @@ fn logical_output<'a: 'b, 'b>(
             known.family = usage.family;
             known.state_input_rows = usage.state_input_rows;
         }
+        known.raw_rows_span_ms = known.raw_rows_span_ms.max(usage.raw_rows_span_ms);
         known.output.rows = known.output.rows.max(usage.output.rows);
         known.output.bytes = known.output.bytes.max(usage.output.bytes);
         known.sources.extend(usage.sources.iter().copied());

@@ -127,14 +127,19 @@ pub struct ResourceSpeed {
     pub ms_per_cpu_op: f64,
     /// Milliseconds scanning one byte takes on one core.
     pub ms_per_scanned_byte: f64,
-    /// The time one batch of raw rows covers, as the executor receives and
-    /// stores them: a grouping visits each group's state once per batch
-    /// its rows arrive in, so a 5 min window of a series sampled at 1 Hz
-    /// in 10 s batches costs 30 visits per series, whether it holds 300
-    /// rows or (at 10 Hz) 3,000. Default 10,000 (10 s), an assumed value:
-    /// the batch width the reference executor's measurements stored, not
-    /// one the deployment declared; omitted from JSON, it takes that
-    /// default.
+    /// The time one batch of raw rows covers in the deployment's data
+    /// store, which returns raw rows to a query in those batches, each
+    /// series' rows of a batch together. The executor has no batch width of
+    /// its own: it groups the batches the store returns and looks up a
+    /// series' group once per batch, so a grouping visits each group's
+    /// state once per batch its rows are in. A 5 min window of a series
+    /// sampled at 1 Hz in 10 s batches costs 30 visits per series, whether
+    /// it holds 300 rows or (at 10 Hz) 3,000. Default 10,000 (10 s), an
+    /// assumed value: the batch width of the store the reference
+    /// measurements read from, not one the deployment declared; omitted
+    /// from JSON, it takes that default. Ingestion-time work is charged
+    /// one second's share of a batch per execution, which follows the
+    /// arriving rows, not the store's batches.
     #[serde(default = "default_raw_batch_width_ms")]
     pub raw_batch_width_ms: u64,
 }
