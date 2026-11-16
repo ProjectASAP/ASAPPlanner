@@ -33,6 +33,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
+# The data `asap_run` ingests: sketch-bench's synthetic time-series
+# generator, pinned to the commit that makes it a standalone library. Only
+# the developer tools depend on it.
+aqpbm-datagen = { git = "https://github.com/ProjectASAP/sketch-bench", rev = "cf8f86735e6f4c59d9827e3ae5d5bd28e8cd3ee1" }
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }

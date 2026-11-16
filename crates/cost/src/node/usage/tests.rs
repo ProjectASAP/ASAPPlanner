@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::ExecutionDataState;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode;
@@ -733,5 +734,148 @@ fn a_ddsketch_over_a_counter_declaring_its_value_unknown_keeps_both_stores() {
     assert_eq!(
         state_bytes(&counter(BTreeMap::new())),
         ddsketch_costed_bytes(true, None)
+    );
+}
+
+/// A query-time producer of `rows` plain rows, for a node under test.
+fn rows_of<'a>(producer: &'a PhysicalASAPDAGNode, rows: u64) -> ProducerOutput<'a> {
+    ProducerOutput {
+        payload: &producer.payload,
+        output_schema: &producer.output_schema,
+        output: EdgeStatistics {
+            rows,
+            bytes: rows * 16,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::None,
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 1,
+        chain_tumbling_window_width_ms: None,
+    }
+}
+
+/// A one-minute `TimeRange` over node 0.
+fn one_minute_range() -> PhysicalASAPDAGNode {
+    node(Payload::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_secs(60),
+        kind: TimeRangeKind::Range,
+        child: 0,
+    }))
+}
+
+/// A query-time `SummaryAgg` of an exact sum over 600 input rows, with a
+/// measured entry of 10 ns per row and 500 ns per computation, takes
+/// 600 · 10 + 500 = 6,500 ns = 0.0065 ms per execution; computed once a
+/// second, 6.5e-6 core-seconds per second, from the table.
+#[test]
+fn node_priced_by_hand() {
+    let mut settings = CostInputs::default();
+    settings.resource_speed.ms_per_cpu_op = 1e-6;
+    settings
+        .measured_operation_costs
+        .operators
+        .push(crate::OperatorCost {
+            operator: OperatorKind::SummaryAgg,
+            phase: Some(ExecutionTiming::QueryTime),
+            sketch: None,
+            exact: Some(ExactKind::Sum),
+            measure: None,
+            ns_per_unit: 10.0,
+            ns_per_invocation: 500.0,
+            memory_bytes_per_state: None,
+        });
+    let data = DataWorkload::default();
+    let range = one_minute_range();
+    let build = node(Payload::ASAP(ASAPOp::SummaryAgg {
+        child: 0,
+        summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::PerEntity,
+        filter: None,
+    }));
+    let usage = node_resource_usage_and_cost(
+        &build,
+        &[rows_of(&range, 600)],
+        (1, 1.0),
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
+    assert_eq!(usage.cost.cost_source, NodeCostSource::Measured);
+    assert!(
+        (usage.work_ms_per_execution - 0.0065).abs() < 1e-12,
+        "{}",
+        usage.work_ms_per_execution
+    );
+    assert!(
+        (usage.cost.cpu_core_seconds_per_second - 6.5e-6).abs() < 1e-15,
+        "{}",
+        usage.cost.cpu_core_seconds_per_second
+    );
+}
+
+/// An `Aggregate` is priced from the table only when each of its measures
+/// has an entry: with an entry for `sum` (10 ns per row) and none for
+/// `quantile`, `Aggregate[sum, quantile]` keeps the formulas, and
+/// `Aggregate[sum]` over 600 rows takes 600 · 10 = 6,000 ns.
+#[test]
+fn aggregate_needs_every_measure() {
+    let mut settings = CostInputs::default();
+    settings.resource_speed.ms_per_cpu_op = 1e-6;
+    settings
+        .measured_operation_costs
+        .operators
+        .push(crate::OperatorCost {
+            operator: OperatorKind::Aggregate,
+            phase: None,
+            sketch: None,
+            exact: None,
+            measure: Some("sum".into()),
+            ns_per_unit: 10.0,
+            ns_per_invocation: 0.0,
+            memory_bytes_per_state: None,
+        });
+    let data = DataWorkload::default();
+    let range = one_minute_range();
+    let aggregate = |measures: Vec<AggIntent>| {
+        node(Payload::NonASAP(NonASAPOp::Aggregate {
+            reduction: Reduction::Reduce(GroupKeys::none()),
+            output_names: vec![String::new(); measures.len()],
+            filters: vec![None; measures.len()],
+            measures,
+            having: None,
+            child: 0,
+        }))
+    };
+    let both = aggregate(vec![
+        AggIntent::Sum { col: None },
+        AggIntent::Quantile { col: None, q: 0.5 },
+    ]);
+    let usage = node_resource_usage_and_cost(
+        &both,
+        &[rows_of(&range, 600)],
+        (1, 1.0),
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
+    assert_eq!(usage.cost.cost_source, NodeCostSource::Analytical);
+    let sum = aggregate(vec![AggIntent::Sum { col: None }]);
+    let usage = node_resource_usage_and_cost(
+        &sum,
+        &[rows_of(&range, 600)],
+        (1, 1.0),
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
+    assert_eq!(usage.cost.cost_source, NodeCostSource::Measured);
+    assert!(
+        (usage.work_ms_per_execution - 0.006).abs() < 1e-12,
+        "{}",
+        usage.work_ms_per_execution
     );
 }
