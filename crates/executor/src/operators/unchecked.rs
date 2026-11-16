@@ -152,6 +152,7 @@ impl TryFrom<UncheckedOperator> for Operator {
                 groups,
                 measures,
                 filters,
+                emit_empty_global,
             } => {
                 if groups.len() + measures.len() != output.fields.len() {
                     return Err(invalid("aggregate width mismatch"));
@@ -159,6 +160,7 @@ impl TryFrom<UncheckedOperator> for Operator {
                 let names = output.fields[groups.len()..].iter().map(|f| f.name.clone());
                 Operator::aggregate(input(0)?, groups, names.zip(measures).collect())?
                     .with_measure_filters(filters)?
+                    .with_emit_empty_global(emit_empty_global, None)?
             }
             Kind::SemiJoin {
                 keys,
@@ -190,6 +192,7 @@ impl TryFrom<UncheckedOperator> for Operator {
                 time,
                 groups,
                 filter,
+                emit_empty_global,
             } => with_filter(
                 Operator::per_group_summary_build(
                     input(0)?,
@@ -200,7 +203,8 @@ impl TryFrom<UncheckedOperator> for Operator {
                     groups,
                 )?,
                 filter,
-            )?,
+            )?
+            .with_emit_empty_global(emit_empty_global, None)?,
             Kind::PerGroupKeyedSummaryBuild {
                 family,
                 parameters,
@@ -246,16 +250,13 @@ impl TryFrom<UncheckedOperator> for Operator {
                 emit_empty_global,
                 parameters,
             } => {
-                let merge = Operator::summary_merge(input(0)?, state, groups)?;
-                if emit_empty_global {
-                    merge.with_emit_empty_global(parameters)?
-                } else if parameters.is_some() {
+                if !emit_empty_global && parameters.is_some() {
                     return Err(invalid(
                         "only a merge that outputs an empty global state takes parameters θ",
                     ));
-                } else {
-                    merge
                 }
+                Operator::summary_merge(input(0)?, state, groups)?
+                    .with_emit_empty_global(emit_empty_global, parameters)?
             }
             Kind::Evaluation { state, query } => Operator::evaluation(input(0)?, state, query)?,
         }

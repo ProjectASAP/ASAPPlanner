@@ -35,8 +35,10 @@ impl Operator {
                     }
                     (DataType::Float64, false)
                 }
+                // NULL for a group of NULLs, as SQL `SUM` (and for a
+                // global one over no row: `with_emit_empty_global`).
                 Reduction::Sum(i) | Reduction::Avg(i) => {
-                    let (t, _) = plain(&input, *i)?;
+                    let (t, nullable) = plain(&input, *i)?;
                     if !matches!(t, DataType::Int64 | DataType::Float64) {
                         return Err(invalid("numeric aggregate input required"));
                     }
@@ -46,8 +48,7 @@ impl Operator {
                         } else {
                             t.clone()
                         },
-                        !input.has_promql_series_identity()
-                            && (groups.is_empty() || plain(&input, *i)?.1),
+                        nullable,
                     )
                 }
                 Reduction::Quantile { column, .. } => {
@@ -63,19 +64,16 @@ impl Operator {
                             "a percentile requires Float64 input and a fraction in [0, 1]",
                         ));
                     }
-                    // NULL for a group with no value, as SQL `SUM`: a global
-                    // one over no row, or a group of NULLs.
-                    (
-                        DataType::Float64,
-                        groups.is_empty() || plain(&input, *column)?.1,
-                    )
+                    // NULL for a group of NULLs, as SQL `SUM` (and for a
+                    // global one over no row: `with_emit_empty_global`).
+                    (DataType::Float64, plain(&input, *column)?.1)
                 }
                 Reduction::Min(i) | Reduction::Max(i) => {
                     let (t, nullable) = plain(&input, *i)?;
                     if !ordered(t) {
                         return Err(invalid("ordered aggregate input required"));
                     }
-                    (t.clone(), nullable || groups.is_empty())
+                    (t.clone(), nullable)
                 }
                 Reduction::StdDev { column, population }
                 | Reduction::Variance { column, population } => {
@@ -83,15 +81,14 @@ impl Operator {
                     if !matches!(t, DataType::Int64 | DataType::Float64) {
                         return Err(invalid("numeric aggregate input required"));
                     }
-                    // SQL: NULL for fewer than two values (sample) or none
-                    // (population); a PromQL group always has a value. The
-                    // IR's aggregate schema defines this nullability; this
+                    // NULL for a group of NULLs and, as SQL's sample
+                    // `STDDEV`/`VAR_SAMP`, for a group of one value (and for
+                    // a global one over no row: `with_emit_empty_global`).
+                    // PromQL's `stddev`/`stdvar` are population ones over
+                    // groups that have a value, so never NULL. The IR's
+                    // aggregate schema defines this nullability; this
                     // derives it again to check the declared output.
-                    (
-                        DataType::Float64,
-                        !input.has_promql_series_identity()
-                            && (!population || groups.is_empty() || nullable),
-                    )
+                    (DataType::Float64, !population || nullable)
                 }
                 Reduction::PearsonCorr { left, right } => {
                     for column in [left, right] {
@@ -113,6 +110,7 @@ impl Operator {
                 groups,
                 measures: measures.into_iter().map(|(_, r)| r).collect(),
                 filters: vec![],
+                emit_empty_global: false,
             },
             inputs: vec![input],
             output: schema(fields),
@@ -128,6 +126,7 @@ impl Operator {
             filters: slot,
             measures,
             groups,
+            ..
         } = &mut self.kind
         else {
             return Err(invalid("measure filters need an aggregate"));
@@ -151,16 +150,7 @@ impl Operator {
             if filter.dtype(&self.inputs[0])?.0 != DataType::Bool {
                 return Err(invalid("measure filter must be boolean"));
             }
-            if matches!(
-                measures[index],
-                Reduction::Sum(_)
-                    | Reduction::Avg(_)
-                    | Reduction::Min(_)
-                    | Reduction::Max(_)
-                    | Reduction::Percentile { .. }
-                    | Reduction::StdDev { .. }
-                    | Reduction::Variance { .. }
-            ) {
+            if measures[index].is_null_without_values() {
                 output.fields[groups.len() + index].nullable = true;
             }
         }
@@ -293,6 +283,22 @@ pub enum Reduction {
     /// PromQL `group`: 1 for every group.
     Group,
 }
+impl Reduction {
+    /// Whether the measure is NULL for a group with no (matching) value, as
+    /// SQL `SELECT sum(x) FROM t WHERE false` is NULL while `count(*)` is 0.
+    pub(super) fn is_null_without_values(&self) -> bool {
+        matches!(
+            self,
+            Reduction::Sum(_)
+                | Reduction::Avg(_)
+                | Reduction::Min(_)
+                | Reduction::Max(_)
+                | Reduction::Percentile { .. }
+                | Reduction::StdDev { .. }
+                | Reduction::Variance { .. }
+        )
+    }
+}
 pub(super) fn execute<'a>(
     operator: &'a Operator,
     mut inputs: Vec<Input<'a, Batch>>,
@@ -333,22 +339,7 @@ pub(super) fn execute<'a>(
                     results.len(),
                 )
             }
-            Kind::Aggregate {
-                groups,
-                measures,
-                filters,
-            } => {
-                columnar::aggregate(
-                    input,
-                    groups,
-                    measures,
-                    filters,
-                    &operator.inputs[0],
-                    &output,
-                    &context,
-                )
-                .await
-            }
+            Kind::Aggregate { .. } => columnar::aggregate(input, operator, &context).await,
             _ => unreachable!(),
         }
     })

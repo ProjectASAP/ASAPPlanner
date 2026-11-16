@@ -199,7 +199,7 @@ fn planner_unit_frequency_update_binds_as_a_value_frequency_build() -> Result<()
         selected_physical_candidate: None,
         view_coverage: None,
     };
-    let build = compile_node(&node, std::slice::from_ref(&input))?;
+    let build = compile_node(&node, std::slice::from_ref(&input), true)?;
     let batch = Batch::try_new(
         input,
         ["a", "a", "b", "b"]
