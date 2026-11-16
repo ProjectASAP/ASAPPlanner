@@ -13,7 +13,7 @@ use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::{DataStore, InMemoryDataStore};
 use asap_executor::values::{Batch, Value};
-use asap_planner::InstallablePlan;
+use asap_planner::{InstallablePlan, MaterializedView};
 use asap_types::ir::operator::Source;
 use asap_types::ir::schema::{DataType, FieldDataType, Schema, PROMQL_SERIES_IDENTITY};
 use asap_types::ir::NonASAPOp;
@@ -169,22 +169,38 @@ pub fn query_roots(plan: &InstallablePlan) -> Vec<u64> {
 }
 
 /// Compile `ids` of `dag` and run them in `scope` over `store` (usually
-/// [`time_series_tables`]), as a runtime does with the executor: each id's
-/// output batches.
+/// [`time_series_tables`], plus the stored states of `views`), as a runtime
+/// does with the executor: each id's output batches. Each of `views` is
+/// bound as its materialized view slot (nothing below it compiled); pass
+/// `&[]` to compute every node from raw data.
 pub fn run(
     dag: &PhysicalASAPDAG,
     store: impl DataStore + 'static,
+    views: &[MaterializedView],
     ids: &[u64],
     scope: Scope,
 ) -> Vec<Vec<Batch>> {
-    // The executor's plan for `ids`; every `Scan` it reaches is a slot of
-    // `store`.
-    let compiled = compile(dag, &[], ids).expect("the executor compiles the plan");
+    // The executor's plan for `ids`; every `Scan` it reaches and every view
+    // in `views` is a slot of `store`.
+    let compiled = compile(dag, views, ids).expect("the executor compiles the plan");
     let instance = compiled.instantiate(Arc::new(store)).unwrap();
+    let ingestion = matches!(scope, Scope::Ingestion { .. });
     block_on(async {
         // The run's scope (ingestion window or query time) and limits.
         let context = RunContext::new(scope, Limits::default()).unwrap();
-        // One output stream per id.
+        if ingestion {
+            // An ingestion run: every id's batches, for the runtime to store.
+            let outputs = instance
+                .execute_ingestion(compiled.roots(), context)
+                .unwrap()
+                .await
+                .unwrap();
+            return outputs
+                .into_iter()
+                .map(|batches| batches.iter().map(|batch| (**batch).clone()).collect())
+                .collect();
+        }
+        // A query run: one output stream per id.
         let outputs = instance.execute(compiled.roots(), context).unwrap();
         futures::future::join_all(outputs.into_iter().map(|mut output| async move {
             // Its batches, collected.

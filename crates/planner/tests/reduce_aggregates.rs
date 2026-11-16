@@ -58,6 +58,7 @@ fn run_query(
     run(
         &plan.dag,
         store(&plan.dag),
+        &[],
         &[plan.dag.roots[0] as u64],
         scope,
     )
