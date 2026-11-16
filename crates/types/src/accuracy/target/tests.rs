@@ -332,3 +332,51 @@ fn exact_targets() {
         AccuracyScope::WholeResult
     );
 }
+
+/// δ = 0.01 splits over min(R, V · fan-in) readout values; an unknown term
+/// drops out of the `min`.
+#[test]
+fn failure_probability_splits_over_the_readout_values_covered() {
+    let read = |per_evaluation, per_output_value| ReadoutValuesRead {
+        per_evaluation,
+        per_output_value,
+    };
+    let per_value = AccuracyTarget::max_error(0.05)
+        .failure_probability(0.01)
+        .accuracy_scope(AccuracyScope::PerValue);
+    let whole = per_value.clone().accuracy_scope(AccuracyScope::WholeResult);
+    // (target, n_q, readout values, divisor)
+    let cases = [
+        // 8 series, no reduction.
+        (&per_value, Some(8), read(Some(8), Some(1)), 1),
+        (&whole, Some(8), read(Some(8), Some(1)), 8),
+        // A global `max` over 1000 series.
+        (&per_value, Some(1), read(Some(1000), Some(1000)), 1000),
+        (&whole, Some(1), read(Some(1000), Some(1000)), 1000),
+        // A grouped sum whose groups are known to hold 100 series each.
+        (&per_value, Some(10), read(Some(1000), Some(100)), 100),
+        (&whole, Some(10), read(Some(1000), Some(100)), 1000),
+        // Unknown terms.
+        (&per_value, None, read(None, Some(1)), 1),
+        (&whole, None, read(Some(100), Some(1)), 100),
+        (&whole, Some(8), read(None, Some(1)), 8),
+        (&per_value, Some(1), read(Some(1000), None), 1000),
+    ];
+    for (target, n_q, readout_values, divisor) in cases {
+        let split = target.failure_probability_per_readout_value(n_q, readout_values);
+        assert_eq!(
+            split,
+            Some(0.01 / divisor as f64),
+            "{target:?} {n_q:?} {readout_values:?}"
+        );
+    }
+    assert_eq!(
+        whole.failure_probability_per_readout_value(None, read(None, Some(1))),
+        None
+    );
+    assert_eq!(
+        AccuracyTarget::max_error(0.05)
+            .failure_probability_per_readout_value(None, read(None, None)),
+        Some(1.0)
+    );
+}
