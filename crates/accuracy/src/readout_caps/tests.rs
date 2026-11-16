@@ -204,13 +204,20 @@ fn an_and_combines_no_readout_errors() {
 /// each copied from one of the 200 readout values below it, so δ = 0.01
 /// splits over 100 of them: 1e-4 per value (min(200, 100 × 1)). A ratio
 /// of the same readouts combines both errors and keeps the composed grid.
+/// The values are non-negative, so DDSketch's guarantee holds.
 #[test]
 fn an_or_takes_each_value_from_one_readout() {
     let target = AccuracyTarget::max_error(0.05)
         .failure_probability(0.01)
         .accuracy_metric(AccuracyMetric::Relative);
+    let mut data = with_series("m", 100);
+    data.sources
+        .get_mut("m")
+        .expect("m")
+        .column_signs
+        .insert("value".into(), ValueSign::NonNegative);
     let readouts_under = |operator: fn(MemoGroupId, MemoGroupId) -> _| {
-        let mut memo = Memo::new(&with_series("m", 100));
+        let mut memo = Memo::new(&data);
         let (_, state, p90) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
         let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
         let root = group(&mut memo, operator(p90, p50));

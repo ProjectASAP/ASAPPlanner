@@ -243,13 +243,30 @@ fn builds_meeting(
 ) -> Vec<bool> {
     readouts
         .iter()
-        .filter_map(|&readout| sketch_readout(memo, memo.candidate(readout)))
-        .flat_map(|(summary_type, statistic)| {
+        .filter_map(|&readout| {
+            let candidate = memo.candidate(readout);
+            let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) =
+                candidate.expression.operator
+            else {
+                return None;
+            };
+            let (summary_type, statistic) = sketch_readout(memo, candidate)?;
+            Some((summary_input, summary_type, statistic))
+        })
+        .flat_map(|(summary_input, summary_type, statistic)| {
             let FieldDataType::Sketch(algorithm) = summary_type else {
                 unreachable!("a sketch readout reads a sketch state")
             };
             parameter_list(algorithm).iter().map(move |parameters| {
-                build_meets_level(&summary_type, parameters, statistic, level, evidence)
+                build_meets_level(
+                    memo,
+                    summary_input,
+                    &summary_type,
+                    parameters,
+                    statistic,
+                    level,
+                    evidence,
+                )
             })
         })
         .collect()

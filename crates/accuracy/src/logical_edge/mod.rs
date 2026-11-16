@@ -6,7 +6,9 @@
 use asap_types::accuracy::{AccuracyGuarantee, AccuracyMetric};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
-use asap_types::stages::{CandidateForMemoGroupId, Memo, RequiredAccuracy, RootPruneReason};
+use asap_types::stages::{
+    CandidateForMemoGroupId, Memo, MemoGroupId, RequiredAccuracy, RootPruneReason,
+};
 use asap_types::summary_type::{MergedError, SketchParams, SketchStatistic, SummaryTypeCapability};
 
 use crate::guarantee::{
@@ -188,10 +190,13 @@ impl ErrorMetricsOfMemo {
 /// level `required` for `statistic`, as the edge from the build checks it
 /// ([`ErrorMetricsOfMemo::edge_meets_logical_requirements`]): its guarantee
 /// at the required failure probability (`evidence`'s measurement, else the
-/// theoretical one) is in the required metric and within the required
+/// theoretical one over the sign and distinct bound of the state group
+/// `summary_input`) is in the required metric and within the required
 /// error. A KLL build of k = 1404 meets rank error 0.0025 at δ = 0.01, not
 /// at δ = 0.00125.
 pub(crate) fn build_meets_level(
+    memo: &Memo,
+    summary_input: MemoGroupId,
     summary_type: &FieldDataType,
     parameters: &SketchParams,
     statistic: &SketchStatistic,
@@ -211,6 +216,10 @@ pub(crate) fn build_meets_level(
                 parameters,
                 statistic,
                 required.failure_probability,
+                memo.groups()[summary_input.0 as usize]
+                    .group_properties
+                    .state_column_sign(),
+                memo.max_distinct_per_evaluation(summary_input),
             )
         });
     guarantee_meets(guarantee.as_ref(), required)
