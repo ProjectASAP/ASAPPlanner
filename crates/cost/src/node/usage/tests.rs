@@ -280,6 +280,63 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
     );
 }
 
+/// An ingestion-time chain assigns each arriving row its window, the work
+/// a `TimeRange` does per row, besides updating the row's state: built per
+/// series carrying `job` over 1,000 series, a Rate chain measures 87 ns per
+/// row at 10 Hz and 106–111 at 1 Hz, where the same Rate built at query
+/// time measures 66–75 and 78–87, and its time range 11. Example: a sum in
+/// 300 s windows of one group, over one second of 10,000 arriving rows,
+/// costs 10,000 × (update + range) operations plus a 300th of an emitted
+/// exact state.
+#[test]
+fn an_ingestion_time_chain_assigns_each_row_its_window_as_a_time_range_does() {
+    use crate::node::operations_per_unit::{
+        EXACT_UPDATE_OPERATIONS_PER_ROW, TIME_RANGE_OPERATIONS_PER_ROW,
+    };
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let scan = node(Payload::NonASAP(NonASAPOp::Scan {
+        source: Source::TimeSeries {
+            metric: "latency".to_string(),
+        },
+        predicates: vec![],
+        schema: Schema::default(),
+    }));
+    let rows = ProducerOutput {
+        payload: &scan.payload,
+        output_schema: &scan.output_schema,
+        output: EdgeStatistics {
+            rows: 10_000,
+            bytes: 10_000 * 16,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::None,
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 1,
+        chain_tumbling_window_width_ms: None,
+        state_input_rows: None,
+    };
+    let chain = PhysicalASAPDAGNode {
+        retention_ms: Some(300_000),
+        output_state: ExecutionDataState::INGESTION_SUMMARY,
+        ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: 0,
+            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::by(vec![]),
+            filter: None,
+            tumbling_window_width_ms: 300_000,
+        }))
+    };
+    let usage =
+        node_resource_usage_and_cost(&chain, &[rows], (1, 1.0), None, &data, &settings).unwrap();
+    assert_eq!(
+        usage.cpu_ops_per_second,
+        10_000.0 * (EXACT_UPDATE_OPERATIONS_PER_ROW + TIME_RANGE_OPERATIONS_PER_ROW)
+            + 1_500.0 / 300.0
+    );
+}
+
 /// A query-time chain reads its scan's lookback and keeps each row in its
 /// window's range, as a `TimeRange` over the same rows does, besides
 /// updating the row's state. Example: a sum in 60 s windows over 36,000
@@ -1272,5 +1329,67 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
     assert!(
         usage.output.bytes_per_row() > sketch_state_bytes(&SketchParams::Kll { k }, merged),
         "merged state sized for 9,600 rows"
+    );
+}
+
+/// The KLL estimate of `quantile_over_time(0.99, latency[5m])` at a 1%
+/// rank target (k = 547) over 1,000 series at 1 Hz, per group, after
+/// `producer` outputs states of 300 rows each, charged 4,844 bytes.
+fn kll_estimate_us_per_group(producer: Payload) -> f64 {
+    use asap_types::summary_type::{SketchParams, SketchStatistic};
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let kll = SketchParams::Kll { k: 547 };
+    let states = node(producer);
+    let state_output = ProducerOutput {
+        payload: &states.payload,
+        output_schema: &states.output_schema,
+        output: EdgeStatistics {
+            rows: 1_000,
+            bytes: 1_000 * 4_844,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::Sketch(&kll),
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 1,
+        chain_tumbling_window_width_ms: None,
+        state_input_rows: None,
+    };
+    let estimate = node(Payload::ASAP(ASAPOp::SummaryEstimate {
+        summary_input: 0,
+        query: SketchStatistic::Quantile { q: 0.99 },
+    }));
+    let usage =
+        node_resource_usage_and_cost(&estimate, &[state_output], (1, 1.0), None, &data, &settings)
+            .unwrap();
+    usage.work_ms_per_execution * 1e3 / 1_000.0
+}
+
+/// A KLL quantile sorts the items its state holds. A merge leaves each
+/// level sorted, so reading a merged state measures 5.9 µs per group
+/// (300 rows per series at k = 547, 1,000 series); a state built by
+/// updates keeps its newest items unsorted and measures 13.4 (13.4–13.9
+/// over 100 to 10,000 series), where charged as a merged state it was
+/// 6.9.
+#[test]
+fn a_kll_estimate_over_a_state_built_by_updates_charges_its_measured_time() {
+    let merged = kll_estimate_us_per_group(Payload::ASAP(ASAPOp::SummaryMerge {
+        children: vec![0],
+        group_by: None,
+    }));
+    assert!(
+        (0.67..=1.5).contains(&(merged / 5.9)),
+        "after a merge: charged {merged:.1} µs per group, measured 5.9"
+    );
+    let built = kll_estimate_us_per_group(Payload::ASAP(ASAPOp::SummaryAgg {
+        child: 0,
+        summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::PerEntity,
+        filter: None,
+    }));
+    assert!(
+        (0.67..=1.5).contains(&(built / 13.4)),
+        "after updates: charged {built:.1} µs per group, measured 13.4"
     );
 }
