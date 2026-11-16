@@ -587,9 +587,9 @@ pub(crate) fn solve_selection(
             {
                 solved.get_solution().columns().to_vec()
             }
-            // At LEAST_HIGHS_FEASIBILITY_TOLERANCE no plan meets the
-            // target the first solve's selection missed by less than the
-            // default tolerance: every plan misses it, by less than 1e-7.
+            // At LEAST_HIGHS_FEASIBILITY_TOLERANCE no plan meets every
+            // target at the tighter tolerance; the first selection missed
+            // this query by less than 1e-7.
             HighsModelStatus::Infeasible | HighsModelStatus::UnboundedOrInfeasible => {
                 return Err(match missed_at_default_tolerance {
                     Some(query) => below_solver_precision(query),
