@@ -295,10 +295,9 @@ fn non_asap_columns(
             };
             let mut columns = columns_of(left);
             let mut right = after_left_scans(&columns, columns_of(right));
-            for (columns, nullable) in [(&mut columns, left_nullable), (&mut right, right_nullable)]
-            {
+            for (side, nullable) in [(&mut columns, left_nullable), (&mut right, right_nullable)] {
                 if nullable {
-                    for column in columns.iter_mut() {
+                    for column in side.iter_mut() {
                         column.lineage = None;
                     }
                 }
