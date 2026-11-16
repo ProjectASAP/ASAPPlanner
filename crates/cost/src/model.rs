@@ -114,7 +114,8 @@ impl ResourceUnitCost {
     }
 }
 
-/// How fast one core does work; the latency check reads it.
+/// How fast one core does work, and the batches of raw rows its work is
+/// split into; the latency check reads it.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceSpeed {
@@ -126,16 +127,34 @@ pub struct ResourceSpeed {
     pub ms_per_cpu_op: f64,
     /// Milliseconds scanning one byte takes on one core.
     pub ms_per_scanned_byte: f64,
+    /// The time one batch of raw rows covers, as the executor receives and
+    /// stores them: a grouping visits each group's state once per batch
+    /// its rows arrive in, so a 5 min window of a series sampled at 1 Hz
+    /// in 10 s batches costs 30 visits per series, whether it holds 300
+    /// rows or (at 10 Hz) 3,000. Default 10,000 (10 s), an assumed value:
+    /// the batch width the reference executor's measurements stored, not
+    /// one the deployment declared; omitted from JSON, it takes that
+    /// default.
+    #[serde(default = "default_raw_batch_width_ms")]
+    pub raw_batch_width_ms: u64,
+}
+
+/// The assumed [`ResourceSpeed::raw_batch_width_ms`]: 10 s.
+const DEFAULT_RAW_BATCH_WIDTH_MS: u64 = 10_000;
+
+fn default_raw_batch_width_ms() -> u64 {
+    DEFAULT_RAW_BATCH_WIDTH_MS
 }
 
 impl ResourceSpeed {
     /// 1 ns per operation and 0.1 ns per scanned byte, the times
     /// [`ResourceUnitCost::illustrative`] prices: one cost unit is one
-    /// millisecond of one core.
+    /// millisecond of one core. Raw rows in 10 s batches (assumed).
     pub(crate) fn illustrative() -> Self {
         Self {
             ms_per_cpu_op: 1e-6,
             ms_per_scanned_byte: 1e-7,
+            raw_batch_width_ms: DEFAULT_RAW_BATCH_WIDTH_MS,
         }
     }
 }
@@ -239,8 +258,8 @@ impl Default for CostInputs {
 }
 
 impl CostInputs {
-    /// Bad input: a negative or non-finite speed, a horizon that is not
-    /// positive, a bad measured table ([`MeasuredOperationCosts`]: a
+    /// Bad input: a negative or non-finite speed, a raw batch width of 0, a
+    /// horizon that is not positive, a bad measured table ([`MeasuredOperationCosts`]: a
     /// negative or non-finite time or size, an entry naming two families,
     /// a duplicate entry, or `ms_per_cpu_op` 0), or a price the chosen cost model reads that is negative or
     /// not finite, or every such price 0 (cost model 3 reads none).
@@ -258,6 +277,12 @@ impl CostInputs {
             if !value.is_finite() || value < 0.0 {
                 return Err(AnalyticalCostError::InvalidCalibration(name, value));
             }
+        }
+        if self.resource_speed.raw_batch_width_ms == 0 {
+            return Err(AnalyticalCostError::InvalidCalibration(
+                "raw_batch_width_ms",
+                0.0,
+            ));
         }
         let horizon = self.non_repeating_query_horizon_seconds;
         if !horizon.is_finite() || horizon <= 0.0 {
@@ -381,6 +406,7 @@ mod tests {
         let slower = ResourceUnitCost::aws_fargate_us_east_1(ResourceSpeed {
             ms_per_cpu_op: 2e-6,
             ms_per_scanned_byte: 2e-7,
+            ..ResourceSpeed::illustrative()
         });
         close(slower.cost_per_cpu_op, 2.2488e-14);
         close(slower.cost_per_scanned_byte, 2.2488e-15);

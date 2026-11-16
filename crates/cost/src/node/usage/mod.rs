@@ -25,7 +25,9 @@ use crate::node::analytical::{
 use crate::node::operations_per_unit::{
     chain_emit_operations_per_state, estimate_operations_per_group,
     hash_aggregate_operations_per_row, merge_operations_per_state, merge_output_operations,
-    update_operations_per_row, CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL,
+    update_operations_per_row, StateLastWrittenBy, CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL,
+    CHAIN_OPERATIONS_PER_ARRIVING_ROW, CHAIN_WINDOW_OPERATIONS_PER_GROUP_PER_RAW_BATCH,
+    OPERATIONS_PER_GROUP_PER_RAW_BATCH, OUTPUT_ROW_OPERATIONS_PER_GROUP,
     TIME_RANGE_OPERATIONS_PER_ROW,
 };
 use crate::node::operator_statistics::{
@@ -621,6 +623,18 @@ pub fn node_resource_usage_and_cost<'a>(
             (_, None) => rows_read(),
         },
     };
+    // The times a grouping into `group_count` groups visits a group's
+    // state: once per group per batch of raw rows its input arrives in
+    // (`group_raw_batch_visits`).
+    let visits = |group_count: u64| {
+        group_raw_batch_visits(
+            input.rows,
+            group_count,
+            rows_per_ms,
+            speed.raw_batch_width_ms,
+            ingestion,
+        )
+    };
     let (out, estimate, detail) = match &node.payload {
         Payload::NonASAP(operator) => match operator {
             NonASAPOp::Scan { source, .. } => {
@@ -691,6 +705,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 let held = input.rows.div_ceil(group_count.max(1));
                 let operations_per_row = hash_aggregate_operations_per_row(keys, measures, held)
                     + carried_label_operations_per_row(&node.output_schema, reduction);
+                let group_visits = visits(group_count);
                 let estimate = estimate_operator(
                     PhysicalOperator::HashAggregate {
                         grouping_key_count: keys,
@@ -714,13 +729,20 @@ pub fn node_resource_usage_and_cost<'a>(
                             })?
                             .max(8),
                     },
-                );
+                )
+                .map(|estimate| {
+                    ResourceEstimate::new(
+                        estimate.cpu_ops() + group_visits * OPERATIONS_PER_GROUP_PER_RAW_BATCH,
+                        estimate.peak_memory_bytes(),
+                        estimate.scan_bytes(),
+                    )
+                });
                 (
                     out,
                     estimate,
                     format!(
                         "hash aggregate {} rows into {group_count} groups: {operations_per_row:.0} \
-                         ops per row",
+                         ops per row, {group_visits:.0} group visits",
                         input.rows
                     ),
                 )
@@ -911,15 +933,18 @@ pub fn node_resource_usage_and_cost<'a>(
                     .checked_mul(state_bytes + state_row_bytes_beside_state(&node.output_schema))
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
+            let group_visits = visits(group_count);
             (
                 out,
                 Ok(ResourceEstimate::new(
-                    input.rows as f64 * update_ops,
+                    input.rows as f64 * update_ops
+                        + group_visits * OPERATIONS_PER_GROUP_PER_RAW_BATCH,
                     out.bytes,
                     0,
                 )),
                 format!(
-                    "build {} into {group_count} states: {} rows x {update_ops} ops",
+                    "build {} into {group_count} states: {} rows x {update_ops} ops, \
+                     {group_visits:.0} group visits",
                     summary_type_name(family),
                     input.rows
                 ),
@@ -935,7 +960,9 @@ pub fn node_resource_usage_and_cost<'a>(
             // One window's states: each input row updates the window its
             // time falls in. At ingestion time the rows of one window
             // arrive at the rate of one second's `input.rows`; at query
-            // time its input holds the rows of every retained window.
+            // time one window holds its width of the sources' rows (its
+            // input holds the rows of every retained window: without a
+            // declared rate, their share of one).
             let group_count = groups(reduction)?;
             let rows_per_tumbling_window = match ingestion {
                 true => u64::try_from(
@@ -943,7 +970,12 @@ pub fn node_resource_usage_and_cost<'a>(
                         .div_ceil(u128::from(ONE_SECOND_MS)),
                 )
                 .map_err(|_| AnalyticalCostError::Overflow)?,
-                false => input.rows.div_ceil(retained_output_count),
+                false => {
+                    rows_per_ms.map_or(input.rows.div_ceil(retained_output_count), |rows_per_ms| {
+                        ((rows_per_ms * *tumbling_window_width_ms as f64).round() as u64)
+                            .clamp(1, input.rows.max(1))
+                    })
+                }
             };
             let (non_negative, value_magnitude_range) = folded_values(update);
             let input_rows = StateInputRows {
@@ -969,11 +1001,17 @@ pub fn node_resource_usage_and_cost<'a>(
                 }
                 false => group_count as f64 * retained_output_count as f64,
             };
-            // Each row it reads is kept in its window's range, the work a
-            // `TimeRange` over the same rows does (11 per row): at query
-            // time each row of the scan's lookback, at ingestion time each
-            // arriving row, assigned its window.
-            let range_ops = input.rows as f64 * TIME_RANGE_OPERATIONS_PER_ROW;
+            // At query time each row of the scan's lookback is kept in its
+            // window's range, the work a `TimeRange` over the same rows does
+            // (11 per row); at ingestion time each arriving row is routed to
+            // its window's state (8 per row).
+            let range_ops = input.rows as f64
+                * match ingestion {
+                    true => CHAIN_OPERATIONS_PER_ARRIVING_ROW,
+                    false => TIME_RANGE_OPERATIONS_PER_ROW,
+                };
+            // Each group's rows of each raw batch are split by window.
+            let group_visits = visits(group_count);
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
@@ -985,14 +1023,17 @@ pub fn node_resource_usage_and_cost<'a>(
                 Ok(ResourceEstimate::new(
                     input.rows as f64 * update_ops
                         + range_ops
+                        + group_visits
+                            * (OPERATIONS_PER_GROUP_PER_RAW_BATCH
+                                + CHAIN_WINDOW_OPERATIONS_PER_GROUP_PER_RAW_BATCH)
                         + emitted_states * chain_emit_operations_per_state(family),
                     out.bytes,
                     0,
                 )),
                 format!(
                     "build {} in tumbling windows of {tumbling_window_width_ms} ms for \
-                     {group_count} groups: {} rows x {update_ops} ops, {emitted_states:.1} \
-                     states emitted",
+                     {group_count} groups: {} rows x {update_ops} ops, {group_visits:.0} \
+                     group visits, {emitted_states:.1} states emitted",
                     summary_type_name(family),
                     input.rows
                 ),
@@ -1069,9 +1110,18 @@ pub fn node_resource_usage_and_cost<'a>(
         Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
             // A merge leaves a KLL's levels sorted; a state built by
             // updates (a `SummaryAgg`, a chain's window) is sorted when read.
-            let state_from_merge = producers.first().is_some_and(|producer| {
-                matches!(producer.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. }))
-            });
+            let written_by = match producers.first() {
+                Some(producer)
+                    if matches!(producer.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. })) =>
+                {
+                    StateLastWrittenBy::Merge
+                }
+                producer => StateLastWrittenBy::Updates {
+                    rows_per_state: producer
+                        .and_then(|producer| producer.state_input_rows)
+                        .and_then(|rows| rows.rows_per_state),
+                },
+            };
             let per_group = match query {
                 SketchStatistic::TopK { k } => *k as u64,
                 SketchStatistic::FrequencyL2
@@ -1090,11 +1140,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 out,
                 Ok(ResourceEstimate::new(
                     input.rows as f64
-                        * estimate_operations_per_group(
-                            family,
-                            input_state_bytes(),
-                            state_from_merge,
-                        ),
+                        * estimate_operations_per_group(family, input_state_bytes(), written_by),
                     0,
                     0,
                 )),
@@ -1103,11 +1149,9 @@ pub fn node_resource_usage_and_cost<'a>(
         }
         Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => (
             edge(input.rows)?,
-            // An exact accumulator's read is its output row alone, however
-            // its state was written.
+            // An exact accumulator's read is its output row alone.
             Ok(ResourceEstimate::new(
-                input.rows as f64
-                    * estimate_operations_per_group(family, input_state_bytes(), true),
+                input.rows as f64 * OUTPUT_ROW_OPERATIONS_PER_GROUP,
                 0,
                 0,
             )),
@@ -1410,6 +1454,38 @@ fn selected_tumbling_windows(
     Ok(u64::try_from(range.as_millis() / u128::from(width_ms))
         .map_err(|_| AnalyticalCostError::Overflow)?
         .max(1))
+}
+
+/// The times a grouping into `group_count` groups visits a group's state
+/// while reading `input_rows` rows: once per group per batch of raw rows
+/// (`raw_batch_width_ms` each) its input arrives in, at most once per row.
+/// The batches are the input's rows over a batch's rows at the sources'
+/// `rows_per_ms`: at query time at least one; at ingestion time a share of
+/// one per execution, the rows of one second over a batch's. Unknown rate:
+/// one batch at query time, a second's share of one at ingestion time.
+/// Example: a 5 min window of 1,000 series at 1 Hz (300,000 rows) in 10 s
+/// batches of 10,000 rows spans 30 batches, 30,000 visits; at 10 Hz the
+/// same 30,000 visits for 3,000,000 rows.
+fn group_raw_batch_visits(
+    input_rows: u64,
+    group_count: u64,
+    rows_per_ms: Option<f64>,
+    raw_batch_width_ms: u64,
+    ingestion: bool,
+) -> f64 {
+    let batch_width_ms = raw_batch_width_ms.max(1) as f64;
+    let batches = match rows_per_ms.filter(|rows_per_ms| *rows_per_ms > 0.0) {
+        Some(rows_per_ms) => input_rows as f64 / (rows_per_ms * batch_width_ms),
+        None => match ingestion {
+            true => ONE_SECOND_MS as f64 / batch_width_ms,
+            false => 1.0,
+        },
+    };
+    let batches = match ingestion {
+        true => batches,
+        false => batches.max(1.0),
+    };
+    (group_count.max(1) as f64 * batches).min(input_rows as f64)
 }
 
 /// The grouping keys `reduction` hashes per row: its keys, or the entity

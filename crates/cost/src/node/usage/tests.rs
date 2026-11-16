@@ -447,6 +447,49 @@ fn a_per_series_aggregate_costs_more_per_row_at_a_lower_sample_rate() {
     }
 }
 
+/// A grouping visits each group's state once per raw batch of the
+/// deployment's `raw_batch_width_ms`: the per-series aggregate over 5 min
+/// of 1,000 series at 1 Hz visits each series 30 times in 10 s batches and
+/// 300 times in 1 s batches (one row each), 270,000 visits × 140
+/// operations more.
+#[test]
+fn a_grouping_visits_each_group_once_per_raw_batch_of_the_declared_width() {
+    use crate::node::operations_per_unit::OPERATIONS_PER_GROUP_PER_RAW_BATCH;
+    use asap_types::ir::operator::AggIntent;
+    let range = node(Payload::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_secs(300),
+        kind: TimeRangeKind::Range,
+        child: 0,
+    }));
+    let aggregate = node(Payload::NonASAP(NonASAPOp::Aggregate {
+        reduction: Reduction::PerEntity,
+        measures: vec![AggIntent::Max { col: None }],
+        output_names: vec![String::new()],
+        filters: vec![],
+        having: None,
+        child: 0,
+    }));
+    let cpu_ops = |raw_batch_width_ms: u64| {
+        let mut settings = CostInputs::default();
+        settings.resource_speed.raw_batch_width_ms = raw_batch_width_ms;
+        node_resource_usage_and_cost(
+            &aggregate,
+            &[raw_rows(&range, "latency", 300_000)],
+            (1, 1.0),
+            None,
+            &thousand_series_sampled_every(1_000),
+            &settings,
+        )
+        .unwrap()
+        .cpu_ops_per_second
+    };
+    let extra = cpu_ops(1_000) - cpu_ops(10_000);
+    assert!(
+        (extra - 270_000.0 * OPERATIONS_PER_GROUP_PER_RAW_BATCH).abs() < 1.0,
+        "1 s batches cost {extra} operations more"
+    );
+}
+
 /// A per-series exact Rate carrying `job`, built at query time from 5 min
 /// of 1,000 series of `requests_total`, measures 85.9 ns per row at 1 Hz
 /// and 68.8 at 10 Hz (1.25x): its update is the same per row, and it visits
@@ -499,13 +542,16 @@ fn a_query_time_rate_build_costs_more_per_row_at_a_lower_sample_rate() {
 
 /// A query-time chain reads its scan's lookback and keeps each row in its
 /// window's range, as a `TimeRange` over the same rows does, besides
-/// updating the row's state. Example: a sum in 60 s windows over 36,000
-/// raw rows, retaining five windows of one group, costs 36,000 × (40
-/// update + 11 range) operations plus five emitted exact states × 1,500.
+/// updating the row's state and visiting its group once per raw batch.
+/// Example: a sum in 60 s windows over 36,000 raw rows of unknown rate (one
+/// batch), retaining five windows of one group, costs 36,000 × 41
+/// operations (30 to update, 11 to keep in range), one group visit × 330
+/// (140 plus the chain's 190) and five emitted exact states × 1,500.
 #[test]
 fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
     use crate::node::operations_per_unit::{
-        EXACT_UPDATE_OPERATIONS_PER_ROW, TIME_RANGE_OPERATIONS_PER_ROW,
+        CHAIN_WINDOW_OPERATIONS_PER_GROUP_PER_RAW_BATCH, EXACT_UPDATE_OPERATIONS_PER_ROW,
+        OPERATIONS_PER_GROUP_PER_RAW_BATCH, TIME_RANGE_OPERATIONS_PER_ROW,
     };
     let settings = CostInputs::default();
     let data = DataWorkload::default();
@@ -546,6 +592,8 @@ fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
     assert_eq!(
         usage.cpu_ops_per_second,
         36_000.0 * (EXACT_UPDATE_OPERATIONS_PER_ROW + TIME_RANGE_OPERATIONS_PER_ROW)
+            + OPERATIONS_PER_GROUP_PER_RAW_BATCH
+            + CHAIN_WINDOW_OPERATIONS_PER_GROUP_PER_RAW_BATCH
             + 5.0 * 1_500.0
     );
 }

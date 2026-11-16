@@ -36,6 +36,7 @@ fn settings_load_from_json_with_defaults_for_omitted_fields() {
             resource_speed: ResourceSpeed {
                 ms_per_cpu_op: 2e-6,
                 ms_per_scanned_byte: 1e-7,
+                raw_batch_width_ms: 10_000,
             },
             ..CostInputs::default()
         }

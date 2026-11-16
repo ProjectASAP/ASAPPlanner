@@ -1,8 +1,9 @@
 //! The CPU operations the formulas charge per unit of work: per row a time
 //! range keeps, per row a hash aggregate groups, per row folded into a
-//! summary state, per row and label column a grouping carries, per state
-//! merged and per byte of a KLL state merged or read, per output group of a
-//! merge, per group read out and per output row built.
+//! summary state, per row and label column a grouping carries, per group
+//! and raw batch a grouping visits, per state merged and per byte of a KLL
+//! state merged or read, per output group of a merge, per group read out
+//! and per output row built.
 //!
 //! One CPU operation is one nanosecond of the reference executor's work on
 //! one core: each count below is the executor's measured time for that
@@ -38,11 +39,13 @@
 //! Example: `quantile_over_time(0.99, latency[1h])` at 1 Hz reads 3.6 M
 //! rows. The exact plan keeps them (`TIME_RANGE_OPERATIONS_PER_ROW`, 11),
 //! groups them per series (`HASH_AGGREGATE_OPERATIONS_PER_KEY` +
-//! `AGGREGATE_MEASURE_OPERATIONS_PER_ROW`, 27) and sorts each series' 3,600
-//! values (11.8 levels × `SORT_OPERATIONS_PER_ROW_PER_LEVEL`, 65): 103 ns per
-//! row. A DDSketch built from the same rows takes 11 +
-//! `DDSKETCH_UPDATE_OPERATIONS_PER_ROW` (210) = 221 ns per row, about twice
-//! the exact plan, as measured (111 and 229).
+//! `AGGREGATE_MEASURE_OPERATIONS_PER_ROW`, 18, plus
+//! `OPERATIONS_PER_GROUP_PER_RAW_BATCH` once per series and 10 s batch, 14
+//! per row) and sorts each series' 3,600 values (11.8 levels ×
+//! `SORT_OPERATIONS_PER_ROW_PER_LEVEL`, 65): 108 ns per row. A DDSketch built
+//! from the same rows takes 11 + `DDSKETCH_UPDATE_OPERATIONS_PER_ROW` (190) +
+//! 14 = 215 ns per row, about twice the exact plan, as measured (111 and
+//! 229).
 
 // Each rule lists every variant, as in `usage`: a wildcard arm would give a
 // new operator, summary type or sketch a default cost instead of failing
@@ -61,23 +64,62 @@ use crate::StateFamily;
 /// A row kept by a time range over raw rows, or a state read by a time
 /// range over a chain's tumbling windows: 9–16 ns per row (median 11) over
 /// 54 time ranges of 30,000 to 36 M rows at 1 Hz and 10 Hz over 100, 1,000
-/// and 10,000 series, 8–18 ns per state over 360,000 states. A tumbling
-/// window chain pays it too, per raw row it reads: at query time it keeps
-/// each row of its scan's lookback in its window's range, and at ingestion
-/// time it assigns each arriving row its window, as a time range does. A
-/// Rate chain at ingestion time measures 87 ns per row at 10 Hz, the same
-/// Rate built at query time 66–76 and its time range 11.
+/// and 10,000 series, 8–18 ns per state over 360,000 states. A query-time
+/// tumbling window chain pays it too, per raw row of its scan's lookback,
+/// which it keeps in its window's range.
 pub(crate) const TIME_RANGE_OPERATIONS_PER_ROW: f64 = 11.0;
 
+/// Per group of a grouping (a hash aggregate, a summary build or a
+/// tumbling window chain), per batch of raw rows its rows arrive in
+/// ([`ResourceSpeed::raw_batch_width_ms`](crate::ResourceSpeed)): finding
+/// the group's state again for the next batch. It is why the same grouping
+/// costs more per row at a lower sample rate: a 10 s batch holds 10 rows
+/// of a series at 1 Hz and 100 at 10 Hz, so this term adds 14 ns per row
+/// at 1 Hz and 1.4 at 10 Hz. Fitted together with the per-row constants
+/// below, minimizing the absolute log error (robust to the few outlying
+/// nodes) over 132 query-time `Aggregate` and `SummaryAgg` nodes
+/// (per-series Max, Count, Sum and quantile aggregates; Max, Sum, Count,
+/// Rate, Increase, DDSketch and KLL builds), 5 min and 1 h windows at
+/// 1 Hz and 10 Hz over 100, 1,000 and 10,000 series, and 12 ingestion-time
+/// chains: 144 per group and batch. A per-series hash aggregate then
+/// measures 0.78–1.22x its charge at 1 Hz and 0.89–1.27x at 10 Hz
+/// (0.88–1.31x and 0.72–0.95x without the term), an exact accumulator
+/// build 0.90–1.27x and 0.89–1.14x (0.73–1.34x and 0.73–1.04x).
+pub(crate) const OPERATIONS_PER_GROUP_PER_RAW_BATCH: f64 = 140.0;
+
+/// Per group of a tumbling window chain, per batch of raw rows, beyond
+/// `OPERATIONS_PER_GROUP_PER_RAW_BATCH`: splitting the group's rows of the
+/// batch by the window each falls in. A Rate chain at ingestion time
+/// measures 124–126 ns per row at 1 Hz and 80–86 at 10 Hz over 1,000 and
+/// 10,000 series, where the same Rate built at query time measures 86–110
+/// and 69–75: the chain's work per group and batch is about twice a plain
+/// build's (fitted 186 with the constants above). With
+/// `CHAIN_OPERATIONS_PER_ARRIVING_ROW`, Rate, Sum and KLL chains at
+/// ingestion time then measure 0.82–1.04x their charge at 1 Hz and
+/// 0.89–1.26x at 10 Hz over 100 to 10,000 series (1.0–1.4x and 0.9–1.3x
+/// with neither term).
+pub(crate) const CHAIN_WINDOW_OPERATIONS_PER_GROUP_PER_RAW_BATCH: f64 = 190.0;
+
+/// Per row an ingestion-time tumbling window chain receives: routing the
+/// arriving row to its window's state, which a build at query time does
+/// not do (fitted 7.9 with the constants above, the chain's per group and
+/// batch term included). A query-time chain instead keeps each row of its
+/// scan's lookback in its window's range (`TIME_RANGE_OPERATIONS_PER_ROW`).
+pub(crate) const CHAIN_OPERATIONS_PER_ARRIVING_ROW: f64 = 8.0;
+
 /// Per input row, for each grouping key of a hash aggregate: hashing the
-/// key and finding its group. With `AGGREGATE_MEASURE_OPERATIONS_PER_ROW`,
-/// a per-series `max_over_time` (one key, one measure) groups a row in
-/// 27 ns.
+/// key and finding its group. With `AGGREGATE_MEASURE_OPERATIONS_PER_ROW`
+/// and `OPERATIONS_PER_GROUP_PER_RAW_BATCH`, a per-series `max_over_time`
+/// (one key, one measure) groups a row in 18 + 14 ns at 1 Hz and
+/// 18 + 1.4 at 10 Hz (fitted 17.5 for the two per-row constants). The
+/// measurements fix only that sum, for one key and one measure; the part
+/// the group and batch term took is charged to the measure, so a grouping
+/// by several keys keeps its charge per key.
 pub(crate) const HASH_AGGREGATE_OPERATIONS_PER_KEY: f64 = 15.0;
 
 /// Per input row, for each plain measure of a hash aggregate (sum, count,
 /// min, max, ...): folding the row's value into its group's.
-pub(crate) const AGGREGATE_MEASURE_OPERATIONS_PER_ROW: f64 = 12.0;
+pub(crate) const AGGREGATE_MEASURE_OPERATIONS_PER_ROW: f64 = 3.0;
 
 /// Per input row, per level of the sort that an exact quantile runs over
 /// its group's values (`log2` of the rows per group levels): a per-series
@@ -86,39 +128,38 @@ pub(crate) const AGGREGATE_MEASURE_OPERATIONS_PER_ROW: f64 = 12.0;
 /// 36,000 (15.1 levels, 4.5–6.4 ns per level).
 pub(crate) const SORT_OPERATIONS_PER_ROW_PER_LEVEL: f64 = 5.5;
 
-/// One row folded into a DDSketch state: 217 ns per row at 1 Hz and 203 at
-/// 10 Hz at query time, 211 at ingestion time.
-pub(crate) const DDSKETCH_UPDATE_OPERATIONS_PER_ROW: f64 = 210.0;
+/// One row folded into a DDSketch state, beyond
+/// `OPERATIONS_PER_GROUP_PER_RAW_BATCH`: 193–278 ns per row at 1 Hz and
+/// 172–191 at 10 Hz at query time over 100 to 10,000 series (fitted 189).
+pub(crate) const DDSKETCH_UPDATE_OPERATIONS_PER_ROW: f64 = 190.0;
 
-/// One row folded into a KLL state: 106 ns per row at 1 Hz and 84 at
-/// 10 Hz at query time, 94 at ingestion time.
-pub(crate) const KLL_UPDATE_OPERATIONS_PER_ROW: f64 = 95.0;
+/// One row folded into a KLL state, beyond
+/// `OPERATIONS_PER_GROUP_PER_RAW_BATCH`: 65–112 ns per row at 1 Hz and
+/// 83–92 at 10 Hz at query time over 100 to 10,000 series (fitted 84).
+/// A state of fewer rows than its `k` is cheaper (65–94 at 300 rows), as
+/// it compacts nothing.
+pub(crate) const KLL_UPDATE_OPERATIONS_PER_ROW: f64 = 84.0;
 
 /// One row folded into an exact accumulator that keeps one value (sum,
 /// count, min, max), beyond any label it carries
-/// (`CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL`): over 1,000 series, an exact Max
-/// built per series takes 35 ns per row at query time (median of 12
-/// runs, 300,000 to 36 M rows) and 44 at ingestion time, an exact Sum
-/// grouped by `job` 30 at query time.
-pub(crate) const EXACT_UPDATE_OPERATIONS_PER_ROW: f64 = 40.0;
+/// (`CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL`) and
+/// `OPERATIONS_PER_GROUP_PER_RAW_BATCH`: an exact Max built per series at
+/// query time takes 40–49 ns per row at 1 Hz and 31–35 at 10 Hz over 100
+/// to 10,000 series, an exact Sum grouped by `job` (10 groups) 29–33 at
+/// both rates (fitted 30.2).
+pub(crate) const EXACT_UPDATE_OPERATIONS_PER_ROW: f64 = 30.0;
 
 /// One row folded into an exact accumulator of a counter's increase (rate,
 /// increase, irate), which also tracks resets and the first and last
-/// samples, beyond any label it carries: built per series carrying a
-/// `job` label at query time it takes 66–109 ns per row (median 83) over
-/// 24 nodes at 1 Hz and 10 Hz over 100, 1,000 and 10,000 series, of which
-/// the label is `CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL` (37). The time
-/// per row follows the sample rate, not the rows per series: 66–76 at
-/// 10 Hz (3,000 and 36,000 rows per series) and 78–109 at 1 Hz (300 and
-/// 3,600). The executor reads each group's state once per stored batch of
-/// rows, and a batch holds a tenth as many rows of a series at 1 Hz. A
-/// term per group cannot follow that (3,000 rows per series at 10 Hz cost
-/// less per row than 3,600 at 1 Hz), and one per group and batch would
-/// need the store's batch length, which the planner does not know; one
-/// constant fits both rates, within 0.8–1.3x. At ingestion time a chain
-/// also assigns each row its window (`TIME_RANGE_OPERATIONS_PER_ROW`): 87
-/// ns per row at 10 Hz, 106–111 at 1 Hz.
-pub(crate) const COUNTER_UPDATE_OPERATIONS_PER_ROW: f64 = 45.0;
+/// samples, beyond any label it carries and
+/// `OPERATIONS_PER_GROUP_PER_RAW_BATCH`: built per series carrying a `job`
+/// label at query time it takes 66–110 ns per row over 22 nodes at 1 Hz
+/// and 10 Hz over 100, 1,000 and 10,000 series, of which the label is
+/// `CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL` (37). The time per row
+/// follows the sample rate, not the rows per series: 66–85 at 10 Hz (3,000
+/// and 36,000 rows per series) and 78–110 at 1 Hz (300 and 3,600), as the
+/// group and batch term charges it (fitted 35.8 with it).
+pub(crate) const COUNTER_UPDATE_OPERATIONS_PER_ROW: f64 = 36.0;
 
 /// Per input row, for each label column a per-series state or group
 /// carries beside its key (the `job` of a per-series sum that a later
@@ -212,17 +253,19 @@ pub(crate) const SKETCH_MERGE_OPERATIONS_PER_BYTE: f64 = 1.0;
 /// (33.5 KB), measured 23 and 42.
 pub(crate) const KLL_ESTIMATE_OPERATIONS_PER_BYTE: f64 = 0.9;
 
-/// Per byte of a KLL state built by updates (by a `SummaryAgg`, or a
-/// chain's window read without a merge) that one group's answer is read
-/// from, before its output row: its newest items are unsorted, so the
-/// quantile sorts them from scratch. Fitted on the executor at k = 547
-/// over 100, 1,000 and 10,000 series of states of 300 to 36,000 rows
-/// (charged 4,844 and 17,000 bytes), the geometric mean of 11 nodes:
-/// within 0.4–2.1x of each. Example: states of 300 rows measure 13.4–13.9
-/// µs per group, charged 1.8 × 4,844 + 2,500 = 11.2 (6.9 as a merged
-/// state); of 3,000 rows 14.5–22.3, of 3,600 25.6–35.3 and of 36,000
-/// 58.6–65.7, each charged 33.1.
-pub(crate) const KLL_ESTIMATE_OPERATIONS_PER_BYTE_OF_UPDATED_STATE: f64 = 1.8;
+/// Per unsorted item of a KLL state built by updates (by a `SummaryAgg`,
+/// or a chain's window read without a merge) that one group's answer is
+/// read from, before its output row: the quantile sorts the newest items,
+/// which updates leave unsorted, and there are at most `k` of them (the
+/// state's rows while it holds fewer). The time is nearly flat in the
+/// state's rows, unlike its bytes. Fitted on the executor at k = 547 over
+/// 100, 1,000 and 10,000 series of states of 300 to 36,000 rows,
+/// minimizing the squared log error over 13 nodes: within 0.55–1.43x of
+/// each but the two of 36,000 rows (1.43x and 2.4x under). Example: states
+/// of 300 rows measure 13.1–14.3 µs per group, charged 2,500 + 40 × 300 =
+/// 14.5; of 3,000 rows 14.7–27.3 and of 3,600 13.3–32.7, charged 2,500 +
+/// 40 × 547 = 24.4 (33.1 when charged per byte).
+pub(crate) const KLL_ESTIMATE_OPERATIONS_PER_UNSORTED_ITEM: f64 = 40.0;
 
 /// One group's answer read from any other sketch state, before its output
 /// row (`OUTPUT_ROW_OPERATIONS_PER_GROUP`): a DDSketch quantile estimate
@@ -237,9 +280,10 @@ pub(crate) const SKETCH_ESTIMATE_OPERATIONS_PER_GROUP: f64 = 1_000.0;
 /// finalize of exact accumulators measures 2.5 µs
 /// per group (median over 135 nodes of 1,000 groups each, 1.8–15 µs). A
 /// per-series hash aggregate builds the same rows: e.g. a per-series max
-/// over 300,000 rows into 1,000 groups measures 11.3 ms, 8.1 ms of it its
-/// rows' work (`hash_aggregate_operations_per_row`, 27 per row), about
-/// 3 µs per group.
+/// over 300,000 rows of 1,000 series at 1 Hz measures 11.3 ms, of which
+/// its rows (`hash_aggregate_operations_per_row`, 18 per row) and its
+/// 30,000 group visits (`OPERATIONS_PER_GROUP_PER_RAW_BATCH`) are charged
+/// 9.6, leaving about 1.7 µs per group.
 pub(crate) const OUTPUT_ROW_OPERATIONS_PER_GROUP: f64 = 2_500.0;
 
 /// Per sketch state a tumbling-window chain completes and emits at the end
@@ -411,26 +455,38 @@ pub(crate) fn chain_emit_operations_per_state(summary_type: &FieldDataType) -> f
     }
 }
 
+/// How the summary state an estimate reads was last written, which a
+/// KLL's read depends on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StateLastWrittenBy {
+    /// A merge, which leaves a KLL's levels sorted.
+    Merge,
+    /// Updates of `rows_per_state` rows each (`None` when unknown), whose
+    /// newest items a KLL sorts when read.
+    Updates { rows_per_state: Option<u64> },
+}
+
 /// The operations reading one group's answer from a state of `family`
-/// holding `state_bytes` costs, its output row included (an exact
-/// accumulator's: finalizing it, the output row alone). A KLL state last
-/// written by a merge (`state_from_merge`) has its levels sorted; one built
-/// by updates sorts its newest items when read. Example: a DDSketch
-/// quantile costs 1,000 + 2,500 = 3,500 per group; a KLL of 4,844 bytes
-/// 6,860 after a merge and 11,219 after updates.
+/// holding `state_bytes`, last written by `written_by`, costs, its output
+/// row included. A KLL state last written by a merge is read per byte; one
+/// built by updates per unsorted item, at most its `k` (every one when its
+/// rows are unknown). Example: a DDSketch quantile costs 1,000 + 2,500 =
+/// 3,500 per group; a KLL at k = 547 of 4,844 bytes 6,860 after a merge
+/// and, built from 300 rows, 2,500 + 40 × 300 = 14,500 after updates.
 pub(crate) fn estimate_operations_per_group(
     family: StateFamily<'_>,
     state_bytes: u64,
-    state_from_merge: bool,
+    written_by: StateLastWrittenBy,
 ) -> f64 {
     let read = match family {
-        StateFamily::Sketch(SketchParams::Kll { .. }) => {
-            let per_byte = match state_from_merge {
-                true => KLL_ESTIMATE_OPERATIONS_PER_BYTE,
-                false => KLL_ESTIMATE_OPERATIONS_PER_BYTE_OF_UPDATED_STATE,
-            };
-            per_byte * state_bytes as f64
-        }
+        StateFamily::Sketch(SketchParams::Kll { k }) => match written_by {
+            StateLastWrittenBy::Merge => KLL_ESTIMATE_OPERATIONS_PER_BYTE * state_bytes as f64,
+            StateLastWrittenBy::Updates { rows_per_state } => {
+                let k = u64::from(*k);
+                let unsorted_items = rows_per_state.map_or(k, |rows| rows.min(k));
+                KLL_ESTIMATE_OPERATIONS_PER_UNSORTED_ITEM * unsorted_items as f64
+            }
+        },
         StateFamily::Sketch(
             SketchParams::DDSketch { .. }
             | SketchParams::Hydra(_)
@@ -451,7 +507,7 @@ pub(crate) fn estimate_operations_per_group(
 /// `grouping_key_count` keys and `measures` over groups of `rows_per_group`
 /// rows: each key hashed and looked up, each measure folded (at least one
 /// operation for an aggregate without measures). Example: a per-series
-/// `max_over_time` (one key, one measure) costs 15 + 12 = 27.
+/// `max_over_time` (one key, one measure) costs 15 + 3 = 18.
 pub(crate) fn hash_aggregate_operations_per_row(
     grouping_key_count: u64,
     measures: &[AggIntent],
@@ -469,6 +525,10 @@ pub(crate) fn hash_aggregate_operations_per_row(
 /// groups of `rows_per_group` rows, an estimate of its work:
 /// - an exact quantile keeps the row and sorts its group
 ///   (`log2(rows_per_group)` levels);
+/// - an exact distinct count, top-k or frequency statistic hashes the row's
+///   value into its group's map of values, the work a grouping key does
+///   (`HASH_AGGREGATE_OPERATIONS_PER_KEY`), besides folding it (not
+///   measured);
 /// - a counter's rate or increase, or a regression over a series' samples
 ///   (`deriv`, `predict_linear`), does about what the Rate accumulator does
 ///   per row (`COUNTER_UPDATE_OPERATIONS_PER_ROW`): it reads each sample's
@@ -483,6 +543,12 @@ fn aggregate_measure_operations_per_row(measure: &AggIntent, rows_per_group: u64
             AGGREGATE_MEASURE_OPERATIONS_PER_ROW
                 + (rows_per_group.max(2) as f64).log2() * SORT_OPERATIONS_PER_ROW_PER_LEVEL
         }
+        AggIntent::TopK { .. }
+        | AggIntent::Cardinality { .. }
+        | AggIntent::FrequencyL2 { .. }
+        | AggIntent::FrequencyEntropy { .. } => {
+            AGGREGATE_MEASURE_OPERATIONS_PER_ROW + HASH_AGGREGATE_OPERATIONS_PER_KEY
+        }
         AggIntent::Rate
         | AggIntent::IRate
         | AggIntent::Increase
@@ -496,10 +562,6 @@ fn aggregate_measure_operations_per_row(measure: &AggIntent, rows_per_group: u64
         | AggIntent::StdDev { .. }
         | AggIntent::Variance { .. }
         | AggIntent::PearsonCorr { .. }
-        | AggIntent::TopK { .. }
-        | AggIntent::Cardinality { .. }
-        | AggIntent::FrequencyL2 { .. }
-        | AggIntent::FrequencyEntropy { .. }
         | AggIntent::Changes
         | AggIntent::Delta
         | AggIntent::IDelta

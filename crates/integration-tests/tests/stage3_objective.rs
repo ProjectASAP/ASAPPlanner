@@ -597,8 +597,11 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     // The same queries over arriving rows only, with no raw data kept (a
     // deployment that stores nothing, as `mixed` arrival does): only
     // ingestion-time views over the arriving rows can answer them, the
-    // kind of plan the objective's scale once led the solver to. Reading
-    // raw data at query time is cheaper.
+    // kind of plan the objective's scale once led the solver to at 2,000x
+    // the cost of the best. With raw data kept the selection costs no more:
+    // here it is that views plan, since reading 5 y of raw rows at query
+    // time visits each series' state once per row (one sample per 15 s, at
+    // most one per 10 s raw batch).
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..Default::default()
@@ -613,8 +616,8 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     let (_, (_, views_only_plan_cost)) =
         selected_plan_objective_and_plan_cost_with(&ingesting, views_only, &CostInputs::default());
     assert!(
-        plan_cost < views_only_plan_cost,
-        "selected {plan_cost} is not below the ingestion-time views plan, {views_only_plan_cost}"
+        plan_cost <= views_only_plan_cost,
+        "selected {plan_cost} is above the ingestion-time views plan, {views_only_plan_cost}"
     );
 }
 
