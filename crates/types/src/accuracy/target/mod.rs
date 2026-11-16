@@ -353,7 +353,7 @@ impl AccuracyTarget {
     pub fn failure_probability_per_readout_value(
         &self,
         values_per_evaluation: Option<u64>,
-        readout_values: ReadoutValuesRead,
+        readout_values: ReadoutValueCounts,
     ) -> Option<f64> {
         let Some(delta) = self.failure_probability else {
             return Some(1.0);
@@ -381,11 +381,35 @@ impl AccuracyTarget {
 /// may depend on all of them (a job's series are not bounded), so both are
 /// 1000; without the `sum`, 1000 and 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReadoutValuesRead {
+pub struct ReadoutValueCounts {
     /// `R`: every readout value one evaluation reads.
     pub per_evaluation: Option<u64>,
     /// The fan-in: the most readout values one output value depends on.
     pub per_output_value: Option<u64>,
+}
+
+impl ReadoutValueCounts {
+    /// The larger of `self` and `other`, count by count, as among
+    /// alternative candidates of one group: (1000, 1) and (8, 8) give
+    /// (1000, 8). Unknown when either is.
+    pub fn larger(self, other: Self) -> Self {
+        let larger = |a: Option<u64>, b: Option<u64>| a.zip(b).map(|(a, b)| a.max(b));
+        Self {
+            per_evaluation: larger(self.per_evaluation, other.per_evaluation),
+            per_output_value: larger(self.per_output_value, other.per_output_value),
+        }
+    }
+
+    /// `self` and `other` added count by count, as the roots of one query
+    /// read together: (1000, 1) and (8, 8) give (1008, 9). Unknown when
+    /// either is or the sum overflows.
+    pub fn plus(self, other: Self) -> Self {
+        let plus = |a: Option<u64>, b: Option<u64>| a.zip(b).and_then(|(a, b)| a.checked_add(b));
+        Self {
+            per_evaluation: plus(self.per_evaluation, other.per_evaluation),
+            per_output_value: plus(self.per_output_value, other.per_output_value),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -3,12 +3,15 @@
 //! comparison of an evaluated bound with a required limit
 //! ([`within_limit`]).
 
-use asap_types::accuracy::AccuracyMetric;
+use asap_types::accuracy::{AccuracyGuarantee, AccuracyMetric};
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
-use asap_types::stages::{CandidateForMemoGroupId, Memo, RootPruneReason};
+use asap_types::stages::{CandidateForMemoGroupId, Memo, RequiredAccuracy, RootPruneReason};
 use asap_types::summary_type::{MergedError, SketchParams, SketchStatistic, SummaryTypeCapability};
 
-use crate::guarantee::{guarantee_before_failure_probability_check, holds_at_failure_probability};
+use crate::guarantee::{
+    guarantee_before_failure_probability_check, holds_at_failure_probability, theoretical_guarantee,
+};
 use crate::readout::sketch_readout;
 use crate::{AccuracyEvidence, ErrorMetricsOfMemo};
 
@@ -169,15 +172,7 @@ impl ErrorMetricsOfMemo {
                 holds_at_failure_probability(guarantee, required.failure_probability)
             })
         });
-        let meets = guarantee.is_some_and(|guarantee| {
-            guarantee.spec.accuracy_metric == required.metric
-                && guarantee
-                    .spec
-                    .error
-                    .evaluate()
-                    .is_some_and(|error| within_limit(error, required.max_error))
-        });
-        if keeps && meets {
+        if keeps && guarantee_meets(guarantee.as_ref(), required) {
             Ok(())
         } else {
             Err(RootPruneReason::BelowRequiredAccuracy {
@@ -187,6 +182,51 @@ impl ErrorMetricsOfMemo {
             })
         }
     }
+}
+
+/// Whether a state of `summary_type` built with `parameters` meets readout
+/// level `required` for `statistic`, as the edge from the build checks it
+/// ([`ErrorMetricsOfMemo::edge_meets_logical_requirements`]): its guarantee
+/// at the required failure probability (`evidence`'s measurement, else the
+/// theoretical one) is in the required metric and within the required
+/// error. A KLL build of k = 1404 meets rank error 0.0025 at δ = 0.01, not
+/// at δ = 0.00125.
+pub(crate) fn build_meets_level(
+    summary_type: &FieldDataType,
+    parameters: &SketchParams,
+    statistic: &SketchStatistic,
+    required: RequiredAccuracy,
+    evidence: &dyn AccuracyEvidence,
+) -> bool {
+    let guarantee = evidence
+        .measured_guarantee(
+            summary_type,
+            parameters,
+            statistic,
+            required.failure_probability,
+        )
+        .or_else(|| {
+            theoretical_guarantee(
+                summary_type,
+                parameters,
+                statistic,
+                required.failure_probability,
+            )
+        });
+    guarantee_meets(guarantee.as_ref(), required)
+}
+
+/// Whether `guarantee`, a θ's at the required failure probability, meets
+/// `required`: in its metric, with an error within its error.
+fn guarantee_meets(guarantee: Option<&AccuracyGuarantee>, required: RequiredAccuracy) -> bool {
+    guarantee.is_some_and(|guarantee| {
+        guarantee.spec.accuracy_metric == required.metric
+            && guarantee
+                .spec
+                .error
+                .evaluate()
+                .is_some_and(|error| within_limit(error, required.max_error))
+    })
 }
 
 /// A heap variant's heap size.

@@ -1,4 +1,5 @@
 use super::*;
+use crate::NoMeasuredGuarantees;
 use asap_types::accuracy::AccuracyScope;
 use asap_types::ir::operator::arguments::{PromQLVectorSetOpKind, Reduction};
 use asap_types::ir::operator::AggIntent;
@@ -7,8 +8,8 @@ use asap_types::ir::QueryRoot;
 use asap_types::stages::{MemoQuery, ValueSign};
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
 use asap_types::test_support::memo_builders::{
-    candidate, estimate, group, own_candidate, quantile_over_time, query, scan_group,
-    sketch_state, with_series,
+    candidate, estimate, group, own_candidate, quantile_over_time, query, scan_group, sketch_state,
+    with_series,
 };
 use asap_types::test_support::memo_fixtures::{aggregate, arithmetic, range, set_operator};
 use asap_types::workload::DataWorkload;
@@ -16,10 +17,15 @@ use asap_types::workload::DataWorkload;
 /// The levels [`readout_levels`] gives the readout candidate `readout`.
 fn levels_of(memo: &Memo, readout: MemoGroupId) -> Vec<RequiredAccuracy> {
     let order = memo.topological_order().expect("acyclic");
-    readout_levels(memo, &ErrorMetricsOfMemo::of(memo, &order), &order)
-        .remove(&own_candidate(readout))
-        .expect("a sketch readout")
-        .levels
+    readout_levels(
+        memo,
+        &ErrorMetricsOfMemo::of(memo, &order),
+        &order,
+        &NoMeasuredGuarantees,
+    )
+    .remove(&own_candidate(readout))
+    .expect("a sketch readout")
+    .levels
 }
 
 /// A whole-result failure probability is split over the values one
@@ -318,9 +324,14 @@ fn an_operator_above_a_count_of_readouts_combines_one_readout_error() {
 /// failure probability.
 fn failure_probability_of(memo: &Memo, readout: MemoGroupId) -> Option<f64> {
     let order = memo.topological_order().expect("acyclic");
-    let required = readout_levels(memo, &ErrorMetricsOfMemo::of(memo, &order), &order)
-        .remove(&own_candidate(readout))
-        .expect("a sketch readout");
+    let required = readout_levels(
+        memo,
+        &ErrorMetricsOfMemo::of(memo, &order),
+        &order,
+        &NoMeasuredGuarantees,
+    )
+    .remove(&own_candidate(readout))
+    .expect("a sketch readout");
     if !required
         .queries_without_per_value_failure_probability
         .is_empty()
@@ -585,26 +596,48 @@ fn a_record_share_scope_splits_over_the_readout_values_of_the_groups_it_covers()
 /// depends on one readout value of each side, fan-in 2, so the two
 /// readouts' failure probabilities sum within δ = 0.01: divisor
 /// min(16, 1 × 2) = 2, and the loosest grid level is 1e-3 (≤ 0.005),
-/// not 1e-4 (≤ 0.01 / 16).
+/// not 1e-4 (≤ 0.01 / 16). Checked on the counts and the query's grid,
+/// since DDSketch's error does not depend on δ, so the readout keeps only
+/// the strictest δ of each error level.
 #[test]
 fn a_per_value_ratio_splits_over_the_two_readout_values_of_each_output_value() {
     let mut memo = Memo::new(&with_series("m", 8));
     let (_, state, p90) = quantile_over_time(&mut memo, SketchAlgorithm::DDSketch, 0.9, 300);
     let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
     let ratio = group(&mut memo, arithmetic(ArithmeticOpKind::Div, p90, p50));
-    with_query(
-        &mut memo,
-        ratio,
-        relative_target(AccuracyScope::PerValue),
-        Some(8),
+    let target = relative_target(AccuracyScope::PerValue);
+    with_query(&mut memo, ratio, target.clone(), Some(8));
+    let order = memo.topological_order().expect("acyclic");
+    let error_metrics = ErrorMetricsOfMemo::of(&memo, &order);
+    let read = readouts_read_by_queries(
+        &memo,
+        &error_metrics.error_contract,
+        &order,
+        &[p90, p50].into(),
     );
-    for readout in [p90, p50] {
-        let loosest = levels_of(&memo, readout)
-            .into_iter()
-            .map(|required| required.failure_probability)
-            .fold(0.0, f64::max);
-        assert!((loosest - 1e-3).abs() < 1e-15, "{loosest}");
-    }
+    assert!(read.composed.contains(&0));
+    let counts = read.readout_values[&0];
+    assert_eq!(
+        counts,
+        ReadoutValueCounts {
+            per_evaluation: Some(16),
+            per_output_value: Some(2),
+        }
+    );
+    let levels = query_levels(
+        &target,
+        Some(8),
+        counts,
+        AccuracyMetric::Relative,
+        0.05,
+        true,
+    )
+    .expect("a per-value failure probability");
+    let loosest = levels
+        .into_iter()
+        .map(|required| required.failure_probability)
+        .fold(0.0, f64::max);
+    assert!((loosest - 1e-3).abs() < 1e-15, "{loosest}");
 }
 
 /// A readout group whose candidates are a readout and a reduction over
@@ -625,7 +658,11 @@ fn a_readout_group_holding_a_reduction_splits_over_the_readout_values_below_it()
         SketchAlgorithm::DDSketch,
         Reduction::by(vec![]),
     );
-    let global = estimate(&mut memo, global_state, SketchStatistic::Quantile { q: 0.9 });
+    let global = estimate(
+        &mut memo,
+        global_state,
+        SketchStatistic::Quantile { q: 0.9 },
+    );
     let sum_of_readouts = Operator::NonASAP(NonASAPOp::Aggregate {
         child: per_series,
         reduction: Reduction::by(vec![]),
@@ -739,7 +776,12 @@ fn levels_met_by_different_builds_are_both_kept() {
             .accuracy_scope(scope)
     };
     with_query(&mut memo, readout, rank(AccuracyScope::PerValue), Some(8));
-    with_query(&mut memo, readout, rank(AccuracyScope::WholeResult), Some(8));
+    with_query(
+        &mut memo,
+        readout,
+        rank(AccuracyScope::WholeResult),
+        Some(8),
+    );
     let failure_probabilities: Vec<f64> = levels_of(&memo, readout)
         .into_iter()
         .map(|level| level.failure_probability)
