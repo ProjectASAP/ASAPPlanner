@@ -45,12 +45,15 @@ fn nodes(roots: &[QueryRoot]) -> Vec<Rc<OperatorNode>> {
 /// by service and by (service, endpoint) over 5 min every 60 s: the
 /// production entrypoint counts both exactly, the measured-better plan. A
 /// KMV build compares each row with the hashes its state retains, and a
-/// rollup inserts each state's hashes the same way: over 12,000,000 rows
-/// of this data's shape (1,000,000 distinct users, 1,000 groups of the
-/// finer grouping), the two exact counts measure 14.7 s per evaluation and
-/// one KMV build with a rollup 393 s
-/// (`production_sql_distinct_region_service_counts_exactly`). Charged a
-/// fixed 48 per row and per byte merged, the KMV rollup was selected.
+/// rollup inserts each state's hashes the same way. The planner sees
+/// 600,000,000 rows per evaluation and 10,000 groups for each grouping,
+/// and sizes the KMV at k = 26,656. Measured on the executor at that
+/// shape (k = 26,656, 1,000,000 distinct users, grouped), a KMV build
+/// takes 7.8 µs per row and an exact count 0.59 µs, 13x apart. The
+/// planner charges the KMV plan 3.9x the exact counts (0.00154 against
+/// 0.00039 per second; 2.8x while the rollup by `service` was charged as
+/// passing one state per group through). Charged a fixed 48 per row and
+/// per byte merged, the KMV rollup was selected.
 #[test]
 fn production_distinct_rollup_counts_exactly() {
     let (workload, roots) = fixture();

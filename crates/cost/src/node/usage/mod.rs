@@ -45,7 +45,7 @@ use crate::{
 use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::resolve_column_ref;
-use asap_types::ir::schema::{FieldDataType, Schema};
+use asap_types::ir::schema::{ColumnId, FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
@@ -229,8 +229,9 @@ pub struct ProducerOutput<'a> {
     /// lookback (one second of arriving rows at ingestion time, the
     /// retained rows of raw data materialized at ingestion), narrowed by a
     /// `TimeRange`, passed on by the operators that keep each row's window
-    /// (a `Filter` keeps the span of the rows it drops); `None` for any
-    /// other node, whose rows are not raw rows. A grouping counts the raw
+    /// and by a `Sort`, `Limit` or `Dedup` (a `Filter` or a `Limit` keeps
+    /// the span of the rows it drops), the longest of a `Concat`'s raw
+    /// inputs'; `None` for any other node, whose rows are not raw rows. A grouping counts the raw
     /// batches its input arrives in from it. Example: `latency > 100` over
     /// a 5 min scan spans 300,000 ms, 30 batches of 10 s, however few rows
     /// it keeps.
@@ -1216,9 +1217,18 @@ pub fn node_resource_usage_and_cost<'a>(
                 _ => producers.iter().map(input_state_bytes).max().unwrap_or(0),
             };
             // Each input state's merge, by the states' family and bytes,
-            // and each output group's state and row; with one state per
-            // group, each state passes through to its group unmerged.
-            let merge_ops: f64 = match states <= group_count {
+            // and each output group's state and row. A merge that keeps
+            // its input's groups (no `group_by`, or the input's own keys)
+            // and reads one state per group passes each state through
+            // unmerged. A rollup merges even when its estimate ties its
+            // input's: states by (region, service) rolled up by `service`
+            // merge several per service.
+            let keeps_input_groups = group_by.as_ref().is_none_or(|keys| {
+                producers
+                    .iter()
+                    .all(|producer| keys_are_input_keys(keys, producer.output_schema))
+            });
+            let merge_ops: f64 = match keeps_input_groups && states <= group_count {
                 true => pass_through_merge_operations(group_count),
                 false => {
                     producers
@@ -1539,10 +1549,27 @@ pub fn node_resource_usage_and_cost<'a>(
             .flatten()
     });
     // A scan and a time range over raw rows say what their rows span; an
-    // operator keeping each row's window passes on its input's.
+    // operator keeping each row's window passes on its input's, and so do
+    // a sort, a limit and a dedup, which output raw rows as they are (a
+    // limit and a dedup drop some, as a filter does). A concat of raw rows
+    // spans the longest of its inputs'.
+    let passes_raw_rows_on = node.payload.keeps_input_window()
+        || matches!(
+            node.payload,
+            Payload::NonASAP(
+                NonASAPOp::Sort { .. } | NonASAPOp::Limit { .. } | NonASAPOp::Dedup { .. }
+            )
+        );
     let raw_rows_span_ms = read_raw_rows_span_ms.or_else(|| {
-        node.payload
-            .keeps_input_window()
+        if matches!(node.payload, Payload::NonASAP(NonASAPOp::Concat { .. })) {
+            return producers
+                .iter()
+                .map(|producer| producer.raw_rows_span_ms)
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .max();
+        }
+        passes_raw_rows_on
             .then_some(input_raw_rows_span_ms)
             .flatten()
     });
@@ -1671,6 +1698,21 @@ fn carried_label_operations_per_row(output_schema: &Schema, reduction: &Reductio
 
 /// The input states a `SummaryMerge` over `producers` reads: every row of
 /// each.
+/// Whether a rollup's `keys` are its input's own keys: every plain
+/// column of `input` but its time index, in any order. Example: over
+/// states keyed by (window_end, region, service), `[2, 1]` is, `[2]` is
+/// not.
+fn keys_are_input_keys(keys: &[ColumnId], input: &Schema) -> bool {
+    let input_keys: BTreeSet<ColumnId> = input
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(column, field)| field.is_plain() && input.time_index != Some(*column))
+        .map(|(column, _)| column)
+        .collect();
+    keys.iter().copied().collect::<BTreeSet<_>>() == input_keys
+}
+
 fn merged_states(producers: &[ProducerOutput<'_>]) -> Result<u64, AnalyticalCostError> {
     producers.iter().try_fold(0_u64, |total, producer| {
         total

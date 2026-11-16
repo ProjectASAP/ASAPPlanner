@@ -88,9 +88,12 @@ pub(crate) const TIME_RANGE_OPERATIONS_PER_ROW: f64 = 11.0;
 /// aggregates and summary builds (Max, Count, Sum and quantile aggregates;
 /// Max, Sum, Count, Rate, Increase, DDSketch and KLL builds) and 254
 /// stored plans' ingestion CPU. The loss and the terms were chosen by
-/// leave-one-setting-out error (each rate, series count, window and
-/// interval left out in turn, its points predicted by a fit on the rest):
-/// squared log error 0.147, absolute 0.150. A chain's term per group and
+/// leave-one-setting-out error (each of the 35 settings, one series count,
+/// rate, window and interval together, left out in turn, its points
+/// predicted by a fit on the rest): squared log error 0.147, absolute
+/// 0.150. Leaving out each rate, each series count or each window instead
+/// gives 0.148, 0.172 and 0.148, the squared loss again at or below the
+/// absolute and the terms the same. A chain's term per group and
 /// batch did not lower it (0.147 with it, fitted 15), so a chain pays only
 /// this one. Fitted 171, then rounded with the others: measured ÷ charged
 /// is 0.76–1.50 for per-series hash aggregates at 1 Hz and 0.87–1.26 at
@@ -194,11 +197,11 @@ pub(crate) const CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL: f64 = 37.0;
 /// One row folded into a KMV state, beyond the retained hashes it compares
 /// the row's hash with (`KMV_OPERATIONS_PER_COMPARED_HASH`): hashing the
 /// value and the state's checks. Fitted with that term on the executor
-/// over 22 builds: 300,000 rows of 100 to 10,000,000 distinct values, one
+/// over 28 builds: 300,000 rows of 100 to 10,000,000 distinct values, one
 /// state at k = 4,323 and 4 to 1,000 states at k = 26,656 (minimizing the
 /// squared log error, chosen by leave-one-out error over the distinct
-/// counts, 0.108 against 0.202 for the absolute): 65 per row and 0.50 per
-/// compared hash, within 0.75–1.27x of each build.
+/// counts, 0.107 against 0.200 for the absolute): 63.8 per row and 0.51
+/// per compared hash, charged 65 and 0.50.
 const KMV_UPDATE_OPERATIONS_PER_ROW: f64 = 65.0;
 
 /// Per retained hash a KMV update compares the row's hash with
@@ -212,22 +215,34 @@ const KMV_UPDATE_OPERATIONS_PER_ROW: f64 = 65.0;
 const KMV_OPERATIONS_PER_COMPARED_HASH: f64 = 0.5;
 
 /// Per input row of an exact distinct count or frequency statistic, beyond
-/// its lookups and inserts below: reading the row's value. Fitted on the
-/// executor's exact `COUNT(DISTINCT user_id)` over 300,000 and 3,000,000
-/// rows of 100 to 100,000,000 distinct values, in 1 to 1,000 groups (45
-/// aggregates; squared log error, the form chosen among 26 by the error
-/// leaving each distinct count and row count out in turn, 0.219; measured
-/// ÷ charged 0.74–1.83): 61 per row, less the measure's own
-/// `AGGREGATE_MEASURE_OPERATIONS_PER_ROW`.
-const EXACT_DISTINCT_OPERATIONS_PER_ROW: f64 = 57.0;
+/// its lookups and inserts below, the measure's own
+/// `AGGREGATE_MEASURE_OPERATIONS_PER_ROW`, its grouping keys
+/// (`HASH_AGGREGATE_OPERATIONS_PER_ROW`,
+/// `HASH_AGGREGATE_OPERATIONS_PER_FURTHER_KEY`) and its group visits
+/// (`OPERATIONS_PER_GROUP_PER_RAW_BATCH`): reading the row's value.
+/// Measured on the executor's exact `COUNT(DISTINCT user_id)` over 300,000
+/// and 3,000,000 rows of 100 to 100,000,000 distinct values, in 1 to 1,000
+/// groups (45 aggregates). Of 26 forms, the one with the lowest error
+/// leaving each distinct count and row count out in turn is a constant,
+/// a term per square root of the distinct values and one per inserted
+/// entry (0.215 by squared log error, fitted 61 + 0.4845 × √(distinct
+/// values) + 103.7 per entry with the key and visits inside the
+/// constant). Refit with the key, the measure, the visits and each
+/// group's output row (`OUTPUT_ROW_OPERATIONS_PER_GROUP`) fixed at their
+/// constants, so a grouped count pays them once: 41.2 per row, 0.529 per
+/// square root and 71.7 per entry (leave-one-out error 0.233; measured ÷
+/// charged 0.74–2.40, 0.74–1.29 for grouped counts over at most 1,000
+/// distinct values, which were 0.59–1.05).
+const EXACT_DISTINCT_OPERATIONS_PER_ROW: f64 = 41.0;
 
 /// Per input row of an exact distinct count, per square root of the
 /// distinct values its value table holds (at most
 /// `EXACT_DISTINCT_LOOKUP_MOST_VALUES`): looking the value up, a cache
-/// miss more often as the table grows (fitted 0.493). Example: 300,000 rows
-/// of 10,000 distinct values measure 115 ns per row, charged 57 + 4 + 49 +
-/// 7 = 117; of 259,000, 589, charged 57 + 4 + 249 + 150 = 460.
-const EXACT_DISTINCT_LOOKUP_OPERATIONS_PER_SQRT_VALUE: f64 = 0.49;
+/// miss more often as the table grows (fitted 0.529). Example: 300,000
+/// rows of 10,000 distinct values in one group measure 115 ns per row,
+/// charged 4 + 41 + 53 + 5 = 103; of 1,000,000 (charged as 300,000, the
+/// rows read), 589, charged 4 + 41 + 290 + 118 = 453.
+const EXACT_DISTINCT_LOOKUP_OPERATIONS_PER_SQRT_VALUE: f64 = 0.53;
 
 /// The most distinct values measured: past 3,000,000 the lookup is
 /// charged as at 3,000,000 (943 ns per row at 2,955,000 values against
@@ -236,18 +251,18 @@ const EXACT_DISTINCT_LOOKUP_MOST_VALUES: f64 = 3_000_000.0;
 
 /// Per entry an exact distinct count inserts, shared over its input rows:
 /// each distinct value into its value table and each (group, value) pair
-/// into its set of pairs (fitted 103).
-const EXACT_DISTINCT_OPERATIONS_PER_INSERTED_ENTRY: f64 = 103.0;
+/// into its set of pairs (fitted 71.7).
+const EXACT_DISTINCT_OPERATIONS_PER_INSERTED_ENTRY: f64 = 72.0;
 
 /// The operations one input row costs an exact distinct count (or
 /// frequency statistic) over `rows` rows in `group_count` groups, of a
-/// column taking `distinct_values` values, beyond the measure's own: the
-/// executor interns each value in one table of every distinct value read
-/// and keeps each group's (group, value) pairs in a set, so its time per
-/// row grows with the distinct values. The pairs are each group's
-/// expected distinct values among its rows, drawn from `distinct_values`.
-/// Example: 300,000 rows of 10,000 values in one group cost 57 + 0.49 ×
-/// 100 + 103 × 20,000 ÷ 300,000 = 113.
+/// column taking `distinct_values` values, beyond the measure's own, its
+/// grouping keys and its group visits: the executor interns each value in
+/// one table of every distinct value read and keeps each group's (group,
+/// value) pairs in a set, so its time per row grows with the distinct
+/// values. The pairs are each group's expected distinct values among its
+/// rows, drawn from `distinct_values`. Example: 300,000 rows of 10,000
+/// values in one group cost 41 + 0.53 × 100 + 72 × 20,000 ÷ 300,000 = 99.
 pub(crate) fn exact_distinct_value_operations_per_row(
     distinct_values: u64,
     group_count: u64,
@@ -319,12 +334,21 @@ pub(crate) const KLL_MERGE_OPERATIONS_PER_MERGED_BYTE: f64 = 0.43;
 /// creating the group's state and its output row. Merging exact
 /// accumulators over 1,000 groups costs 1.17 µs per group with one state
 /// per group and 215 ns per state plus about 0.95 µs per group with 5 to
-/// 360 (median of 20–26 runs per point). Less than a finalize's or an
-/// estimate's output row (`OUTPUT_ROW_OPERATIONS_PER_GROUP`, 2,500): a
-/// merge's row takes its group's key columns and merged state as they are,
-/// where a finalize or an estimate also reads each state into a new value
-/// column.
-const MERGE_OPERATIONS_PER_OUTPUT_GROUP: f64 = 950.0;
+/// 360 (median of 20–26 runs per point). The time per group grows with the
+/// groups: one-state merges on the fitting grid of
+/// `OPERATIONS_PER_GROUP_PER_RAW_BATCH` measure a median 0.98–1.15 µs per
+/// group at 100 and 1,000 groups (1.34 and 1.15 µs for exact
+/// accumulators) and 1.5–1.8 µs at 10,000 (up to 2.5 µs for KLL states).
+/// 1,100 minimizes neither alone but lowers the RMS log error of measured
+/// ÷ charged over every merge on that grid from 0.281 at 950 to 0.248
+/// (one state per group 0.375 → 0.273, several 0.214 → 0.233), and on the
+/// held-out settings from 0.225 to 0.217. At 10,000 groups one-state
+/// merges still measure a median 1.38–1.62x their charge (up to 2.29x for
+/// KLL), at 1,000 groups 0.96x. Less than a finalize's or an estimate's
+/// output row (`OUTPUT_ROW_OPERATIONS_PER_GROUP`, 2,500): a merge's row
+/// takes its group's key columns and merged state as they are, where a
+/// finalize or an estimate also reads each state into a new value column.
+const MERGE_OPERATIONS_PER_OUTPUT_GROUP: f64 = 1_100.0;
 
 /// Per byte of any other sketch state merged, above
 /// `EXACT_MERGE_OPERATIONS_PER_STATE`: merging adds every counter of the
@@ -577,8 +601,8 @@ pub(crate) fn merge_operations_per_state(
 
 /// The operations a `SummaryMerge` of `family` with `output_groups` groups
 /// costs beyond its input states' merges ([`merge_operations_per_state`]):
-/// each group's state and output row. Example: 1,000 groups cost 950,000,
-/// of KLL states 19,950,000.
+/// each group's state and output row. Example: 1,000 groups cost
+/// 1,100,000, of KLL states 20,100,000.
 pub(crate) fn merge_output_operations(family: StateFamily<'_>, output_groups: u64) -> f64 {
     let per_group = match family {
         StateFamily::Sketch(SketchParams::Kll { .. }) => {
@@ -608,7 +632,11 @@ pub(crate) fn merge_output_operations(family: StateFamily<'_>, output_groups: u6
 /// merge. Merging the one window a time range selects from a chain of
 /// 1,000 states per window measures 0.94–1.0 ms for KLL states (k = 547),
 /// 0.97 for DDSketch states and 0.87–1.31 for exact accumulators, where a
-/// KLL merge was charged 29 ms. Example: 1,000 groups cost 950,000.
+/// KLL merge was charged 29 ms. The time per group grows with the
+/// groups: at 10,000 groups such merges measure 1.5–1.8 µs per group, a
+/// median 1.38–1.62x their charge (up to 2.29x for KLL states), at 100 and
+/// 1,000 groups 0.96–1.20x (`MERGE_OPERATIONS_PER_OUTPUT_GROUP`). Example:
+/// 1,000 groups cost 1,100,000.
 pub(crate) fn pass_through_merge_operations(output_groups: u64) -> f64 {
     output_groups as f64 * MERGE_OPERATIONS_PER_OUTPUT_GROUP
 }
