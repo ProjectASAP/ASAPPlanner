@@ -91,8 +91,15 @@ fn lookup_no_extrapolation_below_smallest() {
 /// 0.004998 · 3.0902 / 2.5758 = 0.005997 at δ = 0.002.
 #[test]
 fn closed_form_applies_below_the_measured_range() {
-    let guarantee =
-        theoretical_guarantee(&kll(), &SketchParams::Kll { k: 547 }, &p99(), 0.002).unwrap();
+    let guarantee = theoretical_guarantee(
+        &kll(),
+        &SketchParams::Kll { k: 547 },
+        &p99(),
+        0.002,
+        None,
+        None,
+    )
+    .unwrap();
     let (error, _, metric) = parts(&guarantee);
     assert_eq!(metric, AccuracyMetric::Rank);
     assert!((error - 0.005997).abs() < 5e-6, "{error}");

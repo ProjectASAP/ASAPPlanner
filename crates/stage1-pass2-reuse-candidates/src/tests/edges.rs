@@ -145,14 +145,15 @@ fn measured_p99(
 }
 
 /// `quantile_over_time(0.99, m[5m])` over one series of `m` (so δ is not
-/// split across readout values), with a per-value `metric` target of
+/// split across readout values) whose values are non-negative (so
+/// DDSketch's sign condition holds), with a per-value `metric` target of
 /// `max_error` at δ = 0.01: the memo, its state group and readout group.
 fn p99_with_per_value_target(
     algorithm: SketchAlgorithm,
     metric: AccuracyMetric,
     max_error: f64,
 ) -> (Memo, MemoGroupId, MemoGroupId) {
-    let mut memo = Memo::new(&with_series("m", 1));
+    let mut memo = Memo::new(&with_non_negative_values("m").with_series_count(1));
     let (_, state, readout) = quantile_over_time(&mut memo, algorithm, 0.99, 300);
     query(
         &mut memo,

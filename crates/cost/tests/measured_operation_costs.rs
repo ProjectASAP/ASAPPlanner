@@ -204,7 +204,6 @@ fn full_table() -> MeasuredOperationCosts {
             },
         ],
         ns_per_evaluation: 50_000.0,
-        ..MeasuredOperationCosts::default()
     }
 }
 
