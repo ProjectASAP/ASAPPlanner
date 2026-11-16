@@ -4,7 +4,9 @@
 //! separate. Plan selection (Stage 3) turns them into one objective with
 //! [`crate::ResourceUnitCost`].
 
-use crate::node::operations_per_unit::TIME_RANGE_OPERATIONS_PER_ROW;
+use crate::node::operations_per_unit::{
+    OUTPUT_ROW_OPERATIONS_PER_GROUP, TIME_RANGE_OPERATIONS_PER_ROW,
+};
 use crate::resources::ModeledCpu;
 use asap_types::summary_type::{SketchAlgorithm, SketchParams};
 use serde::{Deserialize, Serialize};
@@ -468,7 +470,8 @@ pub(crate) fn estimate_operator(
                 ..
             },
         ) => ResourceEstimate::new(
-            checked_cpu_product(left.rows, operations_per_row)?,
+            checked_cpu_product(left.rows, operations_per_row)?
+                + *group_count as f64 * OUTPUT_ROW_OPERATIONS_PER_GROUP,
             checked_bytes(&[
                 *group_count,
                 key_bytes
@@ -2135,7 +2138,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(ungrouped.cpu_ops(), 0.0);
+        // No row to fold; its one output row is still built.
+        assert_eq!(ungrouped.cpu_ops(), OUTPUT_ROW_OPERATIONS_PER_GROUP);
         assert_eq!(ungrouped.peak_memory_bytes(), 24);
 
         let grouped = estimate_operator(
