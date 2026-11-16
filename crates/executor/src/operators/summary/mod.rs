@@ -7,6 +7,8 @@ use arrow::array::{Array, BooleanArray, Float64Array, TimestampMillisecondArray,
 use planner_types::summary_type::{MergeInputRule, SummaryTypeCapability};
 use std::num::NonZeroU32;
 
+mod positional_merge;
+
 /// What each input row adds to its item's count in a keyed summary build
 /// ([`Operator::per_group_keyed_summary_build`] or
 /// [`Operator::all_groups_summary_build`]). Produced by the physical planner

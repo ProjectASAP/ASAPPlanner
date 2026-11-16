@@ -57,3 +57,9 @@ path = "tests/series_window_memory_limit.rs"
 [[test]]
 name = "summary_build_memory_limit"
 path = "tests/summary_build_memory_limit.rs"
+
+# Counts its own thread's allocations through a #[global_allocator], so it
+# needs a process of its own.
+[[test]]
+name = "summary_merge_allocations"
+path = "tests/summary_merge_allocations.rs"

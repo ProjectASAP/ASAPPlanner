@@ -34,4 +34,5 @@ mod sql_cardinality;
 mod sql_frequency;
 mod sql_to_post_asap;
 mod stage3_objective;
+mod stored_window_merge;
 mod time_range;
