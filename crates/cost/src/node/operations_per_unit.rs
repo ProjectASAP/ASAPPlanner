@@ -36,12 +36,12 @@
 //! only favours the exact plan further.
 //!
 //! Example: `quantile_over_time(0.99, latency[1h])` at 1 Hz reads 3.6 M
-//! rows. The exact plan keeps them (`TIME_RANGE_OPERATIONS_PER_ROW`, 12),
+//! rows. The exact plan keeps them (`TIME_RANGE_OPERATIONS_PER_ROW`, 11),
 //! groups them per series (`HASH_AGGREGATE_OPERATIONS_PER_KEY` +
 //! `AGGREGATE_MEASURE_OPERATIONS_PER_ROW`, 27) and sorts each series' 3,600
-//! values (11.8 levels × `SORT_OPERATIONS_PER_ROW_PER_LEVEL`, 65): 104 ns per
-//! row. A DDSketch built from the same rows takes 12 +
-//! `DDSKETCH_UPDATE_OPERATIONS_PER_ROW` (210) = 222 ns per row, about twice
+//! values (11.8 levels × `SORT_OPERATIONS_PER_ROW_PER_LEVEL`, 65): 103 ns per
+//! row. A DDSketch built from the same rows takes 11 +
+//! `DDSKETCH_UPDATE_OPERATIONS_PER_ROW` (210) = 221 ns per row, about twice
 //! the exact plan, as measured (111 and 229).
 
 // Each rule lists every variant, as in `usage`: a wildcard arm would give a
@@ -59,11 +59,15 @@ use asap_types::summary_type::{ExactKind, SketchParams};
 use crate::StateFamily;
 
 /// A row kept by a time range over raw rows, or a state read by a time
-/// range over a chain's tumbling windows: 11–12 ns per row over 3.6 M and
-/// 36 M rows, 8–18 ns per state over 360,000 states. A query-time tumbling
-/// window chain pays it too, per raw row it reads: it keeps each row of
-/// its scan's lookback in its window's range, as a time range does.
-pub(crate) const TIME_RANGE_OPERATIONS_PER_ROW: f64 = 12.0;
+/// range over a chain's tumbling windows: 9–16 ns per row (median 11) over
+/// 54 time ranges of 30,000 to 36 M rows at 1 Hz and 10 Hz over 100, 1,000
+/// and 10,000 series, 8–18 ns per state over 360,000 states. A tumbling
+/// window chain pays it too, per raw row it reads: at query time it keeps
+/// each row of its scan's lookback in its window's range, and at ingestion
+/// time it assigns each arriving row its window, as a time range does. A
+/// Rate chain at ingestion time measures 87 ns per row at 10 Hz, the same
+/// Rate built at query time 66–76 and its time range 11.
+pub(crate) const TIME_RANGE_OPERATIONS_PER_ROW: f64 = 11.0;
 
 /// Per input row, for each grouping key of a hash aggregate: hashing the
 /// key and finding its group. With `AGGREGATE_MEASURE_OPERATIONS_PER_ROW`,
@@ -101,9 +105,19 @@ pub(crate) const EXACT_UPDATE_OPERATIONS_PER_ROW: f64 = 40.0;
 /// One row folded into an exact accumulator of a counter's increase (rate,
 /// increase, irate), which also tracks resets and the first and last
 /// samples, beyond any label it carries: built per series carrying a
-/// `job` label it takes 77 ns per row at query time and 87 at ingestion
-/// time, of which the label is `CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL`
-/// (37).
+/// `job` label at query time it takes 66–109 ns per row (median 83) over
+/// 24 nodes at 1 Hz and 10 Hz over 100, 1,000 and 10,000 series, of which
+/// the label is `CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL` (37). The time
+/// per row follows the sample rate, not the rows per series: 66–76 at
+/// 10 Hz (3,000 and 36,000 rows per series) and 78–109 at 1 Hz (300 and
+/// 3,600). The executor reads each group's state once per stored batch of
+/// rows, and a batch holds a tenth as many rows of a series at 1 Hz. A
+/// term per group cannot follow that (3,000 rows per series at 10 Hz cost
+/// less per row than 3,600 at 1 Hz), and one per group and batch would
+/// need the store's batch length, which the planner does not know; one
+/// constant fits both rates, within 0.8–1.3x. At ingestion time a chain
+/// also assigns each row its window (`TIME_RANGE_OPERATIONS_PER_ROW`): 87
+/// ns per row at 10 Hz, 106–111 at 1 Hz.
 pub(crate) const COUNTER_UPDATE_OPERATIONS_PER_ROW: f64 = 45.0;
 
 /// Per input row, for each label column a per-series state or group
@@ -112,7 +126,9 @@ pub(crate) const COUNTER_UPDATE_OPERATIONS_PER_ROW: f64 = 45.0;
 /// exact `Aggregate` carrying `job` takes 51–77 ns per row where one
 /// carrying nothing takes 18–38 at the same settings, and an exact Count
 /// accumulator carrying it 79 ns where a Max carrying nothing takes 42:
-/// 37 ns per row, the median difference.
+/// 37 ns per row, the median difference. Refit at 1 Hz and 10 Hz over 100
+/// to 10,000 series, a per-series Count carrying `job` built at query time
+/// measures 74 ns per row and a Max 40 (medians of 12 nodes each): 34.
 pub(crate) const CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL: f64 = 37.0;
 
 /// One counter update of any other sketch, per counter its row updates
@@ -185,15 +201,28 @@ const MERGE_OPERATIONS_PER_OUTPUT_GROUP: f64 = 950.0;
 /// about 13 µs, 0.4–0.8 ns per byte.
 pub(crate) const SKETCH_MERGE_OPERATIONS_PER_BYTE: f64 = 1.0;
 
-/// Per byte of the KLL state one group's answer is read from, before its
-/// output row: the quantile sorts the items the state holds. The bytes are
-/// those the planner charges for the state (`sketch_state_bytes`); 0.9 per
-/// byte fits `asap_sketchlib`'s KLL at k = 200 to 1,404 over the same 24
-/// merged states as `KLL_MERGE_OPERATIONS_PER_STATE` (median of 3 runs over
-/// 1,000 groups) within 2x at 21 of them. Example: a merged state of 360
-/// states of 10 rows is charged 15 µs at k = 547 (17.0 KB) and 30 µs at
-/// k = 1,404 (33.5 KB), measured 23 and 42.
+/// Per byte of the merged KLL state one group's answer is read from,
+/// before its output row: the quantile sorts the items the state holds,
+/// whose levels a merge leaves sorted. The bytes are those the planner
+/// charges for the state (`sketch_state_bytes`); 0.9 per byte fits
+/// `asap_sketchlib`'s KLL at k = 200 to 1,404 over the same 24 merged
+/// states as `KLL_MERGE_OPERATIONS_PER_STATE` (median of 3 runs over 1,000
+/// groups) within 2x at 21 of them. Example: a merged state of 360 states
+/// of 10 rows is charged 15 µs at k = 547 (17.0 KB) and 30 µs at k = 1,404
+/// (33.5 KB), measured 23 and 42.
 pub(crate) const KLL_ESTIMATE_OPERATIONS_PER_BYTE: f64 = 0.9;
+
+/// Per byte of a KLL state built by updates (by a `SummaryAgg`, or a
+/// chain's window read without a merge) that one group's answer is read
+/// from, before its output row: its newest items are unsorted, so the
+/// quantile sorts them from scratch. Fitted on the executor at k = 547
+/// over 100, 1,000 and 10,000 series of states of 300 to 36,000 rows
+/// (charged 4,844 and 17,000 bytes), the geometric mean of 11 nodes:
+/// within 0.4–2.1x of each. Example: states of 300 rows measure 13.4–13.9
+/// µs per group, charged 1.8 × 4,844 + 2,500 = 11.2 (6.9 as a merged
+/// state); of 3,000 rows 14.5–22.3, of 3,600 25.6–35.3 and of 36,000
+/// 58.6–65.7, each charged 33.1.
+pub(crate) const KLL_ESTIMATE_OPERATIONS_PER_BYTE_OF_UPDATED_STATE: f64 = 1.8;
 
 /// One group's answer read from any other sketch state, before its output
 /// row (`OUTPUT_ROW_OPERATIONS_PER_GROUP`): a DDSketch quantile estimate
@@ -384,12 +413,23 @@ pub(crate) fn chain_emit_operations_per_state(summary_type: &FieldDataType) -> f
 
 /// The operations reading one group's answer from a state of `family`
 /// holding `state_bytes` costs, its output row included (an exact
-/// accumulator's: finalizing it, the output row alone). Example: a
-/// DDSketch quantile costs 1,000 + 2,500 = 3,500 per group.
-pub(crate) fn estimate_operations_per_group(family: StateFamily<'_>, state_bytes: u64) -> f64 {
+/// accumulator's: finalizing it, the output row alone). A KLL state last
+/// written by a merge (`state_from_merge`) has its levels sorted; one built
+/// by updates sorts its newest items when read. Example: a DDSketch
+/// quantile costs 1,000 + 2,500 = 3,500 per group; a KLL of 4,844 bytes
+/// 6,860 after a merge and 11,219 after updates.
+pub(crate) fn estimate_operations_per_group(
+    family: StateFamily<'_>,
+    state_bytes: u64,
+    state_from_merge: bool,
+) -> f64 {
     let read = match family {
         StateFamily::Sketch(SketchParams::Kll { .. }) => {
-            KLL_ESTIMATE_OPERATIONS_PER_BYTE * state_bytes as f64
+            let per_byte = match state_from_merge {
+                true => KLL_ESTIMATE_OPERATIONS_PER_BYTE,
+                false => KLL_ESTIMATE_OPERATIONS_PER_BYTE_OF_UPDATED_STATE,
+            };
+            per_byte * state_bytes as f64
         }
         StateFamily::Sketch(
             SketchParams::DDSketch { .. }

@@ -969,14 +969,11 @@ pub fn node_resource_usage_and_cost<'a>(
                 }
                 false => group_count as f64 * retained_output_count as f64,
             };
-            // At query time it reads the scan's lookback and keeps each
-            // row in its window's range, the work a `TimeRange` over the
-            // same rows does (12 per row); at ingestion time each row
-            // arrives once, in its own window.
-            let range_ops = match ingestion {
-                true => 0.0,
-                false => input.rows as f64 * TIME_RANGE_OPERATIONS_PER_ROW,
-            };
+            // Each row it reads is kept in its window's range, the work a
+            // `TimeRange` over the same rows does (11 per row): at query
+            // time each row of the scan's lookback, at ingestion time each
+            // arriving row, assigned its window.
+            let range_ops = input.rows as f64 * TIME_RANGE_OPERATIONS_PER_ROW;
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
@@ -1022,8 +1019,13 @@ pub fn node_resource_usage_and_cost<'a>(
                 group_count = group_count.min(groups(&Reduction::by(keys.clone()))?);
             }
             // The merged state: each group's input states folded into one,
-            // sized for the rows they fold together when known (a KLL
-            // grows towards its `k`), else as one input state.
+            // sized for the rows they fold together when every input says
+            // what its states fold (a KLL grows towards its `k`), else as
+            // the largest input state. That fallback under-charges a KLL
+            // merge, whose state grows past any one input's; it applies
+            // when an input passes on no `state_input_rows`, e.g. states
+            // read through an operator that does not keep each row's
+            // window.
             let input_state_bytes = |producer: &ProducerOutput<'_>| {
                 state_bytes_per_row(producer.output, producer.output_schema)
             };
@@ -1065,6 +1067,11 @@ pub fn node_resource_usage_and_cost<'a>(
             )
         }
         Payload::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
+            // A merge leaves a KLL's levels sorted; a state built by
+            // updates (a `SummaryAgg`, a chain's window) is sorted when read.
+            let state_from_merge = producers.first().is_some_and(|producer| {
+                matches!(producer.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. }))
+            });
             let per_group = match query {
                 SketchStatistic::TopK { k } => *k as u64,
                 SketchStatistic::FrequencyL2
@@ -1082,7 +1089,12 @@ pub fn node_resource_usage_and_cost<'a>(
             (
                 out,
                 Ok(ResourceEstimate::new(
-                    input.rows as f64 * estimate_operations_per_group(family, input_state_bytes()),
+                    input.rows as f64
+                        * estimate_operations_per_group(
+                            family,
+                            input_state_bytes(),
+                            state_from_merge,
+                        ),
                     0,
                     0,
                 )),
@@ -1091,8 +1103,11 @@ pub fn node_resource_usage_and_cost<'a>(
         }
         Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => (
             edge(input.rows)?,
+            // An exact accumulator's read is its output row alone, however
+            // its state was written.
             Ok(ResourceEstimate::new(
-                input.rows as f64 * estimate_operations_per_group(family, input_state_bytes()),
+                input.rows as f64
+                    * estimate_operations_per_group(family, input_state_bytes(), true),
                 0,
                 0,
             )),
