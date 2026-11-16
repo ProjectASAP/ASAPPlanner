@@ -1,0 +1,43 @@
+[
+ {
+  "name": "clicks",
+  "time_index": 0,
+  "columns": [
+   {
+    "name": "ts",
+    "type": "timestamp",
+    "nullable": false
+   },
+   {
+    "name": "url",
+    "type": "utf8",
+    "nullable": false
+   },
+   {
+    "name": "user_id",
+    "type": "utf8",
+    "nullable": false
+   },
+   {
+    "name": "client_ip",
+    "type": "utf8",
+    "nullable": false
+   },
+   {
+    "name": "region",
+    "type": "utf8",
+    "nullable": false
+   },
+   {
+    "name": "service",
+    "type": "utf8",
+    "nullable": false
+   },
+   {
+    "name": "bytes",
+    "type": "float64",
+    "nullable": false
+   }
+  ]
+ }
+]
