@@ -155,7 +155,7 @@ fn ddsketch_state_bytes_bound_the_library() {
 fn ddsketch_state_bytes_follow_the_declared_value_magnitude_range() {
     let alpha = 0.01;
     let costed = |value_magnitude_range| {
-        sketch_shape(
+        sketch_state_bytes(
             &SketchParams::DDSketch { alpha },
             StateInputRows {
                 rows_per_state: Some(600),
@@ -163,7 +163,6 @@ fn ddsketch_state_bytes_follow_the_declared_value_magnitude_range() {
                 value_magnitude_range,
             },
         )
-        .1
     };
     let struct_bytes = std::mem::size_of::<asap_sketchlib::DdSketch>() as u64;
     let bytes_for_bins = |bins: u64| struct_bytes + 8 * 2 * (bins + 126);
@@ -496,7 +495,7 @@ fn next_uniform(state: &mut u64) -> f64 {
 /// non-negative), or 1,000 rows of 1,000 distinct label values or label
 /// sets. Its charge
 /// (`approx_memory_bytes`; for HydraCms its shared grid over its 10
-/// groups) is compared with `summary_shape` for the same rows. Priced ÷
+/// groups) is compared with `summary_state_bytes` for the same rows. Priced ÷
 /// charged lies within [`BYTES_AGREEMENT_FACTOR`], or the family's row
 /// carries its [`KnownBytesGap`].
 ///
@@ -654,9 +653,7 @@ fn priced_bytes_agree_with_the_executor() {
             }
         }
         let charged = updater.into_accumulator().approx_memory_bytes() as u64;
-        let priced = summary_shape(&family, params.as_ref(), input_rows(rows_fed))
-            .unwrap()
-            .1;
+        let priced = summary_state_bytes(&family, params.as_ref(), input_rows(rows_fed)).unwrap();
         measured.push((family, priced, charged, known_gap));
     }
     // HydraCms: one grid for every group, priced as one Count-Min per
@@ -679,7 +676,7 @@ fn priced_bytes_agree_with_the_executor() {
     }
     measured.push((
         hydra_family,
-        sketch_shape(&hydra, input_rows(hydra_rows_fed / HYDRA_GROUPS)).1,
+        sketch_state_bytes(&hydra, input_rows(hydra_rows_fed / HYDRA_GROUPS)),
         (grid.approx_memory_bytes() / HYDRA_GROUPS as usize) as u64,
         gap(947, 0.104),
     ));
