@@ -682,3 +682,18 @@ fn compaction_latency_is_zero_for_ingestion_time_nodes_holding_no_states() {
         );
     }
 }
+
+/// `max_over_time(latency[5m])` at 1 Hz, raw data kept, every 10 s and
+/// every 60 s. Measured cost per second, stored Max windows against the
+/// exact plan: 1.44 against 1.62–1.66 every 10 s, 0.240 against about
+/// 0.27 every 60 s (regret 1.13–1.24 when exact was selected). The stored
+/// plan was over-charged 29%: a Max state's merge measures 125 ns, not a
+/// Sum's 230, and a chain emits an exact state in 1.3–2.1 µs, not 2.5.
+#[test]
+fn max_over_time_5m_at_1_hz_with_raw_data_keeps_stored_max_windows() {
+    let query = relative("max_over_time(latency[5m])");
+    for setting in [ONE_HZ_EVERY_10_S, ONE_HZ_EVERY_60_S] {
+        let (plan, _) = selected(&workload(query, setting), true);
+        assert_eq!(plan_kind(&plan), PlanKind::StoredStates, "{setting:?}");
+    }
+}
