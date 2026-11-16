@@ -54,7 +54,7 @@
 
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::FieldDataType;
-use asap_types::summary_type::SketchParams;
+use asap_types::summary_type::{ExactKind, SketchParams};
 
 use crate::StateFamily;
 
@@ -123,9 +123,15 @@ pub(crate) const CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL: f64 = 37.0;
 /// 72 ns, 18 ns per counter.
 pub(crate) const SKETCH_UPDATE_OPERATIONS_PER_COUNTER: f64 = 18.0;
 
-/// One exact accumulator state merged into its group's (sum, count, min,
-/// max): 128–265 ns per state over 360,000 states.
+/// One exact accumulator state merged into its group's (sum, count):
+/// 128–265 ns per state over 360,000 states.
 pub(crate) const EXACT_MERGE_OPERATIONS_PER_STATE: f64 = 230.0;
+
+/// One exact Min or Max state merged into its group's: 113–153 ns per
+/// state over 100, 1,000 and 10,000 groups (a fit of 125 per state and
+/// 0.86 µs per group, the group's part in `MERGE_OPERATIONS_PER_OUTPUT_GROUP`),
+/// where a Sum or Count state measures about 230.
+const EXTREMUM_MERGE_OPERATIONS_PER_STATE: f64 = 125.0;
 
 /// One counter-increase accumulator state merged (rate, increase, irate):
 /// 346 ns per state over 360,000 states.
@@ -207,15 +213,30 @@ pub(crate) const SKETCH_ESTIMATE_OPERATIONS_PER_GROUP: f64 = 1_000.0;
 /// 3 µs per group.
 pub(crate) const OUTPUT_ROW_OPERATIONS_PER_GROUP: f64 = 2_500.0;
 
-/// Per state a tumbling-window chain completes and emits at the end of each
-/// window, beyond its rows' updates: fitting each window's time to its rows
-/// and its 1,000 states at 1 Hz (10 s windows of 10,000 rows) and at
-/// 10 Hz (60 s windows of 600,000 rows), 1.9 µs per exact Rate state,
-/// 2.8 µs per KLL state and 3.4 µs per DDSketch state. Measured apart from
+/// Per sketch state a tumbling-window chain completes and emits at the end
+/// of each window, beyond its rows' updates: fitting each window's time to
+/// its rows and its 1,000 states at 1 Hz (10 s windows of 10,000 rows) and
+/// at 10 Hz (60 s windows of 600,000 rows), 2.8 µs per KLL state and
+/// 3.4 µs per DDSketch state. Measured apart from
 /// `OUTPUT_ROW_OPERATIONS_PER_GROUP` and equal to it: both build one row per
 /// group with its labels and series identity, here around a state, there
 /// around a value.
-pub(crate) const CHAIN_EMIT_OPERATIONS_PER_STATE: f64 = 2_500.0;
+const SKETCH_CHAIN_EMIT_OPERATIONS_PER_STATE: f64 = 2_500.0;
+
+/// Per fixed-size exact state a tumbling-window chain emits (sum, count,
+/// min, max, rate): 1.9 µs per Rate state, and at ingestion time
+/// 1.3–2.1 µs per Max state over 100 to 10,000 series. Less than a sketch
+/// state's (`SKETCH_CHAIN_EMIT_OPERATIONS_PER_STATE`): its state is a
+/// fixed record, not a sketch to box.
+const EXACT_CHAIN_EMIT_OPERATIONS_PER_STATE: f64 = 1_500.0;
+
+/// Per output group of a KLL `SummaryMerge`, beyond
+/// `MERGE_OPERATIONS_PER_OUTPUT_GROUP` and its states' merges: creating the
+/// group's KLL and moving its merged state out. In the executor, a merge
+/// of 5 KLL states of 60 rows per series (1,000 and 10,000 series) measures
+/// 32–33 µs per series where its states' merges are charged 14; over 60
+/// states per series this adds 4% to the charge, measured 0.8x.
+const KLL_MERGE_OPERATIONS_PER_OUTPUT_GROUP: f64 = 19_000.0;
 
 /// The operations one input row costs folded into a state of `summary_type`
 /// with `parameters`.
@@ -298,6 +319,7 @@ pub(crate) fn merge_operations_per_state(
         StateFamily::Exact(kind) if kind.tracks_counter_increase() => {
             COUNTER_MERGE_OPERATIONS_PER_STATE
         }
+        StateFamily::Exact(ExactKind::Min | ExactKind::Max) => EXTREMUM_MERGE_OPERATIONS_PER_STATE,
         StateFamily::Exact(_) | StateFamily::None => EXACT_MERGE_OPERATIONS_PER_STATE,
         StateFamily::Sketch(SketchParams::DDSketch { .. }) => DDSKETCH_MERGE_OPERATIONS_PER_STATE,
         StateFamily::Sketch(SketchParams::Kll { .. }) => {
@@ -320,11 +342,44 @@ pub(crate) fn merge_operations_per_state(
     }
 }
 
-/// The operations a `SummaryMerge` with `output_groups` groups costs
-/// beyond its input states' merges ([`merge_operations_per_state`]): each
-/// group's state and output row. Example: 1,000 groups cost 950,000.
-pub(crate) fn merge_output_operations(output_groups: u64) -> f64 {
-    output_groups as f64 * MERGE_OPERATIONS_PER_OUTPUT_GROUP
+/// The operations a `SummaryMerge` of `family` with `output_groups` groups
+/// costs beyond its input states' merges ([`merge_operations_per_state`]):
+/// each group's state and output row. Example: 1,000 groups cost 950,000,
+/// of KLL states 19,950,000.
+pub(crate) fn merge_output_operations(family: StateFamily<'_>, output_groups: u64) -> f64 {
+    let per_group = match family {
+        StateFamily::Sketch(SketchParams::Kll { .. }) => {
+            MERGE_OPERATIONS_PER_OUTPUT_GROUP + KLL_MERGE_OPERATIONS_PER_OUTPUT_GROUP
+        }
+        StateFamily::Sketch(
+            SketchParams::DDSketch { .. }
+            | SketchParams::Hydra(_)
+            | SketchParams::Cms { .. }
+            | SketchParams::CountSketch { .. }
+            | SketchParams::CmsWithHeap { .. }
+            | SketchParams::CountSketchWithHeap { .. }
+            | SketchParams::UnivMon { .. }
+            | SketchParams::Hll { .. }
+            | SketchParams::Kmv { .. },
+        )
+        | StateFamily::Exact(_)
+        | StateFamily::None => MERGE_OPERATIONS_PER_OUTPUT_GROUP,
+    };
+    output_groups as f64 * per_group
+}
+
+/// The operations per state a tumbling-window chain of `summary_type`
+/// costs to complete and emit each window's state: 1,500 for an exact
+/// accumulator, 2,500 for a sketch or any other summary.
+pub(crate) fn chain_emit_operations_per_state(summary_type: &FieldDataType) -> f64 {
+    match summary_type {
+        FieldDataType::ExactAggregate(..) => EXACT_CHAIN_EMIT_OPERATIONS_PER_STATE,
+        FieldDataType::Sketch(..)
+        | FieldDataType::Plain(..)
+        | FieldDataType::SummarySample(..)
+        | FieldDataType::Wavelet(..)
+        | FieldDataType::StatModel(..) => SKETCH_CHAIN_EMIT_OPERATIONS_PER_STATE,
+    }
 }
 
 /// The operations reading one group's answer from a state of `family`
