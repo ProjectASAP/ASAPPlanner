@@ -242,13 +242,15 @@ pub struct ProducerOutput<'a> {
 }
 
 impl ProducerOutput<'_> {
-    /// The source column `weight` reads, when this producer passes that
-    /// column on unchanged from the sources: the column whose values a
-    /// summary built over this producer folds. E.g. `value` for a DDSketch
-    /// over a scan of `latency` or over a filter on that scan; `None` for a
-    /// computed weight such as a rate.
-    pub(crate) fn unchanged_column(&self, weight: &SummaryInputExpr) -> Option<&str> {
-        let SummaryInputExpr::Column(column) = weight else {
+    /// The source column `expr` reads, when `expr` is a single column this
+    /// producer passes on unchanged from the sources: the column whose
+    /// values a summary built over this producer folds, its weight or a
+    /// keyed summary's item. E.g. `value` for a DDSketch over a scan of
+    /// `latency` or over a filter on that scan, `url` for a top-k heap keyed
+    /// by `url`; `None` for a computed weight such as a rate, or a tuple
+    /// or entity-identity item.
+    pub(crate) fn unchanged_column(&self, expr: &SummaryInputExpr) -> Option<&str> {
+        let SummaryInputExpr::Column(column) = expr else {
             return None;
         };
         let index = resolve_column_ref(column, self.output_schema).ok()?;
@@ -1083,6 +1085,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 rows_per_state: (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
                 non_negative,
                 value_magnitude_range,
+                distinct_values: folded_distinct_values(update),
             };
             built_state_input_rows = Some(input_rows);
             let state_bytes = measured_state_bytes.unwrap_or(summary_state_bytes(
@@ -1095,7 +1098,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 family,
                 node.parameters.as_ref(),
                 input_rows.rows_per_state,
-                folded_distinct_values(update),
+                input_rows.distinct_values,
             ) + carried_label_operations_per_row(&node.output_schema, reduction);
             let out = EdgeStatistics {
                 rows: group_count,
@@ -1157,6 +1160,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
                 non_negative,
                 value_magnitude_range,
+                distinct_values: folded_distinct_values(update),
             };
             built_state_input_rows = Some(input_rows);
             let state_bytes = measured_state_bytes.unwrap_or(summary_state_bytes(
@@ -1169,7 +1173,7 @@ pub fn node_resource_usage_and_cost<'a>(
                 family,
                 node.parameters.as_ref(),
                 input_rows.rows_per_state,
-                folded_distinct_values(update),
+                input_rows.distinct_values,
             ) + carried_label_operations_per_row(&node.output_schema, reduction);
             // The states it completes in one execution, each allocated
             // when its window opens: at ingestion time
@@ -1285,9 +1289,7 @@ pub fn node_resource_usage_and_cost<'a>(
                                     family,
                                     input_state_bytes(producer),
                                     merged_state_bytes,
-                                    producer
-                                        .state_input_rows
-                                        .and_then(|rows| rows.rows_per_state),
+                                    producer.state_input_rows,
                                     states.div_ceil(group_count.max(1)),
                                 )
                         })
@@ -1317,9 +1319,7 @@ pub fn node_resource_usage_and_cost<'a>(
                     StateLastWrittenBy::Merge
                 }
                 producer => StateLastWrittenBy::Updates {
-                    rows_per_state: producer
-                        .and_then(|producer| producer.state_input_rows)
-                        .and_then(|rows| rows.rows_per_state),
+                    input_rows: producer.and_then(|producer| producer.state_input_rows),
                 },
             };
             let per_group = match query {

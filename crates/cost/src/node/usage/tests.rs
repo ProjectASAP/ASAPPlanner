@@ -804,6 +804,7 @@ fn a_merge_reading_one_state_per_group_passes_it_through() {
                 rows_per_state: Some(100),
                 non_negative: true,
                 value_magnitude_range: None,
+                distinct_values: None,
             },
         );
         let one_window = ProducerOutput {
@@ -823,6 +824,7 @@ fn a_merge_reading_one_state_per_group_passes_it_through() {
                 rows_per_state: Some(100),
                 non_negative: true,
                 value_magnitude_range: None,
+                distinct_values: None,
             }),
         };
         let merge = PhysicalASAPDAGNode {
@@ -1191,6 +1193,7 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
         rows_per_state: Some(12_000),
         non_negative: false,
         value_magnitude_range: None,
+        distinct_values: None,
     };
     let state_bytes = crate::node::state_bytes::sketch_state_bytes(&parameters, rows);
     let build = PhysicalASAPDAGNode {
@@ -1261,6 +1264,7 @@ fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
         rows_per_state: Some(12_000),
         non_negative: false,
         value_magnitude_range: None,
+        distinct_values: None,
     };
     let state_bytes = crate::node::state_bytes::sketch_state_bytes(&parameters, rows);
     let build = PhysicalASAPDAGNode {
@@ -1710,6 +1714,7 @@ fn ddsketch_costed_bytes(
             rows_per_state: Some(600),
             non_negative,
             value_magnitude_range,
+            distinct_values: None,
         },
     )
 }
@@ -2353,6 +2358,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         rows_per_state: Some(10),
         non_negative: true,
         value_magnitude_range: None,
+        distinct_values: None,
     };
     let input = ProducerOutput {
         payload: &windows.payload,
@@ -2441,6 +2447,7 @@ fn kll_estimate_us_per_group(producer: Payload, rows_per_state: u64, state_bytes
             rows_per_state: Some(rows_per_state),
             non_negative: true,
             value_magnitude_range: None,
+            distinct_values: None,
         }),
     };
     let estimate = node(Payload::ASAP(ASAPOp::SummaryEstimate {
@@ -2704,7 +2711,7 @@ fn a_wider_query_time_count_sketch_costs_more_as_the_executor_measures() {
 /// ingestion time, are charged within the fit's range of measured ÷
 /// charged over its whole grid (235 builds, 158 readouts, 126 merges, 17
 /// ingestion builds; see `operations_per_unit`), rounded outwards: builds
-/// 0.54–4.94, readouts of 10 states or more 0.65–2.15, merges 0.79–2.76,
+/// 0.54–4.94, readouts of 10 states or more 0.65–2.66, merges 0.79–2.76,
 /// ingestion builds 0.61–2.37.
 /// Charged per row alone, without a state's counters, its heap's
 /// re-estimates or its size, the builds were 12–800x under.
@@ -2774,7 +2781,7 @@ fn counter_matrix_sketches_are_charged_their_measured_time() {
         let charges = counter_sketch_charges_ms(&shape);
         let (charged, range) = match term {
             "build" => (charges.build_ms, 0.54..=4.94),
-            "readout" => (charges.readout_ms, 0.65..=2.15),
+            "readout" => (charges.readout_ms, 0.65..=2.66),
             "merge" => (charges.merge_ms, 0.79..=2.76),
             _ => (charges.ingestion_build_ms, 0.61..=2.37),
         };
@@ -2787,4 +2794,39 @@ fn counter_matrix_sketches_are_charged_their_measured_time() {
             shape.items
         );
     }
+}
+
+/// A heap's top-k read and its merge estimate the items the heap holds,
+/// which are the distinct items its state folded, at most its size: a heap
+/// of 10 over 1,000 rows of 5 URLs holds 5, as its updates count them, not
+/// 10. Its read is charged 55 operations per counter of depth less for each
+/// item it does not hold, its merge 53.
+#[test]
+fn a_heap_over_few_distinct_items_is_read_and_merged_for_the_items_it_holds() {
+    let charges = |items| {
+        counter_sketch_charges_ms(&CounterSketchShape {
+            parameters: SketchParams::CmsWithHeap {
+                width: 272,
+                depth: 10,
+                heap_size: 10,
+            },
+            groups: 10,
+            rows_per_state: 1_000,
+            items,
+        })
+    };
+    let (few, many) = (charges(5), charges(10_000));
+    let fewer_residents_ms = |per_counter: f64| 10.0 * 5.0 * per_counter * 10.0 * 1e-6;
+    assert!(
+        (many.readout_ms - few.readout_ms - fewer_residents_ms(55.0)).abs() < 1e-9,
+        "readout {} ms over 5 items, {} over 10,000",
+        few.readout_ms,
+        many.readout_ms
+    );
+    assert!(
+        (many.merge_ms - few.merge_ms - fewer_residents_ms(53.0)).abs() < 1e-9,
+        "merge {} ms over 5 items, {} over 10,000",
+        few.merge_ms,
+        many.merge_ms
+    );
 }

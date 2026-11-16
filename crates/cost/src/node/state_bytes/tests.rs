@@ -184,6 +184,7 @@ fn ddsketch_state_bytes_over_charge_narrower_values_within_their_bands() {
                 rows_per_state: Some(u64::from(n)),
                 non_negative: true,
                 value_magnitude_range: None,
+                distinct_values: None,
             },
         ) as f64
     };
@@ -221,6 +222,7 @@ fn ddsketch_state_bytes_match_the_library_on_latency_like_values() {
                 rows_per_state,
                 non_negative,
                 value_magnitude_range: None,
+                distinct_values: None,
             },
         )
     };
@@ -252,6 +254,7 @@ fn the_assumed_ddsketch_range_is_named_only_when_the_bytes_use_it() {
         rows_per_state: Some(600),
         non_negative: true,
         value_magnitude_range,
+        distinct_values: None,
     };
     let declared = ValueMagnitudeRange {
         min_abs: 0.001,
@@ -304,6 +307,7 @@ fn ddsketch_state_bytes_are_capped_by_the_declared_value_magnitude_range() {
                 rows_per_state,
                 non_negative: true,
                 value_magnitude_range,
+                distinct_values: None,
             },
         )
     };
@@ -374,6 +378,7 @@ fn ddsketch_state_bytes_under_charge_log_uniform_values_over_a_declared_range() 
                 rows_per_state: Some(u64::from(n)),
                 non_negative: true,
                 value_magnitude_range: Some(declared),
+                distinct_values: None,
             },
         );
         let held = library_ddsketch_mean_bytes(alpha, n, false, log_uniform_over_seven_decades);
@@ -409,6 +414,7 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
                 rows_per_state,
                 non_negative: true,
                 value_magnitude_range: None,
+                distinct_values: None,
             },
         )
     };
@@ -635,6 +641,7 @@ fn state_bytes_bound_the_executors_charge() {
                         rows_per_state: Some(u64::from(n)),
                         non_negative: false,
                         value_magnitude_range: None,
+                        distinct_values: None,
                     },
                 ) as usize;
             let context = format!("{algorithm:?} after {n} rows: {priced} priced");
@@ -735,6 +742,7 @@ fn priced_bytes_agree_with_the_executor() {
         rows_per_state: Some(u64::from(rows_per_state)),
         non_negative: true,
         value_magnitude_range: None,
+        distinct_values: None,
     };
     let gap = |issue, priced_over_charged| {
         Some(KnownBytesGap {
