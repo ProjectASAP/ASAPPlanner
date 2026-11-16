@@ -34,8 +34,10 @@ pub struct PruneCause {
 }
 
 /// Why the edge at the end of a [`PruneCause`]'s path fails, or why the
-/// candidate has no edge at all.
+/// candidate has no edge at all. JSON: the snake_case variant name, e.g.
+/// `{"below_required_accuracy": {...}}` or `"no_consumer"`.
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RootPruneReason {
     /// The producer's guarantee, at the required failure probability,
     /// exceeds the consumer input's required error.
@@ -107,8 +109,10 @@ pub struct PrunedCandidate<C> {
 
 /// Why a stage removed a candidate: first Stage 2's (the physical candidate
 /// cannot be built, run or read by a query output), then Stage 3's, before
-/// its selection MILP.
+/// its selection MILP. JSON: the snake_case variant name, e.g.
+/// `"raw_data_not_retained"`, or `{"dominated_by": 3}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PruneReason {
     /// Stage 2: it runs at ingestion time, and the source has no ingestion
     /// pipeline (its data is at rest or its arrival unknown).
