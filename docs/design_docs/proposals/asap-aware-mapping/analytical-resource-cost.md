@@ -797,11 +797,18 @@ groups of its keys, estimated like any `by (keys)` and at most the input's
 groups. The merged state is sized for the rows its group's input states fold
 together: 360 stored KLL windows of 10 rows each merge into a state sized for
 3,600 rows. A readout (estimate or finalize) costs each group's output row,
-plus reading its state (a KLL's per byte, twice that when no merge has
-sorted its levels since its updates). A tumbling-window chain keeps each row
-it reads in its window's range at either timing, at a time range's cost per
-row: at query time over its scan's lookback, at ingestion time as it assigns
-each arriving row its window. A state's row on any edge holds
+plus reading its state (a KLL's per byte after a merge, which leaves its
+levels sorted; after updates, per unsorted item, at most `k`). A grouping (a
+hash aggregate, a summary build or a tumbling-window chain) also costs per
+group per batch of raw rows its input arrives in, the deployment's raw
+batch width (`ResourceSpeed::raw_batch_width_ms`, 10 s assumed when not
+declared): the executor visits each group's state once per batch, so the
+same grouping costs more per row at a lower sample rate (a 10 s batch holds
+10 rows of a series at 1 Hz, 100 at 10 Hz). A chain also splits each group's
+rows of a batch by window; at ingestion time it routes each arriving row to
+its window's state, and at query time keeps each row of its scan's lookback
+in its window's range at a time range's cost per row. A state's
+row on any edge holds
 its labels, its window's time and its series identity beside the state; a
 DDSketch state is sized for the values it is expected to hold, spread like
 latencies, not for the most it could hold; a column's declared
