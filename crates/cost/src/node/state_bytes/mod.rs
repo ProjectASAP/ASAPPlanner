@@ -287,6 +287,23 @@ fn univmon_expected_layers(layers: u8) -> f64 {
     2.0 - 2f64.powi(1 - i32::from(layers.max(1)))
 }
 
+/// The magnitude range [`sketch_shape`] assumes for a state of `params`
+/// over `input_rows`: [`DDSKETCH_ASSUMED_MAGNITUDE_RANGE`] for a DDSketch
+/// whose values declare no range; `None` for a declared range or any other
+/// sketch, whose bytes assume none. E.g. a DDSketch at α = 0.01 over a
+/// `value` without `column_magnitudes` gives `Some([1, 1e9])`.
+pub fn assumed_magnitude_range(
+    params: &SketchParams,
+    input_rows: StateInputRows,
+) -> Option<ValueMagnitudeRange> {
+    match params {
+        SketchParams::DDSketch { .. } if input_rows.value_magnitude_range.is_none() => {
+            Some(DDSKETCH_ASSUMED_MAGNITUDE_RANGE)
+        }
+        _ => None,
+    }
+}
+
 /// The range of value magnitudes a DDSketch is assumed to see when its
 /// column declares no `column_magnitudes`: nine decades, e.g. latencies from 1 ns
 /// to 1 s, costed as magnitudes in `[1, 1e9]` (its bins depend on the ratio

@@ -66,6 +66,22 @@ impl DataArrival {
             Self::AtRest | Self::Unknown => None,
         }
     }
+
+    /// How late a row may arrive, when the data is ingesting or mixed and
+    /// declares it; `None` otherwise.
+    pub fn max_out_of_order_ms(&self) -> Option<u64> {
+        match self {
+            Self::Ingesting {
+                max_out_of_order_ms,
+                ..
+            }
+            | Self::Mixed {
+                max_out_of_order_ms,
+                ..
+            } => *max_out_of_order_ms,
+            Self::AtRest | Self::Unknown => None,
+        }
+    }
 }
 
 /// Queries per second, samples per second, or another rate whose unit is

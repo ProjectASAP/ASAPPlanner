@@ -37,7 +37,7 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPNodeId,
 };
 
-use asap_types::workload::QueryWorkloadEntry;
+use asap_types::workload::{AssumedDataFact, DataWorkload, QueryWorkloadEntry};
 use serde::{Deserialize, Serialize};
 
 use crate::{e2e_plan, PlanError, UserInput};
@@ -73,6 +73,9 @@ pub struct SelectedPlanReport {
     /// The resources Stage 3 predicts it uses, for a runtime to report
     /// against what it measures.
     pub predicted_usage: PredictedUsage,
+    /// The data facts the data workload does not declare that the plan
+    /// assumed, each once ([`assumed_data_facts`]).
+    pub assumed_data_facts: Vec<AssumedDataFact>,
 }
 
 /// What Stage 3 predicts the selected plan uses, per second of wall time
@@ -222,8 +225,9 @@ pub async fn plan_installable(
             })
         },
     )?;
+    let assumed_data_facts = assumed_data_facts(&output.plan, &cost, &data);
     let installable = installable_plan_of(output.plan, &entries).map_err(PlanError::Installable)?;
-    Ok((installable, report_of(&cost)))
+    Ok((installable, report_of(&cost, assumed_data_facts)))
 }
 
 /// The installable plan of `plan`, the plan Stage 3 built for a workload
@@ -546,7 +550,27 @@ fn executor_refreshes(
 }
 
 /// The report of the selected plan's `cost`.
-fn report_of(cost: &PlanCost) -> SelectedPlanReport {
+/// The data facts the selected `plan` (costed as `cost`) assumed because
+/// `data` does not declare them, each once: those its nodes' costs assumed
+/// ([`PlanCost::assumed_data_facts`]), then the in-order arrival Stage 2
+/// offered its ingestion-time counter states under
+/// ([`asap_stage2_physical_optimization::assumed_in_order_arrival`]). A
+/// caller prints each as a warning
+/// ([`AssumedDataFact::accuracy_target_depends_on_it`] says whether the
+/// plan may miss its accuracy target when the assumption fails).
+pub fn assumed_data_facts(
+    plan: &PhysicalASAPDAG,
+    cost: &PlanCost,
+    data: &DataWorkload,
+) -> Vec<AssumedDataFact> {
+    let mut facts = cost.assumed_data_facts();
+    facts.extend(asap_stage2_physical_optimization::assumed_in_order_arrival(
+        plan, data,
+    ));
+    facts
+}
+
+fn report_of(cost: &PlanCost, assumed_data_facts: Vec<AssumedDataFact>) -> SelectedPlanReport {
     SelectedPlanReport {
         cost_per_second: cost.cost_per_second,
         predicted_usage: PredictedUsage {
@@ -582,6 +606,7 @@ fn report_of(cost: &PlanCost) -> SelectedPlanReport {
                 })
                 .collect(),
         },
+        assumed_data_facts,
     }
 }
 

@@ -69,8 +69,10 @@
 //     `plan_installable` derives them; `materialized_views_error` when the
 //     plan is not installable. `warnings`: a PromQL query applying `rate`, `increase`
 //     or `irate` to a declared gauge or combining a declared summary's
-//     quantile series across series (`metric_type_warnings`), and a peak memory over 10^12 bytes
-//     when the cost model declares no memory capacity;
+//     quantile series across series (`metric_type_warnings`), each data fact the selected
+//     plan assumed because the data workload does not declare it (`assumed_data_facts`,
+//     saying whether the plan may then miss its accuracy target), and a peak memory over
+//     10^12 bytes when the cost model declares no memory capacity;
 //   - memo: `nodes`, one node table for the section (each distinct node
 //     once, children as indices before their parents), and `steps`, the
 //     memo after each step run (`stage0`: the frontends' DAG hash-consed,
@@ -99,7 +101,7 @@ use asap_devtools::planning_stages::{
 use asap_devtools::planning_stages_text::planning_stages_text;
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{metric_type_warnings, promql_metric_names};
-use asap_planner::{installable_plan_of, PlanningModels, SelectionError};
+use asap_planner::{assumed_data_facts, installable_plan_of, PlanningModels, SelectionError};
 use asap_stage3_plan_selection::{large_peak_memory_warning, AcceptedAccuracy, Selection};
 use asap_types::accuracy::{default_metric_for_root, AccuracyTarget};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
@@ -222,19 +224,28 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     };
     // A rate, increase or irate over a declared gauge (the query still plans).
     let mut warnings = metric_type_warnings_of(&described, &data)?;
-    // A selected plan's very large peak memory, when the deployment
-    // declares no memory capacity to check it against.
-    warnings.extend(
-        result
-            .as_ref()
-            .ok()
-            .and_then(|run| run.run.selection.as_ref().ok())
-            .and_then(|(plan, _)| asap_cost::plan_cost(plan, &entries, &data, &cost_inputs).ok())
-            .map(|(cost, _)| cost.usage.peak_memory_bytes)
-            .and_then(|peak_memory_bytes| {
-                large_peak_memory_warning(peak_memory_bytes, &cost_inputs.cost_model)
-            }),
-    );
+    // The selected plan's data facts assumed because the data workload
+    // does not declare them, and its very large peak memory when the
+    // deployment declares no memory capacity to check it against.
+    let selected_plan_cost = result
+        .as_ref()
+        .ok()
+        .and_then(|run| run.run.selection.as_ref().ok())
+        .and_then(|(plan, _)| {
+            let (cost, _) = asap_cost::plan_cost(plan, &entries, &data, &cost_inputs).ok()?;
+            Some((plan, cost))
+        });
+    if let Some((plan, cost)) = &selected_plan_cost {
+        warnings.extend(
+            assumed_data_facts(plan, cost, &data)
+                .iter()
+                .map(ToString::to_string),
+        );
+        warnings.extend(large_peak_memory_warning(
+            cost.usage.peak_memory_bytes,
+            &cost_inputs.cost_model,
+        ));
+    }
     let text = if json_format {
         let mut document = document_of(described, &roots, &entries, result, run_until)?;
         // Stage 3 is null when Pass 1 rejected a query.

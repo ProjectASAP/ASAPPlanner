@@ -29,7 +29,9 @@ use asap_types::plan::physical_asap_dag::{
 };
 use asap_types::stages::Lifetime;
 use asap_types::summary_type::SketchParams;
-use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
+use asap_types::workload::{
+    add_assumed_data_fact, AssumedDataFact, DataWorkload, QueryWorkloadEntry,
+};
 
 /// One candidate's usage and cost over the whole workload: `usage` is
 /// the whole candidate's, `per_node` one cost per operator node of its
@@ -48,6 +50,23 @@ pub struct PlanCost {
     /// Each operator node of the candidate's physical plan DAG, by its id
     /// in that DAG, with its cost.
     pub per_node: BTreeMap<PhysicalASAPNodeId, NodeCost>,
+}
+
+impl PlanCost {
+    /// The data facts the data workload does not declare that its nodes'
+    /// costs assumed ([`NodeCost::assumed_data_facts`]), each once, in node
+    /// order.
+    pub fn assumed_data_facts(&self) -> Vec<AssumedDataFact> {
+        let mut facts = Vec::new();
+        for fact in self
+            .per_node
+            .values()
+            .flat_map(|node| &node.assumed_data_facts)
+        {
+            add_assumed_data_fact(&mut facts, fact.clone());
+        }
+        facts
+    }
 }
 
 /// One query's latency per evaluation, its longest chain of work (module
