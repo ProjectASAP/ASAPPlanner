@@ -789,13 +789,16 @@ from logical group count alone.
 
 Summary merge, subtract, delete, and readout are separate physical operators.
 Their CPU and memory use the concrete summary state size and number of input
-states. A merge costs its family's operations per input state (per byte for unmeasured
-sketches; for KLL also per byte of the input state and of the merged state,
-which grows towards `k`), plus each output group's state and row, and outputs
-one state per group. A merge that reads one state per group passes each
-state through to its group unmerged and costs only each group's row: the input's groups, or for a rollup (`group_by`) the
-groups of its keys, estimated like any `by (keys)` and at most the input's
-groups. The merged state is sized for the rows its group's input states fold
+states. A merge costs its family's operations per input state (per byte for
+unmeasured sketches; for KLL also per byte of the input state and of the
+merged state, which grows towards `k`), plus each output group's state and
+row, and outputs one state per group: the input's groups, or for a rollup
+(`group_by`) the groups of its keys, estimated like any `by (keys)` and at
+most the input's groups. A merge that keeps its input's groups (no
+`group_by`, or the input's own keys) and reads one state per group passes
+each state through to its group unmerged and costs only each group's row. A
+rollup merges its states even when its group estimate ties its input's. The
+merged state is sized for the rows its group's input states fold
 together: 360 stored KLL windows of 10 rows each merge into a state sized for
 3,600 rows. A readout (estimate or finalize) costs each group's output row,
 plus reading its state (a KLL's per byte after a merge, which leaves its
@@ -807,7 +810,8 @@ when not declared): the executor visits each group's state once per batch,
 so the same grouping costs more per row at a lower sample rate (a 10 s batch
 holds 10 rows of a series at 1 Hz, 100 at 10 Hz). The batches are counted
 from the time its input's raw rows span (a scan's lookback, narrowed by a
-time range and kept by a filter), not from its rows, so a filter that drops
+time range and kept by a filter, a sort, a limit or a dedup; a concat's
+longest), not from its rows, so a filter that drops
 rows between the scan and the grouping drops no batch; a query-time chain
 sizes its windows the same way. At ingestion time a chain routes each
 arriving row to its window's state, and at query time keeps each row of its
@@ -820,8 +824,7 @@ column takes (declared in `distinct_values_per_label`, else every row's
 differs). A KMV build compares each row's hash with the hashes its state
 retains until the state holds `k` of them, so its cost per row depends on
 `k`, its rows per state and the distinct values; a KMV merge inserts each
-hash an input state retains the same way. A state's
-row on any edge holds
+hash an input state retains the same way. A state's row on any edge holds
 its labels, its window's time and its series identity beside the state; a
 DDSketch state is sized for the values it is expected to hold, spread like
 latencies, not for the most it could hold; a column's declared
