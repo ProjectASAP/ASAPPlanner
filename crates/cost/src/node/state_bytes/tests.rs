@@ -516,6 +516,7 @@ fn priced_bytes_agree_with_the_executor() {
     let input_rows = |rows_per_state: u32| StateInputRows {
         rows_per_state: Some(u64::from(rows_per_state)),
         non_negative: true,
+        value_magnitude_range: None,
     };
     let gap = |issue, priced_over_charged| {
         Some(KnownBytesGap {
