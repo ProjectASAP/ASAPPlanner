@@ -7,12 +7,15 @@ use std::collections::{BTreeSet, HashMap};
 use asap_cost::node::analytical::AnalyticalCostError;
 use asap_cost::{summary_type_name, CostModel};
 use asap_types::accuracy::AccuracyMetric;
+use asap_types::deployment_capabilities::ExclusionSource;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
 };
-use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidate, PrunedCandidate};
+use asap_types::stages::{
+    PhysicalASAPMemoCandidates, PhysicalCandidate, PruneReason, PrunedCandidate,
+};
 use thiserror::Error;
 
 use crate::cost::ExecutionCosts;
@@ -260,6 +263,70 @@ pub(crate) fn infeasible(costs: &ExecutionCosts) -> ErrorSelectingPlan {
         cause: RejectionCause::Infeasible,
         reason,
     }])
+}
+
+/// When Stage 2 pruned some candidate as excluded by the deployment
+/// (`PruneReason::ExcludedByDeployment`), why no plan is left: one
+/// [`RejectionCause::ExcludedByDeployment`] whose reason names `query`, the
+/// first query with no candidate left to answer it (else the infeasible
+/// selection MILP), then each exclusion source with how many candidates it
+/// pruned, in the order Stage 2 first recorded it. E.g. "query 0 has no
+/// candidate left to answer it; excluded by the deployment:
+/// counter_not_extrapolated (7 candidates); the workload may be infeasible
+/// without these exclusions too". `None` when no candidate was excluded:
+/// the selection is infeasible on its own ([`infeasible`]). Telling
+/// whether the workload has a plan without the exclusions would take a
+/// second solve, so the reason says it may not.
+pub(crate) fn excluded_by_deployment(
+    physical: &PhysicalASAPMemoCandidates,
+    query: Option<usize>,
+) -> Option<ErrorSelectingPlan> {
+    let mut pruned_per_source: Vec<(ExclusionSource, usize)> = Vec::new();
+    for pruned in &physical.pruned_candidates {
+        let PruneReason::ExcludedByDeployment(source) = pruned.reason else {
+            continue;
+        };
+        match pruned_per_source
+            .iter_mut()
+            .find(|(seen, _)| *seen == source)
+        {
+            Some((_, count)) => *count += 1,
+            None => pruned_per_source.push((source, 1)),
+        }
+    }
+    if pruned_per_source.is_empty() {
+        return None;
+    }
+    let what = match query {
+        Some(query) => format!("query {query} has no candidate left to answer it"),
+        None => "no plan is left (the selection MILP is infeasible)".to_string(),
+    };
+    let sources: Vec<String> = pruned_per_source
+        .iter()
+        .map(|(source, count)| format!("{} ({count} candidates)", exclusion_source_name(*source)))
+        .collect();
+    Some(ErrorSelectingPlan::NoValidCandidate(vec![Rejection {
+        id: "workload".into(),
+        cause: RejectionCause::ExcludedByDeployment,
+        reason: format!(
+            "{what}; excluded by the deployment: {}; the workload may be infeasible without \
+             these exclusions too",
+            sources.join(", ")
+        ),
+    }]))
+}
+
+/// An exclusion source as the deployment capabilities' JSON names it:
+/// `counter_not_extrapolated`, or `excluded_candidates[2]` for the caller's
+/// third exclusion.
+fn exclusion_source_name(source: ExclusionSource) -> String {
+    match source {
+        ExclusionSource::ExcludedCandidate { index } => format!("excluded_candidates[{index}]"),
+        source => serde_json::to_value(source)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| format!("{source:?}")),
+    }
 }
 
 /// Per query, the sketches its output reads in `plan` (each sketch build

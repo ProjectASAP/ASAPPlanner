@@ -1,21 +1,21 @@
 //! What the deployment's executor can run and keep (the third
 //! deployment input, beside the cost and accuracy models).
 //!
-//! [`DeploymentCapabilities`] says three things:
+//! [`DeploymentCapabilities`] says six things:
 //!
 //! * which sketch summary types the executor supports, and which readouts
 //!   it supports for each. A summary type is supported when the executor can build
 //!   its state, and a readout of it when the executor can answer that
-//!   statistic ([`StatisticKind`]) from the state. Stage 1 (Pass 1) offers
-//!   no summary candidate whose summary type or readout is unsupported, so no
-//!   Pass 2 candidate has one either (Pass 2 rules share, split into tumbling windows
-//!   or reuse existing builds; none adds a summary type or a readout). Exact
-//!   accumulators and plain exact execution are always supported;
+//!   statistic ([`StatisticKind`](crate::summary_type::StatisticKind)) from
+//!   the state. Stage 2 prunes every build of an unsupported summary type
+//!   and every readout the executor does not answer; what reads only them
+//!   loses its producer. Exact accumulators and plain exact execution are
+//!   always supported;
 //! * whether raw data samples are retained. If they are, Stage 3 counts them on
 //!   disk once per source, at the longest window a query-time scan of it
 //!   reads. If they are not, raw data samples are not retained after they arrive, so
-//!   a candidate that scans raw data at query time is invalid (the
-//!   rejection lists every such scan): only ingestion-time work reads raw
+//!   Stage 2 prunes every scan of raw data at query time or kept across
+//!   evaluations: only ingestion-time work reads raw
 //!   rows. Stored data (at rest or mixed) with no raw data retained is a
 //!   contradiction, refused as bad input ([`DeploymentCapabilities::validate`]);
 //! * whether query-time results are retained across evaluations. If they
@@ -25,8 +25,7 @@
 //!   covering the queries' longest look-back. A chain two or more queries
 //!   read keeps its `OneEvaluation` option too (shared within one evaluation),
 //!   and Stage 3 picks the cheaper. If they are not, a query-time result is
-//!   reused only within one evaluation.
-//!
+//!   reused only within one evaluation;
 //! * what the executor's counter functions do (`counter_semantics`):
 //!   whether they handle counter resets and extrapolate to the range's ends;
 //! * which state families it cannot merge across windows
@@ -50,8 +49,11 @@
 
 // The executor lists the summary types it builds as `SupportedSummary`s, so the
 // type lives with the readout vocabulary in `asap-types`.
+use crate::ir::operator::OperatorKind;
+use crate::ir::properties::ExecutionTiming;
+use crate::ir::schema::FieldDataType;
 pub use crate::summary_type::SupportedSummary;
-use crate::summary_type::{SketchAlgorithm, StatisticKind, SummaryFamily};
+use crate::summary_type::{SketchAlgorithm, SummaryFamily, SummaryTypeCapability};
 use crate::workload::{DataArrival, DataWorkload};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -175,12 +177,112 @@ impl DeploymentCapabilities {
     /// false` expands into `{timing: query_time, operator: Scan}` and
     /// `{operator: Scan, kept_across_evaluations: true}`.
     pub fn exclusions(&self) -> Vec<DeploymentExclusion> {
-        todo!("tests-only PR: DeploymentCapabilities::exclusions")
-    }
-
-    /// Whether the executor can build `summary_type` and answer `readout` from it.
-    pub fn supports(&self, summary_type: &SketchAlgorithm, readout: StatisticKind) -> bool {
-        summary_supported(self.supported_summaries.as_deref(), summary_type, readout)
+        let mut exclusions = Vec::new();
+        let mut exclude = |source, candidates| {
+            exclusions.push(DeploymentExclusion { source, candidates });
+        };
+        if let Some(supported) = &self.supported_summaries {
+            // A sketch algorithm not listed: none of its states is built.
+            for &algorithm in SketchAlgorithm::ALL {
+                if !supported.iter().any(|s| s.summary_type == algorithm) {
+                    exclude(
+                        ExclusionSource::SummaryNotSupported,
+                        CandidateExclusion {
+                            summary_family: Some(SummaryFamily::Sketch(algorithm)),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+            // A listed algorithm: each statistic its state answers (its
+            // capability table row) that the executor does not read from it.
+            for listed in supported {
+                let answered =
+                    SummaryTypeCapability::of(&FieldDataType::Sketch(listed.summary_type)).readouts;
+                for &(statistic, _) in answered {
+                    if !listed.readouts.contains(&statistic) {
+                        exclude(
+                            ExclusionSource::ReadoutNotSupported,
+                            CandidateExclusion {
+                                readout: Some(SketchReadout {
+                                    summary_type: listed.summary_type,
+                                    statistic,
+                                }),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        if !self.raw_data_retained {
+            exclude(
+                ExclusionSource::RawDataNotRetained,
+                CandidateExclusion {
+                    timing: Some(ExecutionTiming::QueryTime),
+                    operator: Some(OperatorKind::Scan),
+                    ..Default::default()
+                },
+            );
+            exclude(
+                ExclusionSource::RawDataNotRetained,
+                CandidateExclusion {
+                    operator: Some(OperatorKind::Scan),
+                    kept_across_evaluations: Some(true),
+                    ..Default::default()
+                },
+            );
+        }
+        if !self.query_time_results_retained {
+            exclude(
+                ExclusionSource::QueryTimeResultsNotRetained,
+                CandidateExclusion {
+                    timing: Some(ExecutionTiming::QueryTime),
+                    kept_across_evaluations: Some(true),
+                    ..Default::default()
+                },
+            );
+        }
+        let counters = [
+            (
+                self.counter_semantics.reset_handling,
+                ExclusionSource::CounterResetsNotHandled,
+                CounterSemantics::ResetHandling,
+            ),
+            (
+                self.counter_semantics.extrapolation,
+                ExclusionSource::CounterNotExtrapolated,
+                CounterSemantics::Extrapolation,
+            ),
+        ];
+        for (supported, source, semantics) in counters {
+            if !supported {
+                exclude(
+                    source,
+                    CandidateExclusion {
+                        counter_semantics: Some(semantics),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        for &family in &self.state_not_mergeable_across_windows {
+            exclude(
+                ExclusionSource::StateNotMergeableAcrossWindows,
+                CandidateExclusion {
+                    summary_family: Some(family),
+                    merged_across_windows: Some(true),
+                    ..Default::default()
+                },
+            );
+        }
+        for (index, candidates) in self.excluded_candidates.iter().enumerate() {
+            exclude(
+                ExclusionSource::ExcludedCandidate { index },
+                candidates.clone(),
+            );
+        }
+        exclusions
     }
 
     /// Checks these capabilities against the data workload: stored data
@@ -193,31 +295,20 @@ impl DeploymentCapabilities {
     /// `aggregate_measure` names no aggregate is bad input too
     /// ([`DeploymentCapabilitiesError::InvalidExclusion`]).
     pub fn validate(&self, data: &DataWorkload) -> Result<(), DeploymentCapabilitiesError> {
-        match &data.arrival {
-            DataArrival::AtRest | DataArrival::Mixed { .. } if !self.raw_data_retained => {
-                Err(DeploymentCapabilitiesError::StoredDataNotRetained {
+        if let DataArrival::AtRest | DataArrival::Mixed { .. } = &data.arrival {
+            if !self.raw_data_retained {
+                return Err(DeploymentCapabilitiesError::StoredDataNotRetained {
                     arrival: data.arrival,
-                })
+                });
             }
-            _ => Ok(()),
         }
+        for (index, exclusion) in self.excluded_candidates.iter().enumerate() {
+            if let Some(reason) = exclusion.invalid_reason() {
+                return Err(DeploymentCapabilitiesError::InvalidExclusion { index, reason });
+            }
+        }
+        Ok(())
     }
-}
-
-/// Whether an executor that builds `supported_summaries` (`None`: every
-/// summary type and readout the planner can build) can build
-/// `summary_type` and answer `readout` from it. Pass 1 reads only this
-/// field of [`DeploymentCapabilities`].
-pub fn summary_supported(
-    supported_summaries: Option<&[SupportedSummary]>,
-    summary_type: &SketchAlgorithm,
-    readout: StatisticKind,
-) -> bool {
-    supported_summaries.is_none_or(|supported| {
-        supported
-            .iter()
-            .any(|s| s.summary_type == *summary_type && s.readouts.contains(&readout))
-    })
 }
 
 /// Deployment capabilities that contradict the other planning inputs

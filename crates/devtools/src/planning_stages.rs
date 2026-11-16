@@ -257,16 +257,10 @@ pub fn run_stages_until(
         return Ok(stages);
     }
     let run = &mut stages.run;
-    let pass1 = pass1_memo(
-        stage0_dag,
-        models
-            .deployment_capabilities
-            .supported_summaries
-            .as_deref(),
-    )
-    // As `run_planning`: a query Pass 1 cannot plan is reported before
-    // contradictory deployment capabilities.
-    .map_err(|error| PlanningStagesError::Pass1(error.to_string()))?;
+    let pass1 = pass1_memo(stage0_dag)
+        // As `run_planning`: a query Pass 1 cannot plan is reported before
+        // contradictory deployment capabilities.
+        .map_err(|error| PlanningStagesError::Pass1(error.to_string()))?;
     if let Err(error) = models.deployment_capabilities.validate(data) {
         run.selection = Err(SelectionError::InvalidDeploymentCapabilities(error));
         return Ok(stages);

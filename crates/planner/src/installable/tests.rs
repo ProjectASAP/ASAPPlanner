@@ -307,7 +307,16 @@ fn unrestricted_summaries_default_to_the_executors_families() {
         Some(asap_executor::supported_summary_families())
     );
     assert!(!defaulted.raw_data_retained);
-    assert!(!defaulted.supports(&SketchAlgorithm::CountSketch, StatisticKind::ItemFrequency));
+    // The executor does not answer a Count Sketch's item frequency.
+    assert!(!defaulted
+        .supported_summaries
+        .as_ref()
+        .unwrap()
+        .iter()
+        .any(|s| {
+            s.summary_type == SketchAlgorithm::CountSketch
+                && s.readouts.contains(&StatisticKind::ItemFrequency)
+        }));
     let kll_only = DeploymentCapabilities {
         supported_summaries: Some(vec![SupportedSummary {
             summary_type: SketchAlgorithm::Kll,

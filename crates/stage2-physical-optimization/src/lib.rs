@@ -40,8 +40,10 @@ use candidate::{offered_physical_properties, OfferedPhysicalProperties};
 /// logical edge into its physical edges with $\alpha^{\log}$ and
 /// $\alpha^{\mathrm{phys}}$. Every alternative rejected is recorded in the
 /// output's `pruned_candidates` with its `PruneReason`: first those a
-/// decision-tree prune rule removes ([`candidate`]), then those that
-/// cannot be built or that no query output can read ([`pruning`]). A value
+/// decision-tree prune rule removes ([`candidate`]; among them those one of
+/// the deployment's exclusions matches, `DeploymentCapabilities::exclusions`,
+/// e.g. every query-time scan when raw data is not retained), then those
+/// that cannot be built or that no query output can read ([`pruning`]). A value
 /// outside a dimension's declared value set (`AcrossEvaluations` on a
 /// candidate of a time-dependent group with no known grid) is not offered
 /// and not recorded. Costs nothing, and cannot fail; alignment with each
@@ -60,6 +62,7 @@ pub fn generate_physical_asap_memo_candidates(
     let ingestion_time_offered = group::ingestion_time_offered_per_group(logical, &eliminated);
     let across_evaluations_offered =
         group::across_evaluations_offered_per_group(logical, &eliminated);
+    let exclusions = capabilities.exclusions();
     let mut pruned_candidates = Vec::new();
     // Levels 3 and 4: the offered alternatives, before pruning, and the
     // alternatives of each logical candidate (a range of `alternatives`).
@@ -85,7 +88,7 @@ pub fn generate_physical_asap_memo_candidates(
                 ingestion_time_offered[group_index],
                 across_evaluations_offered[group_index],
                 data,
-                capabilities,
+                &exclusions,
             ) {
                 let alternative = PhysicalCandidate {
                     logical_candidate_id,

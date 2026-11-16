@@ -289,6 +289,16 @@ pub fn is_label_set_column(field: &Field) -> bool {
 }
 
 impl Schema {
+    /// The type of the summary state this schema carries: its first field
+    /// that is not a plain value, e.g. `Sketch(Kll)` for a KLL state keyed
+    /// by series; `None` for rows of plain values.
+    pub fn summary_state_type(&self) -> Option<&FieldDataType> {
+        self.fields
+            .iter()
+            .find(|field| !field.is_plain())
+            .map(|field| &field.dtype)
+    }
+
     pub fn has_promql_series_identity(&self) -> bool {
         self.closed
             && self.fields.iter().any(|field| {

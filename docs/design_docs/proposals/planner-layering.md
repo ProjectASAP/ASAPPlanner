@@ -548,9 +548,9 @@ The sections below describe each stage.
 | Stage | Prunes (`PruneReason`) | Recorded in | `candidate` |
 |---|---|---|---|
 | 0. Frontends | nothing: a query that cannot be lowered fails planning with an error | — | — |
-| 1, Pass 1 | nothing is recorded: a way the measure or the deployment cannot compute is not offered (the exact accumulator of an `avg` over a nullable input, a count sketch over relational rows, a summary the deployment does not support, a quantile summary outside [0, 1], a top-k heap over one row per item), nor a way Pass 1 cannot build | — | — |
+| 1, Pass 1 | nothing is recorded: a way the measure or the deployment cannot compute is not offered (the exact accumulator of an `avg` over a nullable input, a count sketch over relational rows, a quantile summary outside [0, 1], a top-k heap over one row per item), nor a way Pass 1 cannot build | — | — |
 | 1, Pass 2 | nothing: it only adds candidates | — | — |
-| 2 | what cannot be built or materialized: `NoIngestionPipeline`, `RawDataNotRetained` (a scan of raw data the deployment does not keep, at query time or materialized across evaluations), `QueryTimeResultsNotRetained`, `CountMinWeightsNotProvenNonNegative`, `InputHasNoBuildableProducer`, `ReachesNoQueryOutput`; the planner does not check executor support | `PhysicalASAPMemoCandidates::pruned_candidates` | the `PhysicalCandidate` it would have been |
+| 2 | what cannot be built or materialized: `NoIngestionPipeline`, `CountMinWeightsNotProvenNonNegative`, `ExcludedByDeployment` (what the deployment's capabilities exclude: an unsupported summary or readout, a scan of raw data it does not keep, a query-time result kept across evaluations, counter semantics or state merges it lacks, a candidate the caller excludes), `InputHasNoBuildableProducer`, `ReachesNoQueryOutput` | `PhysicalASAPMemoCandidates::pruned_candidates` | the `PhysicalCandidate` it would have been |
 | 3 | valid candidates that lose, and the checks only a whole plan can make (accuracy; latency and cluster capacity later) | its own `RejectionCause` | — |
 
 Stage 2 records a pruned candidate as the `PhysicalCandidate` it would
@@ -1270,13 +1270,13 @@ On the memo, Stage 2 prunes per physical alternative (a logical candidate
 with one timing and lifetime) and records each pruned alternative in `PhysicalASAPMemoCandidates::pruned_candidates`
 ([Pruning by stage](#pruning-by-stage)). It does not generate a
 configuration the deployment cannot run: an ingestion-time alternative
-without an ingestion pipeline (`NoIngestionPipeline`), a scan of raw data
-the deployment does not retain, at query time or materialized across
-evaluations (`RawDataNotRetained`), a
-query-time result materialized across evaluations the deployment does not
-retain (`QueryTimeResultsNotRetained`), and a Count-Min build whose weights
-are not proven non-negative (`CountMinWeightsNotProvenNonNegative`). It does
-not check executor support. It
+without an ingestion pipeline (`NoIngestionPipeline`), a Count-Min build
+whose weights are not proven non-negative
+(`CountMinWeightsNotProvenNonNegative`), and an alternative one of the
+deployment's exclusions matches (`ExcludedByDeployment`, naming the
+capability it comes from: e.g. a scan of raw data the deployment does not
+retain, at query time or materialized across evaluations, is
+`ExcludedByDeployment(RawDataNotRetained)`). It
 then removes the candidates no buildable input or query output can use
 (`InputHasNoBuildableProducer`, `ReachesNoQueryOutput`),
 repeating until nothing more is removed. Stage 2 makes no execution-scope

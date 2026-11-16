@@ -42,7 +42,9 @@
 //     field takes its default).
 //   - `--deployment-capabilities <file>`: the `DeploymentCapabilities`
 //     (`supported_summaries`, `raw_data_retained`,
-//     `query_time_results_retained`; an omitted field takes its default).
+//     `query_time_results_retained`, `counter_semantics`,
+//     `state_not_mergeable_across_windows`, `excluded_candidates`; an
+//     omitted field takes its default).
 //     Without `supported_summaries`, the executor's summary families are
 //     supported, as `plan_installable` defaults it.
 //   - `--ignore-accuracy-guarantees`: Stage 3 accepts every query output

@@ -9,7 +9,7 @@ use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator, TimeRangeKind};
 use asap_types::stages::{Memo, MemoGroupId};
 use asap_types::summary_type::{ExactKind, SummaryUpdate};
-use asap_types::test_support::memo_builders::{candidates_of, group, groups_where, query};
+use asap_types::test_support::memo_builders::{candidates_of, group, query};
 use asap_types::workload::DataWorkload;
 
 /// Each measure of a multi-measure aggregate is its own target; a measure
@@ -26,7 +26,7 @@ fn multi_measure_aggregate_has_one_target_per_measure() {
         None,
     );
     query(&mut memo, both, None);
-    let targets = computation_targets(&memo, None).unwrap();
+    let targets = computation_targets(&memo).unwrap();
     let measures: Vec<(MemoGroupId, usize)> = targets
         .iter()
         .map(|target| (target.aggregate_group, target.measure_index))
@@ -51,8 +51,8 @@ fn aggregate_without_realization_is_not_a_target() {
         None,
     );
     query(&mut memo, stddev, None);
-    assert!(computation_targets(&memo, None).unwrap().is_empty());
-    let memo = pass1_memo(memo, None).unwrap();
+    assert!(computation_targets(&memo).unwrap().is_empty());
+    let memo = pass1_memo(memo).unwrap();
     assert_eq!(candidates_of(&memo, stddev).len(), 1);
 }
 
@@ -71,7 +71,7 @@ fn an_aggregate_read_by_several_roots_is_one_target() {
     );
     query(&mut memo, p, None);
     query(&mut memo, p, None);
-    assert_eq!(computation_targets(&memo, None).unwrap().len(), 1);
+    assert_eq!(computation_targets(&memo).unwrap().len(), 1);
 }
 
 /// A memo whose groups already hold ASAP operators fails at the stage
@@ -92,25 +92,7 @@ fn asap_input_is_rejected() {
     );
     query(&mut memo, state, None);
     assert!(matches!(
-        pass1_memo(memo, None),
+        pass1_memo(memo),
         Err(PerComputationCandidateError::ContainsAsap)
     ));
-}
-
-/// The summaries the deployment does not support are not offered.
-#[test]
-fn unsupported_summaries_are_not_offered() {
-    let mut memo = Memo::new(&DataWorkload::default());
-    let rows = selector(&mut memo, TimeRangeKind::Range, "m", &[]);
-    let p = aggregate_group(
-        &mut memo,
-        rows,
-        Reduction::by(vec![]),
-        vec![quantile(0.9)],
-        None,
-    );
-    query(&mut memo, p, None);
-    let memo = pass1_memo(memo, Some(&[])).unwrap();
-    assert_eq!(candidates_of(&memo, p).len(), 1);
-    assert!(groups_where(&memo, |e| matches!(e, Operator::ASAP(_))).is_empty());
 }

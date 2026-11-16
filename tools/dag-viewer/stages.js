@@ -742,14 +742,28 @@ function usageText(usage) {
 
 // The run's deployment capabilities (`DeploymentCapabilities` JSON) as one
 // line: "raw data not retained · query-time results not retained · every
-// summary the planner builds".
+// summary the planner builds", then each capability left out and the
+// caller's exclusions, e.g. "counter extrapolation not supported · not
+// mergeable across windows: exact Rate · excluded candidates: 2". The
+// defaults leave none out, so they add nothing.
 function deploymentText(capabilities) {
   if (!capabilities || typeof capabilities !== 'object') return '';
   const summaries = Array.isArray(capabilities.supported_summaries)
     ? `summaries: ${capabilities.supported_summaries.map((s) => `${s.family} (${(s.readouts || []).join(', ')})`).join(', ')}`
     : 'every summary the planner builds';
-  return [capabilities.raw_data_retained === false ? 'raw data not retained' : 'raw data retained',
-    capabilities.query_time_results_retained ? 'query-time results retained' : 'query-time results not retained', summaries].join(' · ');
+  const parts = [capabilities.raw_data_retained === false ? 'raw data not retained' : 'raw data retained',
+    capabilities.query_time_results_retained ? 'query-time results retained' : 'query-time results not retained', summaries];
+  const counters = capabilities.counter_semantics || {};
+  if (counters.reset_handling === false) parts.push('counter resets not handled');
+  if (counters.extrapolation === false) parts.push('counter extrapolation not supported');
+  const unmergeable = capabilities.state_not_mergeable_across_windows || [];
+  if (unmergeable.length) {
+    const family = (f) => Object.entries(f || {}).map(([kind, name]) => `${kind} ${name}`).join('');
+    parts.push(`not mergeable across windows: ${unmergeable.map(family).join(', ')}`);
+  }
+  const excluded = capabilities.excluded_candidates || [];
+  if (excluded.length) parts.push(`excluded candidates: ${excluded.length}`);
+  return parts.join(' · ');
 }
 
 // The queries of a `PlanningWorkload` JSON, batch then repeating (the

@@ -20,8 +20,11 @@ impl SummaryFamily {
     /// `Sketch(Kll)` for `FieldDataType::Sketch(Kll)`, `Exact(Sum)` for
     /// `ExactAggregate(Sum, _)`, `None` for any other field type.
     pub fn of(summary_type: &FieldDataType) -> Option<Self> {
-        let _ = summary_type;
-        todo!("tests-only PR: SummaryFamily::of")
+        match summary_type {
+            FieldDataType::Sketch(algorithm) => Some(Self::Sketch(*algorithm)),
+            FieldDataType::ExactAggregate(kind, _) => Some(Self::Exact(*kind)),
+            _ => None,
+        }
     }
 }
 
