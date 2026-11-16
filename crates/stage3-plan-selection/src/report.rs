@@ -167,9 +167,10 @@ pub struct Selection {
     pub milp_variable_count: usize,
     /// The selection MILP's constraint rows.
     pub milp_constraint_count: usize,
-    /// How long building and solving the selection MILP took, the solve
-    /// time summed over `milp_solve_count` solves.
+    /// How long building the selection MILP took.
     pub milp_construction_ms: u64,
+    /// How long HiGHS took to solve the selection MILP, summed over
+    /// `milp_solve_count` solves.
     pub milp_solve_ms: u64,
     /// How many times HiGHS solved the MILP: 1, or 2 when the selection at
     /// HiGHS's default feasibility tolerances (1e-7) missed an accuracy

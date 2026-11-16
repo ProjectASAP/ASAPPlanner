@@ -22,6 +22,17 @@ fn within_limit_admits_only_floating_point_noise() {
     assert!(within_limit(0.0, 0.0));
 }
 
+/// A failure probability per output value of 1e-16 (δ = 0.01 over 1e14
+/// values) is widened only relatively: a bound three times the limit,
+/// 3e-16, misses it, and the tolerated limit stays within one part in a
+/// billion of 1e-16.
+#[test]
+fn a_tiny_limit_is_widened_only_relatively() {
+    assert!(!within_limit(3e-16, 1e-16));
+    assert!(within_limit(1e-16 * (1.0 + 1e-12), 1e-16));
+    assert!(tolerated_limit(1e-16) <= 1e-16 * (1.0 + 2e-9));
+}
+
 /// A distinct count read from HLL (relative error, failure probability
 /// unknown) or UnivMon (no guarantee for it) under a query with a
 /// relative target: the edge fails with `NoGuarantee`, its error would
