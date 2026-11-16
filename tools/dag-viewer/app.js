@@ -1,19 +1,17 @@
-// ASAPPlanner Stage Viewer: an asap-stage-pipeline/v1 document as a Stage 3
-// candidate list beside three DAG lanes stacked top to bottom (Stage 0,
-// then the Stage 1 candidate, then its Stage 2 candidate), details below.
-// Each lane shows the whole workload. Document checks, the candidate list
-// and node labels live in stages.js (tested); node-style.js groups operator
-// kinds.
+// ASAPPlanner Stage Viewer: an asap-stage-pipeline/v2 document as Stage 3's
+// outcome (the selected plan or its error) beside two DAG lanes stacked top
+// to bottom (Stage 0, then Stage 3's plan), details below. Each lane shows
+// the whole workload. Document checks, the plan row and node labels live in
+// stages.js (tested); node-style.js groups operator kinds.
 (function () {
   if (window.cytoscapeDagre) cytoscape.use(window.cytoscapeDagre);
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const tok = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-  let doc, rows, queryIds, logicalById, physicalById;
-  let current = { logical: null, physical: null };
-  const cys = [null, null, null];
-  const laneName = ['Stage 0 · query-language frontends', 'Stage 1 · logical ASAP optimization', 'Stage 2 · physical ASAP optimization'];
+  let doc, queryIds;
+  const cys = [null, null];
+  const laneName = ['Stage 0 · query-language frontends', 'Stage 3 · selected plan'];
 
   function style() {
     return [
@@ -25,7 +23,7 @@
       { selector: 'node[group = "rel"]', style: { 'background-color': tok('--cat-rel'), 'border-color': tok('--cat-rel-line') } },
       { selector: 'node[group = "summary"]', style: { 'background-color': tok('--cat-summary'), 'border-color': tok('--cat-summary-line') } },
       { selector: 'node[group = "scalar"]', style: { 'background-color': tok('--cat-scalar'), 'border-color': tok('--cat-scalar-line'), 'border-style': 'dashed' } },
-      // Stage 2: the fill says when a node runs (the border keeps its
+      // The plan: the fill says when a node runs (the border keeps its
       // category); the label's ⏱ line says it in words.
       { selector: 'node.ingestionTime', style: { 'background-color': tok('--time-ingest') } },
       { selector: 'node.queryTime', style: { 'background-color': tok('--time-query') } },
@@ -33,31 +31,24 @@
       { selector: 'node:selected', style: { 'overlay-color': tok('--accent'), 'overlay-opacity': 0.14, 'overlay-padding': 5 } },
       { selector: 'edge', style: { width: 1.6, 'line-color': tok('--edge'), 'target-arrow-color': tok('--edge'), 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'arrow-scale': 0.9 } },
       { selector: '.dimmed', style: { opacity: 0.15 } },
-      { selector: 'node.tumblingWindow', style: { 'border-style': 'dashed' } },
       { selector: 'edge:selected', style: { 'line-color': tok('--accent'), 'target-arrow-color': tok('--accent'), width: 2.6 } },
     ];
   }
 
   function clearLane(i, text) {
     if (cys[i]) { cys[i].destroy(); cys[i] = null; }
+    laneElements[i] = [];
     $(`lane${i}-meta`).textContent = text;
   }
 
-  // Per lane: what it draws (to redraw it with a tumbling-window chain expanded or
-  // collapsed) and its elements; per drawn DAG, the SummaryTumblingWindowChain node ids drawn
-  // as tumbling windows, so switching plans and back keeps each plan's expanded chains.
-  const drawn = [null, null, null];
-  const laneElements = [[], [], []];
-  const expandedByDag = new WeakMap();
-  const expandedOf = (dag) => { if (!expandedByDag.has(dag)) expandedByDag.set(dag, new Set()); return expandedByDag.get(dag); };
+  // Per lane, its elements, for highlighting.
+  const laneElements = [[], []];
   // The query whose path the lanes highlight ('' for none).
   let highlightedQuery = '';
 
-  // `ids` names the queries of `dag.roots` in order (default: the workload's).
-  function render(i, dag, physical, costPerNode, ids = queryIds) {
+  function render(i, dag, physical, costPerNode) {
     if (cys[i]) cys[i].destroy();
-    drawn[i] = { dag, physical, costPerNode, ids };
-    const elements = stageLaneElements(dag, { physical, costPerNode, queryIds: ids, expandedChains: [...expandedOf(dag)] })
+    const elements = stageLaneElements(dag, { physical, costPerNode, queryIds })
       .map((el) => ({ data: el.data, classes: [el.classes, el.data.rootFor && el.data.rootFor.length ? 'root' : ''].join(' ').trim() }));
     laneElements[i] = elements;
     const cy = cytoscape({
@@ -73,13 +64,8 @@
     dim(i, queryKeep(i));
   }
 
-  function redraw(i) { const d = drawn[i]; render(i, d.dag, d.physical, d.costPerNode, d.ids); }
-
-  // A SummaryTumblingWindowChain expands into its tumbling windows; a tumbling window collapses its chain; any
-  // other node is shown and its upstream and downstream highlighted.
+  // A tapped node is shown and its upstream and downstream highlighted.
   function tapNode(d, i) {
-    if (d.expandable) { expandedOf(drawn[i].dag).add(d.nodeId); redraw(i); showNode(d, i); return; }
-    if (d.kind === 'tumblingWindow') { expandedOf(drawn[i].dag).delete(d.tumblingWindowOf); redraw(i); return; }
     showNode(d, i);
     dim(i, new Set(stageNeighborhoodIds(laneElements[i], d.id)));
   }
@@ -115,14 +101,10 @@
     const items = [['lane', laneName[lane]], ['operator', d.kind], ['node id', d.nodeId]];
     if (d.kind === 'Scalar') items.push(['expression', stageScalarText(n.Scalar)]);
     const [, body] = d.kind === 'Scalar' ? [null, {}] : stageOperatorParts(n.payload || n.operator);
-    if (d.kind === 'SummaryAgg') {
-      items.push(['summary parameters', summaryFamilyText(body.family)]);
-      items.push(['instances', summaryInstancesText(body.grouping, body.reduction)]);
-    }
+    if ('summary_type' in body) items.push(['summary type', summaryTypeText(body.summary_type)]);
+    if (d.kind === 'SummaryTumblingWindowChain') items.push(['tumbling window width', durationText(body.tumbling_window_width_ms)]);
     if (d.rootFor && d.rootFor.length) items.push(['query root of', d.rootFor.join(', ')]);
     if (d.reachedBy) items.push(['queries reaching it', d.reachedBy.join(', ') || 'none']);
-    if (d.tumblingWindowOf !== undefined) items.push(['tumbling window', `${d.tumblingWindowIndex + 1} of ${body.tumbling_window_count} of SummaryTumblingWindowChain ${d.tumblingWindowOf}, window ${tumblingWindowTimeText(d.tumbling_window, body.tumbling_window_width_ms)}`]);
-    if (d.expandable) items.push(['tumbling windows', `${body.tumbling_window_count} × ${durationText(body.tumbling_window_width_ms)} (click the chain to show them, a tumbling window to hide them)`]);
     if (d.timing !== undefined) items.push(['runs at', formatTiming(d.timing)]);
     if (n.lifetime) items.push(['lifetime', compactWire(n.lifetime)]);
     if (n.output_state && n.output_state.primitive) items.push(['output primitive', compactWire(n.output_state.primitive)]);
@@ -151,97 +133,34 @@
       ${e ? schemaTable(e.intermediate_schema) : ''}`;
   }
 
-  function statusChip(status) {
-    if (status === 'selected') return '<span class="chip selected">✓ selected</span>';
-    if (status === 'reference selected') return '<span class="chip costlier">reference pricer\'s pick</span>';
-    if (status === 'costlier') return '<span class="chip costlier">valid · costlier</span>';
-    if (status === 'rejected') return '<span class="chip invalid">✗ invalid</span>';
-    if (status === 'not judged') return '<span class="chip">not judged</span>';
-    if (status === 'not kept') return '<span class="chip invalid">✗ invalid · not kept</span>';
-    return `<span class="chip invalid">${esc(status)}</span>`;
+  // The plan's cost per second as text.
+  function costText(cost) {
+    if (!cost) return 'not costed';
+    return cost.cost_per_second === null ? 'no cost (cost model 3)' : `cost <b>${fmtCost(cost.cost_per_second)}</b> per second`;
   }
 
-  function rowKey(row) {
-    if (row.status === 'not kept') return `X:${row.id}`;
-    return `${row.status === 'pruned' || row.status === 'composition error' ? 'L' : 'P'}:${row.id}`;
+  // Stage 3's outcome: one row for the selected plan or selection's error.
+  function renderPlanRow() {
+    const row = selectedPlanRow(doc);
+    $('rank').innerHTML = row ? `<li><div class="row">
+        <span class="pid">plan</span><span class="plabel">${row.status === 'selected' ? 'the selected plan' : 'no plan selected'}</span>
+        <span class="ptotal">${row.total === null ? '—' : fmtCost(row.total)}</span>
+        <span class="pstatus">${row.status === 'selected' ? '<span class="chip selected">✓ selected</span>' : `<span class="chip invalid">no plan</span><span>${esc(row.reason)}</span>`}` +
+        `${row.accepted ? `<span class="accepted">${esc(row.accepted)}</span>` : ''}</span></div></li>` : '<li class="status">Stage 3 did not run.</li>';
   }
 
-  function renderRanking() {
-    const pressed = current.physical ? `P:${current.physical}` : `L:${current.logical}`;
-    $('rank').innerHTML = rows.map((r) => `<li><button type="button" data-key="${esc(rowKey(r))}" aria-pressed="${rowKey(r) === pressed}"${r.status === 'not kept' ? ' disabled title="the default search did not keep this candidate"' : ''}>
-        <span class="pid">${esc(r.id)}</span><span class="plabel">${esc(r.display_name || r.id)}</span>
-        <span class="ptotal">${r.total === null ? '—' : fmtCost(r.total)}</span>
-        <span class="pstatus">${statusChip(r.status)}${r.reason ? `<span>${esc(r.reason)}</span>` : ''}${r.accepted ? `<span class="accepted">${esc(r.accepted)}</span>` : ''}</span></button></li>`).join('');
-    $('rank').querySelectorAll('button:not([disabled])').forEach((b) => b.addEventListener('click', () => {
-      const [kind, id] = [b.dataset.key.slice(0, 1), b.dataset.key.slice(2)];
-      if (kind === 'P') selectPhysical(id);
-      else selectLogical(id);
-    }));
-  }
-
-  // Choose Stage 1 candidate `id`: show its physical plan when it has one;
-  // a pruned or uncomposed candidate has none, so Stage 2 is cleared.
-  function selectLogical(id) {
-    pressEnumeratedRow(null);
-    const physical = doc.stage2_physical_asap_optimization.candidates.find((p) => p.from_logical === id);
-    if (physical) { selectPhysical(physical.id); return; }
-    showLogical(id);
-    current.physical = null;
-    $('pick2').value = '';
-    clearLane(2, 'no physical plan for this Stage 1 candidate');
-    renderRanking();
-  }
-
-  // Draw Stage 1 candidate `id` in lane 1.
-  function showLogical(id) {
-    current.logical = id;
-    $('pick1').value = id;
-    const c = logicalById.get(id);
-    if (c.dag) {
-      render(1, c.dag, false, null);
-      const physicalFor = doc.stage2_physical_asap_optimization.candidates.filter((p) => p.from_logical === id).map((p) => p.id);
-      const pruned = (doc.stage2_physical_asap_optimization.pruned || []).find((p) => p.from_logical === id);
-      $('lane1-meta').innerHTML = `${esc(c.display_name)} · ${c.dag.nodes.length} nodes · ` +
-        (pruned ? `pruned by Stage 2: ${esc(pruned.reason)}` : `physical plan ${physicalFor.map((p) => `<b>${esc(p)}</b>`).join(', ') || 'none'}`);
-    } else {
-      clearLane(1, '');
-      $('lane1-meta').innerHTML = `${esc(c.display_name)} · <span class="error">composition error: ${esc(c.error)}</span>`;
+  // Draw Stage 3's plan in lane 1 with its node costs, or say why there is none.
+  function renderPlan() {
+    const stage3 = doc.stage3_plan_selection;
+    if (!stage3.plan) {
+      clearLane(1, stage3.error ? `no plan: ${stage3.error}` : 'Stage 3 did not run');
+      return;
     }
-  }
-
-  // Draw enumerated DAG `id` of `memo.enumeration` (enumeration.js) in
-  // lane 1; the document has no physical plan for it.
-  function showEnumerated(id, dag, description, perQueryDag) {
-    current = { logical: null, physical: null };
-    $('pick1').value = '';
-    $('pick2').value = '';
-    // Its roots are its root groups; drawn per query when they map to queries.
-    if (perQueryDag) render(1, perQueryDag, false, null);
-    else render(1, dag, false, null, dag.roots.map((_, k) => `root group #${k + 1}`));
-    $('lane1-meta').innerHTML = `enumerated DAG <b>${esc(id)}</b> · ${esc(description)} · ${dag.nodes.length} nodes` +
-      (perQueryDag ? '' : ' · roots not matched to queries');
-    clearLane(2, 'no physical plan for an enumerated DAG');
-    renderRanking();
-  }
-
-  function selectPhysical(id) {
-    pressEnumeratedRow(null);
-    current.physical = id;
-    $('pick2').value = id;
-    const c = physicalById.get(id);
-    const selection = selectionTable(doc);
-    const cost = selection.cost_per_candidate[id];
-    render(2, c.dag, true, cost ? cost.per_node : null);
-    const row = rows.find((r) => rowKey(r) === `P:${id}`);
-    const priced = rows.filter((r) => r.rank !== null).length;
-    $('lane2-meta').innerHTML = `${esc(c.display_name)} · from <b>${esc(c.from_logical)}</b> · ` +
-      (cost && cost.cost_per_second !== null ? `total <b>${fmtCost(cost.cost_per_second)}</b> ${esc(cost.cost_unit.replace(/_/g, ' '))} · rank ${row.rank} of ${priced}`
-        : cost ? 'no price (cost model 3)' : 'not priced') +
-      ` · ${statusChip(row.status)}` +
-      (row.accepted ? ` · <span class="accepted">${esc(row.accepted)}</span>` : '') +
-      (cost && cost.usage ? `<br>Stage 3 usage: ${esc(usageText(cost.usage))}` : '');
-    if (c.from_logical !== current.logical) showLogical(c.from_logical);
-    renderRanking();
+    render(1, stage3.plan, true, stage3.cost ? stage3.cost.per_node : null);
+    const accepted = acceptedText(stage3.accepted_accuracy_per_query);
+    $('lane1-meta').innerHTML = `${stage3.plan.nodes.length} nodes · ${costText(stage3.cost)}` +
+      (accepted ? ` · <span class="accepted">${esc(accepted)}</span>` : '') +
+      (stage3.cost && stage3.cost.usage ? `<br>Stage 3 usage: ${esc(usageText(stage3.cost.usage))}` : '');
   }
 
   function restyle() { cys.forEach((cy) => cy && cy.style(style())); if (window.MemoView) window.MemoView.restyle(); }
@@ -250,14 +169,11 @@
 
   // Show one stage document; `source` names it, `story` explains it.
   function showDocument(data, source, story) {
-    upgradeTumblingWindowNames(data);
-    upgradeMemoSteps(data);
     fillStagesNotRun(data);
-    const errors = validateStagePipeline(data).concat(validateMemoEnumeration(data));
+    const errors = validateStagePipeline(data);
     if (!errors.length && typeof validateMemo === 'function') errors.push(...validateMemo(data.memo, data.workload.queries.length));
     if (errors.length) throw new Error(errors.slice(0, 3).join('; '));
     doc = data;
-    current = { logical: null, physical: null };
     $('details').innerHTML = HINT;
     $('docName').textContent = source || '';
     $('story').textContent = story || '';
@@ -266,12 +182,6 @@
     highlightedQuery = '';
     $('queryPick').innerHTML = '<option value="">all queries</option>' + queryIds.map((q) => `<option value="${esc(q)}">${esc(q)}</option>`).join('');
     $('queryPick').value = '';
-    const logical = doc.stage1_logical_asap_optimization;
-    const physical = doc.stage2_physical_asap_optimization;
-    const selection = selectionTable(doc);
-    logicalById = new Map(logical.candidates.map((c) => [c.id, c]));
-    physicalById = new Map(physical.candidates.map((c) => [c.id, c]));
-    rows = stageCandidateRows(doc);
 
     $('queries').innerHTML = doc.workload.queries.map((q) => {
       const r = q.requirements || {};
@@ -280,35 +190,15 @@
       const req = [acc && `accuracy ${acc}`, r.max_latency_ms && `latency ≤ ${r.max_latency_ms} ms`, schedule].filter(Boolean).join(' · ');
       return `<div class="query"><span class="qid">${esc(q.id)} · ${esc(q.language)}</span><code>${esc(q.text)}</code>${req ? `<span class="req">${esc(req)}</span>` : ''}</div>`;
     }).join('');
-    const count = (status) => rows.filter((r) => r.status === status).length;
-    $('counts').innerHTML = `Candidates per stage: <b>1</b> logical DAG → <b>${logical.combinations}</b> logical ASAP` +
-      (logical.capped ? ` (<b>${logical.candidates.length}</b> shown)` : '') +
-      ` → <b>${physicalById.size}</b> physical` +
-      (selection.selected_candidate ? ` → <b>1</b> selected (${count('rejected')} invalid, ${count('costlier')} valid but costlier)` : ' → none selected');
-    $('rank-meta').textContent = [stageCandidateHeader(doc), accuracyGuaranteesText(doc), searchText(doc)].filter(Boolean).join(' · ');
+    $('counts').textContent = candidateCountsText(doc);
+    $('rank-meta').textContent = [planHeader(doc), accuracyGuaranteesText(doc), searchText(doc)].filter(Boolean).join(' · ');
     renderDataWorkload();
-    const sel = selection.selected_candidate ? selection.cost_per_candidate[selection.selected_candidate] : null;
-    $('cost-unit').textContent = sel ? sel.cost_unit.replace(/_/g, ' ') : '';
-
-    $('pick1').innerHTML = logical.candidates.map((c) => `<option value="${esc(c.id)}">${esc(c.id)} · ${esc(c.display_name)}</option>`).join('');
-    $('pick2').innerHTML = rows.filter((r) => rowKey(r).startsWith('P'))
-      .sort((a, b) => byPlanNumber(a.id, b.id))
-      .map((r) => `<option value="${esc(r.id)}">${esc(r.id)} · ${esc(r.display_name)}</option>`).join('');
 
     render(0, doc.stage0_query_language_frontends.dag, false, null);
     $('lane0-meta').innerHTML = `${doc.stage0_query_language_frontends.dag.nodes.length} nodes · roots for ${queryIds.map((q) => `<b>${esc(q)}</b>`).join(', ')}`;
-    // The selected plan is the first row when there is one.
-    const first = rows[0];
-    if (first && rowKey(first).startsWith('P')) selectPhysical(first.id);
-    else if (first && first.logical) selectLogical(first.logical);
-    else {
-      clearLane(1, 'no candidates');
-      clearLane(2, 'no candidates');
-      renderRanking();
-    }
+    renderPlanRow();
+    renderPlan();
     renderMaterializedViews();
-    renderMemoSearch();
-    renderEnumeration(doc, showEnumerated);
     if (window.MemoView) window.MemoView.show(doc, queryIds);
   }
 
@@ -333,71 +223,41 @@
       : '<span class="status">No source declared.</span>';
   }
 
-  // The selected plan's materialized views, one row per Stage 2 node (a tumbling window
-  // chain's tumbling windows listed inside its row); a row selects its Stage 2 node.
+  // The plan's materialized views, one row per view; a row selects its plan node.
   function renderMaterializedViews() {
-    const selection = selectionTable(doc);
-    if (!selection.selected_candidate) {
+    const stage3 = doc.stage3_plan_selection;
+    if (!stage3.plan) {
       $('views-meta').textContent = 'no plan selected';
       $('materializedViews').innerHTML = '';
       return;
     }
-    if (selection.materialized_views === undefined) {
-      $('views-meta').textContent = 'this document has no materialized views section; write it again with the current asap_planner';
-      $('materializedViews').innerHTML = '';
-      return;
-    }
-    const groups = materializedViewGroups(doc);
-    const count = groups.reduce((n, g) => n + g.tumblingWindows.length, 0);
-    $('views-meta').innerHTML = selection.materialized_views_error
-      ? `<span class="error">no installable plan: ${esc(selection.materialized_views_error)}</span>`
-      : `<b>${count}</b> materialized view${count === 1 ? '' : 's'} in <b>${groups.length}</b> group${groups.length === 1 ? '' : 's'} of <b>${esc(selection.selected_candidate)}</b>` +
-        (count ? '' : ': nothing is materialized across evaluations; every query computes at query time');
-    const tumblingWindowsCell = (g) => (g.tumblingWindows.length > 1
-      ? `<details><summary>${esc(g.tumblingWindows.length)} installed nodes</summary><ul>${g.tumblingWindows.map((p) => `<li>node ${esc(p.nodeId)} · ${esc(p.tumblingWindow)} · window ${esc(p.window)} · materialized ${esc(p.retention)}</li>`).join('')}</ul></details>`
-      : `node ${esc(g.tumblingWindows[0].nodeId)} · window ${esc(g.tumblingWindows[0].window)}`);
-    $('materializedViews').innerHTML = groups.length ? table(
-      ['Stage 2 node', 'definition', 'kind', 'tumbling windows', 'refresh', 'retention', 'installed', 'Stage 3 cost', 'read by'],
-      groups.map((g) => `<tr class="clickable" tabindex="0" data-node="${g.stage2NodeId === null ? '' : esc(g.stage2NodeId)}"><td>${g.stage2NodeId === null ? '—' : esc(g.stage2NodeId)}</td>` +
-        `<td class="wrap">${esc(g.definition)}</td><td class="wrap">${esc(g.kind)}</td><td>${esc(g.tumblingWindowsText)}</td><td>${esc(g.refresh)}</td>` +
-        `<td>${esc(g.retention)}</td><td class="wrap">${tumblingWindowsCell(g)}</td><td class="wrap">${esc(g.cost)}</td><td class="wrap">${esc(g.readBy.join(', ') || '—')}</td></tr>`).join('')) : '';
+    const rows = materializedViewRows(doc);
+    $('views-meta').innerHTML = stage3.materialized_views_error
+      ? `<span class="error">no installable plan: ${esc(stage3.materialized_views_error)}</span>`
+      : `<b>${rows.length}</b> materialized view${rows.length === 1 ? '' : 's'}` +
+        (rows.length ? '' : ': nothing is materialized across evaluations; every query computes at query time');
+    $('materializedViews').innerHTML = rows.length ? table(
+      ['plan node', 'definition', 'kind', 'refresh', 'reads', 'retention', 'raw-data windows', 'Stage 3 cost', 'read by'],
+      rows.map((r) => `<tr class="clickable" tabindex="0" data-node="${esc(r.nodeId)}"><td>${esc(r.nodeId)}</td>` +
+        `<td class="wrap">${esc(r.definition)}</td><td class="wrap">${esc(r.kind)}</td><td>${esc(r.refresh)}</td><td class="wrap">${esc(r.inputs)}</td>` +
+        `<td>${esc(r.retention)}</td><td class="wrap">${esc(r.window)}</td><td class="wrap">${esc(r.cost)}</td><td class="wrap">${esc(r.readBy.join(', ') || '—')}</td></tr>`).join('')) : '';
     $('materializedViews').querySelectorAll('tr.clickable').forEach((tr) => {
-      const pick = (e) => { if (e && e.target && e.target.closest && e.target.closest('details')) return; if (tr.dataset.node !== '') selectStage2Node(Number(tr.dataset.node)); };
+      const pick = () => selectPlanNode(Number(tr.dataset.node));
       tr.addEventListener('click', pick);
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
     });
   }
 
-  // Joint-search metrics; historical documents may additionally list shared units.
-  function renderMemoSearch() {
-    const view = memoSearchView(doc);
-    $('memoPanel').hidden = !view;
-    if (!view) return;
-    $('memo-meta').textContent = [memoSummaryText(view.summary),
-      view.scansWidened ? 'selected plan: the scan-widening variant of the solution' : ''].filter(Boolean).join(' · ');
-    $('memoShared').innerHTML = view.sharedUnits.length
-      ? table(['shared unit', 'kind', 'readers', 'queries', 'threshold', 'runs', 'strictest reader'],
-        view.sharedUnits.map((u) => `<tr><td class="wrap">${esc(u.unit)}</td><td>${esc(u.kind)}</td><td class="wrap">${esc(u.readers.join(', '))}</td><td>${esc(u.queries.join(', '))}</td>` +
-          `<td class="wrap">${esc(u.threshold)}</td><td class="wrap">${esc(u.schedule)}</td><td>${esc(u.strictest)}</td></tr>`).join(''))
-      : (view.summary && view.summary.status
-        ? '<span class="status">Inspect the selected execution DAG for shared producer nodes.</span>'
-        : '<span class="status">No shared units recorded.</span>');
-  }
-
-  // Show the selected plan in the Stage 2 lane and select its node `id`.
-  function selectStage2Node(id) {
-    const selected = selectionTable(doc).selected_candidate;
-    if (current.physical !== selected) selectPhysical(selected);
-    const cy = cys[2];
+  // Select node `id` of the plan lane and show it.
+  function selectPlanNode(id) {
+    const cy = cys[1];
     if (!cy) return;
-    // An expanded tumbling-window chain is drawn as its tumbling windows: select the newest.
-    let node = cy.getElementById(`n${id}`);
-    if (!node || node.length === 0) node = cy.getElementById(`n${id}p0`);
+    const node = cy.getElementById(`n${id}`);
     if (!node || node.length === 0) return;
     cy.elements().unselect();
     node.select();
     cy.animate ? cy.animate({ center: { eles: node }, duration: 200 }) : cy.center(node);
-    showNode(node.data(), 2);
+    showNode(node.data(), 1);
   }
 
   function showError(err) {
@@ -480,9 +340,7 @@
     if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]);
   });
 
-  $('pick1').addEventListener('change', (e) => selectLogical(e.target.value));
   $('queryPick').addEventListener('change', (e) => highlightQuery(e.target.value));
-  $('pick2').addEventListener('change', (e) => selectPhysical(e.target.value));
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', restyle);
   new MutationObserver(restyle).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   $('details').innerHTML = HINT;
