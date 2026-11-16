@@ -81,15 +81,14 @@ impl Operator {
                     if !matches!(t, DataType::Int64 | DataType::Float64) {
                         return Err(invalid("numeric aggregate input required"));
                     }
-                    // SQL: NULL for fewer than two values (sample) or none
-                    // (population); a PromQL group always has a value. The
-                    // IR's aggregate schema defines this nullability; this
+                    // NULL for a group of NULLs and, as SQL's sample
+                    // `STDDEV`/`VAR_SAMP`, for a group of one value (and for
+                    // a global one over no row: `with_emit_empty_global`).
+                    // PromQL's `stddev`/`stdvar` are population ones over
+                    // groups that have a value, so never NULL. The IR's
+                    // aggregate schema defines this nullability; this
                     // derives it again to check the declared output.
-                    (
-                        DataType::Float64,
-                        !input.has_promql_series_identity()
-                            && (!population || groups.is_empty() || nullable),
-                    )
+                    (DataType::Float64, !population || nullable)
                 }
                 Reduction::PearsonCorr { left, right } => {
                     for column in [left, right] {

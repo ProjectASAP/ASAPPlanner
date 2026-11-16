@@ -616,7 +616,6 @@ fn finish_measure(
                     };
                     match value {
                         Some(value) => Value::Float64(value),
-                        None if promql => Value::Float64(f64::NAN),
                         None => Value::Null,
                     }
                 })

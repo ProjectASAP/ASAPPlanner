@@ -371,8 +371,8 @@ impl Operator {
     /// default; `false` leaves the operator as it is) an empty input has no
     /// row, as a PromQL `count(v)` over an empty vector has no sample.
     ///
-    /// An `Aggregate`'s SUM, AVG, MIN, MAX and percentile measures become
-    /// nullable (NULL over no row). A `PerGroupSummaryBuild` outputs an empty
+    /// An `Aggregate`'s SUM, AVG, MIN, MAX, percentile, standard deviation
+    /// and variance measures become nullable (NULL over no row). A `PerGroupSummaryBuild` outputs an empty
     /// state of its own θ, and a `SummaryMerge` one of `parameters`: the θ
     /// of the states it merges (the exported build node's `parameters`),
     /// `None` for an exact family and for the other two.

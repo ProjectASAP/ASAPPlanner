@@ -436,7 +436,7 @@ async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_ro
 
 /// A global SQL aggregate has one row even over no input row, as SQL
 /// requires: over the last 5 minutes with `WHERE false`, `COUNT(*)` is 0
-/// and `SUM` is NULL. Over the last 5 minutes of [`rows`] (`latency` =
+/// and `SUM`, `STDDEV_POP` and `VAR_SAMP` are NULL. Over the last 5 minutes of [`rows`] (`latency` =
 /// 900, 901, …, 1199) they are 300 and 314,850.
 #[tokio::test]
 async fn a_global_sql_aggregate_over_no_row_answers_one_row() {
@@ -444,6 +444,8 @@ async fn a_global_sql_aggregate_over_no_row_answers_one_row() {
     let queries = [
         format!("SELECT count(*) {last_5_minutes} AND false"),
         format!("SELECT sum(latency) {last_5_minutes} AND false"),
+        format!("SELECT stddev_pop(latency) {last_5_minutes} AND false"),
+        format!("SELECT var_samp(latency) {last_5_minutes} AND false"),
         format!("SELECT count(*) {last_5_minutes}"),
         format!("SELECT sum(latency) {last_5_minutes}"),
     ];
@@ -465,7 +467,14 @@ async fn a_global_sql_aggregate_over_no_row_answers_one_row() {
         .collect();
     assert_eq!(
         answers,
-        ["Int64(0)", "NULL", "Int64(300)", "Float64(314850)",]
-            .map(|value| vec![vec![value.to_string()]])
+        [
+            "Int64(0)",
+            "NULL",
+            "NULL",
+            "NULL",
+            "Int64(300)",
+            "Float64(314850)",
+        ]
+        .map(|value| vec![vec![value.to_string()]])
     );
 }

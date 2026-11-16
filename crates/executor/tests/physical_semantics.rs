@@ -1602,10 +1602,11 @@ fn exact_aggregate_node(
 // A global aggregate follows the result kind of the rows it reads, not
 // whether they carry a series identity column. Over `[job, v]`, the output
 // of `max by (job) (m)` (no identity column), PromQL's `sum(…)`, `avg`,
-// `min`, `max` and `quantile(0.5, …)` are non-null and answer no sample over
-// an empty vector; over the same columns as a SQL relation they are
-// nullable and answer one NULL row over no row. Over jobs a (1) and b (3)
-// both answer 4, 2, 1, 3 and 2.
+// `min`, `max`, `quantile(0.5, …)`, `stddev` and `stdvar` are non-null and
+// answer no sample over an empty vector; over the same columns as a SQL
+// relation they are nullable and answer one NULL row over no row. Over jobs
+// a (1) and b (3) both answer 4, 2, 1, 3, 2, 1 and 1 (mean 2, population
+// variance ((1 - 2)² + (3 - 2)²) / 2 = 1).
 #[test]
 fn a_global_aggregate_follows_its_input_rows_kind() {
     use asap_executor::physical_planner::compile_node;
@@ -1630,6 +1631,20 @@ fn a_global_aggregate_follows_its_input_rows_kind() {
                 q: 0.5,
             },
             2.0,
+        ),
+        (
+            AggIntent::StdDev {
+                col: Some(1),
+                population: true,
+            },
+            1.0,
+        ),
+        (
+            AggIntent::Variance {
+                col: Some(1),
+                population: true,
+            },
+            1.0,
         ),
     ] {
         let mut node = exact_aggregate_node(measure.clone(), "value", DataType::Float64);
@@ -1921,7 +1936,11 @@ fn sql_variance_and_stddev_follow_their_definitions() {
         ]
     };
     let run = |values: &[Option<f64>]| {
-        let op = Operator::aggregate(input.clone(), vec![], measures()).unwrap();
+        // A global SQL aggregate: one row also over no input row.
+        let op = Operator::aggregate(input.clone(), vec![], measures())
+            .unwrap()
+            .with_emit_empty_global(true, None)
+            .unwrap();
         let rows = unary(input.clone(), vec![floats(values)], op);
         (0..4).map(|c| float_at(&rows, 0, c)).collect::<Vec<_>>()
     };
@@ -2030,6 +2049,9 @@ fn correlation_follows_datafusion() {
             vec![],
             vec![("corr".into(), Reduction::PearsonCorr { left: 0, right: 1 })],
         )
+        .unwrap()
+        // A global SQL aggregate: one row also over no input row.
+        .with_emit_empty_global(true, None)
         .unwrap();
         let rows = pairs
             .iter()
