@@ -254,10 +254,28 @@ pub mod planning {
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
     ) -> Vec<Rc<OperatorNode>> {
+        logical_candidates_ignoring_guarantees_on(
+            root,
+            accuracy,
+            &asap_types::deployment_capabilities::DeploymentCapabilities::default(),
+        )
+    }
+
+    /// [`logical_candidates_ignoring_guarantees`] on a deployment with
+    /// `capabilities`. For a test of one sketch's execution: with every
+    /// summary's CPU free, Stage 3 picks among sketches serving the same
+    /// readout by memory alone, e.g. a DDSketch over a KLL for a global
+    /// quantile, so a KLL test declares an executor that builds only KLL.
+    pub fn logical_candidates_ignoring_guarantees_on(
+        root: Rc<OperatorNode>,
+        accuracy: AccuracyTarget,
+        capabilities: &asap_types::deployment_capabilities::DeploymentCapabilities,
+    ) -> Vec<Rc<OperatorNode>> {
         let settings = summary_cpu_free();
         let models = asap_planner::PlanningModels::builtin()
             .with_ignore_accuracy_guarantees(true)
-            .with_cost_inputs(&settings);
+            .with_cost_inputs(&settings)
+            .with_deployment_capabilities(capabilities);
         selected_operator_roots(&run_all_stages_with(root, accuracy, models))
     }
 
