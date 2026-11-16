@@ -1651,6 +1651,26 @@ fn a_selection_missing_its_target_at_the_default_tolerance_is_solved_again_at_th
     );
 }
 
+/// The same ratio over readouts failing with 5.4e-7 at both costs: the
+/// first solve selects two (1.08e-6, within HiGHS's default tolerance of
+/// the 1e-6 limit), the exact check finds the miss, and at tolerance 1e-10
+/// no plan meets the limit, so HiGHS reports the MILP infeasible. The
+/// error names the query the first solve missed and its per-value δ,
+/// not a plan-less "infeasible" that never mentions accuracy.
+#[test]
+fn a_target_no_plan_meets_once_solved_at_the_least_tolerance_names_the_missed_query() {
+    let solved = solve_ratio_over_values(10_000, [5.4e-7, 5.4e-7]);
+    let Err(SelectionMilpError::TargetBelowSolverPrecision {
+        query,
+        failure_probability_per_output_value: Some(delta),
+    }) = solved
+    else {
+        panic!("{solved:?}");
+    };
+    assert_eq!(query, QueryId(0));
+    assert!((delta - 1e-6).abs() <= 1e-12, "{delta}");
+}
+
 /// The same ratio over readouts failing with 4e-7 (cost 1) or 3e-7
 /// (cost 3) each: two cheap readouts fail with up to 8e-7, within 1e-6,
 /// so the solve at HiGHS's default tolerances meets the target and is
