@@ -106,6 +106,12 @@ pub struct OperatorCost {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measure: Option<String>,
     /// CPU nanoseconds per unit the operator processes ([`OperatorKind`]).
+    /// It includes what the formulas charge apart, at the measured shape:
+    /// the output rows a merge, an aggregate or an estimate builds per
+    /// group and the label columns a grouping carries per row. Example: a
+    /// `SummaryMerge` entry measured over 360 states per group holds its
+    /// per-group output row as a 360th of it per state; at 5 states per
+    /// group that row is under-charged.
     pub ns_per_unit: f64,
     /// CPU nanoseconds per computation of the node, whatever its units:
     /// per evaluation at query time, per second of arriving rows at
