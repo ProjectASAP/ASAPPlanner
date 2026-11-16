@@ -21,11 +21,12 @@ use asap_types::workload::DataWorkload;
 /// being `roots[i]` with accuracy target `accuracy_targets[i]` (`None`:
 /// none), every group without candidates. Each query is added with its
 /// $n_q$, the number of values one evaluation returns, which `data` bounds
-/// ([`values_per_result`]); a `Scan`'s column signs are the ones `data`
-/// declares, which the memo holds (`Memo::new`). Fails with the first node
-/// whose expression is not valid over its children's groups
-/// ([`Memo::find_or_add_group`]); the facade validates the roots first, so
-/// that is a frontend bug.
+/// ([`values_per_result`], from the memo's bound on the root group's
+/// values, `Memo::max_values_per_evaluation`); a `Scan`'s column signs are
+/// the ones `data` declares, which the memo holds (`Memo::new`). Fails
+/// with the first node whose expression is not valid over its children's
+/// groups ([`Memo::find_or_add_group`]); the facade validates the roots
+/// first, so that is a frontend bug.
 pub fn memo_of_queries(
     roots: &[QueryRoot],
     accuracy_targets: &[Option<AccuracyTarget>],
@@ -45,6 +46,10 @@ pub fn memo_of_queries(
     }
     let group = |node: &Rc<OperatorNode>| group_of_node[&Rc::as_ptr(node)];
     for (root, accuracy_target) in roots.iter().zip(accuracy_targets) {
+        let values_by_keys = match root {
+            QueryRoot::Operator(node) => memo.max_values_per_evaluation(group(node)),
+            QueryRoot::Scalar(_) => None,
+        };
         memo.add_query(MemoQuery {
             root: match root {
                 QueryRoot::Operator(node) => QueryRoot::Operator(group(node)),
@@ -56,7 +61,7 @@ pub fn memo_of_queries(
             number_of_values_per_query_evaluation: values_per_result(
                 root,
                 series_read(root, data),
-                data,
+                values_by_keys,
             ),
         });
     }

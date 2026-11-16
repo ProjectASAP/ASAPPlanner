@@ -135,20 +135,25 @@ pub fn series_read(root: &QueryRoot, data: &DataWorkload) -> Option<u64> {
     Some(rows)
 }
 
-/// How many values one evaluation of `root` returns at most (`G`): one for
-/// a scalar root and for a root of at most one row (`at_most_one_row`),
-/// provable from the query. Otherwise the smaller of two bounds, either
-/// alone when the other is unknown: `series_read` ([`series_read`]) for a
-/// PromQL instant vector, which bounds the values it can return (each
-/// branch of an `or` adds its own), and, for a grouped root of any
-/// language, the groups its keys' declared distinct values allow
-/// (`declared_group_bound`), at most `series_read`. `None` when neither
-/// applies: an ungrouped SQL result, a grouping with an undeclared key, a
-/// range vector.
+/// How many values one evaluation of `root` returns at most (`G`, $n_q$):
+/// one for a scalar root and for a root of at most one row
+/// (`at_most_one_row`), provable from the query. Otherwise the smaller of
+/// two bounds, either alone when the other is unknown ([`smaller_known`]):
+/// - `values_by_keys`, the memo's bound for the root's group
+///   (`Memo::max_values_per_evaluation`): the product, over the scans its
+///   group keys come from, of each key set's declared distinct values,
+///   clamped to the rows its grouping reads; the rule that also bounds the
+///   readout values a query reads, so `GROUP BY dst` with 300 `dst` values
+///   declared gives 300, whatever groups of rows the table declares;
+/// - for a PromQL instant vector, `series_read` ([`series_read`]), which
+///   bounds the values it can return (each branch of an `or` adds its own).
+///
+/// `None` when neither applies: an ungrouped SQL result, a grouping by an
+/// undeclared key over rows of unknown count, a range vector.
 pub fn values_per_result(
     root: &QueryRoot,
     series_read: Option<u64>,
-    data: &DataWorkload,
+    values_by_keys: Option<u64>,
 ) -> Option<u64> {
     let node = match root {
         QueryRoot::Scalar(_) => return Some(1),
@@ -158,185 +163,15 @@ pub fn values_per_result(
     let by_series = (node.result_kind == OperatorResultKind::InstantVector)
         .then_some(series_read)
         .flatten();
-    // Each group holds at least one row read, so the series read also
-    // bound the groups.
-    let by_groups = declared_group_bound(node, data)
-        .map(|groups| series_read.map_or(groups, |series| groups.min(series)));
-    by_groups.or(by_series).map(|values| values.max(1))
+    smaller_known(values_by_keys, by_series).map(|values| values.max(1))
 }
 
-/// An upper bound on the groups `node` returns, from the distinct values
-/// the sources it reads declare for its group keys
-/// (`SourceFacts::distinct_values_per_label` and
-/// `distinct_values_per_label_set`): the smallest product of declared counts
-/// covering the keys ([`declared_distinct_combinations`]). The grouping is
-/// found below operators that only keep, drop or reorder rows, and through
-/// a summary's estimate (not a top-k, which returns several rows per
-/// group), merge and finalization. `None` when no such grouping is found,
-/// it is a `without (...)`, or a key is not a source column passed through
-/// unchanged covered by declared counts: the declared counts are upper
-/// bounds, never defaults.
-fn declared_group_bound(node: &OperatorNode, data: &DataWorkload) -> Option<u64> {
-    let grouped = |reduction: &Reduction, input: &OperatorNode| -> Option<u64> {
-        let Reduction::Reduce(keys) = reduction else {
-            return None;
-        };
-        if keys.is_without() {
-            return None;
-        }
-        declared_distinct_combinations(input, keys.keys(), data)
-    };
-    match &node.operator {
-        Operator::NonASAP(NonASAPOp::Aggregate {
-            reduction,
-            measures,
-            child,
-            ..
-        }) if !measures
-            .iter()
-            .any(|m| matches!(m, AggIntent::TopK { .. } | AggIntent::CountValues { .. })) =>
-        {
-            grouped(reduction, child)
-        }
-        Operator::ASAP(
-            ASAPOp::SummaryAgg {
-                reduction, child, ..
-            }
-            | ASAPOp::SummaryTumblingWindowChain {
-                reduction, child, ..
-            },
-        ) => grouped(reduction, child),
-        // A merge's children are states of one definition: its first
-        // build's grouping stands for all of them.
-        Operator::ASAP(ASAPOp::SummaryMerge {
-            children,
-            group_by: None,
-            ..
-        }) => match children.first().and_then(|first| first.summary_build()) {
-            Some(
-                ASAPOp::SummaryAgg {
-                    reduction, child, ..
-                }
-                | ASAPOp::SummaryTumblingWindowChain {
-                    reduction, child, ..
-                },
-            ) => grouped(&reduction, &child),
-            _ => None,
-        },
-        Operator::ASAP(ASAPOp::SummaryEstimate {
-            summary_input,
-            query,
-        }) if !matches!(query, SketchStatistic::TopK { .. }) => {
-            declared_group_bound(summary_input, data)
-        }
-        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child })
-        | Operator::NonASAP(
-            NonASAPOp::Project { child, .. }
-            | NonASAPOp::Filter { child, .. }
-            | NonASAPOp::Sort { child, .. }
-            | NonASAPOp::Limit { child, .. }
-            | NonASAPOp::Dedup { child, .. },
-        ) => declared_group_bound(child, data),
-        _ => None,
-    }
-}
-
-/// The distinct combinations of values columns `columns` of `node` take
-/// together at most, when each is a source column passed through
-/// unchanged: traced down through operators that keep their input's
-/// columns (filter, sort, limit, time range and shift), a projection that
-/// selects them, a grouped aggregate's keys, a per-series reduction's other
-/// columns, and each branch of a union (whose combinations add), to the
-/// scans, where the source's declared label and label-set counts bound them
-/// ([`SourceFacts::declared_distinct_combinations`]). A join is not traced:
-/// it can pair values of different rows. `None` when a column is computed
-/// or relabeled on the way (its values are no longer the source's), or a
-/// source's declared counts do not cover the columns.
-///
-/// [`SourceFacts::declared_distinct_combinations`]: super::SourceFacts::declared_distinct_combinations
-fn declared_distinct_combinations(
-    node: &OperatorNode,
-    columns: &[usize],
-    data: &DataWorkload,
-) -> Option<u64> {
-    match node.non_asap()? {
-        NonASAPOp::Scan { source, .. } => {
-            let labels = columns
-                .iter()
-                .map(|&column| Some(node.schema.fields.get(column)?.name.as_str()))
-                .collect::<Option<Vec<_>>>()?;
-            data.sources
-                .get(source_name(source))?
-                .declared_distinct_combinations(&labels)
-        }
-        NonASAPOp::Filter { child, .. }
-        | NonASAPOp::Sort { child, .. }
-        | NonASAPOp::Limit { child, .. }
-        | NonASAPOp::TimeRange { child, .. }
-        | NonASAPOp::TimeShift { child, .. } => {
-            declared_distinct_combinations(child, columns, data)
-        }
-        // A grouped aggregate returns its keys first, unchanged; but a
-        // `count_values` label named like a key takes that key's place
-        // with the stringified sample values.
-        NonASAPOp::Aggregate {
-            reduction: Reduction::Reduce(keys),
-            measures,
-            child,
-            ..
-        } if !keys.is_without()
-            && !measures
-                .iter()
-                .any(|m| matches!(m, AggIntent::CountValues { .. })) =>
-        {
-            let inputs = columns
-                .iter()
-                .map(|&column| keys.keys().get(column).copied())
-                .collect::<Option<Vec<_>>>()?;
-            declared_distinct_combinations(child, &inputs, data)
-        }
-        // A per-series reduction keeps every column but the one it reduces.
-        NonASAPOp::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures,
-            child,
-            ..
-        } => {
-            let reduced = match measures.first()?.input_cols().first() {
-                Some(&input) => input,
-                None => crate::ir::scalar::column_resolution::resolve_column_ref(
-                    &crate::ir::scalar::ColumnRef::SampleValue,
-                    &child.schema,
-                )
-                .ok()?,
-            };
-            (!columns.contains(&reduced))
-                .then(|| declared_distinct_combinations(child, columns, data))
-                .flatten()
-        }
-        NonASAPOp::Project { cols, child, .. } => {
-            let inputs = columns
-                .iter()
-                .map(|&column| match cols.get(column)?.expr {
-                    ScalarExpr::Column(input) => Some(input),
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()?;
-            declared_distinct_combinations(child, &inputs, data)
-        }
-        NonASAPOp::SetOp {
-            kind: RelationalSetOpKind::Union,
-            left,
-            right,
-            ..
-        } => Some(
-            declared_distinct_combinations(left, columns, data)?
-                .saturating_add(declared_distinct_combinations(right, columns, data)?),
-        ),
-        NonASAPOp::Concat { children, .. } => children.iter().try_fold(0u64, |total, child| {
-            Some(total.saturating_add(declared_distinct_combinations(child, columns, data)?))
-        }),
-        _ => None,
+/// The smaller of two upper bounds, either alone when the other is
+/// unknown: `(Some(300), Some(96))` gives 96, `(None, Some(96))` 96.
+pub(crate) fn smaller_known(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 
