@@ -20,6 +20,7 @@ use planner_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload,
 };
+use planner_types::plan::time_window::{InputRows, TimeIndexedPlan};
 use planner_types::plan::TimeWindow;
 use planner_types::summary_type::{
     SketchParams, SketchStatistic, SummaryInputExpr, SummaryTypeCapability,
@@ -513,14 +514,17 @@ fn compile_internal(
                 }
                 continue;
             }
-            // A chain builds, in an ingestion run, the window of its input
-            // ending at the run's end: one row per key, stamped with that
-            // `window_end`. Older windows are earlier runs', in the store.
-            // Built at query time, it builds at each evaluation `T` every
-            // window `(T - (k+1)c, T - kc]` its readers read, in one pass:
-            // each row is grouped with its key by the end of its window,
-            // and each state is stamped with that end, as the stored
-            // windows are, for the `TimeRange`s above it to select.
+            // A chain refreshed in an ingestion run builds the window of
+            // its input ending at the run's end: one row per key, stamped
+            // with that `window_end`. Older windows are earlier runs', in
+            // the store. Built for its readers instead (at query time, or
+            // an unbound view: it then reads what its readers read,
+            // [`CompileGraph::input_time_access`]), it
+            // builds at each evaluation `T` every window
+            // `(T - (k+1)c, T - kc]` its readers read, in one pass: each
+            // row is grouped with its key by the end of its window, and
+            // each state is stamped with that end, as the stored windows
+            // are, for the `TimeRange`s above it to select.
             if let Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 summary_type,
                 input: update,
@@ -530,9 +534,9 @@ fn compile_internal(
                 ..
             }) = &node.payload
             {
-                let query_time = node.output_state.timing
-                    == planner_types::ir::properties::ExecutionTiming::QueryTime;
-                if !query_time {
+                if node.output_state.timing
+                    == planner_types::ir::properties::ExecutionTiming::IngestionTime
+                {
                     crate::capability::validate_ingestion_time_summary(filter.as_ref())
                         .map_err(Error::Invalid)?;
                 }
@@ -559,42 +563,79 @@ fn compile_internal(
                     })) => Some(named_column(input, &ColumnRef::SampleValue)?),
                     _ => None,
                 };
-                let window = if query_time {
-                    // The windows its readers read, whole tumbling windows.
-                    let read = window_read_above(id, &graph).ok_or_else(|| {
-                        invalid(format!(
-                            "node {id}: a query-time tumbling-window chain is read \
-                                 outside the time ranges above it"
-                        ))
-                    })?;
-                    let millis = |ms: u64| {
-                        i64::try_from(ms).map_err(|_| invalid("a chain's read overflows Int64"))
-                    };
-                    let (end_offset_ms, read_width_ms) = (
-                        millis(read.ends_before_evaluation_ms)?,
-                        millis(read.length_ms)?,
-                    );
-                    if end_offset_ms % width_ms != 0 || read_width_ms % width_ms != 0 {
-                        return Err(invalid(format!(
-                            "node {id}: a window ({end_offset_ms} ms back, {read_width_ms} ms \
-                             wide) is not whole tumbling windows of {width_ms} ms"
-                        )));
-                    }
-                    Operator::time_range(
-                        input.clone(),
-                        time,
-                        end_offset_ms,
-                        read_width_ms,
-                        sample_value,
-                        None,
-                    )?
-                    .with_tumbling_window_ends(width_ms)?
-                } else {
-                    Operator::time_range(input.clone(), time, 0, width_ms, sample_value, None)?
+                let millis = |ms: u64| {
+                    i64::try_from(ms).map_err(|_| invalid("a chain's read overflows Int64"))
                 };
-                // At query time each key's rows group by their window end
-                // too.
-                let window_end = query_time.then_some(time);
+                let (window, built_for_readers) = match graph.input_time_access(id).reads {
+                    // Refreshed: its newest window, `(T - length_ms, T]`.
+                    InputRows::LastWindow { length_ms } => (
+                        Operator::time_range(
+                            input.clone(),
+                            time,
+                            0,
+                            millis(length_ms)?,
+                            sample_value,
+                            None,
+                        )?,
+                        false,
+                    ),
+                    // The windows its readers read, whole tumbling windows.
+                    _ => {
+                        let read = window_read_above(id, &graph).ok_or_else(|| {
+                            invalid(format!(
+                                "node {id}: a tumbling-window chain built for its readers is \
+                                 read outside the time ranges above it"
+                            ))
+                        })?;
+                        let (end_offset_ms, read_width_ms) = (
+                            millis(read.ends_before_evaluation_ms)?,
+                            millis(read.length_ms)?,
+                        );
+                        if end_offset_ms % width_ms != 0 || read_width_ms % width_ms != 0 {
+                            return Err(invalid(format!(
+                                "node {id}: a window ({end_offset_ms} ms back, {read_width_ms} ms \
+                                 wide) is not whole tumbling windows of {width_ms} ms"
+                            )));
+                        }
+                        (
+                            Operator::time_range(
+                                input.clone(),
+                                time,
+                                end_offset_ms,
+                                read_width_ms,
+                                sample_value,
+                                None,
+                            )?
+                            .with_tumbling_window_ends(width_ms)?,
+                            true,
+                        )
+                    }
+                };
+                // The rows the build reads: built for its readers, each
+                // followed by its tumbling window's end, which groups each
+                // key's rows by window too; the sample time stays the
+                // update's time (a counter's rate needs it).
+                let windowed = window.schema();
+                // The window end's column in `schema`, when built for its
+                // readers.
+                let window_end_in = |schema: &SchemaRef| {
+                    built_for_readers
+                        .then(|| {
+                            schema
+                                .fields
+                                .iter()
+                                .position(|field| {
+                                    field.name == crate::operators::TUMBLING_WINDOW_END_COLUMN
+                                })
+                                .ok_or_else(|| {
+                                    invalid(
+                                        "a chain built for its readers has no window-end column",
+                                    )
+                                })
+                        })
+                        .transpose()
+                };
+                let window_end = window_end_in(&windowed)?;
                 let build = match reduction {
                     PlannerReduction::PerEntity => {
                         let SummaryInputExpr::Column(value) = &update.weight else {
@@ -602,14 +643,12 @@ fn compile_internal(
                                 "per-entity update requires a projected value column",
                             ));
                         };
-                        let value = named_column(input, value)?;
-                        let groups = (0..input.fields.len())
-                            .filter(|&column| {
-                                column != value && (column != time || window_end.is_some())
-                            })
+                        let value = named_column(&windowed, value)?;
+                        let groups = (0..windowed.fields.len())
+                            .filter(|&column| column != value && column != time)
                             .collect();
                         Operator::per_group_summary_build(
-                            input.clone(),
+                            windowed.clone(),
                             summary_type.clone(),
                             node.parameters.clone(),
                             value,
@@ -618,7 +657,7 @@ fn compile_internal(
                         )?
                     }
                     _ => summary_agg_build(
-                        input,
+                        &windowed,
                         summary_type,
                         node.parameters.as_ref(),
                         update,
@@ -627,20 +666,12 @@ fn compile_internal(
                     )?,
                 };
                 let build = match filter {
-                    Some(filter) => build.with_row_filter(expression(&filter.0, input)?)?,
+                    Some(filter) => build.with_row_filter(expression(&filter.0, &windowed)?)?,
                     None => build,
                 };
                 let compact = build.schema();
                 // The window end's column among the build's output columns.
-                let window_end = window_end
-                    .map(|time| {
-                        compact
-                            .fields
-                            .iter()
-                            .position(|field| field.name == input.fields[time].name)
-                            .ok_or_else(|| invalid("a chain's build drops its window end"))
-                    })
-                    .transpose()?;
+                let window_end = window_end_in(&compact)?;
                 physical_dag.add(auxiliary, inputs, window)?;
                 physical_dag.add(helper_id(id, 1)?, vec![auxiliary], build)?;
                 physical_dag.add(

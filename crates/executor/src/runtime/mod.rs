@@ -103,10 +103,12 @@ enum NodeRun {
     /// than one consumer: run to the end once before any consumer reads it,
     /// then read by each consumer, as the planner charges one run whose
     /// output is held. Likewise a computed `AcrossEvaluations` node with
-    /// more than one consumer, which only a hand-built DAG has at query time
-    /// (a compiled plan reads it through its view slot). Example: a
-    /// `OneEvaluation` scan read by three queries is one store read whose
-    /// batches every query reads.
+    /// more than one consumer: an unbound view, which a compile with its
+    /// view slot not bound computes for its readers in the query run, or a
+    /// node of a hand-built DAG. Example: a `OneEvaluation` scan read by
+    /// three queries is one store read whose batches every query reads; a
+    /// stored chain no view slot binds, read by two queries, is built once
+    /// and read by both.
     Held,
     /// Every other node: one run whose batches reach each consumer as they
     /// come. At query time it has one consumer (a computed `None` node with
