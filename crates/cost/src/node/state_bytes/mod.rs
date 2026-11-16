@@ -134,6 +134,41 @@ pub struct StateInputRows {
 }
 
 impl StateInputRows {
+    /// What one state folds when each group merges, from every input, that
+    /// input's states (`Some((rows each folds, states per group))`): their
+    /// rows summed, non-negative when all are, within the magnitude range
+    /// spanning all of theirs. `None` when any input's is unknown. Example:
+    /// 360 states of 10 rows and 60 of 100 merge into one of 9,600 rows.
+    pub(crate) fn merged(inputs: impl IntoIterator<Item = Option<(Self, u64)>>) -> Option<Self> {
+        let mut merged: Option<Self> = None;
+        for (rows, states) in inputs.into_iter().collect::<Option<Vec<_>>>()? {
+            let input = Self {
+                rows_per_state: rows
+                    .rows_per_state
+                    .map(|per_state| per_state.saturating_mul(states)),
+                ..rows
+            };
+            merged = Some(match merged {
+                None => input,
+                Some(sum) => Self {
+                    rows_per_state: sum
+                        .rows_per_state
+                        .zip(input.rows_per_state)
+                        .map(|(a, b)| a.saturating_add(b)),
+                    non_negative: sum.non_negative && input.non_negative,
+                    value_magnitude_range: sum
+                        .value_magnitude_range
+                        .zip(input.value_magnitude_range)
+                        .map(|(a, b)| ValueMagnitudeRange {
+                            min_abs: a.min_abs.min(b.min_abs),
+                            max_abs: a.max_abs.max(b.max_abs),
+                        }),
+                },
+            });
+        }
+        merged
+    }
+
     /// Unknown rows of unknown sign: the most a state is assumed to hold.
     pub const UNKNOWN: Self = Self {
         rows_per_state: None,
@@ -319,17 +354,20 @@ fn exponential_values_magnitude_ratio(rows: u64) -> f64 {
 /// counter per bucket its values span beyond the first.
 ///
 /// The span is that of the values the state folds, not of the column: the
-/// magnitude ratio its rows are assumed to span
-/// ([`exponential_values_magnitude_ratio`]), at most that of
-/// `DDSKETCH_ASSUMED_MAGNITUDE_RANGE` (also the span when the rows are
-/// unknown); a declared `column_magnitudes` range is not read yet. The library's worst case over every order of
+/// smallest of the magnitude ratio its rows are assumed to span
+/// ([`exponential_values_magnitude_ratio`]), the ratio of its column's
+/// declared `column_magnitudes` (`input_rows.value_magnitude_range`) and
+/// that of `DDSKETCH_ASSUMED_MAGNITUDE_RANGE`; without known rows, the
+/// smaller of the last two. The library's worst case over every order of
 /// inserts and merges (`estimated_memory_bytes`) is about twice the span
 /// over the whole range, which is not what a state holds on average.
 ///
 /// Example: at α = 0.01, 10 exponential samples span a ratio of 52, 198
 /// buckets: 144 + 1,024 + 8 × 197 = 2,744 bytes, where `asap_sketchlib`
 /// holds 2,910 on average; 3,000 samples span 538 buckets, 5,464 bytes
-/// against 5,769 held. The library's bound for either is 18,752.
+/// against 5,769 held. The library's bound for either is 18,752. A gauge
+/// declared within [90, 110] spans a ratio of 1.22, 11 buckets: 1,248
+/// bytes for any number of rows.
 fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
     use asap_sketchlib::DdSketch;
     let struct_bytes = std::mem::size_of::<DdSketch>() as u64;
@@ -355,8 +393,12 @@ fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
     let rows_per_store = input_rows
         .rows_per_state
         .map(|rows| rows.div_ceil(stores).max(1));
-    let column_ratio =
-        DDSKETCH_ASSUMED_MAGNITUDE_RANGE.max_abs / DDSKETCH_ASSUMED_MAGNITUDE_RANGE.min_abs;
+    // The most the column's values span: its declared range, at most the
+    // assumed one.
+    let column_ratio = input_rows
+        .value_magnitude_range
+        .map_or(f64::INFINITY, |range| range.magnitude_ratio())
+        .min(DDSKETCH_ASSUMED_MAGNITUDE_RANGE.magnitude_ratio());
     let span = buckets_spanned(rows_per_store.map_or(column_ratio, |rows| {
         exponential_values_magnitude_ratio(rows).min(column_ratio)
     }));
