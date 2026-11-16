@@ -147,6 +147,7 @@ fn grouped_sort_limit_across_batches() {
                 nulls_first: false,
             }],
             vec![0],
+            None,
         )
         .unwrap(),
     )
@@ -1073,6 +1074,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
                 nulls_first: false,
             }],
             vec![0],
+            None,
         )
         .unwrap(),
     )

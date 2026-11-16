@@ -138,6 +138,10 @@ enum Kind {
     Sort {
         keys: Vec<SortKey>,
         groups: Vec<usize>,
+        /// Keep only the first `fetch` rows of each group, in sort order
+        /// (`topk by (job) (3, m)` gives `Some(3)`); `None` sorts every row.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fetch: Option<u64>,
     },
     Window {
         intent: Box<planner_types::ir::operator::AggIntent<ColumnRef>>,

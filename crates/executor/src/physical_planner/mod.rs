@@ -82,12 +82,22 @@ thread_local! {
 /// Planner ID range, so every boundary choice yields a sub-DAG of the same
 /// lowering and candidate cuts need not renumber operators. A node lowering to
 /// several helpers takes consecutive indices below its base.
+///
+/// Lowerings number their helpers from 0 up (`helper_id(id, 0)`, then 1,
+/// 2, ...), except the projection a `without` grouping adds before the
+/// node's own lowering ([`resolve_without`]): it takes the last index,
+/// [`WITHOUT_PROJECTION_HELPER`], so no lowering's helpers reach it.
 fn helper_id(node: NodeId, index: u64) -> Result<NodeId, Error> {
     if index >= 1 << 16 {
         return Err(invalid(format!("node {node} needs more than 2^16 helpers")));
     }
     Ok(u64::MAX - (node << 16) - index)
 }
+
+/// The helper index of a `without` grouping's projection: the last one, so
+/// it never collides with the helpers the node's own lowering numbers from
+/// 0.
+const WITHOUT_PROJECTION_HELPER: u64 = (1 << 16) - 1;
 
 fn compile_internal(
     dag: &PhysicalASAPDAG,
@@ -255,6 +265,69 @@ fn compile_internal(
                 inputs = vec![auxiliary];
                 schemas.truncate(1);
             }
+            // A `without` grouping groups by the columns it keeps, after
+            // removing the excluded labels from a series identity.
+            let resolved;
+            let node = match resolve_without(node, &schemas)
+                .map_err(|error| invalid(format!("node {id}: {error}")))?
+            {
+                Some((rewritten, projection)) => {
+                    if let Some(projection) = projection {
+                        let helper = helper_id(id, WITHOUT_PROJECTION_HELPER)?;
+                        schemas = vec![projection.schema()];
+                        physical_dag.add(helper, inputs, projection)?;
+                        inputs = vec![helper];
+                    }
+                    resolved = rewritten;
+                    &resolved
+                }
+                None => node,
+            };
+            // An exact top-k or `count_values` lowers to a helper operator
+            // (none for a `count_values` whose label `without` removes) and
+            // the node's own.
+            if let Payload::NonASAP(NonASAPOp::Aggregate {
+                reduction: PlannerReduction::Reduce(keys),
+                measures,
+                filters,
+                having: None,
+                ..
+            }) = &node.payload
+            {
+                if let [measure @ (AggIntent::TopK { .. } | AggIntent::CountValues { .. })] =
+                    measures.as_slice()
+                {
+                    let [input] = schemas.as_slice() else {
+                        return Err(invalid(format!("node {id}: an aggregate reads one input")));
+                    };
+                    if filters.iter().any(Option::is_some) {
+                        return Err(invalid(format!(
+                            "node {id}: a filtered top-k or count_values"
+                        )));
+                    }
+                    let (helper_operator, operator) = match measure {
+                        AggIntent::TopK { k, .. } => {
+                            let Some(NonASAPOp::Aggregate { child, .. }) = restored[&id].non_asap()
+                            else {
+                                unreachable!("an aggregate restores as an aggregate")
+                            };
+                            lower_exact_topk(child, keys, *k as u64, input, &output)
+                        }
+                        AggIntent::CountValues { label } => {
+                            lower_count_values(keys, label, input, &output)
+                        }
+                        _ => unreachable!("matched a top-k or count_values"),
+                    }
+                    .map_err(|error| invalid(format!("node {id}: {error}")))?;
+                    if let Some(helper_operator) = helper_operator {
+                        let helper = helper_id(id, 0)?;
+                        physical_dag.add(helper, inputs, helper_operator)?;
+                        inputs = vec![helper];
+                    }
+                    physical_dag.add(id, inputs, operator)?;
+                    continue;
+                }
+            }
             if let Payload::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &node.payload {
                 use planner_types::ir::operator::maintained_population::PopulationInput;
                 let PopulationInput::CurrentSeries(spec) = &population.input else {
@@ -331,22 +404,9 @@ fn compile_internal(
                     .collect::<Result<Vec<_>, _>>()?;
                 let value = named_column(&input, &ColumnRef::SampleValue)?;
                 physical_dag.add(
-                    auxiliary,
-                    inputs,
-                    Operator::sort(
-                        input.clone(),
-                        vec![SortKey {
-                            column: value,
-                            descending: true,
-                            nulls_first: false,
-                        }],
-                        groups.clone(),
-                    )?,
-                )?;
-                physical_dag.add(
                     id,
-                    vec![auxiliary],
-                    Operator::limit(input, *k as u64, 0, groups)?.with_output_schema(output)?,
+                    inputs,
+                    top_k_sort(&input, value, groups, *k as u64)?.with_output_schema(output)?,
                 )?;
                 continue;
             }
@@ -869,7 +929,10 @@ pub(crate) fn require_sound_merge(input: &SchemaRef) -> Result<(), Error> {
 }
 
 /// Bind a Planner node against the schemas supplied by its deployment edges.
-/// This is the same checked path used by complete DAG binding.
+/// This is the same checked path used by complete DAG binding for a node
+/// that lowers to one operator. A node that lowers to several (an exact
+/// top-k, `count_values`, or a `without` grouping over a series identity)
+/// is lowered only by [`compile`]; here it is refused.
 pub fn compile_node(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Operator, Error> {
     for schema in inputs {
         crate::values::validate_schema(schema)?;
@@ -1052,6 +1115,7 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                     })
                     .collect::<Result<_, Error>>()?,
                 groups(input, partition_by)?,
+                None,
             ),
             NonASAPOp::Limit {
                 n,
@@ -1136,6 +1200,19 @@ fn bind_operation(node: &PhysicalASAPDAGNode, inputs: &[SchemaRef]) -> Result<Op
                             AggIntent::Avg { col } => Reduction::Avg(column(*col)?),
                             AggIntent::Min { col } => Reduction::Min(column(*col)?),
                             AggIntent::Max { col } => Reduction::Max(column(*col)?),
+                            AggIntent::StdDev { col, population } => Reduction::StdDev {
+                                column: column(*col)?,
+                                population: *population,
+                            },
+                            AggIntent::Variance { col, population } => Reduction::Variance {
+                                column: column(*col)?,
+                                population: *population,
+                            },
+                            AggIntent::PearsonCorr { left, right } => Reduction::PearsonCorr {
+                                left: *left,
+                                right: *right,
+                            },
+                            AggIntent::Group => Reduction::Group,
                             // PromQL `quantile by (G) (φ, v)` exactly: the
                             // group's values, interpolated as Prometheus does
                             // (NaN first). A filtered one has no kernel: the IR
@@ -1410,38 +1487,245 @@ fn summary_column(input: &SchemaRef) -> Result<usize, Error> {
         _ => Err(invalid("one summary state column required")),
     }
 }
+/// The column of `input` that `column` names, resolved as the planner
+/// resolves it (`resolve_column_ref`): a name must be unique, and the
+/// sample value is the `value` column or, after an aggregate renamed it, the
+/// one numeric column. An outer `sum by (job)` over `sum without (instance)
+/// (m)` updates on `sum` of `[job, $promql_series_identity, sum]`.
 fn named_column(input: &SchemaRef, column: &ColumnRef) -> Result<usize, Error> {
-    let name = match column {
-        // This summary-update lookup matches column names without qualifiers.
-        // Reject ambiguous names rather than guessing a join side.
-        ColumnRef::Named(name) | ColumnRef::Qualified { name, .. } => name.as_str(),
-        ColumnRef::SampleValue => "value",
-        _ => {
-            return Err(invalid(
-                "summary update requires an unambiguous bound column",
-            ))
+    planner_types::ir::scalar::resolve_column_ref(column, input)
+        .map_err(|error| invalid(format!("summary update column: {error}")))
+}
+/// The `Sort` an exact top-k lowers to: the first `k` rows of each
+/// `partitions` group by the column `value`, largest first, NULL and NaN
+/// last. `topk by (job) (2, m)` keeps each job's two largest samples.
+fn top_k_sort(
+    input: &SchemaRef,
+    value: usize,
+    partitions: Vec<usize>,
+    k: u64,
+) -> Result<Operator, Error> {
+    Operator::sort(
+        input.clone(),
+        vec![SortKey {
+            column: value,
+            descending: true,
+            nulls_first: false,
+        }],
+        partitions,
+        Some(k),
+    )
+}
+
+/// An exact top-k `Aggregate{Reduce(keys), [TopK{k}]}` over `child` (PromQL
+/// `topk`, SQL's heavy hitter) reading `input`, lowered: the first `k` rows
+/// of its input per `keys` partition by the ranked value ([`top_k_sort`]),
+/// then a projection of its ranked rows' columns. `topk(2, sum by (job)
+/// (x))` over job sums `a=7, b=10, c=3` answers `b=10` and `a=7`.
+fn lower_exact_topk(
+    child: &std::rc::Rc<OperatorNode>,
+    keys: &GroupKeys,
+    k: u64,
+    input: &SchemaRef,
+    output: &SchemaRef,
+) -> Result<(Option<Operator>, Operator), Error> {
+    let ranked = |error: String| invalid(format!("top-k: {error}"));
+    let value = planner_types::ir::schema::topk::ranked_column(child)
+        .map_err(|error| ranked(error.to_string()))?;
+    let columns = planner_types::ir::schema::topk::ranked_row_projection(
+        child,
+        &PlannerReduction::Reduce(keys.clone()),
+        &output.fields[keys.len()].name,
+    )
+    .map_err(|error| ranked(error.to_string()))?
+    .into_iter()
+    .map(|item| match item.expr {
+        ScalarExpr::Column(column) => {
+            Ok((item.alias.unwrap_or_default(), Expression::Column(column)))
         }
+        _ => Err(ranked("a ranked row projects columns".into())),
+    })
+    .collect::<Result<_, _>>()?;
+    Ok((
+        Some(top_k_sort(input, value, groups(input, keys)?, k)?),
+        Operator::project(input.clone(), columns)?.with_output_schema(output.clone())?,
+    ))
+}
+
+/// PromQL `count_values("l", v)` as `Aggregate{Reduce(keys),
+/// [CountValues{l}]}` reading `input`, lowered: a projection adding the
+/// value as text in the label `l` ([`Expression::FloatText`]), then a count
+/// per group and value text. `l` replaces a grouping label of that name:
+/// `count_values by (job) ("job", v)` over `{job=a} 2` and `{job=b} 2`
+/// answers `{job="2"} 2`. A `without` grouping that excludes `l` removes it
+/// again (the IR's `output` has no `l`), so the count is per group only:
+/// `count_values("zone", v) without (instance, zone)` adds no projection.
+fn lower_count_values(
+    keys: &GroupKeys,
+    label: &str,
+    input: &SchemaRef,
+    output: &SchemaRef,
+) -> Result<(Option<Operator>, Operator), Error> {
+    let (project, partitions) = if output.fields.iter().any(|field| field.name == label) {
+        let value = named_column(input, &ColumnRef::SampleValue)?;
+        let mut columns: Vec<_> = input
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(i, field)| (field.name.clone(), Expression::Column(i)))
+            .collect();
+        columns.push((label.to_string(), Expression::FloatText(value)));
+        let text = input.fields.len();
+        let mut partitions = groups(input, keys)?;
+        match partitions
+            .iter()
+            .position(|&key| input.fields[key].name == label)
+        {
+            Some(key) => partitions[key] = text,
+            None => partitions.push(text),
+        }
+        (Some(Operator::project(input.clone(), columns)?), partitions)
+    } else {
+        (None, groups(input, keys)?)
     };
-    let matches = input
-        .fields
-        .iter()
-        .enumerate()
-        .filter(|(_, field)| field.name == name)
-        .map(|(i, _)| i)
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [column] => Ok(*column),
-        _ => Err(invalid("summary update column missing or ambiguous")),
+    let counted = project
+        .as_ref()
+        .map_or_else(|| input.clone(), Operator::schema);
+    let aggregate =
+        Operator::aggregate(counted, partitions, vec![(String::new(), Reduction::Count)])?
+            .with_output_schema(output.clone())?;
+    Ok((project, aggregate))
+}
+
+/// `node` with its `without` grouping (PromQL `sum without (instance) (m)`)
+/// over `inputs` resolved to the columns it keeps
+/// ([`without_kept_columns`](planner_types::ir::schema::aggregate_schema::without_kept_columns)),
+/// as a `by` grouping; `None` for a node without one. A kept series
+/// identity, or label map, keeps every label but the excluded ones and
+/// `__name__`: the returned projection rewrites it in place first, for an
+/// aggregation (an `Aggregate` or a `SummaryAgg`), whose output keeps that
+/// label set. A ranking (a top-k, `Sort` or `Limit`) keeps each row's
+/// labels, so it is refused one.
+fn resolve_without(
+    node: &PhysicalASAPDAGNode,
+    inputs: &[SchemaRef],
+) -> Result<Option<(PhysicalASAPDAGNode, Option<Operator>)>, Error> {
+    let (keys, output_has_one_label_set_per_group) = match &node.payload {
+        // `histogram_quantile` reads its `without([le])` grouping itself.
+        Payload::NonASAP(NonASAPOp::Aggregate { measures, .. })
+            if matches!(measures.as_slice(), [AggIntent::HistogramQuantile { .. }]) =>
+        {
+            return Ok(None)
+        }
+        Payload::NonASAP(NonASAPOp::Aggregate {
+            reduction: PlannerReduction::Reduce(keys),
+            measures,
+            ..
+        }) => {
+            let ranking = matches!(measures.as_slice(), [AggIntent::TopK { .. }]);
+            (keys, !ranking)
+        }
+        Payload::ASAP(ASAPOp::SummaryAgg {
+            reduction: PlannerReduction::Reduce(keys),
+            ..
+        }) => (keys, true),
+        Payload::NonASAP(
+            NonASAPOp::Sort { partition_by, .. } | NonASAPOp::Limit { partition_by, .. },
+        ) => (partition_by, false),
+        _ => return Ok(None),
+    };
+    if !keys.is_without() {
+        return Ok(None);
     }
+    let [input] = inputs else {
+        return Err(invalid("a without grouping reads one input"));
+    };
+    check_grouping_columns(input, keys.keys())?;
+    let excluded: Vec<String> = keys
+        .keys()
+        .iter()
+        .map(|&i| input.fields[i].name.clone())
+        .collect();
+    // `count_values("zone", v)`'s label replaces a kept label `zone`, as
+    // Prometheus overwrites it before grouping: the kept label set drops it
+    // too, so `{job=b, zone=z}` and `{job=b}` with the value 2 are one group
+    // `{job=b, zone="2"}`. Whether the label itself is output (not when the
+    // grouping removes it: an excluded label or `__name__`) is the IR's
+    // `output`, which `lower_count_values` reads; removing such a label
+    // twice here changes nothing.
+    let replaced = match &node.payload {
+        Payload::NonASAP(NonASAPOp::Aggregate { measures, .. }) => match measures.as_slice() {
+            [AggIntent::CountValues { label }] => Some(label.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let removed: Vec<String> = excluded.iter().cloned().chain(replaced).collect();
+    let kept =
+        planner_types::ir::schema::aggregate_schema::without_kept_columns(input, keys.keys());
+    let mut rewrites = false;
+    let columns = (0..input.fields.len())
+        .map(|i| {
+            let field = &input.fields[i];
+            let expression =
+                if !kept.contains(&i) || !planner_types::ir::schema::is_label_set_column(field) {
+                    Expression::Column(i)
+                } else if field.name == promql_rows::SERIES_IDENTITY_COLUMN {
+                    rewrites = true;
+                    Expression::LabelIdentity {
+                        column: i,
+                        excluding: removed
+                            .iter()
+                            .cloned()
+                            .chain(["__name__".to_string()])
+                            .collect(),
+                    }
+                } else {
+                    rewrites = true;
+                    Expression::LabelSet {
+                        column: i,
+                        labels: removed.clone(),
+                        without: true,
+                    }
+                };
+            (field.name.clone(), expression)
+        })
+        .collect();
+    if rewrites && !output_has_one_label_set_per_group {
+        return Err(invalid(
+            "a without partition over series identity needs each row's labels kept",
+        ));
+    }
+    let mut node = node.clone();
+    let kept = GroupKeys::by(kept);
+    match &mut node.payload {
+        Payload::NonASAP(NonASAPOp::Aggregate { reduction, .. })
+        | Payload::ASAP(ASAPOp::SummaryAgg { reduction, .. }) => {
+            *reduction = PlannerReduction::Reduce(kept)
+        }
+        Payload::NonASAP(
+            NonASAPOp::Sort { partition_by, .. } | NonASAPOp::Limit { partition_by, .. },
+        ) => *partition_by = kept,
+        _ => unreachable!("matched above"),
+    }
+    let projection = rewrites
+        .then(|| Operator::project(input.clone(), columns))
+        .transpose()?;
+    Ok(Some((node, projection)))
 }
 fn groups(input: &SchemaRef, groups: &GroupKeys) -> Result<Vec<usize>, Error> {
     if groups.is_without() {
         return Err(invalid("grouping without requires resolved label columns"));
     }
-    if groups.keys().iter().any(|&i| i >= input.fields.len()) {
+    check_grouping_columns(input, groups.keys())?;
+    Ok(groups.keys().to_vec())
+}
+/// An error unless every column of `columns` is a column of `input`.
+fn check_grouping_columns(input: &SchemaRef, columns: &[usize]) -> Result<(), Error> {
+    if columns.iter().any(|&i| i >= input.fields.len()) {
         return Err(invalid("grouping column out of range"));
     }
-    Ok(groups.keys().to_vec())
+    Ok(())
 }
 fn expression(
     expr: &ScalarExpr<PhysicalASAPNodeId>,

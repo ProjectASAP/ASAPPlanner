@@ -123,9 +123,9 @@ pub(super) fn measure_output(
             // so its value is the sample-value column; a per-series count is
             // Float64.
             let (sum, count) = match measure.reduction {
-                Reduction::Reduce(by) => (
-                    last_as_float64(memo, pending, by.len(), sum)?,
-                    last_as_float64(memo, pending, by.len(), count)?,
+                Reduction::Reduce(_) => (
+                    last_as_float64(memo, pending, sum)?,
+                    last_as_float64(memo, pending, count)?,
                 ),
                 Reduction::PerEntity => {
                     let sum_schema = pending.schema(memo, sum);
@@ -356,24 +356,22 @@ fn ranked_as_topk(
     }))
 }
 
-/// `group` (a memo group or pending), a grouped aggregate's `keys` group
-/// keys and then its value, with the value cast to Float64 unless it
-/// already is one (a pending `Project` over it).
+/// `group` (a memo group or pending), a grouped aggregate's label columns
+/// and then its value, with the value cast to Float64 unless it already is
+/// one (a pending `Project` over it).
 fn last_as_float64(
     memo: &Memo,
     pending: &mut Pending,
-    keys: usize,
     group: MemoGroupId,
 ) -> Result<MemoGroupId, PerComputationCandidateError> {
-    if pending
-        .schema(memo, group)
-        .fields
-        .last()
-        .map(|field| &field.dtype)
-        == Some(&FieldDataType::Plain(DataType::Float64))
-    {
+    let fields = &pending.schema(memo, group).fields;
+    if fields.last().map(|field| &field.dtype) == Some(&FieldDataType::Plain(DataType::Float64)) {
         return Ok(group);
     }
+    // The columns before the value: `by`'s keys, or the labels a `without`
+    // keeps (`avg without (instance, zone)` over `[.., zone, instance,
+    // $promql_series_identity]` keeps only the identity).
+    let keys = fields.len() - 1;
     let mut cols = key_items(keys);
     cols.push(ProjectItem {
         alias: None,

@@ -6,7 +6,7 @@
 use crate::ir::schema::ColumnId;
 use thiserror::Error;
 /// Errors from schema and type derivation over an operator DAG.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum SchemaDerivationError {
     #[error("invalid scalar function signature: {0}")]
     InvalidScalarSignature(String),

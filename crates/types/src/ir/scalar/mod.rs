@@ -236,7 +236,9 @@ impl<C> ScalarExpr<C> {
         self.map_parts(column, &mut C::clone)
     }
 
-    fn map_parts<D>(
+    /// One walk over this expression: every column reference renumbered by
+    /// `column`, every operator node it reads mapped by `f`.
+    pub(crate) fn map_parts<D>(
         &self,
         column: &mut impl FnMut(ColumnId) -> ColumnId,
         f: &mut impl FnMut(&C) -> D,

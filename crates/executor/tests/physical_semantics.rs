@@ -190,6 +190,7 @@ fn sort_direction_null_placement_and_ties() {
                 nulls_first,
             }],
             vec![],
+            None,
         )
         .unwrap();
         let result = unary(
@@ -206,6 +207,407 @@ fn sort_direction_null_placement_and_ties() {
             .collect::<Vec<_>>();
         assert_eq!(ids, expected);
     }
+}
+
+// Over ascending input, where every row displaces its group's last kept
+// row, and with a text key before the number (`ORDER BY label, v`), a sort
+// that keeps the first `fetch` rows of each group answers the same rows, in
+// the same order, as a full sort and a per-group limit.
+#[test]
+fn sort_with_fetch_over_ascending_input_equals_sort_then_limit() {
+    let input = schema(&[
+        ("g", DataType::Int64, false),
+        ("label", DataType::Utf8, true),
+        ("v", DataType::Float64, false),
+    ]);
+    let rows: Vec<Vec<Value>> = (0..300i64)
+        .map(|i| {
+            let label = match i % 5 {
+                0 => Value::Null,
+                k => Value::Utf8(format!("l{}", k % 2).into()),
+            };
+            vec![Value::Int64(i % 4), label, Value::Float64(i as f64 / 3.)]
+        })
+        .collect();
+    let batches = || rows.chunks(17).map(<[_]>::to_vec).collect::<Vec<_>>();
+    for groups in [vec![], vec![0]] {
+        for (label_descending, value_descending) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let key = vec![
+                SortKey {
+                    column: 1,
+                    descending: label_descending,
+                    nulls_first: label_descending,
+                },
+                SortKey {
+                    column: 2,
+                    descending: value_descending,
+                    nulls_first: false,
+                },
+            ];
+            for fetch in [1, 3, 7, 1000] {
+                let fetched = unary(
+                    input.clone(),
+                    batches(),
+                    Operator::sort(input.clone(), key.clone(), groups.clone(), Some(fetch))
+                        .unwrap(),
+                );
+                let mut dag = PhysicalDAG::default();
+                let source = batches()
+                    .into_iter()
+                    .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
+                    .collect();
+                dag.add(0, vec![], Operator::source(input.clone(), source).unwrap())
+                    .unwrap();
+                dag.add(
+                    1,
+                    vec![0],
+                    Operator::sort(input.clone(), key.clone(), groups.clone(), None).unwrap(),
+                )
+                .unwrap();
+                dag.add(
+                    2,
+                    vec![1],
+                    Operator::limit(input.clone(), fetch, 0, groups.clone()).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    format!("{fetched:?}"),
+                    format!("{:?}", collect(&dag, 2)),
+                    "groups {groups:?}, descending {label_descending}/{value_descending}, fetch {fetch}"
+                );
+            }
+        }
+    }
+}
+
+// A sort that keeps the first `fetch` rows of each group answers the same
+// rows, in the same order, as a full sort and a per-group limit: ties in
+// input order, NaN after every number, NULLs where the key puts them, also
+// across batches and with fewer rows than `fetch` in a group.
+#[test]
+fn sort_with_fetch_equals_sort_then_limit() {
+    let input = schema(&[
+        ("g", DataType::Int64, false),
+        ("v", DataType::Float64, true),
+        ("id", DataType::Int64, false),
+    ]);
+    let values = [
+        Some(3.),
+        Some(f64::NAN),
+        None,
+        Some(3.),
+        Some(1.),
+        Some(f64::INFINITY),
+        Some(3.),
+        Some(-0.),
+        Some(0.),
+        Some(f64::NAN),
+        Some(2.),
+        None,
+        Some(3.),
+        Some(-1.),
+    ];
+    // Groups 0 and 1 hold six or seven rows; group 2 holds one.
+    let rows: Vec<Vec<Value>> = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let group = if i == 13 { 2 } else { i as i64 % 2 };
+            vec![
+                Value::Int64(group),
+                v.map_or(Value::Null, Value::Float64),
+                Value::Int64(i as i64),
+            ]
+        })
+        .collect();
+    let batches = || {
+        vec![
+            rows[..5].to_vec(),
+            vec![],
+            rows[5..9].to_vec(),
+            rows[9..].to_vec(),
+        ]
+    };
+    let ids = |rows: Vec<Vec<Value>>| -> Vec<i64> {
+        rows.iter()
+            .map(|row| match row[2] {
+                Value::Int64(id) => id,
+                _ => unreachable!(),
+            })
+            .collect()
+    };
+    for groups in [vec![], vec![0]] {
+        for (descending, nulls_first) in
+            [(true, false), (true, true), (false, false), (false, true)]
+        {
+            let key = vec![SortKey {
+                column: 1,
+                descending,
+                nulls_first,
+            }];
+            for fetch in [0, 1, 2, 3, 8] {
+                let fetched = unary(
+                    input.clone(),
+                    batches(),
+                    Operator::sort(input.clone(), key.clone(), groups.clone(), Some(fetch))
+                        .unwrap(),
+                );
+                let mut dag = PhysicalDAG::default();
+                let source = batches()
+                    .into_iter()
+                    .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
+                    .collect();
+                dag.add(0, vec![], Operator::source(input.clone(), source).unwrap())
+                    .unwrap();
+                dag.add(
+                    1,
+                    vec![0],
+                    Operator::sort(input.clone(), key.clone(), groups.clone(), None).unwrap(),
+                )
+                .unwrap();
+                dag.add(
+                    2,
+                    vec![1],
+                    Operator::limit(input.clone(), fetch, 0, groups.clone()).unwrap(),
+                )
+                .unwrap();
+                let limited = collect(&dag, 2);
+                assert_eq!(
+                    ids(fetched),
+                    ids(limited),
+                    "groups {groups:?}, descending {descending}, nulls first {nulls_first}, fetch {fetch}"
+                );
+            }
+        }
+    }
+}
+
+/// The rows of `ops` run in a chain over `batches` of `input`, or the
+/// error the run returns.
+fn try_chain(
+    input: &SchemaRef,
+    batches: Vec<Batch>,
+    ops: Vec<Operator>,
+) -> Result<Vec<Vec<Value>>, String> {
+    let mut dag = PhysicalDAG::default();
+    dag.add(0, vec![], Operator::source(input.clone(), batches).unwrap())
+        .unwrap();
+    let root = ops.len() as u64;
+    for (index, op) in ops.into_iter().enumerate() {
+        dag.add(index as u64 + 1, vec![index as u64], op).unwrap();
+    }
+    block_on(async {
+        let mut stream = dag
+            .execute(&[root], context())
+            .map_err(|error| error.to_string())?
+            .remove(0);
+        let mut rows = vec![];
+        while let Some(batch) = stream.next().await {
+            rows.extend(batch.map_err(|error| error.to_string())?.to_rows());
+        }
+        Ok(rows)
+    })
+}
+
+/// A linear congruential generator: the same cases on every run.
+struct Lcg(u64);
+impl Lcg {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) % n
+    }
+}
+
+// Over random batches, groups, keys, directions and `fetch`, a sort that
+// keeps the first `fetch` rows of each group answers the same rows, or the
+// same error, as a full sort and a per-group limit. The keys mix numbers
+// (NULL, NaN, ±inf, -0), nullable text (empty, case, unicode, NUL) and maps
+// of nullable numbers (a NULL, -0 or NaN value inside), so the test of a
+// row against its group's last kept row agrees with the heap's order.
+// Every seed (each key kind) runs in every build; a debug build runs 40
+// cases per seed, a release build 400.
+#[test]
+fn sort_with_fetch_equals_sort_then_limit_over_random_rows() {
+    const CASES_PER_SEED: usize = if cfg!(debug_assertions) { 40 } else { 400 };
+    let input = schema(&[
+        ("g", DataType::Utf8, false),
+        ("h", DataType::Int64, false),
+        ("v", DataType::Float64, true),
+        ("w", DataType::Int64, true),
+        ("id", DataType::Int64, false),
+        ("t", DataType::Utf8, true),
+        (
+            "m",
+            DataType::Map {
+                key: Box::new(DataType::Utf8),
+                value: Box::new(DataType::Float64),
+                value_nullable: true,
+            },
+            true,
+        ),
+    ]);
+    const TEXTS: [&str; 8] = ["", "a", "A", "b", "ä", "a\u{0}", "zz", "☃"];
+    let map = |random: &mut Lcg, nan: bool| {
+        if random.below(8) == 0 {
+            return Value::Null;
+        }
+        let mut entries = Vec::new();
+        for name in ["a", "b"] {
+            if random.below(2) == 0 {
+                continue;
+            }
+            let value = match random.below(7) {
+                0 => Value::Null,
+                1 => Value::Float64(-0.),
+                2 => Value::Float64(0.),
+                3 if nan => Value::Float64(f64::NAN),
+                _ => Value::Float64(random.below(3) as f64),
+            };
+            entries.push((Value::Utf8(name.into()), value));
+        }
+        Value::Map(entries.into())
+    };
+    for (seed, key_columns, nan_in_map) in [
+        (42, vec![2, 3], false),
+        (7, vec![2, 3, 5], false),
+        (8, vec![5], false),
+        (9, vec![6], false),
+        (10, vec![2, 5, 6], false),
+        (11, vec![6], true),
+    ] {
+        let mut random = Lcg(seed);
+        for case in 0..CASES_PER_SEED {
+            let group_count = 1 + random.below(6);
+            let distinct_values = 1 + random.below(8);
+            let mut id = 0;
+            let batches: Vec<Batch> = (0..1 + random.below(30))
+                .map(|_| {
+                    let rows = (0..random.below(40))
+                        .map(|_| {
+                            id += 1;
+                            vec![
+                                Value::Utf8(format!("g{}", random.below(group_count)).into()),
+                                Value::Int64(random.below(2) as i64),
+                                match random.below(12) {
+                                    0 => Value::Null,
+                                    1 => Value::Float64(f64::NAN),
+                                    2 => Value::Float64(f64::INFINITY),
+                                    3 => Value::Float64(f64::NEG_INFINITY),
+                                    4 => Value::Float64(-0.),
+                                    _ => Value::Float64(random.below(distinct_values) as f64),
+                                },
+                                if random.below(10) == 0 {
+                                    Value::Null
+                                } else {
+                                    Value::Int64(random.below(3) as i64)
+                                },
+                                Value::Int64(id),
+                                if random.below(5) == 0 {
+                                    Value::Null
+                                } else {
+                                    Value::Utf8(TEXTS[random.below(8) as usize].into())
+                                },
+                                map(&mut random, nan_in_map),
+                            ]
+                        })
+                        .collect();
+                    Batch::try_new(input.clone(), rows).unwrap()
+                })
+                .collect();
+            let groups = [vec![], vec![0], vec![0, 1], vec![5]][case % 4].clone();
+            let keys: Vec<SortKey> = (0..1 + random.below(3))
+                .map(|_| SortKey {
+                    column: key_columns[random.below(key_columns.len() as u64) as usize],
+                    descending: random.below(2) == 0,
+                    nulls_first: random.below(2) == 0,
+                })
+                .collect();
+            let fetch = [0, 1, 2, 3, 5, 1000][random.below(6) as usize];
+            let sort = |fetch| Operator::sort(input.clone(), keys.clone(), groups.clone(), fetch);
+            let fetched = try_chain(&input, batches.clone(), vec![sort(Some(fetch)).unwrap()]);
+            let limited = try_chain(
+                &input,
+                batches,
+                vec![
+                    sort(None).unwrap(),
+                    Operator::limit(input.clone(), fetch, 0, groups.clone()).unwrap(),
+                ],
+            );
+            assert_eq!(
+                format!("{fetched:?}"),
+                format!("{limited:?}"),
+                "seed {seed}, case {case}: groups {groups:?}, keys {keys:?}, fetch {fetch}"
+            );
+        }
+    }
+}
+
+// Two series identities that differ only in an excluded label rewrite to
+// the same identity, so `sum without (instance)` adds them in one group,
+// within a batch and across batches.
+#[test]
+fn identities_equal_but_for_an_excluded_label_aggregate_in_one_group() {
+    let input = schema(&[
+        ("identity", DataType::Utf8, false),
+        ("v", DataType::Float64, false),
+    ]);
+    let row =
+        |identity: &str, value: f64| vec![Value::Utf8(identity.into()), Value::Float64(value)];
+    let batches = vec![
+        vec![
+            row(r#"{"instance":"1","job":"a"}"#, 1.),
+            row(r#"{"instance":"2","job":"a"}"#, 2.),
+            row(r#"{"instance":"1","job":"b"}"#, 4.),
+            row(r#"{"instance":"1","job":"a"}"#, 8.),
+        ],
+        vec![row(r#"{"instance":"3","job":"a"}"#, 16.)],
+    ];
+    let project = Operator::project(
+        input.clone(),
+        vec![
+            (
+                "identity".into(),
+                Expression::LabelIdentity {
+                    column: 0,
+                    excluding: vec!["instance".into()],
+                },
+            ),
+            ("v".into(), Expression::Column(1)),
+        ],
+    )
+    .unwrap();
+    let projected = project.schema();
+    let mut dag = PhysicalDAG::default();
+    let source = batches
+        .into_iter()
+        .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
+        .collect();
+    dag.add(0, vec![], Operator::source(input.clone(), source).unwrap())
+        .unwrap();
+    dag.add(1, vec![0], project).unwrap();
+    dag.add(
+        2,
+        vec![1],
+        Operator::aggregate(projected, vec![0], vec![("sum".into(), Reduction::Sum(1))]).unwrap(),
+    )
+    .unwrap();
+    let mut sums = collect(&dag, 2)
+        .into_iter()
+        .map(|row| format!("{row:?}"))
+        .collect::<Vec<_>>();
+    sums.sort();
+    assert_eq!(
+        sums,
+        [
+            format!("{:?}", row(r#"{"job":"a"}"#, 27.)),
+            format!("{:?}", row(r#"{"job":"b"}"#, 4.)),
+        ]
+    );
 }
 
 // Outer joins preserve unmatched NULLs, while semi/anti joins preserve left multiplicity.
@@ -1388,4 +1790,273 @@ fn exact_cardinality_grouping_normalizes_float_identities() {
         result[1].as_slice(),
         [Value::Int64(2), Value::Int64(0)]
     ));
+}
+
+/// The value of row `row`'s column `column`: `Some` float, `None` for NULL.
+fn float_at(rows: &[Vec<Value>], row: usize, column: usize) -> Option<f64> {
+    match rows[row][column] {
+        Value::Float64(value) => Some(value),
+        Value::Null => None,
+        ref other => panic!("a DOUBLE: {other:?}"),
+    }
+}
+
+fn floats(values: &[Option<f64>]) -> Vec<Vec<Value>> {
+    values
+        .iter()
+        .map(|v| vec![v.map_or(Value::Null, Value::Float64)])
+        .collect()
+}
+
+/// SQL `STDDEV`/`VAR_SAMP` and `STDDEV_POP`/`VAR_POP` as DataFusion and
+/// Postgres define them: NULLs ignored; the sample forms NULL for fewer
+/// than two values, the population forms for none; NaN once a value is
+/// NaN or infinite.
+#[test]
+fn sql_variance_and_stddev_follow_their_definitions() {
+    let input = schema(&[("v", DataType::Float64, true)]);
+    let measures = || {
+        vec![
+            (
+                "var_pop".into(),
+                Reduction::Variance {
+                    column: 0,
+                    population: true,
+                },
+            ),
+            (
+                "var_samp".into(),
+                Reduction::Variance {
+                    column: 0,
+                    population: false,
+                },
+            ),
+            (
+                "stddev_pop".into(),
+                Reduction::StdDev {
+                    column: 0,
+                    population: true,
+                },
+            ),
+            (
+                "stddev_samp".into(),
+                Reduction::StdDev {
+                    column: 0,
+                    population: false,
+                },
+            ),
+        ]
+    };
+    let run = |values: &[Option<f64>]| {
+        let op = Operator::aggregate(input.clone(), vec![], measures()).unwrap();
+        let rows = unary(input.clone(), vec![floats(values)], op);
+        (0..4).map(|c| float_at(&rows, 0, c)).collect::<Vec<_>>()
+    };
+    let close = |got: Vec<Option<f64>>, expected: [Option<f64>; 4]| {
+        for (got, expected) in got.iter().zip(expected) {
+            match (got, expected) {
+                (Some(a), Some(b)) => assert!((a - b).abs() < 1e-12, "{got:?} vs {expected:?}"),
+                _ => assert_eq!(*got, expected),
+            }
+        }
+    };
+    // 1, 2, 4 and a NULL: mean 7/3, squared deviations 14/3.
+    close(
+        run(&[Some(1.), None, Some(2.), Some(4.)]),
+        [
+            Some(14. / 9.),
+            Some(7. / 3.),
+            Some((14f64 / 9.).sqrt()),
+            Some((7f64 / 3.).sqrt()),
+        ],
+    );
+    close(run(&[Some(5.)]), [Some(0.), None, Some(0.), None]);
+    close(run(&[None]), [None, None, None, None]);
+    close(run(&[]), [None, None, None, None]);
+    for poison in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for values in [[Some(poison), Some(1.)], [Some(1.), Some(poison)]] {
+            assert!(run(&values).iter().all(|v| v.unwrap().is_nan()));
+        }
+    }
+    // An Int64 column reads as Float64.
+    let integers = schema(&[("v", DataType::Int64, false)]);
+    let op = Operator::aggregate(
+        integers.clone(),
+        vec![],
+        vec![(
+            "var_samp".into(),
+            Reduction::Variance {
+                column: 0,
+                population: false,
+            },
+        )],
+    )
+    .unwrap();
+    let rows = unary(
+        integers,
+        vec![vec![vec![Value::Int64(1)], vec![Value::Int64(3)]]],
+        op,
+    );
+    assert_eq!(float_at(&rows, 0, 0), Some(2.));
+}
+
+/// Over PromQL series, `stddev` and `stdvar` are population statistics
+/// (Welford's update, as Prometheus computes them): a single value has
+/// deviation 0, a single infinite one NaN.
+#[test]
+fn promql_stddev_of_one_series() {
+    let mut input = (*schema(&[
+        (
+            planner_types::ir::schema::PROMQL_SERIES_IDENTITY,
+            DataType::Utf8,
+            false,
+        ),
+        ("value", DataType::Float64, false),
+    ]))
+    .clone();
+    input.closed = true;
+    let input = Arc::new(input);
+    for (value, expected) in [(3., 0.), (f64::INFINITY, f64::NAN)] {
+        let op = Operator::aggregate(
+            input.clone(),
+            vec![],
+            vec![(
+                "stddev".into(),
+                Reduction::StdDev {
+                    column: 1,
+                    population: true,
+                },
+            )],
+        )
+        .unwrap();
+        let rows = unary(
+            input.clone(),
+            vec![vec![vec![Value::Utf8("{}".into()), Value::Float64(value)]]],
+            op,
+        );
+        let got = float_at(&rows, 0, 0).unwrap();
+        assert!(
+            got == expected || (got.is_nan() && expected.is_nan()),
+            "{got}"
+        );
+    }
+}
+
+/// SQL `corr` as DataFusion computes it: over the rows where both inputs
+/// are non-NULL, NULL for fewer than two, a constant input, or one input's
+/// NaN; NaN when both have one.
+#[test]
+fn correlation_follows_datafusion() {
+    let input = schema(&[
+        ("a", DataType::Float64, true),
+        ("b", DataType::Float64, true),
+    ]);
+    let run = |pairs: &[(Option<f64>, Option<f64>)]| {
+        let op = Operator::aggregate(
+            input.clone(),
+            vec![],
+            vec![("corr".into(), Reduction::PearsonCorr { left: 0, right: 1 })],
+        )
+        .unwrap();
+        let rows = pairs
+            .iter()
+            .map(|(a, b)| {
+                vec![
+                    a.map_or(Value::Null, Value::Float64),
+                    b.map_or(Value::Null, Value::Float64),
+                ]
+            })
+            .collect();
+        float_at(&unary(input.clone(), vec![rows], op), 0, 0)
+    };
+    let line = [
+        (Some(1.), Some(3.)),
+        (Some(2.), Some(5.)),
+        (Some(3.), Some(7.)),
+    ];
+    assert!((run(&line).unwrap() - 1.).abs() < 1e-12);
+    let falling = [(Some(1.), Some(3.)), (Some(2.), Some(1.)), (None, Some(9.))];
+    assert!((run(&falling).unwrap() + 1.).abs() < 1e-12);
+    // (1, 1), (2, 3), (3, 2): covariance 1/3, both variances 2/3.
+    let scattered = [
+        (Some(1.), Some(1.)),
+        (Some(2.), Some(3.)),
+        (Some(3.), Some(2.)),
+    ];
+    assert!((run(&scattered).unwrap() - 0.5).abs() < 1e-12);
+    assert_eq!(run(&[(Some(1.), Some(2.))]), None);
+    assert_eq!(run(&[]), None);
+    assert_eq!(run(&[(Some(1.), Some(2.)), (Some(1.), Some(5.))]), None);
+    assert_eq!(
+        run(&[(Some(1.), Some(2.)), (Some(f64::NAN), Some(5.))]),
+        None
+    );
+    assert!(
+        run(&[(Some(1.), Some(2.)), (Some(f64::NAN), Some(f64::NAN))])
+            .unwrap()
+            .is_nan()
+    );
+}
+
+/// PromQL `group` is 1 for every group, whatever its values.
+#[test]
+fn group_is_one_per_group() {
+    let input = schema(&[
+        ("job", DataType::Utf8, false),
+        ("v", DataType::Float64, false),
+    ]);
+    let op = Operator::aggregate(
+        input.clone(),
+        vec![0],
+        vec![("group".into(), Reduction::Group)],
+    )
+    .unwrap();
+    let rows = unary(
+        input,
+        vec![vec![
+            vec![Value::Utf8("a".into()), Value::Float64(f64::NAN)],
+            vec![Value::Utf8("a".into()), Value::Float64(-3.)],
+            vec![Value::Utf8("b".into()), Value::Float64(0.)],
+        ]],
+        op,
+    );
+    assert_eq!(rows.len(), 2);
+    assert!((0..2).all(|row| float_at(&rows, row, 1) == Some(1.)));
+}
+
+/// `count_values` labels a value as Go's `FormatFloat(v, 'f', -1, 64)`
+/// writes it: the shortest round-tripping decimal, never an exponent.
+#[test]
+fn float_text_matches_go_format_float() {
+    let input = schema(&[("v", DataType::Float64, false)]);
+    let cases = [
+        (1., "1"),
+        (2.5, "2.5"),
+        (0.1, "0.1"),
+        (-0., "-0"),
+        (1e21, "1000000000000000000000"),
+        (1e-7, "0.0000001"),
+        (f64::NAN, "NaN"),
+        (f64::INFINITY, "+Inf"),
+        (f64::NEG_INFINITY, "-Inf"),
+    ];
+    let op = Operator::project(
+        input.clone(),
+        vec![("text".into(), Expression::FloatText(0))],
+    )
+    .unwrap();
+    let rows = unary(
+        input,
+        vec![cases
+            .iter()
+            .map(|(v, _)| vec![Value::Float64(*v)])
+            .collect()],
+        op,
+    );
+    for (row, (_, text)) in rows.iter().zip(cases) {
+        assert!(
+            matches!(&row[0], Value::Utf8(got) if got.as_ref() == text),
+            "{row:?} vs {text}"
+        );
+    }
 }

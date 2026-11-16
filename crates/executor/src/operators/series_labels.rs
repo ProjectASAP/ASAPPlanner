@@ -9,8 +9,11 @@ use planner_types::ir::schema::PROMQL_SERIES_IDENTITY;
 pub(super) type Labels = BTreeMap<String, String>;
 
 /// Where a row's label set lives: the encoded series identity when present,
-/// otherwise the non-empty Utf8 label columns. The one Float64 column is the
-/// sample value, whatever an aggregate named it.
+/// otherwise the non-empty Utf8 label columns. The one numeric column is the
+/// sample value, whatever an aggregate named it: Float64, or Int64 for a
+/// count (`count without (instance) (m)` answers `{job="a"} 3` as Int64,
+/// as `count by (job) (m)` does). A label rewrite carries the value as it
+/// is; an operator that computes on it reads it with [`float_layout`].
 #[derive(Clone, Debug)]
 pub(super) struct Layout {
     pub(super) identity: Option<usize>,
@@ -26,7 +29,7 @@ pub(super) fn layout(input: &SchemaRef) -> Result<Layout, Error> {
         match plain(input, i)? {
             (DataType::Utf8, false) if field.name == PROMQL_SERIES_IDENTITY => identity = Some(i),
             (DataType::Utf8, _) if field.name != PROMQL_SERIES_IDENTITY => labels.push(i),
-            (DataType::Float64, false) if value.is_none() => value = Some(i),
+            (DataType::Float64 | DataType::Int64, false) if value.is_none() => value = Some(i),
             (DataType::Timestamp, false) if input.time_index == Some(i) => {}
             _ => return Err(invalid("PromQL vector requires labels, time and one value")),
         }
@@ -36,6 +39,17 @@ pub(super) fn layout(input: &SchemaRef) -> Result<Layout, Error> {
         labels,
         value: value.ok_or_else(|| invalid("PromQL vector requires one value"))?,
     })
+}
+
+/// [`layout`] for an operator that computes on the sample value (a binary
+/// operator, `histogram_quantile`, `label_replace`): it reads and writes
+/// the value as Float64, so an Int64 count is refused.
+pub(super) fn float_layout(input: &SchemaRef) -> Result<Layout, Error> {
+    let layout = layout(input)?;
+    if plain(input, layout.value)?.0 != &DataType::Float64 {
+        return Err(invalid("PromQL vector value must be Float64 here"));
+    }
+    Ok(layout)
 }
 
 impl Layout {
@@ -96,8 +110,8 @@ impl Operator {
         if destination.is_empty() || destination == PROMQL_SERIES_IDENTITY {
             return Err(invalid("invalid or reserved destination label name"));
         }
-        layout(&input)?;
-        let out = layout(&output)?;
+        float_layout(&input)?;
+        let out = float_layout(&output)?;
         if input
             .fields
             .iter()
@@ -171,7 +185,7 @@ impl Operator {
     /// label set other than the `le` column's label. The result drops `le`,
     /// `__name__` and the time column; its value is the quantile.
     pub fn series_histogram_quantile(input: SchemaRef, q: f64, le: usize) -> Result<Self, Error> {
-        let layout = layout(&input)?;
+        let layout = float_layout(&input)?;
         if !layout.labels.contains(&le) {
             return Err(invalid("histogram bucket bound must be a label column"));
         }
@@ -235,7 +249,7 @@ impl Operator {
                     return Err(invalid("PromQL scalar operand must be one Float64 value"));
                 }
             } else {
-                layout(schema)?;
+                float_layout(schema)?;
             }
         }
         let mut output = if scalars == [true, false] {
@@ -1267,5 +1281,36 @@ mod columnar_tests {
             }
         }
         assert!(errors > 0, "the repeated-label-set error is exercised");
+    }
+
+    /// `count without (instance) (m)` outputs `[identity, count: Int64]`: a
+    /// label rewrite carries the Int64 count as it is, while an operator
+    /// that computes on the value (`* on() ...`, `histogram_quantile`)
+    /// requires a Float64 sample.
+    #[test]
+    fn a_label_rewrite_carries_an_int64_count_and_a_computation_refuses_it() {
+        let counted = Arc::new(Schema {
+            fields: vec![
+                field(PROMQL_SERIES_IDENTITY, DataType::Utf8, false),
+                field("count", DataType::Int64, false),
+            ],
+            time_index: None,
+            unique_keys: vec![],
+            closed: false,
+        });
+        Operator::series_without_name(counted.clone()).unwrap();
+        Operator::series_labels(counted.clone(), VectorMatchKind::On, vec!["job".into()]).unwrap();
+        let multiply = BinaryOperator {
+            kind: BinaryOpKind::Arithmetic(planner_types::ir::scalar::ArithmeticOpKind::Mul),
+            vector_match: None,
+            checked_relative_division: false,
+            checked_finite_division: false,
+        };
+        let Err(error) =
+            Operator::series_binary(counted.clone(), counted, multiply, [false, false])
+        else {
+            panic!("a binary operator over an Int64 count is refused");
+        };
+        assert!(error.to_string().contains("must be Float64"), "{error}");
     }
 }

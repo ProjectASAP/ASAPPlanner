@@ -166,6 +166,7 @@ fn compile_sort(descending: bool, grouping: &GroupKeys<ColumnRef>) -> Result<Com
             nulls_first: false,
         }],
         vec![2],
+        None,
     )?;
     let output = vector_output(sort.schema(), 0, 1)?;
     Ok(unary(vec![project, sort, output]))

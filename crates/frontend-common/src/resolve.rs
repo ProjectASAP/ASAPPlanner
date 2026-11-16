@@ -212,7 +212,7 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
             return Ok(child);
         }
         asap_types::ir::schema::series_identity::with_promql_series_identity(&child)
-            .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e).into())
+            .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e.to_string()).into())
     };
     match tree {
         U::Scan {
@@ -378,7 +378,7 @@ fn resolve(tree: &UnresolvedOp, usage_derived_schema: &Schema) -> Result<Bound, 
         } => {
             let child = resolve(child, usage_derived_schema)?;
             let scope = child.scope();
-            let reduction = resolve_reduction(reduction, scope)?;
+            let reduction = resolve_reduction(reduction, &child)?;
             let measures = measures
                 .iter()
                 .map(|m| resolve_agg_intent(m, scope))
@@ -799,7 +799,64 @@ fn resolve_group_keys(
     keys: &GroupKeys<ColumnRef>,
     scope: Scope,
 ) -> Result<GroupKeys<ColumnId>, ResolveError> {
-    let ids = scope.resolve_all(keys.keys())?;
+    keys.try_map_keys(&mut |key| scope.resolve(key))
+}
+
+/// Resolve PromQL aggregation grouping keys with the language's absent-label
+/// semantics (issue #53): a key not present in the input is dropped rather
+/// than rejected when it is provably absent from every row.
+///
+/// - In a **closed** schema every row carries the key's empty value, so
+///   grouping `by` it is the identity partition, and Prometheus omits the
+///   (empty) label from the output. This is what makes `sum(sum by (k) (m))
+///   by (j)` lower: the inner cross-series aggregate freezes the schema to
+///   the closed `[k, sum]`, which provably lacks `j`. A closed schema that
+///   carries the series identity proves nothing: in `max without (instance)
+///   ((10 * min without (zone) (m)) unless n)` the left side's realized
+///   `[$promql_series_identity, min]` has no `instance` column, but its
+///   identity has `instance`.
+/// - A key that a `without` aggregate below already removed
+///   (`removed_below`, see [`labels_removed_by_without`]) is absent from
+///   every row, as in Prometheus. As a `without` key it removes nothing:
+///   in `sum without (instance) (sum without (instance) (m))` the inner
+///   output `[$promql_series_identity, sum]` has no `instance`, and the
+///   outer grouping is `without ()`. As a `by` key it is the empty label:
+///   `sum by (instance) (sum without (instance) (m))` is `sum by ()`.
+///
+/// Any other key unresolved over an open schema is still an error: the
+/// label may exist at runtime, in the series identity, without a column of
+/// its own (the output of `m and n` carries `m`'s labels in its identity
+/// only), so it indicates a resolution gap, not an absent label. (SQL is
+/// unaffected — its `GROUP BY` resolves through the strict
+/// [`resolve_group_keys`], and DataFusion has already validated the columns
+/// anyway.)
+fn resolve_group_keys_promql(
+    keys: &GroupKeys<ColumnRef>,
+    scope: Scope,
+    removed_below: &[&str],
+) -> Result<GroupKeys<ColumnId>, ResolveError> {
+    // A closed schema with a series identity column lists only the labels
+    // its side of the query named; any other label may be in the identity.
+    let provably_absent = scope.schema.closed
+        && !scope
+            .schema
+            .fields
+            .iter()
+            .any(|field| field.name == asap_types::ir::schema::PROMQL_SERIES_IDENTITY);
+    let removed = |key: &ColumnRef| match key {
+        ColumnRef::Named(name) | ColumnRef::Qualified { name, .. } => {
+            removed_below.contains(&name.as_str())
+        }
+        ColumnRef::SampleValue | ColumnRef::Wildcard => false,
+    };
+    let ids = keys
+        .keys()
+        .iter()
+        .filter_map(|key| match scope.resolve(key) {
+            Err(ResolveError::NotFound { .. }) if provably_absent || removed(key) => None,
+            other => Some(other),
+        })
+        .collect::<Result<_, _>>()?;
     Ok(if keys.is_without() {
         GroupKeys::without(ids)
     } else {
@@ -807,144 +864,67 @@ fn resolve_group_keys(
     })
 }
 
-/// Resolve PromQL aggregation grouping keys with the language's absent-label
-/// semantics (issue #53): a key not present in a **closed** schema is provably
-/// absent from every row, so all rows carry its empty value, grouping by it is
-/// the identity partition, and Prometheus omits the (empty) label from the
-/// aggregation output — so the key is **dropped** rather than rejected. This
-/// is what makes `sum(sum by (k) (m)) by (j)` lower: the inner cross-series
-/// aggregate freezes the schema to the closed `[k, sum]`, which provably lacks
-/// `j`.
-///
-/// Against an **open** schema an unresolved key is still an error: the label
-/// may exist at runtime, and PromQL leaves seed every referenced label via the
-/// schema resolver, so an unresolved key over an open schema indicates a resolution bug,
-/// not an absent label. (SQL is unaffected — its `GROUP BY` resolves through
-/// the strict [`resolve_group_keys`], and DataFusion has already validated
-/// the columns anyway.)
-fn resolve_group_keys_promql(
-    cols: &[ColumnRef],
-    scope: Scope,
-) -> Result<Vec<ColumnId>, ResolveError> {
-    cols.iter()
-        .filter_map(|c| match scope.resolve(c) {
-            Err(ResolveError::NotFound { .. }) if scope.schema.closed => None,
-            other => Some(other),
-        })
-        .collect()
+/// The labels removed from every series of `input` by a `without`
+/// aggregate: the ones it excludes, seen through the filters and
+/// projections above it that keep every label. `sum without (instance)
+/// (m)` and `sum without (instance) (m) > 1` remove `instance`; any other
+/// operator, none.
+fn labels_removed_by_without(input: &OperatorNode) -> Vec<&str> {
+    match input.non_asap() {
+        Some(NonASAPOp::Aggregate {
+            reduction: Reduction::Reduce(keys),
+            child,
+            ..
+        }) if keys.is_without() => keys
+            .keys()
+            .iter()
+            .filter_map(|&key| child.schema.fields.get(key))
+            .map(|field| field.name.as_str())
+            .collect(),
+        Some(NonASAPOp::Filter { child, .. }) => labels_removed_by_without(child),
+        // `10 * x` and `abs(x)` project every column of `x` (less
+        // `__name__`) under its name.
+        Some(NonASAPOp::Project { child, .. })
+            if child.schema.fields.iter().all(|field| {
+                field.name == "__name__"
+                    || input
+                        .schema
+                        .fields
+                        .iter()
+                        .any(|kept| kept.name == field.name)
+            }) =>
+        {
+            labels_removed_by_without(child)
+        }
+        _ => Vec::new(),
+    }
 }
 
-/// Resolve a name-based reduction. Uses [`resolve_group_keys_promql`] rather
-/// than the strict [`resolve_group_keys`]: a key absent from a **closed**
-/// schema (the output of a nested cross-series aggregate that collapsed the
-/// label) is provably absent from every row, so PromQL drops it from the
-/// grouping rather than rejecting the query (issue #53) — `sum(sum by (group)
-/// (m)) by (job)`. SQL `GROUP BY` keys are always present, so the lenient
-/// path is a no-op difference there.
+/// Resolve a name-based reduction over `input`. Uses
+/// [`resolve_group_keys_promql`] rather than the strict
+/// [`resolve_group_keys`]: a key provably absent from every row is dropped
+/// rather than rejected — `sum(sum by (group) (m)) by (job)` (issue #53).
+/// SQL `GROUP BY` keys are always present, so the lenient path is a no-op
+/// difference there.
 fn resolve_reduction(
     reduction: &Reduction<ColumnRef>,
-    scope: Scope,
+    input: &Bound,
 ) -> Result<Reduction<ColumnId>, ResolveError> {
     Ok(match reduction {
-        Reduction::Reduce(by) => {
-            let ids = resolve_group_keys_promql(by.keys(), scope)?;
-            Reduction::Reduce(if by.is_without() {
-                GroupKeys::without(ids)
-            } else {
-                GroupKeys::by(ids)
-            })
-        }
+        Reduction::Reduce(keys) => Reduction::Reduce(resolve_group_keys_promql(
+            keys,
+            input.scope(),
+            &labels_removed_by_without(&input.node),
+        )?),
         Reduction::PerEntity => Reduction::PerEntity,
     })
 }
 
-/// Resolve a name-based aggregate intent: every `col: Option<ColumnRef>`
-/// resolves to `Option<ColumnId>` (`None` stays `None`, the sample-value
-/// convention); every other field carries through unchanged.
 fn resolve_agg_intent(
     intent: &AggIntent<ColumnRef>,
     scope: Scope,
 ) -> Result<AggIntent<ColumnId>, ResolveError> {
-    let col = |c: &Option<ColumnRef>| -> Result<Option<ColumnId>, ResolveError> {
-        c.as_ref().map(|r| scope.resolve(r)).transpose()
-    };
-    Ok(match intent {
-        AggIntent::Count => AggIntent::Count,
-        AggIntent::PearsonCorr { left, right } => AggIntent::PearsonCorr {
-            left: scope.resolve(left)?,
-            right: scope.resolve(right)?,
-        },
-        AggIntent::Sum { col: c } => AggIntent::Sum { col: col(c)? },
-        AggIntent::Min { col: c } => AggIntent::Min { col: col(c)? },
-        AggIntent::Max { col: c } => AggIntent::Max { col: col(c)? },
-        AggIntent::Avg { col: c } => AggIntent::Avg { col: col(c)? },
-        AggIntent::StdDev { col: c, population } => AggIntent::StdDev {
-            col: col(c)?,
-            population: *population,
-        },
-        AggIntent::Variance { col: c, population } => AggIntent::Variance {
-            col: col(c)?,
-            population: *population,
-        },
-        AggIntent::Quantile { col: c, q } => AggIntent::Quantile {
-            col: col(c)?,
-            q: *q,
-        },
-        AggIntent::TopK { k } => AggIntent::TopK { k: *k },
-        AggIntent::Cardinality { cols } => AggIntent::Cardinality {
-            cols: scope.resolve_all(cols)?,
-        },
-        AggIntent::FrequencyL2 { col: c } => AggIntent::FrequencyL2 { col: col(c)? },
-        AggIntent::FrequencyEntropy { col: c } => AggIntent::FrequencyEntropy { col: col(c)? },
-        AggIntent::Rate => AggIntent::Rate,
-        AggIntent::IRate => AggIntent::IRate,
-        AggIntent::Increase => AggIntent::Increase,
-        AggIntent::Changes => AggIntent::Changes,
-        AggIntent::Delta => AggIntent::Delta,
-        AggIntent::IDelta => AggIntent::IDelta,
-        AggIntent::Deriv => AggIntent::Deriv,
-        AggIntent::Resets => AggIntent::Resets,
-        AggIntent::PredictLinear { seconds } => AggIntent::PredictLinear { seconds: *seconds },
-        AggIntent::DoubleExpSmoothing { smoothing, trend } => AggIntent::DoubleExpSmoothing {
-            smoothing: *smoothing,
-            trend: *trend,
-        },
-        AggIntent::HistogramCount => AggIntent::HistogramCount,
-        AggIntent::HistogramSum => AggIntent::HistogramSum,
-        AggIntent::HistogramAvg => AggIntent::HistogramAvg,
-        AggIntent::HistogramStdDev => AggIntent::HistogramStdDev,
-        AggIntent::HistogramStdVar => AggIntent::HistogramStdVar,
-        AggIntent::HistogramFraction { lower, upper } => AggIntent::HistogramFraction {
-            lower: *lower,
-            upper: *upper,
-        },
-        AggIntent::HistogramQuantile { q, le } => AggIntent::HistogramQuantile {
-            q: *q,
-            le: scope.resolve(le)?,
-        },
-        AggIntent::Math(f) => AggIntent::Math(f.clone()),
-        AggIntent::Absent { labels } => AggIntent::Absent {
-            labels: labels.clone(),
-        },
-        AggIntent::AbsentOverTime => AggIntent::AbsentOverTime,
-        AggIntent::PresentOverTime => AggIntent::PresentOverTime,
-        AggIntent::TimeFn(f) => AggIntent::TimeFn(*f),
-        AggIntent::Group => AggIntent::Group,
-        AggIntent::CountValues { label } => AggIntent::CountValues {
-            label: label.clone(),
-        },
-        AggIntent::LastOverTime => AggIntent::LastOverTime,
-        AggIntent::FirstOverTime => AggIntent::FirstOverTime,
-        AggIntent::MadOverTime => AggIntent::MadOverTime,
-        AggIntent::TsOfMinOverTime => AggIntent::TsOfMinOverTime,
-        AggIntent::TsOfMaxOverTime => AggIntent::TsOfMaxOverTime,
-        AggIntent::TsOfFirstOverTime => AggIntent::TsOfFirstOverTime,
-        AggIntent::TsOfLastOverTime => AggIntent::TsOfLastOverTime,
-        AggIntent::Extension { ext_kind, payload } => AggIntent::Extension {
-            ext_kind: ext_kind.clone(),
-            payload: payload.clone(),
-        },
-    })
+    intent.try_map_cols(&mut |column| scope.resolve(column))
 }
 
 /// Resolve a standalone scalar in an empty column scope; plan reads retain their own scope.
@@ -1458,32 +1438,77 @@ mod tests {
             unique_keys: vec![],
             closed: true,
         };
+        let job = || ColumnRef::Named("job".into());
         assert_eq!(
-            resolve_group_keys_promql(&[ColumnRef::Named("job".into())], Scope::unqualified(&s)),
-            Ok(vec![])
+            resolve_group_keys_promql(&GroupKeys::by(vec![job()]), Scope::unqualified(&s), &[]),
+            Ok(GroupKeys::by(vec![]))
         );
         // Present keys still resolve positionally; absent ones drop around them.
         assert_eq!(
             resolve_group_keys_promql(
-                &[
-                    ColumnRef::Named("job".into()),
-                    ColumnRef::Named("group".into())
-                ],
-                Scope::unqualified(&s)
+                &GroupKeys::by(vec![job(), ColumnRef::Named("group".into())]),
+                Scope::unqualified(&s),
+                &[]
             ),
-            Ok(vec![0])
+            Ok(GroupKeys::by(vec![0]))
         );
     }
 
     #[test]
+    fn group_keys_promql_keeps_an_absent_key_of_a_closed_identity_schema() {
+        // A realized side of a binary operator: closed, but its labels live in
+        // the identity, so `instance` may be there. Not dropped.
+        let s = Schema {
+            fields: vec![
+                Field::plain(
+                    asap_types::ir::schema::PROMQL_SERIES_IDENTITY,
+                    DataType::Utf8,
+                    false,
+                ),
+                Field::plain("min", DataType::Float64, false),
+            ],
+            time_index: None,
+            unique_keys: vec![],
+            closed: true,
+        };
+        let instance = || ColumnRef::Named("instance".into());
+        for keys in [
+            GroupKeys::by(vec![instance()]),
+            GroupKeys::without(vec![instance()]),
+        ] {
+            assert!(matches!(
+                resolve_group_keys_promql(&keys, Scope::unqualified(&s), &[]),
+                Err(ResolveError::NotFound { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn group_keys_promql_still_errors_on_open_schema() {
-        // An open schema can't prove absence — an unresolved key there is a
-        // resolution bug (the schema resolver seeds every referenced label), not an
-        // absent label. Keep the strict error.
+        // An open schema can't prove a `by` key absent — an unresolved key there
+        // is a resolution bug (the schema resolver seeds every referenced label),
+        // not an absent label. Keep the strict error.
         let open = ts_value_schema(); // closed: false
+        let job = || ColumnRef::Named("job".into());
+        let open_scope = || Scope::unqualified(&open);
         assert!(matches!(
-            resolve_group_keys_promql(&[ColumnRef::Named("job".into())], Scope::unqualified(&open)),
+            resolve_group_keys_promql(&GroupKeys::by(vec![job()]), open_scope(), &[]),
             Err(ResolveError::NotFound { .. })
         ));
+        // A `by` key a `without` below removed groups by the empty label.
+        assert_eq!(
+            resolve_group_keys_promql(&GroupKeys::by(vec![job()]), open_scope(), &["job"]),
+            Ok(GroupKeys::by(vec![]))
+        );
+        // A `without` key may still be in the series identity, unless the
+        // input `without` aggregate removed it: then it removes nothing.
+        assert!(matches!(
+            resolve_group_keys_promql(&GroupKeys::without(vec![job()]), open_scope(), &[]),
+            Err(ResolveError::NotFound { .. })
+        ));
+        assert_eq!(
+            resolve_group_keys_promql(&GroupKeys::without(vec![job()]), open_scope(), &["job"]),
+            Ok(GroupKeys::without(vec![]))
+        );
     }
 }

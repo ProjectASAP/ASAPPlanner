@@ -185,11 +185,22 @@ pub enum NonASAPOp<C = Rc<OperatorNode>> {
 }
 
 impl<C> NonASAPOp<C> {
-    /// The direct operator inputs, in field order, followed by the operator
-    /// nodes referenced from this operator's scalar expressions.
+    /// The direct operator inputs, followed by the operator nodes referenced
+    /// from this operator's scalar expressions.
     pub(crate) fn children(&self) -> Vec<&C> {
+        let mut out = self.inputs();
+        for expr in self.scalar_exprs() {
+            out.extend(expr.operator_refs());
+        }
+        out
+    }
+
+    /// The direct operator inputs, in field order: a `Join`'s left then
+    /// right. Their output columns, in this order, are the operator's
+    /// [`input_scope`](NonASAPOp::input_scope).
+    pub(crate) fn inputs(&self) -> Vec<&C> {
         use NonASAPOp::*;
-        let mut out: Vec<&C> = match self {
+        match self {
             Scan { .. } | Values { .. } | PromqlVectorFromScalar(_) => vec![],
             Filter { child, .. }
             | Project { child, .. }
@@ -207,11 +218,22 @@ impl<C> NonASAPOp<C> {
             Join { left, right, .. } | SetOp { left, right, .. } => vec![left, right],
             BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
             Concat { children, .. } => children.iter().collect(),
-        };
-        for expr in self.scalar_exprs() {
-            out.extend(expr.operator_refs());
         }
-        out
+    }
+
+    /// The operator's input scope: the output columns of its direct
+    /// [`inputs`](NonASAPOp::inputs), in order, which its column references
+    /// index. A `Join` of `[a, b]` and `[c]` reads `c` as `Column(2)`;
+    /// [`map_input_columns`](NonASAPOp::map_input_columns) renumbers these
+    /// references.
+    pub(crate) fn input_scope(&self) -> Vec<&Field>
+    where
+        C: OperatorInput,
+    {
+        self.inputs()
+            .into_iter()
+            .flat_map(|input| input.schema().fields.iter())
+            .collect()
     }
 
     /// Every scalar expression this operator owns.
@@ -251,22 +273,65 @@ impl<C> NonASAPOp<C> {
     }
 
     /// Rebuild this operator with `f` applied to every child, including the
-    /// operator nodes referenced from scalar expressions, in
-    /// [`Self::children`] order (direct inputs first), so a caller may hand
-    /// out replacements by position. Every other field is cloned. `f` may
-    /// change the reference type, e.g. from `Rc<OperatorNode>` to a node id.
-    ///
-    /// Example: `Project { child: q, cols: [q.value + scalar(c)] }` calls `f`
-    /// on `q`, then on `c`.
+    /// operator nodes referenced from scalar expressions, in the order
+    /// [`map_parts`](NonASAPOp::map_parts) visits them. Every other field is
+    /// cloned. `f` may change the reference type, e.g. from
+    /// `Rc<OperatorNode>` to a node id.
     pub(crate) fn map_children<D>(&self, mut f: impl FnMut(&C) -> D) -> NonASAPOp<D> {
+        self.map_parts(&mut |column| column, &mut f)
+    }
+
+    /// This operator with every column reference into its input scope
+    /// renumbered by `column`: the columns of its direct inputs, in
+    /// [`inputs`](NonASAPOp::inputs) order. A `Sort` by `Column(0)` over
+    /// `[sum]` whose input becomes `[$promql_series_identity, sum]` must sort
+    /// by `Column(1)`; the renumbering `0 → 1` gives that. Two references are
+    /// in another scope and kept: a `Scan`'s predicates index its own
+    /// schema, and an `Aggregate`'s `having` indexes its output. Operator
+    /// nodes read from scalar expressions keep their own scope.
+    pub(crate) fn map_input_columns(&self, column: &mut impl FnMut(ColumnId) -> ColumnId) -> Self
+    where
+        C: Clone,
+    {
+        self.map_parts(column, &mut C::clone)
+    }
+
+    /// One walk over every field of this operator: each column reference
+    /// into its input scope renumbered by `column` (see
+    /// [`map_input_columns`](NonASAPOp::map_input_columns)), each child and
+    /// each operator node read from a scalar expression mapped by `f`, and
+    /// every other field cloned. A `Scan`'s predicates, an `Aggregate`'s
+    /// `having` and the expressions of an operator without inputs index
+    /// another scope, so their columns are kept.
+    ///
+    /// `f` runs in [`Self::children`] order (direct inputs first), so a
+    /// caller may hand out replacements by position. Example:
+    /// `Project { child: q, cols: [q.value + scalar(c)] }` calls `f` on `q`,
+    /// then on `c`.
+    fn map_parts<D>(
+        &self,
+        column: &mut impl FnMut(ColumnId) -> ColumnId,
+        f: &mut impl FnMut(&C) -> D,
+    ) -> NonASAPOp<D> {
         use NonASAPOp::*;
-        fn map_pred<C, D>(p: &Predicate<C>, f: &mut impl FnMut(&C) -> D) -> Predicate<D> {
-            Predicate(p.0.map_operator_refs(f))
+        fn kept(column: ColumnId) -> ColumnId {
+            column
         }
-        fn map_keys<C, D>(keys: &[SortKey<C>], f: &mut impl FnMut(&C) -> D) -> Vec<SortKey<D>> {
+        fn map_pred<C, D>(
+            p: &Predicate<C>,
+            column: &mut impl FnMut(ColumnId) -> ColumnId,
+            f: &mut impl FnMut(&C) -> D,
+        ) -> Predicate<D> {
+            Predicate(p.0.map_parts(column, f))
+        }
+        fn map_keys<C, D>(
+            keys: &[SortKey<C>],
+            column: &mut impl FnMut(ColumnId) -> ColumnId,
+            f: &mut impl FnMut(&C) -> D,
+        ) -> Vec<SortKey<D>> {
             keys.iter()
                 .map(|k| SortKey {
-                    expr: k.expr.map_operator_refs(f),
+                    expr: k.expr.map_parts(column, f),
                     ascending: k.ascending,
                     nulls_first: k.nulls_first,
                 })
@@ -279,21 +344,24 @@ impl<C> NonASAPOp<C> {
                 schema,
             } => Scan {
                 source: source.clone(),
-                predicates: predicates.iter().map(|p| map_pred(p, &mut f)).collect(),
+                predicates: predicates
+                    .iter()
+                    .map(|p| map_pred(p, &mut kept, f))
+                    .collect(),
                 schema: schema.clone(),
             },
             Values { rows, schema } => Values {
                 rows: rows
                     .iter()
-                    .map(|row| row.iter().map(|e| e.map_operator_refs(&mut f)).collect())
+                    .map(|row| row.iter().map(|e| e.map_parts(&mut kept, f)).collect())
                     .collect(),
                 schema: schema.clone(),
             },
-            PromqlVectorFromScalar(e) => PromqlVectorFromScalar(e.map_operator_refs(&mut f)),
+            PromqlVectorFromScalar(e) => PromqlVectorFromScalar(e.map_parts(&mut kept, f)),
             Filter { pred, child } => {
                 let child = f(child);
                 Filter {
-                    pred: map_pred(pred, &mut f),
+                    pred: map_pred(pred, column, f),
                     child,
                 }
             }
@@ -303,7 +371,7 @@ impl<C> NonASAPOp<C> {
                     .iter()
                     .map(|c| ProjectItem {
                         alias: c.alias.clone(),
-                        expr: c.expr.map_operator_refs(&mut f),
+                        expr: c.expr.map_parts(column, f),
                     })
                     .collect();
                 Project { cols, child }
@@ -319,12 +387,12 @@ impl<C> NonASAPOp<C> {
                 let child = f(child);
                 let filters = filters
                     .iter()
-                    .map(|p| p.as_ref().map(|p| map_pred(p, &mut f)))
+                    .map(|p| p.as_ref().map(|p| map_pred(p, column, f)))
                     .collect();
-                let having = having.as_ref().map(|p| map_pred(p, &mut f));
+                let having = having.as_ref().map(|p| map_pred(p, &mut kept, f));
                 Aggregate {
-                    reduction: reduction.clone(),
-                    measures: measures.clone(),
+                    reduction: reduction.map_columns(column),
+                    measures: measures.iter().map(|m| m.map_columns(column)).collect(),
                     output_names: output_names.clone(),
                     filters,
                     having,
@@ -340,7 +408,7 @@ impl<C> NonASAPOp<C> {
                 let (left, right) = (f(left), f(right));
                 Join {
                     kind: kind.clone(),
-                    pred: map_pred(pred, &mut f),
+                    pred: map_pred(pred, column, f),
                     left,
                     right,
                 }
@@ -357,10 +425,10 @@ impl<C> NonASAPOp<C> {
                 right: f(right),
             },
             Concat { children } => Concat {
-                children: children.iter().map(&mut f).collect(),
+                children: children.iter().map(f).collect(),
             },
             Dedup { cols, child } => Dedup {
-                cols: cols.clone(),
+                cols: cols.iter().map(|&c| column(c)).collect(),
                 child: f(child),
             },
             Sort {
@@ -370,8 +438,8 @@ impl<C> NonASAPOp<C> {
             } => {
                 let child = f(child);
                 Sort {
-                    keys: map_keys(keys, &mut f),
-                    partition_by: partition_by.clone(),
+                    keys: map_keys(keys, column, f),
+                    partition_by: partition_by.map_columns(column),
                     child,
                 }
             }
@@ -383,7 +451,7 @@ impl<C> NonASAPOp<C> {
             } => Limit {
                 n: *n,
                 offset: *offset,
-                partition_by: partition_by.clone(),
+                partition_by: partition_by.map_columns(column),
                 child: f(child),
             },
             BinaryOp {
@@ -407,12 +475,12 @@ impl<C> NonASAPOp<C> {
                 child,
             } => {
                 let child = f(child);
-                let args = args.iter().map(|e| e.map_operator_refs(&mut f)).collect();
-                let order_by = map_keys(order_by, &mut f);
+                let args = args.iter().map(|e| e.map_parts(column, f)).collect();
+                let order_by = map_keys(order_by, column, f);
                 SQLWindowFunc {
                     func: func.clone(),
                     args,
-                    partition_by: partition_by.clone(),
+                    partition_by: partition_by.map_columns(column),
                     order_by,
                     frame: frame.clone(),
                     output_name: output_name.clone(),
@@ -432,7 +500,7 @@ impl<C> NonASAPOp<C> {
                 let child = f(child);
                 PromqlRelabel {
                     dst: dst.clone(),
-                    value: value.map_operator_refs(&mut f),
+                    value: value.map_parts(column, f),
                     child,
                 }
             }
@@ -441,7 +509,7 @@ impl<C> NonASAPOp<C> {
                 child: f(child),
             },
             PromqlSeriesSample { by, kind, child } => PromqlSeriesSample {
-                by: by.clone(),
+                by: by.map_columns(column),
                 kind: *kind,
                 child: f(child),
             },
@@ -637,14 +705,30 @@ impl<I: OperatorInput> NonASAPOp<I> {
                 }
                 if child.result_kind() == OperatorResultKind::Relation {
                     for (index, measure) in measures.iter().enumerate() {
+                        // SQL's sample `STDDEV`/`VAR_SAMP` is NULL for a group
+                        // of fewer than two values; the others, and the
+                        // population forms, for a group of no value.
+                        let sample = matches!(
+                            measure,
+                            AggIntent::StdDev {
+                                population: false,
+                                ..
+                            } | AggIntent::Variance {
+                                population: false,
+                                ..
+                            }
+                        );
                         if matches!(
                             measure,
                             AggIntent::Sum { .. }
                                 | AggIntent::Avg { .. }
                                 | AggIntent::Min { .. }
                                 | AggIntent::Max { .. }
+                                | AggIntent::StdDev { .. }
+                                | AggIntent::Variance { .. }
                         ) {
-                            let nullable = offset == 0
+                            let nullable = sample
+                                || offset == 0
                                 || filters.get(index).is_some_and(Option::is_some)
                                 || measure
                                     .input_cols()
@@ -1056,14 +1140,7 @@ impl<I: OperatorInput> NonASAPOp<I> {
                 {
                     return Err(invalid("SQL join requires relations"));
                 }
-                let scope = Schema::new(
-                    left.schema()
-                        .fields
-                        .iter()
-                        .chain(&right.schema().fields)
-                        .cloned()
-                        .collect(),
-                );
+                let scope = Schema::new(self.input_scope().into_iter().cloned().collect());
                 predicate(pred, &scope)?;
             }
             SetOp { left, right, .. } => {

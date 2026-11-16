@@ -372,6 +372,18 @@ pub enum MathFunc {
 // `asap_frontend_promql::promql::reduction_for`) — so they stay generic
 // alongside `input_col`, in one `impl<C>` block.
 impl AggIntent<ColumnId> {
+    /// This intent with every column renumbered by `column`: the value
+    /// columns of [`input_cols`](AggIntent::input_cols) and
+    /// `histogram_quantile`'s `le`. `Sum { col: Some(1) }` under a renumbering
+    /// that moves column 1 to 2 is `Sum { col: Some(2) }`. An `Extension`
+    /// names its columns, so it is unchanged.
+    pub(crate) fn map_columns(&self, column: &mut impl FnMut(ColumnId) -> ColumnId) -> Self {
+        let mapped: Result<_, std::convert::Infallible> =
+            self.try_map_cols(&mut |&c| Ok(column(c)));
+        let Ok(mapped) = mapped;
+        mapped
+    }
+
     /// Resolve the existing SQL arg-selector extension using its child schema.
     /// The tuple is (selected value column, ordering column).
     /// Unknown extensions remain owned by their deployment model. Recognized
@@ -459,19 +471,109 @@ impl<C: Clone> AggIntent<C> {
     /// is built over from it.
     pub fn input_cols(&self) -> Vec<C> {
         match self {
-            AggIntent::Sum { col }
-            | AggIntent::Min { col }
-            | AggIntent::Max { col }
-            | AggIntent::Avg { col }
-            | AggIntent::Quantile { col, .. }
-            | AggIntent::FrequencyL2 { col, .. }
-            | AggIntent::FrequencyEntropy { col, .. }
-            | AggIntent::StdDev { col, .. }
-            | AggIntent::Variance { col, .. } => col.clone().into_iter().collect(),
-            AggIntent::Cardinality { cols, .. } => cols.clone(),
-            AggIntent::PearsonCorr { left, right } => vec![left.clone(), right.clone()],
-            _ => vec![],
+            // `le` is the bucket bound each value is ranked by, not a value.
+            AggIntent::HistogramQuantile { .. } => vec![],
+            _ => {
+                let mut cols = Vec::new();
+                let walked: Result<_, std::convert::Infallible> = self.try_map_cols(&mut |col| {
+                    cols.push(col.clone());
+                    Ok(())
+                });
+                let Ok(_) = walked;
+                cols
+            }
         }
+    }
+
+    /// This intent with every column it holds mapped by `f`, in argument
+    /// order; the first error stops the walk. Every variant is listed, so a
+    /// new variant that holds a column must be mapped here: a front end
+    /// resolves `Sum { col: Some("value") }` to `Sum { col: Some(1) }` with
+    /// it, and series identity realization renumbers `Some(1)` to
+    /// `Some(2)` when it inserts a column before it.
+    pub fn try_map_cols<D, E>(
+        &self,
+        f: &mut impl FnMut(&C) -> Result<D, E>,
+    ) -> Result<AggIntent<D>, E> {
+        let mut col = |c: &Option<C>| c.as_ref().map(&mut *f).transpose();
+        Ok(match self {
+            AggIntent::Count => AggIntent::Count,
+            AggIntent::Sum { col: c } => AggIntent::Sum { col: col(c)? },
+            AggIntent::Min { col: c } => AggIntent::Min { col: col(c)? },
+            AggIntent::Max { col: c } => AggIntent::Max { col: col(c)? },
+            AggIntent::Avg { col: c } => AggIntent::Avg { col: col(c)? },
+            AggIntent::StdDev { col: c, population } => AggIntent::StdDev {
+                col: col(c)?,
+                population: *population,
+            },
+            AggIntent::Variance { col: c, population } => AggIntent::Variance {
+                col: col(c)?,
+                population: *population,
+            },
+            AggIntent::Quantile { col: c, q } => AggIntent::Quantile {
+                col: col(c)?,
+                q: *q,
+            },
+            AggIntent::FrequencyL2 { col: c } => AggIntent::FrequencyL2 { col: col(c)? },
+            AggIntent::FrequencyEntropy { col: c } => AggIntent::FrequencyEntropy { col: col(c)? },
+            AggIntent::PearsonCorr { left, right } => AggIntent::PearsonCorr {
+                left: f(left)?,
+                right: f(right)?,
+            },
+            AggIntent::Cardinality { cols } => AggIntent::Cardinality {
+                cols: cols.iter().map(&mut *f).collect::<Result<_, _>>()?,
+            },
+            AggIntent::HistogramQuantile { q, le } => {
+                AggIntent::HistogramQuantile { q: *q, le: f(le)? }
+            }
+            AggIntent::TopK { k } => AggIntent::TopK { k: *k },
+            AggIntent::Rate => AggIntent::Rate,
+            AggIntent::IRate => AggIntent::IRate,
+            AggIntent::Increase => AggIntent::Increase,
+            AggIntent::Changes => AggIntent::Changes,
+            AggIntent::Delta => AggIntent::Delta,
+            AggIntent::IDelta => AggIntent::IDelta,
+            AggIntent::Deriv => AggIntent::Deriv,
+            AggIntent::Resets => AggIntent::Resets,
+            AggIntent::PredictLinear { seconds } => AggIntent::PredictLinear { seconds: *seconds },
+            AggIntent::DoubleExpSmoothing { smoothing, trend } => AggIntent::DoubleExpSmoothing {
+                smoothing: *smoothing,
+                trend: *trend,
+            },
+            AggIntent::HistogramCount => AggIntent::HistogramCount,
+            AggIntent::HistogramSum => AggIntent::HistogramSum,
+            AggIntent::HistogramAvg => AggIntent::HistogramAvg,
+            AggIntent::HistogramStdDev => AggIntent::HistogramStdDev,
+            AggIntent::HistogramStdVar => AggIntent::HistogramStdVar,
+            AggIntent::HistogramFraction { lower, upper } => AggIntent::HistogramFraction {
+                lower: *lower,
+                upper: *upper,
+            },
+            AggIntent::Math(func) => AggIntent::Math(func.clone()),
+            AggIntent::Absent { labels } => AggIntent::Absent {
+                labels: labels.clone(),
+            },
+            AggIntent::AbsentOverTime => AggIntent::AbsentOverTime,
+            AggIntent::PresentOverTime => AggIntent::PresentOverTime,
+            AggIntent::TimeFn(func) => AggIntent::TimeFn(*func),
+            AggIntent::Group => AggIntent::Group,
+            AggIntent::CountValues { label } => AggIntent::CountValues {
+                label: label.clone(),
+            },
+            AggIntent::LastOverTime => AggIntent::LastOverTime,
+            AggIntent::FirstOverTime => AggIntent::FirstOverTime,
+            AggIntent::MadOverTime => AggIntent::MadOverTime,
+            AggIntent::TsOfMinOverTime => AggIntent::TsOfMinOverTime,
+            AggIntent::TsOfMaxOverTime => AggIntent::TsOfMaxOverTime,
+            AggIntent::TsOfFirstOverTime => AggIntent::TsOfFirstOverTime,
+            AggIntent::TsOfLastOverTime => AggIntent::TsOfLastOverTime,
+            // An extension names its columns in its payload, resolved
+            // against the child schema (`arg_selector_columns`).
+            AggIntent::Extension { ext_kind, payload } => AggIntent::Extension {
+                ext_kind: ext_kind.clone(),
+                payload: payload.clone(),
+            },
+        })
     }
 }
 

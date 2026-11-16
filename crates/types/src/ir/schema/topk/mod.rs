@@ -14,7 +14,7 @@ use crate::ir::{ASAPOp, NonASAPOp, Operator, ScalarExpr};
 /// `FinalizeExactAccumulator` or `SummaryEstimate`, under the `Project`
 /// restoring its names (a renaming) and a value `HAVING`'s `Filter`. Over
 /// per-series rows (PromQL `topk by (..) (k, rows)`) it is the sample value.
-pub(crate) fn ranked_column<I: OperatorInput>(child: &I) -> Result<ColumnId, ResolveError> {
+pub fn ranked_column<I: OperatorInput>(child: &I) -> Result<ColumnId, ResolveError> {
     match ranked_source(child) {
         RankedSource::TopK(reduction) => Ok(reduction.group_keys().map_or(0, |keys| keys.len())),
         RankedSource::OneRowPerItem(Reduction::Reduce(_)) => Ok(child.schema().fields.len() - 1),
@@ -140,7 +140,7 @@ pub(crate) fn topk_output_name(k: usize, output_names: &[String]) -> String {
 
 /// Ordered projection of ranked rows: partition keys, ranked value, then
 /// item identity. TopK retains rows; partition keys alone are not unique.
-pub(crate) fn ranked_row_projection<I: OperatorInput>(
+pub fn ranked_row_projection<I: OperatorInput>(
     child: &I,
     reduction: &Reduction,
     output_name: &str,

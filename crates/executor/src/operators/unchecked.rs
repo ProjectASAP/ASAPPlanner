@@ -136,7 +136,11 @@ impl TryFrom<UncheckedOperator> for Operator {
                 }
             }
             Kind::Limit { n, offset, groups } => Operator::limit(input(0)?, n, offset, groups)?,
-            Kind::Sort { keys, groups } => Operator::sort(input(0)?, keys, groups)?,
+            Kind::Sort {
+                keys,
+                groups,
+                fetch,
+            } => Operator::sort(input(0)?, keys, groups, fetch)?,
             Kind::Window {
                 intent,
                 coordinate,
