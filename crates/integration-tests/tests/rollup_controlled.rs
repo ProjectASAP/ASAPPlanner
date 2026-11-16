@@ -48,7 +48,8 @@ fn nodes(roots: &[QueryRoot]) -> Vec<Rc<OperatorNode>> {
 /// 2,000,000 rows per second and 600,000,000 rows per evaluation, 10,000
 /// groups for each grouping and 1,000,000 users.
 /// Returns the sketches each query's accepted plan reads and how many KMV
-/// builds the selected plan holds.
+/// builds (at query time, or in tumbling windows as rows arrive) the
+/// selected plan holds.
 fn plan_rollup(sample_interval_ms: u64) -> (Vec<Vec<String>>, usize) {
     let (mut workload, roots) = fixture();
     let data = workload.data_workload.as_mut().unwrap();
@@ -88,10 +89,15 @@ fn plan_rollup(sample_interval_ms: u64) -> (Vec<Vec<String>>, usize) {
         .filter(|node| {
             matches!(
                 node.asap(),
-                Some(ASAPOp::SummaryAgg {
-                    summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
-                    ..
-                })
+                Some(
+                    ASAPOp::SummaryAgg {
+                        summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+                        ..
+                    } | ASAPOp::SummaryTumblingWindowChain {
+                        summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+                        ..
+                    }
+                )
             )
         })
         .count();
@@ -106,9 +112,12 @@ fn plan_rollup(sample_interval_ms: u64) -> (Vec<Vec<String>>, usize) {
 /// - 12,000,000 rows (12,000 rows per state, ×10): exact 127.9 s, KMV
 ///   178.4 s. Exact is 1.39x faster.
 ///
-/// At 2,000,000 rows per second (a sample every 5 ms) the planned shape (600,000,000 rows over
-/// 10,000 groups) has 60,000 rows per state, as the 60,000,000-row run
-/// does, so the planner builds a KMV.
+/// At 2,000,000 rows per second (a sample every 5 ms) the planned shape
+/// (600,000,000 rows over 10,000 groups) has 60,000 rows per state, as the
+/// 60,000,000-row run does, so the planner reads a KMV. It builds it in
+/// 1-minute tumbling windows as rows arrive and merges the 5 the range
+/// covers: each minute's 120,000,000 new rows are folded once, where a
+/// query-time build folds all 600,000,000 at each evaluation.
 #[test]
 fn production_distinct_rollup_builds_kmv_at_60k_rows_per_state() {
     let (sketches, kmv_builds) = plan_rollup(5);
