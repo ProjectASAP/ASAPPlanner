@@ -12,12 +12,12 @@ use super::group::{
     MemoGroupError,
 };
 use crate::accuracy::AccuracyTarget;
-use crate::ir::operator::arguments::Reduction;
+use crate::ir::operator::arguments::{JoinKind, Reduction, Source, SourceColumn};
 use crate::ir::operator::input::InputOrTemporaryBuild;
 use crate::ir::operator::AggIntent;
 use crate::ir::schema::{DataType, FieldDataType, Schema};
 use crate::ir::QueryRoot;
-use crate::ir::{ASAPOp, NonASAPOp, Operator};
+use crate::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use crate::stages::{
     CandidateError, CandidateForMemoGroup, CandidateForMemoGroupId, ColumnLineage,
     LogicalRequirements, MemoGroup, MemoGroupId,
@@ -95,62 +95,177 @@ impl Memo {
 
     /// The most values one evaluation of `group`, a readout or a state,
     /// returns, from the facts the data workload declares; `None` when they
-    /// bound it in no way. Only a result keyed by the sources' labels (or
-    /// SQL columns copied unchanged, not times) is bounded
-    /// ([`Self::keys_of_values`]), by the smaller of:
-    /// - the series (PromQL) or groups of rows (SQL) of the sources scanned
-    ///   below it (`GroupProperties::scanned_sources`, each source's
-    ///   `SourceFacts::series_count`, when every one declares it): each
-    ///   value of a per-series result, or of a result grouped by their
-    ///   labels, comes from at least one of them;
-    /// - for keys copied from one source, the distinct combinations it
-    ///   declares for them (`SourceFacts::distinct_values_per_label` and
-    ///   `distinct_values_per_label_set`); 1 for no key.
+    /// bound it in no way. As SQL optimizers estimate the groups of a
+    /// `GROUP BY` (the product of the key columns' distinct counts, clamped
+    /// to the input rows), but as an upper bound, it is the smaller of:
+    /// - the values its keys can take ([`Self::keys_of_values`]): for keys
+    ///   copied unchanged from source columns, the product, over the scans
+    ///   they come from, of the combinations each scan's source declares
+    ///   for its keys (`SourceFacts::distinct_values_per_label` and
+    ///   `distinct_values_per_label_set`), at most its series for a PromQL
+    ///   source, each series having one label set; 1 for no key; for a
+    ///   per-series result (or several rows per group, as a top-k), the
+    ///   series of the PromQL sources scanned below it, summed
+    ///   (`SourceFacts::series_count`). A SQL key with no declared count,
+    ///   such as a measure column, or a computed key or a time, bounds
+    ///   nothing: the groups of rows a SQL source declares do not say which
+    ///   columns form them;
+    /// - the rows its input reads per evaluation
+    ///   ([`Self::max_rows_per_evaluation`]): there are never more groups
+    ///   than input rows.
     ///
-    /// A result grouped by a computed key or a time is not bounded: one
-    /// value per bucket of `GROUP BY date_trunc('minute', ts)` over the last
-    /// 15 minutes is about 16 values, however few groups of rows the table
-    /// holds.
+    /// Keys from different scans multiply, for a join pairs their values:
+    /// `flows JOIN hosts ... GROUP BY f.src, h.region`, with 6 `src` and 6
+    /// `region` values declared, returns up to 36 values, not 6 + 6.
     ///
     /// Examples: a readout of `quantile_over_time(0.9, m[5m])` over `m`
     /// with 1000 series returns at most 1000 values, which `max(...)` over
     /// it reads at once; `SELECT count(DISTINCT dst) FROM flows` reads one
-    /// distinct count per evaluation.
+    /// distinct count per evaluation; `GROUP BY bytes` over the last 15
+    /// minutes of `flows`, 6 groups of rows sampled every minute, returns
+    /// at most the 6 × 16 = 96 rows it reads.
     pub fn max_values_per_evaluation(&self, group: MemoGroupId) -> Option<u64> {
-        let KeysOfValues::Labels { declared_groups } = self.keys_of_values(group) else {
+        let (keys, input) = self.keys_of_values(group)?;
+        let by_keys = match keys {
+            // PromQL has no join: a vector binary operator returns at most
+            // one series per series of one side, `or` both sides', so the
+            // series of the sources scanned add up.
+            KeysOfValues::PerSeries => self.groups[input.0 as usize]
+                .group_properties
+                .scanned_sources
+                .iter()
+                .try_fold(0u64, |total, source| {
+                    if !source.is_time_series() {
+                        return None;
+                    }
+                    let (facts, _) = series_facts(&self.source_facts, source_name(source))?;
+                    total.checked_add(facts.series_count?)
+                }),
+            KeysOfValues::SourceColumns(columns) => {
+                let mut columns_per_scan: BTreeMap<(&Source, u32), Vec<&str>> = BTreeMap::new();
+                for column in &columns {
+                    columns_per_scan
+                        .entry((&column.source, column.scan_ordinal))
+                        .or_default()
+                        .push(column.column.as_str());
+                }
+                columns_per_scan
+                    .into_iter()
+                    .try_fold(1u64, |product, ((source, _), columns)| {
+                        let (facts, _) = series_facts(&self.source_facts, source_name(source))?;
+                        let declared = facts.declared_distinct_combinations(&columns);
+                        let series = facts.series_count.filter(|_| source.is_time_series());
+                        product.checked_mul(smaller_known(declared, series)?)
+                    })
+            }
+            KeysOfValues::ComputedOrTime => None,
+        };
+        smaller_known(by_keys, self.max_rows_per_evaluation(input))
+    }
+
+    /// The most rows one evaluation of `group` returns, from the facts the
+    /// data workload declares; `None` when they bound it in no way. A `Scan`
+    /// returns the rows its source holds (`SourceFacts::rows_held`), and a
+    /// `TimeRange` over it the rows of its window
+    /// (`SourceFacts::max_rows_in_window`; for an instant selector, one per
+    /// series at most); an operator that keeps, drops or groups its input's
+    /// rows at most its input's; a join at most the product of its inputs'
+    /// (plus each side's own for an outer join), a union their sum.
+    /// Example: `flows WHERE ts >= now() - INTERVAL '15 minutes'`, 6 groups
+    /// of rows sampled every minute, returns at most 6 × 16 = 96 rows.
+    fn max_rows_per_evaluation(&self, group: MemoGroupId) -> Option<u64> {
+        let rows = |input: &MemoGroupId| self.max_rows_per_evaluation(*input);
+        let facts = |source: &Source| {
+            series_facts(&self.source_facts, source_name(source)).map(|(facts, _)| facts)
+        };
+        let Operator::NonASAP(op) = &self.groups[group.0 as usize].expression else {
+            // A state, readout or merge: its rows are not its input's.
             return None;
         };
-        let series_scanned = self.groups[group.0 as usize]
-            .group_properties
-            .scanned_sources
-            .iter()
-            .try_fold(0u64, |total, source| {
-                let (facts, _) = series_facts(&self.source_facts, source_name(source))?;
-                total.checked_add(facts.series_count?)
-            });
-        match (series_scanned, declared_groups) {
-            (Some(series), Some(groups)) => Some(series.min(groups)),
-            (series, groups) => series.or(groups),
+        match op {
+            NonASAPOp::Scan { source, .. } => facts(source)?.rows_held,
+            NonASAPOp::Values { rows, .. } => u64::try_from(rows.len()).ok(),
+            NonASAPOp::TimeRange { range, kind, child } => {
+                let window_rows = match &self.groups[child.0 as usize].expression {
+                    Operator::NonASAP(NonASAPOp::Scan { source, .. }) => {
+                        facts(source).and_then(|facts| {
+                            let window_ms = u64::try_from(range.as_millis()).ok()?;
+                            let in_window = facts.max_rows_in_window(window_ms);
+                            match kind {
+                                TimeRangeKind::Range => in_window,
+                                TimeRangeKind::Instant => {
+                                    smaller_known(in_window, facts.series_count)
+                                }
+                            }
+                        })
+                    }
+                    Operator::NonASAP(_) | Operator::ASAP(_) => None,
+                };
+                smaller_known(window_rows, rows(child))
+            }
+            NonASAPOp::Filter { child, .. }
+            | NonASAPOp::Project { child, .. }
+            | NonASAPOp::Dedup { child, .. }
+            | NonASAPOp::Sort { child, .. }
+            | NonASAPOp::Limit { child, .. }
+            | NonASAPOp::SQLWindowFunc { child, .. }
+            | NonASAPOp::TimeShift { child, .. }
+            | NonASAPOp::PromqlRelabel { child, .. }
+            | NonASAPOp::PromqlInfoEnrich { child, .. }
+            | NonASAPOp::PromqlSeriesSample { child, .. } => rows(child),
+            // A global aggregate returns one row even over no rows.
+            NonASAPOp::Aggregate { child, .. } => rows(child).map(|rows| rows.max(1)),
+            NonASAPOp::Join {
+                kind, left, right, ..
+            } => {
+                let (left, right) = (rows(left)?, rows(right)?);
+                let pairs = left.checked_mul(right)?;
+                match kind {
+                    JoinKind::Inner | JoinKind::Cross => Some(pairs),
+                    JoinKind::Semi | JoinKind::Anti => Some(left),
+                    JoinKind::Left | JoinKind::Right | JoinKind::Full => {
+                        pairs.checked_add(left)?.checked_add(right)
+                    }
+                }
+            }
+            // A vector binary operator returns at most one row per row of
+            // one side (`or` keeps both sides' rows); a set operator at most
+            // both sides' rows.
+            NonASAPOp::BinaryOp { lhs, rhs, .. }
+            | NonASAPOp::SetOp {
+                left: lhs,
+                right: rhs,
+                ..
+            } => rows(lhs)?.checked_add(rows(rhs)?),
+            NonASAPOp::Concat { children } => children
+                .iter()
+                .try_fold(0u64, |total, child| total.checked_add(rows(child)?)),
+            NonASAPOp::PromqlVectorFromScalar(_) => Some(1),
+            // Its child's rows at each step of its range, which no declared
+            // fact bounds here.
+            NonASAPOp::PromqlSubquery { .. } => None,
         }
     }
 
-    /// What the values of `group` are keyed by
-    /// ([`Self::max_values_per_evaluation`]): the keys of the state it is,
-    /// or reads, or of the aggregate it is. A top-k readout or aggregate
-    /// returns several rows per group, so its declared groups are unknown.
-    fn keys_of_values(&self, group: MemoGroupId) -> KeysOfValues {
+    /// What the values of `group` are keyed by, and the group of rows they
+    /// are computed from ([`Self::max_values_per_evaluation`]): the keys of
+    /// the state it is, or reads, or of the aggregate it is, and that
+    /// state's or aggregate's input. A top-k readout or aggregate returns
+    /// several rows per group, so it counts as per series. `None` for any
+    /// other group.
+    fn keys_of_values(&self, group: MemoGroupId) -> Option<(KeysOfValues, MemoGroupId)> {
         let (reduction, child, one_row_per_group) = match &self.groups[group.0 as usize].expression
         {
             Operator::ASAP(ASAPOp::SummaryEstimate {
                 summary_input,
                 query,
             }) => {
-                let keys = self.keys_of_values(*summary_input);
-                return if matches!(query, SketchStatistic::TopK { .. }) {
-                    keys.without_declared_groups()
+                let (keys, input) = self.keys_of_values(*summary_input)?;
+                return Some(if matches!(query, SketchStatistic::TopK { .. }) {
+                    (keys.several_rows_per_group(), input)
                 } else {
-                    keys
-                };
+                    (keys, input)
+                });
             }
             Operator::ASAP(
                 ASAPOp::SummaryAgg {
@@ -172,24 +287,18 @@ impl Memo {
                     .iter()
                     .any(|m| matches!(m, AggIntent::TopK { .. } | AggIntent::CountValues { .. })),
             ),
-            _ => return KeysOfValues::ComputedOrTime,
+            _ => return None,
         };
         let keys = match reduction {
             Reduction::Reduce(by) if !by.is_without() => by.keys(),
             // One value per series, or per group of every label but some.
-            _ => {
-                return KeysOfValues::Labels {
-                    declared_groups: None,
-                }
-            }
+            _ => return Some((KeysOfValues::PerSeries, child)),
         };
         let input = &self.groups[child.0 as usize].group_properties;
-        let mut source = None;
-        let mut labels = Vec::new();
-        let mut one_source = true;
+        let mut columns = Vec::new();
         for key in keys {
             let Some(ColumnLineage::SourceColumn(column)) = input.column_lineage.get(*key) else {
-                return KeysOfValues::ComputedOrTime;
+                return Some((KeysOfValues::ComputedOrTime, child));
             };
             let time_valued = input.schema.fields.get(*key).is_some_and(|field| {
                 matches!(
@@ -198,24 +307,16 @@ impl Memo {
                 )
             });
             if time_valued {
-                return KeysOfValues::ComputedOrTime;
+                return Some((KeysOfValues::ComputedOrTime, child));
             }
-            one_source &= source.is_none_or(|source| source == &column.source);
-            source = Some(&column.source);
-            labels.push(column.column.as_str());
+            columns.push(column.clone());
         }
-        let declared_groups = match source {
-            None => Some(1),
-            Some(source) if one_source => series_facts(&self.source_facts, source_name(source))
-                .and_then(|(facts, _)| facts.declared_distinct_combinations(&labels)),
-            Some(_) => None,
-        };
-        let keys = KeysOfValues::Labels { declared_groups };
-        if one_row_per_group {
-            keys
+        let keys = KeysOfValues::SourceColumns(columns);
+        Some(if one_row_per_group {
+            (keys, child)
         } else {
-            keys.without_declared_groups()
-        }
+            (keys.several_rows_per_group(), child)
+        })
     }
 
     /// The queries, by index in the workload.
@@ -577,30 +678,39 @@ fn add_parent(group: &mut MemoGroup, parent: MemoGroupId) {
     }
 }
 
-/// What the values one evaluation of a readout or state returns are keyed
-/// by ([`Memo::max_values_per_evaluation`]).
+/// What the values of a readout, state or aggregate are keyed by
+/// ([`Memo::keys_of_values`]).
 enum KeysOfValues {
-    /// Each value is one series, or one group of labels (SQL columns)
-    /// copied unchanged from the sources: at most the series (groups of
-    /// rows) scanned, and at most `declared_groups`, the combinations the
-    /// source declares for the keys, when known (`Some(20)` for `by (job)`
-    /// over 20 declared jobs, `Some(1)` for no key).
-    Labels { declared_groups: Option<u64> },
+    /// One value per series (or per group of every label but some), or
+    /// several per group (a top-k): at most the series of the PromQL
+    /// sources scanned.
+    PerSeries,
+    /// One value per combination of these columns, each copied unchanged
+    /// from a column of one scan of a source (`by (job)`, `GROUP BY src`);
+    /// none for one value.
+    SourceColumns(Vec<SourceColumn>),
     /// A key is computed (`date_trunc('minute', ts)`, an expression) or a
-    /// time: one value per bucket or time, which no fact bounds.
+    /// time: one value per bucket or time, which no declared count bounds.
     ComputedOrTime,
 }
 
 impl KeysOfValues {
-    /// These keys, with no declared groups: a top-k returns several rows
-    /// per group.
-    fn without_declared_groups(self) -> Self {
+    /// These keys for a result with several rows per group (a top-k): its
+    /// values are not bounded by its groups.
+    fn several_rows_per_group(self) -> Self {
         match self {
-            Self::Labels { .. } => Self::Labels {
-                declared_groups: None,
-            },
+            Self::PerSeries | Self::SourceColumns(_) => Self::PerSeries,
             Self::ComputedOrTime => Self::ComputedOrTime,
         }
+    }
+}
+
+/// The smaller of two upper bounds, either alone when the other is
+/// unknown.
+fn smaller_known(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 
