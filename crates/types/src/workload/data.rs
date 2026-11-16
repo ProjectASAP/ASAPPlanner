@@ -256,10 +256,7 @@ impl SourceFacts {
             .zip(self.sample_interval)
             .filter(|(_, interval)| interval.0 > 0)
             .and_then(|(series, interval)| series.checked_mul(window_ms / interval.0 + 1));
-        match (by_rate, self.rows_held) {
-            (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
-            (by_rate, rows_held) => by_rate.or(rows_held),
-        }
+        super::bounds::smaller_known(by_rate, self.rows_held)
     }
 
     /// An upper bound on the distinct combinations of values `labels` take
