@@ -106,15 +106,24 @@ fn whole_result_quantile_grouped_by(
         "SELECT {keys}, approx_percentile_cont(bytes, 0.9) AS q FROM flows \
          WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY {keys}"
     );
-    sql_pass2_over(
-        &[(
-            &query,
-            json!({"max_error": 0.01, "failure_probability": 0.01, "accuracy_metric": "rank"}),
-        )],
+    whole_result_quantile(
+        &query,
         json!({"flows": {
             "series_count": 6,
             "distinct_values_per_label": src_values.map_or(json!({}), |src| json!({"src": src})),
         }}),
+    )
+}
+
+/// `query`, a 0.9-quantile at rank error 0.01 and δ = 0.01 over the whole
+/// result, over the facts `sources` declares.
+fn whole_result_quantile(query: &str, sources: serde_json::Value) -> LogicalASAPMemoCandidates {
+    sql_pass2_over(
+        &[(
+            query,
+            json!({"max_error": 0.01, "failure_probability": 0.01, "accuracy_metric": "rank"}),
+        )],
+        sources,
     )
 }
 
@@ -143,20 +152,88 @@ fn a_whole_result_grouped_by_a_source_column_and_a_time_bucket_gives_its_readout
     }
 }
 
-/// Grouped by the source column `src` alone, the result holds at most the
-/// 6 groups of rows `flows` declares. With no `src` count declared, the
-/// query's value count is unknown, but the readout's δ still splits over
-/// R = 6: 0.01 / 6.
+/// Grouped by the source column `src`, with 4 distinct `src` values
+/// declared, the result holds at most 4 values: the readout's δ splits
+/// over them, 0.01 / 4.
 #[test]
-fn a_whole_result_grouped_by_a_source_column_splits_over_the_groups_of_rows() {
-    let logical = whole_result_quantile_grouped_by("src", None);
-    let readouts = kll_readouts(&logical);
+fn a_whole_result_grouped_by_a_declared_source_column_splits_over_its_distinct_values() {
+    let logical = whole_result_quantile_grouped_by("src", Some(4));
+    assert_levels(&logical, &[0.01 / 4.0]);
+}
+
+/// `GROUP BY bytes` keys each quantile by a measure value: one group per
+/// distinct `bytes`, and no count of distinct `bytes` is declared. The 6
+/// groups of rows `flows` declares do not bound it (nothing says which
+/// columns form them); the rows the query reads do, as there are never
+/// more groups than rows. With no sampling interval declared, the rows
+/// are unknown too, so the readout gets no per-value failure probability,
+/// rather than δ / 6. Sampled every minute, the last 15 minutes hold at
+/// most 6 × 16 = 96 rows: δ splits over 96.
+#[test]
+fn a_whole_result_grouped_by_an_undeclared_measure_column_splits_over_the_rows_read() {
+    let by_bytes = |sample_interval: Option<u64>| {
+        whole_result_quantile(
+            "SELECT bytes, approx_percentile_cont(bytes, 0.9) AS q FROM flows \
+             WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY bytes",
+            json!({"flows": {
+                "series_count": 6,
+                "sample_interval": sample_interval,
+                "distinct_values_per_label": {"src": 6},
+            }}),
+        )
+    };
+    for (live, failure_probability) in kll_readouts(&by_bytes(None)) {
+        assert_eq!((live, failure_probability), (false, None));
+    }
+    assert_levels(&by_bytes(Some(60_000)), &[0.01 / 96.0]);
+}
+
+/// `flows JOIN hosts` grouped by `f.src` and `h.region`: with 6 groups of
+/// rows and 6 `src` values in `flows`, and 6 groups of rows, 6 hosts and
+/// 6 regions in `hosts`, the result can hold 6 × 6 = 36 values (6 flows
+/// to one host, and 6 host rows, one per region, for that host), not
+/// 6 + 6 = 12: the readout's δ splits over 36. When the join reads fewer rows, they bound
+/// the values instead: with `flows` holding 6 rows and `hosts` 5, the join
+/// reads at most 30, and δ splits over 30.
+#[test]
+fn a_whole_result_over_a_join_splits_over_the_product_of_its_sides_values() {
+    let join = |flows_rows: Option<u64>, hosts_rows: Option<u64>| {
+        whole_result_quantile(
+            "SELECT f.src, h.region, approx_percentile_cont(f.bytes, 0.9) AS q \
+             FROM flows f JOIN hosts h ON f.dst = h.host \
+             WHERE f.ts >= now() - INTERVAL '15 minutes' GROUP BY f.src, h.region",
+            json!({
+                "flows": {
+                    "series_count": 6,
+                    "rows_held": flows_rows,
+                    "distinct_values_per_label": {"src": 6, "dst": 300},
+                },
+                "hosts": {
+                    "series_count": 6,
+                    "rows_held": hosts_rows,
+                    "distinct_values_per_label": {"host": 6, "region": 6},
+                },
+            }),
+        )
+    };
+    assert_levels(&join(None, None), &[0.01 / 36.0]);
+    assert_levels(&join(Some(6), Some(5)), &[0.01 / 30.0]);
+}
+
+/// Asserts that the KLL readout candidates of `logical` keep at least
+/// one, and that the failure probabilities they must meet are `expected`
+/// (distinct, ascending), each candidate having one.
+fn assert_levels(logical: &LogicalASAPMemoCandidates, expected: &[f64]) {
+    let readouts = kll_readouts(logical);
     assert!(readouts.iter().any(|(live, _)| *live), "{readouts:?}");
-    for (_, failure_probability) in readouts {
-        let failure_probability = failure_probability.expect("a level");
-        assert!(
-            (failure_probability - 0.01 / 6.0).abs() < 1e-12,
-            "{failure_probability}"
-        );
+    let mut levels: Vec<f64> = readouts
+        .iter()
+        .map(|(_, failure_probability)| failure_probability.expect("a level"))
+        .collect();
+    levels.sort_by(f64::total_cmp);
+    levels.dedup_by(|a, b| (*a - *b).abs() < 1e-15);
+    assert_eq!(levels.len(), expected.len(), "{levels:?}");
+    for (level, expected) in levels.iter().zip(expected) {
+        assert!((level - expected).abs() < 1e-12, "{levels:?}");
     }
 }
