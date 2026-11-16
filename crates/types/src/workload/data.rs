@@ -252,6 +252,26 @@ pub struct LabelSetDistinctValues {
 const MAX_KEYS_COVERED_BY_LABEL_SETS: usize = 16;
 
 impl SourceFacts {
+    /// The most rows (PromQL samples) a window of `window_ms` over the
+    /// source holds, from declared facts only: each of its `series_count`
+    /// series (groups of rows) receives one sample per `sample_interval`,
+    /// so at most `window_ms / sample_interval + 1` fall in the window, and
+    /// the source holds `rows_held` rows in all. The smaller of the two,
+    /// either alone when the other is unknown; `None` when neither is
+    /// declared. Example: 6 groups of rows sampled every minute hold at
+    /// most 6 × 16 = 96 rows in 15 minutes.
+    pub(crate) fn max_rows_in_window(&self, window_ms: u64) -> Option<u64> {
+        let by_rate = self
+            .series_count
+            .zip(self.sample_interval)
+            .filter(|(_, interval)| interval.0 > 0)
+            .and_then(|(series, interval)| series.checked_mul(window_ms / interval.0 + 1));
+        match (by_rate, self.rows_held) {
+            (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
+            (by_rate, rows_held) => by_rate.or(rows_held),
+        }
+    }
+
     /// An upper bound on the distinct combinations of values `labels` take
     /// together in this source, from declared counts only: the smallest
     /// product of counts, of declared label sets
