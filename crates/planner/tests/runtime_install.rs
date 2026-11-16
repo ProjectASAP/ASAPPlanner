@@ -551,8 +551,9 @@ async fn grouped_and_per_series_counts_over_a_shared_query_time_chain_install_an
 /// no rows. Every value of `m` lies above 0 and below 1,000 ([`m_samples`]),
 /// so `count(sum by (job) (m >= 1000))` counts an empty vector while
 /// `count(sum by (job) (m >= 0))` counts the 2 jobs, and
-/// `count(count by (x) (m))` counts one group, as no series has `x`. With
-/// no sample at all every query is empty. Each query is planned on its
+/// `count(count by (x) (m))` counts one group, as no series has `x`.
+/// `stddev` and `stdvar` follow the same rule: none over the empty vector,
+/// and 0 over that one group. With no sample at all every query is empty. Each query is planned on its
 /// own, exactly.
 #[tokio::test]
 async fn a_global_promql_count_over_an_empty_aggregate_answers_no_sample() {
@@ -561,7 +562,8 @@ async fn a_global_promql_count_over_an_empty_aggregate_answers_no_sample() {
         let query_time = Scope::Query {
             evaluation_time_ms: EVALUATION_MS,
         };
-        run(&plan.dag, samples, &query_roots(plan), query_time)
+        let store = CountingStore(time_series_tables(&plan.dag, samples));
+        run(&plan.dag, store, &query_roots(plan), query_time)
             .concat()
             .iter()
             .flat_map(Batch::to_rows)
@@ -576,6 +578,9 @@ async fn a_global_promql_count_over_an_empty_aggregate_answers_no_sample() {
         ("count(sum by (job) (m >= 1000))", vec![]),
         ("count(count by (x) (m))", vec![1.0]),
         ("count(sum by (job) (m >= 0))", vec![2.0]),
+        ("stddev(sum by (job) (m >= 1000))", vec![]),
+        ("stdvar(sum by (job) (m >= 1000))", vec![]),
+        ("stdvar(count by (x) (m))", vec![0.0]),
     ] {
         let plan = plan_every_minute(&[(query, "")]).await;
         assert_eq!(
