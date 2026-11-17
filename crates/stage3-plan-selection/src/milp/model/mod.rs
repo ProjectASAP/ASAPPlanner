@@ -22,6 +22,7 @@ use good_lp::{
     constraint, variable, Constraint, Expression, ProblemVariables, SolverModel, Variable,
 };
 
+use asap_types::accuracy::FailureProbabilityBound;
 use asap_types::ir::operator::Source;
 use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId};
 use asap_types::workload::QueryWorkloadEntry;
@@ -391,13 +392,15 @@ pub(crate) enum SelectionMilpError {
     Solver(String),
     /// The solver's selection misses `query`'s accuracy target when
     /// checked exactly: its limits, such as a failure probability of
-    /// 1e-12 per output value (δ = 0.01 over 1e10 values), are below the
+    /// 1e-12 for each covered value (δ = 0.01 over 1e10 values), are below the
     /// solver's least feasibility tolerance,
     /// [`LEAST_HIGHS_FEASIBILITY_TOLERANCE`], so (K) cannot be trusted.
     TargetBelowSolverPrecision {
         query: QueryId,
-        /// The target's δ per output value; `None` without a δ.
-        failure_probability_per_output_value: Option<f64>,
+        /// The union bound the target's δ is checked by, with its limit
+        /// (`AccuracyTarget::failure_probability_bound`); `None` without
+        /// one.
+        failure_probability_bound: Option<FailureProbabilityBound>,
     },
 }
 
@@ -556,19 +559,11 @@ pub(crate) fn solve_selection(
     // The query the first solve's selection missed, checked exactly: the
     // error names it if the second solve finds no plan at all.
     let mut missed_at_default_tolerance: Option<QueryId> = None;
-    let below_solver_precision = |query: QueryId| {
-        let memo = &inputs.physical.logical_candidates.memo;
-        let memo_query = &memo.queries()[query.0];
-        SelectionMilpError::TargetBelowSolverPrecision {
-            query,
-            failure_probability_per_output_value: memo_query.accuracy_target.as_ref().and_then(
-                |target| {
-                    target.failure_probability_per_output_value(
-                        memo_query.number_of_values_per_query_evaluation,
-                    )
-                },
-            ),
-        }
+    let below_solver_precision = |query: QueryId| SelectionMilpError::TargetBelowSolverPrecision {
+        query,
+        failure_probability_bound: rules
+            .as_ref()
+            .and_then(|rules| rules.failure_probability_bound(query)),
     };
     let (selected, selected_edges, answering) = loop {
         let started = Instant::now();
