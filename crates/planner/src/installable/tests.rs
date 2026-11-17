@@ -363,3 +363,51 @@ fn a_root_time_shift_is_read_whole_by_the_installer_not_by_the_cost() {
     assert_eq!(retention.len(), 1);
     assert_eq!(retention[0].lookback_ms(), None);
 }
+
+/// `sum by (job) (last_over_time(data[1m]))` every 10 s, exact: Stages 1-3
+/// plan it, but the Planner's executor has no `last_over_time` kernel, so
+/// its compile check refuses the plan. A runtime other than the Planner's
+/// executor still gets the plan, validated, from
+/// [`InstallablePlan::of_dag_without_executor_check`].
+#[tokio::test]
+async fn a_plan_only_the_executor_cannot_compile_is_built_without_its_check() {
+    let workload: crate::PlanningWorkload = serde_json::from_str(
+        r#"{"query_workload": {"language": "promql", "repeating_queries": [{
+              "query": "sum by (job) (last_over_time(data[1m]))",
+              "demand": {"fixed_interval_at": {"interval": 10000, "evaluation_phase": 0}},
+              "requirements": {"accuracy": {"max_error": 0.0, "failure_probability": 0.0}},
+              "predictability": {"predictable": {"known_at": null}}}]},
+            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 10000.0}},
+              "sources": {"data": {"series_count": 1000, "metric_type": "gauge",
+                  "sample_interval": 100}}}}"#,
+    )
+    .unwrap();
+    let output = crate::e2e_plan(crate::UserInput::new(
+        &workload,
+        crate::FrontendInput::Promql,
+        crate::PlanningModels::builtin(),
+    ))
+    .await
+    .expect("Stages 1-3 plan last_over_time");
+    let query_texts = vec!["sum by (job) (last_over_time(data[1m]))".to_owned()];
+    // Precondition: an executor-only gap. Once the executor runs
+    // `last_over_time`, pick another query it plans but cannot compile.
+    let refused = InstallablePlan::of_dag(output.plan.clone(), query_texts.clone()).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            InstallablePlanError::QueryRunNotExecutable { .. }
+                | InstallablePlanError::MaterializedViewNotExecutable { .. }
+        ),
+        "{refused}"
+    );
+    let plan = InstallablePlan::of_dag_without_executor_check(output.plan.clone(), query_texts)
+        .expect("validated without the executor's compile check");
+    plan.validate().unwrap();
+    assert!(plan.check_compiles().is_err());
+    // Still validated: one query text per root.
+    assert!(matches!(
+        InstallablePlan::of_dag_without_executor_check(output.plan, Vec::new()),
+        Err(InstallablePlanError::QueriesDoNotMatchRoots { roots: 1 })
+    ));
+}
