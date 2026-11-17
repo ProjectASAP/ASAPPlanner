@@ -231,7 +231,7 @@ fn assert_excluded_by_deployment(run: &PlanningRun, named: &[&str]) {
 
 fn kll_at_most(k: u32) -> CandidateExclusion {
     CandidateExclusion {
-        sketch_parameters: Some(SketchParameterRange::KllK {
+        sketch_parameter_range: Some(SketchParameterRange::KllK {
             at_least: None,
             at_most: Some(k),
         }),
@@ -239,8 +239,8 @@ fn kll_at_most(k: u32) -> CandidateExclusion {
     }
 }
 
-/// The four exclusions of the sketch-benefit sweep's "stored" arm: no
-/// query-time scan, no per-series aggregate, no query-time build or chain.
+/// The four exclusions of an arm with no query-time scan: no query-time
+/// scan, no per-series aggregate, no query-time build or chain.
 fn stored_arm() -> Vec<CandidateExclusion> {
     vec![
         CandidateExclusion {
@@ -289,7 +289,7 @@ fn kll(k: u32) -> (FieldDataType, Option<SketchParams>) {
 #[test]
 fn an_exclusion_matching_nothing_changes_nothing() {
     let nothing = excluding(vec![CandidateExclusion {
-        sketch_parameters: Some(SketchParameterRange::KmvK {
+        sketch_parameter_range: Some(SketchParameterRange::KmvK {
             at_least: None,
             at_most: Some(106_263),
         }),
@@ -366,7 +366,7 @@ fn excluding_every_kll_size_selects_a_plan_without_kll() {
     }
 }
 
-/// The sweep's "stored" arm: without query-time scans, per-series
+/// An arm with no query-time scan: without query-time scans, per-series
 /// aggregates and query-time builds, the sum is read from an ingestion-time
 /// chain of exact sums; eight candidates are excluded.
 #[test]
@@ -513,10 +513,21 @@ fn a_target_without_mergeable_rate_state_builds_rate_within_one_evaluation() {
         ],
         ..Default::default()
     };
-    let merged_state = |kind| CandidateExclusion {
-        summary_family: Some(SummaryFamily::Exact(kind)),
-        merged_across_windows: Some(true),
-        ..Default::default()
+    // A counter state merged across windows: a chain of it, or a build of
+    // it kept across evaluations.
+    let merged_state = |kind| {
+        [
+            CandidateExclusion {
+                summary_family: Some(SummaryFamily::Exact(kind)),
+                operator: Some(OperatorKind::SummaryTumblingWindowChain),
+                ..Default::default()
+            },
+            CandidateExclusion {
+                summary_family: Some(SummaryFamily::Exact(kind)),
+                kept_across_evaluations: Some(true),
+                ..Default::default()
+            },
+        ]
     };
     let cases = [
         ("rate", "5m", ExactKind::Rate, 0.279284, 0.367671),
@@ -554,7 +565,9 @@ fn a_target_without_mergeable_rate_state_builds_rate_within_one_evaluation() {
         );
         assert_eq!(builds(plan), vec![(FieldDataType::exact(kind), None)]);
         assert_cost(selection, restricted_cost);
-        assert!(!some_node_matches(plan, &merged_state(kind)), "{function}");
+        for merged in merged_state(kind) {
+            assert!(!some_node_matches(plan, &merged), "{function}");
+        }
         assert_eq!(
             pruned_by(&restricted, ExclusionSource::StateNotMergeableAcrossWindows),
             3,

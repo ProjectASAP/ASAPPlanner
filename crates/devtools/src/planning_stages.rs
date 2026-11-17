@@ -257,7 +257,10 @@ pub fn run_stages_until(
         return Ok(stages);
     }
     let run = &mut stages.run;
-    let pass1 = pass1_memo(stage0_dag, &models.deployment_capabilities.exclusions())
+    // As `run_planning`: the exclusions are expanded once, for Pass 1 and
+    // Stage 2.
+    let exclusions = models.deployment_capabilities.exclusions();
+    let pass1 = pass1_memo(stage0_dag, &exclusions)
         // As `run_planning`: a query Pass 1 cannot plan is reported before
         // contradictory deployment capabilities.
         .map_err(|error| PlanningStagesError::Pass1(error.to_string()))?;
@@ -282,8 +285,7 @@ pub fn run_stages_until(
         return Ok(stages);
     }
     let logical = run.logical_asap_candidates.as_ref().expect("set above");
-    let physical =
-        generate_physical_asap_memo_candidates(logical, data, models.deployment_capabilities);
+    let physical = generate_physical_asap_memo_candidates(logical, data, &exclusions);
     if until == RunUntil::Stage2 {
         run.physical_asap_candidates = Some(physical);
         return Ok(stages);

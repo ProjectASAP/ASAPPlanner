@@ -104,9 +104,16 @@ tests in `planner_layering_example4.rs`.
   as bad input).
 - A new pricing input goes in `CostInputs` (validated in its
   `validate`); a new statement about the executor goes in
-  `DeploymentCapabilities`. Both reach the stages through `PlanningModels`;
-  a stage function takes only the field it reads (Stage 2 takes
-  `query_time_results_retained: bool`, not the whole struct).
+  `DeploymentCapabilities`. Both reach the stages through `PlanningModels`.
+  A new deployment capability is three pieces: its field in
+  `DeploymentCapabilities` (with a default that changes no plan), its
+  expansion into `CandidateExclusion`s in
+  `DeploymentCapabilities::exclusions`, and the `ExclusionSource` variant
+  those exclusions carry. The facade expands the exclusions once and hands
+  the list to Pass 1 and Stage 2; no stage reads the struct itself. When no
+  `CandidateExclusion` field can say what the capability rules out, add the
+  field to `CandidateExclusion` (with its `matches` test and the operators
+  it applies to in `invalid_reason`).
 - Expose it in `asap_planner` and in the
   [Stage Viewer guide](../user_guide_docs/stage-viewer.md).
 

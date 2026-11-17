@@ -105,7 +105,22 @@ pub struct OperatorCost {
     /// when each of its measures has an entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measure: Option<String>,
-    /// CPU nanoseconds per unit the operator processes ([`OperatorKind`]).
+    /// CPU nanoseconds per unit the operator processes. The unit is the
+    /// row the operator reads unless listed here:
+    ///
+    /// * `Scan`: per sample read. At ingestion time, an arriving sample; at
+    ///   query time, a sample fetched and decoded from the database holding
+    ///   raw data, part of the deployment's cost;
+    /// * `Aggregate`: per input row, for each measure;
+    /// * `SummaryAgg`: per input row inserted into its group's state;
+    /// * `SummaryEstimate`: per group read;
+    /// * `FinalizeExactAccumulator`: per accumulator finalized (one per
+    ///   group);
+    /// * `SummaryMerge`: per input state merged (each tumbling window of a
+    ///   chain is a state);
+    /// * `SummaryTumblingWindowChain`: per input row placed in its tumbling
+    ///   window and inserted into that window's state.
+    ///
     /// It includes what the formulas charge apart, at the measured shape:
     /// the output rows a merge, an aggregate or an estimate builds per
     /// group and the label columns a grouping carries per row. Example: a

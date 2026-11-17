@@ -5,8 +5,7 @@
 //! deployment are combined with OR.
 //!
 //! The fields that read a state's family (`summary_family`,
-//! `sketch_parameters`, `merged_across_windows`) match the operators that
-//! build state (`SummaryAgg`, `SummaryTumblingWindowChain`) only: a merge,
+//! `sketch_parameter_range`) match the operators that build state (`SummaryAgg`, `SummaryTumblingWindowChain`) only: a merge,
 //! estimate or finalization over an excluded build has no producer left,
 //! so it is pruned as unbuildable without guessing its family from its
 //! output schema.
@@ -21,7 +20,7 @@ use crate::ir::schema::FieldDataType;
 use crate::ir::{ASAPOp, NonASAPOp, Operator};
 use crate::stages::PhysicalProperties;
 use crate::summary_type::{
-    ExactKind, SketchAlgorithm, SketchParameterRange, SketchParams, StatisticKind, SummaryFamily,
+    SketchAlgorithm, SketchParameterRange, SketchParams, StatisticKind, SummaryFamily,
 };
 
 /// Physical candidates whose description matches every field that is set.
@@ -47,47 +46,26 @@ pub struct CandidateExclusion {
     /// grouped. An operator without one never matches.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub per_entity_reduction: Option<bool>,
-    /// Matches an `Aggregate` one of whose measures is of this kind, named
-    /// as an `AggIntent`'s `kind` in JSON, e.g. `"rate"`: with `timing:
-    /// query_time`, a query-time `rate` computed from raw rows.
+    /// Matches an `Aggregate` operator one of whose measures is of this
+    /// kind, named as an `AggIntent`'s `kind` in JSON, e.g. `"rate"` or
+    /// `"i_rate"`. It matches the `Aggregate` only, never a state build:
+    /// `{"aggregate_measure": "rate", "timing": "query_time"}` excludes an
+    /// `Aggregate[rate]` over raw rows, but a query-time rate computed
+    /// from raw rows by a `SummaryAgg` of a `Rate` state is still offered.
+    /// To rule out that state too, add `{"summary_family": {"exact":
+    /// "Rate"}}`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregate_measure: Option<String>,
-    /// Matches a candidate whose counter function needs this semantics:
-    /// an `Aggregate` computing such a function, or a build of such a
-    /// counter state (`Rate`, `Increase`, `IRate`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub counter_semantics: Option<CounterSemantics>,
     /// Matches a state build of this family.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary_family: Option<SummaryFamily>,
     /// Matches a state build whose θ is in this range.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sketch_parameters: Option<SketchParameterRange>,
-    /// Matches a state build by how its state is used: `Some(true)` a
-    /// state merged across windows (a tumbling-window chain, whose windows
-    /// a `SummaryMerge` combines, or a build kept across evaluations),
-    /// `Some(false)` a state built and finalized (or read) within one
-    /// evaluation (a `SummaryAgg` not kept across evaluations).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub merged_across_windows: Option<bool>,
+    pub sketch_parameter_range: Option<SketchParameterRange>,
     /// Matches a `SummaryEstimate` reading this statistic from a state of
     /// this sketch algorithm.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readout: Option<SketchReadout>,
-}
-
-/// What a counter function may need beyond reading its samples. JSON:
-/// `"reset_handling"`, `"extrapolation"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CounterSemantics {
-    /// A drop in a counter is a reset and is added back: `rate`,
-    /// `increase`, `irate` and `resets`, and the `Rate`, `Increase` and
-    /// `IRate` states.
-    ResetHandling,
-    /// The increase over the samples is extrapolated to the range's ends:
-    /// `rate`, `increase` and `delta`, and the `Rate` and `Increase` states.
-    Extrapolation,
 }
 
 /// A statistic read from a sketch algorithm's state, e.g. a quantile from
@@ -99,10 +77,10 @@ pub struct SketchReadout {
     pub statistic: StatisticKind,
 }
 
-/// One physical candidate (or plan node) as an exclusion matches it: its
-/// operator, θ and physical properties, and, for a `SummaryEstimate`, the
-/// summary type of the state it reads. `C` is how the operator names its
-/// inputs: memo groups in Stage 2, plan node ids in a selected plan.
+/// One physical candidate as an exclusion matches it: its operator, θ and
+/// physical properties, and, for a `SummaryEstimate`, the summary type of
+/// the state it reads. `C` is how the operator names its inputs: memo
+/// groups in Stage 2, plan node ids when a test checks a selected plan.
 #[derive(Debug, Clone, Copy)]
 pub struct CandidateDescription<'a, C> {
     pub operator: &'a Operator<C>,
@@ -114,16 +92,14 @@ pub struct CandidateDescription<'a, C> {
     pub read_summary_type: Option<&'a FieldDataType>,
 }
 
-/// The state builds: the operators the family, θ and
-/// `merged_across_windows` fields match.
+/// The state builds: the operators the family and θ fields match.
 const STATE_BUILDS: &[OperatorKind] = &[
     OperatorKind::SummaryAgg,
     OperatorKind::SummaryTumblingWindowChain,
 ];
 
 /// An `Aggregate` or a state build: the operators with a reduction
-/// (`per_entity_reduction`), and those a counter semantics can be needed by
-/// (an `Aggregate`'s counter function, a counter state's build).
+/// (`per_entity_reduction`).
 const AGGREGATE_OR_STATE_BUILD: &[OperatorKind] = &[
     OperatorKind::Aggregate,
     OperatorKind::SummaryAgg,
@@ -152,21 +128,14 @@ impl CandidateExclusion {
             && passes(self.aggregate_measure.as_deref().map(|name| {
                 aggregate_measures(operator).any(|measure| measure.kind_name() == name)
             }))
-            && passes(self.counter_semantics.map(|semantics| {
-                aggregate_measures(operator).any(|measure| semantics.needed_by_measure(measure))
-                    || build.is_some_and(|summary_type| semantics.needed_by_state(summary_type))
-            }))
             && passes(self.summary_family.map(|family| {
                 build.is_some_and(|summary_type| SummaryFamily::of(summary_type) == Some(family))
             }))
-            && passes(self.sketch_parameters.map(|range| {
+            && passes(self.sketch_parameter_range.map(|range| {
                 build.is_some()
                     && candidate
                         .parameters
                         .is_some_and(|parameters| range.contains(parameters))
-            }))
-            && passes(self.merged_across_windows.map(|merged| {
-                build.is_some() && merged_across_windows(operator, properties) == merged
             }))
             && passes(self.readout.map(|readout| match operator {
                 Operator::ASAP(ASAPOp::SummaryEstimate { query, .. }) => {
@@ -182,7 +151,7 @@ impl CandidateExclusion {
     /// `summary_family` and no other field: every state of the family, as
     /// `supported_summaries` does for an algorithm it does not list. Pass 1
     /// offers no way to compute through such a family. `None` for any
-    /// narrower exclusion, e.g. KLL only when merged across windows.
+    /// narrower exclusion, e.g. KLL tumbling-window chains only.
     pub fn family_excluded_outright(&self) -> Option<SummaryFamily> {
         let family = self.summary_family?;
         let family_only = Self {
@@ -190,6 +159,22 @@ impl CandidateExclusion {
             ..Self::default()
         };
         (*self == family_only).then_some(family)
+    }
+
+    /// The readout this exclusion rules out outright, when it sets
+    /// `readout` and no other field: every estimate of that statistic from
+    /// that algorithm's state, as `supported_summaries` does for a readout
+    /// it does not list. Pass 1 offers no build of that algorithm for a
+    /// measure that reads only that statistic, e.g. no KLL for a quantile
+    /// when KLL's `Quantile` readout is excluded. `None` for any narrower
+    /// exclusion.
+    pub fn readout_excluded_outright(&self) -> Option<SketchReadout> {
+        let readout = self.readout?;
+        let readout_only = Self {
+            readout: Some(readout),
+            ..Self::default()
+        };
+        (*self == readout_only).then_some(readout)
     }
 
     /// Why this exclusion is bad input, or `None` when it can be applied:
@@ -219,14 +204,14 @@ impl CandidateExclusion {
                 }
             }
         }
-        if let Some(range) = &self.sketch_parameters {
+        if let Some(range) = &self.sketch_parameter_range {
             if let Some(reason) = range.invalid_reason() {
                 return Some(reason);
             }
             if let Some(family) = self.summary_family {
                 if family != SummaryFamily::Sketch(range.algorithm()) {
                     return Some(format!(
-                        "its sketch_parameters range over {:?}, which is not its summary_family {family:?}",
+                        "its sketch_parameter_range ranges over {:?}, which is not its summary_family {family:?}",
                         range.algorithm()
                     ));
                 }
@@ -264,20 +249,12 @@ impl CandidateExclusion {
                 ),
             ),
             (
-                "counter_semantics",
-                set(self.counter_semantics.is_some(), AGGREGATE_OR_STATE_BUILD),
-            ),
-            (
                 "summary_family",
                 set(self.summary_family.is_some(), STATE_BUILDS),
             ),
             (
-                "sketch_parameters",
-                set(self.sketch_parameters.is_some(), STATE_BUILDS),
-            ),
-            (
-                "merged_across_windows",
-                set(self.merged_across_windows.is_some(), STATE_BUILDS),
+                "sketch_parameter_range",
+                set(self.sketch_parameter_range.is_some(), STATE_BUILDS),
             ),
             (
                 "readout",
@@ -287,38 +264,6 @@ impl CandidateExclusion {
         .into_iter()
         .filter_map(|(field, operators)| Some((field, operators?)))
         .collect()
-    }
-}
-
-impl CounterSemantics {
-    /// Whether the counter function `measure` needs this semantics:
-    /// extrapolation `rate`, `increase` and `delta`; reset handling
-    /// `rate`, `increase`, `irate` and `resets`.
-    fn needed_by_measure(self, measure: &AggIntent) -> bool {
-        match self {
-            Self::Extrapolation => {
-                matches!(
-                    measure,
-                    AggIntent::Rate | AggIntent::Increase | AggIntent::Delta
-                )
-            }
-            Self::ResetHandling => matches!(
-                measure,
-                AggIntent::Rate | AggIntent::Increase | AggIntent::IRate | AggIntent::Resets
-            ),
-        }
-    }
-
-    /// Whether a state of `summary_type` needs this semantics: the `Rate`
-    /// and `Increase` states both, the `IRate` state reset handling only.
-    fn needed_by_state(self, summary_type: &FieldDataType) -> bool {
-        let FieldDataType::ExactAggregate(kind, _) = summary_type else {
-            return false;
-        };
-        match self {
-            Self::Extrapolation => matches!(kind, ExactKind::Rate | ExactKind::Increase),
-            Self::ResetHandling => kind.tracks_counter_increase(),
-        }
     }
 }
 
@@ -342,14 +287,4 @@ fn aggregate_measures<C>(operator: &Operator<C>) -> impl Iterator<Item = &AggInt
         _ => &[],
     };
     measures.iter()
-}
-
-/// Whether a state build is merged across windows: a tumbling-window chain
-/// (a `SummaryMerge` combines its windows), or a build kept across
-/// evaluations (each evaluation merges in the rows that arrived since).
-fn merged_across_windows<C>(operator: &Operator<C>, properties: PhysicalProperties) -> bool {
-    matches!(
-        operator,
-        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
-    ) || properties.is_across_evaluations()
 }

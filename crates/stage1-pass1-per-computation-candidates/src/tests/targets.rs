@@ -12,7 +12,9 @@ use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator, TimeRangeKind};
 use asap_types::stages::{Memo, MemoGroupId};
-use asap_types::summary_type::{ExactKind, SketchAlgorithm, SummaryFamily, SummaryUpdate};
+use asap_types::summary_type::{
+    ExactKind, SketchAlgorithm, StatisticKind, SummaryFamily, SummaryUpdate,
+};
 use asap_types::test_support::memo_builders::{candidates_of, group, groups_where, query};
 use asap_types::workload::DataWorkload;
 
@@ -155,26 +157,35 @@ fn an_excluded_exact_family_is_left_to_stage_2() {
     assert!(built_summary_types(&memo).contains(&FieldDataType::exact(ExactKind::Sum)));
 }
 
-/// Only an exclusion of every state of a family skips it in Pass 1. KLL
-/// listed without its quantile readout, or KLL not mergeable across
-/// windows, still has builds Stage 2 may keep, so Pass 1 offers them; the
-/// algorithms not listed are skipped.
+/// A KLL listed without its quantile readout cannot answer a quantile, so
+/// Pass 1 offers a quantile no KLL build (and, with every other algorithm
+/// unlisted, no summary at all). A readout the measure does not read
+/// (KLL's `Total`) keeps the build.
 #[test]
-fn a_partial_exclusion_keeps_the_summary() {
-    let kll_without_quantile = DeploymentCapabilities {
+fn an_excluded_readout_of_the_measure_skips_the_summary() {
+    let kll_with = |readouts| DeploymentCapabilities {
         supported_summaries: Some(vec![SupportedSummary {
             summary_type: SketchAlgorithm::Kll,
-            readouts: vec![],
+            readouts,
         }]),
         ..Default::default()
     };
-    let (memo, _) = pass1_under(quantile(0.9), &kll_without_quantile.exclusions());
-    let built = built_summary_types(&memo);
-    assert!(!built.is_empty());
-    assert!(built
-        .iter()
-        .all(|summary_type| *summary_type == FieldDataType::Sketch(SketchAlgorithm::Kll)));
+    let (memo, aggregate) = pass1_under(quantile(0.9), &kll_with(vec![]).exclusions());
+    assert!(built_summary_types(&memo).is_empty());
+    assert_eq!(candidates_of(&memo, aggregate).len(), 1);
 
+    let (memo, _) = pass1_under(
+        quantile(0.9),
+        &kll_with(vec![StatisticKind::Quantile]).exclusions(),
+    );
+    assert!(built_summary_types(&memo).contains(&FieldDataType::Sketch(SketchAlgorithm::Kll)));
+}
+
+/// Only an exclusion of every state of a family, or of the readout the
+/// measure reads, skips a summary in Pass 1. KLL not mergeable across
+/// windows still has builds Stage 2 may keep, so Pass 1 offers them.
+#[test]
+fn a_partial_exclusion_keeps_the_summary() {
     let kll_not_mergeable = DeploymentCapabilities {
         state_not_mergeable_across_windows: vec![SummaryFamily::Sketch(SketchAlgorithm::Kll)],
         ..Default::default()

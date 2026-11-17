@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use asap_cost::node::analytical::AnalyticalCostError;
 use asap_cost::{summary_type_name, CostModel};
 use asap_types::accuracy::AccuracyMetric;
-use asap_types::deployment_capabilities::{DeploymentCapabilities, ExclusionSource};
+use asap_types::deployment_capabilities::ExclusionSource;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::{
@@ -296,20 +296,15 @@ pub(crate) fn excluded_by_deployment(
     query: Option<usize>,
     costs: &ExecutionCosts,
 ) -> Option<ErrorSelectingPlan> {
-    // The default deployment's own exclusions (query-time results not
-    // kept across evaluations) are planning as it always was, so they
-    // neither cause this rejection nor appear in it.
-    let default_sources: Vec<ExclusionSource> = DeploymentCapabilities::default()
-        .exclusions()
-        .into_iter()
-        .map(|exclusion| exclusion.source)
-        .collect();
     let mut pruned_per_source: Vec<(ExclusionSource, usize)> = Vec::new();
     for pruned in stage2_pruned_candidates {
         let PruneReason::ExcludedByDeployment(source) = pruned.reason else {
             continue;
         };
-        if default_sources.contains(&source) {
+        // The default deployment's own exclusions (query-time results not
+        // kept across evaluations) are planning as it always was, so they
+        // neither cause this rejection nor appear in it.
+        if source.in_default_deployment() {
             continue;
         }
         match pruned_per_source
@@ -335,7 +330,7 @@ pub(crate) fn excluded_by_deployment(
             } else {
                 "candidates"
             };
-            format!("{} ({count} {noun})", exclusion_source_name(*source))
+            format!("{source} ({count} {noun})")
         })
         .collect();
     Some(ErrorSelectingPlan::NoValidCandidate(vec![Rejection {
@@ -348,19 +343,6 @@ pub(crate) fn excluded_by_deployment(
             costing_failures(costs)
         ),
     }]))
-}
-
-/// An exclusion source as the deployment capabilities' JSON names it:
-/// `counter_not_extrapolated`, or `excluded_candidates[2]` for the caller's
-/// third exclusion.
-fn exclusion_source_name(source: ExclusionSource) -> String {
-    match source {
-        ExclusionSource::ExcludedCandidate { index } => format!("excluded_candidates[{index}]"),
-        source => serde_json::to_value(source)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_else(|| format!("{source:?}")),
-    }
 }
 
 /// Per query, the sketches its output reads in `plan` (each sketch build

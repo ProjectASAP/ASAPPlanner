@@ -48,7 +48,7 @@ asap_planner (--workload <file>)... --run-until stage0|stage1_pass1|stage1_pass2
 | `--out <file>` | Write to this file instead of standard output. |
 | `--sql-catalog-table <json>` | One SQL table a SQL workload reads, as `{"name", "columns": [{"name", "type", "nullable"}], "time_index"}`. Repeat it per table. |
 | `--cost-inputs <file>` | The cost model and its costs (`CostInputs` JSON). The files in `tools/dag-viewer/cost-inputs/` are ready to use. Without it, the built-in usage-over-time model is used. Stage 3 costs only usage-over-time models (`aws-fargate-us-east-1.json` is one); a provisioned- or cluster-capacity model ends Stage 3 with an `UnsupportedCostModel` error. |
-| `--deployment-capabilities <file>` | What the deployment can do, e.g. `{"raw_data_retained": true, "query_time_results_retained": false}`. Set it to match your deployment. |
+| `--deployment-capabilities <file>` | What the deployment can do, e.g. `{"raw_data_retained": true, "query_time_results_retained": false}`. Set it to match your deployment; see [Deployment capabilities](#deployment-capabilities). |
 | `--ignore-accuracy-guarantees` | Accept candidates without an accuracy guarantee. By default each query's accuracy requirement is enforced. |
 
 Any other option, or a missing required one, is a usage error (exit
@@ -56,6 +56,50 @@ status 2). An input the planner cannot read exits with status 1. So does a
 run in which a stage failed (for example, Pass 1 rejected a query, or no
 plan meets the requirements): the output is still written, with the error
 under the stage that failed.
+
+## Deployment capabilities
+
+The `--deployment-capabilities` file is a `DeploymentCapabilities` JSON
+object; an omitted field keeps its default. Besides
+`supported_summaries`, `raw_data_retained` and
+`query_time_results_retained`, three fields say what the executor cannot
+do or what the caller rules out:
+
+```json
+{
+  "counter_semantics": {"reset_handling": true, "extrapolation": false},
+  "state_not_mergeable_across_windows": [{"exact": "Rate"}, {"sketch": "Kll"}],
+  "excluded_candidates": [
+    {"timing": "query_time", "operator": "Scan"},
+    {"summary_family": {"sketch": "Kll"}, "sketch_parameter_range": {"kll_k": {"at_most": 1403}}},
+    {"timing": "query_time", "aggregate_measure": "rate"}
+  ]
+}
+```
+
+- `counter_semantics` (default: both `true`): without `extrapolation`, no
+  `rate`, `increase` or `delta` and no `Rate` or `Increase` state is
+  planned; without `reset_handling`, no `rate`, `increase`, `irate` or
+  `resets` and no `Rate`, `Increase` or `IRate` state.
+- `state_not_mergeable_across_windows` (default none): for each family
+  listed, no tumbling-window chain and no state kept across evaluations;
+  its state is built and finalized within one evaluation.
+- `excluded_candidates` (default none): each entry is a
+  `CandidateExclusion` that rules out every physical candidate matching all
+  the fields it sets: `timing`, `kept_across_evaluations`, `operator`,
+  `per_entity_reduction`, `aggregate_measure` (an `Aggregate` measure's
+  JSON `kind`, e.g. `"rate"` or `"i_rate"`), `summary_family`,
+  `sketch_parameter_range` and `readout` (`{"summary_type": "Kll",
+  "statistic": "Quantile"}`). `aggregate_measure` matches the `Aggregate`
+  only: to rule out a `Rate` state as well, add `{"summary_family":
+  {"exact": "Rate"}}`. An entry that sets no field, or whose fields match
+  no operator in common, is refused.
+
+Stage 2 prints each candidate a capability rules out as
+`ExcludedByDeployment(<source>)`, e.g.
+`ExcludedByDeployment(counter_not_extrapolated)`, or
+`ExcludedByDeployment(excluded_candidates[0])` for the first entry of
+`excluded_candidates`. When no plan is left, Stage 3 names those sources.
 
 ## Stages
 

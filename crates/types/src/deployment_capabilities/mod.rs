@@ -27,17 +27,22 @@
 //!   and Stage 3 picks the cheaper. If they are not, a query-time result is
 //!   reused only within one evaluation;
 //! * what the executor's counter functions do (`counter_semantics`):
-//!   whether they handle counter resets and extrapolate to the range's ends;
+//!   whether they handle counter resets and extrapolate to the range's ends.
+//!   One it lacks rules out the counter functions and counter states that
+//!   need it;
 //! * which state families it cannot merge across windows
 //!   (`state_not_mergeable_across_windows`): it builds and finalizes their
-//!   state within one evaluation only;
+//!   state within one evaluation only, so their tumbling-window chains and
+//!   builds kept across evaluations are ruled out;
 //! * further candidates the caller rules out directly
 //!   (`excluded_candidates`), e.g. a benchmark arm that must not scan raw
 //!   data at query time.
 //!
 //! Every capability a deployment lacks expands into [`CandidateExclusion`]s
 //! ([`DeploymentCapabilities::exclusions`]), each with the capability it
-//! comes from ([`ExclusionSource`]). Stage 2 applies them as one filter:
+//! comes from ([`ExclusionSource`]). The planner facade expands them once
+//! and hands the list to Pass 1 (which skips the summaries they rule out
+//! outright) and Stage 2, which applies them as one filter:
 //! a physical candidate one of them matches is pruned with
 //! `PruneReason::ExcludedByDeployment`, and its consumers lose it as an
 //! input.
@@ -49,23 +54,25 @@
 
 // The executor lists the summary types it builds as `SupportedSummary`s, so the
 // type lives with the readout vocabulary in `asap-types`.
+use crate::ir::operator::AggIntent;
 use crate::ir::operator::OperatorKind;
 use crate::ir::properties::ExecutionTiming;
 use crate::ir::schema::FieldDataType;
 pub use crate::summary_type::SupportedSummary;
-use crate::summary_type::{SketchAlgorithm, SummaryFamily, SummaryTypeCapability};
+use crate::summary_type::{ExactKind, SketchAlgorithm, SummaryFamily, SummaryTypeCapability};
 use crate::workload::{DataArrival, DataWorkload};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use thiserror::Error;
 
 mod exclusion;
 #[cfg(test)]
 mod tests;
 
-pub use exclusion::{CandidateDescription, CandidateExclusion, CounterSemantics, SketchReadout};
+pub use exclusion::{CandidateDescription, CandidateExclusion, SketchReadout};
 
 /// What the deployment's executor can run and keep. Planning reads it in
-/// Stage 2, as the exclusions it expands into
+/// Pass 1 and Stage 2, as the exclusions it expands into
 /// ([`DeploymentCapabilities::exclusions`]). It is data only; `asap_planner` reads it from
 /// `--deployment-capabilities <json>` and shows it in the stage document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -134,8 +141,10 @@ impl Default for CounterSemanticsSupport {
 /// Which capability an exclusion comes from: the reason Stage 2 records
 /// for a candidate it matches (`PruneReason::ExcludedByDeployment`).
 /// JSON: the snake_case variant name, e.g. `"raw_data_not_retained"`, or
-/// `{"excluded_candidate": {"index": 0}}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `{"excluded_candidate": {"index": 0}}`. Printed (`Display`) as the
+/// capabilities' JSON names it: `raw_data_not_retained`, or
+/// `excluded_candidates[0]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExclusionSource {
     /// `supported_summaries` does not list the sketch algorithm.
@@ -159,6 +168,34 @@ pub enum ExclusionSource {
     ExcludedCandidate { index: usize },
 }
 
+impl ExclusionSource {
+    /// Whether the default deployment ([`DeploymentCapabilities::default`])
+    /// has this source too: only `QueryTimeResultsNotRetained`, which is
+    /// planning as it is without deployment inputs. A rejection blames the
+    /// deployment only for the other sources.
+    pub fn in_default_deployment(self) -> bool {
+        matches!(self, Self::QueryTimeResultsNotRetained)
+    }
+}
+
+impl fmt::Display for ExclusionSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::SummaryNotSupported => "summary_not_supported",
+            Self::ReadoutNotSupported => "readout_not_supported",
+            Self::RawDataNotRetained => "raw_data_not_retained",
+            Self::QueryTimeResultsNotRetained => "query_time_results_not_retained",
+            Self::CounterResetsNotHandled => "counter_resets_not_handled",
+            Self::CounterNotExtrapolated => "counter_not_extrapolated",
+            Self::StateNotMergeableAcrossWindows => "state_not_mergeable_across_windows",
+            Self::ExcludedCandidate { index } => {
+                return write!(f, "excluded_candidates[{index}]");
+            }
+        };
+        f.write_str(name)
+    }
+}
+
 /// One exclusion a deployment's capabilities expand into, with the
 /// capability it comes from.
 #[derive(Debug, Clone, PartialEq)]
@@ -169,13 +206,16 @@ pub struct DeploymentExclusion {
 
 impl DeploymentCapabilities {
     /// The exclusions these capabilities expand into, the caller's
-    /// `excluded_candidates` last (in their order): the one list Stage 2
-    /// filters physical candidates by. A capability the deployment has
-    /// expands into nothing, so the default's only exclusion is
-    /// `{timing: query_time, kept_across_evaluations: true}` from
-    /// `query_time_results_retained: false`. E.g. `raw_data_retained:
-    /// false` expands into `{timing: query_time, operator: Scan}` and
-    /// `{operator: Scan, kept_across_evaluations: true}`.
+    /// `excluded_candidates` last (in their order): the one list Pass 1 and
+    /// Stage 2 read. A capability the deployment has expands into nothing,
+    /// so the default's only exclusion is `{timing: query_time,
+    /// kept_across_evaluations: true}` from `query_time_results_retained:
+    /// false`. E.g. `raw_data_retained: false` expands into `{timing:
+    /// query_time, operator: Scan}` and `{operator: Scan,
+    /// kept_across_evaluations: true}`, and `counter_semantics.extrapolation:
+    /// false` into one exclusion each for the measures `rate`, `increase` and
+    /// `delta` and the `Rate` and `Increase` states. A new capability is a
+    /// field, its expansion here and its [`ExclusionSource`].
     pub fn exclusions(&self) -> Vec<DeploymentExclusion> {
         let mut exclusions = Vec::new();
         let mut exclude = |source, exclusion| {
@@ -243,35 +283,69 @@ impl DeploymentCapabilities {
                 },
             );
         }
+        // A counter semantics left out: the counter functions (`Aggregate`
+        // measures) and counter states that need it.
         let counters = [
             (
                 self.counter_semantics.reset_handling,
                 ExclusionSource::CounterResetsNotHandled,
-                CounterSemantics::ResetHandling,
+                [
+                    AggIntent::Rate,
+                    AggIntent::Increase,
+                    AggIntent::IRate,
+                    AggIntent::Resets,
+                ]
+                .as_slice(),
+                [ExactKind::Rate, ExactKind::Increase, ExactKind::IRate].as_slice(),
             ),
             (
                 self.counter_semantics.extrapolation,
                 ExclusionSource::CounterNotExtrapolated,
-                CounterSemantics::Extrapolation,
+                [AggIntent::Rate, AggIntent::Increase, AggIntent::Delta].as_slice(),
+                [ExactKind::Rate, ExactKind::Increase].as_slice(),
             ),
         ];
-        for (supported, source, semantics) in counters {
-            if !supported {
+        for (supported, source, functions, states) in counters {
+            if supported {
+                continue;
+            }
+            for function in functions {
                 exclude(
                     source,
                     CandidateExclusion {
-                        counter_semantics: Some(semantics),
+                        aggregate_measure: Some(function.kind_name()),
+                        ..Default::default()
+                    },
+                );
+            }
+            for &kind in states {
+                exclude(
+                    source,
+                    CandidateExclusion {
+                        summary_family: Some(SummaryFamily::Exact(kind)),
                         ..Default::default()
                     },
                 );
             }
         }
+        // A family not mergeable across windows: its tumbling-window chains
+        // (a `SummaryMerge` combines their windows) and its builds kept
+        // across evaluations (each evaluation merges in the rows that
+        // arrived since).
         for &family in &self.state_not_mergeable_across_windows {
             exclude(
                 ExclusionSource::StateNotMergeableAcrossWindows,
                 CandidateExclusion {
                     summary_family: Some(family),
-                    merged_across_windows: Some(true),
+                    operator: Some(OperatorKind::SummaryTumblingWindowChain),
+                    ..Default::default()
+                },
+            );
+            exclude(
+                ExclusionSource::StateNotMergeableAcrossWindows,
+                CandidateExclusion {
+                    summary_family: Some(family),
+                    kept_across_evaluations: Some(true),
                     ..Default::default()
                 },
             );
@@ -293,7 +367,7 @@ impl DeploymentCapabilities {
     /// candidate), two of whose fields match no operator in common (a
     /// `readout` with an `operator: SummaryAgg`), whose range is empty or
     /// names an α outside (0, 1), whose `summary_family` its
-    /// `sketch_parameters` contradict, or whose `aggregate_measure` names no
+    /// `sketch_parameter_range` contradicts, or whose `aggregate_measure` names no
     /// aggregate is bad input too
     /// ([`DeploymentCapabilitiesError::InvalidExclusion`]).
     pub fn validate(&self, data: &DataWorkload) -> Result<(), DeploymentCapabilitiesError> {
@@ -325,7 +399,7 @@ pub enum DeploymentCapabilitiesError {
         arrival: DataArrival,
     },
     /// Bad input: `excluded_candidates[index]` cannot be applied.
-    #[error("deployment capabilities, excluded candidate {index}: {reason}")]
+    #[error("excluded candidate {index}: {reason}")]
     InvalidExclusion {
         /// Its index in `excluded_candidates`.
         index: usize,

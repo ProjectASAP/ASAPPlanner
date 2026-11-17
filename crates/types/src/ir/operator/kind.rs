@@ -1,7 +1,6 @@
 //! The kind of an operator without its arguments: the name every operator
-//! has in a physical plan DAG. Measured operation costs are keyed by it
-//! (the unit each is priced per is the row it reads unless said
-//! otherwise), and deployment exclusions match on it.
+//! has in a physical plan DAG. Measured operation costs are keyed by it,
+//! and deployment exclusions match on it.
 
 use serde::{Deserialize, Serialize};
 
@@ -9,19 +8,15 @@ use super::asap::ASAPOp;
 use super::node::Operator;
 use super::non_asap::NonASAPOp;
 
-/// Every physical operator a physical plan DAG can contain, by the name it
-/// has there, e.g. `Scan` or `SummaryTumblingWindowChain`. The unit
-/// `asap-cost` prices each per is the row it reads unless said otherwise.
+/// An operator without its arguments: every physical operator a physical
+/// plan DAG can contain, by the name it has there, e.g. `Scan` or
+/// `SummaryTumblingWindowChain`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OperatorKind {
-    /// Per sample read. At ingestion time, an arriving sample; at query
-    /// time, a sample fetched and decoded from the database holding raw
-    /// data, part of the deployment's cost.
     Scan,
     Values,
     Filter,
     Project,
-    /// Per input row, for each measure.
     Aggregate,
     Join,
     SetOp,
@@ -38,17 +33,12 @@ pub enum OperatorKind {
     PromqlInfoEnrich,
     PromqlSeriesSample,
     PromqlSubquery,
-    /// Per input row inserted into its group's state.
     SummaryAgg,
-    /// Per group read.
     SummaryEstimate,
-    /// Per accumulator finalized (one per group).
     FinalizeExactAccumulator,
     MaintainPopulation,
     EvaluatePopulation,
-    /// Per input state merged (each tumbling window of a chain is a state).
     SummaryMerge,
-    /// Per input row placed in its tumbling window and inserted into that tumbling window's state.
     // Formerly named `PaneChain`; old JSON still loads.
     #[serde(alias = "PaneChain")]
     SummaryTumblingWindowChain,

@@ -42,7 +42,7 @@ async fn exclusions_reach_stage2_through_plan_installable() {
     let workload = kll_workload();
     let capabilities = DeploymentCapabilities {
         excluded_candidates: vec![CandidateExclusion {
-            sketch_parameters: Some(SketchParameterRange::KllK {
+            sketch_parameter_range: Some(SketchParameterRange::KllK {
                 at_least: None,
                 at_most: Some(1403),
             }),

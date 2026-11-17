@@ -106,10 +106,13 @@ pub fn run_planning(
         })
         .collect();
     let initial = memo_of_queries(&roots, &accuracy_targets, data)?;
-    // Pass 1: the initial candidates, without the summaries of a sketch
-    // algorithm the deployment excludes outright (Stage 2 prunes the rest it cannot run).
-    // A query Pass 1 cannot plan is an input error.
-    let pass1 = pass1_memo(initial, &models.deployment_capabilities.exclusions())?;
+    // The deployment's capabilities as exclusions, expanded once for Pass 1
+    // and Stage 2.
+    let exclusions = models.deployment_capabilities.exclusions();
+    // Pass 1: the initial candidates, without the summaries the deployment
+    // excludes outright (Stage 2 prunes the rest it cannot run). A query
+    // Pass 1 cannot plan is an input error.
+    let pass1 = pass1_memo(initial, &exclusions)?;
     let mut report = PlanningReport {
         pass1_ms: elapsed_ms(started),
         ..PlanningReport::default()
@@ -138,8 +141,7 @@ pub fn run_planning(
             .sum();
         // Stage 2.
         let started = Instant::now();
-        let physical =
-            generate_physical_asap_memo_candidates(logical, data, models.deployment_capabilities);
+        let physical = generate_physical_asap_memo_candidates(logical, data, &exclusions);
         report.stage2_ms = elapsed_ms(started);
         let physical = physical_asap_candidates.insert(physical);
         report.physical_candidates = physical.physical_candidates.len();

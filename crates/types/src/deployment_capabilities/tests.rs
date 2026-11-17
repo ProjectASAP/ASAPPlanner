@@ -251,7 +251,7 @@ fn summary_family_and_parameter_range_match_state_builds_only() {
         [true, true, true, false]
     );
     let below_1404 = CandidateExclusion {
-        sketch_parameters: Some(SketchParameterRange::KllK {
+        sketch_parameter_range: Some(SketchParameterRange::KllK {
             at_least: None,
             at_most: Some(1403),
         }),
@@ -328,57 +328,130 @@ fn aggregate_measure_matches_an_aggregate_computing_it() {
     ));
 }
 
-/// `merged_across_windows` tells a state merged across windows (a chain,
-/// or a build kept across evaluations) from one built and finalized within
-/// one evaluation (a query-time `SummaryAgg` not kept), so a target
-/// without mergeable rate state keeps its one-evaluation rate builds.
-#[test]
-fn merged_across_windows_separates_chains_from_one_evaluation_builds() {
-    let rate_build = build(exact(ExactKind::Rate));
-    let rate_chain = chain(exact(ExactKind::Rate));
-    let merged_rate = CandidateExclusion {
-        summary_family: Some(SummaryFamily::Exact(ExactKind::Rate)),
-        merged_across_windows: Some(true),
-        ..Default::default()
-    };
-    assert!(matches(&merged_rate, &rate_chain, it_across()));
-    assert!(matches(&merged_rate, &rate_chain, qt_across()));
-    assert!(matches(&merged_rate, &rate_build, qt_across()));
-    assert!(matches(&merged_rate, &rate_build, it_across()));
-    assert!(!matches(&merged_rate, &rate_build, qt_one()));
-    assert!(!matches(&merged_rate, &rate_build, qt_none()));
-    assert!(!matches(
-        &merged_rate,
-        &chain(exact(ExactKind::Sum)),
-        it_across()
-    ));
-    assert!(!matches(
-        &merged_rate,
-        &per_series(AggIntent::Rate),
-        qt_none()
-    ));
-    let one_evaluation = CandidateExclusion {
-        merged_across_windows: Some(false),
-        ..Default::default()
-    };
-    assert!(matches(&one_evaluation, &rate_build, qt_one()));
-    assert!(matches(&one_evaluation, &rate_build, qt_none()));
-    assert!(!matches(&one_evaluation, &rate_chain, it_across()));
-    assert!(!matches(&one_evaluation, &scan(), qt_none()));
+/// Whether one of the exclusions `capabilities` expand into matches
+/// `operator` at `physical_properties`, no θ: what Stage 2 prunes it for.
+fn excluded_by(
+    capabilities: &DeploymentCapabilities,
+    operator: &Operator<usize>,
+    physical_properties: PhysicalProperties,
+) -> bool {
+    capabilities
+        .exclusions()
+        .iter()
+        .any(|e| matches(&e.exclusion, operator, physical_properties))
 }
 
-/// Counter semantics match the functions and states that need them:
-/// extrapolation `rate`, `increase` and `delta`; reset handling `rate`,
-/// `increase`, `irate` and `resets`.
+/// A family not mergeable across windows expands into its tumbling-window
+/// chains (whose windows a `SummaryMerge` combines) and its builds kept
+/// across evaluations (each evaluation merges in the rows that arrived
+/// since). Together they rule out a rate state merged across windows, at
+/// either timing, and keep a query-time rate build within one evaluation.
 #[test]
-fn counter_semantics_match_the_functions_that_need_them() {
-    let needs = |semantics: CounterSemantics, operator: &Operator<usize>| {
-        let exclusion = CandidateExclusion {
-            counter_semantics: Some(semantics),
-            ..Default::default()
-        };
-        matches(&exclusion, operator, qt_one())
+fn a_family_not_mergeable_across_windows_expands_into_its_chains_and_kept_builds() {
+    let not_mergeable = DeploymentCapabilities {
+        state_not_mergeable_across_windows: vec![SummaryFamily::Exact(ExactKind::Rate)],
+        query_time_results_retained: true,
+        ..Default::default()
     };
+    let rate = Some(SummaryFamily::Exact(ExactKind::Rate));
+    let exclusion = |exclusion| DeploymentExclusion {
+        source: ExclusionSource::StateNotMergeableAcrossWindows,
+        exclusion,
+    };
+    assert_eq!(
+        not_mergeable.exclusions(),
+        vec![
+            exclusion(CandidateExclusion {
+                summary_family: rate,
+                operator: Some(OperatorKind::SummaryTumblingWindowChain),
+                ..Default::default()
+            }),
+            exclusion(CandidateExclusion {
+                summary_family: rate,
+                kept_across_evaluations: Some(true),
+                ..Default::default()
+            }),
+        ]
+    );
+    let rate_build = build(exact(ExactKind::Rate));
+    let rate_chain = chain(exact(ExactKind::Rate));
+    let excluded =
+        |operator: &Operator<usize>, properties| excluded_by(&not_mergeable, operator, properties);
+    assert!(excluded(&rate_chain, it_across()));
+    assert!(excluded(&rate_chain, qt_across()));
+    assert!(excluded(&rate_build, qt_across()));
+    assert!(excluded(&rate_build, it_across()));
+    assert!(!excluded(&rate_build, qt_one()));
+    assert!(!excluded(&rate_build, qt_none()));
+    assert!(!excluded(&chain(exact(ExactKind::Sum)), it_across()));
+    assert!(!excluded(&per_series(AggIntent::Rate), qt_none()));
+}
+
+/// The counter semantics a deployment lacks expand into the counter
+/// functions (by their JSON `kind`) and counter states that need them:
+/// without extrapolation `rate`, `increase`, `delta` and the `Rate` and
+/// `Increase` states; without reset handling `rate`, `increase`, `irate`
+/// (`"i_rate"`), `resets` and the `Rate`, `Increase` and `IRate` states.
+/// `irate` does not extrapolate, so only reset handling rules it out.
+#[test]
+fn counter_semantics_left_out_expand_into_the_functions_and_states_that_need_them() {
+    for (measure, name) in [
+        (AggIntent::Rate, "rate"),
+        (AggIntent::Increase, "increase"),
+        (AggIntent::Delta, "delta"),
+        (AggIntent::IRate, "i_rate"),
+        (AggIntent::Resets, "resets"),
+    ] {
+        assert_eq!(measure.kind_name(), name);
+    }
+    let without = |reset_handling, extrapolation| DeploymentCapabilities {
+        counter_semantics: CounterSemanticsSupport {
+            reset_handling,
+            extrapolation,
+        },
+        query_time_results_retained: true,
+        ..Default::default()
+    };
+    let measure = |source, name: &str| DeploymentExclusion {
+        source,
+        exclusion: CandidateExclusion {
+            aggregate_measure: Some(name.to_string()),
+            ..Default::default()
+        },
+    };
+    let state = |source, kind| DeploymentExclusion {
+        source,
+        exclusion: CandidateExclusion {
+            summary_family: Some(SummaryFamily::Exact(kind)),
+            ..Default::default()
+        },
+    };
+    let not_extrapolated = ExclusionSource::CounterNotExtrapolated;
+    assert_eq!(
+        without(true, false).exclusions(),
+        vec![
+            measure(not_extrapolated, "rate"),
+            measure(not_extrapolated, "increase"),
+            measure(not_extrapolated, "delta"),
+            state(not_extrapolated, ExactKind::Rate),
+            state(not_extrapolated, ExactKind::Increase),
+        ]
+    );
+    let resets_not_handled = ExclusionSource::CounterResetsNotHandled;
+    assert_eq!(
+        without(false, true).exclusions(),
+        vec![
+            measure(resets_not_handled, "rate"),
+            measure(resets_not_handled, "increase"),
+            measure(resets_not_handled, "i_rate"),
+            measure(resets_not_handled, "resets"),
+            state(resets_not_handled, ExactKind::Rate),
+            state(resets_not_handled, ExactKind::Increase),
+            state(resets_not_handled, ExactKind::IRate),
+        ]
+    );
+
+    // What each expansion rules out, function by function.
     let functions = [
         per_series(AggIntent::Rate),
         per_series(AggIntent::Increase),
@@ -392,18 +465,18 @@ fn counter_semantics_match_the_functions_that_need_them() {
         build(exact(ExactKind::Sum)),
         scan(),
     ];
-    assert_eq!(
+    let ruled_out = |capabilities: &DeploymentCapabilities| {
         functions
             .iter()
-            .map(|f| needs(CounterSemantics::Extrapolation, f))
-            .collect::<Vec<_>>(),
+            .map(|f| excluded_by(capabilities, f, qt_one()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ruled_out(&without(true, false)),
         [true, true, true, false, false, false, true, true, false, false, false]
     );
     assert_eq!(
-        functions
-            .iter()
-            .map(|f| needs(CounterSemantics::ResetHandling, f))
-            .collect::<Vec<_>>(),
+        ruled_out(&without(false, true)),
         [true, true, false, true, true, false, true, true, true, false, false]
     );
 }
@@ -488,8 +561,28 @@ fn each_capability_left_out_expands_into_its_exclusions() {
         ..Default::default()
     };
     let exclusion = |source, exclusion| DeploymentExclusion { source, exclusion };
+    // The counter and mergeability expansions, item by item, are their own
+    // tests; here only their place in the order.
+    let sources: Vec<ExclusionSource> =
+        capabilities.exclusions().iter().map(|e| e.source).collect();
+    let mut expected_sources = vec![
+        ExclusionSource::RawDataNotRetained,
+        ExclusionSource::RawDataNotRetained,
+        ExclusionSource::QueryTimeResultsNotRetained,
+    ];
+    expected_sources.extend([ExclusionSource::CounterResetsNotHandled; 7]);
+    expected_sources.extend([ExclusionSource::CounterNotExtrapolated; 5]);
+    expected_sources.extend([ExclusionSource::StateNotMergeableAcrossWindows; 2]);
+    expected_sources.push(ExclusionSource::ExcludedCandidate { index: 0 });
+    assert_eq!(sources, expected_sources);
+    let exclusions = capabilities.exclusions();
+    let first_three_and_last: Vec<DeploymentExclusion> = exclusions[..3]
+        .iter()
+        .chain(exclusions.last())
+        .cloned()
+        .collect();
     assert_eq!(
-        capabilities.exclusions(),
+        first_three_and_last,
         vec![
             exclusion(
                 ExclusionSource::RawDataNotRetained,
@@ -508,28 +601,6 @@ fn each_capability_left_out_expands_into_its_exclusions() {
                 }
             ),
             query_time_results_exclusion(),
-            exclusion(
-                ExclusionSource::CounterResetsNotHandled,
-                CandidateExclusion {
-                    counter_semantics: Some(CounterSemantics::ResetHandling),
-                    ..Default::default()
-                }
-            ),
-            exclusion(
-                ExclusionSource::CounterNotExtrapolated,
-                CandidateExclusion {
-                    counter_semantics: Some(CounterSemantics::Extrapolation),
-                    ..Default::default()
-                }
-            ),
-            exclusion(
-                ExclusionSource::StateNotMergeableAcrossWindows,
-                CandidateExclusion {
-                    summary_family: Some(SummaryFamily::Exact(ExactKind::Rate)),
-                    merged_across_windows: Some(true),
-                    ..Default::default()
-                }
-            ),
             exclusion(ExclusionSource::ExcludedCandidate { index: 0 }, stored_only),
         ]
     );
@@ -609,7 +680,7 @@ fn invalid_excluded_candidates_are_rejected() {
         ..Default::default()
     };
     let range = |range| CandidateExclusion {
-        sketch_parameters: Some(range),
+        sketch_parameter_range: Some(range),
         ..Default::default()
     };
     let invalid = [
@@ -628,7 +699,7 @@ fn invalid_excluded_candidates_are_rejected() {
         }),
         CandidateExclusion {
             summary_family: Some(SummaryFamily::Sketch(SketchAlgorithm::DDSketch)),
-            sketch_parameters: Some(SketchParameterRange::KllK {
+            sketch_parameter_range: Some(SketchParameterRange::KllK {
                 at_least: None,
                 at_most: Some(1403),
             }),
@@ -636,7 +707,7 @@ fn invalid_excluded_candidates_are_rejected() {
         },
         CandidateExclusion {
             summary_family: Some(SummaryFamily::Exact(ExactKind::Sum)),
-            sketch_parameters: Some(SketchParameterRange::KmvK {
+            sketch_parameter_range: Some(SketchParameterRange::KmvK {
                 at_least: Some(4323),
                 at_most: None,
             }),
@@ -667,7 +738,7 @@ fn invalid_excluded_candidates_are_rejected() {
 
 /// An exclusion whose fields match no operator in common contradicts
 /// itself and matches nothing, so it is bad input: a state family, θ range
-/// or `merged_across_windows` (state builds only) with another operator, an
+/// (state builds only) with another operator, an
 /// `aggregate_measure` (an `Aggregate` only) with another operator, a
 /// `readout` (a `SummaryEstimate` only) with another operator or with a
 /// build-only field, and `per_entity_reduction` with an operator that has
@@ -688,14 +759,10 @@ fn self_contradicting_exclusions_are_rejected() {
         ..Default::default()
     };
     let parameters = CandidateExclusion {
-        sketch_parameters: Some(SketchParameterRange::KllK {
+        sketch_parameter_range: Some(SketchParameterRange::KllK {
             at_least: None,
             at_most: Some(1403),
         }),
-        ..Default::default()
-    };
-    let merged = CandidateExclusion {
-        merged_across_windows: Some(true),
         ..Default::default()
     };
     let measure = CandidateExclusion {
@@ -715,7 +782,6 @@ fn self_contradicting_exclusions_are_rejected() {
         // {"exact": "Rate"}}`.
         with_operator(OperatorKind::SummaryMerge, family.clone()),
         with_operator(OperatorKind::SummaryEstimate, parameters.clone()),
-        with_operator(OperatorKind::Aggregate, merged.clone()),
         with_operator(OperatorKind::SummaryAgg, measure.clone()),
         with_operator(OperatorKind::SummaryAgg, readout.clone()),
         CandidateExclusion {
@@ -724,7 +790,7 @@ fn self_contradicting_exclusions_are_rejected() {
         },
         CandidateExclusion {
             readout: Some(kll_readout),
-            ..merged.clone()
+            ..parameters.clone()
         },
         with_operator(OperatorKind::Scan, per_entity.clone()),
     ];
@@ -744,7 +810,7 @@ fn self_contradicting_exclusions_are_rejected() {
     }
     let consistent = [
         with_operator(OperatorKind::SummaryTumblingWindowChain, family.clone()),
-        with_operator(OperatorKind::SummaryAgg, merged),
+        with_operator(OperatorKind::SummaryAgg, parameters),
         with_operator(OperatorKind::Aggregate, measure.clone()),
         with_operator(OperatorKind::SummaryEstimate, readout),
         with_operator(OperatorKind::SummaryAgg, per_entity.clone()),
@@ -778,7 +844,7 @@ fn a_family_is_excluded_outright_only_by_a_family_only_exclusion() {
     };
     assert_eq!(family_only.family_excluded_outright(), Some(kll));
     let narrower = CandidateExclusion {
-        merged_across_windows: Some(true),
+        operator: Some(OperatorKind::SummaryTumblingWindowChain),
         ..family_only
     };
     assert_eq!(narrower.family_excluded_outright(), None);
@@ -803,21 +869,20 @@ fn a_family_is_excluded_outright_only_by_a_family_only_exclusion() {
     assert_eq!(outright, every_sketch);
 }
 
-/// The sweep's "stored" arm, written as the caller writes it, plus a KLL
-/// size range: it loads field by field and round-trips; a misspelled field
-/// is refused; `{}` is the default; and the new capabilities fill their
-/// defaults field by field.
+/// The exclusions of an arm with no query-time scan, written as the caller
+/// writes them, plus a KLL size range: they load field by field and
+/// round-trip; a misspelled or removed field is refused; `{}` is the
+/// default; and the new capabilities fill their defaults field by field.
 #[test]
-fn excluded_candidates_json_matches_the_sweep_arm_format() {
+fn excluded_candidates_json_loads_field_by_field() {
     let json = r#"{"excluded_candidates": [
         {"timing": "query_time", "operator": "Scan"},
         {"operator": "Aggregate", "per_entity_reduction": true},
         {"timing": "query_time", "operator": "SummaryAgg"},
         {"timing": "query_time", "operator": "SummaryTumblingWindowChain"},
-        {"summary_family": {"sketch": "Kll"}, "sketch_parameters": {"kll_k": {"at_most": 1403}}},
+        {"summary_family": {"sketch": "Kll"}, "sketch_parameter_range": {"kll_k": {"at_most": 1403}}},
         {"timing": "query_time", "aggregate_measure": "rate"},
-        {"summary_family": {"exact": "Rate"}, "merged_across_windows": true},
-        {"counter_semantics": "extrapolation"},
+        {"summary_family": {"exact": "Rate"}, "operator": "SummaryTumblingWindowChain"},
         {"readout": {"summary_type": "Kll", "statistic": "Total"}},
         {"operator": "Scan", "kept_across_evaluations": true}]}"#;
     let loaded: DeploymentCapabilities = serde_json::from_str(json).unwrap();
@@ -847,7 +912,7 @@ fn excluded_candidates_json_matches_the_sweep_arm_format() {
             }),
             exclusion(CandidateExclusion {
                 summary_family: Some(SummaryFamily::Sketch(SketchAlgorithm::Kll)),
-                sketch_parameters: Some(SketchParameterRange::KllK {
+                sketch_parameter_range: Some(SketchParameterRange::KllK {
                     at_least: None,
                     at_most: Some(1403),
                 }),
@@ -860,11 +925,7 @@ fn excluded_candidates_json_matches_the_sweep_arm_format() {
             }),
             exclusion(CandidateExclusion {
                 summary_family: Some(SummaryFamily::Exact(ExactKind::Rate)),
-                merged_across_windows: Some(true),
-                ..Default::default()
-            }),
-            exclusion(CandidateExclusion {
-                counter_semantics: Some(CounterSemantics::Extrapolation),
+                operator: Some(OperatorKind::SummaryTumblingWindowChain),
                 ..Default::default()
             }),
             exclusion(CandidateExclusion {
@@ -886,10 +947,19 @@ fn excluded_candidates_json_matches_the_sweep_arm_format() {
         serde_json::from_str::<DeploymentCapabilities>(&written).unwrap(),
         loaded
     );
-    assert!(serde_json::from_str::<DeploymentCapabilities>(
-        r#"{"excluded_candidates": [{"timing": "query_time", "operater": "Scan"}]}"#
-    )
-    .is_err());
+    for refused in [
+        r#"{"excluded_candidates": [{"timing": "query_time", "operater": "Scan"}]}"#,
+        // Counter semantics and mergeability are capabilities, not
+        // exclusion fields; θ ranges are `sketch_parameter_range`.
+        r#"{"excluded_candidates": [{"counter_semantics": "extrapolation"}]}"#,
+        r#"{"excluded_candidates": [{"summary_family": {"exact": "Rate"}, "merged_across_windows": true}]}"#,
+        r#"{"excluded_candidates": [{"sketch_parameters": {"kll_k": {"at_most": 1403}}}]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<DeploymentCapabilities>(refused).is_err(),
+            "{refused}"
+        );
+    }
     assert_eq!(
         serde_json::from_str::<DeploymentCapabilities>("{}").unwrap(),
         DeploymentCapabilities::default()
@@ -937,4 +1007,58 @@ fn default_capabilities_and_json_fill_the_rest() {
     );
     assert!(parsed.raw_data_retained && !parsed.query_time_results_retained);
     assert!(serde_json::from_str::<DeploymentCapabilities>(r#"{"raw_data": false}"#).is_err());
+}
+
+/// A source prints as the capabilities' JSON names it, the caller's own
+/// exclusion by its index; only the default deployment's own source (no
+/// query-time result kept across evaluations) is in the default
+/// deployment.
+#[test]
+fn exclusion_sources_print_as_their_json_names() {
+    let every_source = [
+        ExclusionSource::SummaryNotSupported,
+        ExclusionSource::ReadoutNotSupported,
+        ExclusionSource::RawDataNotRetained,
+        ExclusionSource::QueryTimeResultsNotRetained,
+        ExclusionSource::CounterResetsNotHandled,
+        ExclusionSource::CounterNotExtrapolated,
+        ExclusionSource::StateNotMergeableAcrossWindows,
+        ExclusionSource::ExcludedCandidate { index: 2 },
+    ];
+    for source in every_source {
+        let printed = source.to_string();
+        match source {
+            ExclusionSource::ExcludedCandidate { .. } => {
+                assert_eq!(printed, "excluded_candidates[2]")
+            }
+            _ => assert_eq!(serde_json::to_value(source).unwrap(), printed.as_str()),
+        }
+    }
+    assert_eq!(
+        ExclusionSource::CounterNotExtrapolated.to_string(),
+        "counter_not_extrapolated"
+    );
+    let default_sources: Vec<ExclusionSource> = DeploymentCapabilities::default()
+        .exclusions()
+        .iter()
+        .map(|e| e.source)
+        .collect();
+    for source in every_source {
+        assert_eq!(
+            source.in_default_deployment(),
+            default_sources.contains(&source),
+            "{source}"
+        );
+    }
+}
+
+/// The error names the exclusion once; the planner adds the
+/// "deployment capabilities" context.
+#[test]
+fn an_invalid_exclusion_error_names_its_index_once() {
+    let error = DeploymentCapabilitiesError::InvalidExclusion {
+        index: 0,
+        reason: "it sets no field".to_string(),
+    };
+    assert_eq!(error.to_string(), "excluded candidate 0: it sets no field");
 }
