@@ -441,6 +441,67 @@ async fn a_window_equal_to_its_interval_is_built_at_ingestion_time_from_table_ro
     assert_eq!(by_key(run_data_plane(&plan).remove(0)), expected);
 }
 
+/// A filtered row count and a filtered sum over the last 5 minutes, for a
+/// deployment that keeps no raw data: each `FILTER (WHERE latency >= 1000)`
+/// state is built at ingestion from the table rows, which carry the
+/// `latency` column the filter reads, and answers the exact values. Of
+/// [`rows`], latency `i` at row `i`, the last 5 minutes have latencies
+/// 1000..=1199 at or over 1000: per service `s{i % 3}`, counts 66, 67, 67
+/// and sums 66 * (1002 + 1197) / 2 = 72,567, 67 * (1000 + 1198) / 2 =
+/// 73,633 and 67 * (1001 + 1199) / 2 = 73,700.
+#[tokio::test]
+async fn filtered_aggregates_are_built_at_ingestion_time_from_table_rows() {
+    let count = "SELECT service, COUNT(*) FILTER (WHERE latency >= 1000) AS value FROM http \
+                 WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service";
+    let sum = "SELECT service, SUM(latency) FILTER (WHERE latency >= 1000) AS value FROM http \
+               WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY service";
+    let plan = plan_without_raw_data(&[count, sum], EXACT).await;
+    assert!(
+        plan.dag.nodes.iter().any(|node| {
+            let filtered = matches!(
+                &node.payload,
+                PhysicalASAPOperatorPayload::ASAP(
+                    ASAPOp::SummaryAgg {
+                        filter: Some(_),
+                        ..
+                    } | ASAPOp::SummaryTumblingWindowChain {
+                        filter: Some(_),
+                        ..
+                    }
+                )
+            );
+            filtered
+                && node.output_state.timing
+                    == asap_types::ir::properties::ExecutionTiming::IngestionTime
+        }),
+        "a filtered build runs at ingestion time"
+    );
+    assert!(
+        plan.raw_data_retention().unwrap().is_empty(),
+        "no raw data at query time"
+    );
+    let answers = run_data_plane(&plan);
+    let expected = |values: [Value; 3]| -> BTreeMap<String, String> {
+        ["s0", "s1", "s2"]
+            .into_iter()
+            .zip(&values)
+            .map(|(service, value)| (service.to_string(), shown(value)))
+            .collect()
+    };
+    assert_eq!(
+        by_key(answers[0].clone()),
+        expected([Value::Int64(66), Value::Int64(67), Value::Int64(67)])
+    );
+    assert_eq!(
+        by_key(answers[1].clone()),
+        expected([
+            Value::Float64(72_567.0),
+            Value::Float64(73_633.0),
+            Value::Float64(73_700.0)
+        ])
+    );
+}
+
 /// A global SQL aggregate has one row even over no input row, as SQL
 /// requires: over the last 5 minutes with `WHERE false`, `COUNT(*)` is 0
 /// and `SUM`, `STDDEV_POP` and `VAR_SAMP` are NULL. Over the last 5 minutes of [`rows`] (`latency` =
