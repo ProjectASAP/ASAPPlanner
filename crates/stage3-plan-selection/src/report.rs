@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use asap_cost::node::analytical::AnalyticalCostError;
 use asap_cost::{summary_type_name, CostModel};
-use asap_types::accuracy::AccuracyMetric;
+use asap_types::accuracy::{AccuracyMetric, FailureProbabilityBound};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::{
@@ -207,14 +207,14 @@ pub enum ErrorSelectingPlan {
     /// Query `query`'s accuracy target is below the solver's precision:
     /// the MILP's selection misses it when checked exactly, so no plan is
     /// returned rather than one that may not meet the target. Example: a
-    /// failure probability of 1e-12 per output value (δ = 0.01 over 1e10
-    /// values), below the solver's feasibility tolerance 1e-10.
+    /// failure probability of 1e-12 for each covered value (δ = 0.01 over
+    /// 1e10 values), below the solver's feasibility tolerance 1e-10.
     #[error(
-        "query {query}: an accuracy target is below the solver's precision (failure probability per output value {failure_probability_per_output_value:?}); the solver's plan misses it, so no plan is returned"
+        "query {query}: an accuracy target is below the solver's precision (failure probability bound {failure_probability_bound:?}); the solver's plan misses it, so no plan is returned"
     )]
     AccuracyTargetBelowSolverPrecision {
         query: usize,
-        failure_probability_per_output_value: Option<f64>,
+        failure_probability_bound: Option<FailureProbabilityBound>,
     },
     /// The selection MILP implements cost model 1 only (#1095 §3).
     #[error("the selection MILP does not support {0}")]

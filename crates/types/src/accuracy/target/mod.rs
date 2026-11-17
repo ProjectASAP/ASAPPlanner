@@ -167,9 +167,9 @@ impl AccuracyScope {
     /// when unbound: one for [`Self::PerValue`], `G` for
     /// [`Self::WholeResult`], and `min(⌊1 / share⌋, G)` for
     /// [`Self::GroupsWithRecordShareAtLeast`], which is bound even when `G`
-    /// is not. A target's failure probability splits over the readout values
+    /// is not. A target's failure probability is bounded over the estimates
     /// these values depend on
-    /// ([`AccuracyTarget::failure_probability_per_readout_value`]), so the
+    /// ([`AccuracyTarget::failure_probability_bound`]), so the
     /// strictest of several scopes is the one that covers the most values.
     pub fn max_values_covered(self, values_per_result: Option<u64>) -> Option<u64> {
         match self {
@@ -298,30 +298,6 @@ impl AccuracyTarget {
         self.max_error == 0.0 && self.failure_probability == Some(0.0)
     }
 
-    /// The failure probability each output value of one evaluation must
-    /// meet: the target's δ split evenly, by the union bound, over the
-    /// values its scope covers when one evaluation returns
-    /// `values_per_evaluation` ($n_q$; [`AccuracyScope::max_values_covered`]).
-    /// `None` when the target sets no δ, and when that count is not known
-    /// for a δ over the whole result. A readout value's failure probability
-    /// splits δ over the readout values the covered output values depend
-    /// on instead ([`Self::failure_probability_per_readout_value`]).
-    ///
-    /// Example: δ = 0.01 over the whole result of a query returning 100
-    /// series gives 0.0001 per output value; with the number of series
-    /// unknown, `None`; per value (`AccuracyScope::PerValue`), 0.01 either
-    /// way.
-    pub fn failure_probability_per_output_value(
-        &self,
-        values_per_evaluation: Option<u64>,
-    ) -> Option<f64> {
-        let delta = self.failure_probability?;
-        let values = self
-            .accuracy_scope
-            .max_values_covered(values_per_evaluation)?;
-        Some(delta / values.max(1) as f64)
-    }
-
     /// The metrics this target accepts an error in: its metric, every
     /// metric when it names none.
     pub fn metrics(&self) -> Vec<AccuracyMetric> {
@@ -331,17 +307,62 @@ impl AccuracyTarget {
             .collect()
     }
 
-    /// The failure probability each readout value below the query must
-    /// meet: δ split by the union bound over the readout values the output
-    /// values one statement covers depend on, `readout_values`, when one
-    /// evaluation returns `values_per_evaluation` ($n_q$). 1 when the
-    /// target sets no δ; `None` when no bound on that count is known.
+    /// Which union bound checks this target's failure probability, and
+    /// its limit, when one evaluation returns `values_per_evaluation`
+    /// ($n_q$) and the query reads `readout_values` (`R` and the fan-in).
+    /// `None` when the target sets no δ, and when neither bound is known.
     ///
-    /// The statement covers at most `V` output values
-    /// ([`AccuracyScope::max_values_covered`]), each depending on at most
-    /// `fan_in` readout values, and the query reads `R` in all, so it fails
-    /// only when one of at most `min(R, V · fan_in)` readout values does,
-    /// whatever their dependence. An unknown term drops out of the `min`.
+    /// The statement fails only when an estimate (one readout value in one
+    /// evaluation) a covered output value depends on fails, so its failure
+    /// probability is at most the summed δ of those estimates. Two sums
+    /// bound it: every estimate the query reads (at most `R`), or each of
+    /// the `V` covered values' own estimates (at most `V · fan-in`;
+    /// [`AccuracyScope::max_values_covered`]). The bound counting fewer
+    /// estimates is named; a tie, or `V · fan-in` unknown, names every
+    /// estimate read; `R` unknown names each covered value.
+    ///
+    /// Examples at δ = 0.01 over the whole result:
+    /// - `max(quantile_over_time(0.9, m[5m]))` over 1000 series: `R` 1000,
+    ///   `V · fan-in` 1 · 1000, so every estimate read, at most 0.01.
+    /// - `q or r` over 100 series each, same labels: `R` 200, `V · fan-in`
+    ///   100 · 1, so each covered value, at most 0.01 / 100.
+    /// - `q * on() group_left e`, `e` one sketched series, 1000 values:
+    ///   `R` 1, so every estimate read, at most 0.01.
+    pub fn failure_probability_bound(
+        &self,
+        values_per_evaluation: Option<u64>,
+        readout_values: ReadoutValueCounts,
+    ) -> Option<FailureProbabilityBound> {
+        let delta = self.failure_probability?;
+        let values_covered = self
+            .accuracy_scope
+            .max_values_covered(values_per_evaluation);
+        let estimates_of_covered_values = values_covered
+            .zip(readout_values.per_output_value)
+            .map(|(values, fan_in)| values.saturating_mul(fan_in));
+        let every_estimate_read = FailureProbabilityBound::EveryEstimateRead { limit: delta };
+        Some(
+            match (readout_values.per_evaluation, estimates_of_covered_values) {
+                (Some(read), Some(covered)) if read <= covered => every_estimate_read,
+                (Some(_), None) => every_estimate_read,
+                (_, Some(_)) => {
+                    let values_covered = values_covered?.max(1);
+                    FailureProbabilityBound::EachCoveredValue {
+                        values_covered,
+                        limit: delta / values_covered as f64,
+                    }
+                }
+                (None, None) => return None,
+            },
+        )
+    }
+
+    /// The failure probability each readout value below the query must
+    /// meet: the limit of [`Self::failure_probability_bound`] split evenly
+    /// over the estimates its sum counts, `R` for every estimate read and
+    /// the fan-in for each covered value. So a query whose readouts all
+    /// meet it meets its bound by construction. 1 when the target sets no
+    /// δ; `None` when no bound is known.
     ///
     /// Examples at δ = 0.01:
     /// - `quantile_over_time(0.99, m[5m])` over 8 series per value:
@@ -355,19 +376,44 @@ impl AccuracyTarget {
         values_per_evaluation: Option<u64>,
         readout_values: ReadoutValueCounts,
     ) -> Option<f64> {
-        let Some(delta) = self.failure_probability else {
+        if self.failure_probability.is_none() {
             return Some(1.0);
-        };
-        let readout_values_covered = self
-            .accuracy_scope
-            .max_values_covered(values_per_evaluation)
-            .zip(readout_values.per_output_value)
-            .map(|(values, fan_in)| values.saturating_mul(fan_in));
-        let split_over = match (readout_values.per_evaluation, readout_values_covered) {
-            (Some(all), Some(covered)) => all.min(covered),
-            (all, covered) => all.or(covered)?,
-        };
-        Some(delta / split_over.max(1) as f64)
+        }
+        Some(
+            match self.failure_probability_bound(values_per_evaluation, readout_values)? {
+                FailureProbabilityBound::EveryEstimateRead { limit } => {
+                    limit / readout_values.per_evaluation?.max(1) as f64
+                }
+                FailureProbabilityBound::EachCoveredValue { limit, .. } => {
+                    limit / readout_values.per_output_value?.max(1) as f64
+                }
+            },
+        )
+    }
+}
+
+/// Which union bound a query's failure probability is checked by, with its
+/// limit ([`AccuracyTarget::failure_probability_bound`]). Pass 2 splits δ
+/// by it, and selection checks it on the readouts actually selected.
+///
+/// Example: δ = 0.01 over the whole result of `q or r`, 100 series each:
+/// `EachCoveredValue { values_covered: 100, limit: 1e-4 }`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FailureProbabilityBound {
+    /// The summed δ of every estimate any output value depends on is at
+    /// most `limit`, the target's δ.
+    EveryEstimateRead { limit: f64 },
+    /// The summed δ of the estimates one output value depends on is at
+    /// most `limit`, δ over the `values_covered` values the scope covers.
+    EachCoveredValue { values_covered: u64, limit: f64 },
+}
+
+impl FailureProbabilityBound {
+    /// Its limit.
+    pub fn limit(&self) -> f64 {
+        match *self {
+            Self::EveryEstimateRead { limit } | Self::EachCoveredValue { limit, .. } => limit,
+        }
     }
 }
 
