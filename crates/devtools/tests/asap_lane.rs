@@ -151,8 +151,7 @@ fn run_dir(temp: &TempDir, workloads: &[&WorkloadSpec], plans: &[(&str, &str, Pa
     let run = RunDir::create_at(&temp.0.join("run")).unwrap();
     for workload in workloads {
         write_json(
-            &run
-                .path()
+            &run.path()
                 .join("workloads")
                 .join(format!("{}.json", workload.name)),
             workload,
@@ -171,7 +170,11 @@ fn run_dir(temp: &TempDir, workloads: &[&WorkloadSpec], plans: &[(&str, &str, Pa
 
 /// Runs the ASAP lane over `run` with warm-up `warmup` and `runs` measured
 /// runs.
-fn run_asap_lane(run: &RunDir, warmup: u32, runs: u32) -> Vec<aqpbm_harness::bench_external::LaneCell> {
+fn run_asap_lane(
+    run: &RunDir,
+    warmup: u32,
+    runs: u32,
+) -> Vec<aqpbm_harness::bench_external::LaneCell> {
     let protocol = Protocol {
         warmup_runs: warmup,
         measured_runs: runs,
@@ -313,7 +316,7 @@ fn conformance_kit_passes_on_the_asap_engine() {
 /// `sum_over_time(m[5m])` every 10 s over 2 series, planned twice: with
 /// samples arriving (a chain of 10 s tumbling windows built at ingestion
 /// time) and at rest (raw samples scanned at query time). The ASAP lane
-/// runs both plans (one warm-up and two measured runs, so three installs
+/// runs both plans (one warm-up and three measured runs, so four installs
 /// interleaved) and answers every scheduled evaluation exactly: per series,
 /// the sum of its samples in `(T - 5 min, T]`.
 #[test]
@@ -334,7 +337,7 @@ fn the_asap_lane_runs_a_planned_sum_over_time_and_answers_exactly() {
         &[&workload],
         &[("ingesting", "w", ingesting), ("at-rest", "w", at_rest)],
     );
-    let cells = run_asap_lane(&run, 1, 2);
+    let cells = run_asap_lane(&run, 1, 3);
     assert_eq!(cells.len(), 2, "{cells:?}");
     assert!(
         cells.iter().all(|cell| cell.outcome == CellOutcome::Ran),
@@ -429,10 +432,11 @@ fn a_plan_for_other_queries_is_refused_naming_the_query() {
         engine_options: options,
     };
     let with_plan = arm(serde_json::json!({ "plan_file": plan_file }));
-    let install_error = |workload: &WorkloadSpec, arm: &ArmSpec| match AsapEngine.install(workload, arm) {
-        Ok(_) => panic!("installed"),
-        Err(EngineError(message)) => message,
-    };
+    let install_error =
+        |workload: &WorkloadSpec, arm: &ArmSpec| match AsapEngine.install(workload, arm) {
+            Ok(_) => panic!("installed"),
+            Err(EngineError(message)) => message,
+        };
     let workload = harness_workload("w", SUM_QUERY, 300_000);
 
     let error = install_error(&workload, &arm(serde_json::Value::Null));
@@ -442,7 +446,10 @@ fn a_plan_for_other_queries_is_refused_naming_the_query() {
     assert!(error.contains("missing.plan.json"), "{error}");
     let not_a_plan = temp.0.join("not-a-plan.json");
     std::fs::write(&not_a_plan, "{}").unwrap();
-    let error = install_error(&workload, &arm(serde_json::json!({ "plan_file": not_a_plan })));
+    let error = install_error(
+        &workload,
+        &arm(serde_json::json!({ "plan_file": not_a_plan })),
+    );
     assert!(error.contains("not-a-plan.json"), "{error}");
 
     // Another query text: the error names the query and both texts.
@@ -458,7 +465,10 @@ fn a_plan_for_other_queries_is_refused_naming_the_query() {
         ..two.queries[0].clone()
     });
     let error = install_error(&two, &with_plan);
-    assert!(error.contains("1 query text") && error.contains("2 queries"), "{error}");
+    assert!(
+        error.contains("1 query text") && error.contains("2 queries"),
+        "{error}"
+    );
 
     // The plan's text as the query's second text (after a SQL text) matches.
     let mut sql_first = workload.clone();
