@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::accuracy::{FailureProbabilityBound, ReadoutValueCounts};
 use crate::stages::{
     CandidateForMemoGroupId, LogicalEdge, Memo, MemoGroupId, PrunedLogicalCandidate,
     RootPruneReason,
@@ -66,9 +67,39 @@ pub struct LogicalASAPMemoCandidates {
     /// (its MILP's constraint (X)); Pass 2 only lists it. Empty for a query without an accuracy
     /// target.
     pub exact_only_groups_of_query: Vec<BTreeSet<MemoGroupId>>,
+    /// Indexed by query: the readout values (estimates) its output can
+    /// depend on, `R` per evaluation and the fan-in per output value, as
+    /// Pass 2 counted them to split the query's δ over its readouts;
+    /// `None` for a query without an accuracy target. Stage 3's constraint
+    /// (K) checks the bound they name
+    /// ([`Self::failure_probability_bound`]), so the split and the check
+    /// cannot choose differently. Example: `max(quantile_over_time(0.9,
+    /// m[5m]))` over 1000 series: `R` 1000, fan-in 1000.
+    pub readout_values_of_query: Vec<Option<ReadoutValueCounts>>,
 }
 
 impl LogicalASAPMemoCandidates {
+    /// The union bound query `query`'s failure probability is checked by,
+    /// with its limit: its target's
+    /// (`AccuracyTarget::failure_probability_bound`) over the readout
+    /// values Pass 2 counted for it ([`Self::readout_values_of_query`]).
+    /// `None` without a target δ, or with neither bound known (the query
+    /// then reads its readouts only exactly).
+    ///
+    /// Example: δ = 0.01 over the whole result of
+    /// `max(quantile_over_time(0.9, m[5m]))` over 1000 series: every
+    /// estimate read, at most 0.01.
+    pub fn failure_probability_bound(&self, query: usize) -> Option<FailureProbabilityBound> {
+        let memo_query = &self.memo.queries()[query];
+        memo_query
+            .accuracy_target
+            .as_ref()?
+            .failure_probability_bound(
+                memo_query.number_of_values_per_query_evaluation,
+                self.readout_values_of_query.get(query).copied().flatten()?,
+            )
+    }
+
     /// Whether query `query` must not read `candidate`: it is not exact
     /// (it has sketch parameters θ) and its group is one the query may read
     /// only exactly ([`Self::exact_only_groups_of_query`]). A readout's own

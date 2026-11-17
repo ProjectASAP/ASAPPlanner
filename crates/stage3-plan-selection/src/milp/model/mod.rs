@@ -561,9 +561,10 @@ pub(crate) fn solve_selection(
     let mut missed_at_default_tolerance: Option<QueryId> = None;
     let below_solver_precision = |query: QueryId| SelectionMilpError::TargetBelowSolverPrecision {
         query,
-        failure_probability_bound: rules
-            .as_ref()
-            .and_then(|rules| rules.failure_probability_bound(query)),
+        failure_probability_bound: inputs
+            .physical
+            .logical_candidates
+            .failure_probability_bound(query.0),
     };
     let (selected, selected_edges, answering) = loop {
         let started = Instant::now();

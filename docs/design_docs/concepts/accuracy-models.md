@@ -481,9 +481,10 @@ execution `v` answering query `q`:
   holds only up to `b` (a ratio's denominator).
 - Failure probabilities, with `HP_{c,i} ≥ P_u − M^P_u(1 − y_{u,c,i})` and
   `HW_{c,i} ≥ W_u − M^W_u(1 − y_{u,c,i})` per selectable producer `u`, over
-  only the inputs whose error reaches the output (`β > 0` in a metric of
-  `c`'s contract, the test Pass 2's split uses; a count's input and the
-  right input of `and` and `unless` add nothing):
+  only the inputs whose estimates reach the output (`β > 0` in a metric of
+  `c`'s contract, or values chosen by estimates, the test Pass 2's split
+  uses; a count's input and the right input of `and` and `unless` add
+  nothing unless a top-k chooses their values):
   - a readout: `P_c = δ_c` and `W_c = R_c δ_c`, with `δ_c` its required
     failure probability and `R_c` its estimates per evaluation
     (`Memo::max_estimates_per_evaluation`); a top-k readout, whose output
@@ -491,9 +492,10 @@ execution `v` answering query `q`:
     Constants, as a readout's error is;
   - any other execution:
     `P_c ≥ Σ_{i read value by value} HP_{c,i} + Σ_{i read whole} HW_{c,i}`,
-    where an operator that copies each output value from one input (`or`, a
-    concatenation) has instead `P_c ≥ HP_{c,i} + Σ_{i read whole} HW_{c,i}`
-    for each input `i` read value by value; and `W_c ≥ Σ_i HW_{c,i}`. The
+    where an operator each of whose output values depends on one input's
+    estimates (`or`, a concatenation, with no top-k choosing an input's
+    values) has instead `P_c ≥ HP_{c,i} + Σ_{i read whole} HW_{c,i}` for
+    each input `i` read value by value; and `W_c ≥ Σ_i HW_{c,i}`. The
     operator classes are in the table below.
 - At the outputs of a query `q` with a target: `E_{v,m} ≤ ε_q + M(1 − z_{q,v})`
   in each metric the root allows (the target's at an operator root, none for
@@ -501,7 +503,9 @@ execution `v` answering query `q`:
   a δ, one failure row per query, over every output `v` it may be answered
   from, by the bound `AccuracyTarget::failure_probability_bound` names from
   `V` (the values the target's scope covers) and the query's counts `R` and
-  fan-in (Pass 2's `ReadoutValueCounts`):
+  fan-in (Pass 2's `ReadoutValueCounts`). Pass 2 records the counts it split
+  δ by (`LogicalASAPMemoCandidates::readout_values_of_query`), and (K)
+  checks the bound they name:
   - every estimate read, when `R ≤ V · fan_in` or `V` is unbound:
     `W_v ≤ δ_q + M(1 − z_{q,v})`;
   - each covered value, when `V · fan_in < R` or `R` is unbound:
@@ -527,7 +531,12 @@ estimates an output value depends on is decided by the data's series and
 keys (labels, group keys, join keys), not by the estimates. The exceptions
 are operators that choose by estimated value: a top-k readout is charged for
 every value it ranks, and any other such operator (a comparison, a `LIMIT`
-after ordering by an estimate) has no contract. So for any data `D` the
+after ordering by an estimate) has no contract. An operator keeping or
+taking values by the keys a top-k chose (`p and topk(3, q)`, `p unless
+topk(3, q)`, `topk(3, q) or p`, also through operators reading the top-k
+value by value) depends on every estimate the top-k ranks: that input's
+estimates count even where `β = 0`, and `or` sums its sides' `P`
+(`asap_accuracy::values_chosen_by_estimate`). So for any data `D` the
 statement fails only on `⋃_{e ∈ S_q(D)} E_e`, where `S_q(D)` is the
 estimates the covered output values depend on and `E_e` is estimate `e`'s
 miss. Hence
@@ -552,15 +561,19 @@ The recursions are sound step by step:
 
 An exact input has δ = 0. An input with `β = 0` contributes only which series
 or keys it has. A readout returns exactly the series the exact evaluation
-does, so those estimates cannot make the output miss.
+does, so those estimates cannot make the output miss, except a top-k's,
+whose keys are chosen by its estimates (above).
 
 *The assumption it rests on.* Soundness needs `R_c` to be an upper bound on
 the estimates one evaluation of readout `c` computes, under every dataset
 the declared facts allow; it is the only declared count the bound trusts
 (`n_q` only decides which row is checked). `R_c` is
-`Memo::max_values_per_evaluation`: the product of the distinct values its
-state's keys' scans declare, at most the series for PromQL labels, clamped
-to the rows its input reads. Two cases checked against it:
+`Memo::max_estimates_per_evaluation`: for a readout other than a top-k its
+values, `Memo::max_values_per_evaluation`, the product of the distinct
+values its state's keys' scans declare, at most the series for PromQL
+labels, clamped to the rows its input reads. The declared distinct items
+are the deployment's contract, as HLL's are: declaring fewer than a state
+counts gives a too small `R_c`. Two cases checked against it:
 - A top-k readout ranks every distinct item of each state, more than the
   values it returns. Its `R_c` is the smaller of its states' count times the
   declared distinct items per state (`SourceFacts::max_distinct_per_evaluation`)
@@ -581,18 +594,18 @@ alternative.
 
 *Operator classes* (shared with Pass 2's split:
 `asap_accuracy::inputs_read_value_by_value`,
-`takes_each_value_from_one_input` and the "error reaches the output" test
-`ErrorMetricsOfMemo::input_error_reaches_output`):
+`ErrorMetricsOfMemo::each_value_depends_on_one_input` and the "estimates
+reach the output" test `ErrorMetricsOfMemo::input_estimates_reach_output`):
 
 | Class | Operators | `P_c` | `W_c` |
 |---|---|---|---|
 | Readout | `SummaryEstimate` (not top-k) | `δ_c` | `R_c δ_c` |
 | Readout choosing by estimate | top-k | `R_c δ_c` | `R_c δ_c` |
 | Value by value | filter on copied columns, project, sort, time shift, relabel, label enrichment, series sample; binary arithmetic, one-to-one or many-to-one (`on`, `ignoring`, `group_left`, `group_right`: each output value reads one value of each side, and the "one" side's value is read by many outputs but is one estimate); join | `Σ_i HP` | `Σ_i HW` |
-| Each value from one input | `or`, concatenation (`UNION ALL`); `and`, `unless` (left only, the right has `β = 0`) | `max_i HP` | `Σ_i HW` |
+| Each value from one input | `or`, concatenation (`UNION ALL`); `and`, `unless` (left only, the right has `β = 0`) | `max_i HP`; `Σ_i HP` when a top-k chooses an input's values | `Σ_i HW` |
 | Input read whole | aggregates (`sum`/`max`/`avg` by or without keys), any operator whose output value may read many values of an input, the operand of `scalar` | `Σ_i HW` | `Σ_i HW` |
 | No contract | a subquery, a comparison, a counter rate | none: no error, and so no estimate, passes | none |
-| `β = 0` input | a count's input, the right of `and` and `unless` | adds 0 | adds 0 |
+| `β = 0` input | a count's input, the right of `and` and `unless` | adds 0, or as read value by value or whole when a top-k chooses its values | adds 0, or `HW` when a top-k chooses its values |
 
 *Same rule as Pass 2, for a query planned alone.* Pass 2 gives each readout
 of a query one level `δ / min(R, V · fan_in)`. Its `R` and fan-in add, per
@@ -663,13 +676,15 @@ target. The stricter tolerance is paid for only when the check needs it:
 solving every (K) at 1e-10 made RangeHeavy-8users about 6× slower, deriving
 the tolerance from the smallest limit solved RollupHeavy-8users about 2.8×
 slower, and scaling (K)'s rows by their limits solved RangeHeavy-8users
-about 4× slower.
+about 4× slower, and dividing every failure probability by the smallest
+root limit (so the tightest limit is 1) solved RangeHeavy-8users 10% and
+RangeHeavy-8users-counter 48% slower.
 
 **Context copies.** A copy of an equivalent evaluation context shares its
 original's variables and has no rows of its own. Two contexts are copies only
 when each output's root limits (the tolerated error per metric, and the
-failure probability bound with its limit and, for each covered value, its
-`V`) are equal, so the copy's rows would repeat the original's:
+failure probability bound's kind and limit, all the rows read of it) are
+equal, so the copy's rows would repeat the original's:
 - queries at δ = 0.01 per value returning 10 and 100 values are copies;
 - over a whole result they are copies when both check every estimate read
   (a readout of 10 series declaring 10 and 50 values);

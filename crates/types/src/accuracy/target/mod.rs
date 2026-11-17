@@ -408,6 +408,26 @@ pub enum FailureProbabilityBound {
     EachCoveredValue { values_covered: u64, limit: f64 },
 }
 
+/// The bound in words, for error messages: "every estimate read fails
+/// with at most 0.01 in all" or "each of 100 covered values fails with at
+/// most 0.0001".
+impl std::fmt::Display for FailureProbabilityBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::EveryEstimateRead { limit } => {
+                write!(f, "every estimate read fails with at most {limit} in all")
+            }
+            Self::EachCoveredValue {
+                values_covered,
+                limit,
+            } => write!(
+                f,
+                "each of {values_covered} covered values fails with at most {limit}"
+            ),
+        }
+    }
+}
+
 impl FailureProbabilityBound {
     /// Its limit.
     pub fn limit(&self) -> f64 {

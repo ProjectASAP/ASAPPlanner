@@ -47,6 +47,7 @@ use crate::milp::accuracy::{AccuracyRules, AccuracyVariables, ErrorModel};
 use crate::plan::plan_of;
 use crate::retention::{edge_retention_need_ms, least_retention_ms_per_execution};
 use crate::selectable::{QueryId, SelectableEdge};
+use asap_accuracy::{readout_levels, ErrorMetricsOfMemo, NoMeasuredGuarantees};
 
 const NONE: Lifetime = Lifetime::None;
 const ONE_EVALUATION: Lifetime = Lifetime::OneEvaluation(StorageMedium::Memory);
@@ -70,7 +71,8 @@ fn empty_memo() -> Memo {
 
 /// Stage 2's output over `memo`, with one query-time candidate per
 /// (logical candidate, lifetime) of `candidates` and every edge between
-/// a candidate of an input group and its consumer admissible.
+/// a candidate of an input group and its consumer admissible, and each
+/// query's failure-probability bound as Pass 2 records it.
 fn physical(
     memo: Memo,
     candidates: &[(CandidateForMemoGroupId, Lifetime)],
@@ -108,6 +110,18 @@ fn physical(
         }
     }
     let groups = memo.groups().len();
+    let readout_values_of_query = memo
+        .topological_order()
+        .map(|order| {
+            readout_levels(
+                &memo,
+                &ErrorMetricsOfMemo::of(&memo, &order),
+                &order,
+                &NoMeasuredGuarantees,
+            )
+            .readout_values_of_query
+        })
+        .unwrap_or_default();
     PhysicalASAPMemoCandidates::new(
         LogicalASAPMemoCandidates {
             memo,
@@ -116,6 +130,7 @@ fn physical(
             pruned: vec![],
             evaluation_grid_of_group: vec![None; groups],
             exact_only_groups_of_query: vec![],
+            readout_values_of_query,
         },
         physical_candidates,
         edges,

@@ -39,4 +39,4 @@ pub use measured::{
     MeasuredSketchAccuracyError,
 };
 pub use metric_rule::{query_roots_with_target, ErrorMetricsOfMemo};
-pub use readout_caps::{readout_levels, readout_value_counts_of_queries, ReadoutRequiredAccuracy};
+pub use readout_caps::{readout_levels, ReadoutLevels, ReadoutRequiredAccuracy};
