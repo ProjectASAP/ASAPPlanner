@@ -25,15 +25,13 @@
     "accepted": [
       {
         "accepted_metric": null,
-        "sketches": [
-          "CmsWithHeap"
-        ],
-        "summary": "no accuracy target (CmsWithHeap)"
+        "sketches": [],
+        "summary": "no accuracy target"
       }
     ],
     "cost": {
-      "cost_per_second": 3.34907479468e-7,
-      "cpu_core_seconds_per_second": 0.0252173675,
+      "cost_per_second": 3.64389360906e-7,
+      "cpu_core_seconds_per_second": 0.027839267,
       "per_node": {
         "0": {
           "cost_per_second": 6.52152e-9,
@@ -81,40 +79,31 @@
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 1.54061966081e-9,
+          "cost_per_second": 3.02475975973e-8,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.000137017,
-          "detail": "build CmsWithHeap into 1 states: 10000 rows x 137 ops, 1 group visits; x 0.1000/s; holds 3254 bytes for 1.370 ms",
+          "cpu_core_seconds_per_second": 0.00269,
+          "detail": "hash aggregate 10000 rows into 10000 groups: 20 ops per row, 10000 group visits; x 0.1000/s; holds 400000 bytes for 26.900 ms",
           "multiplier": 1,
-          "operator": "SummaryAgg",
+          "operator": "Aggregate",
           "timing": "query_time"
         },
         "6": {
-          "cost_per_second": 3.93540004831e-12,
+          "cost_per_second": 7.78844522855e-10,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 3.5e-7,
-          "detail": "estimate 1 groups x 5; x 0.1000/s; holds 120 bytes for 0.003 ms",
+          "cpu_core_seconds_per_second": 0.000069267,
+          "detail": "hash aggregate 10000 rows into 1 groups: 69 ops per row, 1 group visits; x 0.1000/s; holds 80016 bytes for 0.693 ms",
           "multiplier": 1,
-          "operator": "SummaryEstimate",
-          "timing": "query_time"
-        },
-        "7": {
-          "cost_per_second": 5.6220000138e-15,
-          "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 5e-10,
-          "detail": "operator: pass 5 rows; x 0.1000/s; holds 24 bytes for 0.000 ms",
-          "multiplier": 1,
-          "operator": "Project",
+          "operator": "Aggregate",
           "timing": "query_time"
         }
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 44656704.4934,
-        "cpu_ops_per_second": 24737367.5,
+        "average_memory_bytes": 44657785.59,
+        "cpu_ops_per_second": 27359267.0,
         "disk_bytes": 0,
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 46083590,
+        "peak_memory_bytes": 46560208,
         "scanned_bytes_per_second": 4800000.0
       }
     },
@@ -389,31 +378,6 @@
         {
           "consumer": 6,
           "data_state": {
-            "primitive": "SummaryState",
-            "timing": "query_time"
-          },
-          "grouping": "NotApplicable",
-          "intermediate_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
-                  "Sketch": "CmsWithHeap"
-                },
-                "name": "state",
-                "nullable": false
-              }
-            ],
-            "time_index": null,
-            "unique_keys": []
-          },
-          "producer": 5,
-          "role": "Input",
-          "window": "NotApplicable"
-        },
-        {
-          "consumer": 7,
-          "data_state": {
             "primitive": "Raw",
             "timing": "query_time"
           },
@@ -432,7 +396,7 @@
                 "dtype": {
                   "Plain": "float64"
                 },
-                "name": "topk",
+                "name": "sum",
                 "nullable": false
               }
             ],
@@ -443,7 +407,7 @@
               ]
             ]
           },
-          "producer": 6,
+          "producer": 5,
           "role": "Input",
           "window": "NotApplicable"
         }
@@ -825,61 +789,6 @@
             "fields": [
               {
                 "dtype": {
-                  "Sketch": "CmsWithHeap"
-                },
-                "name": "state",
-                "nullable": false
-              }
-            ],
-            "time_index": null,
-            "unique_keys": []
-          },
-          "output_state": {
-            "primitive": "SummaryState",
-            "timing": "query_time"
-          },
-          "parameters": {
-            "CmsWithHeap": {
-              "depth": 5,
-              "heap_size": 10,
-              "width": 28
-            }
-          },
-          "payload": {
-            "ASAP": {
-              "SummaryAgg": {
-                "child": 4,
-                "filter": null,
-                "input": {
-                  "item": {
-                    "Column": {
-                      "Named": "job"
-                    }
-                  },
-                  "weight": {
-                    "Column": "SampleValue"
-                  }
-                },
-                "reduction": {
-                  "Reduce": []
-                },
-                "summary_type": {
-                  "Sketch": "CmsWithHeap"
-                }
-              }
-            }
-          }
-        },
-        {
-          "id": 6,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
-          "output_schema": {
-            "closed": true,
-            "fields": [
-              {
-                "dtype": {
                   "Plain": "utf8"
                 },
                 "name": "job",
@@ -889,7 +798,7 @@
                 "dtype": {
                   "Plain": "float64"
                 },
-                "name": "topk",
+                "name": "sum",
                 "nullable": false
               }
             ],
@@ -905,21 +814,34 @@
             "timing": "query_time"
           },
           "payload": {
-            "ASAP": {
-              "SummaryEstimate": {
-                "query": {
-                  "TopK": {
-                    "k": 5
+            "NonASAP": {
+              "Aggregate": {
+                "child": 4,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "col": null,
+                    "kind": "sum"
                   }
-                },
-                "summary_input": 5
+                ],
+                "output_names": [
+                  ""
+                ],
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                }
               }
             }
           }
         },
         {
-          "id": 7,
-          "lifetime": "None",
+          "id": 6,
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "output_schema": {
             "closed": true,
             "fields": [
@@ -951,29 +873,29 @@
           },
           "payload": {
             "NonASAP": {
-              "Project": {
-                "child": 6,
-                "cols": [
+              "Aggregate": {
+                "child": 5,
+                "filters": [],
+                "having": null,
+                "measures": [
                   {
-                    "alias": "topk_5",
-                    "expr": {
-                      "Column": 1
-                    }
-                  },
-                  {
-                    "alias": "job",
-                    "expr": {
-                      "Column": 0
-                    }
+                    "k": 5,
+                    "kind": "top_k"
                   }
-                ]
+                ],
+                "output_names": [
+                  ""
+                ],
+                "reduction": {
+                  "Reduce": []
+                }
               }
             }
           }
         }
       ],
       "roots": [
-        7
+        6
       ],
       "scalar_roots": []
     }
