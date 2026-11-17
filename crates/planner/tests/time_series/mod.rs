@@ -17,8 +17,7 @@ use asap_executor::Error;
 use asap_planner::{InstallablePlan, MaterializedView};
 use asap_types::ir::operator::Source;
 use asap_types::ir::schema::{DataType, FieldDataType, Schema, PROMQL_SERIES_IDENTITY};
-use asap_types::ir::NonASAPOp;
-use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use futures::{executor::block_on, StreamExt};
 
 /// One raw data sample as it arrives, e.g. one Prometheus Remote Write sample.
@@ -67,40 +66,24 @@ pub fn series_identity(labels: &BTreeMap<String, String>) -> String {
 /// every column those `Scan`s read.
 pub fn time_series_tables(dag: &PhysicalASAPDAG, samples: &[RawDataSample]) -> InMemoryDataStore {
     // Each metric's columns: the union of its Scans' columns, by name.
-    let mut schemas: BTreeMap<&str, Schema> = BTreeMap::new();
-    for node in &dag.nodes {
-        let PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan {
-            source: Source::TimeSeries { metric },
-            schema,
-            ..
-        }) = &node.payload
-        else {
-            continue;
-        };
-        let known = schemas.entry(metric).or_insert_with(|| schema.clone());
-        for field in &schema.fields {
-            if !known.fields.iter().any(|f| f.name == field.name) {
-                known.fields.push(field.clone());
-            }
-        }
-    }
+    let schemas = dag
+        .raw_data_schemas()
+        .into_iter()
+        .filter_map(|(source, schema)| match source {
+            Source::TimeSeries { metric } => Some((metric, schema)),
+            Source::Table { .. } => None,
+        });
     let mut tables = InMemoryDataStore::default();
     for (metric, schema) in schemas {
         let schema = Arc::new(schema);
         let rows = samples
             .iter()
-            .filter(|s| s.labels.get("__name__").map(String::as_str) == Some(metric))
+            .filter(|s| s.labels.get("__name__") == Some(&metric))
             .map(|sample| row(&schema, sample))
             .collect();
         let batch = Batch::try_new(schema.clone(), rows).unwrap();
         tables = tables
-            .with_raw_data(
-                Source::TimeSeries {
-                    metric: metric.to_string(),
-                },
-                schema,
-                vec![batch],
-            )
+            .with_raw_data(Source::TimeSeries { metric }, schema, vec![batch])
             .unwrap();
     }
     tables

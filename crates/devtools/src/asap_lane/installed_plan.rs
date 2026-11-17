@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use aqpbm_harness::data::Sample;
 use aqpbm_harness::engine::{
     Answers, EngineError, Footprint, InstalledArm, PlanSummary, SampleChunk, StepReport,
     WorkloadSpec,
@@ -15,9 +14,7 @@ use asap_planner::{InstallablePlan, MaterializedView, MaterializedViewRefresh, R
 use futures::executor::block_on;
 use futures::StreamExt;
 
-use super::time_series_batches::{
-    answers_of, time_series_tables, SeriesIdentities, TimeSeriesTable,
-};
+use super::time_series_batches::{answers_of, time_series_tables, SampleRouter, TimeSeriesTable};
 
 /// The memory one run may reserve: no limit in practice, so the lane
 /// measures the plan, not a limit of this runtime.
@@ -31,19 +28,21 @@ pub(super) struct InstalledPlan {
     /// The workload query each root answers, in root order.
     query_ids: Vec<String>,
     tables: Vec<TimeSeriesTable>,
-    identities: SeriesIdentities,
+    router: SampleRouter,
     refreshes: Vec<GroupRefresh>,
     query_run: CompiledPhysicalDAG,
     /// Shared with each run while it runs, held alone between steps.
     store: Arc<InMemoryDataStore>,
     /// The end of the samples ingested so far: the data start before the
-    /// first chunk.
+    /// first chunk (the harness's samples lie in `(start, start + duration]`).
     ingested_until_ms: i64,
 }
 
 /// One ingestion refresh group: refreshed by one ingestion run per window
 /// `(e - width, e]` with `e + phase ≡ 0 (mod width)`, whose roots are its
-/// views.
+/// views. The phase is measured back from evaluation times on the width's
+/// grid: the harness evaluates at multiples of the evaluation interval,
+/// which plans made for evaluation phase 0 assume.
 struct GroupRefresh {
     window: RefreshWindow,
     views: Vec<MaterializedView>,
@@ -104,7 +103,9 @@ impl InstalledPlan {
         let tables = time_series_tables(&plan.dag).map_err(unsupported)?;
         let retention = plan.raw_data_retention().map_err(not_executable)?;
         // A refresh reads the window ending at a chunk's end or before it,
-        // so the raw samples it reads reach back one window and one chunk.
+        // so the raw samples it reads reach back one window and one chunk;
+        // the harness's chunks are one evaluation interval each
+        // (`ArmSchedule::for_workload`).
         let chunk_ms = workload
             .queries
             .iter()
@@ -134,47 +135,62 @@ impl InstalledPlan {
             .map(|record| record.description.start_ms)
             .min()
             .unwrap_or(0);
+        let mut store = Arc::new(store);
+        // The windows before the data that a view keeps, refreshed empty,
+        // so a query shifted back past the data start reads windows with
+        // no samples rather than missing ones. Example: a 10 s chain kept
+        // 5 min, with data from 0, has empty windows ending at -290 s ...
+        // 0 s before the first chunk.
+        for refresh in &refreshes {
+            let kept_ms = refresh
+                .views
+                .iter()
+                .map(MaterializedView::retention_ms)
+                .max();
+            let from_ms = ingested_until_ms - kept_ms.unwrap_or(0) as i64;
+            for end_ms in window_ends(refresh.window, from_ms, ingested_until_ms) {
+                refresh_window(refresh, &mut store, end_ms)?;
+            }
+        }
         Ok(InstalledPlan {
             plan,
             query_ids,
             tables,
-            identities: SeriesIdentities::default(),
+            router: SampleRouter::default(),
             refreshes,
             query_run,
-            store: Arc::new(store),
+            store,
             ingested_until_ms,
         })
     }
+}
 
-    /// The store, between runs: no run holds it then.
-    fn store_mut(&mut self) -> &mut InMemoryDataStore {
-        Arc::get_mut(&mut self.store).expect("no run holds the store between steps")
-    }
+/// The store, between runs: no run holds it then.
+fn store_between_runs(store: &mut Arc<InMemoryDataStore>) -> &mut InMemoryDataStore {
+    Arc::get_mut(store).expect("no run holds the store between steps")
+}
 
-    /// Refreshes `refresh` for the window ending at `end_ms`: one ingestion
-    /// run whose roots are its views, each view's output appended.
-    fn refresh_window(&mut self, refresh: usize, end_ms: i64) -> Result<(), EngineError> {
-        let GroupRefresh {
-            window,
-            views,
-            compiled,
-        } = &self.refreshes[refresh];
-        let start_ms = end_ms - window.width_ms as i64;
-        let scope = Scope::Ingestion {
-            window_start_ms: start_ms,
-            window_end_ms: end_ms,
-        };
-        let outputs = run_ingestion(compiled, &self.store, scope)
-            .map_err(|error| run_failed(&format!("refresh of ({start_ms}, {end_ms}]"), error))?;
-        let views = views.clone();
-        let store = self.store_mut();
-        for (view, batches) in views.iter().zip(outputs) {
-            store
-                .append_materialized_view(view, (start_ms, end_ms), batches)
-                .map_err(|error| run_failed("storing a view", error))?;
-        }
-        Ok(())
+/// Refreshes `refresh` for the window ending at `end_ms`: one ingestion run
+/// whose roots are its views, each view's output appended to `store`.
+fn refresh_window(
+    refresh: &GroupRefresh,
+    store: &mut Arc<InMemoryDataStore>,
+    end_ms: i64,
+) -> Result<(), EngineError> {
+    let start_ms = end_ms - refresh.window.width_ms as i64;
+    let scope = Scope::Ingestion {
+        window_start_ms: start_ms,
+        window_end_ms: end_ms,
+    };
+    let outputs = run_ingestion(&refresh.compiled, store, scope)
+        .map_err(|error| run_failed(&format!("refresh of ({start_ms}, {end_ms}]"), error))?;
+    let store = store_between_runs(store);
+    for (view, batches) in refresh.views.iter().zip(outputs) {
+        store
+            .append_materialized_view(view, (start_ms, end_ms), batches)
+            .map_err(|error| run_failed("storing a view", error))?;
     }
+    Ok(())
 }
 
 /// `compiled` run in ingestion `scope` over `store`: each root's batches.
@@ -288,38 +304,26 @@ impl InstalledArm for InstalledPlan {
     }
 
     /// Appends the chunk's samples of each time series the plan reads as
-    /// its rows for `(previous end, chunk end]`, then refreshes each group
-    /// for every window ending in that range.
+    /// its rows for `(previous end, chunk end]` (nothing for a series with
+    /// no sample in it), then refreshes each group for every window ending
+    /// in that range.
     fn ingest(&mut self, chunk: &SampleChunk) -> Result<StepReport, EngineError> {
         let (after_ms, until_ms) = (self.ingested_until_ms, chunk.end_ms);
-        let mut batches = Vec::with_capacity(self.tables.len());
-        for table in &self.tables {
-            let samples: Vec<&Sample> = chunk
-                .samples
-                .iter()
-                .filter(|sample| sample.labels.get("__name__") == Some(&table.metric))
-                .collect();
+        let routed = self.router.route(chunk, &mut self.tables);
+        for (table, samples) in self.tables.iter_mut().zip(routed) {
+            if samples.is_empty() {
+                continue;
+            }
             let batch = table
-                .batch(&samples, &mut self.identities)
+                .batch(&samples)
                 .map_err(|error| run_failed("raw samples", error))?;
-            batches.push(batch);
-        }
-        let sources: Vec<_> = self
-            .tables
-            .iter()
-            .map(|table| table.source.clone())
-            .collect();
-        let store = self.store_mut();
-        for (source, batch) in sources.iter().zip(batches) {
-            store
-                .append_raw_data(source, (after_ms, until_ms), vec![batch])
+            store_between_runs(&mut self.store)
+                .append_raw_data(&table.source, (after_ms, until_ms), vec![batch])
                 .map_err(|error| run_failed("raw samples", error))?;
         }
-        for refresh in 0..self.refreshes.len() {
-            let ends: Vec<i64> =
-                window_ends(self.refreshes[refresh].window, after_ms, until_ms).collect();
-            for end_ms in ends {
-                self.refresh_window(refresh, end_ms)?;
+        for refresh in &self.refreshes {
+            for end_ms in window_ends(refresh.window, after_ms, until_ms) {
+                refresh_window(refresh, &mut self.store, end_ms)?;
             }
         }
         self.ingested_until_ms = until_ms;
@@ -338,7 +342,9 @@ impl InstalledArm for InstalledPlan {
         Ok((answers, StepReport::default()))
     }
 
-    /// The bytes of the stored views and of the raw samples held.
+    /// The bytes of the stored views and of the raw samples held, as the
+    /// executor counts each batch: a dictionary of series texts shared by
+    /// several batches is counted in each.
     fn footprint(&self) -> Result<Footprint, EngineError> {
         Ok(Footprint {
             view_bytes: self.store.materialized_view_bytes() as u64,

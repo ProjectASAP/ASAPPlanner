@@ -24,7 +24,7 @@ asap-executor = { path = "../executor" }
 # --lane asap` runs the Planner's executor as an engine under test
 # (`asap_lane::AsapEngine`). Pinned to a sketch-bench commit; sketch-bench
 # never depends on the planner.
-aqpbm-harness = { git = "https://github.com/ProjectASAP/sketch-bench", rev = "af7fa57c917696815937f7cdd84f48c3391e1c89" }
+aqpbm-harness = { git = "https://github.com/ProjectASAP/sketch-bench", rev = "671d3997b25cd03f79a927506a492485803d728b" }
 futures = "0.3"
 
 # Used by the asap_planner / variant_coverage bins (catalog schemas,
@@ -38,7 +38,7 @@ tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 
 [dev-dependencies]
 # The data generator of the harness's workloads, at the harness's pin.
-aqpbm-datagen = { git = "https://github.com/ProjectASAP/sketch-bench", rev = "af7fa57c917696815937f7cdd84f48c3391e1c89" }
+aqpbm-datagen = { git = "https://github.com/ProjectASAP/sketch-bench", rev = "671d3997b25cd03f79a927506a492485803d728b" }
 asap-types = { path = "../types", features = ["test-support"] }
 asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
 
