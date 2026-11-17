@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+pub mod state_fingerprint;
+pub mod stored_windows;
+
 use asap_executor::runtime::{RunContext, Scope};
 use asap_executor::values::{Batch, SchemaRef};
 use futures::TryStreamExt;

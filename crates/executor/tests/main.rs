@@ -24,6 +24,7 @@ mod raw_scan;
 mod sql_relational_operators;
 mod state_column_updater;
 mod stored_tumbling_window_memory_limit;
+mod summary_merge_windows;
 mod summary_projection;
 mod text_extremum_memory;
 mod thread_safety;

@@ -20,6 +20,16 @@ pub trait AggregateCore: Send + Sync {
     /// Merge with a state of the same family and shape, leaving both inputs unchanged.
     fn merge_with(&self, other: &dyn AggregateCore) -> Result<Box<dyn AggregateCore>, KernelError>;
 
+    /// Merge `other` into this state in place: afterwards this state is
+    /// the one [`Self::merge_with`] returns, and nothing new is allocated
+    /// once this state covers `other`'s range (a DDSketch adds `other`'s
+    /// bucket counts into its own stores). A `SummaryMerge` merges every
+    /// later window of a group into the group's own copy this way.
+    fn merge_in_place(&mut self, other: &dyn AggregateCore) -> Result<(), KernelError> {
+        let _ = other;
+        todo!("merge fast path: merge in place")
+    }
+
     /// Answer a sketch evaluation. Exact states are read through
     /// [`ExactAccumulator::evaluation`](super::exact::ExactAccumulator::evaluation).
     fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
