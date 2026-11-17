@@ -16,71 +16,42 @@
 //! query's target.
 
 use asap_accuracy::{theoretical_guarantee, tolerated_limit};
-use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
-use asap_planner::{DeploymentCapabilities, PlanningModels};
+use std::collections::HashSet;
+
 use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::stages::ValueSign;
 use asap_types::summary_type::SketchParams;
-use asap_types::workload::PlanningWorkload;
 
-/// PromQL `queries`, each `(query, accuracy JSON)` every 60 s, over one
-/// series of `latency`, a gauge sampled at 10 Hz whose values are declared
-/// non-negative (so DDSketch's quantile guarantee holds over it).
-fn workload(queries: &[(&str, &str)]) -> PlanningWorkload {
-    let entries: Vec<String> = queries
-        .iter()
-        .map(|(query, accuracy)| {
-            format!(
-                r#"{{"query": {query:?}, "demand": {{"fixed_interval_at": {{"interval": 60000, "evaluation_phase": 0}}}},
-                  "requirements": {{"accuracy": {accuracy}}}, "predictability": {{"predictable": {{"known_at": null}}}}}}"#
-            )
-        })
-        .collect();
-    serde_json::from_str(&format!(
-        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}]}},
-            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 10.0}}}},
-              "sources": {{"latency": {{"series_count": 1, "metric_type": "gauge", "sample_interval": 100,
-                "column_signs": {{"value": "non_negative"}}}}}}}}}}"#,
-        entries.join(",")
-    ))
-    .unwrap()
-}
-
-/// The plan the production stages select for `queries`, no raw data kept
-/// (every query reads summaries built at ingestion or exact states).
+/// The plan the production stages select for `queries` over one series
+/// of `latency`, no raw data kept (every query reads summaries built at
+/// ingestion).
 fn plan(queries: &[(&str, &str)]) -> PhysicalASAPDAG {
-    let workload = workload(queries);
-    let entries: Vec<_> = workload.query_workload.entries().collect();
-    let data = workload.data_workload.clone().unwrap();
-    let capabilities = DeploymentCapabilities {
-        raw_data_retained: false,
-        ..Default::default()
-    };
-    let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
-    let roots = lower_promql_roots(&workload).unwrap();
-    let run = run_planning_stages_over(roots, &entries, &data, models).unwrap();
-    let (plan, _) = run.run.selection.as_ref().expect("a plan is selected");
-    plan.clone()
+    crate::accuracy_at_query_roots::plan(queries, 1, false)
 }
 
-/// Whether the readouts query `query`'s output reads in `plan` meet
-/// `target`, each alone: every `SummaryEstimate` on the path below its
-/// root reads a state whose θ has a theoretical guarantee, at the target's
-/// failure probability, in a metric the target allows and within its
-/// error. One series and one readout per path, so the target's δ is the
-/// readout value's. `Err` says which readout misses and why.
+/// The one sketch readout query `query`'s output reads in `plan`, if it
+/// meets `target`: the `SummaryEstimate` below the query's root reads a
+/// state whose θ has a theoretical guarantee, at the target's failure
+/// probability, in a metric the target allows and within its error. One
+/// series and one readout per path, so the target's δ is the readout
+/// value's. `Err` says which readout misses and why, or that the path
+/// has no sketch readout to check.
 fn query_meets_its_target(
     plan: &PhysicalASAPDAG,
     query: usize,
     target: &AccuracyTarget,
-) -> Result<(), String> {
+) -> Result<PhysicalASAPNodeId, String> {
     let node = |id: PhysicalASAPNodeId| plan.nodes.iter().find(|n| n.id == id).unwrap();
     let mut pending = vec![plan.roots[query]];
-    let mut readouts = 0;
+    let mut visited = HashSet::new();
+    let mut readouts = Vec::new();
     while let Some(id) = pending.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
         pending.extend(
             plan.edges
                 .iter()
@@ -94,11 +65,12 @@ fn query_meets_its_target(
         else {
             continue;
         };
-        readouts += 1;
+        readouts.push(id);
         let state = node(*summary_input);
-        let Some(parameters) = &state.parameters else {
-            continue;
-        };
+        let parameters = state
+            .parameters
+            .as_ref()
+            .ok_or(format!("readout {id:?} reads a state with no θ"))?;
         let summary_type = state
             .output_schema
             .fields
@@ -128,20 +100,31 @@ fn query_meets_its_target(
             ));
         }
     }
-    assert!(readouts <= 1, "one readout per query path here");
-    Ok(())
+    match readouts[..] {
+        [readout] => Ok(readout),
+        _ => Err(format!(
+            "expected one sketch readout on the path, found {readouts:?}"
+        )),
+    }
 }
 
-/// Plans `queries` and checks each query's own target on the plan.
-fn assert_each_query_meets_its_target(queries: &[(&str, &str)]) -> PhysicalASAPDAG {
+/// Plans `queries` and checks each query's own target on the plan;
+/// returns the plan and the readout each query reads.
+fn assert_each_query_meets_its_target(
+    queries: &[(&str, &str)],
+) -> (PhysicalASAPDAG, Vec<PhysicalASAPNodeId>) {
     let plan = plan(queries);
-    for (index, (query, accuracy)) in queries.iter().enumerate() {
-        let target: AccuracyTarget = serde_json::from_str(accuracy).unwrap();
-        if let Err(reason) = query_meets_its_target(&plan, index, &target) {
-            panic!("query {index} ({query} at {accuracy}) misses its target: {reason}\nqueries: {queries:?}");
-        }
-    }
-    plan
+    let readouts = queries
+        .iter()
+        .enumerate()
+        .map(|(index, (query, accuracy))| {
+            let target: AccuracyTarget = serde_json::from_str(accuracy).unwrap();
+            query_meets_its_target(&plan, index, &target).unwrap_or_else(|reason| {
+                panic!("query {index} ({query} at {accuracy}) misses its target: {reason}\nqueries: {queries:?}")
+            })
+        })
+        .collect();
+    (plan, readouts)
 }
 
 const P99: &str = "quantile_over_time(0.99, latency[1h])";
@@ -159,7 +142,7 @@ fn one_query_text_at_two_rank_targets_reads_a_kll_meeting_the_stricter() {
         [(P99, RANK_0_05), (P99, RANK_0_001)],
         [(P99, RANK_0_001), (P99, RANK_0_05)],
     ] {
-        let plan = assert_each_query_meets_its_target(&queries);
+        let (plan, _) = assert_each_query_meets_its_target(&queries);
         assert!(
             plan.nodes
                 .iter()
@@ -171,7 +154,8 @@ fn one_query_text_at_two_rank_targets_reads_a_kll_meeting_the_stricter() {
 }
 
 /// The L2 norm of one series over 24 h at relative 0.1 and at relative
-/// 0.05: the plan reads a UnivMon meeting 0.05 for the strict query.
+/// 0.05: the plan reads a UnivMon meeting 0.05 for the strict query
+/// (2,367 columns of 5 rows on the built-in grid; 624 meet only 0.1).
 #[test]
 fn one_query_text_at_two_relative_targets_reads_a_univmon_meeting_the_stricter() {
     let l2 = "l2_over_time(latency[24h])";
@@ -179,7 +163,15 @@ fn one_query_text_at_two_relative_targets_reads_a_univmon_meeting_the_stricter()
     let strict =
         r#"{"accuracy_metric": "relative", "max_error": 0.05, "failure_probability": 0.1}"#;
     for queries in [[(l2, loose), (l2, strict)], [(l2, strict), (l2, loose)]] {
-        assert_each_query_meets_its_target(&queries);
+        let (plan, _) = assert_each_query_meets_its_target(&queries);
+        assert!(
+            plan.nodes.iter().any(|n| matches!(
+                n.parameters,
+                Some(SketchParams::UnivMon { sketch_cols, .. }) if sketch_cols >= 2_367
+            )),
+            "{:?}",
+            plan.nodes.iter().map(|n| &n.parameters).collect::<Vec<_>>()
+        );
     }
 }
 
@@ -189,8 +181,14 @@ fn one_query_text_at_two_relative_targets_reads_a_univmon_meeting_the_stricter()
 #[test]
 fn two_query_texts_sharing_a_readout_group_each_meet_their_target() {
     let sorted_p99 = "sort(quantile_over_time(0.99, latency[1h]))";
-    assert_each_query_meets_its_target(&[(P99, RANK_0_05), (sorted_p99, RANK_0_001)]);
-    assert_each_query_meets_its_target(&[(sorted_p99, RANK_0_05), (P99, RANK_0_001)]);
+    for queries in [
+        [(P99, RANK_0_05), (sorted_p99, RANK_0_001)],
+        [(sorted_p99, RANK_0_05), (P99, RANK_0_001)],
+    ] {
+        let (plan, readouts) = assert_each_query_meets_its_target(&queries);
+        assert_ne!(plan.roots[0], plan.roots[1], "the two texts root apart");
+        assert_eq!(readouts[0], readouts[1], "both read one readout");
+    }
 }
 
 /// Property: for any set of queries over shared readout groups, each with
