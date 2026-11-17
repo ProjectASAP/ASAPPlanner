@@ -593,7 +593,12 @@ that snapshot is the deployment's choice. `instantiate` constructs the
 runnable DAG without lowering again and opens no reader; a missing source or
 view, or a batch in another schema, fails the read. Each run executes with
 independent per-run state, and its `RunContext` carries the run's scope: an
-ingestion window, or a query evaluation time `T`.
+ingestion window, or a query evaluation time `T`. When the data workload
+declares `max_out_of_order_ms`, the `RunContext` also carries that bound, and
+the deployment must pass it: a counter build (`rate`, `increase`) then folds
+each series' late rows in time order. The deployment seals an ingestion window
+only after the bound has passed its end: with a 20 s bound, the window
+`(T - 60 s, T]` is built once rows past `T + 20 s` have arrived.
 
 ### Operators own semantics; the store only reads
 
