@@ -104,6 +104,21 @@ impl ErrorMetricsOfMemo {
             .as_ref()
     }
 
+    /// Whether `candidate`'s input `input` can make its output miss: its
+    /// error reaches the output in some metric
+    /// ([`crate::estimate_dependence::input_error_reaches_output`], the
+    /// test Pass 2's failure-probability split counts by).
+    pub fn input_error_reaches_output(
+        &self,
+        candidate: CandidateForMemoGroupId,
+        input: usize,
+    ) -> bool {
+        crate::estimate_dependence::input_error_reaches_output(
+            &self.error_contract[candidate.group.0 as usize][candidate.index_in_group],
+            input,
+        )
+    }
+
     /// The error metric of `candidate` when it is a sketch readout.
     pub(crate) fn readout_error_metric(
         &self,
