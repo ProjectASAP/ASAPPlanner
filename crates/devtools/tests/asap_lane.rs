@@ -388,18 +388,18 @@ fn the_asap_lane_runs_a_planned_sum_over_time_and_answers_exactly() {
     }
 }
 
-/// `last_over_time(m[10s])`: Stages 1-3 plan it, but the Planner's executor
-/// has no `last_over_time` kernel. The plan file written for a runtime other
+/// `absent_over_time(m[10s])`: Stages 1-3 plan it, but the Planner's
+/// executor cannot compile it. The plan file written for a runtime other
 /// than the executor (`--executor-check skip`) is a "not executable" cell
 /// on the ASAP lane, so the other lanes still run that plan.
 #[test]
 fn a_plan_the_executor_cannot_compile_is_a_not_executable_cell() {
-    const QUERY: &str = "last_over_time(m[10s])";
-    let temp = TempDir::new("last");
+    const QUERY: &str = "absent_over_time(m[10s])";
+    let temp = TempDir::new("absent");
     let planning = planning_workload(QUERY, "m", 2, 1_000, r#""at_rest""#);
-    let plan_file = temp.0.join("last.plan.json");
+    let plan_file = temp.0.join("absent.plan.json");
     // Precondition: an executor-only gap. Once the executor runs
-    // `last_over_time`, pick another query it plans but cannot compile.
+    // `absent_over_time`, pick another query it plans but cannot compile.
     assert!(!write_plan_file(&planning, &plan_file, "compile"));
     assert!(write_plan_file(&planning, &plan_file, "skip"));
     let workload = harness_workload("w", QUERY, 10_000);
