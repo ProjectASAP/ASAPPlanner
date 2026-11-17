@@ -111,6 +111,8 @@ test('each candidate sits inside its group, colored by origin, with θ, and an e
   assert.equal(call('memoClip', 'abcdef', 4), 'abc…');
   assert.ok(byId(elements, 'g4c6>g1'));
   assert.ok(byId(elements, 'g4c7>g5'));
+  // G5's three candidates all read G6: one edge, from the group.
+  assert.deepEqual(edgesOf(elements).filter((e) => e.data.source.startsWith('g5')).map((e) => e.data.id), ['g5>g6']);
   const cy = cytoscape(elements);
   assert.equal(cy.getElementById('g4').children().length, 10);
   assert.equal(cy.edges().length, edgesOf(elements).length);
@@ -125,18 +127,86 @@ test("Pass 2's pruned candidates are marked and counted on their group", () => {
   assert.ok(!call('memoStepElements', fixture(), 1, {}).some((e) => /pruned/.test(e.classes || '')));
 });
 
-test('a large group collapses to one count per origin and expands on request', () => {
+test('selected plan only leaves the plan\'s candidates and their groups, on the last step only', () => {
+  const elements = call('memoStepElements', fixture(), PASS2, { selectedOnly: true });
+  // The plan reads the KLL chain; G1, the raw range only the exact
+  // aggregate and the Pass 1 builds read, is left out with its edges.
+  assert.deepEqual(nodesOf(elements).map((e) => e.data.id).sort(),
+    ['g0', 'g0c1', 'g2', 'g2c0', 'g3', 'g3c0', 'g4', 'g4c7', 'g5', 'g5c0', 'g6', 'g6c0']);
+  assert.ok(edgesOf(elements).every((e) => e.data.target !== 'g1'));
+  // Earlier steps have no plan to filter by.
+  assert.equal(call('memoStepElements', fixture(), 1, { selectedOnly: true }).length, call('memoStepElements', fixture(), 1, {}).length);
+});
+
+test('hiding pruned candidates leaves out them, groups with none left, and the edges into those groups', () => {
+  const memo = fixture();
+  // Say Pass 2 also pruned G1's only candidate.
+  memo.steps[PASS2].groups[1].candidates[0].pruned = true;
+  const elements = call('memoStepElements', memo, PASS2, { hidePruned: true });
+  assert.deepEqual(nodesOf(elements).filter((e) => e.data.parent === 'g4').map((e) => e.data.id), ['g4c4', 'g4c5', 'g4c6', 'g4c7', 'g4c8', 'g4c9']);
+  assert.match(byId(elements, 'g4').data.label, /\(4 pruned by Pass 2, hidden\)/);
+  assert.ok(!byId(elements, 'g1') && !elements.some((e) => e.data.target === 'g1'));
+});
+
+test('a candidate\'s dimensions are its origin, sketch family, θ fields and window width', () => {
+  const step = fixture().steps[PASS2];
+  assert.deepEqual(call('memoCandidateDims', step.groups[4].candidates[5]), [['origin', 'Pass1'], ['sketch', 'Kll'], ['k', '1404']]);
+  assert.deepEqual(call('memoCandidateDims', step.groups[4].candidates[7]), [['origin', 'TumblingWindows'], ['sketch', 'Kll'], ['k', '547']]);
+  // G0's Project has no θ.
+  assert.deepEqual(call('memoCandidateDims', step.groups[0].candidates[1]), [['origin', 'Pass1']]);
+  // G6's chain has a window width.
+  assert.deepEqual(call('memoCandidateDims', step.groups[6].candidates[0]).at(-1), ['window_ms', '60000']);
+});
+
+test('a large group splits by its first varying dimension; a count drills into it', () => {
   const memo = fixture();
   const inG4 = (elements) => nodesOf(elements).filter((e) => e.data.parent === 'g4');
-  const collapsed = call('memoStepElements', memo, PASS2, { collapseAbove: 4 });
-  assert.deepEqual(inG4(collapsed).map((e) => e.data.label), ['7 Pass1\n✗ 4 pruned', '3 TumblingWindows\n✚ 3 new · ✓ selected']);
-  assert.match(byId(collapsed, 'g4').data.label, /click a count to expand/);
-  assert.match(byId(collapsed, 'g4otumbling_windows').classes, /chosen/);
-  assert.ok(byId(collapsed, 'g4otumbling_windows>g5'));
-  const open = call('memoStepElements', memo, PASS2, { collapseAbove: 4, expanded: [4] });
-  assert.equal(inG4(open).length, 10);
-  assert.match(byId(open, 'g4').data.label, /click the group to collapse/);
-  assert.equal(cytoscape(open).getElementById('g4').children().length, 10);
+  const split = call('memoStepElements', memo, PASS2, { collapseAbove: 4 });
+  assert.deepEqual(inG4(split).map((e) => e.data.label), ['7 Pass1\n✗ 4 pruned', '3 TumblingWindows\n✚ 3 new · ✓ selected']);
+  assert.match(byId(split, 'g4').data.label, /click a count to expand/);
+  assert.match(byId(split, 'g4b1').classes, /chosen/);
+  assert.ok(byId(split, 'g4b1>g5'));
+  // Pass1's 7 candidates still exceed 4, so they split by the next varying dimension, k.
+  const pass1 = [['origin', 'Pass1']];
+  const deeper = call('memoStepElements', memo, PASS2, { collapseAbove: 4, drill: { 4: { path: pass1 } } });
+  assert.deepEqual(inG4(deeper).map((e) => e.data.label.split('\n')[0]),
+    ['1 · k=26', '1 · k=52', '1 · k=132', '1 · k=269', '1 · k=547', '1 · k=1404', '1 · k=2863']);
+  assert.match(byId(deeper, 'g4').data.label, /click the group to go back\norigin=Pass1 \(7\)/);
+  // With room for all 7, the drilled group shows Pass1's candidates themselves.
+  const open = call('memoStepElements', memo, PASS2, { collapseAbove: 7, drill: { 4: { path: pass1 } } });
+  assert.deepEqual(inG4(open).map((e) => e.data.id), ['g4c0', 'g4c1', 'g4c2', 'g4c3', 'g4c4', 'g4c5', 'g4c6']);
+  assert.equal(cytoscape(open).getElementById('g4').children().length, 7);
+  // Drilled in, a candidate shows the dimensions that still tell the shown ones apart.
+  assert.equal(byId(open, 'g4c5').data.label.split('\n')[1], 'θ k=1404');
+});
+
+test('a group splits by the dimension chosen next; a candidate without it counts as "none", last', () => {
+  const g4 = fixture().steps[PASS2].groups[4];
+  // Say G4's last merge carried no θ.
+  g4.candidates[9].parameters = null;
+  const split = call('memoGroupDrill', g4.candidates, { path: [], next: 'k' }, 4);
+  assert.equal(split.dim, 'k');
+  assert.deepEqual(split.choices, ['origin', 'sketch', 'k']);
+  // The merges share k with the Pass 1 builds they replace: 547 and 1404 twice.
+  assert.deepEqual(split.buckets.map(([value, cs]) => [value, cs.length]),
+    [['26', 1], ['52', 1], ['132', 1], ['269', 1], ['547', 2], ['1404', 2], ['2863', 1], ['none', 1]]);
+  // A `next` that no longer varies falls back to the first that does.
+  assert.equal(call('memoGroupDrill', g4.candidates, { path: [['origin', 'Pass1']], next: 'origin' }, 4).dim, 'k');
+});
+
+test('a group with mostly pruned candidates, hidden, offers no split buttons: they count the drawn candidates', () => {
+  const memo = fixture();
+  const g4 = memo.steps[PASS2].groups[4];
+  // Say Pass 2 pruned all but two of G4's ten candidates.
+  g4.candidates.forEach((c, i) => { c.pruned = i < 8; });
+  // All ten exceed 4, so they would split by origin...
+  assert.equal(call('memoGroupDrill', g4.candidates, { path: [], next: null }, 4).dim, 'origin');
+  // ...but with the pruned ones hidden, the two drawn ones are drawn one by one, with no split to offer.
+  const shown = call('memoShownCandidates', memo, PASS2, g4, { hidePruned: true });
+  assert.deepEqual(shown.map((c) => c.index), [8, 9]);
+  assert.equal(call('memoGroupDrill', shown, { path: [], next: null }, 4).dim, null);
+  const elements = call('memoStepElements', memo, PASS2, { hidePruned: true, collapseAbove: 4 });
+  assert.deepEqual(nodesOf(elements).filter((e) => e.data.parent === 'g4').map((e) => e.data.id), ['g4c8', 'g4c9']);
 });
 
 test('the selected candidates are highlighted on the last step only', () => {
@@ -150,13 +220,13 @@ test('the selected candidates are highlighted on the last step only', () => {
   assert.ok(!call('memoStepElements', memo, PASS2, {}).some((e) => /chosen/.test(e.classes || '')));
 });
 
-test('a collapsed count marks only the selected candidate\'s edges', () => {
+test('a count marks only the selected candidate\'s edges', () => {
   const memo = fixture();
   // Another TumblingWindows candidate of G4 reads G1 instead of G5.
   memo.steps[PASS2].groups[4].candidates[8].children = [1];
   const elements = call('memoStepElements', memo, PASS2, { collapseAbove: 4 });
-  assert.match(byId(elements, 'g4otumbling_windows>g5').classes, /chosen/);
-  assert.equal(byId(elements, 'g4otumbling_windows>g1').classes, '');
+  assert.match(byId(elements, 'g4b1>g5').classes, /chosen/);
+  assert.equal(byId(elements, 'g4b1>g1').classes, '');
 });
 
 test('highlighting a query dims the groups it does not reach', () => {
@@ -183,6 +253,24 @@ test("Pass 2's logical edges into a candidate: each producer of the input group,
   assert.equal(input.edges.length, 10);
   assert.match(input.edges[0], /^✗ #0: α\^log = 0: the producer's guarantee exceeds Rank ≤ 0\.01/);
   assert.equal(input.edges[5], '✓ #5');
+});
+
+test("a candidate's physical variants as a timing × lifetime grid: which exist, which Stage 2 pruned, which the plan uses", () => {
+  const cell = (ids, pruned, selected) => ({ ids, pruned, selected });
+  const none = cell([], false, false);
+  // G4's selected merge: query time only; the plan keeps its result for one run.
+  assert.deepEqual(call('memoPhysicalGrid', fixtureDoc(), 4, 7), [[none, none, none], [cell([5], false, false), cell([6], false, true), cell([], true, false)]]);
+  // The Scan: at ingestion time, not kept, read by the chain; no raw data
+  // is kept, so every query-time variant is pruned.
+  const pruned = cell([], true, false);
+  assert.deepEqual(call('memoPhysicalGrid', fixtureDoc(), 2, 0), [[cell([2], false, true), none, pruned], [pruned, pruned, pruned]]);
+  assert.equal(call('memoPhysicalGrid', { memo: fixture() }, 0, 0), null);
+  // Drawn under each kept candidate's label with `physical`, not under a pruned one.
+  const elements = call('memoStepElements', fixture(), PASS2, { physical: fixtureDoc() });
+  assert.match(byId(elements, 'g4c7').data.grid, /^data:image\/svg\+xml;utf8,/);
+  assert.match(byId(elements, 'g4c7').classes, /withGrid/);
+  assert.equal(byId(elements, 'g4c0').data.grid, undefined);
+  assert.ok(byId(elements, 'g4c7').data.h > byId(call('memoStepElements', fixture(), PASS2, {}), 'g4c7').data.h);
 });
 
 test("a candidate's physical candidates list each input's physical edges with α^phys, the selected one marked", () => {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local server for the ASAPPlanner Stage Viewer: serves the page, writes the
+"""Local server for the ASAPPlanner Plan Viewer: serves the page, writes the
 example documents, and plans PlanningWorkload files with
 `asap_planner --run-until stage3 --format json`."""
 
@@ -252,7 +252,7 @@ def main() -> None:
         parser.error(f"{BINARY} does not exist; start without --skip-build")
     write_examples(args.regenerate)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"ASAPPlanner Stage Viewer: http://{args.host}:{args.port}")
+    print(f"ASAPPlanner Plan Viewer: http://{args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

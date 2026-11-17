@@ -14,7 +14,7 @@ tool on first use.
 
 | Command (`cargo run -p asap-devtools --bin … -- …`) | Input / options | Result |
 | --- | --- | --- |
-| `asap_planner --workload <file> --run-until <stage>` | `PlanningWorkload` JSON files | Runs the planner's stages up to `<stage>` and prints each stage's output as text, or with `--format json` as the document the [Stage Viewer](stage-viewer.md) shows |
+| `asap_planner --workload <file> --run-until <stage>` | `PlanningWorkload` JSON files | Runs the planner's stages up to `<stage>` and prints each stage's output as text, or with `--format json` as the document the [Plan Viewer](plan-viewer.md) shows |
 | `convert_rqe_atomic_costs <rqe_atomic_costs.json> <out.json>` | sketch-bench's per-operation cost table | Writes a measured table to set as `measured_operation_costs` in an `asap_planner --cost-inputs` file; skipped rows are listed on stderr |
 | `analyze_corpora --corpora --sample-interval-ms 1000 --out-dir <dir>` | Repository PromQL corpora, output directory | Writes successful/error IR dumps and summary reports |
 | `analyze_corpora --sql-corpora --out-dir <dir>` | Repository SQL corpora, output directory | Writes SQL corpus reports |
@@ -49,7 +49,7 @@ the selected physical candidates, the plan's `cost_per_second` with each
 node's charge, each query's accepted accuracy, and the search status
 (`Optimal` when the plan is proven the cheapest). For this example the
 selected plan is exact for both queries. Add `--format json --out plan.json`
-and open the document in the [Stage Viewer](stage-viewer.md) to see every
+and open the document in the [Plan Viewer](plan-viewer.md) to see every
 stage.
 
 ## Inspect a query's logical DAG

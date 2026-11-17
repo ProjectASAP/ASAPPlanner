@@ -8,11 +8,10 @@
 // `--run-until` (`stage0`, `stage1_pass1`, `stage1_pass2`, `stage2` or
 // `stage3`) and writes each stage's output, as text (`--format text`, the default;
 // `asap_devtools::planning_stages_text`) or as an `asap-stage-pipeline/v2`
-// document for the Stage Viewer (`--format json`), to `--out` or standard
-// output. The text folds each memo group's candidates that differ only in
-// θ into one line (their indices, each θ parameter's values, how many Pass
-// 2 pruned by cause), printing in full only those Pass 2 kept, and counts
-// the pruned lists per cause; `--printing-full-candidates` prints every candidate, edge and
+// document for the Plan Viewer (`--format json`), to `--out` or standard
+// output. The text is terse by default (a legend per stage, folded θ
+// variants, producer ids per input, pruned counts per cause); `--verbose`
+// prints every candidate, edge with its reason, group's properties and
 // pruned candidate.
 //
 // The stages run as `run_planning` runs them
@@ -157,7 +156,7 @@ use asap_types::workload::{
 use serde_json::{json, Value};
 
 const USAGE: &str = "usage: asap_planner (--workload <file>)... \
---run-until stage0|stage1_pass1|stage1_pass2|stage2|stage3 [--format text|json] [--printing-full-candidates] [--out <file>] \
+--run-until stage0|stage1_pass1|stage1_pass2|stage2|stage3 [--format text|json] [--verbose] [--out <file>] \
 [--sql-catalog-table <json>]... [--cost-inputs <file>] [--deployment-capabilities <file>] \
 [--ignore-accuracy-guarantees]";
 
@@ -203,7 +202,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut cost_inputs = CostInputs::default();
     let mut deployment_capabilities = DeploymentCapabilities::default();
     let mut ignore_accuracy_guarantees = false;
-    let mut printing_full_candidates = false;
+    let mut verbose = false;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let mut value = || {
@@ -227,7 +226,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--cost-inputs" => cost_inputs = read_json(&flag, &value()?)?,
             "--deployment-capabilities" => deployment_capabilities = read_json(&flag, &value()?)?,
             "--ignore-accuracy-guarantees" => ignore_accuracy_guarantees = true,
-            "--printing-full-candidates" => printing_full_candidates = true,
+            "--verbose" => verbose = true,
+            "--printing-full-candidates" => {
+                return Err(Failure::Usage(
+                    "--printing-full-candidates was renamed to --verbose".into(),
+                ))
+            }
             other => return Err(Failure::Usage(format!("unknown argument {other}"))),
         }
     }
@@ -335,7 +339,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 &run,
                 plan_cost.as_ref(),
                 materialized_views.as_ref(),
-                printing_full_candidates,
+                verbose,
             ),
             Err(PlanningStagesError::Pass1(error)) => format!("error: Pass 1: {error}\n"),
             Err(error) => return Err(error.to_string().into()),
