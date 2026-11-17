@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use aqpbm_harness::engine::{
+use aqpbm_core::harness::engine::{
     Answers, EngineError, Footprint, InstalledArm, PlanSummary, SampleChunk, StepReport,
     WorkloadSpec,
 };

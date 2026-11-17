@@ -1,6 +1,6 @@
 //! The in-process ASAP lane of the engine comparison: the Planner's
 //! executor as an engine under test of the sketch-bench harness
-//! (`aqpbm-harness`).
+//! (`aqpbm_core::harness`).
 //!
 //! [`AsapEngine`] installs a plan file `asap_planner --plan-file` wrote (an
 //! [`InstallablePlan`]) as given, so this lane and every other lane of a
@@ -21,7 +21,7 @@ mod time_series_batches;
 
 use std::path::PathBuf;
 
-use aqpbm_harness::engine::{
+use aqpbm_core::harness::engine::{
     ArmSpec, CpuAccounting, EngineDescription, EngineError, EngineUnderTest, InstalledArm,
     WorkloadSpec,
 };
