@@ -5,7 +5,7 @@
 //! its output.
 use std::collections::BTreeSet;
 
-use asap_accuracy::NoMeasuredGuarantees;
+use asap_accuracy::{AccuracyEvidence, NoMeasuredGuarantees};
 use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
@@ -59,7 +59,17 @@ pub fn entry(interval_ms: u32) -> QueryWorkloadEntry {
 }
 
 pub fn pass2(memo: Memo, entries: &[QueryWorkloadEntry]) -> LogicalASAPMemoCandidates {
-    generate_logical_asap_memo_candidates(memo, entries, &NoMeasuredGuarantees).unwrap()
+    pass2_with_evidence(memo, entries, &NoMeasuredGuarantees)
+}
+
+/// [`pass2`] with the deployment's measured accuracy `evidence`, read
+/// before each summary's theoretical guarantee.
+pub fn pass2_with_evidence(
+    memo: Memo,
+    entries: &[QueryWorkloadEntry],
+    evidence: &dyn AccuracyEvidence,
+) -> LogicalASAPMemoCandidates {
+    generate_logical_asap_memo_candidates(memo, entries, evidence).unwrap()
 }
 
 /// The edges into input `input` of `consumer`: each producer and α^log.

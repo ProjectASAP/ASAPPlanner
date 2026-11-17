@@ -31,8 +31,7 @@ mod resources;
 
 pub(crate) use measured::aggregate_lookup;
 pub use measured::{
-    lookup, CostTableProvenance, MeasuredOperationCost, MeasuredOperationCosts, NodeCostSource,
-    OperatorCost, OperatorKind, StateFamily, SummaryOperation,
+    lookup, MeasuredOperationCosts, NodeCostSource, OperatorCost, OperatorKind, StateFamily,
 };
 pub use model::{
     CalibrationFit, ClusterLimits, ClusterObjective, CostInputs, CostModel, ResourceSpeed,

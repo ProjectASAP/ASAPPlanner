@@ -9,12 +9,16 @@
 //!  "insert_cpu_secs": 8.5e-8, "merge_cpu_secs": 1.2e-6, "query_cpu_secs": 4.0e-7, ...}
 //! ```
 //!
-//! and each becomes three entries, one per operation, in CPU nanoseconds:
+//! and each becomes four `OperatorCost` entries of the table's object form,
+//! in CPU nanoseconds per unit, for both phases:
 //!
 //! ```json
-//! [{"sketch": {"Kll": {"k": 200}}, "operation": "update", "cpu_ns_per_operation": 85.0},
-//!  {"sketch": {"Kll": {"k": 200}}, "operation": "merge", "cpu_ns_per_operation": 1200.0},
-//!  {"sketch": {"Kll": {"k": 200}}, "operation": "estimate", "cpu_ns_per_operation": 400.0}]
+//! {"operators": [
+//!   {"operator": "SummaryAgg", "phase": null, "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 85.0, "ns_per_invocation": 0.0},
+//!   {"operator": "SummaryTumblingWindowChain", "phase": null, "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 85.0, "ns_per_invocation": 0.0},
+//!   {"operator": "SummaryMerge", "phase": null, "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 1200.0, "ns_per_invocation": 0.0},
+//!   {"operator": "SummaryEstimate", "phase": null, "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 400.0, "ns_per_invocation": 0.0}],
+//!  "ns_per_evaluation": 0.0}
 //! ```
 //!
 //! Only this converter reads the sketch-bench format; the planner reads the
@@ -24,7 +28,7 @@
 //!
 //! [`CostInputs::measured_operation_costs`]: asap_cost::CostInputs::measured_operation_costs
 
-use asap_cost::{MeasuredOperationCost, SummaryOperation};
+use asap_cost::{MeasuredOperationCosts, OperatorCost, OperatorKind};
 use asap_types::summary_type::SketchParams;
 use serde_json::Value;
 
@@ -40,9 +44,11 @@ pub struct SkippedRow {
 /// What [`convert_rqe_atomic_costs`] produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConvertedCosts {
-    /// The measured table: three entries per converted row (update, merge,
-    /// estimate), in row order.
-    pub measured_operation_costs: Vec<MeasuredOperationCost>,
+    /// The measured table in its object form: per converted row, an update
+    /// becomes `SummaryAgg` and `SummaryTumblingWindowChain` entries, a merge a
+    /// `SummaryMerge` entry and an estimate a `SummaryEstimate` entry, each
+    /// for both phases, in row order.
+    pub measured_operation_costs: MeasuredOperationCosts,
     /// The rows skipped, in row order.
     pub skipped_rows: Vec<SkippedRow>,
 }
@@ -55,10 +61,8 @@ pub fn convert_rqe_atomic_costs(rows: &Value) -> Result<ConvertedCosts, String> 
     let rows = rows
         .as_array()
         .ok_or("rqe_atomic_costs.json is not a JSON array of rows")?;
-    let mut converted = ConvertedCosts {
-        measured_operation_costs: Vec::new(),
-        skipped_rows: Vec::new(),
-    };
+    let mut operators: Vec<OperatorCost> = Vec::new();
+    let mut skipped_rows = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         let sketch_name = row["sketch"]
             .as_str()
@@ -67,7 +71,7 @@ pub fn convert_rqe_atomic_costs(rows: &Value) -> Result<ConvertedCosts, String> 
         let sketch = match sketch_params(sketch_name, params) {
             Ok(Some(sketch)) => sketch,
             Ok(None) => {
-                converted.skipped_rows.push(SkippedRow {
+                skipped_rows.push(SkippedRow {
                     sketch_name: sketch_name.to_string(),
                     reason: skip_reason(sketch_name).to_string(),
                 });
@@ -75,19 +79,24 @@ pub fn convert_rqe_atomic_costs(rows: &Value) -> Result<ConvertedCosts, String> 
             }
             Err(error) => return Err(format!("row {index} ({sketch_name}): {error}")),
         };
-        if converted
-            .measured_operation_costs
+        if operators
             .iter()
-            .any(|entry| entry.sketch == sketch)
+            .any(|entry| entry.sketch.as_ref() == Some(&sketch))
         {
             return Err(format!(
                 "row {index} ({sketch_name}): a second row for {sketch:?}"
             ));
         }
-        for (field, operation) in [
-            ("insert_cpu_secs", SummaryOperation::Update),
-            ("merge_cpu_secs", SummaryOperation::Merge),
-            ("query_cpu_secs", SummaryOperation::Estimate),
+        // An update prices both operators that fold rows into a state; a
+        // merge and an estimate their one operator.
+        let updates: &[OperatorKind] = &[
+            OperatorKind::SummaryAgg,
+            OperatorKind::SummaryTumblingWindowChain,
+        ];
+        for (field, kinds) in [
+            ("insert_cpu_secs", updates),
+            ("merge_cpu_secs", &[OperatorKind::SummaryMerge]),
+            ("query_cpu_secs", &[OperatorKind::SummaryEstimate]),
         ] {
             let seconds = row[field]
                 .as_f64()
@@ -95,16 +104,25 @@ pub fn convert_rqe_atomic_costs(rows: &Value) -> Result<ConvertedCosts, String> 
                 .ok_or(format!(
                     "row {index} ({sketch_name}): `{field}` is not a non-negative number"
                 ))?;
-            converted
-                .measured_operation_costs
-                .push(MeasuredOperationCost {
-                    sketch: sketch.clone(),
-                    operation,
-                    cpu_ns_per_operation: seconds * 1e9,
-                });
+            operators.extend(kinds.iter().map(|&operator| OperatorCost {
+                operator,
+                phase: None,
+                sketch: Some(sketch.clone()),
+                exact: None,
+                measure: None,
+                ns_per_unit: seconds * 1e9,
+                ns_per_invocation: 0.0,
+                memory_bytes_per_state: None,
+            }));
         }
     }
-    Ok(converted)
+    Ok(ConvertedCosts {
+        measured_operation_costs: MeasuredOperationCosts {
+            operators,
+            ..MeasuredOperationCosts::default()
+        },
+        skipped_rows,
+    })
 }
 
 /// Why a row whose name has no planner sketch is skipped.
@@ -183,10 +201,14 @@ mod tests {
 
     /// Four sketch-bench rows in the format of `rqe_atomic_costs.json`: a
     /// KLL and a Count-Min top-k convert, the exact sum and the Hydra HLL
-    /// are skipped. The table written as JSON reads back as the same
-    /// entries, with seconds turned into nanoseconds.
+    /// are skipped. Each converted row gives four `OperatorCost` entries for
+    /// both phases (an update prices `SummaryAgg` and
+    /// `SummaryTumblingWindowChain`, a merge `SummaryMerge`, an estimate
+    /// `SummaryEstimate`), with seconds turned into nanoseconds per unit;
+    /// the table written as JSON reads back equal.
     #[test]
     fn a_small_sample_converts_and_round_trips() {
+        use asap_cost::{OperatorCost, OperatorKind};
         let sample = json!([
             {"sketch": "kll-percall", "sketch_config": {"algorithm": "kll-percall", "params": {"k": 200}},
              "mem_bytes_per_instance": 9648.0, "insert_cpu_secs": 8.5e-8, "merge_cpu_secs": 1.2e-6,
@@ -208,29 +230,44 @@ mod tests {
             depth: 3,
             heap_size: 32,
         };
-        let expected: Vec<_> = [
-            (&kll, SummaryOperation::Update, 85.0),
-            (&kll, SummaryOperation::Merge, 1200.0),
-            (&kll, SummaryOperation::Estimate, 400.0),
-            (&cms, SummaryOperation::Update, 60.0),
-            (&cms, SummaryOperation::Merge, 5000.0),
-            (&cms, SummaryOperation::Estimate, 350.0),
-        ]
-        .into_iter()
-        .map(|(sketch, operation, ns)| (sketch.clone(), operation, ns))
-        .collect();
-        let got: Vec<_> = converted
-            .measured_operation_costs
-            .iter()
-            .map(|e| (e.sketch.clone(), e.operation, e.cpu_ns_per_operation))
-            .collect();
-        assert_eq!(got.len(), expected.len());
-        for ((sketch, operation, ns), (want_sketch, want_operation, want_ns)) in
-            got.iter().zip(&expected)
-        {
-            assert_eq!((sketch, operation), (want_sketch, want_operation));
-            assert!((ns - want_ns).abs() < 1e-9 * want_ns, "{ns} vs {want_ns}");
+        let expected = [
+            (&kll, OperatorKind::SummaryAgg, 85.0),
+            (&kll, OperatorKind::SummaryTumblingWindowChain, 85.0),
+            (&kll, OperatorKind::SummaryMerge, 1200.0),
+            (&kll, OperatorKind::SummaryEstimate, 400.0),
+            (&cms, OperatorKind::SummaryAgg, 60.0),
+            (&cms, OperatorKind::SummaryTumblingWindowChain, 60.0),
+            (&cms, OperatorKind::SummaryMerge, 5000.0),
+            (&cms, OperatorKind::SummaryEstimate, 350.0),
+        ];
+        let table = &converted.measured_operation_costs;
+        assert_eq!(table.operators.len(), expected.len());
+        for (entry, (sketch, operator, ns)) in table.operators.iter().zip(expected) {
+            let OperatorCost {
+                operator: got_operator,
+                phase,
+                sketch: got_sketch,
+                exact,
+                measure,
+                ns_per_unit,
+                ns_per_invocation,
+                memory_bytes_per_state,
+            } = entry;
+            assert_eq!(
+                (got_operator, got_sketch.as_ref(), *phase),
+                (&operator, Some(sketch), None)
+            );
+            assert_eq!(
+                (exact, measure, memory_bytes_per_state),
+                (&None, &None, &None)
+            );
+            assert_eq!(*ns_per_invocation, 0.0);
+            assert!(
+                (ns_per_unit - ns).abs() < 1e-9 * ns,
+                "{ns_per_unit} vs {ns}"
+            );
         }
+        assert_eq!(table.ns_per_evaluation, 0.0);
         let skipped: Vec<_> = converted
             .skipped_rows
             .iter()
@@ -238,9 +275,9 @@ mod tests {
             .collect();
         assert_eq!(skipped, ["exact-sum", "hydra-hll"]);
 
-        let written = serde_json::to_string(&converted.measured_operation_costs).unwrap();
-        let read: Vec<MeasuredOperationCost> = serde_json::from_str(&written).unwrap();
-        assert_eq!(read, converted.measured_operation_costs);
+        let written = serde_json::to_string(table).unwrap();
+        let read: MeasuredOperationCosts = serde_json::from_str(&written).unwrap();
+        assert_eq!(&read, table);
     }
 
     /// Bad input is an error, not a skipped row: a missing time, a negative
