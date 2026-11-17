@@ -551,12 +551,6 @@ fn compile_internal(
                 ..
             }) = &node.payload
             {
-                if node.output_state.timing
-                    == planner_types::ir::properties::ExecutionTiming::IngestionTime
-                {
-                    crate::capability::validate_ingestion_time_summary(filter.as_ref())
-                        .map_err(Error::Invalid)?;
-                }
                 let [input] = schemas.as_slice() else {
                     return Err(invalid("a tumbling-window chain reads one input"));
                 };
@@ -1323,12 +1317,6 @@ fn bind_operation(
             filter,
             ..
         }) => {
-            if node.output_state.timing
-                == planner_types::ir::properties::ExecutionTiming::IngestionTime
-            {
-                crate::capability::validate_ingestion_time_summary(filter.as_ref())
-                    .map_err(Error::Invalid)?;
-            }
             let build = summary_agg_build(
                 input,
                 family,
