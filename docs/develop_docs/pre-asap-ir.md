@@ -348,9 +348,9 @@ Example for `filters`:
   The SQL front end fills `filters` from an explicit `FILTER (WHERE p)`, from
   `count(CASE WHEN p THEN x END)` (`p`, plus `x IS NOT NULL` when `x` is nullable), and from
   `count(expr)` over any other nullable `expr` (`expr IS NOT NULL`), because canonical `Count`
-  counts rows and never consults its argument. A filtered measure has no summary binding yet:
-  `asap-aware-mapping` retains such an `Aggregate` as an ordinary exact sub-DAG, and canonicalization does
-  not promote a filtered count ranking to a heavy-hitter `TopK`.
+  counts rows and never consults its argument. A filtered measure binds to a
+  `SummaryAgg` whose `filter` gates the rows that update its state, at query or ingestion time;
+  canonicalization does not promote a filtered count ranking to a heavy-hitter `TopK`.
 
 Example for `having`:
 

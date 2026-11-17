@@ -166,14 +166,9 @@ node reached from two consumers that need different timings;
 assignment is applied. How much a materialized output retains (retention) is decided
 later and is not in the assignment.
 
-A node the assignment does not set is not materialized. The test helper
-`PhysicalPropertiesAssignment::materialized_at_ingestion_where_allowed(roots)`
-(feature `test-support`) sets every `SummaryAgg`, `SummaryTumblingWindowChain`
-and `MaintainPopulation` materialized at ingestion time where the DAG allows it (not
-filtered, nothing below it that can only run at query time). The test
-helpers `validate_at_ingestion` and `planned_data_state` use it to check, at
-planning time and without materializing anything, that a candidate stays valid
-when every sub-DAG is materialized at ingestion time.
+A node the assignment does not set is not materialized. A filtered `SummaryAgg`
+(its `filter` gates which rows update the state) may be materialized at ingestion time
+like an unfiltered one.
 
 ## Exported DAG
 

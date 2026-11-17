@@ -7,6 +7,7 @@
 //! runtime runs it: each tumbling window built in an ingestion run over its window from
 //! the table bound at the plan's `Scan`, the queries answered from the tumbling windows.
 
+use asap_types::ir::properties::ExecutionTiming;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -470,9 +471,7 @@ async fn filtered_aggregates_are_built_at_ingestion_time_from_table_rows() {
                     }
                 )
             );
-            filtered
-                && node.output_state.timing
-                    == asap_types::ir::properties::ExecutionTiming::IngestionTime
+            filtered && node.output_state.timing == ExecutionTiming::IngestionTime
         }),
         "a filtered build runs at ingestion time"
     );

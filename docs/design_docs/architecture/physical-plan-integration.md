@@ -443,9 +443,9 @@ Post-ASAP DAG wire version 7 adds a per-measure row predicate to the aggregate
 operators (#466): `filters` on the exact aggregate value operation, parallel to
 its measures, and `filter` on `SummaryAgg`, gating which rows update the
 summary state. The version bump makes an older reader fail loudly instead of
-taking a filtered aggregate as unfiltered. No planner rule sets `SummaryAgg.filter`
-yet; a filtered pre-ASAP measure is retained as an exact fallback.
-The native physical planner rejects either field when set.
+taking a filtered aggregate as unfiltered. Pass 1 sets `SummaryAgg.filter` for a filtered
+measure, and the native physical planner binds both fields at query time and at
+ingestion time.
 
 The candidate row producer derives its key columns from the summary update's
 item identity and subpopulation keys. Its last column, `__asap_estimate`, is the
