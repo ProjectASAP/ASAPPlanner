@@ -86,11 +86,11 @@ impl RunContext {
     /// data store returns them, at most `max_out_of_order_ms` behind a
     /// later row of their series: the data workload's
     /// `max_out_of_order_ms`. A counter build (rate, increase) then holds
-    /// each row until the newest row is more than the bound past it and
-    /// folds the rows in time order, so rows of `{t=10 s, 12 s, 11 s}`
-    /// with a 5 s bound build the state `{10 s, 11 s, 12 s}` builds.
-    /// Without it, a counter row not after its series' previous row is an
-    /// operator error.
+    /// each row until the newest row of its series is more than the bound
+    /// past it and folds the rows in time order: one series' rows at
+    /// 10 s, 12 s, 11 s with a 5 s bound build the same state as rows at
+    /// 10 s, 11 s, 12 s. Without it, a counter row not after its series'
+    /// previous row is an operator error.
     pub fn with_max_out_of_order_ms(mut self, max_out_of_order_ms: u64) -> Self {
         self.max_out_of_order_ms = Some(max_out_of_order_ms);
         self
