@@ -6,12 +6,16 @@ use asap_frontend_common::{
     resolve_root, UnresolvedOp as U, UnresolvedPredicate, UnresolvedScalar,
 };
 use asap_types::ir::operator::{
-    AggIntent, BinaryOpKind, GroupKeys, PromQLVectorSetOpKind, Reduction, Source,
+    AggIntent, BinaryOpKind, GroupKeys, GroupSide, PromQLVectorSetOpKind, Reduction, Source,
+    VectorGrouping, VectorMatch, VectorMatchKind,
 };
 use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
-use asap_types::ir::{BinaryOperator, ExprSemantics, TimeRangeKind};
+use asap_types::ir::{ExprSemantics, TimeRangeKind};
 use asap_types::workload::{DurationMs, PlanningWorkload, QueryLanguage, WorkloadError};
-use metricsql_parser::ast::{AggregateModifier, DurationExpr, Expr, MetricExpr, RollupExpr};
+use metricsql_parser::ast::{
+    AggregateModifier, BinModifier, DurationExpr, Expr, MetricExpr, RollupExpr,
+    VectorMatchCardinality, VectorMatchModifier,
+};
 use metricsql_parser::functions::{AggregateFunction, BuiltinFunction, RollupFunction};
 use metricsql_parser::label::{LabelFilter, LabelFilterOp, NAME_LABEL};
 use thiserror::Error;
@@ -308,9 +312,13 @@ impl Lowerer<'_> {
     }
 
     fn binary(&self, expr: &metricsql_parser::ast::BinaryExpr) -> Result<U, MetricsqlError> {
-        if expr.modifier.is_some() {
-            return Err(unsupported("binary vector matching modifiers"));
+        let modifier = expr.modifier.as_ref();
+        if modifier.is_some_and(|m| m.keep_metric_names) {
+            return Err(unsupported(
+                "keep_metric_names on a binary operator requires metric-name lineage",
+            ));
         }
+        let return_bool = modifier.is_some_and(|m| m.return_bool);
         use metricsql_parser::ast::Operator as O;
         let op = match expr.op {
             O::Add => BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
@@ -343,31 +351,47 @@ impl Lowerer<'_> {
                     scalar: UnresolvedScalar::Literal(ScalarValue::Float64(n.value)),
                     op,
                     scalar_left,
-                    return_bool: false,
+                    return_bool,
                 });
             }
         }
-        Ok(binary_op(
+        Ok(U::vector_binary(
             op,
+            modifier.map(vector_match),
+            return_bool,
             self.lower(&expr.left)?,
             self.lower(&expr.right)?,
         ))
     }
 }
 
-/// A `BinaryOp` with default matching; MetricsQL modifiers (including `bool`)
-/// are rejected before reaching here.
-fn binary_op(kind: BinaryOpKind, lhs: U, rhs: U) -> U {
-    U::BinaryOp {
-        operator: BinaryOperator {
-            kind,
-            vector_match: None,
-            checked_relative_division: false,
-            checked_finite_division: false,
-        },
-        return_bool: false,
-        lhs: Rc::new(lhs),
-        rhs: Rc::new(rhs),
+/// The vector matching a written modifier asks for, as the PromQL frontend
+/// lowers it: `on(job)` / `ignoring(instance)` name the matched labels, and
+/// `group_left(team)` / `group_right` the many side and the labels it copies
+/// from the one side. A modifier without `on`/`ignoring` (the one the
+/// parser gives every set operator, as in `a and b`, or `a > bool b`)
+/// matches on every label but the metric name, which is `ignoring()`.
+fn vector_match(modifier: &BinModifier) -> VectorMatch {
+    let (kind, labels) = match &modifier.matching {
+        Some(VectorMatchModifier::On(labels)) => (VectorMatchKind::On, labels.as_ref()),
+        Some(VectorMatchModifier::Ignoring(labels)) => (VectorMatchKind::Ignoring, labels.as_ref()),
+        None => (VectorMatchKind::Ignoring, &[][..]),
+    };
+    let grouping = match &modifier.card {
+        VectorMatchCardinality::ManyToOne(labels) => Some(VectorGrouping {
+            side: GroupSide::Left,
+            labels: labels.as_ref().to_vec(),
+        }),
+        VectorMatchCardinality::OneToMany(labels) => Some(VectorGrouping {
+            side: GroupSide::Right,
+            labels: labels.as_ref().to_vec(),
+        }),
+        VectorMatchCardinality::OneToOne | VectorMatchCardinality::ManyToMany => None,
+    };
+    VectorMatch {
+        kind,
+        labels: labels.to_vec(),
+        grouping,
     }
 }
 

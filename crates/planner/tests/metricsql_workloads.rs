@@ -225,3 +225,146 @@ async fn metricsql_grouped_average_averages_every_series_of_each_group() {
         query_answers(&plan_promql(query, AT_REST).await, &samples)
     );
 }
+
+/// `query` in MetricsQL at T over [`samples`]: its answers, after checking
+/// that they equal the PromQL form's answers and that both languages select
+/// the same plan with data arriving.
+async fn metricsql_answers_checked_against_promql(query: &str) -> Vec<Answer> {
+    let metricsql = plan_metricsql(query, INGESTING)
+        .await
+        .unwrap_or_else(|e| panic!("{query} as MetricsQL: {e}"));
+    assert_eq!(
+        metricsql.dag,
+        plan_promql(query, INGESTING).await.dag,
+        "{query}"
+    );
+    let samples = samples();
+    let metricsql = plan_metricsql(query, AT_REST)
+        .await
+        .unwrap_or_else(|e| panic!("{query} as MetricsQL: {e}"));
+    let answers = query_answers(&metricsql, &samples);
+    assert_eq!(
+        answers,
+        query_answers(&plan_promql(query, AT_REST).await, &samples),
+        "{query}"
+    );
+    answers
+}
+
+/// A series' labels from `(name, value)` pairs.
+fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
+/// Binary operators with `on`/`ignoring`, `group_left`, the set operators
+/// and `bool` answer what PromQL answers, and the values worked out by hand
+/// from [`samples`] at T, where `latency` is 4, 14, 24 and 34 for series
+/// `a`..`d` (jobs `j1`, `j1`, `j2`, `j2`): the per-job sums are 18 and 58,
+/// the averages 9 and 29, and each counter's 5 m rate is `(index + 1) / 15`.
+#[tokio::test]
+async fn metricsql_vector_matching_answers_as_promql_does() {
+    let a = labels(&[("instance", "a"), ("job", "j1")]);
+    let b = labels(&[("instance", "b"), ("job", "j1")]);
+    let c = labels(&[("instance", "c"), ("job", "j2")]);
+    let d = labels(&[("instance", "d"), ("job", "j2")]);
+    let j1 = labels(&[("job", "j1")]);
+    let j2 = labels(&[("job", "j2")]);
+    let named = |series: &BTreeMap<String, String>| {
+        let mut series = series.clone();
+        series.insert("__name__".to_string(), "latency".to_string());
+        series
+    };
+    let cases: Vec<(&str, Vec<Answer>)> = vec![
+        // Each series' share of its job's total.
+        (
+            "latency / on(job) group_left sum by (job)(latency)",
+            vec![
+                (a.clone(), 4.0 / 18.0),
+                (b.clone(), 14.0 / 18.0),
+                (c.clone(), 24.0 / 58.0),
+                (d.clone(), 34.0 / 58.0),
+            ],
+        ),
+        // Each series' distance from its job's average.
+        (
+            "latency - ignoring(instance) group_left avg by (job)(latency)",
+            vec![
+                (a.clone(), -5.0),
+                (b.clone(), 5.0),
+                (c.clone(), -5.0),
+                (d.clone(), 5.0),
+            ],
+        ),
+        // Per job, the total rate over the rate of instances a and c:
+        // j1 (1 + 2) / 1, j2 (3 + 4) / 3.
+        (
+            r#"sum by (job)(rate(requests_total[5m])) / on(job) group_left sum by (job)(rate(requests_total{instance=~"a|c"}[5m]))"#,
+            vec![(j1.clone(), 3.0), (j2.clone(), 7.0 / 3.0)],
+        ),
+        (
+            r#"latency and on(job) latency{instance="a"}"#,
+            vec![(named(&a), 4.0), (named(&b), 14.0)],
+        ),
+        (
+            r#"latency unless on(job) latency{instance="a"}"#,
+            vec![(named(&c), 24.0), (named(&d), 34.0)],
+        ),
+        // Plans before this change too (no written modifier): checks parity.
+        (
+            r#"latency{job="j1"} or latency{job="j2"}"#,
+            vec![
+                (named(&a), 4.0),
+                (named(&b), 14.0),
+                (named(&c), 24.0),
+                (named(&d), 34.0),
+            ],
+        ),
+        (
+            "latency > bool 10",
+            vec![
+                (a.clone(), 0.0),
+                (b.clone(), 1.0),
+                (c.clone(), 1.0),
+                (d.clone(), 1.0),
+            ],
+        ),
+        // j1: 14 > 4 * 3; j2: 34 > 24 * 3 is false.
+        (
+            "max by (job)(latency) > bool on(job) min by (job)(latency) * 3",
+            vec![(j1.clone(), 1.0), (j2.clone(), 0.0)],
+        ),
+        // `bool` alone between two vectors matches on every label.
+        (
+            "max by (job)(latency) > bool min by (job)(latency) * 3",
+            vec![(j1.clone(), 1.0), (j2.clone(), 0.0)],
+        ),
+        // The right side is the many side and keeps its labels: each series
+        // times its job's largest latency (14 for j1, 34 for j2).
+        (
+            "max by (job)(latency) * on(job) group_right latency",
+            vec![
+                (a.clone(), 56.0),
+                (b.clone(), 196.0),
+                (c.clone(), 816.0),
+                (d.clone(), 1156.0),
+            ],
+        ),
+        // `on()` matches on no label: every series against the one total, 76.
+        (
+            "latency / on() group_left sum(latency)",
+            vec![
+                (a.clone(), 4.0 / 76.0),
+                (b.clone(), 14.0 / 76.0),
+                (c.clone(), 24.0 / 76.0),
+                (d.clone(), 34.0 / 76.0),
+            ],
+        ),
+    ];
+    for (query, expected) in cases {
+        let answers = metricsql_answers_checked_against_promql(query).await;
+        assert_answers_near_relative(&answers, &expected, 1e-9);
+    }
+}
