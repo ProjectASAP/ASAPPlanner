@@ -1,13 +1,14 @@
 //! A column bound from another operator's whole output, as a scalar
-//! expression reads one (PromQL `scalar(v)`, SQL subqueries): the reading
-//! expression then reads that column.
+//! expression reads one (the IR's `ScalarRef` edge: PromQL `scalar(v)`,
+//! SQL subqueries): the reading expression then reads that column.
 use super::*;
 
 /// How a scalar expression reads another operator's output.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum SubqueryRead {
-    /// PromQL `scalar(v)`: the `value` column of `v`'s one sample; NaN
-    /// unless `v` has exactly one.
+pub enum ScalarRefRead {
+    /// PromQL `scalar(v)`: the `value` column (Float64, or Int64 for
+    /// `count`) of `v`'s one sample, as a Float64; NaN unless `v` has
+    /// exactly one.
     VectorScalar { value: usize },
     /// An SQL scalar subquery: its one row's one column; NULL without a
     /// row; more than one row is an error.
@@ -22,29 +23,35 @@ pub enum SubqueryRead {
 
 impl Operator {
     /// The rows of `input`, each with one more column, `name`, holding what
-    /// `read` reads of `subquery`'s output.
-    pub fn bind_subquery(
+    /// `read` reads of `referenced`'s output.
+    pub fn bind_scalar_ref(
         input: SchemaRef,
-        subquery: SchemaRef,
-        read: SubqueryRead,
+        referenced: SchemaRef,
+        read: ScalarRefRead,
         name: &str,
     ) -> Result<Self, Error> {
         let one_column = || -> Result<&DataType, Error> {
-            match subquery.fields.as_slice() {
-                [_] => Ok(plain(&subquery, 0)?.0),
-                _ => Err(invalid("a subquery read needs a subquery of one column")),
+            match referenced.fields.as_slice() {
+                [_] => Ok(plain(&referenced, 0)?.0),
+                _ => Err(invalid(
+                    "an SQL subquery read needs a subquery of one column",
+                )),
             }
         };
+        let mut in_compares_floats = false;
         let (dtype, nullable) = match &read {
-            SubqueryRead::VectorScalar { value } => {
-                if plain(&subquery, *value)? != (&DataType::Float64, false) {
-                    return Err(invalid("scalar() reads a non-null Float64 sample value"));
+            ScalarRefRead::VectorScalar { value } => {
+                if !matches!(
+                    plain(&referenced, *value)?.0,
+                    DataType::Float64 | DataType::Int64
+                ) {
+                    return Err(invalid("scalar() reads a Float64 or Int64 sample value"));
                 }
                 (DataType::Float64, false)
             }
-            SubqueryRead::Scalar => (one_column()?.clone(), true),
-            SubqueryRead::Exists => (DataType::Bool, false),
-            SubqueryRead::In { probe } => {
+            ScalarRefRead::Scalar => (one_column()?.clone(), true),
+            ScalarRefRead::Exists => (DataType::Bool, false),
+            ScalarRefRead::In { probe } => {
                 let (probe, _) = probe.dtype(&input)?;
                 let value = one_column()?;
                 let numeric =
@@ -52,20 +59,18 @@ impl Operator {
                 if probe != *value && !(numeric(&probe) && numeric(value)) {
                     return Err(invalid("IN compares values of different types"));
                 }
+                // An Int64 against Float64 compares as a float.
+                in_compares_floats = probe != *value;
                 (DataType::Bool, true)
             }
         };
-        let mut fields = input.fields.clone();
-        fields.push(result_field(name, dtype, nullable));
-        let output = Arc::new(Schema {
-            fields,
-            unique_keys: vec![],
-            closed: false,
-            time_index: input.time_index,
-        });
+        let output = appended_schema(&input, name, dtype, nullable);
         Ok(Self {
-            kind: Kind::BindSubquery(read),
-            inputs: vec![input, subquery],
+            kind: Kind::BindScalarRef {
+                read,
+                in_compares_floats,
+            },
+            inputs: vec![input, referenced],
             output,
         })
     }
@@ -84,9 +89,14 @@ pub(super) fn execute<'a>(
     mut inputs: Vec<Input<'a, Batch>>,
     context: RunContext,
 ) -> Result<OutputStream<'a, Batch>, Error> {
-    let Kind::BindSubquery(read) = &operator.kind else {
+    let Kind::BindScalarRef {
+        read,
+        in_compares_floats: as_float,
+    } = &operator.kind
+    else {
         unreachable!()
     };
+    let as_float = *as_float;
     let mut subquery = inputs
         .pop()
         .ok_or_else(|| invalid("subquery input missing"))?;
@@ -96,15 +106,8 @@ pub(super) fn execute<'a>(
     let SummaryFamilyType::Plain(dtype) = operator.output.fields[bound].dtype.clone() else {
         unreachable!("a bound column is plain")
     };
-    // `IN` compares an integer against floats as a float.
-    let as_float = match read {
-        SubqueryRead::In { probe } => {
-            probe.dtype(&operator.inputs[0])?.0 != *plain(&operator.inputs[1], 0)?.0
-        }
-        _ => false,
-    };
     let probe = match read {
-        SubqueryRead::In { probe } => Some(probe.at_evaluation_time(&context).into_owned()),
+        ScalarRefRead::In { probe } => Some(probe.at_evaluation_time(&context).into_owned()),
         _ => None,
     };
     let rows_context = context.clone();
@@ -121,12 +124,12 @@ pub(super) fn execute<'a>(
             work.checkpoint_rows(batch.num_rows()).await?;
             rows = rows.saturating_add(batch.num_rows());
             let column = match read {
-                SubqueryRead::VectorScalar { value } => *value,
-                SubqueryRead::Exists => continue,
-                SubqueryRead::Scalar | SubqueryRead::In { .. } => 0,
+                ScalarRefRead::VectorScalar { value } => *value,
+                ScalarRefRead::Exists => continue,
+                ScalarRefRead::Scalar | ScalarRefRead::In { .. } => 0,
             };
             let values = decoded(&batch, column)?;
-            if let SubqueryRead::In { .. } = read {
+            if let ScalarRefRead::In { .. } = read {
                 for value in &values {
                     match value {
                         Value::Null => has_null = true,
@@ -145,16 +148,21 @@ pub(super) fn execute<'a>(
             }
         }
         let constant = match read {
-            SubqueryRead::VectorScalar { .. } if rows == 1 => last,
-            SubqueryRead::VectorScalar { .. } => Value::Float64(f64::NAN),
-            SubqueryRead::Scalar if rows > 1 => {
+            // `count`'s Int64 sample is its float.
+            ScalarRefRead::VectorScalar { .. } if rows == 1 => match last {
+                Value::Int64(v) => Value::Float64(v as f64),
+                Value::Float64(v) => Value::Float64(v),
+                _ => Value::Float64(f64::NAN),
+            },
+            ScalarRefRead::VectorScalar { .. } => Value::Float64(f64::NAN),
+            ScalarRefRead::Scalar if rows > 1 => {
                 return Err(Error::Operator(
                     "a scalar subquery returned more than one row".into(),
                 ))
             }
-            SubqueryRead::Scalar => last,
-            SubqueryRead::Exists => Value::Bool(rows > 0),
-            SubqueryRead::In { .. } => Value::Null,
+            ScalarRefRead::Scalar => last,
+            ScalarRefRead::Exists => Value::Bool(rows > 0),
+            ScalarRefRead::In { .. } => Value::Null,
         };
         Ok(Bound {
             constant,
@@ -193,20 +201,14 @@ pub(super) fn execute<'a>(
                         )?,
                         Some(probe) => bound.marks(probe, &batch, as_float)?,
                     };
-                    let mut arrays = batch.record_batch().columns().to_vec();
-                    let mut states: Vec<_> = (0..arrays.len())
-                        .map(|column| batch.state_column(column).cloned())
-                        .collect();
-                    arrays.push(column);
-                    states.push(None);
-                    Batch::from_parts(output.clone(), arrays, states, batch.num_rows())
+                    batch.with_appended_column(output.clone(), column)
                 })
                 .boxed_local()
         })
         .boxed_local())
 }
 
-/// What a [`SubqueryRead`] read of the subquery's whole output.
+/// What a [`ScalarRefRead`] read of the subquery's whole output.
 struct Bound {
     /// The bound value of every row, but for `IN`.
     constant: Value,

@@ -1,19 +1,26 @@
 //! SQL `INTERSECT` and `EXCEPT`, with or without `ALL`: rows compare as a
-//! whole, NULL equal to NULL, as SQL set operations compare them.
+//! whole, NULL equal to NULL, as SQL set operations compare them. The SQL
+//! frontend lowers them to semi and anti joins today, so only an IR built
+//! directly reaches this operator.
 use super::*;
+use planner_types::ir::operator::RelationalSetOpKind;
 
 impl Operator {
-    /// The rows of `left` that `right` also has (`except` false) or lacks
-    /// (`except` true). Without `all`, each such distinct row once; with
+    /// The rows of `left` that `right` also has (`kind` `Intersect`) or
+    /// lacks (`Except`). Without `all`, each such distinct row once; with
     /// `all`, a row `l` times in `left` and `r` times in `right` appears
     /// `min(l, r)` times in an intersection and `max(l - r, 0)` times in a
-    /// difference. Both inputs have the plain columns of `left`'s types.
+    /// difference. Both inputs have the plain columns of `left`'s types. A
+    /// `Union` is bad input: it lowers to a union operator.
     pub fn set_operation(
         left: SchemaRef,
         right: SchemaRef,
-        except: bool,
+        kind: RelationalSetOpKind,
         all: bool,
     ) -> Result<Self, Error> {
+        if kind == RelationalSetOpKind::Union {
+            return Err(invalid("a UNION lowers to a union, not a set operation"));
+        }
         if left.fields.len() != right.fields.len()
             || (0..left.fields.len()).any(|i| match (plain(&left, i), plain(&right, i)) {
                 (Ok((a, _)), Ok((b, _))) => a != b,
@@ -23,7 +30,7 @@ impl Operator {
             return Err(invalid("set operation inputs differ in their column types"));
         }
         Ok(Self {
-            kind: Kind::SetOperation { except, all },
+            kind: Kind::SetOperation { kind, all },
             inputs: vec![left.clone(), right],
             output: left,
         })
@@ -35,9 +42,10 @@ pub(super) fn execute<'a>(
     mut inputs: Vec<Input<'a, Batch>>,
     context: RunContext,
 ) -> Result<OutputStream<'a, Batch>, Error> {
-    let Kind::SetOperation { except, all } = operator.kind else {
+    let Kind::SetOperation { kind, all } = &operator.kind else {
         unreachable!()
     };
+    let (except, all) = (*kind == RelationalSetOpKind::Except, *all);
     let mut right = inputs.pop().ok_or_else(|| invalid("right input missing"))?;
     let mut left = inputs.pop().ok_or_else(|| invalid("left input missing"))?;
     Ok(futures::stream::once(async move {

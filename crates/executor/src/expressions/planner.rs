@@ -40,13 +40,14 @@ use std::{cmp::Ordering, sync::Arc};
 
 /// `expr`'s value over `row`. `evaluation_time_ms` is SQL `now()`: the
 /// query's evaluation time, `None` outside a query run. `regexes` holds the
-/// compiled pattern of each `=~` / `!~` in `expr` ([`label_regexes_of`]).
+/// compiled pattern of each `=~` / `!~` and literal `LIKE` pattern in
+/// `expr` ([`pattern_regexes_of`]).
 pub(super) fn evaluate(
     expr: &ScalarExpr,
     row: &[Value],
     schema: &planner_types::ir::schema::Schema,
     evaluation_time_ms: Option<i64>,
-    regexes: &LabelRegexes,
+    regexes: &PatternRegexes,
 ) -> Result<Value, Error> {
     match expr {
         ScalarExpr::CurrentTimestamp => evaluation_time_ms.map(Value::Timestamp).ok_or_else(|| {
@@ -110,6 +111,7 @@ pub(super) fn evaluate(
                 return Err(Error::Invalid(format!("{op:?} needs a literal pattern")));
             };
             let regex = regexes
+                .labels
                 .get(pattern.as_str())
                 .ok_or_else(|| Error::Invalid(format!("label regex {pattern:?} not compiled")))?;
             match evaluate(left, row, schema, evaluation_time_ms, regexes)? {
@@ -139,7 +141,14 @@ pub(super) fn evaluate(
             };
             let case_insensitive = matches!(op, CompareOpKind::ILike | CompareOpKind::NotILike);
             let negated = matches!(op, CompareOpKind::NotLike | CompareOpKind::NotILike);
-            let matched = match regexes.get(&like_key(&pattern, case_insensitive)) {
+            // A literal pattern is compiled once; any other, per row.
+            let compiled = match &**right {
+                ScalarExpr::Literal(ScalarValue::Utf8(literal)) => {
+                    regexes.likes[usize::from(case_insensitive)].get(literal.as_str())
+                }
+                _ => None,
+            };
+            let matched = match compiled {
                 Some(regex) => regex.is_match(&text),
                 None => like_regex(&pattern, case_insensitive)?.is_match(&text),
             };
@@ -419,29 +428,38 @@ pub(super) fn evaluate(
     }
 }
 
-/// Whether `CAST(value AS to)` from `from` has a native evaluation:
-/// numbers to each other, an integer or a boolean to text, text to a
-/// number, and integers to booleans and back.
+/// Whether `CAST(value AS to)` from `from` has a native evaluation: the
+/// identity, a NULL, or a pair [`cast`] converts, probed with a value of
+/// `from` every such pair converts (0, 0.0, false, "0"). Int64 to Bool is
+/// castable; Float64 to Utf8 is not.
 fn castable(from: &DataType, to: &DataType) -> bool {
-    use DataType::*;
-    from == to
-        || *from == Null
-        || matches!(
-            (from, to),
-            (Int64, Float64 | Utf8 | Bool)
-                | (Float64, Int64)
-                | (Bool, Utf8 | Int64)
-                | (Utf8, Int64 | Float64)
-        )
+    let probe = match from {
+        DataType::Null => return true,
+        DataType::Int64 => Value::Int64(0),
+        DataType::Float64 => Value::Float64(0.),
+        DataType::Bool => Value::Bool(false),
+        DataType::Utf8 => Value::Utf8("0".into()),
+        _ => return from == to,
+    };
+    cast(probe, to).is_ok()
 }
 
-/// `value` cast to `to` as DataFusion's `CAST` does, for the pairs
-/// [`castable`] accepts: a float truncates toward zero to an integer, an
+/// `value` cast to `to` as DataFusion's `CAST` does, the one table of the
+/// pairs with a native evaluation ([`castable`] reads it): a float truncates toward zero to an integer, an
 /// integer is true unless zero, text parses as a decimal number. Bad input
 /// when a value has no image (NaN or out of range to an integer, text that
 /// is no number); `TRY_CAST` gives NULL instead.
 fn cast(value: Value, to: &DataType) -> Result<Value, Error> {
-    let fail = |value: &Value| Error::Invalid(format!("cannot cast {value:?} to {to:?}"));
+    let fail = |value: &Value| {
+        let shown = match value {
+            Value::Utf8(text) => format!("{text:?}"),
+            Value::Int64(v) => v.to_string(),
+            Value::Float64(v) => v.to_string(),
+            Value::Bool(v) => v.to_string(),
+            other => format!("{other:?}"),
+        };
+        Error::Invalid(format!("cannot cast {shown} to {to:?}"))
+    };
     Ok(match (value, to) {
         (value, _) if value.matches(to, true) => value,
         (Value::Int64(v), DataType::Float64) => Value::Float64(v as f64),
@@ -468,18 +486,11 @@ fn cast(value: Value, to: &DataType) -> Result<Value, Error> {
     })
 }
 
-/// The key of SQL `LIKE` pattern `pattern` among an expression's compiled
-/// patterns, apart from the PromQL label patterns.
-fn like_key(pattern: &str, case_insensitive: bool) -> String {
-    format!(
-        "\0{}like\0{pattern}",
-        if case_insensitive { "i" } else { "" }
-    )
-}
-
 /// SQL `LIKE` pattern `pattern` as an anchored regex, as Arrow's `like`
-/// kernel reads it: `%` is any text, `_` any one character, `\` makes the
-/// next character literal (a trailing `\` is itself); `ILIKE` ignores case.
+/// kernel (DataFusion's, and the vectorized path's) reads it: `%` is any
+/// text, `_` any one character, `\` makes the next character literal (a
+/// trailing `\` is itself); `ILIKE` ignores case: `a\_%` matches `a_b`, not
+/// `ab`.
 fn like_regex(pattern: &str, case_insensitive: bool) -> Result<regex::Regex, Error> {
     let mut regex = String::from(if case_insensitive { "(?is)^" } else { "(?s)^" });
     let mut chars = pattern.chars();
@@ -557,13 +568,20 @@ fn compare(op: &CompareOpKind, left: Value, right: Value) -> Result<Value, Error
     Ok(Value::Bool(value))
 }
 
-/// The compiled pattern of each PromQL `=~` / `!~` in an expression, by
-/// pattern text, and of each literal SQL `LIKE` pattern, by [`like_key`].
-pub(super) type LabelRegexes = std::collections::HashMap<String, regex::Regex>;
+/// The compiled patterns of an expression, each by its text: each PromQL
+/// `=~` / `!~` pattern, and each literal SQL `LIKE` pattern (`likes[0]`)
+/// and `ILIKE` pattern (`likes[1]`). A row looks its pattern up by text,
+/// building no key.
+#[derive(Debug, Default)]
+pub(super) struct PatternRegexes {
+    labels: std::collections::HashMap<String, regex::Regex>,
+    likes: [std::collections::HashMap<String, regex::Regex>; 2],
+}
 
-/// Compiles every `=~` / `!~` pattern in `expr` ([`super::promql_anchored_regex`]).
-fn label_regexes_of(expr: &ScalarExpr) -> Result<LabelRegexes, Error> {
-    let mut regexes = LabelRegexes::new();
+/// Compiles every `=~` / `!~` pattern ([`super::promql_anchored_regex`])
+/// and literal `LIKE` / `ILIKE` pattern ([`like_regex`]) in `expr`.
+fn pattern_regexes_of(expr: &ScalarExpr) -> Result<PatternRegexes, Error> {
+    let mut regexes = PatternRegexes::default();
     let mut pending = vec![expr];
     while let Some(expr) = pending.pop() {
         if let ScalarExpr::Compare {
@@ -578,10 +596,9 @@ fn label_regexes_of(expr: &ScalarExpr) -> Result<LabelRegexes, Error> {
         {
             if let ScalarExpr::Literal(ScalarValue::Utf8(pattern)) = &**right {
                 let case_insensitive = matches!(op, CompareOpKind::ILike | CompareOpKind::NotILike);
-                if let std::collections::hash_map::Entry::Vacant(entry) =
-                    regexes.entry(like_key(pattern, case_insensitive))
-                {
-                    entry.insert(like_regex(pattern, case_insensitive)?);
+                let likes = &mut regexes.likes[usize::from(case_insensitive)];
+                if !likes.contains_key(pattern.as_str()) {
+                    likes.insert(pattern.clone(), like_regex(pattern, case_insensitive)?);
                 }
             }
         }
@@ -592,11 +609,11 @@ fn label_regexes_of(expr: &ScalarExpr) -> Result<LabelRegexes, Error> {
         } = expr
         {
             if let ScalarExpr::Literal(ScalarValue::Utf8(pattern)) = &**right {
-                if !regexes.contains_key(pattern.as_str()) {
+                if !regexes.labels.contains_key(pattern.as_str()) {
                     let regex = super::promql_anchored_regex(pattern).map_err(|e| {
                         Error::Invalid(format!("invalid label regex {pattern:?}: {e}"))
                     })?;
-                    regexes.insert(pattern.to_string(), regex);
+                    regexes.labels.insert(pattern.to_string(), regex);
                 }
             }
         }
@@ -826,7 +843,7 @@ pub struct CompiledExpression {
     /// Its `=~` / `!~` patterns, compiled when the expression is, or on
     /// first use after deserialization; clones share them.
     #[serde(skip)]
-    label_regexes: Arc<std::sync::OnceLock<LabelRegexes>>,
+    pattern_regexes: Arc<std::sync::OnceLock<PatternRegexes>>,
 }
 impl CompiledExpression {
     pub(crate) fn expression(&self) -> &ScalarExpr {
@@ -912,7 +929,7 @@ impl CompiledExpression {
             .scalar_type(&schema)
             .map_err(|e| Error::Invalid(e.to_string()))?;
         Ok(Self {
-            label_regexes: Arc::new(label_regexes_of(expression)?.into()),
+            pattern_regexes: Arc::new(pattern_regexes_of(expression)?.into()),
             expression: expression.clone(),
             schema,
             output,
@@ -970,16 +987,16 @@ impl CompiledExpression {
             row,
             &self.schema,
             self.evaluation_time_ms,
-            self.label_regexes()?,
+            self.pattern_regexes()?,
         )
     }
 
-    fn label_regexes(&self) -> Result<&LabelRegexes, Error> {
-        if let Some(regexes) = self.label_regexes.get() {
+    fn pattern_regexes(&self) -> Result<&PatternRegexes, Error> {
+        if let Some(regexes) = self.pattern_regexes.get() {
             return Ok(regexes);
         }
-        let regexes = label_regexes_of(&self.expression)?;
-        Ok(self.label_regexes.get_or_init(|| regexes))
+        let regexes = pattern_regexes_of(&self.expression)?;
+        Ok(self.pattern_regexes.get_or_init(|| regexes))
     }
 }
 fn validate(expr: &ScalarExpr, schema: &planner_types::ir::schema::Schema) -> Result<(), Error> {
@@ -1488,6 +1505,8 @@ mod tests {
         assert_eq!(like(Some("abbc"), Like, "a_c"), Some(false));
         assert_eq!(like(Some("a_c"), Like, "a\\_c"), Some(true));
         assert_eq!(like(Some("abc"), Like, "a\\_c"), Some(false));
+        // `\` makes any next character literal, with or without wildcards.
+        assert_eq!(like(Some("ab"), Like, "a\\b"), Some(true));
         assert_eq!(like(Some("a.c"), Like, "a.c"), Some(true));
         assert_eq!(like(Some("abc"), Like, "a.c"), Some(false));
         assert_eq!(like(Some("a\nb"), Like, "a%b"), Some(true));
@@ -1566,7 +1585,11 @@ mod tests {
             shown(cast(Value::Utf8("2.5".into()), Utf8, Float64, false)),
             shown(Ok(Value::Float64(2.5)))
         );
-        assert!(cast(Value::Utf8("x".into()), Utf8, Int64, false).is_err());
+        let error = cast(Value::Utf8("x".into()), Utf8, Int64, false).unwrap_err();
+        assert!(
+            error.to_string().contains(r#"cannot cast "x" to Int64"#),
+            "{error}"
+        );
         assert_eq!(
             shown(cast(Value::Utf8("x".into()), Utf8, Int64, true)),
             shown(Ok(Value::Null))

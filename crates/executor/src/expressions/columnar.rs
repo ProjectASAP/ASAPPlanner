@@ -5,7 +5,8 @@
 //!
 //! - **Vectorized:** an expression built only from operations that cannot
 //!   fail on well-typed input (column reads, literals, comparisons of
-//!   scalar types and `IN` lists of them, Kleene logic, null tests, `Float64` arithmetic and
+//!   scalar types and `IN` lists of them, `LIKE` / `ILIKE` against a
+//!   literal pattern, Kleene logic, null tests, `Float64` arithmetic and
 //!   negation, `Int64`-to-`Float64` casts) runs as Arrow kernels or tight
 //!   loops over whole columns.
 //! - **Per distinct input:** any other expression runs through its row
@@ -260,6 +261,31 @@ fn lower_scalar(
             (
                 VectorExpr::FloatArithmetic(op.clone(), Box::new(left), Box::new(right)),
                 DataType::Float64,
+            )
+        }
+        // SQL `LIKE` / `ILIKE` against a literal pattern: Arrow's kernels,
+        // whose reading of the pattern the row path's follows.
+        ScalarExpr::Compare {
+            left,
+            op:
+                op @ (CompareOpKind::Like
+                | CompareOpKind::NotLike
+                | CompareOpKind::ILike
+                | CompareOpKind::NotILike),
+            right,
+            ..
+        } => {
+            let ScalarExpr::Literal(ScalarValue::Utf8(_)) = &**right else {
+                return None;
+            };
+            let (l, a) = lower_scalar(left, schema, evaluation_time_ms)?;
+            let (r, _) = lower_scalar(right, schema, evaluation_time_ms)?;
+            if a != DataType::Utf8 {
+                return None;
+            }
+            (
+                VectorExpr::Compare(op.clone(), Box::new(l), Box::new(r), a),
+                DataType::Bool,
             )
         }
         ScalarExpr::Compare {
@@ -541,7 +567,7 @@ fn compare_kernel(
     left: &Evaluated,
     right: &Evaluated,
 ) -> Result<Evaluated, Error> {
-    use arrow::compute::kernels::cmp;
+    use arrow::compute::kernels::{cmp, comparison};
     let (l, r) = (datum(left)?, datum(right)?);
     let (l, r) = (l.as_ref(), r.as_ref());
     let result = match op {
@@ -551,7 +577,11 @@ fn compare_kernel(
         CompareOpKind::Le => cmp::lt_eq(l, r),
         CompareOpKind::Gt => cmp::gt(l, r),
         CompareOpKind::Ge => cmp::gt_eq(l, r),
-        _ => unreachable!("lowered comparisons are ordering comparisons"),
+        CompareOpKind::Like => comparison::like(l, r),
+        CompareOpKind::NotLike => comparison::nlike(l, r),
+        CompareOpKind::ILike => comparison::ilike(l, r),
+        CompareOpKind::NotILike => comparison::nilike(l, r),
+        _ => unreachable!("lowered comparisons are ordering and LIKE comparisons"),
     }
     .map_err(arrow_error)?;
     Ok(Evaluated::Column(Arc::new(result)))
@@ -1032,6 +1062,35 @@ mod tests {
                     !null_item
                 );
                 check(&in_list, &batch);
+            }
+        }
+    }
+
+    // `s [NOT] [I]LIKE 'pattern'` runs Arrow's kernels with the row values:
+    // wildcards, case, and escapes with and without wildcards.
+    #[test]
+    fn a_like_is_vectorized_with_row_values() {
+        let batch = batch(300);
+        for pattern in ["a%", "%b", "_p_", "API", "%E%", "", "a\\pi", "a\\_i%"] {
+            for op in [
+                CompareOpKind::Like,
+                CompareOpKind::NotLike,
+                CompareOpKind::ILike,
+                CompareOpKind::NotILike,
+            ] {
+                for column in [4, 5] {
+                    let like = planner(
+                        ScalarExpr::Compare {
+                            left: Box::new(ScalarExpr::Column(column)),
+                            op: op.clone(),
+                            right: Box::new(ScalarExpr::Literal(ScalarValue::Utf8(pattern.into()))),
+                            semantics: ExprSemantics::Sql,
+                        },
+                        &batch,
+                    );
+                    assert!(lower_expression(&like, batch.schema()).is_some());
+                    check(&like, &batch);
+                }
             }
         }
     }

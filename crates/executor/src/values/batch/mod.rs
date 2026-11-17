@@ -279,6 +279,20 @@ impl Batch {
         })
     }
 
+    /// This batch with `column` (a plain column) after its own, as
+    /// `schema`, whose last field types it. Shares the existing columns.
+    pub(crate) fn with_appended_column(
+        &self,
+        schema: SchemaRef,
+        column: ArrayRef,
+    ) -> Result<Self, Error> {
+        let mut arrays = self.record_batch.columns().to_vec();
+        let mut state_columns = self.state_columns.to_vec();
+        arrays.push(column);
+        state_columns.push(None);
+        Self::from_parts(schema, arrays, state_columns, self.num_rows())
+    }
+
     /// Rows `offset..offset + length`, sharing the column buffers.
     pub(crate) fn slice(&self, offset: usize, length: usize) -> Self {
         if offset == 0 && length == self.num_rows() {
