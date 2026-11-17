@@ -48,6 +48,11 @@ asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
 name = "devtools"
 path = "tests/main.rs"
 
+# Its own process: the check compares thread and process CPU.
+[[test]]
+name = "asap_lane_conformance"
+path = "tests/asap_lane_conformance.rs"
+
 # The nightly corpus-snapshots workflow runs this binary by name.
 [[test]]
 name = "corpus_snapshots"

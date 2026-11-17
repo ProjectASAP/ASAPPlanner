@@ -8,11 +8,9 @@ use std::process::Command;
 
 use aqpbm_core::harness::arm_run::ArmSchedule;
 use aqpbm_core::harness::bench_external::{run_lane, CellOutcome, LaneSetup};
-use aqpbm_core::harness::conformance::{self, ConformanceCheck};
 use aqpbm_core::harness::data::{workload_chunks, DataRecord, SeriesLabels};
 use aqpbm_core::harness::engine::{
-    ArmSpec, CpuAccounting, EngineDescription, EngineError, EngineUnderTest, InstalledArm,
-    QueryLanguage, QueryText, WorkloadQuery, WorkloadSpec,
+    ArmSpec, EngineError, EngineUnderTest, QueryLanguage, QueryText, WorkloadQuery, WorkloadSpec,
 };
 use aqpbm_core::harness::protocol::{
     LoadProbe, MeasurementClocks, OsCpuClock, Protocol, ProtocolError,
@@ -21,26 +19,10 @@ use aqpbm_core::harness::records::ArmResult;
 use aqpbm_core::harness::rundir::RunDir;
 use aqpbm_datagen::{DataDistribution, SeriesLabelSpec, TimeSeriesDescription, UniformParameter};
 use asap_devtools::asap_lane::AsapEngine;
-use asap_planner::{plan_installable, FrontendInput, PlanningModels, PlanningWorkload, UserInput};
 
-/// A directory under the build's test temp directory, removed when dropped.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(test: &str) -> Self {
-        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("asap-lane-{}-{test}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        TempDir(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+#[path = "asap_lane_support.rs"]
+mod support;
+use support::{planning_workload, TempDir};
 
 /// Every core idle, so a test never waits on the machine's load.
 struct IdleProbe;
@@ -52,29 +34,6 @@ impl LoadProbe for IdleProbe {
     fn loadavg(&mut self) -> f64 {
         0.0
     }
-}
-
-/// The planning workload of one exact PromQL `query` evaluated every 10 s at
-/// phase 0 over gauge `metric` with `series_count` series sampled every
-/// `sample_interval_ms`, arriving as `arrival` (`{"ingesting": ...}` or
-/// `"at_rest"`).
-fn planning_workload(
-    query: &str,
-    metric: &str,
-    series_count: u64,
-    sample_interval_ms: u64,
-    arrival: &str,
-) -> String {
-    format!(
-        r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{{
-              "query": {query:?},
-              "demand": {{"fixed_interval_at": {{"interval": 10000, "evaluation_phase": 0}}}},
-              "requirements": {{"accuracy": {{"max_error": 0.0, "failure_probability": 0.0}}}},
-              "predictability": {{"predictable": {{"known_at": null}}}}}}]}},
-            "data_workload": {{"arrival": {arrival},
-              "sources": {{{metric:?}: {{"series_count": {series_count}, "metric_type": "gauge",
-                  "sample_interval": {sample_interval_ms}}}}}}}}}"#
-    )
 }
 
 /// Writes `plan_file` with `asap_planner --plan-file` for `planning`, which
@@ -236,79 +195,6 @@ fn arm_result(run: &RunDir, workload: &str, variant: &str) -> ArmResult {
         .join("results/asap")
         .join(format!("{workload}__{variant}.json"));
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-}
-
-/// The conformance kit's probe arm has no engine options, so this engine
-/// hands `AsapEngine` the plan file of each probe workload, by name.
-struct WithPlanFiles {
-    plan_files: BTreeMap<String, PathBuf>,
-}
-
-impl EngineUnderTest for WithPlanFiles {
-    fn description(&self) -> EngineDescription {
-        AsapEngine.description()
-    }
-    fn cpu_accounting(&self) -> CpuAccounting {
-        AsapEngine.cpu_accounting()
-    }
-    fn install(
-        &self,
-        workload: &WorkloadSpec,
-        arm: &ArmSpec,
-    ) -> Result<Box<dyn InstalledArm>, EngineError> {
-        let arm = ArmSpec {
-            engine_options: serde_json::json!({"plan_file": self.plan_files[&workload.name]}),
-            ..arm.clone()
-        };
-        AsapEngine.install(workload, &arm)
-    }
-}
-
-/// The harness's conformance kit passes on the ASAP lane: deterministic
-/// answers, left-open windows (`count_over_time(probe[10s])` at 20 s counts
-/// only the sample at 20 s), and the executor's work on the calling thread.
-#[test]
-fn conformance_kit_passes_on_the_asap_engine() {
-    let temp = TempDir::new("conformance");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-    let mut plan_files = BTreeMap::new();
-    for workload in conformance::probe_workloads() {
-        let query = &workload.queries[0].texts[0];
-        assert_eq!(query.language, QueryLanguage::PromQl);
-        let planning: PlanningWorkload = serde_json::from_str(&planning_workload(
-            &query.text,
-            "probe",
-            1,
-            10_000,
-            r#"{"ingesting": {"rows_per_second": 0.1}}"#,
-        ))
-        .unwrap();
-        let (plan, _) = runtime
-            .block_on(plan_installable(UserInput::new(
-                &planning,
-                FrontendInput::Promql,
-                PlanningModels::builtin(),
-            )))
-            .unwrap();
-        let path = temp.0.join(format!("{}.plan.json", workload.name));
-        std::fs::write(&path, serde_json::to_string(&plan).unwrap()).unwrap();
-        plan_files.insert(workload.name.clone(), path);
-    }
-    let mut engine = WithPlanFiles { plan_files };
-    let report = conformance::check(
-        &mut engine,
-        &MeasurementClocks::with_calling_thread(&OsCpuClock),
-    )
-    .unwrap_or_else(|failures| panic!("{failures:#?}"));
-    for check in [
-        ConformanceCheck::DeterministicAnswers,
-        ConformanceCheck::LeftOpenWindow,
-        ConformanceCheck::WorkOnCallingThread,
-    ] {
-        assert!(report.passed.contains(&check), "{report:?}");
-    }
 }
 
 /// `sum_over_time(m[5m])` every 10 s over 2 series, planned twice: with
