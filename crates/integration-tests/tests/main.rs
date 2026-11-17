@@ -3,7 +3,6 @@
 //! One file: `cargo test -p asap-integration-tests --test integration <file>::`.
 
 mod physical_common;
-mod planner_layering_common;
 mod planning_common;
 
 mod accuracy_at_query_roots;

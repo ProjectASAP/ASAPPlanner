@@ -4,35 +4,11 @@
 
 This report is for planner developers. It separates three changes: storing repeated producer lists once, factoring equivalent candidate connections, and spending a bounded search budget across progressively larger tumbling-window-width domains. Storage compression alone does not reduce the number of MILP variables. Searching fewer widths before a timeout does not prove equivalence to the complete domain.
 
-## Reproduction
+## Method
 
-Use frozen `stage_pipeline` executables; record their SHA-256 hashes. Do not run the four-case comparison concurrently with another benchmark. Both sides use the same input files, AWS pricing, deployment capabilities, enforced accuracy, a 30-second cooperative planning budget, and a 90-second external process timeout. Each case runs sequentially. Whole-process wall time and peak RSS include plan export and validation, so wall time may exceed the cooperative planning budget.
+The runner that produced these numbers drove a `stage_pipeline` executable with flags that no longer exist (`--cost-model`, `--enforce-accuracy-guarantees`, `--table`, a planning budget), so it was deleted; the numbers below cannot be reproduced on the current planner. Both sides used the same input files, AWS pricing, deployment capabilities, enforced accuracy, a 30-second cooperative planning budget, and a 90-second external process timeout, one case at a time. Whole-process wall time and peak RSS include plan export and validation.
 
-```bash
-python3 tools/benchmark_tumbling_window_search.py summarize BEFORE_BINARY BEFORE_DIR
-python3 tools/benchmark_tumbling_window_search.py run AFTER_BINARY AFTER_DIR
-python3 tools/benchmark_tumbling_window_search.py compare BEFORE_DIR AFTER_DIR COMPARISON.md
-```
-
-`summarize` imports existing plan, timing, and `summary.json` artifacts without executing the planner again. Each directory receives `results.json`, with the binary hash, input fingerprints, full search reports, selected cost/usage, and acceptance checks. Comparison rejects mismatched inputs, budgets, or concurrency. Missing old metrics remain **unreported**, rather than zero.
-
-Broader acceptance uses the same runner:
-
-```bash
-python3 tools/benchmark_tumbling_window_search.py run AFTER_BINARY VIEWER_DIR --suite viewer --jobs 2
-python3 tools/benchmark_tumbling_window_search.py run AFTER_BINARY ASAP_DIR --suite asap --jobs 2
-```
-
-For an archived 30-workload baseline without input fingerprints, compare only cost and acceptance after checking its original pricing configuration:
-
-```bash
-python3 tools/benchmark_tumbling_window_search.py compare OLD_ASAP_DIR ASAP_DIR QUALITY.md --quality-only
-```
-
-This mode checks serialized workloads, deployment capabilities, accuracy modes, Stage 0 DAGs, and objective/calibration settings. It deliberately excludes planning-time and memory comparisons; the old runner must confirm the pricing profile because historical documents do not serialize it.
-
-
-These suites contain the nine viewer workload examples and 30 mixed ASAPQuery workloads, respectively. They check query coverage, enforced accuracy, finite cost, valid cost bounds, no stored-output errors, and no global bound, gap, optimum, or exhaustion claim while tumbling-window widths remain pending. Existing Rust/JavaScript tests remain responsible for DAG structure and installation invariants.
+The broader acceptance ran two suites, the nine viewer workload examples and 30 mixed ASAPQuery workloads. They check query coverage, enforced accuracy, finite cost, valid cost bounds, no stored-output errors, and no global bound, gap, optimum, or exhaustion claim while tumbling-window widths remain pending. Existing Rust/JavaScript tests remain responsible for DAG structure and installation invariants.
 
 ## Baseline
 

@@ -4,10 +4,6 @@ autotests = false
 version = "0.1.0"
 edition = "2021"
 
-# Thin facade over the two front ends — re-exports `lower_promql` / `lower_sql`
-# (and batch + lowerer + error types) so a caller can depend on one crate for
-# both languages. A caller that needs only one language should depend on the
-# matching `asap-frontend-*` crate directly to avoid pulling the other parser.
 [dependencies]
 asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-metricsql = { path = "../frontend-metricsql" }
