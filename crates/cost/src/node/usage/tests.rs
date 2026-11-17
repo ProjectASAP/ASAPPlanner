@@ -231,7 +231,8 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
     assert_eq!(
         merge_usage.cpu_ops_per_second,
         5_000.0 * crate::node::operations_per_unit::DDSKETCH_MERGE_OPERATIONS_PER_STATE
-            + crate::node::operations_per_unit::merge_output_operations(merge_usage.family, 1_000)
+            + crate::node::operations_per_unit::merge_output_terms(merge_usage.family, 1_000)
+                .operations()
     );
 }
 
@@ -280,7 +281,8 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
     assert_eq!(
         merge_usage.cpu_ops_per_second,
         5_000.0 * crate::node::operations_per_unit::COUNTER_MERGE_OPERATIONS_PER_STATE
-            + crate::node::operations_per_unit::merge_output_operations(merge_usage.family, 1_000)
+            + crate::node::operations_per_unit::merge_output_terms(merge_usage.family, 1_000)
+                .operations()
     );
 }
 
@@ -2316,12 +2318,13 @@ fn a_kll_merge_of_few_states_charges_each_group_its_measured_time() {
 /// Sum and Count states measure about 230.
 #[test]
 fn a_max_merge_charges_its_measured_time_per_state() {
-    use crate::node::operations_per_unit::merge_operations_per_state;
+    use crate::node::operations_per_unit::merge_terms_per_state;
     for kind in [ExactKind::Max, ExactKind::Min] {
-        let max = merge_operations_per_state(StateFamily::Exact(&kind), 56, 56, None, 1);
+        let max = merge_terms_per_state(StateFamily::Exact(&kind), 56, 56, None, 1).operations();
         assert!((100.0..=150.0).contains(&max), "{kind:?}: {max} per state");
     }
-    let sum = merge_operations_per_state(StateFamily::Exact(&ExactKind::Sum), 56, 56, None, 1);
+    let sum =
+        merge_terms_per_state(StateFamily::Exact(&ExactKind::Sum), 56, 56, None, 1).operations();
     assert!((200.0..=260.0).contains(&sum), "Sum: {sum} per state");
 }
 

@@ -99,7 +99,7 @@ pub(crate) enum PhysicalOperator {
         grouping_key_count: u64,
         /// CPU operations one input row costs, its grouping keys and
         /// measures together
-        /// (`operations_per_unit::hash_aggregate_operations_per_row`):
+        /// (`operations_per_unit::hash_aggregate_terms_per_row`):
         /// 27 for a per-series `max_over_time` (one key, one measure).
         operations_per_row: u64,
     },
@@ -369,15 +369,6 @@ fn validate_partitioning(
         return inconsistent("ordered partitions do not sum to the input edge");
     }
     Ok(())
-}
-
-/// [`estimate_operator_with_terms`] without its terms.
-#[cfg(test)]
-pub(crate) fn estimate_operator(
-    operator: PhysicalOperator,
-    statistics: OperatorStatistics,
-) -> Result<ResourceEstimate, AnalyticalCostError> {
-    estimate_operator_with_terms(operator, statistics).map(|(estimate, _)| estimate)
 }
 
 /// Estimate one physical operator. Child costs are deliberately excluded;
@@ -1625,31 +1616,33 @@ mod tests {
     /// operations each), and keeps no more than it reads.
     #[test]
     fn time_shift_is_free_and_time_range_is_priced_by_the_rows_it_keeps() {
-        let shift = estimate_operator(
+        let shift = estimate_operator_with_terms(
             PhysicalOperator::TimeShift,
             OperatorStatistics::PassThrough {
                 edges: unary_row_edges(1_000, 1_000),
             },
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(shift.cpu_ops(), 0.0);
         assert_eq!(shift.scan_bytes(), 0);
-        let range = estimate_operator(
+        let range = estimate_operator_with_terms(
             PhysicalOperator::TimeRange,
             OperatorStatistics::PassThrough {
                 edges: unary_row_edges(1_000, 200),
             },
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(range.cpu_ops(), 200.0 * TIME_RANGE_OPERATIONS_PER_ROW);
-        assert!(estimate_operator(
+        assert!(estimate_operator_with_terms(
             PhysicalOperator::TimeRange,
             OperatorStatistics::PassThrough {
                 edges: unary_row_edges(200, 1_000),
             },
         )
         .is_err());
-        assert!(estimate_operator(
+        assert!(estimate_operator_with_terms(
             PhysicalOperator::TimeShift,
             OperatorStatistics::PassThrough {
                 edges: unary_row_edges(1_000, 200),
@@ -1741,20 +1734,20 @@ mod tests {
             build_side: Some(HashJoinBuildSide::Right),
         };
 
-        assert!(estimate_operator(
+        assert!(estimate_operator_with_terms(
             operator(PromqlBinaryOperation::Or),
             promql_binary_statistics(150, 15),
         )
         .is_ok());
         assert!(matches!(
-            estimate_operator(
+            estimate_operator_with_terms(
                 operator(PromqlBinaryOperation::ArithmeticOrComparison),
                 promql_binary_statistics(60, 5),
             ),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
         ));
         assert!(matches!(
-            estimate_operator(
+            estimate_operator_with_terms(
                 operator(PromqlBinaryOperation::And),
                 promql_binary_statistics(101, 10),
             ),
@@ -1777,7 +1770,7 @@ mod tests {
             },
             promql: Some(PromqlUnaryEdgeStatistics { input, output }),
         };
-        assert!(estimate_operator(
+        assert!(estimate_operator_with_terms(
             PhysicalOperator::PromqlScalarToVector,
             OperatorStatistics::PromqlScalarToVector {
                 edges: edges(scalar, vector),
@@ -1785,7 +1778,7 @@ mod tests {
         )
         .is_ok());
         assert!(matches!(
-            estimate_operator(
+            estimate_operator_with_terms(
                 PhysicalOperator::PromqlScalarToVector,
                 OperatorStatistics::PromqlScalarToVector {
                     edges: edges(vector, scalar),
@@ -1804,7 +1797,9 @@ mod tests {
             },
             promql_output: promql_edge(0, 10, PromqlValueKind::Scalar),
         };
-        let estimate = estimate_operator(PhysicalOperator::PromqlScalarLeaf, statistics).unwrap();
+        let estimate = estimate_operator_with_terms(PhysicalOperator::PromqlScalarLeaf, statistics)
+            .unwrap()
+            .0;
 
         assert_eq!(estimate.cpu_ops(), 10.0);
         assert_eq!(estimate.peak_memory_bytes(), 8);
@@ -1832,7 +1827,7 @@ mod tests {
         };
 
         assert_eq!(
-            estimate_operator(
+            estimate_operator_with_terms(
                 PhysicalOperator::HashAggregate {
                     grouping_key_count: 0,
                     operations_per_row: 1,
@@ -1866,7 +1861,7 @@ mod tests {
             },
         };
 
-        assert!(estimate_operator(
+        assert!(estimate_operator_with_terms(
             PhysicalOperator::PromqlPresence {
                 kind: PromqlPresenceKind::PresentPerSeries,
                 operations_per_row: 1,
@@ -1875,7 +1870,7 @@ mod tests {
         )
         .is_ok());
         assert!(matches!(
-            estimate_operator(
+            estimate_operator_with_terms(
                 PhysicalOperator::PromqlPresence {
                     kind: PromqlPresenceKind::Absent,
                     operations_per_row: 1,
@@ -1889,7 +1884,7 @@ mod tests {
     #[test]
     fn operator_estimator_rejects_contradictory_cardinality_evidence() {
         assert!(matches!(
-            estimate_operator(
+            estimate_operator_with_terms(
                 filter_operator(),
                 OperatorStatistics::Filter {
                     edges: unary_row_edges(10, 11),
@@ -1899,7 +1894,7 @@ mod tests {
             Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
         ));
         assert!(matches!(
-            estimate_operator(
+            estimate_operator_with_terms(
                 project_operator(),
                 OperatorStatistics::Project {
                     edges: unary_row_edges(10, 9),
@@ -1910,7 +1905,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            estimate_operator(
+            estimate_operator_with_terms(
                 aggregate_operator(),
                 OperatorStatistics::HashAggregate {
                     edges: unary_row_edges(10, 3),
@@ -1923,7 +1918,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            estimate_operator(
+            estimate_operator_with_terms(
                 PhysicalOperator::TopK {
                     limit: 3,
                     offset: 0,
@@ -1939,7 +1934,7 @@ mod tests {
 
     #[test]
     fn physical_operator_formulas_keep_disk_at_scan_and_require_join_stats() {
-        let scan = estimate_operator(
+        let scan = estimate_operator_with_terms(
             PhysicalOperator::Scan,
             OperatorStatistics::Scan {
                 source_read_bytes: 64_000,
@@ -1956,10 +1951,11 @@ mod tests {
                 },
             },
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(scan.scan_bytes(), 64_000);
 
-        let topk = estimate_operator(
+        let topk = estimate_operator_with_terms(
             PhysicalOperator::TopK {
                 limit: 10,
                 offset: 0,
@@ -1979,12 +1975,13 @@ mod tests {
                 },
             },
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(topk.scan_bytes(), 0);
         assert_eq!(topk.cpu_ops(), 4_000.0);
         assert_eq!(topk.peak_memory_bytes(), 400);
 
-        let mismatched_join_statistics = estimate_operator(
+        let mismatched_join_statistics = estimate_operator_with_terms(
             PhysicalOperator::HashJoin {
                 build_side: HashJoinBuildSide::Left,
                 equality_key_count: 1,
@@ -2001,7 +1998,7 @@ mod tests {
             ))
         );
 
-        let build_left = estimate_operator(
+        let build_left = estimate_operator_with_terms(
             PhysicalOperator::HashJoin {
                 build_side: HashJoinBuildSide::Left,
                 equality_key_count: 1,
@@ -2026,10 +2023,11 @@ mod tests {
                 },
             },
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(build_left.peak_memory_bytes(), 80_000);
 
-        let aggregate = estimate_operator(
+        let aggregate = estimate_operator_with_terms(
             aggregate_operator(),
             OperatorStatistics::HashAggregate {
                 group_count: 100,
@@ -2048,10 +2046,11 @@ mod tests {
                 },
             },
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(aggregate.peak_memory_bytes(), 5_600);
 
-        let oversized_topk = estimate_operator(
+        let oversized_topk = estimate_operator_with_terms(
             PhysicalOperator::TopK {
                 limit: 1_000,
                 offset: 0,
@@ -2071,10 +2070,11 @@ mod tests {
                 },
             },
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(oversized_topk.cpu_ops(), 8.0);
 
-        let offset_limit = estimate_operator(
+        let offset_limit = estimate_operator_with_terms(
             PhysicalOperator::Limit {
                 limit: 10,
                 offset: 900_000,
@@ -2093,7 +2093,8 @@ mod tests {
                 },
             },
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(offset_limit.cpu_ops(), 900_010.0);
     }
 
@@ -2111,14 +2112,15 @@ mod tests {
             rows: 100,
             bytes: 10_000,
         };
-        let estimate = estimate_operator(
+        let estimate = estimate_operator_with_terms(
             PhysicalOperator::Scan,
             OperatorStatistics::Scan {
                 edges: unary_edges(logical, logical),
                 source_read_bytes: 2_500,
             },
         )
-        .unwrap();
+        .unwrap()
+        .0;
 
         assert_eq!(estimate.scan_bytes(), 2_500);
         assert_eq!(estimate.peak_memory_bytes(), 100);
@@ -2136,8 +2138,9 @@ mod tests {
         };
 
         assert_eq!(
-            estimate_operator(filter_operator(), filter)
+            estimate_operator_with_terms(filter_operator(), filter)
                 .unwrap()
+                .0
                 .scan_bytes(),
             0
         );
@@ -2150,7 +2153,7 @@ mod tests {
             bytes: 80,
         };
         assert_eq!(
-            estimate_operator(
+            estimate_operator_with_terms(
                 PhysicalOperator::Scan,
                 OperatorStatistics::Scan {
                     edges: unary_edges(logical, logical),
@@ -2166,7 +2169,7 @@ mod tests {
     #[test]
     fn hash_aggregate_handles_empty_grouped_and_ungrouped_inputs() {
         let empty = EdgeStatistics { rows: 0, bytes: 0 };
-        let ungrouped = estimate_operator(
+        let ungrouped = estimate_operator_with_terms(
             PhysicalOperator::HashAggregate {
                 grouping_key_count: 0,
                 operations_per_row: 1,
@@ -2178,12 +2181,13 @@ mod tests {
                 accumulator_bytes_per_group: 8,
             },
         )
-        .unwrap();
+        .unwrap()
+        .0;
         // No row to fold; its one output row is still built.
         assert_eq!(ungrouped.cpu_ops(), OUTPUT_ROW_OPERATIONS_PER_GROUP);
         assert_eq!(ungrouped.peak_memory_bytes(), 24);
 
-        let grouped = estimate_operator(
+        let grouped = estimate_operator_with_terms(
             PhysicalOperator::HashAggregate {
                 grouping_key_count: 1,
                 operations_per_row: 1,
@@ -2195,7 +2199,8 @@ mod tests {
                 accumulator_bytes_per_group: 8,
             },
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(grouped.peak_memory_bytes(), 0);
     }
 
@@ -2210,18 +2215,19 @@ mod tests {
             scalar_inputs: vec![],
         };
         assert_eq!(
-            estimate_operator(
+            estimate_operator_with_terms(
                 PhysicalOperator::Filter {
                     predicate_operations_per_row: 3,
                 },
                 filter,
             )
             .unwrap()
+            .0
             .cpu_ops(),
             300.0
         );
 
-        let sort = estimate_operator(
+        let sort = estimate_operator_with_terms(
             PhysicalOperator::InMemoryComparisonSort {
                 ordering_key_count: 1,
                 partitioned: true,
@@ -2242,7 +2248,8 @@ mod tests {
                 },
             },
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(sort.cpu_ops(), 600.0);
         assert_eq!(sort.peak_memory_bytes(), 400);
     }
@@ -2250,7 +2257,7 @@ mod tests {
     #[test]
     fn concat_requires_at_least_one_physical_input() {
         assert_eq!(
-            estimate_operator(
+            estimate_operator_with_terms(
                 PhysicalOperator::Concat,
                 OperatorStatistics::Concat {
                     inputs: vec![],

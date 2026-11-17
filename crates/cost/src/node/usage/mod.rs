@@ -24,9 +24,9 @@ use crate::node::analytical::{
 };
 use crate::node::cost_terms::{CostConstant, NodeCostTerms};
 use crate::node::operations_per_unit::{
-    chain_emit_operations_per_state, estimate_operations_per_group,
-    hash_aggregate_operations_per_row, merge_output_terms, merge_terms_per_state,
-    pass_through_merge_operations, update_operations_per_row, StateLastWrittenBy,
+    chain_emit_terms_per_state, estimate_terms_per_group, hash_aggregate_terms_per_row,
+    merge_output_terms, merge_terms_per_state, pass_through_merge_terms, update_terms_per_row,
+    StateLastWrittenBy,
 };
 use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
@@ -868,17 +868,14 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                     .chain([input.rows])
                     .min()
                     .unwrap_or(input.rows);
-                let terms_per_row = hash_aggregate_operations_per_row(
+                let terms_per_row = hash_aggregate_terms_per_row(
                     keys,
                     measures,
                     input.rows,
                     group_count,
                     distinct_values,
                 )
-                .plus_terms(&carried_label_operations_per_row(
-                    &node.output_schema,
-                    reduction,
-                ));
+                .plus_terms(&carried_label_terms_per_row(&node.output_schema, reduction));
                 let operations_per_row = terms_per_row.operations();
                 let group_visits = visits(group_count);
                 let estimate = estimate_operator_with_terms(
@@ -907,17 +904,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 )
                 .map(|(estimate, operator_terms)| {
                     // The operator charges its rows times the per-row
-                    // operations rounded up, without a constant: split
-                    // into the per-row terms and the rounding.
-                    let rounding = operator_terms.operations_without_constant
-                        - input.rows as f64 * operations_per_row;
-                    let terms = NodeCostTerms {
-                        operations_without_constant: 0.0,
-                        ..operator_terms
-                    }
-                    .plus_terms(&terms_per_row.times(input.rows as f64))
-                    .plus_terms(&NodeCostTerms::without_constant(rounding))
-                    .plus(CostConstant::OperationsPerGroupPerRawBatch, group_visits);
+                    // operations rounded up, without a constant: those
+                    // per-row terms charge all but the rounding.
+                    let terms = operator_terms
+                        .attributing_to_constants(&terms_per_row.times(input.rows as f64))
+                        .plus(CostConstant::OperationsPerGroupPerRawBatch, group_visits);
                     charged(terms, estimate.peak_memory_bytes(), estimate.scan_bytes())
                 });
                 (
@@ -1115,16 +1106,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 input_rows,
             )?);
             assumed_data_facts.extend(assumed_magnitude_range_fact(column, input_rows));
-            let update_terms = update_operations_per_row(
+            let update_terms = update_terms_per_row(
                 family,
                 node.parameters.as_ref(),
                 input_rows.rows_per_state,
                 folded_distinct_values(update),
             )
-            .plus_terms(&carried_label_operations_per_row(
-                &node.output_schema,
-                reduction,
-            ));
+            .plus_terms(&carried_label_terms_per_row(&node.output_schema, reduction));
             let update_ops = update_terms.operations();
             let out = EdgeStatistics {
                 rows: group_count,
@@ -1188,16 +1176,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 input_rows,
             )?);
             assumed_data_facts.extend(assumed_magnitude_range_fact(column, input_rows));
-            let update_terms = update_operations_per_row(
+            let update_terms = update_terms_per_row(
                 family,
                 node.parameters.as_ref(),
                 input_rows.rows_per_state,
                 folded_distinct_values(update),
             )
-            .plus_terms(&carried_label_operations_per_row(
-                &node.output_schema,
-                reduction,
-            ));
+            .plus_terms(&carried_label_terms_per_row(&node.output_schema, reduction));
             let update_ops = update_terms.operations();
             // The states it completes in one execution: at ingestion time
             // one second's share of each group's window (a 10 s window: a
@@ -1232,7 +1217,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         .times(input.rows as f64)
                         .plus(range_constant, input.rows as f64)
                         .plus(CostConstant::OperationsPerGroupPerRawBatch, group_visits)
-                        .plus_terms(&chain_emit_operations_per_state(family).times(emitted_states)),
+                        .plus_terms(&chain_emit_terms_per_state(family).times(emitted_states)),
                     out.bytes,
                     0,
                 )),
@@ -1300,7 +1285,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                     .all(|producer| keys_are_input_keys(keys, producer.output_schema))
             });
             let merge_terms = match keeps_input_groups && states <= group_count {
-                true => pass_through_merge_operations(group_count),
+                true => pass_through_merge_terms(group_count),
                 false => producers
                     .iter()
                     .fold(NodeCostTerms::default(), |terms, producer| {
@@ -1363,7 +1348,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             (
                 out,
                 Ok(charged(
-                    estimate_operations_per_group(family, input_state_bytes(), written_by)
+                    estimate_terms_per_group(family, input_state_bytes(), written_by)
                         .times(input.rows as f64),
                     0,
                     0,
@@ -1775,10 +1760,7 @@ fn grouping_key_count(reduction: &Reduction) -> u64 {
 /// the per-series sum under `sum by (job) (sum_over_time(latency[5m]))`
 /// outputs the series identity (its key) and `job`, so it carries one
 /// label: 37 operations per row.
-fn carried_label_operations_per_row(
-    output_schema: &Schema,
-    reduction: &Reduction,
-) -> NodeCostTerms {
+fn carried_label_terms_per_row(output_schema: &Schema, reduction: &Reduction) -> NodeCostTerms {
     let label_columns = output_schema
         .fields
         .iter()

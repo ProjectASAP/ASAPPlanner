@@ -321,7 +321,7 @@ fn cache_miss_fraction(entries: f64, entries_in_cache: f64) -> f64 {
 /// pairs) cost 59 + 13 × 10.0 + 207 × 0.8 + 79 × 0.96 + 356 × 1 M ÷ 12 M +
 /// 13 × 11.3 M ÷ 12 M = 472 (measured 488 ns per row with the key and the
 /// measure, charged 492).
-pub(crate) fn exact_distinct_value_operations_per_row(
+pub(crate) fn exact_distinct_value_terms_per_row(
     distinct_values: u64,
     group_count: u64,
     rows: u64,
@@ -344,13 +344,13 @@ pub(crate) fn exact_distinct_value_operations_per_row(
             CostConstant::ExactDistinctOperationsPerRowAtFullPairMiss,
             cache_miss_fraction(pairs, EXACT_DISTINCT_PAIRS_IN_CACHE),
         )
-        .plus(
-            CostConstant::ExactDistinctOperationsPerInsertedValue,
-            values.min(rows) / rows,
-        )
-        .plus(
-            CostConstant::ExactDistinctOperationsPerInsertedPair,
-            pairs / rows,
+        .plus_terms(
+            &NodeCostTerms::of(
+                CostConstant::ExactDistinctOperationsPerInsertedValue,
+                values.min(rows),
+            )
+            .plus(CostConstant::ExactDistinctOperationsPerInsertedPair, pairs)
+            .divided_by(rows),
         )
 }
 
@@ -505,7 +505,7 @@ pub(crate) const KLL_MERGE_OPERATIONS_PER_OUTPUT_GROUP: f64 = 19_000.0;
 /// of a column taking `distinct_values` values (`None`: every row's
 /// differs). Only a KMV's depends on them
 /// ([`kmv_compared_hashes_per_row`]).
-pub(crate) fn update_operations_per_row(
+pub(crate) fn update_terms_per_row(
     summary_type: &FieldDataType,
     parameters: Option<&SketchParams>,
     rows_per_state: Option<u64>,
@@ -637,25 +637,6 @@ fn univmon_expected_layers(layers: u8) -> f64 {
 /// 12,000 rows each into 100 groups (10 states per group) inserts 119,300
 /// hashes per group, 58,278 compared per hash: 348 s, measured 352 on the
 /// executor.
-pub(crate) fn merge_operations_per_state(
-    family: StateFamily<'_>,
-    state_bytes: u64,
-    merged_state_bytes: u64,
-    rows_per_input_state: Option<u64>,
-    input_states_per_group: u64,
-) -> f64 {
-    merge_terms_per_state(
-        family,
-        state_bytes,
-        merged_state_bytes,
-        rows_per_input_state,
-        input_states_per_group,
-    )
-    .operations()
-}
-
-/// [`merge_operations_per_state`] as terms: the units of each constant one
-/// input state's merge charges.
 pub(crate) fn merge_terms_per_state(
     family: StateFamily<'_>,
     state_bytes: u64,
@@ -691,7 +672,7 @@ pub(crate) fn merge_terms_per_state(
             let retained_hashes =
                 rows_per_input_state.map_or(u64::from(*k), |rows| rows.min(u64::from(*k)));
             let hashes_per_group = retained_hashes.saturating_mul(input_states_per_group.max(1));
-            update_operations_per_row(
+            update_terms_per_row(
                 &FieldDataType::Sketch(SketchAlgorithm::Kmv),
                 Some(&SketchParams::Kmv { k: *k }),
                 Some(hashes_per_group),
@@ -715,15 +696,9 @@ pub(crate) fn merge_terms_per_state(
 }
 
 /// The operations a `SummaryMerge` of `family` with `output_groups` groups
-/// costs beyond its input states' merges ([`merge_operations_per_state`]):
+/// costs beyond its input states' merges ([`merge_terms_per_state`]):
 /// each group's state and output row. Example: 1,000 groups cost
 /// 1,100,000, of KLL states 20,100,000.
-#[cfg(test)]
-pub(crate) fn merge_output_operations(family: StateFamily<'_>, output_groups: u64) -> f64 {
-    merge_output_terms(family, output_groups).operations()
-}
-
-/// [`merge_output_operations`] as terms: units per output group.
 pub(crate) fn merge_output_terms(family: StateFamily<'_>, output_groups: u64) -> NodeCostTerms {
     let per_group = NodeCostTerms::of(CostConstant::MergeOperationsPerOutputGroup, 1.0);
     let per_group = match family {
@@ -759,7 +734,7 @@ pub(crate) fn merge_output_terms(family: StateFamily<'_>, output_groups: u64) ->
 /// median 1.38–1.62x their charge (up to 2.29x for KLL states), at 100 and
 /// 1,000 groups 0.96–1.20x (`MERGE_OPERATIONS_PER_OUTPUT_GROUP`). Example:
 /// 1,000 groups cost 1,100,000.
-pub(crate) fn pass_through_merge_operations(output_groups: u64) -> NodeCostTerms {
+pub(crate) fn pass_through_merge_terms(output_groups: u64) -> NodeCostTerms {
     NodeCostTerms::of(
         CostConstant::MergeOperationsPerOutputGroup,
         output_groups as f64,
@@ -769,7 +744,7 @@ pub(crate) fn pass_through_merge_operations(output_groups: u64) -> NodeCostTerms
 /// The operations per state a tumbling-window chain of `summary_type`
 /// costs to complete and emit each window's state: 1,500 for an exact
 /// accumulator, 2,500 for a sketch or any other summary.
-pub(crate) fn chain_emit_operations_per_state(summary_type: &FieldDataType) -> NodeCostTerms {
+pub(crate) fn chain_emit_terms_per_state(summary_type: &FieldDataType) -> NodeCostTerms {
     match summary_type {
         FieldDataType::ExactAggregate(..) => {
             NodeCostTerms::of(CostConstant::ExactChainEmitOperationsPerState, 1.0)
@@ -802,7 +777,7 @@ pub(crate) enum StateLastWrittenBy {
 /// rows are unknown). Example: a DDSketch quantile costs 1,000 + 2,500 =
 /// 3,500 per group; a KLL at k = 547 of 4,844 bytes 6,860 after a merge
 /// and, built from 300 rows, 2,500 + 40 × 300 = 14,500 after updates.
-pub(crate) fn estimate_operations_per_group(
+pub(crate) fn estimate_terms_per_group(
     family: StateFamily<'_>,
     state_bytes: u64,
     written_by: StateLastWrittenBy,
@@ -847,7 +822,7 @@ pub(crate) fn estimate_operations_per_group(
 /// without measures). Example: a per-series `max_over_time` (one key, one
 /// measure) costs 16 + 4 = 20; `GROUP BY job, instance` with one measure
 /// 28 more.
-pub(crate) fn hash_aggregate_operations_per_row(
+pub(crate) fn hash_aggregate_terms_per_row(
     grouping_key_count: u64,
     measures: &[AggIntent],
     rows: u64,
@@ -865,7 +840,7 @@ pub(crate) fn hash_aggregate_operations_per_row(
     let measures = measures
         .iter()
         .fold(NodeCostTerms::default(), |terms, measure| {
-            terms.plus_terms(&aggregate_measure_operations_per_row(
+            terms.plus_terms(&aggregate_measure_terms_per_row(
                 measure,
                 rows,
                 group_count,
@@ -887,7 +862,7 @@ pub(crate) fn hash_aggregate_operations_per_row(
 ///   (`log2(rows_per_group)` levels);
 /// - an exact distinct count or frequency statistic interns the row's value
 ///   in a table of every distinct value read and keeps its group's
-///   (group, value) pairs ([`exact_distinct_value_operations_per_row`] of
+///   (group, value) pairs ([`exact_distinct_value_terms_per_row`] of
 ///   the `distinct_values` the column takes); a top-k hashes the row's
 ///   value into its group's map, the work a further grouping key does
 ///   (`HASH_AGGREGATE_OPERATIONS_PER_FURTHER_KEY`, not measured);
@@ -899,7 +874,7 @@ pub(crate) fn hash_aggregate_operations_per_row(
 ///   including `changes`, `delta`, `idelta` and `resets`, which compare
 ///   neighbouring samples without tracking a counter's increase (not
 ///   measured).
-fn aggregate_measure_operations_per_row(
+fn aggregate_measure_terms_per_row(
     measure: &AggIntent,
     rows: u64,
     group_count: u64,
@@ -915,7 +890,7 @@ fn aggregate_measure_operations_per_row(
         AggIntent::Cardinality { .. }
         | AggIntent::FrequencyL2 { .. }
         | AggIntent::FrequencyEntropy { .. } => measure_row.plus_terms(
-            &exact_distinct_value_operations_per_row(distinct_values, group_count, rows),
+            &exact_distinct_value_terms_per_row(distinct_values, group_count, rows),
         ),
         AggIntent::TopK { .. } => {
             measure_row.plus(CostConstant::HashAggregateOperationsPerFurtherKey, 1.0)

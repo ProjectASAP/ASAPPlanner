@@ -71,47 +71,6 @@ pub enum CostConstant {
 }
 
 impl CostConstant {
-    /// Every constant, in declaration order.
-    pub const ALL: &'static [CostConstant] = &[
-        CostConstant::TimeRangeOperationsPerRow,
-        CostConstant::OperationsPerGroupPerRawBatch,
-        CostConstant::ChainOperationsPerArrivingRow,
-        CostConstant::HashAggregateOperationsPerRow,
-        CostConstant::HashAggregateOperationsPerFurtherKey,
-        CostConstant::AggregateMeasureOperationsPerRow,
-        CostConstant::SortOperationsPerRowPerLevel,
-        CostConstant::DdsketchUpdateOperationsPerRow,
-        CostConstant::KllUpdateOperationsPerRow,
-        CostConstant::ExactUpdateOperationsPerRow,
-        CostConstant::CounterUpdateOperationsPerRow,
-        CostConstant::CarriedLabelOperationsPerRowPerLabel,
-        CostConstant::KmvUpdateOperationsPerRow,
-        CostConstant::KmvOperationsPerComparedHash,
-        CostConstant::ExactDistinctOperationsPerRow,
-        CostConstant::ExactDistinctOperationsPerValueDoubling,
-        CostConstant::ExactDistinctOperationsPerRowAtFullValueMiss,
-        CostConstant::ExactDistinctOperationsPerRowAtFullPairMiss,
-        CostConstant::ExactDistinctOperationsPerInsertedValue,
-        CostConstant::ExactDistinctOperationsPerInsertedPair,
-        CostConstant::SketchUpdateOperationsPerCounter,
-        CostConstant::ExactMergeOperationsPerState,
-        CostConstant::ExtremumMergeOperationsPerState,
-        CostConstant::CounterMergeOperationsPerState,
-        CostConstant::DdsketchMergeOperationsPerState,
-        CostConstant::KllMergeOperationsPerState,
-        CostConstant::KllMergeOperationsPerInputByte,
-        CostConstant::KllMergeOperationsPerMergedByte,
-        CostConstant::MergeOperationsPerOutputGroup,
-        CostConstant::SketchMergeOperationsPerByte,
-        CostConstant::KllEstimateOperationsPerByte,
-        CostConstant::KllEstimateOperationsPerUnsortedItem,
-        CostConstant::SketchEstimateOperationsPerGroup,
-        CostConstant::OutputRowOperationsPerGroup,
-        CostConstant::SketchChainEmitOperationsPerState,
-        CostConstant::ExactChainEmitOperationsPerState,
-        CostConstant::KllMergeOperationsPerOutputGroup,
-    ];
-
     /// Its built-in value, e.g. 170.0 for `OperationsPerGroupPerRawBatch`:
     /// the constant of the same name in `operations_per_unit`.
     pub fn operations_per_unit(self) -> f64 {
@@ -230,11 +189,19 @@ pub struct NodeCostTerms {
     /// reads, a predicate's operations per row, the rounding a hash
     /// aggregate applies to its per-row operations.
     pub operations_without_constant: f64,
+    /// The formula's charge: these terms at the built-in values, added in
+    /// the order the formula adds them. Floating-point addition depends on
+    /// order, so this is the exact value the formula charges, where
+    /// re-adding `units_per_constant` in key order may differ in the last
+    /// bits. Example: `rows × (update + carried label) + visits × 170` adds
+    /// the per-row operations before multiplying by the rows.
+    operations_at_built_in_values: f64,
 }
 
 impl NodeCostTerms {
     /// `operations_without_constant + Σ units × value(constant)`; with
-    /// [`CostConstant::operations_per_unit`] it is the formula's charge.
+    /// [`CostConstant::operations_per_unit`] it is the formula's charge up
+    /// to floating-point summation order.
     pub fn operations_with(&self, value: impl Fn(CostConstant) -> f64) -> f64 {
         self.operations_without_constant
             + self
@@ -246,7 +213,7 @@ impl NodeCostTerms {
 
     /// The operations at the built-in values: the formula's charge.
     pub(crate) fn operations(&self) -> f64 {
-        self.operations_with(CostConstant::operations_per_unit)
+        self.operations_at_built_in_values
     }
 
     /// `units` of `constant` alone. Example: `of(TimeRangeOperationsPerRow,
@@ -261,6 +228,7 @@ impl NodeCostTerms {
         Self {
             units_per_constant: BTreeMap::new(),
             operations_without_constant: operations,
+            operations_at_built_in_values: operations,
         }
     }
 
@@ -268,6 +236,7 @@ impl NodeCostTerms {
     pub(crate) fn plus(mut self, constant: CostConstant, units: f64) -> Self {
         if units != 0.0 {
             *self.units_per_constant.entry(constant).or_insert(0.0) += units;
+            self.operations_at_built_in_values += units * constant.operations_per_unit();
         }
         self
     }
@@ -275,9 +244,26 @@ impl NodeCostTerms {
     /// These terms and `other`'s.
     pub(crate) fn plus_terms(mut self, other: &NodeCostTerms) -> Self {
         for (constant, units) in &other.units_per_constant {
-            self = self.plus(*constant, *units);
+            *self.units_per_constant.entry(*constant).or_insert(0.0) += units;
         }
         self.operations_without_constant += other.operations_without_constant;
+        self.operations_at_built_in_values += other.operations_at_built_in_values;
+        self
+    }
+
+    /// These terms with `part`'s constants charging some of their
+    /// operations without a constant: `part`'s units are added and the
+    /// operations without a constant shrink by what those units charge, so
+    /// the charge is unchanged. Example: a hash aggregate charges 300,000
+    /// rows × 27 operations without a constant, its per-row operations
+    /// 26.4 rounded up; attributing the 26.4 per row to their constants
+    /// leaves the 180,000 operations of rounding without one.
+    pub(crate) fn attributing_to_constants(mut self, part: &NodeCostTerms) -> Self {
+        for (constant, units) in &part.units_per_constant {
+            *self.units_per_constant.entry(*constant).or_insert(0.0) += units;
+        }
+        self.operations_without_constant -=
+            part.operations_at_built_in_values - part.operations_without_constant;
         self
     }
 
@@ -290,6 +276,19 @@ impl NodeCostTerms {
         }
         self.units_per_constant.retain(|_, units| *units != 0.0);
         self.operations_without_constant *= times;
+        self.operations_at_built_in_values *= times;
+        self
+    }
+
+    /// These terms shared over `parts`: the terms of a whole input spread
+    /// over its rows. Example: 259,000 inserted values over 300,000 rows
+    /// is 0.86 units of `ExactDistinctOperationsPerInsertedValue` per row.
+    pub(crate) fn divided_by(mut self, parts: f64) -> Self {
+        for units in self.units_per_constant.values_mut() {
+            *units /= parts;
+        }
+        self.operations_without_constant /= parts;
+        self.operations_at_built_in_values /= parts;
         self
     }
 }
