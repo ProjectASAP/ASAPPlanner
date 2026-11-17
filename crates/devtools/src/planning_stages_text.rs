@@ -106,7 +106,12 @@ pub fn planning_stages_text(
         failure(&mut out);
         return out;
     };
-    section(&mut out, "Stage 1 Pass 1 output: Memo", CANDIDATE_LEGEND);
+    section(
+        &mut out,
+        "Stage 1 Pass 1 output: Memo",
+        // Under --verbose nothing is folded, so the fold label is left out.
+        &CANDIDATE_LEGEND[..CANDIDATE_LEGEND.len() - usize::from(verbose)],
+    );
     write_memo(&mut out, pass1, Some(MemoStep::Pass1), verbose);
     if until == RunUntil::Pass1 {
         return out;
@@ -183,6 +188,7 @@ const CANDIDATE_LEGEND: &[&str] = &[
     "[i] = candidate i, then the rule that added it",
     "exact = no sketch",
     "θ = sketch parameters",
+    // Last: left out under --verbose.
     "[a..b] = candidates that differ only in θ, folded (--verbose lists each)",
 ];
 const PASS2_LEGEND: &[&str] = &[
@@ -602,7 +608,7 @@ fn write_memo(out: &mut String, memo: &Memo, step: Option<MemoStep<'_>>, verbose
                     out,
                     "    ",
                     vec![row(
-                        format!("[{}]", index_ranges(members)),
+                        format!("[{}]", index_ranges("", members)),
                         candidate,
                         index >= first_added,
                         candidate_text(candidate, false),
@@ -685,9 +691,10 @@ fn write_stored_logical_edges(
         let others =
             memo.groups()[group.0 as usize].candidates.len() - satisfied.len() - failed.len();
         let mut line = format!("        input {input} <- G{}:", group.0);
-        for (mark, indices) in [("✓", satisfied), ("✗", failed)] {
+        for (mark, mut indices) in [("✓", satisfied), ("✗", failed)] {
             if !indices.is_empty() {
-                let _ = write!(line, " {mark} G{}[{}]", group.0, index_ranges(&indices));
+                indices.sort_unstable();
+                let _ = write!(line, " {mark} G{}[{}]", group.0, index_ranges("", &indices));
             }
         }
         if others > 0 {
@@ -815,8 +822,9 @@ pub fn logical_edges_into(
         .collect()
 }
 
-/// `0..279`, or `0..3, 7, 9..12`: sorted indices as ranges.
-fn index_ranges(indices: &[usize]) -> String {
+/// Sorted indices as ranges, each end with `prefix`: `0..279`, or
+/// `0..3, 7, 9..12` with prefix "", and `C0..C1, C3` with prefix "C".
+fn index_ranges(prefix: &str, indices: &[usize]) -> String {
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     for &index in indices {
         match ranges.last_mut() {
@@ -827,8 +835,8 @@ fn index_ranges(indices: &[usize]) -> String {
     ranges
         .iter()
         .map(|&(start, end)| match start == end {
-            true => start.to_string(),
-            false => format!("{start}..{end}"),
+            true => format!("{prefix}{start}"),
+            false => format!("{prefix}{start}..{prefix}{end}"),
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -1359,17 +1367,18 @@ fn write_physical_by_logical_candidate(
                 .into_iter()
                 .enumerate()
             {
-                let producers: Vec<usize> = physical
+                let mut producers: Vec<usize> = physical
                     .admissible_edges_into(id, input)
                     .iter()
                     .map(|&edge| physical.edge(edge).producer_candidate_id.0)
                     .collect();
+                producers.sort_unstable();
                 let mut line = match producers.is_empty() {
                     true => format!("        input {input} <- G{}: reads nothing", group.0),
                     false => format!(
                         "        input {input} <- G{}: reads {}",
                         group.0,
-                        physical_ranges(&producers)
+                        index_ranges("C", &producers)
                     ),
                 };
                 if let Some(&(producer, ..)) =
@@ -1383,20 +1392,6 @@ fn write_physical_by_logical_candidate(
             }
         }
     }
-}
-
-/// `C0..C1, C3`: sorted physical candidate ids as ranges.
-fn physical_ranges(ids: &[usize]) -> String {
-    let mut ids = ids.to_vec();
-    ids.sort_unstable();
-    index_ranges(&ids)
-        .split(", ")
-        .map(|range| match range.split_once("..") {
-            Some((start, end)) => format!("C{start}..C{end}"),
-            None => format!("C{range}"),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// Stage 3's plan, each node with its physical candidate, operator and

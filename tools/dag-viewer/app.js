@@ -1,7 +1,7 @@
 // ASAPPlanner Plan Viewer: an asap-stage-pipeline/v2 document as Stage 3's
 // outcome (the selected plan or its error) beside two DAG lanes stacked top
 // to bottom (Stage 0, then Stage 3's plan), details below. Each lane shows
-// the whole workload. Document checks, the plan row and node labels live in
+// the whole workload. Document checks, the outcome line and node labels live in
 // stages.js (tested); node-style.js groups operator kinds.
 (function () {
   if (window.cytoscapeDagre) cytoscape.use(window.cytoscapeDagre);

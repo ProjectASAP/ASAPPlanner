@@ -373,6 +373,18 @@ function memoGroupDrill(candidates, state, collapseAbove) {
   return { path, shown, choices, dim, buckets };
 }
 
+// The candidates of `group` (at step `s` of `memo`) that are drawn: with
+// `hidePruned`, all but Pass 2's pruned ones; with `selectedOnly` (last
+// step, with a plan), only those the selected plan uses. For example, with
+// `hidePruned` a group of 10 candidates of which Pass 2 pruned 8 draws 2.
+function memoShownCandidates(memo, s, group, options) {
+  const { hidePruned = false, selectedOnly = false } = options || {};
+  const last = s === memo.steps.length - 1;
+  const planOnly = selectedOnly && last && !!memo.selected_candidates;
+  const chosen = planOnly ? memo.selected_candidates[String(group.id)] || [] : [];
+  return group.candidates.filter((c) => (!hidePruned || !c.pruned) && (!planOnly || chosen.includes(c.index)));
+}
+
 // Step `s` of `memo` as cytoscape elements with preset positions. A group
 // is node `g<id>` (a compound node holding its candidates, or a plain box
 // when it has none, as at Stage 0); a candidate is `g<id>c<index>`; a large
@@ -397,12 +409,9 @@ function memoStepElements(memo, s, options) {
   const nodes = [];
   const edges = [];
   const edgeIds = new Set();
-  // With `hidePruned`, Pass 2's pruned candidates are left out; with
-  // `selectedOnly` (last step, with a plan), every candidate the plan does
-  // not use. A group left with none is left out, with the edges into it.
-  const planOnly = selectedOnly && last && !!memo.selected_candidates;
-  const shownOf = (group) => group.candidates.filter((c) => (!hidePruned || !c.pruned)
-    && (!planOnly || (selected[String(group.id)] || []).includes(c.index)));
+  // A group left with no shown candidate (memoShownCandidates) is left
+  // out, with the edges into it.
+  const shownOf = (group) => memoShownCandidates(memo, s, group, { hidePruned, selectedOnly });
   const hidden = new Set(step.groups.filter((g) => g.candidates.length && !shownOf(g).length).map((g) => g.id));
   const edge = (source, child, chosen, queries) => {
     if (hidden.has(child)) return;
@@ -587,11 +596,13 @@ function memoViewController() {
     ];
   }
 
+  // Which candidates are drawn, from the show-pruned and plan-only filters.
+  const shownOptions = () => ({ hidePruned: !($('memoShowPruned') || {}).checked, selectedOnly: !!($('memoPlanOnly') || {}).checked });
+
   function draw() {
     if (cy) { cy.destroy(); cy = null; }
-    elements = memoStepElements(memo, stepIndex, { drill: drill[stepIndex], queryIds, hidePruned: !($('memoShowPruned') || {}).checked,
-      physical: memo.steps[stepIndex].step === 'pass2' && doc.stage2_physical_asap_optimization && ($('memoShowPhysical') || {}).checked ? doc : null,
-      selectedOnly: !!($('memoPlanOnly') || {}).checked });
+    elements = memoStepElements(memo, stepIndex, { drill: drill[stepIndex], queryIds, ...shownOptions(),
+      physical: memo.steps[stepIndex].step === 'pass2' && doc.stage2_physical_asap_optimization && ($('memoShowPhysical') || {}).checked ? doc : null });
     cy = cytoscape({
       container: $('cyMemo'), elements, style: style(), layout: { name: 'preset', fit: true, padding: 16 },
       wheelSensitivity: 0.25, minZoom: 0.05, maxZoom: 2.5, boxSelectionEnabled: false,
@@ -664,10 +675,12 @@ function memoViewController() {
   const section = (title, items) => (items.length ? `<div class="eyebrow">${esc(title)}</div>${list(items)}` : '');
 
   // While the group is split into counts, a button per dimension that still
-  // varies, to split by it instead.
+  // varies, to split by it instead. Built from the drawn candidates, as the
+  // drawing is: a group whose few shown candidates are drawn one by one
+  // offers no split.
   function splitButtons(group) {
     const state = drillOf(group.id);
-    const split = memoGroupDrill(group.candidates, state, MEMO_COLLAPSE_ABOVE);
+    const split = memoGroupDrill(memoShownCandidates(memo, stepIndex, group, shownOptions()), state, MEMO_COLLAPSE_ABOVE);
     if (!split.dim) return '';
     const buttons = split.choices.map((dim) => `<button type="button" class="btn" data-dim="${esc(dim)}" aria-pressed="${dim === split.dim}">${esc(dim)}</button>`).join(' ');
     return `<div class="eyebrow">split by</div><div class="memo-split">${buttons}</div>`;

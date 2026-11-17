@@ -1,6 +1,6 @@
 // DOM-free logic of the Plan Viewer: checking an `asap-stage-pipeline/v2`
-// document (written by the `asap_planner` devtool), the selected plan's row,
-// and each drawn DAG (Stage 0's and Stage 3's plan) as cytoscape elements
+// document (written by the `asap_planner` devtool), the outcome line and
+// settings rows, and each drawn DAG (Stage 0's and Stage 3's plan) as cytoscape elements
 // with readable labels.
 // app.js draws them; test_viewer.py runs this file headless.
 const STAGE_PIPELINE_FORMAT = 'asap-stage-pipeline/v2';
@@ -353,7 +353,7 @@ function candidateCountsText(doc) {
 // Whether Stage 3 checked accuracy guarantees (`accuracy_guarantees`).
 const ACCURACY_GUARANTEE_MODES = ['ignored', 'enforced'];
 // The search behind the document and the size of Stage 3's selection
-// MILP, for the plan list's header, e.g. "candidate-connection search ·
+// MILP, for the outcome line, e.g. "candidate-connection search ·
 // MILP 88 variables, 126 constraints" (the document leaves out the MILP's
 // times). "" for a document that names no search.
 function searchText(doc) {

@@ -227,6 +227,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--deployment-capabilities" => deployment_capabilities = read_json(&flag, &value()?)?,
             "--ignore-accuracy-guarantees" => ignore_accuracy_guarantees = true,
             "--verbose" => verbose = true,
+            "--printing-full-candidates" => {
+                return Err(Failure::Usage(
+                    "--printing-full-candidates was renamed to --verbose".into(),
+                ))
+            }
             other => return Err(Failure::Usage(format!("unknown argument {other}"))),
         }
     }

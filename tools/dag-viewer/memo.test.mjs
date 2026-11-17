@@ -194,6 +194,21 @@ test('a group splits by the dimension chosen next; a candidate without it counts
   assert.equal(call('memoGroupDrill', g4.candidates, { path: [['origin', 'Pass1']], next: 'origin' }, 4).dim, 'k');
 });
 
+test('a group with mostly pruned candidates, hidden, offers no split buttons: they count the drawn candidates', () => {
+  const memo = fixture();
+  const g4 = memo.steps[PASS2].groups[4];
+  // Say Pass 2 pruned all but two of G4's ten candidates.
+  g4.candidates.forEach((c, i) => { c.pruned = i < 8; });
+  // All ten exceed 4, so they would split by origin...
+  assert.equal(call('memoGroupDrill', g4.candidates, { path: [], next: null }, 4).dim, 'origin');
+  // ...but with the pruned ones hidden, the two drawn ones are drawn one by one, with no split to offer.
+  const shown = call('memoShownCandidates', memo, PASS2, g4, { hidePruned: true });
+  assert.deepEqual(shown.map((c) => c.index), [8, 9]);
+  assert.equal(call('memoGroupDrill', shown, { path: [], next: null }, 4).dim, null);
+  const elements = call('memoStepElements', memo, PASS2, { hidePruned: true, collapseAbove: 4 });
+  assert.deepEqual(nodesOf(elements).filter((e) => e.data.parent === 'g4').map((e) => e.data.id), ['g4c8', 'g4c9']);
+});
+
 test('the selected candidates are highlighted on the last step only', () => {
   const memo = fixture();
   const last = call('memoStepElements', memo, PASS2, {});
