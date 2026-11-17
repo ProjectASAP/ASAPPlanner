@@ -1063,14 +1063,23 @@ fn appended_raw_data_is_read_by_range_and_dropped_after_its_lookback() {
             .append_raw_data(&source, (start, end), vec![rows_at(&schema, &[end])])
             .unwrap();
     }
-    assert_eq!(times_read(&store, &source, &schema, Some((5, 20))), [10, 20]);
+    assert_eq!(
+        times_read(&store, &source, &schema, Some((5, 20))),
+        [10, 20]
+    );
     assert_eq!(times_read(&store, &source, &schema, Some((10, 20))), [20]);
     store
         .append_raw_data(&source, (20, 30), vec![rows_at(&schema, &[25, 30])])
         .unwrap();
     assert_eq!(times_read(&store, &source, &schema, None), [20, 25, 30]);
-    assert_eq!(times_read(&store, &source, &schema, Some((15, 30))), [20, 25, 30]);
-    assert_eq!(times_read(&store, &source, &schema, Some((20, 30))), [25, 30]);
+    assert_eq!(
+        times_read(&store, &source, &schema, Some((15, 30))),
+        [20, 25, 30]
+    );
+    assert_eq!(
+        times_read(&store, &source, &schema, Some((20, 30))),
+        [25, 30]
+    );
     let held = rows_at(&schema, &[20]).memory_bytes() + rows_at(&schema, &[25, 30]).memory_bytes();
     assert_eq!(store.raw_data_bytes(), held);
     assert_eq!(store.materialized_view_bytes(), 0);
@@ -1079,11 +1088,15 @@ fn appended_raw_data_is_read_by_range_and_dropped_after_its_lookback() {
     assert!(store
         .append_raw_data(&source, (25, 40), vec![rows_at(&schema, &[40])])
         .is_err());
-    let other = Source::TimeSeries { metric: "other".into() };
+    let other = Source::TimeSeries {
+        metric: "other".into(),
+    };
     assert!(store
         .append_raw_data(&other, (30, 40), vec![rows_at(&schema, &[40])])
         .is_err());
-    let fixed = Source::TimeSeries { metric: "fixed".into() };
+    let fixed = Source::TimeSeries {
+        metric: "fixed".into(),
+    };
     let mut store = store
         .with_raw_data(fixed.clone(), schema.clone(), vec![rows_at(&schema, &[1])])
         .unwrap();
