@@ -5,17 +5,17 @@
 //! assignment correctness is tested separately against the MILP model oracle.
 //! Larger fixtures check validated behavior without asserting global optimality.
 
-use asap_cost::{
-    request_overhead_cost_per_second, ClusterLimits, ClusterObjective, CostInputs, CostModel,
-};
+use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel};
 use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots};
 use asap_planner::{
-    run_planning, ErrorSelectingPlan, PlanSearchSettings, PlanningModels, PlanningRun,
-    SelectionError,
+    run_planning, CandidateExclusion, ErrorSelectingPlan, PlanSearchSettings, PlanningModels,
+    PlanningRun, SelectionError,
 };
 use asap_types::accuracy::AccuracyTarget;
 use asap_types::deployment_capabilities::DeploymentCapabilities;
-use asap_types::ir::QueryRoot;
+use asap_types::ir::operator::AggIntent;
+use asap_types::ir::{NonASAPOp, QueryRoot};
+use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload;
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, PrometheusMetricType,
     Query, QueryLanguage, QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand,
@@ -327,8 +327,11 @@ fn repeated_sql_queries_preserve_separate_output_references() {
 }
 
 // Request work on a literal output is charged though no operator node
-// owns it: `1` every 1 ms at 2 ms per request costs 1,000 requests per
-// second x 2,000,000 CPU operations, the whole of the plan's cost.
+// owns it. `1` every 1 ms is 1,000 requests per second; at 2 ms
+// (2,000,000 ns) per request and the default 1 ns per CPU operation that
+// is 2,000,000 operations each, 2e9 per second. The default unit cost
+// prices one operation at 1e-6 (one cost unit is one core-millisecond),
+// so the plan costs 2,000 per second, all of it request overhead.
 #[test]
 fn rootless_request_overhead_is_charged() {
     let workload = workload_of(&[("1", 1)], AccuracyTarget::exact());
@@ -345,9 +348,8 @@ fn rootless_request_overhead_is_charged() {
     );
     let (plan, selection) = result.selection.as_ref().unwrap();
     assert!(plan.nodes.is_empty(), "a literal needs no operator node");
-    let overhead = request_overhead_cost_per_second(&entries, &settings).unwrap();
-    assert!(overhead > 0.0);
-    assert_eq!(selection.selected_plan_cost_per_second, overhead);
+    let cost = selection.selected_plan_cost_per_second;
+    assert!((cost - 2_000.0).abs() < 1e-6, "{cost}");
 }
 
 // The same request overhead counts against a latency bound and a cluster's
@@ -392,26 +394,43 @@ fn rootless_request_overhead_respects_capacity_and_latency() {
     }
 }
 
-// Unsupported exact operators cannot become accepted merely because no summary
-// candidate exists; failure must leave the exported physical plan absent.
-// `absent_over_time` is lowered as a per-entity aggregate without an exact
-// per-entity kernel.
+// An exact operator the executor does not run is planned like any other,
+// from raw rows, until the deployment declares it unsupported; then no
+// plan is returned. `absent_over_time(m[5m])` exactly has one plan: a
+// per-series `Aggregate[AbsentOverTime]` over the 5 m of raw rows (no
+// summary answers it). Excluding that measure leaves no candidate.
 #[test]
-fn unsupported_exact_operation_never_returns_an_unvalidated_plan() {
+fn unsupported_exact_operation_declared_by_the_deployment_returns_no_plan() {
     let workload = workload_of(
         &[("absent_over_time(m[5m])", 60_000)],
         AccuracyTarget::exact(),
     );
+    let settings = CostInputs::default();
+    let planned = run_workload(&workload, &settings, &DeploymentCapabilities::default());
+    let (plan, _) = planned.selection.as_ref().unwrap();
+    assert!(plan.nodes.iter().any(|node| matches!(
+        &node.payload,
+        PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Aggregate { measures, .. })
+            if measures.as_slice() == [AggIntent::AbsentOverTime]
+    )));
+
+    let mut deployment = DeploymentCapabilities::default();
+    deployment.excluded_candidates.push(CandidateExclusion {
+        aggregate_measure: Some("absent_over_time".to_string()),
+        ..Default::default()
+    });
     let roots = lower_promql_roots(&workload).unwrap();
     let entries: Vec<_> = workload.query_workload.entries().collect();
-    let result = run(
+    let refused = run(
         &roots,
         &entries,
         workload.data_workload.as_ref().unwrap(),
-        PlanningModels::builtin(),
+        PlanningModels::builtin()
+            .with_cost_inputs(&settings)
+            .with_deployment_capabilities(&deployment),
         false,
     );
-    assert!(result.selection.is_err());
+    assert!(refused.selection.is_err());
 }
 
 // Deterministic small mixed workloads exercise exact temporal operators, counter
