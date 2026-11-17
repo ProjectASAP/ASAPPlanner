@@ -183,6 +183,19 @@ pub(super) fn window(
     Ok((start, end))
 }
 
+/// `(start, end]` of `window` in a run, as [`window`] reads it.
+pub(super) fn time_window_bounds(
+    window: planner_types::plan::TimeWindow,
+    context: &RunContext,
+) -> Result<(i64, i64), Error> {
+    let millis = |ms: u64| i64::try_from(ms).map_err(|_| invalid("time range overflows Int64"));
+    self::window(
+        millis(window.ends_before_evaluation_ms)?,
+        millis(window.length_ms)?,
+        context,
+    )
+}
+
 pub(super) fn execute<'a>(
     operator: &'a Operator,
     mut inputs: Vec<Input<'a, Batch>>,

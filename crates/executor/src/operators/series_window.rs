@@ -55,7 +55,7 @@ impl Operator {
     /// Output rows keep the input schema, with time `t` and the result value.
     pub fn series_window(
         input: SchemaRef,
-        function: Option<AggIntent<ColumnRef>>,
+        function: Option<AggIntent>,
         range_ms: i64,
         offset_ms: i64,
         at_ms: Option<i64>,
@@ -88,27 +88,10 @@ impl Operator {
         if steps.is_some_and(|s| s.range_ms / s.step_ms > MAX_SUBQUERY_STEPS) {
             return Err(invalid("subquery exceeds 100000 steps"));
         }
-        if !matches!(
-            function,
-            None | Some(
-                AggIntent::Rate
-                    | AggIntent::Deriv
-                    | AggIntent::PredictLinear { .. }
-                    | AggIntent::Increase
-                    | AggIntent::Delta
-                    | AggIntent::Count
-                    | AggIntent::Sum { col: None }
-                    | AggIntent::Avg { col: None }
-                    | AggIntent::Min { col: None }
-                    | AggIntent::Max { col: None }
-                    | AggIntent::IRate
-                    | AggIntent::IDelta
-                    | AggIntent::Changes
-                    | AggIntent::Resets
-                    | AggIntent::LastOverTime
-                    | AggIntent::Quantile { col: None, .. }
-            )
-        ) {
+        if function
+            .as_ref()
+            .is_some_and(|function| !range_function::has_range_function_kernel(function))
+        {
             return Err(invalid("unsupported PromQL range function"));
         }
         Ok(Self {
@@ -303,7 +286,7 @@ pub(super) fn execute<'a>(
                         if fresh.is_empty() {
                             None
                         } else {
-                            match aggregate::temporal::window_value(
+                            match range_function::range_function_value(
                                 intent,
                                 &fresh,
                                 start,

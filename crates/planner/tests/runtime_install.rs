@@ -771,6 +771,66 @@ async fn counter_rates_and_increases_answer_at_query_time_from_raw_samples() {
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
+/// Per-series time functions other than `rate` and `increase` install and
+/// answer as Prometheus does on a deployment that keeps raw data, with the
+/// plan run as installed ([`installed_answers`]). Over `[5m]` series `i`
+/// (0-based) of [`counter_samples`] has the 20 samples of steps 13..=32,
+/// `i + 1` apart every 15 s: no reset, 19 changes, a slope of
+/// `(i + 1) / 15` per second, and a last value of `32 (i + 1)`.
+#[tokio::test]
+async fn per_series_time_functions_install_and_answer_from_raw_samples() {
+    let samples = counter_samples();
+    let per_series = |value: fn(f64) -> f64| -> Vec<Answer> {
+        [("a", "j1"), ("b", "j1"), ("c", "j2"), ("d", "j2")]
+            .iter()
+            .enumerate()
+            .map(|(i, (instance, job))| {
+                (
+                    labels(&[("instance", instance), ("job", job)]),
+                    value(i as f64 + 1.0),
+                )
+            })
+            .collect()
+    };
+    let mut mismatches = Vec::new();
+    for (query, expected) in [
+        // The last two samples: (i + 1) over 15 s.
+        ("irate(requests_total[5m])", per_series(|n| n / 15.0)),
+        ("idelta(requests_total[5m])", per_series(|n| n)),
+        ("changes(requests_total[5m])", per_series(|_| 19.0)),
+        ("resets(requests_total[5m])", per_series(|_| 0.0)),
+        ("deriv(requests_total[5m])", per_series(|n| n / 15.0)),
+        // The fitted line at T plus 60 s of slope: 32 (i + 1) + 4 (i + 1).
+        (
+            "predict_linear(requests_total[5m], 60)",
+            per_series(|n| 36.0 * n),
+        ),
+        // 19 (i + 1) over 285 s, extrapolated 15 s to the window start, as
+        // `increase` (counter_queries).
+        ("delta(requests_total[5m])", per_series(|n| 20.0 * n)),
+        // Summed by job: j1 holds series 1 and 2, j2 series 3 and 4.
+        (
+            "sum by (job) (delta(requests_total[5m]))",
+            vec![
+                (labels(&[("job", "j1")]), 20.0 * 3.0),
+                (labels(&[("job", "j2")]), 20.0 * 7.0),
+            ],
+        ),
+    ] {
+        let plan = plan_counter_queries(&[query], 10_000, COUNTERS_INGESTING, true).await;
+        let answered = installed_answers(&plan, &samples).remove(0);
+        let matches = answered.len() == expected.len()
+            && answered.iter().zip(&expected).all(|(answer, expected)| {
+                answer.0 == expected.0
+                    && (answer.1 - expected.1).abs() <= 1e-9 * expected.1.abs().max(1.0)
+            });
+        if !matches {
+            mismatches.push(format!("{query}: {answered:?}, expected {expected:?}"));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// `rate(requests_total[5m] offset 1m)` and `rate(requests_total[5m])`,
 /// each every minute, planned together with data `arrival`: the plan with
 /// its shared tumbling-window chain (1-minute windows) built at `timing`.

@@ -662,7 +662,7 @@ pub(super) fn execute<'a>(
                 for (mut set, buckets) in histograms {
                     work.checkpoint().await?;
                     set.remove("__name__");
-                    let value = aggregate::temporal::bucket_quantile(q, buckets, &context).await?;
+                    let value = range_function::bucket_quantile(q, buckets, &context).await?;
                     if !seen.insert(set.clone()) {
                         return Err(invalid(
                             "vector cannot contain metrics with the same labelset",

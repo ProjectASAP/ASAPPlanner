@@ -245,11 +245,7 @@ impl Operator {
         if time.is_none()
             && matches!(
                 family,
-                SummaryFamilyType::ExactAggregate(
-                    planner_types::summary_type::ExactKind::Rate
-                        | planner_types::summary_type::ExactKind::Increase,
-                    _
-                )
+                SummaryFamilyType::ExactAggregate(kind, _) if kind.tracks_counter_increase()
             )
         {
             return Err(invalid("counter summary requires a timestamp column"));
@@ -1172,11 +1168,7 @@ fn evaluate_states(
         let SummaryEvaluation::Exact(evaluation) = query else {
             return false;
         };
-        if !matches!(
-            evaluation.statistic,
-            planner_types::summary_type::ExactKind::Rate
-                | planner_types::summary_type::ExactKind::Increase
-        ) {
+        if !evaluation.statistic.tracks_counter_increase() {
             return false;
         }
         match states.storage() {

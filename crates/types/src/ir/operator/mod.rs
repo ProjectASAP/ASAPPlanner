@@ -22,10 +22,7 @@ pub mod non_asap;
 pub mod query;
 pub mod tumbling_window_chain;
 
-pub use agg_intent::{
-    agg_has_exact_per_entity_kernel, default_cardinality, default_quantile, AggIntent, MathFunc,
-    TimeFunc,
-};
+pub use agg_intent::{default_cardinality, default_quantile, AggIntent, MathFunc, TimeFunc};
 pub use arguments::{
     AtModifier, BinaryOpKind, ColState, GroupKeys, GroupSide, InfoMatcher, JoinKind,
     PromQLVectorSetOpKind, Reduction, RelationalSetOpKind, SampleKind, Source, TimeShift,

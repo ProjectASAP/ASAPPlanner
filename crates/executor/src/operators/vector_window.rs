@@ -16,9 +16,12 @@ pub(crate) fn matrix_schema() -> SchemaRef {
 }
 
 impl Operator {
-    pub fn range_window(intent: AggIntent<ColumnRef>) -> Result<Self, Error> {
-        // Reuse the window constructor's semantic admission, without fixing request time.
-        Self::window(matrix_schema(), intent.clone(), 1, 2, vec![0], Some((0, 1)))?;
+    pub fn range_window(intent: AggIntent) -> Result<Self, Error> {
+        if !range_function::has_range_function_kernel(&intent) {
+            return Err(invalid(
+                "unsupported temporal intent or unresolved value column",
+            ));
+        }
         Ok(Self {
             kind: Kind::RangeWindow {
                 intent: Box::new(intent),
@@ -71,7 +74,7 @@ pub(super) fn execute<'a>(
                     window = Some((start, end));
                 }
                 let (mut arrays, results) =
-                    aggregate::temporal::reduce_batch(batch, intent, &[0], 1, 2, window, &context)
+                    range_function::reduce_batch(batch, intent, &[0], 1, 2, window, &context)
                         .await?;
                 // The result as an exact Float64.
                 let values = results
@@ -173,11 +176,12 @@ pub(super) fn execute<'a>(
                 )?;
                 let mut workspace = Workspace::new(&context)?;
                 workspace.grow(projected.memory_bytes())?;
-                let (mut arrays, results) = aggregate::temporal::reduce_batch(
+                let (mut arrays, results) = range_function::reduce_batch(
                     &projected,
                     &AggIntent::HistogramQuantile {
                         q: *q,
-                        le: ColumnRef::Named("le".into()),
+                        // The bucket bound is the coordinate column.
+                        le: 1,
                     },
                     &[0],
                     1,

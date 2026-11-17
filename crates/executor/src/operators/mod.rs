@@ -24,6 +24,7 @@ pub(crate) mod group_table;
 mod joins;
 mod limit;
 mod projection;
+pub(crate) mod range_function;
 mod scope_timestamp;
 mod series_labels;
 mod series_window;
@@ -75,11 +76,11 @@ enum Kind {
         operator: crate::expressions::binary::BinaryOperator,
     },
     RangeWindow {
-        intent: Box<planner_types::ir::operator::AggIntent<ColumnRef>>,
+        intent: Box<planner_types::ir::operator::AggIntent>,
     },
     HistogramQuantile,
     SeriesWindow {
-        function: Option<Box<planner_types::ir::operator::AggIntent<ColumnRef>>>,
+        function: Option<Box<planner_types::ir::operator::AggIntent>>,
         coordinate: usize,
         value: usize,
         range_ms: i64,
@@ -144,11 +145,12 @@ enum Kind {
         fetch: Option<u64>,
     },
     Window {
-        intent: Box<planner_types::ir::operator::AggIntent<ColumnRef>>,
+        intent: Box<planner_types::ir::operator::AggIntent>,
         coordinate: usize,
         value: usize,
         groups: Vec<usize>,
-        window: Option<(i64, i64)>,
+        /// Back from the evaluation time (`Operator::window`).
+        window: Option<planner_types::plan::TimeWindow>,
     },
     Aggregate {
         groups: Vec<usize>,

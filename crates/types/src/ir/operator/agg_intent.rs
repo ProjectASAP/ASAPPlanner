@@ -420,6 +420,14 @@ impl AggIntent<ColumnId> {
 }
 
 impl<C: Clone> AggIntent<C> {
+    /// Whether this range function's result keeps the series' metric name:
+    /// Prometheus keeps it for `last_over_time` and `first_over_time` only,
+    /// which act like selectors. `last_over_time(up[5m])` is still `up`;
+    /// `rate(requests_total[5m])` has no `__name__`.
+    pub fn keeps_metric_name(&self) -> bool {
+        matches!(self, AggIntent::LastOverTime | AggIntent::FirstOverTime)
+    }
+
     /// Whether this is a *per-series* reduction — it reduces a single series'
     /// samples over its range window (one value out per series), so it does
     /// **not** collapse across series and every label column is preserved.
@@ -718,26 +726,6 @@ pub mod topk {
             descending && !matches!(self, Self::NonAdditive)
         }
     }
-}
-
-/// Whether the executor reduces each series' raw data samples exactly for an
-/// `Aggregate` of `op` with `Reduction::PerEntity` (a PromQL
-/// `quantile/sum/avg/min/max/count/distinct/l2/entropy_over_time` over raw
-/// samples). The executor compiles only these, and Stage 3 rejects a plan
-/// holding any other exact per-entity aggregate, so both read this one list.
-pub fn agg_has_exact_per_entity_kernel(op: &AggIntent) -> bool {
-    matches!(
-        op,
-        AggIntent::Count
-            | AggIntent::Sum { .. }
-            | AggIntent::Avg { .. }
-            | AggIntent::Min { .. }
-            | AggIntent::Max { .. }
-            | AggIntent::Quantile { .. }
-            | AggIntent::Cardinality { .. }
-            | AggIntent::FrequencyL2 { .. }
-            | AggIntent::FrequencyEntropy { .. }
-    )
 }
 
 /// Default `Cardinality` intent over the sample value — HLL standard error at
