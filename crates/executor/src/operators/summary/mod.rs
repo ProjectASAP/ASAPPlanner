@@ -601,6 +601,9 @@ async fn build_per_group_summary(
         .map(|filter| filter.at_evaluation_time(context));
     let mut table = GroupTable::new(build.groups.to_vec());
     let mut updater = StateColumnUpdater::new(build.family, build.parameters)?;
+    if let Some(max_out_of_order_ms) = context.max_out_of_order_ms() {
+        updater = updater.with_max_out_of_order_ms(max_out_of_order_ms);
+    }
     let mut work = Cooperative::new(context);
     let mut workspace = Workspace::new(context)?;
     // A global SQL aggregate has one row over no input rows; a PromQL

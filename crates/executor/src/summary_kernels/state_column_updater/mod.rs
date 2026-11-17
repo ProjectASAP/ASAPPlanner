@@ -13,6 +13,9 @@ use planner_types::ir::schema::FieldDataType;
 use planner_types::summary_type::{SketchParams, SummaryUpdate};
 use std::sync::Arc;
 
+mod reorder_buffer;
+use reorder_buffer::CounterOrder;
+
 /// The open summary states of one family, one per group, updated one sample
 /// at a time; sealed into an immutable [`StateColumn`].
 ///
@@ -28,9 +31,10 @@ pub struct StateColumnUpdater {
     parameters: Option<SketchParams>,
     /// The states, by group.
     states: GroupStates,
-    /// For a counter (rate, increase, irate), each group's latest sample time:
-    /// samples must arrive in strictly increasing time within a group.
-    latest_sample_ms: Option<Vec<Option<i64>>>,
+    /// For a counter (rate, increase, irate), the order its samples are
+    /// applied in: each group's in increasing time; `None` for any other
+    /// family.
+    counter: Option<CounterOrder>,
     /// Memory the open states hold, kept up to date on every change.
     memory_bytes: usize,
     /// The shape of the keys [`Self::add_group_with_key`] has taken, from
@@ -134,10 +138,34 @@ impl StateColumnUpdater {
             family: family.clone(),
             parameters: parameters.cloned(),
             states,
-            latest_sample_ms: counter.then(Vec::new),
+            counter: counter.then(CounterOrder::default),
             memory_bytes,
             key_types: None,
         })
+    }
+
+    /// This updater taking each group's samples in any order within
+    /// `max_out_of_order_ms`: the data's declared bound on how late a
+    /// sample arrives after a later sample of its series (`DataArrival`'s
+    /// `max_out_of_order_ms`). A counter (rate, increase, irate) holds each
+    /// sample until the newest sample seen in its group is at least the
+    /// bound past it, then applies the group's held samples in time order:
+    /// samples at 10 s, 12 s, 11 s with a 5 s bound build the state of
+    /// 10 s, 11 s, 12 s, whatever other groups' samples arrive between
+    /// them. A sample further behind is still applied when it follows its
+    /// group's last applied sample; otherwise [`Self::update`] refuses it,
+    /// as Prometheus refuses a sample outside its out-of-order window.
+    /// [`Self::seal`] and [`Self::merge`] apply every held sample first, so
+    /// a runtime seals a tumbling window once the bound has passed after
+    /// its end. Any other family needs no order and is returned unchanged.
+    /// A 0 bound refuses exactly the samples an updater without a bound
+    /// refuses; a bound beyond Int64 holds every sample until the seal.
+    pub fn with_max_out_of_order_ms(mut self, max_out_of_order_ms: u64) -> Self {
+        if let Some(counter) = &mut self.counter {
+            let max_out_of_order_ms = i64::try_from(max_out_of_order_ms).unwrap_or(i64::MAX);
+            self.memory_bytes += counter.reorder_within(max_out_of_order_ms);
+        }
+        self
     }
 
     fn sketch_updater(
@@ -262,8 +290,8 @@ impl StateColumnUpdater {
                 ))
             }
         };
-        if let Some(latest) = &mut self.latest_sample_ms {
-            latest.push(None);
+        if let Some(counter) = &mut self.counter {
+            self.memory_bytes += counter.add_group();
         }
         Ok(group)
     }
@@ -284,7 +312,8 @@ impl StateColumnUpdater {
     /// `timestamp_ms` (read only by counters). Bad input for a group never
     /// added; an operator error when the state cannot take the value (not
     /// finite for a sketch or a counter, outside a DDSketch's domain, a
-    /// counter sample not after the group's previous one) or the family is
+    /// counter sample not after the group's last applied one, or at the time
+    /// of a held one ([`Self::with_max_out_of_order_ms`])) or the family is
     /// keyed. The state is then unchanged.
     pub fn update(&mut self, group: u32, value: f64, timestamp_ms: i64) -> Result<(), Error> {
         self.update_value(group, &Value::Float64(value), timestamp_ms)
@@ -300,8 +329,20 @@ impl StateColumnUpdater {
         timestamp_ms: i64,
     ) -> Result<(), Error> {
         let index = self.index(group)?;
-        if let Some(latest) = &mut self.latest_sample_ms {
-            if latest[index].is_some_and(|prior| timestamp_ms <= prior) {
+        if self
+            .counter
+            .as_ref()
+            .is_some_and(|counter| counter.reorder_buffer.is_some())
+        {
+            return self.hold_and_release(group, value, timestamp_ms);
+        }
+        self.apply(index, value, timestamp_ms)
+    }
+
+    /// Update state `index` with one sample, in its group's time order.
+    fn apply(&mut self, index: usize, value: &Value, timestamp_ms: i64) -> Result<(), Error> {
+        if let Some(counter) = &self.counter {
+            if counter.latest_applied_ms[index].is_some_and(|prior| timestamp_ms <= prior) {
                 return Err(operator_error(
                     "counter samples must have strictly increasing timestamps within each group",
                 ));
@@ -339,8 +380,8 @@ impl StateColumnUpdater {
                 ))
             }
         }
-        if let Some(latest) = &mut self.latest_sample_ms {
-            latest[index] = Some(timestamp_ms);
+        if let Some(counter) = &mut self.counter {
+            counter.latest_applied_ms[index] = Some(timestamp_ms);
         }
         Ok(())
     }
@@ -382,12 +423,15 @@ impl StateColumnUpdater {
     /// overlap twice, so they are refused as bad input, as are different
     /// families or θ. An operator error when a kernel refuses the merge. On
     /// an error this updater may hold some groups already merged.
-    pub fn merge(&mut self, other: Self) -> Result<(), Error> {
+    pub fn merge(&mut self, mut other: Self) -> Result<(), Error> {
         if self.family != other.family || self.parameters != other.parameters {
             return Err(Error::Invalid(
                 "cannot merge different summary families or parameters".into(),
             ));
         }
+        // Held samples are part of each shard's window.
+        self.release_all_held();
+        other.release_all_held();
         if let (
             GroupStates::Hydra { grid, names },
             GroupStates::Hydra {
@@ -453,10 +497,8 @@ impl StateColumnUpdater {
             }
             _ => unreachable!("one family has one kind of states"),
         }
-        if let (Some(latest), Some(theirs)) = (&mut self.latest_sample_ms, other.latest_sample_ms) {
-            for (latest, theirs) in latest.iter_mut().zip(theirs) {
-                *latest = (*latest).max(theirs);
-            }
+        if let (Some(counter), Some(theirs)) = (&mut self.counter, other.counter) {
+            counter.merge_latest_applied(&theirs);
         }
         Ok(())
     }
@@ -466,8 +508,10 @@ impl StateColumnUpdater {
         self.memory_bytes
     }
 
-    /// The states as an immutable column, state `g` being group `g`'s.
-    pub fn seal(self) -> StateColumn {
+    /// The states as an immutable column, state `g` being group `g`'s,
+    /// after applying every held sample.
+    pub fn seal(mut self) -> StateColumn {
+        self.release_all_held();
         match self.states {
             GroupStates::Exact { states, .. } => StateColumn::from_exact(self.family, states),
             GroupStates::Sketches(states) => StateColumn::from_objects(

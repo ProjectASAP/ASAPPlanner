@@ -552,6 +552,145 @@ fn merging_counter_shards_that_overlap_in_time_is_refused() {
     }
 }
 
+// A counter updater given the data's declared `max_out_of_order_ms`
+// (5 s) folds a late sample in time order. One series' samples arrive
+// as 10 s: 100, 12 s: 120, 11 s: 110 (1 s late, within the bound): the
+// state equals the one in-order arrival builds, for rate and increase,
+// whether sealed with samples still held or merged as a shard. A sample
+// beyond the bound that precedes an applied one is an operator error
+// and leaves the state unchanged: after 10 s, 12 s and 18 s (10 s and
+// 12 s applied, being more than 5 s behind 18 s), 11.5 s is refused.
+#[test]
+fn counter_samples_late_within_the_declared_bound_build_the_in_order_state() {
+    for family in [
+        exact(ExactKind::Rate, ExactParams::Rate),
+        exact(ExactKind::Increase, ExactParams::Increase),
+    ] {
+        let build = |samples: &[(i64, f64)], bound: Option<u64>| {
+            let mut updater = updater(&family);
+            if let Some(bound) = bound {
+                updater = updater.with_max_out_of_order_ms(bound);
+            }
+            let group = updater.add_group().unwrap();
+            let refused: Vec<bool> = samples
+                .iter()
+                .map(|&(ts, value)| updater.update(group, value, ts).is_err())
+                .collect();
+            (updater, refused)
+        };
+        let read = |updater: StateColumnUpdater| fingerprint(updater.seal().state(0).as_ref());
+        let in_order = [(10_000, 100.0), (12_000, 120.0), (11_000, 110.0)];
+        let mut sorted = in_order;
+        sorted.sort_by_key(|&(ts, _)| ts);
+        let (expected, _) = build(&sorted, None);
+        let expected = read(expected);
+        // Without the bound the late sample is refused, as before.
+        assert_eq!(build(&in_order, None).1, [false, false, true]);
+        let (late, refused) = build(&in_order, Some(5_000));
+        assert_eq!(refused, [false, false, false], "{family:?}");
+        assert_eq!(read(late), expected, "{family:?}");
+        // As one shard of a window: held samples are applied before a merge.
+        let (mut shard, _) = build(&in_order, Some(5_000));
+        let (later, _) = build(&[(20_000, 200.0)], Some(5_000));
+        shard.merge(later).unwrap();
+        let (whole, _) = build(&[sorted[0], sorted[1], sorted[2], (20_000, 200.0)], None);
+        assert_eq!(read(shard), read(whole), "{family:?}");
+
+        // Beyond the bound, behind an applied sample: refused.
+        let beyond = [
+            (10_000, 100.0),
+            (12_000, 120.0),
+            (18_000, 180.0),
+            (11_500, 115.0),
+        ];
+        let (updater, refused) = build(&beyond, Some(5_000));
+        assert_eq!(refused, [false, false, false, true], "{family:?}");
+        assert_eq!(read(updater), read(build(&beyond[..3], None).0));
+    }
+    // A family that needs no order takes the bound and is unchanged.
+    let sum = exact(ExactKind::Sum, ExactParams::Sum);
+    let build_sum = |bound: Option<u64>| {
+        let mut updater = updater(&sum);
+        if let Some(bound) = bound {
+            updater = updater.with_max_out_of_order_ms(bound);
+        }
+        let group = updater.add_group().unwrap();
+        updater.update(group, 2.0, 12_000).unwrap();
+        updater.update(group, 1.0, 11_000).unwrap();
+        fingerprint(updater.seal().state(0).as_ref())
+    };
+    assert_eq!(build_sum(Some(5_000)), build_sum(None));
+}
+
+// The bound applies per series, as `DataArrival` declares it: a sample
+// is late relative to later samples of its own series only. With a 5 s
+// bound, series A's sample at 12 s, then series B's at 30 s, then A's at
+// 11 s: B's newer sample does not push A's 12 s sample out of the buffer,
+// so A's 11 s sample (1 s behind A's newest) is folded in time order.
+#[test]
+fn counter_samples_are_late_relative_to_their_own_series_only() {
+    for family in [
+        exact(ExactKind::Rate, ExactParams::Rate),
+        exact(ExactKind::Increase, ExactParams::Increase),
+    ] {
+        let build = |samples: &[(u32, i64, f64)], bound: Option<u64>| {
+            let mut updater = updater(&family);
+            if let Some(bound) = bound {
+                updater = updater.with_max_out_of_order_ms(bound);
+            }
+            updater.ensure_groups(2).unwrap();
+            for &(group, ts, value) in samples {
+                updater.update(group, value, ts).unwrap();
+            }
+            let column = updater.seal();
+            [0, 1].map(|group| fingerprint(column.state(group).as_ref()))
+        };
+        let arrival = [(0, 12_000, 120.0), (1, 30_000, 300.0), (0, 11_000, 110.0)];
+        let in_order = [(0, 11_000, 110.0), (0, 12_000, 120.0), (1, 30_000, 300.0)];
+        assert_eq!(
+            build(&arrival, Some(5_000)),
+            build(&in_order, None),
+            "{family:?}"
+        );
+    }
+}
+
+// A 0 bound behaves as no bound: it refuses exactly the samples an
+// updater without a bound refuses (one at or before its group's previous
+// sample) and builds the same states from the rest.
+#[test]
+fn a_zero_bound_refuses_what_no_bound_refuses() {
+    let family = exact(ExactKind::Rate, ExactParams::Rate);
+    let build = |samples: &[(u32, i64, f64)], bound: Option<u64>| {
+        let mut updater = updater(&family);
+        if let Some(bound) = bound {
+            updater = updater.with_max_out_of_order_ms(bound);
+        }
+        updater.ensure_groups(2).unwrap();
+        let refused: Vec<bool> = samples
+            .iter()
+            .map(|&(group, ts, value)| updater.update(group, value, ts).is_err())
+            .collect();
+        let column = updater.seal();
+        let states = [0, 1].map(|group| fingerprint(column.state(group).as_ref()));
+        (refused, states)
+    };
+    for samples in [
+        vec![(0, 10_000, 100.0), (0, 12_000, 120.0), (0, 11_000, 110.0)],
+        vec![(0, 10_000, 100.0), (0, 10_000, 101.0), (0, 13_000, 130.0)],
+        vec![
+            (0, 10_000, 100.0),
+            (1, 5_000, 50.0),
+            (1, 4_000, 40.0),
+            (0, 11_000, 110.0),
+        ],
+    ] {
+        let (refused, states) = build(&samples, Some(0));
+        assert!(refused.iter().any(|&refused| refused), "{samples:?}");
+        assert_eq!((refused, states), build(&samples, None), "{samples:?}");
+    }
+}
+
 // A group number the updater never added is bad input, not a panic.
 #[test]
 fn an_unknown_group_is_bad_input() {
