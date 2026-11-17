@@ -195,7 +195,8 @@ fn defined_constants() -> Vec<(String, f64)> {
 /// terms are kept per constant: 0.1 compared hashes (0.62 each) and 0.3
 /// merged bytes (0.43 each) per row, times 7 rows, charge
 /// (0.1 × 0.62 + 0.3 × 0.43) × 7 = 1.337, where adding the per-constant
-/// products 0.7 × 0.62 + 2.1 × 0.43 gives 1.3370000000000002.
+/// products (0.1 × 7) × 0.62 + (0.3 × 7) × 0.43 gives 1.3370000000000002
+/// (0.1 × 7 is 0.7000000000000001).
 #[test]
 fn the_charge_adds_terms_in_the_formula_s_order() {
     let terms = NodeCostTerms::of(CostConstant::KmvUpdateOperationsPerComparedHash, 0.1)

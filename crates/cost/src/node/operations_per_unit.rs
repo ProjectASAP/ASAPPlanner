@@ -252,8 +252,8 @@ pub(crate) const KMV_UPDATE_OPERATIONS_PER_COMPARED_HASH: f64 = 0.62;
 /// sharing hashes (see [`merge_terms_per_state`]), scores 0.050 (RMS
 /// of the log error; largest 0.10); taking every hash as distinct scores
 /// 0.104, and also passing each group's first state through unmerged
-/// 0.120. Adding a constant per state, or per hash times log2 k, leaves it
-/// at 0.046. Fitted 2.61 per hash and 0.428 per compared hash, charged 2.6
+/// 0.120. Adding a constant per state, or per hash times log2 k, brings it
+/// to 0.046 but fits a negative constant per hash, so neither is kept. Fitted 2.61 per hash and 0.428 per compared hash, charged 2.6
 /// and 0.43: measured ÷ charged is 0.90–1.08 over the 45 merges, against
 /// 0.21–1.10 at the earlier 65 and 0.5. On 24 held-out rollups of states
 /// merged from 5 windows (10 and 100 per group, 6,000 to 300,000 rows each,
@@ -735,14 +735,18 @@ pub(crate) fn merge_terms_per_state(
         StateFamily::Sketch(SketchParams::Kmv { k }) => {
             let values = input_rows.and_then(|rows| rows.distinct_values);
             // The distinct values each input state folded, of which it
-            // retains the `k` smallest hashes.
-            let folded_values = input_rows.and_then(|rows| rows.rows_per_state).map(|rows| {
-                let rows = rows as f64;
-                values.map_or(rows, |values| {
-                    let values = values.max(1) as f64;
-                    expected_distinct_values(rows, values)
+            // retains the `k` smallest hashes: all `values` when its rows
+            // are unknown (a state never folds more).
+            let folded_values = input_rows
+                .and_then(|rows| rows.rows_per_state)
+                .map(|rows| {
+                    let rows = rows as f64;
+                    values.map_or(rows, |values| {
+                        let values = values.max(1) as f64;
+                        expected_distinct_values(rows, values)
+                    })
                 })
-            });
+                .or(values.map(|values| values.max(1) as f64));
             let retained_hashes =
                 folded_values.map_or(f64::from(*k), |folded| folded.min(f64::from(*k)));
             let hashes_per_group = retained_hashes * input_states_per_group.max(1) as f64;

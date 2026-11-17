@@ -1272,6 +1272,37 @@ fn a_kmv_merge_charges_its_measured_time_per_state() {
     }
 }
 
+/// A KMV state whose rows are unknown (built at ingestion) retains at most
+/// the distinct values its column takes: merging states of 500 users at
+/// k = 4,323 is charged as states that folded all 500, not 4,323 hashes
+/// each.
+#[test]
+fn a_kmv_merge_of_states_with_unknown_rows_retains_at_most_the_column_s_values() {
+    use crate::node::operations_per_unit::merge_terms_per_state;
+    let parameters = SketchParams::Kmv { k: 4_323 };
+    let charge = |rows_per_state, distinct_values| {
+        merge_terms_per_state(
+            StateFamily::Sketch(&parameters),
+            0,
+            0,
+            Some(StateInputRows {
+                rows_per_state,
+                distinct_values,
+                ..StateInputRows::UNKNOWN
+            }),
+            10,
+        )
+        .operations()
+    };
+    let unknown_rows = charge(None, Some(500));
+    let all_values_folded = charge(Some(1_000_000), Some(500));
+    assert!(
+        (unknown_rows / all_values_folded - 1.0).abs() < 1e-6,
+        "unknown rows {unknown_rows:.0}, every value folded {all_values_folded:.0}"
+    );
+    assert!(unknown_rows < charge(None, None) / 8.0);
+}
+
 /// A rollup merge of KMV states updates each group's state with every hash
 /// each input state retains (`asap_sketchlib`'s merge), so it compares
 /// those hashes with the ones the group's state already retains. Measured

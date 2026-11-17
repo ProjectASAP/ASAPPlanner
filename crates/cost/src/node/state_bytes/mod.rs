@@ -133,11 +133,13 @@ pub struct StateInputRows {
     /// `DDSKETCH_ASSUMED_MAGNITUDE_RANGE`. E.g. `Some(ValueMagnitudeRange {
     /// min_abs: 0.001, max_abs: 10000.0 })` for a latency in seconds.
     pub value_magnitude_range: Option<ValueMagnitudeRange>,
-    /// The distinct values the folded column takes, each folded row a draw
-    /// from them; `None` when not declared, which takes every row's value
-    /// as new. E.g. `Some(1_000_000)` for `user_id` over 1,000,000 users:
-    /// KMV states of 12,000 rows each then retain hashes of about 11,930
-    /// distinct users, and states merged together share some of them.
+    /// The distinct values the folded column takes in one state, each
+    /// folded row a draw from them: the fewer of the column's declared
+    /// distinct values and the sources' bound per group; `None` when
+    /// neither is declared, which takes every row's value as new. E.g.
+    /// `Some(1_000_000)` for `user_id` over 1,000,000 users: KMV states of
+    /// 12,000 rows each then fold about 11,929 distinct users, and states
+    /// merged together share some of their retained hashes.
     pub distinct_values: Option<u64>,
 }
 
