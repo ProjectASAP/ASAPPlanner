@@ -418,9 +418,9 @@ pub(crate) fn exact_distinct_value_terms_per_row(
 /// One counter update of a Hydra or HyperLogLog sketch, or of a sample, per
 /// counter its row updates ([`counters_updated_per_row`]), above
 /// `EXACT_UPDATE_OPERATIONS_PER_ROW`, the executor's cost of handing a row
-/// to its group's state. Not measured on the executor: `asap_sketchlib`'s
-/// own Count-Min Sketch of depth 3 with a top-k heap updates in about
-/// 72 ns, 18 ns per counter. The counter-matrix sketches (Count-Min, Count
+/// to its group's state. Not measured on the executor; taken from
+/// `asap_sketchlib`'s own Count-Min Sketch of depth 3 with a top-k heap,
+/// which updates in about 72 ns, 18 ns per counter. The counter-matrix sketches (Count-Min, Count
 /// Sketch, their heap variants, UnivMon) have measured constants below.
 pub(crate) const SKETCH_UPDATE_OPERATIONS_PER_COUNTER: f64 = 18.0;
 
@@ -442,7 +442,7 @@ pub(crate) const SKETCH_UPDATE_OPERATIONS_PER_COUNTER: f64 = 18.0;
 /// each (width, depth) shape 0.319; the old charges (18 per counter
 /// updated, nothing per state) were 3.1 RMS log under, up to 800x;
 /// measured ÷ charged is now 0.55–4.94. 17 ingestion-time builds, held
-/// out, measure 0.62–2.36x their charge (old: 4–246x). The largest errors
+/// out, measure 0.59–2.42x their charge (old: 4–246x). The largest errors
 /// are states of 2.8 MB or more, whose allocation the allocator serves
 /// either from memory it keeps or by faulting in fresh pages: one
 /// 120,000 x 47 Count Sketch measures 4.9x its charge, 100 states of
@@ -469,7 +469,7 @@ pub(crate) const UNIVMON_UPDATE_OPERATIONS_PER_COUNTER: f64 = 95.0;
 /// row costs one estimate per resident plus one ([`heap_residents_per_update`]),
 /// each hashing the item's key and reading one counter per row of depth
 /// (fitted 153 per estimate and 33.2 per counter read). Example: depth 10,
-/// heap of 10 full: 11 x (150 + 33 x 10) = 5,280 per row, measured 5.0–5.1
+/// heap of 10 full: 29 + 11 x (150 + 33 x 10) = 5,309 per row, measured 5.0–5.1
 /// µs at 1,000 and 10,000 rows per state, against 227 charged before.
 /// `asap_sketchlib`'s own heap update estimates only the row's item; once
 /// the kernel uses it, this constant, `CMS_HEAP_OPERATIONS_PER_ESTIMATED_COUNTER`
@@ -500,7 +500,8 @@ pub(crate) const COUNT_SKETCH_HEAP_OPERATIONS_PER_ESTIMATED_COUNTER: f64 = 36.0;
 /// state (fitted 2.1, one constant for every family). Example: a
 /// 7,500 x 81 Count Sketch (607,500 counters) costs 1.28 ms per state
 /// before its first row; 100 such states of 100 rows measure 3.6 ms each
-/// more than 300 x 81 ones.
+/// more than 300 x 81 ones, charged 1.22 ms more (the allocator's regime
+/// for states this large, see above).
 pub(crate) const SKETCH_ALLOCATION_OPERATIONS_PER_COUNTER: f64 = 2.1;
 
 /// One exact accumulator state merged into its group's (sum, count):
@@ -586,13 +587,14 @@ pub(crate) const COUNTER_MATRIX_MERGE_OPERATIONS_PER_STATE: f64 = 2_300.0;
 
 /// Per counter of a counter-matrix sketch state merged: the executor copies
 /// the group's state and adds the input's counters to it. Example: a
-/// 7,500 x 81 Count Sketch merges in 2,300 + 2.9 x 607,500 + 53 x 10 x 81
+/// 7,500 x 81 Count Sketch with a heap of 10 merges in 2,300 + 2.9 x
+/// 607,500 + 53 x 10 x 81
 /// = 1.81 ms, measured 1.93 (100 states into one).
 pub(crate) const COUNTER_MATRIX_MERGE_OPERATIONS_PER_COUNTER: f64 = 2.9;
 
 /// Per counter a heap's residents are re-estimated from when a state with
-/// a heap is merged: each resident of the merged heap is estimated over
-/// every row of depth (see `COUNTER_MATRIX_MERGE_OPERATIONS_PER_STATE`).
+/// a heap is merged: each resident of the input state's heap is estimated
+/// over every row of depth (see `COUNTER_MATRIX_MERGE_OPERATIONS_PER_STATE`).
 pub(crate) const HEAP_MERGE_OPERATIONS_PER_RESIDENT_COUNTER: f64 = 53.0;
 
 /// Per byte of the merged KLL state one group's answer is read from,
@@ -810,18 +812,17 @@ pub(crate) fn kmv_compared_hashes_per_row(
 }
 
 /// The counters one input row updates in a sketch with `parameters`: one
-/// per row of depth for Count-Min and Count Sketch, plus one heap update for
-/// their top-k variants; for UnivMon, the same per layer it updates
-/// (`univmon_expected_layers`); one for every other sketch. Example: a
-/// Count-Min Sketch of depth 3 with a heap updates 4.
+/// per row of depth for Count-Min and Count Sketch (a top-k heap's work is
+/// charged apart, [`update_terms_per_row`]); for UnivMon, its rows and its
+/// heap per layer it updates (`univmon_expected_layers`); one for every
+/// other sketch. Example: a Count-Min Sketch of depth 3 updates 3.
 pub(crate) fn counters_updated_per_row(parameters: &SketchParams) -> f64 {
     match parameters {
         SketchParams::Hydra(hydra) => counters_updated_per_row(&hydra.per_subpopulation()),
-        SketchParams::Cms { depth, .. } | SketchParams::CountSketch { depth, .. } => {
-            f64::from(*depth)
-        }
-        SketchParams::CmsWithHeap { depth, .. }
-        | SketchParams::CountSketchWithHeap { depth, .. } => f64::from(*depth) + 1.0,
+        SketchParams::Cms { depth, .. }
+        | SketchParams::CountSketch { depth, .. }
+        | SketchParams::CmsWithHeap { depth, .. }
+        | SketchParams::CountSketchWithHeap { depth, .. } => f64::from(*depth),
         SketchParams::UnivMon {
             sketch_rows,
             layers,
@@ -988,13 +989,7 @@ pub(crate) fn merge_terms_per_state(
             // are unknown (a state never folds more).
             let folded_values = input_rows
                 .and_then(|rows| rows.rows_per_state)
-                .map(|rows| {
-                    let rows = rows as f64;
-                    values.map_or(rows, |values| {
-                        let values = values.max(1) as f64;
-                        expected_distinct_values(rows, values)
-                    })
-                })
+                .map(|rows| distinct_items_seen(rows as f64, values))
                 .or(values.map(|values| values.max(1) as f64));
             let retained_hashes =
                 folded_values.map_or(f64::from(*k), |folded| folded.min(f64::from(*k)));
@@ -1112,8 +1107,10 @@ pub(crate) fn chain_emit_terms_per_state(summary_type: &FieldDataType) -> NodeCo
 /// KLL's and a top-k heap's read depend on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum StateLastWrittenBy {
-    /// A merge, which leaves a KLL's levels sorted.
-    Merge,
+    /// A merge of states folding the rows `input_rows` says (`None` when
+    /// unknown), which leaves a KLL's levels sorted and whose distinct
+    /// items a heap holds.
+    Merge { input_rows: Option<StateInputRows> },
     /// Updates of the rows `input_rows` says each state folds (`None` when
     /// unknown), whose newest items a KLL sorts when read and whose
     /// distinct items a heap holds.
@@ -1137,7 +1134,7 @@ pub(crate) fn estimate_terms_per_group(
     let output_row = NodeCostTerms::of(CostConstant::OutputRowOperationsPerGroup, 1.0);
     match family {
         StateFamily::Sketch(SketchParams::Kll { k }) => match written_by {
-            StateLastWrittenBy::Merge => output_row.plus(
+            StateLastWrittenBy::Merge { .. } => output_row.plus(
                 CostConstant::KllEstimateOperationsPerByte,
                 state_bytes as f64,
             ),
@@ -1159,10 +1156,8 @@ pub(crate) fn estimate_terms_per_group(
                 depth, heap_size, ..
             },
         ) => {
-            let input_rows = match written_by {
-                StateLastWrittenBy::Merge => None,
-                StateLastWrittenBy::Updates { input_rows } => input_rows,
-            };
+            let (StateLastWrittenBy::Merge { input_rows }
+            | StateLastWrittenBy::Updates { input_rows }) = written_by;
             output_row
                 .plus(CostConstant::HeapReadOperationsPerGroup, 1.0)
                 .plus(

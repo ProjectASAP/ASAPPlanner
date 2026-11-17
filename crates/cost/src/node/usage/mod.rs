@@ -1130,6 +1130,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             // sketch's counters), before its first row.
             let allocation_terms = state_allocation_terms(node.parameters.as_ref());
             let allocation_ops = allocation_terms.operations();
+            let allocation_detail = if allocation_ops > 0.0 {
+                format!(", {allocation_ops} ops to allocate each state")
+            } else {
+                String::new()
+            };
             let terms = update_terms
                 .times(input.rows as f64)
                 .plus(CostConstant::OperationsPerGroupPerRawBatch, group_visits)
@@ -1139,7 +1144,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 Ok(charged(terms, out.bytes, 0)),
                 format!(
                     "build {} into {group_count} states: {} rows x {update_ops} ops, \
-                     {group_visits:.0} group visits, {allocation_ops} ops to allocate each state",
+                     {group_visits:.0} group visits{allocation_detail}",
                     summary_type_name(family),
                     input.rows
                 ),
@@ -1336,7 +1341,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 Some(producer)
                     if matches!(producer.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. })) =>
                 {
-                    StateLastWrittenBy::Merge
+                    StateLastWrittenBy::Merge {
+                        input_rows: producer.state_input_rows,
+                    }
                 }
                 producer => StateLastWrittenBy::Updates {
                     input_rows: producer.and_then(|producer| producer.state_input_rows),
