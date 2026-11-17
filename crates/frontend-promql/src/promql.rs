@@ -77,7 +77,7 @@ use asap_types::ir::operator::arguments::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, PromQLVectorSetOpKind, Reduction, Source,
     TimeShift, VectorGrouping, VectorMatch, VectorMatchKind,
 };
-use asap_types::ir::{BinaryOperator, ExprSemantics, TimeRangeKind};
+use asap_types::ir::{ExprSemantics, TimeRangeKind};
 
 use asap_types::ir::operator::{InfoMatcher, SampleKind};
 use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
@@ -967,7 +967,13 @@ impl PromqlLowerer<'_> {
                 grouping,
             }
         });
-        Ok(vector_binary(op, vector_match, bin.return_bool(), lhs, rhs))
+        Ok(Unresolved::vector_binary(
+            op,
+            vector_match,
+            bin.return_bool(),
+            lhs,
+            rhs,
+        ))
     }
 
     fn lower_inner(&self, expr: &Expr) -> Result<Inner> {
@@ -1352,27 +1358,6 @@ fn children(expr: &Expr) -> Vec<&Expr> {
         | Expr::NumberLiteral(_)
         | Expr::StringLiteral(_)
         | Expr::Extension(_) => vec![],
-    }
-}
-
-/// A binary operation over two vectors.
-fn vector_binary(
-    kind: BinaryOpKind,
-    vector_match: Option<VectorMatch>,
-    return_bool: bool,
-    lhs: Unresolved,
-    rhs: Unresolved,
-) -> Unresolved {
-    Unresolved::BinaryOp {
-        operator: BinaryOperator {
-            kind,
-            vector_match,
-            checked_relative_division: false,
-            checked_finite_division: false,
-        },
-        return_bool,
-        lhs: Rc::new(lhs),
-        rhs: Rc::new(rhs),
     }
 }
 

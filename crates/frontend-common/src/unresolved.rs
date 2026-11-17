@@ -16,8 +16,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use asap_types::ir::operator::{
-    AggIntent, GroupKeys, InfoMatcher, JoinKind, Reduction, RelationalSetOpKind, SampleKind,
-    Source, TimeShift, WindowFrame, WindowFuncKind,
+    AggIntent, BinaryOpKind, GroupKeys, InfoMatcher, JoinKind, Reduction, RelationalSetOpKind,
+    SampleKind, Source, TimeShift, VectorMatch, WindowFrame, WindowFuncKind,
 };
 use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 use asap_types::ir::schema::{DataType, Schema};
@@ -319,6 +319,30 @@ impl UnresolvedScalar {
 }
 
 impl UnresolvedOp {
+    /// A binary operation over two vectors, matched by `vector_match`
+    /// (`None`: one-to-one on every label but the metric name); `return_bool`
+    /// makes a comparison answer 0 or 1 instead of filtering. The PromQL
+    /// and MetricsQL frontends both lower `a / on(job) group_left b` here.
+    pub fn vector_binary(
+        kind: BinaryOpKind,
+        vector_match: Option<VectorMatch>,
+        return_bool: bool,
+        lhs: UnresolvedOp,
+        rhs: UnresolvedOp,
+    ) -> Self {
+        UnresolvedOp::BinaryOp {
+            operator: BinaryOperator {
+                kind,
+                vector_match,
+                checked_relative_division: false,
+                checked_finite_division: false,
+            },
+            return_bool,
+            lhs: Rc::new(lhs),
+            rhs: Rc::new(rhs),
+        }
+    }
+
     /// A `Concat` of `children`.
     pub fn concat(children: Vec<UnresolvedOp>) -> Self {
         UnresolvedOp::Concat {
