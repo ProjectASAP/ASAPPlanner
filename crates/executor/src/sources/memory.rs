@@ -60,9 +60,11 @@ impl InMemoryDataStore {
         schema: SchemaRef,
         batches: Vec<Batch>,
     ) -> Result<Self, Error> {
-        self.bind_raw_data(source, schema, &batches)?;
+        if batches.iter().any(|batch| batch.schema() != &schema) {
+            return Err(Error::Invalid("raw data batch schema mismatch".into()));
+        }
         held_by_store(&batches);
-        self.raw_data.last_mut().expect("just bound").rows = RawRows::Whole(batches);
+        self.bind_raw_data(source, schema, RawRows::Whole(batches))?;
         Ok(self)
     }
 
@@ -78,11 +80,11 @@ impl InMemoryDataStore {
         schema: SchemaRef,
         lookback_ms: Option<u64>,
     ) -> Result<Self, Error> {
-        self.bind_raw_data(source, schema, &[])?;
-        self.raw_data.last_mut().expect("just bound").rows = RawRows::Appended {
+        let rows = RawRows::Appended {
             lookback_ms,
             rows: Vec::new(),
         };
+        self.bind_raw_data(source, schema, rows)?;
         Ok(self)
     }
 
@@ -151,13 +153,13 @@ impl InMemoryDataStore {
             .sum()
     }
 
-    /// Bind `source` with no rows yet; bad input when it is already bound or
-    /// a batch of `batches` is in another schema than `schema`.
+    /// Bind `source` to `rows`, all in `schema`; bad input when it is
+    /// already bound.
     fn bind_raw_data(
         &mut self,
         source: Source,
         schema: SchemaRef,
-        batches: &[Batch],
+        rows: RawRows,
     ) -> Result<(), Error> {
         crate::values::validate_schema(&schema)?;
         if self.raw_data.iter().any(|table| table.source == source) {
@@ -165,13 +167,10 @@ impl InMemoryDataStore {
                 "raw data {source:?} is bound twice"
             )));
         }
-        if batches.iter().any(|batch| batch.schema() != &schema) {
-            return Err(Error::Invalid("raw data batch schema mismatch".into()));
-        }
         self.raw_data.push(RawTable {
             source,
             schema,
-            rows: RawRows::Whole(Vec::new()),
+            rows,
         });
         Ok(())
     }

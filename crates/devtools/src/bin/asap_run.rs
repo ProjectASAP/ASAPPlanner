@@ -34,9 +34,6 @@ const USAGE: &str =
     "usage: asap_run bench-external --lane asap --run-dir <dir> [--variant <v>]... \
 [--core <n>] [--warmup <n>] [--runs <n>] [--max-core-busy <f>]";
 
-/// The lanes this binary runs.
-const LANES: [&str; 1] = ["asap"];
-
 enum Failure {
     Usage(String),
     Run(String),
@@ -96,8 +93,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         Some("asap") => AsapEngine,
         Some(other) => {
             return Err(Failure::Usage(format!(
-                "unknown lane {other}; known lanes: {}",
-                LANES.join(", ")
+                "unknown lane {other}; known lanes: asap"
             )))
         }
         None => return Err(Failure::Usage("--lane is required".into())),
