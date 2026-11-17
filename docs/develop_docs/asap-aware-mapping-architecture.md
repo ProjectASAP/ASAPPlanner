@@ -128,7 +128,7 @@ No stage caps the candidates it plans, and neither does `asap_planner`.
   Pass 1.
 - `crates/integration-tests/tests/planner_layering_example{1,2,3,4}.rs` pin
   the design document's examples through every stage;
-  `reuse_rules.rs`, `deployment_capabilities.rs`, `physical_properties_e2e.rs`
+  `reuse_rules.rs`, `deployment_exclusions.rs`, `physical_properties_e2e.rs`
   and `pass1_candidates.rs` cover single rules end to end.
 - `crates/devtools/tests/asap_planner.rs` checks the stage document and the
   committed viewer examples; `asap_planner_acceptance.rs` checks

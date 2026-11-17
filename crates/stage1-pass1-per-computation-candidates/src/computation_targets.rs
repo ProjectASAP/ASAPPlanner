@@ -14,7 +14,7 @@
 //! The input must be a logical memo: a group whose expression is an ASAP
 //! operator is rejected. No cost model and no accuracy target is read.
 
-use asap_types::deployment_capabilities::DeploymentExclusion;
+use asap_types::deployment_capabilities::{DeploymentExclusion, SketchReadout};
 use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::operator::arguments::Source;
 use asap_types::ir::operator::non_asap::any_measure_filtered;
@@ -142,9 +142,10 @@ fn nullable_avg_input(input: &Schema, intent: &AggIntent) -> bool {
 /// Pass 1 walks the groups, so an aggregate several queries read is one
 /// target per measure. An aggregate measure is eligible when it has a
 /// realization besides exact execution, even if every such realization is
-/// pruned. A summary whose sketch algorithm one of the deployment's
-/// `exclusions` rules out outright is skipped ([`without_excluded_families`]); Stage 2
-/// prunes the rest the deployment cannot run. Measure filters and `HAVING`
+/// pruned. A summary whose sketch algorithm, or the readout the measure
+/// reads from it, one of the deployment's `exclusions` rules out outright
+/// is skipped ([`without_excluded_summaries`]); Stage 2 prunes the rest the
+/// deployment cannot run. Measure filters and `HAVING`
 /// keep every candidate.
 pub(crate) fn computation_targets(
     memo: &Memo,
@@ -197,37 +198,60 @@ pub(crate) fn computation_targets(
     prune_topk_heaps_over_one_row_per_item(memo, &mut targets);
     add_nested_distributive_targets(memo, &mut targets);
     close_absorptions(&mut targets);
-    without_excluded_families(&mut targets, exclusions);
+    without_excluded_summaries(memo, &mut targets, exclusions);
     Ok(targets)
 }
 
 /// Drops from `targets`, and from their fused computations, each summary
-/// whose sketch algorithm one of `exclusions` rules out outright
-/// (`CandidateExclusion::family_excluded_outright`): Stage 2 would prune
-/// every build of it, and everything that reads only them. E.g. under
+/// Stage 2 would prune every build of, or every readout of for the
+/// measure: its sketch algorithm is excluded outright
+/// (`CandidateExclusion::family_excluded_outright`), or the statistic the
+/// measure reads from it is (`CandidateExclusion::readout_excluded_outright`;
+/// the outer measure's for a fused computation). E.g. under
 /// `supported_summaries: []` a quantile keeps no summary, only its exact
-/// expression. A narrower exclusion (KLL not mergeable across windows, or
-/// KLL's quantile readout) keeps the summary: Stage 2 decides per
-/// candidate. Exact accumulators are left to Stage 2 too.
-fn without_excluded_families(
+/// expression, and with KLL listed without its `Quantile` readout a
+/// quantile keeps no KLL. A narrower exclusion (KLL tumbling-window chains
+/// only) keeps the summary: Stage 2 decides per candidate. Exact
+/// accumulators are left to Stage 2 too.
+fn without_excluded_summaries(
+    memo: &Memo,
     targets: &mut [ComputationTarget],
     exclusions: &[DeploymentExclusion],
 ) {
-    let excluded: Vec<SummaryFamily> = exclusions
+    let families: Vec<SummaryFamily> = exclusions
         .iter()
         .filter_map(|exclusion| exclusion.exclusion.family_excluded_outright())
         .collect();
-    if excluded.is_empty() {
+    let readouts: Vec<SketchReadout> = exclusions
+        .iter()
+        .filter_map(|exclusion| exclusion.exclusion.readout_excluded_outright())
+        .collect();
+    if families.is_empty() && readouts.is_empty() {
         return;
     }
-    let buildable = |way: &HowToComputeAggregateMeasure| {
-        !matches!(way, HowToComputeAggregateMeasure::Summary(algorithm)
-            if excluded.contains(&SummaryFamily::Sketch(*algorithm)))
-    };
     for target in targets.iter_mut() {
-        target.ways_to_compute.retain(buildable);
+        let read_statistic = match expression(memo, target.aggregate_group) {
+            Operator::NonASAP(NonASAPOp::Aggregate { measures, .. }) => {
+                SketchStatistic::for_intent(&measures[target.measure_index])
+                    .map(|statistic| statistic.kind())
+            }
+            _ => None,
+        };
+        let excluded = |way: &HowToComputeAggregateMeasure| {
+            let HowToComputeAggregateMeasure::Summary(algorithm) = way else {
+                return false;
+            };
+            families.contains(&SummaryFamily::Sketch(*algorithm))
+                || read_statistic.is_some_and(|statistic| {
+                    readouts.contains(&SketchReadout {
+                        summary_type: *algorithm,
+                        statistic,
+                    })
+                })
+        };
+        target.ways_to_compute.retain(|way| !excluded(way));
         if let Some(fused) = &mut target.fused_computation {
-            fused.ways_to_compute.retain(buildable);
+            fused.ways_to_compute.retain(|way| !excluded(way));
         }
     }
 }

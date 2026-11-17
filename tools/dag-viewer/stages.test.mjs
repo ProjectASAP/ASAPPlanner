@@ -114,7 +114,7 @@ test('queries show a fixed interval and its phase', () => {
 });
 
 test('Stage 2 and Stage 3 pruning reasons read as words; dominated_by names its physical candidate', () => {
-  assert.equal(call('prunedReasonText', 'query_time_results_not_retained'), 'query time results not retained');
+  assert.equal(call('prunedReasonText', 'no_ingestion_pipeline'), 'no ingestion pipeline');
   assert.equal(call('prunedReasonText', { dominated_by: 7 }), 'dominated by C7');
   assert.equal(call('prunedReasonText', { excluded_by_deployment: 'raw_data_not_retained' }),
     'excluded by the deployment: raw data not retained');

@@ -69,8 +69,8 @@ pub use asap_stage3_plan_selection::{
     AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, Selection,
 };
 pub use asap_types::deployment_capabilities::{
-    CandidateExclusion, CounterSemantics, CounterSemanticsSupport, DeploymentCapabilities,
-    ExclusionSource, SketchReadout, SupportedSummary,
+    CandidateExclusion, CounterSemanticsSupport, DeploymentCapabilities, ExclusionSource,
+    SketchReadout, SupportedSummary,
 };
 pub use asap_types::ir::properties::selection::{
     Constraint, IntervalConstraintLimit, SelectionBox,
