@@ -32,6 +32,14 @@ fn exact_coarse_sum_reuses_fine_sum() {
 /// With raw data kept, each query is answered at query time from the raw
 /// rows (0.086/s together, 0.059/s for the 2m sum alone): the shared chain
 /// costs 2.16/s under the measured unit costs, so it is not selected.
+///
+/// The module's cost relation (at most 0.1% more than the 2m sum alone)
+/// does not hold even with the chain: the 1m sum reads a different range
+/// of the chain's 60 s windows (its newest one, against the 2m sum's
+/// newest two), so it pays its own merge, finalize and sum over the 10,000
+/// series every evaluation: 0.18/s + 0.42/s + 0.0007/s = 0.60/s, which is
+/// the whole difference (2.16/s against 1.56/s alone). The reuse is the
+/// shared chain, which this test checks.
 #[test]
 fn nested_exact_sum_reuses_newest_tumbling_windows() {
     let mut related = fuzz_workload("nested_exact_sum", false);
