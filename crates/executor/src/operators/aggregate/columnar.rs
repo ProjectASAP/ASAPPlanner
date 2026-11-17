@@ -2,6 +2,10 @@
 //! numbers each row's group, and each measure keeps one running state per
 //! group, updated in row order. The result equals reducing each group's
 //! rows in input order (the row-at-a-time operator).
+use super::running::{
+    compensated_sum_value, extremum_replaces, float_extremum_replaces, integer_sum_value,
+    RunningAvg,
+};
 use super::{kahan_inc, percentile_cont, quantile, Reduction};
 use crate::operators::common::{row_chunks, Workspace};
 use crate::operators::group_table::GroupTable;
@@ -17,56 +21,6 @@ use planner_types::ir::schema::{DataType, FieldDataType};
 
 fn invalid(message: &str) -> Error {
     Error::Invalid(message.into())
-}
-
-/// Prometheus `avg` as a running state: a compensated sum until it would
-/// overflow, then an incremental mean (see `super::promql_avg`).
-#[derive(Clone, Copy, Default)]
-struct RunningAvg {
-    sum: f64,
-    compensation: f64,
-    mean: f64,
-    incremental: bool,
-    count: u64,
-}
-
-impl RunningAvg {
-    fn add(&mut self, value: f64) {
-        if self.count == 0 {
-            *self = Self {
-                sum: value,
-                count: 1,
-                ..Self::default()
-            };
-            return;
-        }
-        self.count += 1;
-        let count = self.count as f64;
-        if !self.incremental {
-            let (next, next_c) = kahan_inc(value, self.sum, self.compensation);
-            if !next.is_infinite() {
-                (self.sum, self.compensation) = (next, next_c);
-                return;
-            }
-            self.incremental = true;
-            self.mean = self.sum / (count - 1.);
-            self.compensation /= count - 1.;
-        }
-        let q = (count - 1.) / count;
-        (self.mean, self.compensation) =
-            kahan_inc(value / count, q * self.mean, q * self.compensation);
-    }
-    fn value(&self) -> f64 {
-        if self.count == 0 {
-            return f64::NAN;
-        }
-        if self.incremental {
-            self.mean + self.compensation
-        } else {
-            let count = self.count as f64;
-            self.sum / count + self.compensation / count
-        }
-    }
 }
 
 /// Welford's running count, mean and sum of squared deviations from the
@@ -345,17 +299,9 @@ fn update_measure(
                 if selected(row) && values.is_valid(row) {
                     let value = values.value(row);
                     let slot = &mut best[group as usize];
-                    *slot =
-                        Some(slot.map_or(
-                            value,
-                            |old| {
-                                if min {
-                                    old.min(value)
-                                } else {
-                                    old.max(value)
-                                }
-                            },
-                        ));
+                    if slot.is_none_or(|old| float_extremum_replaces(value, old, min)) {
+                        *slot = Some(value);
+                    }
                 }
             }
         }
@@ -377,14 +323,7 @@ fn update_measure(
                 let slot = &mut best[group as usize];
                 let better = match slot {
                     None => true,
-                    Some(old) => {
-                        let order = value.compare(old)?;
-                        if min {
-                            order.is_lt()
-                        } else {
-                            order.is_gt()
-                        }
-                    }
+                    Some(old) => extremum_replaces(value, old, min)?,
                 };
                 if better {
                     // The replaced value's bytes are released.
@@ -505,10 +444,8 @@ fn finish_measure(
                 let (sum, c, seen) = sums[g as usize];
                 if !seen {
                     Value::Null
-                } else if sum.is_infinite() {
-                    Value::Float64(sum)
                 } else {
-                    Value::Float64(sum + c)
+                    Value::Float64(compensated_sum_value(sum, c))
                 }
             })
             .collect(),
@@ -532,9 +469,7 @@ fn finish_measure(
                 } else if matches!(measure, Reduction::Avg(_)) {
                     Ok(Value::Float64(sum as f64 / count as f64))
                 } else {
-                    i64::try_from(sum)
-                        .map(Value::Int64)
-                        .map_err(|_| invalid("integer sum overflow"))
+                    integer_sum_value(sum)
                 }
             })
             .collect::<Result<_, _>>()?,

@@ -52,6 +52,10 @@ pub mod promql_values;
 mod compiled;
 pub use compiled::CompiledPhysicalDAG;
 
+mod lowering;
+mod promql_series;
+mod relational;
+mod scalar_refs;
 mod time_window;
 use time_window::{
     below_time_shifts, counter_window, first_input, node_below_shifts, time_range_window,
@@ -132,11 +136,19 @@ fn compile_internal(
             },
         )
     });
+    // Per consumer, how many of its inputs (the last ones) its scalar
+    // expressions read.
+    let mut scalar_ref_input_count = BTreeMap::<NodeId, usize>::new();
     for edge in edges {
         dependencies
             .entry(edge.consumer as u64)
             .or_default()
             .push(edge.producer as u64);
+        if edge.role == planner_types::plan::physical_asap_dag::EdgeRole::ScalarRef {
+            *scalar_ref_input_count
+                .entry(edge.consumer as u64)
+                .or_default() += 1;
+        }
     }
     let mut views_by_node = BTreeMap::new();
     for view in views {
@@ -257,6 +269,19 @@ fn compile_internal(
                 .iter()
                 .map(|id| Arc::new(nodes[id].output_schema.clone()))
                 .collect::<Vec<_>>();
+            if lowering::lower_to_several_operators(
+                id,
+                node,
+                &inputs,
+                &schemas,
+                scalar_ref_input_count.get(&id).copied().unwrap_or(0),
+                &output,
+                &mut physical_dag,
+            )
+            .map_err(|error| invalid(format!("node {id}: {error}")))?
+            {
+                continue;
+            }
             // Whether an aggregate, summary build or merge reads a SQL
             // relation's rows (or states built from them), which gives it
             // SQL's rules for an empty input and a quantile; no other
@@ -1003,9 +1028,12 @@ pub(crate) fn require_sound_merge(input: &SchemaRef) -> Result<(), Error> {
 
 /// Bind a Planner node against the schemas supplied by its deployment edges.
 /// This is the same checked path used by complete DAG binding for a node
-/// that lowers to one operator. A node that lowers to several (an exact
-/// top-k, `count_values`, or a `without` grouping over a series identity)
-/// is lowered only by [`compile`]; here it is refused.
+/// that lowers to one operator, such as `SELECT DISTINCT` (a `Dedup`). A
+/// node that lowers to several (an exact top-k, `count_values`, a `without`
+/// grouping over a series identity, a `UNION` / `Concat`, a SQL window
+/// function, a `Sort` by an expression, PromQL `vector(s)`, or a scalar
+/// read of another operator) is lowered only by [`compile`]; here it is
+/// refused.
 /// `over_relation`: whether the node reads a SQL relation's rows (for
 /// summary states, whether they were built from one). Then an aggregate,
 /// build or merge into no groups has SQL's one row over no input rows, and
@@ -1108,6 +1136,14 @@ fn bind_operation(
             Arc::new(node.output_schema.clone()),
         );
     }
+    // SQL `INTERSECT` / `EXCEPT` [ALL]; a `UNION` lowers to several
+    // operators ([`lowering`]).
+    if let Payload::NonASAP(NonASAPOp::SetOp { kind, all, .. }) = &node.payload {
+        let [left, right] = inputs else {
+            return Err(invalid("a set operation reads two inputs"));
+        };
+        return Operator::set_operation(left.clone(), right.clone(), kind.clone(), *all);
+    }
     if let Payload::NonASAP(NonASAPOp::Values { rows, schema, .. }) = &node.payload {
         if !inputs.is_empty() {
             return Err(invalid("Values takes no relational inputs"));
@@ -1186,23 +1222,36 @@ fn bind_operation(
                 keys, partition_by, ..
             } => Operator::sort(
                 input.clone(),
-                keys.iter()
-                    .map(|key| {
-                        let ScalarExpr::Column(column) = key.expr else {
-                            return Err(invalid(
-                                "sort expression must be projected before sorting",
-                            ));
-                        };
-                        Ok(SortKey {
-                            column,
-                            descending: !key.ascending,
-                            nulls_first: key.nulls_first,
-                        })
-                    })
-                    .collect::<Result<_, Error>>()?,
+                lowering::sort_keys(keys, |expr| match expr {
+                    ScalarExpr::Column(column) => Ok(*column),
+                    _ => Err(invalid(
+                        "a sort by an expression lowers to several operators; compile lowers it",
+                    )),
+                })?,
                 groups(input, partition_by)?,
                 None,
             ),
+            // SQL `DISTINCT`: the first row of each distinct value of `cols`
+            // (all columns when empty).
+            NonASAPOp::Dedup { cols, .. } => {
+                let columns = match cols.is_empty() {
+                    true => (0..input.fields.len()).collect(),
+                    false => cols.clone(),
+                };
+                Operator::limit(input.clone(), 1, 0, columns)
+            }
+            NonASAPOp::PromqlRelabel { dst, value, .. } => Operator::series_relabel(
+                input.clone(),
+                Arc::new(node.output_schema.clone()),
+                dst.clone(),
+                promql_series::relabel_value(value, input)?,
+            ),
+            NonASAPOp::PromqlSeriesSample { by, kind, .. } => {
+                Operator::series_sample(input.clone(), groups(input, by)?, *kind)
+            }
+            NonASAPOp::PromqlInfoEnrich { .. } => Err(invalid(
+                "info() joins its info metric, which the plan does not carry as an input",
+            )),
             NonASAPOp::Limit {
                 n,
                 offset,
@@ -1657,13 +1706,10 @@ fn lower_count_values(
 ) -> Result<(Option<Operator>, Operator), Error> {
     let (project, partitions) = if output.fields.iter().any(|field| field.name == label) {
         let value = named_column(input, &ColumnRef::SampleValue)?;
-        let mut columns: Vec<_> = input
-            .fields
-            .iter()
-            .enumerate()
-            .map(|(i, field)| (field.name.clone(), Expression::Column(i)))
-            .collect();
-        columns.push((label.to_string(), Expression::FloatText(value)));
+        let project = lowering::widening_projection(
+            input,
+            [(label.to_string(), Expression::FloatText(value))],
+        )?;
         let text = input.fields.len();
         let mut partitions = groups(input, keys)?;
         match partitions
@@ -1673,7 +1719,7 @@ fn lower_count_values(
             Some(key) => partitions[key] = text,
             None => partitions.push(text),
         }
-        (Some(Operator::project(input.clone(), columns)?), partitions)
+        (Some(project), partitions)
     } else {
         (None, groups(input, keys)?)
     };

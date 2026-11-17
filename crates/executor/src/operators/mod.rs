@@ -18,6 +18,7 @@ use crate::expressions::ordered;
 pub use crate::expressions::Expression;
 use common::*;
 mod aggregate;
+mod bind_scalar_ref;
 mod current_series;
 mod filter;
 pub(crate) mod group_table;
@@ -27,17 +28,23 @@ mod projection;
 pub(crate) mod range_function;
 mod scope_timestamp;
 mod series_labels;
+mod series_sample;
 mod series_window;
+mod set_operation;
 mod sort;
 mod source;
+mod sql_window;
 mod summary;
 mod time_range;
 mod unchecked;
 pub(crate) mod vector_binary;
 pub(crate) mod vector_window;
 pub use aggregate::Reduction;
+pub use bind_scalar_ref::ScalarRefRead;
+pub(crate) use series_labels::RelabelValue;
 pub use series_window::SubquerySteps;
 pub use sort::SortKey;
+pub use sql_window::SqlWindowSpec;
 pub use summary::{RowWeight, SummaryEvaluation};
 pub(crate) use time_range::TUMBLING_WINDOW_END_COLUMN;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -103,8 +110,27 @@ enum Kind {
     },
     SeriesRelabel {
         destination: String,
-        replacement: String,
-        source_regex: Option<(String, String)>,
+        value: RelabelValue,
+    },
+    /// PromQL `limitk` / `limit_ratio` ([`Operator::series_sample`]).
+    SeriesSample {
+        groups: Vec<usize>,
+        kind: planner_types::ir::operator::SampleKind,
+    },
+    /// SQL `INTERSECT` / `EXCEPT` ([`Operator::set_operation`]).
+    SetOperation {
+        kind: planner_types::ir::operator::RelationalSetOpKind,
+        all: bool,
+    },
+    /// A SQL analytic window function ([`Operator::sql_window`]).
+    SqlWindow(Box<SqlWindowSpec>),
+    /// A column bound from another operator's output
+    /// ([`Operator::bind_scalar_ref`]).
+    BindScalarRef {
+        read: ScalarRefRead,
+        /// For `IN`: whether the probe and the values compare as floats
+        /// (an Int64 against Float64), fixed by the input types.
+        in_compares_floats: bool,
     },
     SeriesHistogramQuantile {
         /// `f64` bits: JSON cannot encode the NaN and infinite quantiles.
@@ -446,6 +472,10 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
                 | Kind::SeriesBinary { .. }
                 | Kind::SeriesHistogramQuantile { .. }
                 | Kind::SeriesRelabel { .. }
+                | Kind::SeriesSample { .. }
+                | Kind::SetOperation { .. }
+                | Kind::SqlWindow(_)
+                | Kind::BindScalarRef { .. }
                 | Kind::Aggregate { .. }
                 | Kind::Window { .. }
                 | Kind::Join { .. }
@@ -500,6 +530,10 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             Kind::SeriesLabels { .. } => "SeriesLabels",
             Kind::SeriesBinary { .. } => "SeriesBinary",
             Kind::SeriesRelabel { .. } => "SeriesRelabel",
+            Kind::SeriesSample { .. } => "SeriesSample",
+            Kind::SetOperation { .. } => "SetOperation",
+            Kind::SqlWindow(_) => "SqlWindow",
+            Kind::BindScalarRef { .. } => "BindScalarRef",
             Kind::SeriesHistogramQuantile { .. } => "SeriesHistogramQuantile",
             Kind::Project(_) => "Project",
             Kind::Filter(_) => "Filter",
@@ -566,6 +600,10 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             | Kind::SeriesBinary { .. }
             | Kind::SeriesHistogramQuantile { .. }
             | Kind::SeriesRelabel { .. } => series_labels::execute(self, inputs, context),
+            Kind::SeriesSample { .. } => series_sample::execute(self, inputs, context),
+            Kind::SetOperation { .. } => set_operation::execute(self, inputs, context),
+            Kind::SqlWindow(_) => sql_window::execute(self, inputs, context),
+            Kind::BindScalarRef { .. } => bind_scalar_ref::execute(self, inputs, context),
             Kind::Filter(_) => filter::execute(self, inputs, context),
             Kind::TimeRange { .. } => time_range::execute(self, inputs, context),
             Kind::EvaluateAt { .. } => time_range::execute_evaluate_at(inputs, context),

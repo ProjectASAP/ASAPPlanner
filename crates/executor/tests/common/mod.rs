@@ -80,3 +80,76 @@ pub fn run_roots(
             .collect())
     })
 }
+
+/// Run `operator` over sources holding `inputs` (each its schema and rows)
+/// at query time 0: the output rows, or the run's error. The run releases
+/// every byte it charged.
+pub fn run_over_sources(
+    inputs: Vec<(SchemaRef, Vec<Vec<asap_executor::values::Value>>)>,
+    operator: asap_executor::operators::Operator,
+) -> Result<Vec<Vec<asap_executor::values::Value>>, asap_executor::Error> {
+    run_over_sources_within(Default::default(), inputs, operator)
+}
+
+/// [`run_over_sources`] within `limits`.
+pub fn run_over_sources_within(
+    limits: asap_executor::runtime::Limits,
+    inputs: Vec<(SchemaRef, Vec<Vec<asap_executor::values::Value>>)>,
+    operator: asap_executor::operators::Operator,
+) -> Result<Vec<Vec<asap_executor::values::Value>>, asap_executor::Error> {
+    use asap_executor::operators::Operator;
+    use asap_executor::plan::PhysicalDAG;
+    use planner_types::stages::Lifetime;
+    let mut dag = PhysicalDAG::default();
+    let count = inputs.len() as u64;
+    for (id, (schema, rows)) in inputs.into_iter().enumerate() {
+        let batch = Batch::try_new(schema.clone(), rows).unwrap();
+        dag.add(
+            id as u64,
+            vec![],
+            Operator::source(schema, vec![batch]).unwrap(),
+            Lifetime::None,
+        )
+        .unwrap();
+    }
+    dag.add(count, (0..count).collect(), operator, Lifetime::None)
+        .unwrap();
+    let context = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: 0,
+        },
+        limits,
+    )
+    .unwrap();
+    let rows = run_roots(&dag, &[count], context.clone()).map(|mut outputs| {
+        outputs
+            .remove(0)
+            .iter()
+            .flat_map(Batch::to_rows)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(context.retained_bytes(), 0);
+    rows
+}
+
+/// A Planner node of `payload` typed `output`, for `compile_node`.
+pub fn planner_node(
+    payload: planner_types::ir::NonASAPOp<
+        planner_types::plan::physical_asap_dag::PhysicalASAPNodeId,
+    >,
+    output: &SchemaRef,
+) -> planner_types::plan::physical_asap_dag::PhysicalASAPDAGNode {
+    planner_types::plan::physical_asap_dag::PhysicalASAPDAGNode {
+        id: 99,
+        output_schema: (**output).clone(),
+        output_state: planner_types::ir::properties::ExecutionDataState::QUERY_ROWS,
+        lifetime: Default::default(),
+        parameters: None,
+        retention_ms: None,
+        payload: planner_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload::NonASAP(
+            payload,
+        ),
+        selected_physical_candidate: None,
+        view_coverage: None,
+    }
+}

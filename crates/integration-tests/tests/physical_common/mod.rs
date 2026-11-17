@@ -184,3 +184,48 @@ pub fn series_labels(
     }
     labels
 }
+
+#[allow(dead_code)]
+/// Run the planned `root` (an exact selection) at `evaluation_time_ms`, with
+/// each `Scan` reading `rows(source, schema)`: the root's rows, or the
+/// run's error.
+pub fn run_selected_root(
+    root: &std::rc::Rc<asap_types::ir::OperatorNode>,
+    evaluation_time_ms: i64,
+    rows: impl FnMut(
+        &asap_types::ir::operator::Source,
+        &asap_executor::values::SchemaRef,
+    ) -> Vec<Vec<asap_executor::values::Value>>,
+) -> Result<
+    (
+        asap_executor::values::SchemaRef,
+        Vec<Vec<asap_executor::values::Value>>,
+    ),
+    String,
+> {
+    let dag = asap_integration_tests::physical_export::physical_asap_dag(root);
+    let store = raw_data_store(&dag, rows);
+    let roots = [dag.roots[0] as u64];
+    let plan = asap_executor::physical_planner::compile(&dag, &[], &roots)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let schema = Arc::new(
+        dag.nodes
+            .iter()
+            .find(|node| node.id as u64 == roots[0])
+            .unwrap()
+            .output_schema
+            .clone(),
+    );
+    let bound = plan.instantiate(Arc::new(store)).unwrap();
+    let context = RunContext::new(Scope::Query { evaluation_time_ms }, Limits::default()).unwrap();
+    let rows = block_on(async {
+        let mut output = bound.execute(&roots, context.clone()).unwrap().remove(0);
+        let mut rows = Vec::new();
+        while let Some(batch) = output.next().await {
+            rows.extend(batch.map_err(|error| error.to_string())?.to_rows());
+        }
+        Ok::<_, String>(rows)
+    });
+    assert_eq!(context.retained_bytes(), 0);
+    Ok((schema, rows?))
+}
