@@ -1,4 +1,4 @@
-// cargo run -p asap-lower --bin variant_coverage -- --sample-interval-ms 1000
+// cargo run -p asap-devtools --bin variant_coverage -- --sample-interval-ms 1000
 //
 // Lowers every query in every corpus we have (PromQL + SQL), walks the
 // resulting `OperatorNode` DAGs, and reports which IR variants show up — per

@@ -1,4 +1,4 @@
-// cargo run -p asap-lower --example canonical_examples
+// cargo run -p asap-devtools --example canonical_examples
 //
 // One-off: pretty-print the `OperatorNode` DAG for one canonical query per variant,
 // plus custom Join/SetOp/Dedup/CTE probes, to eyeball the actual shape.

@@ -5,8 +5,6 @@
 //! assignment correctness is tested separately against the MILP model oracle.
 //! Larger fixtures check validated behavior without asserting global optimality.
 
-use crate::planner_layering_common;
-
 use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel};
 use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots};
 use asap_planner::{run_planning, PlanSearchSettings, PlanningModels, PlanningRun};
@@ -16,7 +14,7 @@ use asap_types::ir::QueryRoot;
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, PrometheusMetricType,
     Query, QueryLanguage, QueryRequirements, QueryWorkload, QueryWorkloadEntry, RepeatedDemand,
-    RepeatingEntry, RepetitionInterval, SourceFacts, TimestampMs,
+    RepeatingEntry, RepetitionInterval, SourceFacts, SqlDialect, TimestampMs,
 };
 
 fn workload_of(queries: &[(&str, u32)], accuracy: AccuracyTarget) -> PlanningWorkload {
@@ -216,10 +214,96 @@ fn composed_quantile_and_sum_outputs_are_validated_together() {
     );
 }
 
+/// Example 2: three dashboard panels over one flow stream, every 10 s
+/// over the last minute, with 10,000,000 distinct sources, and the
+/// `flows(ts, src_ip)` table they read (the design names only these two
+/// columns). The queries are the distinct sources (ε = 0.02), the entropy
+/// of the per-source counts (ε = 0.05) and their L2 norm (ε = 0.01, the
+/// strictest), each with δ = 0.01. Q3 casts the counts to DOUBLE: the
+/// design's Int64 `c * c` can overflow, so the SQL frontend recognizes
+/// only the Float64 product.
+fn example2() -> (PlanningWorkload, asap_frontend_sql::SqlCatalog) {
+    use asap_types::ir::schema::{DataType, Field, Schema};
+    // (query, ε, δ) per panel.
+    let panels = [
+        (
+            "SELECT COUNT(DISTINCT src_ip) FROM flows WHERE ts >= now() - INTERVAL '1 minute'",
+            0.02,
+            0.01,
+        ),
+        (
+            "SELECT -SUM(p * LN(p)) FROM (\
+             SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p FROM flows \
+             WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)",
+            0.05,
+            0.01,
+        ),
+        (
+            "SELECT SQRT(SUM(CAST(c AS DOUBLE) * CAST(c AS DOUBLE))) FROM (\
+             SELECT src_ip, COUNT(*) AS c FROM flows \
+             WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)",
+            0.01,
+            0.01,
+        ),
+    ];
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+            query_batch: None,
+            repeating_queries: Some(
+                panels
+                    .iter()
+                    .map(|&(query, epsilon, delta)| RepeatingEntry {
+                        query: Query(query.into()),
+                        demand: RepeatedDemand::FixedIntervalAt {
+                            interval: RepetitionInterval(10_000),
+                            evaluation_phase: TimestampMs(0),
+                        },
+                        requirements: QueryRequirements {
+                            accuracy: AccuracyTarget::max_error(epsilon).failure_probability(delta),
+                            max_latency_ms: None,
+                        },
+                        predictability: Predictability::Predictable { known_at: None },
+                        range_evaluation: None,
+                    })
+                    .collect(),
+            ),
+        },
+        // SQL needs no sample interval; `flows` holds 10,000,000 groups
+        // (one per source IP).
+        data_workload: Some(DataWorkload {
+            arrival: DataArrival::Ingesting {
+                rows_per_second: 1_000_000.0 / 15.0,
+                max_out_of_order_ms: None,
+            },
+            sources: [(
+                "flows".to_string(),
+                SourceFacts {
+                    series_count: Some(10_000_000),
+                    ..SourceFacts::default()
+                },
+            )]
+            .into(),
+        }),
+    };
+    let catalog = asap_frontend_sql::SqlCatalog::new().with_table(
+        "flows",
+        Schema::with_time_index(
+            vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("src_ip", DataType::Utf8, false),
+            ],
+            0,
+            vec![],
+        ),
+    );
+    (workload, catalog)
+}
+
 // The SQL frontend keeps repeated and different-window COUNT DISTINCT outputs.
 #[test]
 fn repeated_sql_queries_preserve_separate_output_references() {
-    let (mut workload, catalog) = planner_layering_common::example2();
+    let (mut workload, catalog) = example2();
     let entries = workload.query_workload.repeating_queries.as_mut().unwrap();
     let first = entries[0].clone();
     *entries = [1, 5, 1].into_iter().map(|minutes| RepeatingEntry {

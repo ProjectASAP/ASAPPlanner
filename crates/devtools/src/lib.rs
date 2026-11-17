@@ -1,20 +1,12 @@
-//! `asap-lower` — thin facade over the two query front ends.
+//! Developer tools over the planner: the `asap_planner` inspection CLI and
+//! the other bins, plus the helpers they and the integration tests share.
 //!
 //! Re-exports both language paths so a caller can depend on a single crate for
 //! PromQL *and* SQL. Both front ends end at the canonical intent algebra via
 //! the same unified operator IR ([`asap_types::ir::OperatorNode`]).
 //!
-//! ## Dependency isolation
-//!
-//! Depending on this facade pulls **both** parsers (`promql-parser` and
-//! DataFusion). A caller that needs only one language should depend on the
-//! matching front-end crate directly — [`asap_frontend_promql`] (PromQL parser
-//! only) or [`asap_frontend_sql`] (DataFusion only) — so it never compiles the
-//! other's parser.
-//!
-//! [`planning_stages`] and [`planner_layering_examples`] hold the one
-//! pipeline and the #509 example workloads that `asap_planner` and the
-//! planner-layering acceptance tests share; [`candidate_labels`] names the
+//! [`planning_stages`] holds the one pipeline that `asap_planner` and the
+//! integration tests share; [`candidate_labels`] names the
 //! candidates for the viewer document. [`corpora`] splits the checked-in
 //! query corpora and holds their SQL catalogs. [`rqe_atomic_costs`] converts
 //! sketch-bench's measured per-operation costs into plan selection's
@@ -24,7 +16,6 @@
 pub mod candidate_labels;
 pub mod corpora;
 pub mod planner_fuzz;
-pub mod planner_layering_examples;
 pub mod planning_stages;
 pub mod planning_stages_text;
 pub mod rqe_atomic_costs;
