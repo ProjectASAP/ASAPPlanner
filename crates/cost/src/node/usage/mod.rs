@@ -1098,6 +1098,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 rows_per_state: (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
                 non_negative,
                 value_magnitude_range,
+                distinct_values: folded_distinct_values(update),
             };
             built_state_input_rows = Some(input_rows);
             let state_bytes = measured_state_bytes.unwrap_or(summary_state_bytes(
@@ -1110,7 +1111,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 family,
                 node.parameters.as_ref(),
                 input_rows.rows_per_state,
-                folded_distinct_values(update),
+                input_rows.distinct_values,
             )
             .plus_terms(&carried_label_terms_per_row(&node.output_schema, reduction));
             let update_ops = update_terms.operations();
@@ -1168,6 +1169,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
                 non_negative,
                 value_magnitude_range,
+                distinct_values: folded_distinct_values(update),
             };
             built_state_input_rows = Some(input_rows);
             let state_bytes = measured_state_bytes.unwrap_or(summary_state_bytes(
@@ -1180,7 +1182,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 family,
                 node.parameters.as_ref(),
                 input_rows.rows_per_state,
-                folded_distinct_values(update),
+                input_rows.distinct_values,
             )
             .plus_terms(&carried_label_terms_per_row(&node.output_schema, reduction));
             let update_ops = update_terms.operations();
@@ -1294,9 +1296,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                                 family,
                                 input_state_bytes(producer),
                                 merged_state_bytes,
-                                producer
-                                    .state_input_rows
-                                    .and_then(|rows| rows.rows_per_state),
+                                producer.state_input_rows,
                                 states.div_ceil(group_count.max(1)),
                             )
                             .times(producer.output.rows as f64),

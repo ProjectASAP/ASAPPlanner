@@ -24,6 +24,33 @@ fn exact_state_is_priced_at_the_executors_state_size() {
     assert_eq!(asap_types::summary_type::EXACT_ACCUMULATOR_STATE_BYTES, 56);
 }
 
+/// Merging states keeps the larger column's distinct values, since they
+/// describe the column the states were built from, not one state: states
+/// over 1,000 and 1,000,000 users merge as 1,000,000; with either unknown,
+/// unknown. Rows add up per state.
+#[test]
+fn merged_input_rows_keep_the_larger_distinct_values() {
+    let rows = |rows_per_state, distinct_values| StateInputRows {
+        rows_per_state: Some(rows_per_state),
+        non_negative: true,
+        value_magnitude_range: None,
+        distinct_values,
+    };
+    let merged = StateInputRows::merged([
+        Some((rows(12_000, Some(1_000)), 2)),
+        Some((rows(6_000, Some(1_000_000)), 1)),
+    ])
+    .unwrap();
+    assert_eq!(merged.rows_per_state, Some(30_000));
+    assert_eq!(merged.distinct_values, Some(1_000_000));
+    let merged = StateInputRows::merged([
+        Some((rows(12_000, Some(1_000)), 1)),
+        Some((rows(6_000, None), 1)),
+    ])
+    .unwrap();
+    assert_eq!(merged.distinct_values, None);
+}
+
 /// The rows a family is fed.
 enum Rows {
     /// One sample value a row.
@@ -184,6 +211,7 @@ fn ddsketch_state_bytes_over_charge_narrower_values_within_their_bands() {
                 rows_per_state: Some(u64::from(n)),
                 non_negative: true,
                 value_magnitude_range: None,
+                distinct_values: None,
             },
         ) as f64
     };
@@ -221,6 +249,7 @@ fn ddsketch_state_bytes_match_the_library_on_latency_like_values() {
                 rows_per_state,
                 non_negative,
                 value_magnitude_range: None,
+                distinct_values: None,
             },
         )
     };
@@ -252,6 +281,7 @@ fn the_assumed_ddsketch_range_is_named_only_when_the_bytes_use_it() {
         rows_per_state: Some(600),
         non_negative: true,
         value_magnitude_range,
+        distinct_values: None,
     };
     let declared = ValueMagnitudeRange {
         min_abs: 0.001,
@@ -304,6 +334,7 @@ fn ddsketch_state_bytes_are_capped_by_the_declared_value_magnitude_range() {
                 rows_per_state,
                 non_negative: true,
                 value_magnitude_range,
+                distinct_values: None,
             },
         )
     };
@@ -374,6 +405,7 @@ fn ddsketch_state_bytes_under_charge_log_uniform_values_over_a_declared_range() 
                 rows_per_state: Some(u64::from(n)),
                 non_negative: true,
                 value_magnitude_range: Some(declared),
+                distinct_values: None,
             },
         );
         let held = library_ddsketch_mean_bytes(alpha, n, false, log_uniform_over_seven_decades);
@@ -409,6 +441,7 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
                 rows_per_state,
                 non_negative: true,
                 value_magnitude_range: None,
+                distinct_values: None,
             },
         )
     };
@@ -635,6 +668,7 @@ fn state_bytes_bound_the_executors_charge() {
                         rows_per_state: Some(u64::from(n)),
                         non_negative: false,
                         value_magnitude_range: None,
+                        distinct_values: None,
                     },
                 ) as usize;
             let context = format!("{algorithm:?} after {n} rows: {priced} priced");
@@ -735,6 +769,7 @@ fn priced_bytes_agree_with_the_executor() {
         rows_per_state: Some(u64::from(rows_per_state)),
         non_negative: true,
         value_magnitude_range: None,
+        distinct_values: None,
     };
     let gap = |issue, priced_over_charged| {
         Some(KnownBytesGap {

@@ -57,9 +57,10 @@
 
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::FieldDataType;
-use asap_types::summary_type::{ExactKind, SketchAlgorithm, SketchParams};
+use asap_types::summary_type::{ExactKind, SketchParams};
 
 use crate::node::cost_terms::{CostConstant, NodeCostTerms};
+use crate::node::state_bytes::StateInputRows;
 use crate::StateFamily;
 
 /// A row kept by a time range over raw rows, or a state read by a time
@@ -196,24 +197,76 @@ pub(crate) const COUNTER_UPDATE_OPERATIONS_PER_ROW: f64 = 33.0;
 pub(crate) const CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL: f64 = 37.0;
 
 /// One row folded into a KMV state, beyond the retained hashes it compares
-/// the row's hash with (`KMV_OPERATIONS_PER_COMPARED_HASH`): hashing the
-/// value and the state's checks. Fitted with that term on the executor
-/// over 28 builds: 300,000 rows of 100 to 10,000,000 distinct values, one
-/// state at k = 4,323 and 4 to 1,000 states at k = 26,656 (minimizing the
-/// squared log error, chosen by leave-one-out error over the distinct
-/// counts, 0.107 against 0.200 for the absolute): 63.8 per row and 0.51
-/// per compared hash, charged 65 and 0.50.
-pub(crate) const KMV_UPDATE_OPERATIONS_PER_ROW: f64 = 65.0;
+/// the row's hash with (`KMV_UPDATE_OPERATIONS_PER_COMPARED_HASH`): reading
+/// the row's value, finding its group's state, hashing the value and
+/// checking it against the state's largest retained hash.
+///
+/// Measured on the executor's KMV `SummaryAgg` by (service, endpoint),
+/// each build's time less its input's, median of 3 runs on one pinned
+/// core, 10 rows per group per batch: 10 to 10,000 groups, 1,200 to
+/// 60,000 rows per group, 10,000 to 1,000,000 distinct values, at k =
+/// 1,081, 4,323, 26,656 and 106,263 (132 builds). The two settings a busy
+/// host disturbed were measured three and four times and their median
+/// kept. Of the forms compared by the error leaving one setting (groups,
+/// rows per group, distinct values) out, a constant per row and one per
+/// compared hash scores 0.058 (RMS of the log error; largest 0.25), and
+/// 0.057 leaving each k out. Adding a term per inserted hash (the heap's
+/// push), or per inserted hash times log2 k, leaves it at 0.058; a term
+/// for the states' retained hashes outgrowing the cache brings it to 0.049
+/// but fits a machine-specific cache size, so it is left out. Fitted 108.8
+/// per row and 0.620 per compared hash, charged 110 and 0.62: measured ÷
+/// charged is 0.81–1.27 over the 132 builds, against 1.17–1.63 at the
+/// earlier 65 and 0.50. Example: 400 states at k = 4,323 over 60,000 rows
+/// each of 1,000,000 distinct values compare 976 hashes per row, 715 ns
+/// charged, 712 measured (553 charged before).
+pub(crate) const KMV_UPDATE_OPERATIONS_PER_ROW: f64 = 110.0;
 
 /// Per retained hash a KMV update compares the row's hash with
 /// ([`kmv_compared_hashes_per_row`]): `asap_sketchlib` checks a new hash
 /// for a duplicate by walking every hash it retains, unless the state is
-/// full and the hash is above its largest. Example: 4 states by `region` at
-/// k = 26,656 over 75,000 rows each of 100,000 distinct values compare
-/// 13,820 hashes per row, 6,975 ns charged, 7,410 measured; one state at
-/// k = 4,323 over all 300,000 rows fills early and compares 314, 222 ns
-/// charged, 191 measured.
-pub(crate) const KMV_OPERATIONS_PER_COMPARED_HASH: f64 = 0.5;
+/// full and the hash is above its largest, so an update costs O(k) while
+/// the state fills and for every hash that enters it. That walk is the
+/// library's, not the algorithm's: a set membership check would take O(1)
+/// per update; once the library has one, this constant and
+/// `KMV_UPDATE_OPERATIONS_PER_ROW` are measured again. Fitted with that
+/// constant (see its doc). Example: 4 states by `region` at k = 26,656 over
+/// 75,000 rows each of 100,000 distinct values compare 13,820 hashes per
+/// row, 8,678 ns charged, 8,357 measured; one state at k = 4,323 over all
+/// 300,000 rows fills early and compares 314, 305 ns charged, 329
+/// measured.
+pub(crate) const KMV_UPDATE_OPERATIONS_PER_COMPARED_HASH: f64 = 0.62;
+
+/// Per hash a KMV merge reads from an input state, beyond the retained
+/// hashes it compares that hash with
+/// (`KMV_MERGE_OPERATIONS_PER_COMPARED_HASH`): `asap_sketchlib` merges by
+/// updating the group's state with each hash the input retains, without
+/// reading a row or hashing a value.
+///
+/// Measured on the executor's `SummaryMerge` over stored KMV states, median
+/// of 3 runs on one pinned core: states of 1,200, 12,000 and 60,000 rows
+/// of 1,000,000 distinct values, merged 5 per group (a 5-minute range of
+/// 1-minute windows) and 10, 50 and 200 per group (a rollup), at k =
+/// 1,081, 4,323, 26,656 and 106,263 (45 merges). Of the forms compared by
+/// the error leaving one setting (k, rows per state, states per group)
+/// out, a constant per hash and one per compared hash, with the states
+/// sharing hashes (see [`merge_terms_per_state`]), scores 0.050 (RMS
+/// of the log error; largest 0.10); taking every hash as distinct scores
+/// 0.104, and also passing each group's first state through unmerged
+/// 0.120. Adding a constant per state, or per hash times log2 k, brings it
+/// to 0.046 but fits a negative constant per hash, so neither is kept. Fitted 2.61 per hash and 0.428 per compared hash, charged 2.6
+/// and 0.43: measured ÷ charged is 0.90–1.08 over the 45 merges, against
+/// 0.21–1.10 at the earlier 65 and 0.5. On 24 held-out rollups of states
+/// merged from 5 windows (10 and 100 per group, 6,000 to 300,000 rows each,
+/// some of 20,000 users) it is 0.84–1.14 (RMS log error 0.091, against
+/// 0.436 at 65 and 0.5).
+pub(crate) const KMV_MERGE_OPERATIONS_PER_HASH: f64 = 2.6;
+
+/// Per retained hash a KMV merge compares an inserted hash with, as a
+/// build's update does (`KMV_UPDATE_OPERATIONS_PER_COMPARED_HASH`); the
+/// library's linear walk makes a merge of `k`-hash states O(k²), where a
+/// sorted merge would be O(k). Fitted with `KMV_MERGE_OPERATIONS_PER_HASH`
+/// (see its doc).
+pub(crate) const KMV_MERGE_OPERATIONS_PER_COMPARED_HASH: f64 = 0.43;
 
 /// Per input row of an exact distinct count or frequency statistic, beyond
 /// its lookups and inserts below, the measure's own
@@ -308,6 +361,13 @@ fn cache_miss_fraction(entries: f64, entries_in_cache: f64) -> f64 {
     (1.0 - entries_in_cache / entries.max(1.0)).max(0.0)
 }
 
+/// The expected distinct values among `draws` uniform draws from a column
+/// of `values` values: `values · (1 − e^(−draws / values))`. Example:
+/// 12,000 rows of 1,000,000 users hold 11,929 distinct users.
+fn expected_distinct_values(draws: f64, values: f64) -> f64 {
+    -values * (-draws / values).exp_m1()
+}
+
 /// The operations one input row costs an exact distinct count (or
 /// frequency statistic) over `rows` rows in `group_count` groups, of a
 /// column taking `distinct_values` values, beyond the measure's own, its
@@ -329,7 +389,7 @@ pub(crate) fn exact_distinct_value_terms_per_row(
     let values = distinct_values.max(1) as f64;
     let rows = rows.max(1) as f64;
     let groups = group_count.max(1) as f64;
-    let pairs = groups * -values * (-(rows / groups) / values).exp_m1();
+    let pairs = groups * expected_distinct_values(rows / groups, values);
     let table_values = values.clamp(EXACT_DISTINCT_FEWEST_VALUES, EXACT_DISTINCT_MOST_VALUES);
     NodeCostTerms::of(CostConstant::ExactDistinctOperationsPerRow, 1.0)
         .plus(
@@ -526,7 +586,7 @@ pub(crate) fn update_terms_per_row(
         }
         (_, Some(SketchParams::Kmv { k })) => {
             NodeCostTerms::of(CostConstant::KmvUpdateOperationsPerRow, 1.0).plus(
-                CostConstant::KmvOperationsPerComparedHash,
+                CostConstant::KmvUpdateOperationsPerComparedHash,
                 kmv_compared_hashes_per_row(*k, rows_per_state, distinct_values),
             )
         }
@@ -577,7 +637,7 @@ pub(crate) fn kmv_compared_hashes_per_row(
             // Distinct values among the rows before it, and the share of
             // its own value among them.
             let seen = match values.is_finite() {
-                true => -values * (-row / values).exp_m1(),
+                true => expected_distinct_values(row, values),
                 false => row,
             };
             let seen_before = seen / values;
@@ -626,22 +686,26 @@ fn univmon_expected_layers(layers: u8) -> f64 {
 
 /// The operations one input state of `family` holding `state_bytes` costs
 /// merged into its group's state, which holds `merged_state_bytes` once
-/// merged; each input state folds `rows_per_input_state` rows (`None`:
-/// unknown) and its group merges `input_states_per_group` of them. A KMV
-/// merge updates the group's state with each hash the input retains (at
-/// most `k`, its rows when fewer), as `asap_sketchlib` merges, so each hash
-/// costs a row's update over all the hashes the group's merge inserts
-/// ([`kmv_compared_hashes_per_row`], each a different value). Example: a
-/// KLL state of 872 bytes merged into one of 33,512 costs 360 + 0.1 × 872 +
-/// 0.43 × 33,512 = 14,857. A rollup of 1,000 KMV states at k = 106,263 of
-/// 12,000 rows each into 100 groups (10 states per group) inserts 119,300
-/// hashes per group, 58,278 compared per hash: 348 s, measured 352 on the
-/// executor.
+/// merged; each input state folds `input_rows` (`None`: unknown) and its
+/// group merges `input_states_per_group` of them. A KMV merge updates the
+/// group's state with each hash the input retains (at most `k`, the
+/// distinct values it folded when fewer), as `asap_sketchlib` merges, so
+/// each hash costs `KMV_MERGE_OPERATIONS_PER_HASH` plus the retained hashes
+/// it is compared with over all the hashes the group's merge inserts
+/// ([`kmv_compared_hashes_per_row`]). Each state retains the smallest
+/// hashes of the values it folded, so the states draw theirs from the same
+/// smallest hashes of the column's values and share some: of `V` values, a
+/// state retaining `h` hashes of the `D` it folded draws them from the
+/// `V h / D` smallest. Example: a KLL state of 872 bytes merged into one of
+/// 33,512 costs 360 + 0.1 × 872 + 0.43 × 33,512 = 14,857. Five 1-minute
+/// KMV states at k = 4,323 of 12,000 rows each of 1,000,000 users retain
+/// 4,323 hashes each, drawn from the 362,000 smallest: 3.40 ms per state,
+/// measured 3.12 on the executor.
 pub(crate) fn merge_terms_per_state(
     family: StateFamily<'_>,
     state_bytes: u64,
     merged_state_bytes: u64,
-    rows_per_input_state: Option<u64>,
+    input_rows: Option<StateInputRows>,
     input_states_per_group: u64,
 ) -> NodeCostTerms {
     match family {
@@ -669,16 +733,34 @@ pub(crate) fn merge_terms_per_state(
                 )
         }
         StateFamily::Sketch(SketchParams::Kmv { k }) => {
+            let values = input_rows.and_then(|rows| rows.distinct_values);
+            // The distinct values each input state folded, of which it
+            // retains the `k` smallest hashes: all `values` when its rows
+            // are unknown (a state never folds more).
+            let folded_values = input_rows
+                .and_then(|rows| rows.rows_per_state)
+                .map(|rows| {
+                    let rows = rows as f64;
+                    values.map_or(rows, |values| {
+                        let values = values.max(1) as f64;
+                        expected_distinct_values(rows, values)
+                    })
+                })
+                .or(values.map(|values| values.max(1) as f64));
             let retained_hashes =
-                rows_per_input_state.map_or(u64::from(*k), |rows| rows.min(u64::from(*k)));
-            let hashes_per_group = retained_hashes.saturating_mul(input_states_per_group.max(1));
-            update_terms_per_row(
-                &FieldDataType::Sketch(SketchAlgorithm::Kmv),
-                Some(&SketchParams::Kmv { k: *k }),
-                Some(hashes_per_group),
-                None,
-            )
-            .times(retained_hashes as f64)
+                folded_values.map_or(f64::from(*k), |folded| folded.min(f64::from(*k)));
+            let hashes_per_group = retained_hashes * input_states_per_group.max(1) as f64;
+            // The smallest hashes of the column's values the states draw
+            // theirs from (`None`: every hash differs).
+            let shared_hashes = values
+                .zip(folded_values)
+                .map(|(values, folded)| (values as f64 * retained_hashes / folded.max(1.0)) as u64);
+            NodeCostTerms::of(CostConstant::KmvMergeOperationsPerHash, 1.0)
+                .plus(
+                    CostConstant::KmvMergeOperationsPerComparedHash,
+                    kmv_compared_hashes_per_row(*k, Some(hashes_per_group as u64), shared_hashes),
+                )
+                .times(retained_hashes)
         }
         StateFamily::Sketch(
             SketchParams::Hydra(_)

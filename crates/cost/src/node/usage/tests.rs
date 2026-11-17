@@ -806,6 +806,7 @@ fn a_merge_reading_one_state_per_group_passes_it_through() {
                 rows_per_state: Some(100),
                 non_negative: true,
                 value_magnitude_range: None,
+                distinct_values: None,
             },
         );
         let one_window = ProducerOutput {
@@ -825,6 +826,7 @@ fn a_merge_reading_one_state_per_group_passes_it_through() {
                 rows_per_state: Some(100),
                 non_negative: true,
                 value_magnitude_range: None,
+                distinct_values: None,
             }),
         };
         let merge = PhysicalASAPDAGNode {
@@ -1130,10 +1132,10 @@ fn an_exact_distinct_count_reads_at_most_its_column_s_declared_distinct_values()
 /// it holds `k` of them, then only hashes below its largest
 /// (`asap_sketchlib`'s duplicate check). Over 300,000 rows of 100,000
 /// distinct `user_id`s, one state at k = 4,323 fills early and measures
-/// 191 ns per row; four states by `region` at k = 26,656 (75,000 rows
-/// each) stay below `k` for most rows and measure 7,410. Charged a fixed
-/// 48 per row, the grouped build looked cheaper than an exact distinct
-/// count it measures 25x more than.
+/// 329 ns per row; four states by `region` at k = 26,656 (75,000 rows
+/// each) stay below `k` for most rows and measure 8,357 (median of 3
+/// runs of 3). Charged a fixed 48 per row, the grouped build looked
+/// cheaper than an exact distinct count it measures 25x more than.
 #[test]
 fn a_kmv_build_costs_per_retained_hash_it_compares() {
     use asap_types::summary_type::SketchAlgorithm;
@@ -1147,7 +1149,7 @@ fn a_kmv_build_costs_per_retained_hash_it_compares() {
             child: 0,
         }))
     };
-    for (keys, k, measured) in [(vec![], 4_323, 191.0), (vec![2], 26_656, 7_410.0)] {
+    for (keys, k, measured) in [(vec![], 4_323, 329.0), (vec![2], 26_656, 8_357.0)] {
         let mut rows = raw_rows(&range, "t", 300_000, 300_000);
         rows.output_schema = &range.output_schema;
         rows.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
@@ -1171,13 +1173,143 @@ fn a_kmv_build_costs_per_retained_hash_it_compares() {
     }
 }
 
+/// A KMV build's time per row, measured on the executor (median of 3 runs
+/// on one pinned core) over `user_id`s drawn from 1,000,000 values, in 10
+/// states by `job` and 1,000 by `instance`, from 1,200 to 60,000 rows per
+/// state at k = 1,081 to 106,263. Charged 65 per row and 0.5 per compared
+/// hash, these builds were charged 0.62–0.84 of their time: 400 states at
+/// k = 4,323 over 60,000 rows each were charged 553 ns per row and
+/// measure 712.
+#[test]
+fn a_kmv_build_charges_its_measured_time_per_row() {
+    use asap_types::summary_type::SketchAlgorithm;
+    let settings = CostInputs::default();
+    let (data, schema) = sql_rows_of_t(1_000_000);
+    let range = PhysicalASAPDAGNode {
+        output_schema: schema,
+        ..node(Payload::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(300),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        }))
+    };
+    // (grouping keys, input rows, k, measured ns per row)
+    for (keys, rows, k, measured) in [
+        (vec![1], 600_000, 1_081, 176.4),
+        (vec![1], 600_000, 4_323, 733.6),
+        (vec![1], 120_000, 26_656, 3_611.3),
+        (vec![3], 1_200_000, 4_323, 513.0),
+        (vec![3], 12_000_000, 4_323, 1_645.4),
+        (vec![3], 12_000_000, 106_263, 3_911.4),
+    ] {
+        let mut input = raw_rows(&range, "t", rows, 300_000);
+        input.output_schema = &range.output_schema;
+        input.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
+        let build = PhysicalASAPDAGNode {
+            parameters: Some(SketchParams::Kmv { k }),
+            ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+                child: 0,
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+                input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
+                reduction: Reduction::by(keys.clone()),
+                filter: None,
+            }))
+        };
+        let usage =
+            node_resource_usage_and_cost(&build, &[input], (1, 1.0), None, &data, &settings)
+                .unwrap();
+        let charged = usage.cpu_ops_per_second / rows as f64;
+        assert!(
+            (0.8..=1.25).contains(&(charged / measured)),
+            "k = {k}, keys {keys:?}, {rows} rows: charged {charged:.1} ns per row, \
+             measured {measured}"
+        );
+    }
+}
+
+/// A KMV merge's time per input state, measured on the executor's
+/// `SummaryMerge` over stored KMV states (median of 3 runs on one pinned
+/// core): states of `user_id`s drawn from 1,000,000 values (or 20,000),
+/// merged 5 per group (a 5-minute range of 1-minute windows) and 10 to 200
+/// per group (a rollup), at k = 1,081 to 106,263. Charged 65 per hash and
+/// 0.5 per compared hash, every hash taken as distinct, these merges were
+/// charged 0.87x to 4.9x their time: 200 states per group of 1,200 rows
+/// each at k = 1,081 were charged 88,151 ns per state and measure 18,109.
+/// States of 20,000 users share many hashes, and each shared one walks
+/// until it finds itself.
+#[test]
+fn a_kmv_merge_charges_its_measured_time_per_state() {
+    use crate::node::operations_per_unit::merge_terms_per_state;
+    // (k, input states per group, rows each state folds, distinct users,
+    // measured ns per state)
+    for (k, states, rows, users, measured) in [
+        (4_323, 5, 12_000, 1_000_000, 3_115_412.0),
+        (1_081, 200, 1_200, 1_000_000, 18_109.0),
+        (26_656, 50, 12_000, 1_000_000, 22_587_600.0),
+        (106_263, 10, 12_000, 1_000_000, 299_052_000.0),
+        (4_323, 200, 60_000, 1_000_000, 361_479.0),
+        (4_323, 10, 60_000, 20_000, 3_330_600.0),
+    ] {
+        let parameters = SketchParams::Kmv { k };
+        let input_rows = StateInputRows {
+            rows_per_state: Some(rows),
+            distinct_values: Some(users),
+            ..StateInputRows::UNKNOWN
+        };
+        let charged = merge_terms_per_state(
+            StateFamily::Sketch(&parameters),
+            0,
+            0,
+            Some(input_rows),
+            states,
+        )
+        .operations();
+        assert!(
+            (0.8..=1.25).contains(&(charged / measured)),
+            "k = {k}, {states} states per group of {rows} rows of {users} users: charged \
+             {charged:.0} ns per state, measured {measured}"
+        );
+    }
+}
+
+/// A KMV state whose rows are unknown (built at ingestion) retains at most
+/// the distinct values its column takes: merging states of 500 users at
+/// k = 4,323 is charged as states that folded all 500, not 4,323 hashes
+/// each.
+#[test]
+fn a_kmv_merge_of_states_with_unknown_rows_retains_at_most_the_column_s_values() {
+    use crate::node::operations_per_unit::merge_terms_per_state;
+    let parameters = SketchParams::Kmv { k: 4_323 };
+    let charge = |rows_per_state, distinct_values| {
+        merge_terms_per_state(
+            StateFamily::Sketch(&parameters),
+            0,
+            0,
+            Some(StateInputRows {
+                rows_per_state,
+                distinct_values,
+                ..StateInputRows::UNKNOWN
+            }),
+            10,
+        )
+        .operations()
+    };
+    let unknown_rows = charge(None, Some(500));
+    let all_values_folded = charge(Some(1_000_000), Some(500));
+    assert!(
+        (unknown_rows / all_values_folded - 1.0).abs() < 1e-6,
+        "unknown rows {unknown_rows:.0}, every value folded {all_values_folded:.0}"
+    );
+    assert!(unknown_rows < charge(None, None) / 8.0);
+}
+
 /// A rollup merge of KMV states updates each group's state with every hash
 /// each input state retains (`asap_sketchlib`'s merge), so it compares
 /// those hashes with the ones the group's state already retains. Measured
 /// on the executor: 1,000 states by (region, service) at k = 106,263, each
 /// built from 12,000 rows of 1,000,000 distinct users, merged into 100
-/// groups by service take 352 s (the plan's 393 s less its 40 s build).
-/// Charged per byte of state, they were 0.1 s.
+/// groups by service take 299 s (299 ms per state, median of 3 runs on
+/// one pinned core). Charged per byte of state, they were 0.1 s.
 #[test]
 fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
     use asap_types::ir::schema::DataType;
@@ -1193,6 +1325,7 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
         rows_per_state: Some(12_000),
         non_negative: false,
         value_magnitude_range: None,
+        distinct_values: Some(1_000_000),
     };
     let state_bytes = crate::node::state_bytes::sketch_state_bytes(&parameters, rows);
     let build = PhysicalASAPDAGNode {
@@ -1237,8 +1370,8 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
     assert_eq!(usage.output.rows, 100);
     let charged_s = usage.work_ms_per_execution / 1_000.0;
     assert!(
-        (0.75..=1.33).contains(&(352.0 / charged_s)),
-        "charged {charged_s:.1} s, measured 352"
+        (0.8..=1.25).contains(&(299.0 / charged_s)),
+        "charged {charged_s:.1} s, measured 299"
     );
 }
 
@@ -1263,6 +1396,7 @@ fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
         rows_per_state: Some(12_000),
         non_negative: false,
         value_magnitude_range: None,
+        distinct_values: None,
     };
     let state_bytes = crate::node::state_bytes::sketch_state_bytes(&parameters, rows);
     let build = PhysicalASAPDAGNode {
@@ -1712,6 +1846,7 @@ fn ddsketch_costed_bytes(
             rows_per_state: Some(600),
             non_negative,
             value_magnitude_range,
+            distinct_values: None,
         },
     )
 }
@@ -2356,6 +2491,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         rows_per_state: Some(10),
         non_negative: true,
         value_magnitude_range: None,
+        distinct_values: None,
     };
     let input = ProducerOutput {
         payload: &windows.payload,
@@ -2444,6 +2580,7 @@ fn kll_estimate_us_per_group(producer: Payload, rows_per_state: u64, state_bytes
             rows_per_state: Some(rows_per_state),
             non_negative: true,
             value_magnitude_range: None,
+            distinct_values: None,
         }),
     };
     let estimate = node(Payload::ASAP(ASAPOp::SummaryEstimate {
@@ -2883,6 +3020,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             rows_per_state: Some(60),
             non_negative: true,
             value_magnitude_range: None,
+            distinct_values: None,
         };
         // A KLL state's bytes grow with its `k`; an exact state is 56 bytes.
         let state_bytes = parameters.as_ref().map_or(56, |parameters| {
@@ -3001,6 +3139,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
         rows_per_state: Some(12_000),
         non_negative: false,
         value_magnitude_range: None,
+        distinct_values: None,
     };
     let kmv_build = PhysicalASAPDAGNode {
         parameters: Some(kmv.clone()),
@@ -3115,6 +3254,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
                     rows_per_state: Some(rows_per_state),
                     non_negative: true,
                     value_magnitude_range: None,
+                    distinct_values: None,
                 }),
             }],
             None,
