@@ -865,9 +865,9 @@ class AppTests(unittest.TestCase):
     def test_the_memo_view_hides_pruned_candidates_until_asked(self):
         """Pass 2's pruned candidates are hidden until the box is ticked."""
         js = self.memo_page(show_pruned=False)
-        self.assertEqual(self.memo_ids(js, "g3"), ["g3c4", "g3c5", "g3c6", "g3c7"])
+        self.assertEqual(self.memo_ids(js, "g4"), ["g4c4", "g4c5", "g4c6", "g4c7", "g4c8", "g4c9"])
         js.eval("__els.memoShowPruned.checked = true; __els.memoShowPruned.__on.change()")
-        self.assertEqual(len(self.memo_ids(js, "g3")), 8)
+        self.assertEqual(len(self.memo_ids(js, "g4")), 10)
 
     def tap_memo(self, js, element_id):
         js.eval(f"__taps['cyMemo node']({{ target: {{ data() {{ return __rendered.cyMemo.find((e) => e.data.id === {json.dumps(element_id)}).data; }} }} }})")

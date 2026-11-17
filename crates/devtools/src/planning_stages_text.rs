@@ -59,7 +59,9 @@ use crate::planning_stages::{PlanningStagesRun, RunUntil};
 /// derives them (or why it is not installable), each printed with the plan
 /// when given. A failure ends the text with its error.
 ///
-/// Each section starts with a legend of the labels it prints. Unless
+/// Each section starts with a legend of the labels it adds: a label is
+/// explained once, in the first section that prints it (the memo labels in
+/// Stage 0's memo, the candidate labels in Pass 1). Unless
 /// `verbose`: the candidates of a memo group that differ only in θ are
 /// folded ([`write_memo`]); groups omit their properties line; Pass 2's
 /// edges are the stored ones as producer ids by $\alpha^{\log}$, without
@@ -104,11 +106,7 @@ pub fn planning_stages_text(
         failure(&mut out);
         return out;
     };
-    section(
-        &mut out,
-        "Stage 1 Pass 1 output: Memo",
-        &[MEMO_LEGEND, CANDIDATE_LEGEND].concat(),
-    );
+    section(&mut out, "Stage 1 Pass 1 output: Memo", CANDIDATE_LEGEND);
     write_memo(&mut out, pass1, Some(MemoStep::Pass1), verbose);
     if until == RunUntil::Pass1 {
         return out;
@@ -122,8 +120,6 @@ pub fn planning_stages_text(
         &mut out,
         "Stage 1 Pass 2 output = Stage 2 input: LogicalASAPMemoCandidates",
         &[
-            MEMO_LEGEND,
-            CANDIDATE_LEGEND,
             PASS2_LEGEND,
             if verbose {
                 PASS2_VERBOSE_EDGES_LEGEND
@@ -330,8 +326,8 @@ pub fn column_lineage_text(
 /// it scans, (from Pass 2 on, `grid`) the grid a result of it is evaluated
 /// on, and an aggregate's coverage ([`aggregate_coverage_text`]):
 /// `State ts=latency.ts:Unknown state=G4.1:Unknown · depends on the
-/// evaluation time · scans latency · evaluated every 60000 ms at 0 ·
-/// covers G1 through [SummaryAgg Kll] selecting [...]`.
+/// evaluation time · scans latency · every 60000 ms · covers G1 through
+/// [SummaryAgg Kll] selecting [...]`.
 fn group_properties_text(group: &MemoGroup, grid: Option<Option<&EvaluationGrid>>) -> String {
     let properties = &group.group_properties;
     let columns: Vec<String> = properties
@@ -453,12 +449,7 @@ enum MemoStep<'a> {
 ///     [57]  Pass1  SummaryAgg CmsWithHeap <- G1  θ=CmsWithHeap(depth=7, heap_size=10, width=544)  fuses=[G4]
 ///         input 0 <- G1: ✓ G1[0]
 /// ```
-fn write_memo(
-    out: &mut String,
-    memo: &Memo,
-    step: Option<MemoStep<'_>>,
-    verbose: bool,
-) {
+fn write_memo(out: &mut String, memo: &Memo, step: Option<MemoStep<'_>>, verbose: bool) {
     // The group lines share one set of column widths, with each group's
     // candidates printed under its line.
     let (earlier, logical) = match step {
@@ -707,9 +698,10 @@ fn write_stored_logical_edges(
     }
 }
 
-/// The logical edges into each input of `consumer`, recomputed
-/// (`verbose`): each candidate of the input group with `✓`, or `✗` and why
-/// ([`logical_edges_into`]).
+/// The logical edges into each input of `consumer` (`verbose`), as Pass 2
+/// stored them: each candidate of the input group with `✓`, or `✗` and why:
+/// the reason Pass 2 recorded in `failing_logical_edges`, or `no edge` for
+/// a producer of another θ ([`logical_edges_into`]).
 fn write_logical_edges(
     out: &mut String,
     logical: &LogicalASAPMemoCandidates,

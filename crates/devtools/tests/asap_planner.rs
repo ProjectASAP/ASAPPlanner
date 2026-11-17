@@ -2315,7 +2315,7 @@ fn the_default_text_is_the_terse_form_and_verbose_adds_the_details() {
         String::from_utf8(output.stdout).unwrap()
     };
     let (terse, verbose) = (text(&[]), text(&["--verbose"]));
-    for detail in ["reads only time series", "α^log", "α^phys"] {
+    for detail in [" · scans ", "α^log", "α^phys"] {
         assert!(!terse.contains(detail), "terse text has no {detail:?}");
         assert!(verbose.contains(detail), "verbose text has {detail:?}");
     }
