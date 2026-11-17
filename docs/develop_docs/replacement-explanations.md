@@ -5,7 +5,7 @@
 > and why each candidate was pruned or rejected, is now in the stages'
 > output: Pass 1's pruned candidates with their `PruneReason`, Stage 2's
 > pruned candidates, and Stage 3's `Rejection` reasons, all written by
-> `asap_planner` (see the [Stage Viewer guide](../user_guide_docs/stage-viewer.md)).
+> `asap_planner` (see the [Plan Viewer guide](../user_guide_docs/plan-viewer.md)).
 
 ASAP-aware mapping should make its discovered opportunities visible to users and other components.
 

@@ -1,6 +1,6 @@
-# See how ASAPPlanner plans a workload: the Stage Viewer
+# See how ASAPPlanner plans a workload: the Plan Viewer
 
-The Stage Viewer is a web page that shows what ASAPPlanner does with one
+The Plan Viewer is a web page that shows what ASAPPlanner does with one
 workload at each
 [planning stage](../design_docs/proposals/planner-layering.md#asapplanner-system-overview-planning-stages),
 and which plan it selects. It reads one JSON document per workload, written

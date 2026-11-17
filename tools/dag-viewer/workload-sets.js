@@ -77,7 +77,7 @@
     }
     $('setsServer').textContent = `planning ${entry.id}…`;
     sqlTables(entry.file, workload)
-      .then((tables) => window.StageViewer.planWorkload(workload, set.deployment_capabilities || null, source, story, set.cost_model || null, set.accuracy_guarantees || null, tables))
+      .then((tables) => window.PlanViewer.planWorkload(workload, set.deployment_capabilities || null, source, story, set.cost_model || null, set.accuracy_guarantees || null, tables))
       .then(() => { $('setsServer').textContent = 'planned by the local server'; })
       .catch((err) => { $('setsServer').textContent = `the server could not plan ${entry.id}: ${err.message}`; });
   }
