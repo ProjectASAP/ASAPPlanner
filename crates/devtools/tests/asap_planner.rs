@@ -2432,8 +2432,8 @@ fn plan_file_round_trips_with_and_without_the_executor_check() {
     }
 }
 
-/// `sum by (job) (mad_over_time(data[1m]))`: Stages 1-3 plan it, but the
-/// Planner's executor has no `mad_over_time` kernel. Without `--plan-file`
+/// `absent_over_time(data[1m])`: Stages 1-3 plan it, but the
+/// Planner's executor has no `absent_over_time` kernel. Without `--plan-file`
 /// the run succeeds and the document says why the plan is not installable,
 /// as before. With the compile check (the default, or `compile`) and
 /// `--plan-file`, the stage output is still written, the run exits 1, and
@@ -2442,12 +2442,12 @@ fn plan_file_round_trips_with_and_without_the_executor_check() {
 /// does not compile there.
 #[test]
 fn executor_check_skip_writes_a_plan_the_executor_cannot_compile() {
-    let query = "sum by (job) (mad_over_time(data[1m]))";
+    let query = "absent_over_time(data[1m])";
     let workload = TempFile::json(&adhoc(&[query], exact(), &["data"]));
     let stage3 = ["--workload", workload.path(), "--run-until", "stage3"];
 
     // Precondition: an executor-only gap. Once the executor runs
-    // `mad_over_time`, pick another query it plans but cannot compile.
+    // `absent_over_time`, pick another query it plans but cannot compile.
     let document = document_of(&stage3);
     let views_error = document["stage3_plan_selection"]["materialized_views_error"]
         .as_str()
