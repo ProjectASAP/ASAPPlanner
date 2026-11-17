@@ -234,15 +234,18 @@ pub async fn plan_installable(
 
 /// The installable plan of `plan`, the plan Stage 3 built for a workload
 /// whose entries are `entries` (in `QueryWorkload::entries()` order): what
-/// [`plan_installable`] returns after planning, without its cost report. A
-/// caller that runs the planning stages itself (e.g. a developer tool) uses
-/// it to see what a runtime would install.
+/// [`plan_installable`] returns after planning, without its cost report.
+/// [`InstallablePlan::of_dag`], with each view's refresh and the query run
+/// compiled ([`executor_compiles`]): a plan the Planner's executor cannot
+/// run is refused here, not installed.
 pub fn installable_plan_of(
     plan: PhysicalASAPDAG,
     entries: &[QueryWorkloadEntry],
 ) -> Result<InstallablePlan, InstallablePlanError> {
     let query_texts: Vec<String> = entries.iter().map(|entry| entry.query.0.clone()).collect();
-    InstallablePlan::of_dag(plan, query_texts)
+    let plan = InstallablePlan::of_dag(plan, query_texts)?;
+    executor_compiles(&plan.dag, &plan.materialized_views()?)?;
+    Ok(plan)
 }
 
 impl InstallablePlan {
@@ -296,7 +299,8 @@ impl InstallablePlan {
     /// DAG's own `TimeRange`s are compiled, so a window the executor cannot
     /// run fails here. `Err` holds the executor's error, or why the views
     /// cannot be derived. [`plan_installable`] runs the same compiles before
-    /// it returns a plan; this checks a plan read from a plan file.
+    /// it returns a plan; this checks a plan read from a plan file or built
+    /// by [`Self::of_dag`].
     pub fn check_compiles(&self) -> Result<(), String> {
         let views = self
             .materialized_views()
@@ -304,27 +308,15 @@ impl InstallablePlan {
         executor_compiles(&self.dag, &views).map_err(|error| error.to_string())
     }
 
-    /// The plan of `dag`, validated ([`Self::of_dag_without_executor_check`]),
-    /// with each view's refresh and the query run compiled
-    /// ([`executor_compiles`]): a plan the Planner's executor cannot run is
-    /// refused here, not installed.
-    pub(crate) fn of_dag(
-        dag: PhysicalASAPDAG,
-        query_texts: Vec<String>,
-    ) -> Result<Self, InstallablePlanError> {
-        let plan = Self::of_dag_without_executor_check(dag, query_texts)?;
-        executor_compiles(&plan.dag, &plan.materialized_views()?)?;
-        Ok(plan)
-    }
-
     /// The plan of `dag` answering `query_texts` (one per root, in workload
-    /// order) for a runtime other than the Planner's executor: checked as
-    /// [`Self::validate`] checks a plan file (the DAG's validity, one text
-    /// per root, no standalone scalar query, and each view's and query-time
-    /// scan's retention, which Stage 3 set), but not compiled by the
-    /// Planner's executor. E.g. a plan with an `absent_over_time` the executor
-    /// has no kernel for is returned here and refused by [`Self::of_dag`].
-    pub fn of_dag_without_executor_check(
+    /// order), checked as [`Self::validate`] checks a plan file: the DAG's
+    /// validity, one text per root, no standalone scalar query, and each
+    /// view's and query-time scan's retention, which Stage 3 set. Not
+    /// compiled by the Planner's executor ([`Self::check_compiles`] does
+    /// that), so a runtime other than the Planner's executor gets every plan
+    /// Stage 3 selects: e.g. a plan with an `absent_over_time`, which the
+    /// Planner's executor has no kernel for.
+    pub fn of_dag(
         dag: PhysicalASAPDAG,
         query_texts: Vec<String>,
     ) -> Result<Self, InstallablePlanError> {

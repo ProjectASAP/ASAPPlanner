@@ -1,0 +1,32 @@
+{
+  "supported_summaries": [
+    {"summary_type": "Cms", "readouts": ["ItemFrequency", "Total"]},
+    {"summary_type": "CountSketch", "readouts": ["ItemFrequency"]},
+    {"summary_type": "CountSketchWithL2Norm", "readouts": ["ItemFrequency", "FrequencyL2"]},
+    {"summary_type": "CmsWithHeap", "readouts": ["ItemFrequency", "TopK"]},
+    {"summary_type": "CountSketchWithHeap", "readouts": ["ItemFrequency", "TopK"]},
+    {"summary_type": "CmsWithSpaceSaving", "readouts": ["ItemFrequency", "TopK"]},
+    {"summary_type": "CountSketchWithSpaceSaving", "readouts": ["ItemFrequency", "TopK"]},
+    {"summary_type": "CmsFold", "readouts": ["ItemFrequency", "TopK"]},
+    {"summary_type": "CountSketchFold", "readouts": ["ItemFrequency", "TopK"]},
+    {"summary_type": "Hll", "readouts": ["Distinct"]},
+    {"summary_type": "HllHip", "readouts": ["Distinct"]},
+    {"summary_type": "Kmv", "readouts": ["Distinct"]},
+    {"summary_type": "Kll", "readouts": ["Quantile", "Rank"]},
+    {"summary_type": "KllDynamic", "readouts": ["Quantile", "Rank"]},
+    {"summary_type": "DDSketch", "readouts": ["Quantile"]},
+    {"summary_type": "SpaceSaving", "readouts": ["ItemFrequency", "TopK"]},
+    {"summary_type": "Elastic", "readouts": ["ItemFrequency", "TopK"]},
+    {"summary_type": "Coco", "readouts": ["ItemFrequency", "PartialKeySum"]},
+    {"summary_type": "Bloom", "readouts": ["Membership"]},
+    {"summary_type": "SetAggregator", "readouts": ["Distinct", "Membership"]},
+    {"summary_type": "UnivMon", "readouts": ["Total", "FrequencyL2", "Distinct", "FrequencyEntropy", "GSum"]},
+    {"summary_type": "UnivMonTwoTier", "readouts": ["Total", "FrequencyL2", "Distinct", "FrequencyEntropy", "GSum"]},
+    {"summary_type": "UnivMonQ", "readouts": ["ItemFrequency", "FrequencyL2", "Distinct", "Quantile", "Rank", "GSum", "FrequencyEntropy", "TopK"]},
+    {"summary_type": "HydraCms", "readouts": ["ItemFrequency", "Total"]},
+    {"summary_type": "HydraCountSketch", "readouts": ["ItemFrequency"]},
+    {"summary_type": "HydraKll", "readouts": ["Quantile", "Rank"]},
+    {"summary_type": "HydraHll", "readouts": ["Distinct"]},
+    {"summary_type": "HydraUnivMon", "readouts": ["Total", "Distinct", "FrequencyL2", "FrequencyEntropy"]}
+  ]
+}

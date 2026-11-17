@@ -1,7 +1,7 @@
 {
   "accuracy_guarantees": "enforced",
   "materialized_views": [],
-  "materialized_views_error": "the executor cannot compile the plan's query run: invalid DAG: node 3: invalid DAG: value operation has no native implementation",
+  "planner_executor_error": "the executor cannot compile the plan's query run: invalid DAG: node 3: invalid DAG: value operation has no native implementation",
   "query": "max_over_time(sum(process_resident_memory_bytes)[6h:1m])",
   "selected": {
     "accepted": [
