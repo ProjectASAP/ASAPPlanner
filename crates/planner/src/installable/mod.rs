@@ -322,7 +322,7 @@ impl InstallablePlan {
     /// [`Self::validate`] checks a plan file (the DAG's validity, one text
     /// per root, no standalone scalar query, and each view's and query-time
     /// scan's retention, which Stage 3 set), but not compiled by the
-    /// Planner's executor. E.g. a plan with a `last_over_time` the executor
+    /// Planner's executor. E.g. a plan with an `absent_over_time` the executor
     /// has no kernel for is returned here and refused by [`Self::of_dag`].
     pub fn of_dag_without_executor_check(
         dag: PhysicalASAPDAG,

@@ -373,8 +373,8 @@ fn a_root_time_shift_is_read_whole_by_the_installer_not_by_the_cost() {
     assert_eq!(retention[0].lookback_ms(), None);
 }
 
-/// `sum by (job) (last_over_time(data[1m]))` every 10 s, exact: Stages 1-3
-/// plan it, but the Planner's executor has no `last_over_time` kernel, so
+/// `absent_over_time(data[1m])` every 10 s, exact: Stages 1-3
+/// plan it, but the Planner's executor has no `absent_over_time` kernel, so
 /// its compile check refuses the plan. A runtime other than the Planner's
 /// executor still gets the plan, validated, from
 /// [`InstallablePlan::of_dag_without_executor_check`].
@@ -382,7 +382,7 @@ fn a_root_time_shift_is_read_whole_by_the_installer_not_by_the_cost() {
 async fn a_plan_only_the_executor_cannot_compile_is_built_without_its_check() {
     let workload: crate::PlanningWorkload = serde_json::from_str(
         r#"{"query_workload": {"language": "promql", "repeating_queries": [{
-              "query": "sum by (job) (last_over_time(data[1m]))",
+              "query": "absent_over_time(data[1m])",
               "demand": {"fixed_interval_at": {"interval": 10000, "evaluation_phase": 0}},
               "requirements": {"accuracy": {"max_error": 0.0, "failure_probability": 0.0}},
               "predictability": {"predictable": {"known_at": null}}}]},
@@ -397,10 +397,10 @@ async fn a_plan_only_the_executor_cannot_compile_is_built_without_its_check() {
         crate::PlanningModels::builtin(),
     ))
     .await
-    .expect("Stages 1-3 plan last_over_time");
-    let query_texts = vec!["sum by (job) (last_over_time(data[1m]))".to_owned()];
+    .expect("Stages 1-3 plan absent_over_time");
+    let query_texts = vec!["absent_over_time(data[1m])".to_owned()];
     // Precondition: an executor-only gap. Once the executor runs
-    // `last_over_time`, pick another query it plans but cannot compile.
+    // `absent_over_time`, pick another query it plans but cannot compile.
     let refused = InstallablePlan::of_dag(output.plan.clone(), query_texts.clone()).unwrap_err();
     assert!(
         matches!(
