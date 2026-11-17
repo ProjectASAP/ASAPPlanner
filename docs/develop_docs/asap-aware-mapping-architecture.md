@@ -28,7 +28,7 @@ in `asap-integration-tests` (`crate_graph`) checks these edges with
 | `asap-stage3-plan-selection` (`crates/stage3-plan-selection`) | Stage 3: `select_plan` over Stage 2's output; costs each candidate and selectable edge with `asap-cost`, selects with the baseline MILP and builds the plan (`PhysicalASAPDAG`) |
 | `asap-planner` (`crates/planner`) | The facade: `e2e_plan` runs Stage 0, then the optimization pass (`Stage1ToStage3Pass` by default), which orchestrates Stages 1–3 (`run_planning`); the planning models (`PlanningModels`) and the `OptimizationPass` trait |
 | `asap-executor` (`crates/executor`) | Stage 4, the reference executor: operators and summary kernels over `asap_sketchlib`; it runs a `PhysicalASAPDAG` |
-| `asap-devtools` | `asap_planner` and the other inspection tools, the design-doc example workloads (`planner_layering_examples`) and the candidate labels |
+| `asap-devtools` | `asap_planner` and the other inspection tools and the candidate labels |
 
 ```text
 asap-types ◄── frontends (Stage 0)

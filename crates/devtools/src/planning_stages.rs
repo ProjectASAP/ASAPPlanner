@@ -1,6 +1,7 @@
-//! The four planner stages of #509 run over one workload: the facade's
-//! search for the planner-layering acceptance tests, and
-//! [`run_stages_until`] for `asap_planner`.
+//! The planner stages run over one workload: [`run_search_over`] and
+//! [`run_planning_stages_over`] run the facade's search for the integration
+//! tests and `planner_fuzz`, and [`run_stages_until`] stops after a chosen
+//! stage for `asap_planner`.
 
 use asap_frontend_sql::SqlCatalog;
 use asap_planner::{
@@ -134,7 +135,7 @@ pub fn lower_sql_roots(
         .collect()
 }
 
-/// Why [`run_planning_stages`] produced no run.
+/// Why a planning run produced no result.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanningStagesError {
     /// Pass 1 failed: there are no candidates, only the frontends' roots.
@@ -158,17 +159,7 @@ impl From<PlanningStagesError> for String {
     }
 }
 
-/// The planning stages over `workload`.
-pub fn run_planning_stages(
-    workload: &PlanningWorkload,
-    roots: Vec<QueryRoot>,
-) -> Result<PlanningStagesRun, PlanningStagesError> {
-    let entries: Vec<_> = workload.query_workload.entries().collect();
-    let data = workload.data_workload.clone().unwrap_or_default();
-    run_planning_stages_over(roots, &entries, &data, PlanningModels::builtin())
-}
-
-/// [`run_planning_stages`] over roots lowered from any mix of query
+/// The planning stages over roots lowered from any mix of query
 /// languages: query `i` is `roots[i]`, with workload entry `entries[i]`
 /// (its accuracy target, latency bound, recurrence and predictability).
 /// `models.deployment_capabilities` is what the executor can run and keep:
@@ -187,17 +178,6 @@ pub fn run_planning_stages_over(
         models,
         PlanSearchSettings { inspect: true },
     )
-}
-
-/// The facade's planning, as `plan_installable` runs it. Use the executor's summary capabilities in
-/// `models` when comparing with installation behavior.
-pub fn run_default_search_over(
-    roots: Vec<QueryRoot>,
-    entries: &[QueryWorkloadEntry],
-    data: &DataWorkload,
-    models: PlanningModels<'_>,
-) -> Result<PlanningStagesRun, PlanningStagesError> {
-    run_search_over(roots, entries, data, models, PlanSearchSettings::default())
 }
 
 /// The facade's planning with `settings`.

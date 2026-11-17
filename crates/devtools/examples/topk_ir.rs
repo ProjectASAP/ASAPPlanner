@@ -1,4 +1,4 @@
-// cargo run -p asap-lower --example topk_ir
+// cargo run -p asap-devtools --example topk_ir
 //
 // Lowers every topk-shaped query from the design discussion and prints the
 // resulting pre-ASAP IR. Used for interactive exploration; not a test.
