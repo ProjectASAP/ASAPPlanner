@@ -420,6 +420,14 @@ impl AggIntent<ColumnId> {
 }
 
 impl<C: Clone> AggIntent<C> {
+    /// Whether this range function's result keeps the series' metric name:
+    /// Prometheus keeps it for `last_over_time` and `first_over_time` only,
+    /// which act like selectors. `last_over_time(up[5m])` is still `up`;
+    /// `rate(requests_total[5m])` has no `__name__`.
+    pub fn keeps_metric_name(&self) -> bool {
+        matches!(self, AggIntent::LastOverTime | AggIntent::FirstOverTime)
+    }
+
     /// Whether this is a *per-series* reduction — it reduces a single series'
     /// samples over its range window (one value out per series), so it does
     /// **not** collapse across series and every label column is preserved.
@@ -718,48 +726,6 @@ pub mod topk {
             descending && !matches!(self, Self::NonAdditive)
         }
     }
-}
-
-/// Whether the executor reduces each series' raw data samples exactly for an
-/// `Aggregate` of `op` with `Reduction::PerEntity`: a PromQL range function
-/// over raw samples (`rate`, `changes`, `stddev_over_time`, …,
-/// `present_over_time`) or `timestamp(v)` over an instant selector. The
-/// executor compiles only these and refuses a plan holding any other exact
-/// per-entity aggregate (e.g. `absent_over_time`).
-pub fn agg_has_exact_per_entity_kernel(op: &AggIntent) -> bool {
-    matches!(
-        op,
-        AggIntent::Count
-            | AggIntent::Sum { .. }
-            | AggIntent::Avg { .. }
-            | AggIntent::Min { .. }
-            | AggIntent::Max { .. }
-            | AggIntent::StdDev { .. }
-            | AggIntent::Variance { .. }
-            | AggIntent::Quantile { .. }
-            | AggIntent::Cardinality { .. }
-            | AggIntent::FrequencyL2 { .. }
-            | AggIntent::FrequencyEntropy { .. }
-            | AggIntent::Rate
-            | AggIntent::Increase
-            | AggIntent::IRate
-            | AggIntent::Delta
-            | AggIntent::IDelta
-            | AggIntent::Deriv
-            | AggIntent::Changes
-            | AggIntent::Resets
-            | AggIntent::PredictLinear { .. }
-            | AggIntent::DoubleExpSmoothing { .. }
-            | AggIntent::LastOverTime
-            | AggIntent::FirstOverTime
-            | AggIntent::MadOverTime
-            | AggIntent::TsOfMinOverTime
-            | AggIntent::TsOfMaxOverTime
-            | AggIntent::TsOfFirstOverTime
-            | AggIntent::TsOfLastOverTime
-            | AggIntent::PresentOverTime
-            | AggIntent::TimeFn(TimeFunc::Timestamp)
-    )
 }
 
 /// Default `Cardinality` intent over the sample value — HLL standard error at

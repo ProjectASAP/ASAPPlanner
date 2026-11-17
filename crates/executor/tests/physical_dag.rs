@@ -1066,9 +1066,12 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         3,
         4,
         vec![0, 1, 2],
-        // The window (0 s, 60 s]: ending 59 s after the query's
-        // evaluation time (1 s), and at the ingestion run's window end.
-        Some((-59_000, 60_000)),
+        // The window (0 s, 60 s]: ending at the query's evaluation time
+        // (60 s), and at the ingestion run's window end.
+        Some(planner_types::plan::TimeWindow {
+            ends_before_evaluation_ms: 0,
+            length_ms: 60_000,
+        }),
     )
     .unwrap();
     let family = FieldDataType::Sketch(if count_sketch {
@@ -1140,12 +1143,16 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
     )
     .unwrap();
     for scope in [
-        query(),
+        Scope::Query {
+            evaluation_time_ms: 60_000,
+        },
         Scope::Ingestion {
             window_start_ms: 0,
             window_end_ms: 60_000,
         },
-        query(),
+        Scope::Query {
+            evaluation_time_ms: 60_000,
+        },
     ] {
         let result = run(&dag, 5, scope);
         assert_eq!(result.len(), 4);

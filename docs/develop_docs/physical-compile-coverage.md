@@ -167,8 +167,8 @@ Fallback and in query-time `Binary` nodes, following Prometheus'
   unique. A left duplicate is an error only if more than one match is kept.
 - `and`, `or`, and `unless` match label sets many-to-many, with `on` or
   `ignoring`, and return the original series.
-- Range functions other than `last_over_time` now drop `__name__` in the
-  Fallback. Series whose label sets become equal are an error, as in
+- Range functions other than `last_over_time` and `first_over_time` now
+  drop `__name__` in the Fallback. Series whose label sets become equal are an error, as in
   Prometheus. Vector-scalar results are checked the same way. Inside a
   subquery the inner function also drops the name and checks identities
   separately at each evaluation timestamp.
@@ -215,6 +215,19 @@ Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 
 Totals are unchanged: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 
+## Covered by per-series time functions
+
+| Row | Change |
+|---|---|
+| 1 | An exact per-series range function over raw samples lowers to a per-entity `Aggregate` over the window's `TimeRange`, which `compile` binds natively. A row reduction (`sum/avg/min/max/count/quantile/stddev/stdvar_over_time`, distinct, l2 and entropy) runs on the aggregate operator; a function of each series' time-ordered samples (`rate`, `increase`, `irate`, `delta`, `idelta`, `deriv`, `predict_linear`, `changes`, `resets`, `last/first_over_time`, `mad_over_time`, `ts_of_min/max/first/last_over_time`, `double_exponential_smoothing`, `present_over_time`) runs on the range function kernel, whose window ends a fixed offset before the evaluation time. `timestamp(v)` over an instant selector runs the same way. `rate` and `increase` extrapolate as Prometheus 3.x `extrapolatedRate`, in this kernel and in the exact counter state alike. The result drops `__name__`, except `last_over_time` and `first_over_time`, which keep it as Prometheus does. Still Partial. |
+
+The range function kernel reads the window of a `TimeRange` whose `TimeShift`s
+carry no `@` anchor: `rate(x[5m] @ 300)` does not compile yet, since its
+window is not a fixed offset back from the evaluation time. Any other
+per-entity aggregate, such as `absent_over_time(x[5m])`, fails to compile.
+
+Totals are unchanged: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
+
 ## Remaining
 
 In order of backend usage:
@@ -223,7 +236,8 @@ In order of backend usage:
    - Other scalar functions as operands.
    - Subquery operands other than one per-series function; implicit
      subquery resolution, which is a deployment default.
-   - Other functions, such as `stddev_over_time` and math functions.
+   - Other functions, such as `absent_over_time`, range functions under an
+     `@` anchor, and math functions.
      `absent(v)` is covered: it lowers to an `Aggregate` by no key with an
      `Absent` measure carrying the labels of `v`'s equality matchers, and
      compiles to the executor's `Absent` operator, which emits one sample of

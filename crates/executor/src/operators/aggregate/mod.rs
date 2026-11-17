@@ -159,23 +159,22 @@ impl Operator {
         Ok(self)
     }
     /// Each group's `intent` over its samples. `window` is the samples'
-    /// range window as `(end_offset_ms, width_ms)`: in a run, the window
-    /// `width_ms` wide ending `end_offset_ms` before the evaluation time (at
-    /// an ingestion run's window end), as `Operator::time_range` keeps it;
-    /// `None` only for a histogram quantile, whose coordinate is a bucket
-    /// bound.
+    /// time window back from the evaluation time (an ingestion run's window
+    /// end): `rate(x[5m] offset 1m)` reads `TimeWindow {
+    /// ends_before_evaluation_ms: 60_000, length_ms: 300_000 }`. `None` only
+    /// for a histogram quantile, whose coordinate is a bucket bound.
     pub fn window(
         input: SchemaRef,
         intent: planner_types::ir::operator::AggIntent,
         coordinate: usize,
         value: usize,
         groups: Vec<usize>,
-        window: Option<(i64, i64)>,
+        window: Option<planner_types::plan::TimeWindow>,
     ) -> Result<Self, Error> {
         use planner_types::ir::operator::AggIntent;
         validate_groups(&input, &groups)?;
         let histogram = matches!(intent, AggIntent::HistogramQuantile { .. });
-        if !histogram && !temporal::has_window_kernel(&intent) {
+        if !histogram && !super::range_function::has_range_function_kernel(&intent) {
             return Err(invalid(
                 "unsupported temporal intent or unresolved value column",
             ));
@@ -190,7 +189,7 @@ impl Operator {
         {
             return Err(invalid("window coordinate/value schema mismatch"));
         }
-        if (!histogram && !matches!(window, Some((_, width_ms)) if width_ms > 0))
+        if (!histogram && !matches!(window, Some(window) if window.length_ms > 0))
             || (histogram && window.is_some())
         {
             return Err(invalid("invalid temporal window"));
@@ -311,11 +310,11 @@ pub(super) fn execute<'a>(
             } => {
                 let input = collect_batch(input, &operator.inputs[0], &context).await?;
                 let window = window
-                    .map(|(end_offset_ms, width_ms)| {
-                        crate::operators::time_range::window(end_offset_ms, width_ms, &context)
+                    .map(|window| {
+                        crate::operators::time_range::time_window_bounds(window, &context)
                     })
                     .transpose()?;
-                let (mut arrays, results) = temporal::reduce_batch(
+                let (mut arrays, results) = super::range_function::reduce_batch(
                     &input.batch,
                     intent,
                     groups,
@@ -346,10 +345,9 @@ pub(super) fn execute<'a>(
 }
 
 mod columnar;
-pub(super) mod temporal;
 // Matches Prometheus `quantile`: NaN for no values or a NaN q, ±Inf outside
 // [0, 1], and NaN samples ordered first.
-pub(super) fn quantile(q: f64, mut values: Vec<f64>) -> f64 {
+pub(in crate::operators) fn quantile(q: f64, mut values: Vec<f64>) -> f64 {
     if values.is_empty() || q.is_nan() {
         return f64::NAN;
     }
@@ -396,7 +394,7 @@ fn interpolated(q: f64, values: &[f64]) -> f64 {
 
 /// Prometheus `kahansum.Inc`: Kahan-Neumaier compensated addition, with the
 /// compensation cleared once the sum is infinite.
-pub(super) fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
+pub(in crate::operators) fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
     let t = sum + inc;
     let c = if t.is_infinite() {
         0.

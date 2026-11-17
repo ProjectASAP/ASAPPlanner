@@ -10,7 +10,7 @@ use crate::{AggregateCore, Error};
 
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::FieldDataType;
-use planner_types::summary_type::{ExactKind, SketchParams, SummaryUpdate};
+use planner_types::summary_type::{SketchParams, SummaryUpdate};
 use std::sync::Arc;
 
 /// The open summary states of one family, one per group, updated one sample
@@ -123,10 +123,7 @@ impl StateColumnUpdater {
         };
         let counter = matches!(
             family,
-            FieldDataType::ExactAggregate(
-                ExactKind::Rate | ExactKind::Increase | ExactKind::IRate,
-                _
-            )
+            FieldDataType::ExactAggregate(kind, _) if kind.tracks_counter_increase()
         );
         // A Hydra grid is allocated up front, shared by all groups.
         let memory_bytes = match &states {

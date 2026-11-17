@@ -47,10 +47,7 @@ fn binary_of(operator: Operator) -> Computation {
 
 /// PromQL `range_function(m[w])` over a matrix: dropping the metric name
 /// unless `preserve_metric_name`.
-fn compile_temporal(
-    intent: &AggIntent<ColumnRef>,
-    preserve_metric_name: bool,
-) -> Result<Computation, Error> {
+fn compile_temporal(intent: &AggIntent, preserve_metric_name: bool) -> Result<Computation, Error> {
     let mut operators = vec![Operator::range_window(intent.clone())?];
     if !preserve_metric_name {
         operators.push(Operator::project(

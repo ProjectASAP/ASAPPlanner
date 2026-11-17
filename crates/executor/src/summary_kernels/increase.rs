@@ -216,8 +216,8 @@ pub(crate) fn extrapolated_rate(
     if to_end_seconds >= extrapolation_threshold_seconds {
         to_end_seconds = average_interval_seconds / 2.;
     }
-    let mut factor = (sampled_interval_seconds + to_start_seconds + to_end_seconds)
-        / sampled_interval_seconds;
+    let mut factor =
+        (sampled_interval_seconds + to_start_seconds + to_end_seconds) / sampled_interval_seconds;
     if is_rate {
         factor /= (end_ms as f64 - start_ms as f64) / 1000.;
     }

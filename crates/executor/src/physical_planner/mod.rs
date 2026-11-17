@@ -11,9 +11,7 @@ use crate::{
     Error,
 };
 use planner_types::ir::operator::asap::evaluated_rows_kind;
-use planner_types::ir::operator::{
-    agg_has_exact_per_entity_kernel, AggIntent, GroupKeys, Reduction as PlannerReduction,
-};
+use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as PlannerReduction};
 use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
 use planner_types::ir::schema::{DataType, FieldDataType};
 use planner_types::plan::materialized_view::MaterializedView;
@@ -435,8 +433,10 @@ fn compile_internal(
             // An exact per-series range reduction over raw data samples
             // (`rate`, `changes`, `stddev_over_time`, …), or `timestamp(v)`
             // over an instant selector, reduces each series' raw data samples
-            // in the window natively. Any other fails to compile
-            // (`agg_has_exact_per_entity_kernel`).
+            // in the window natively: a row reduction by the aggregate
+            // operator, a function of time-ordered samples by the range
+            // function kernel. Any other (e.g. `absent_over_time`) fails to
+            // compile.
             if let Payload::NonASAP(NonASAPOp::Aggregate {
                 reduction: PlannerReduction::PerEntity,
                 measures,
@@ -459,11 +459,6 @@ fn compile_internal(
                     Some(column) => *column,
                     None => named_column(input, &ColumnRef::SampleValue)?,
                 };
-                if !agg_has_exact_per_entity_kernel(measure) {
-                    return Err(invalid(format!(
-                        "node {id}: per-entity aggregate {measure:?} has no native implementation"
-                    )));
-                }
                 let coordinate = input
                     .time_index
                     .ok_or_else(|| invalid("temporal input lacks time"))?;
@@ -499,7 +494,15 @@ fn compile_internal(
                     AggIntent::FrequencyL2 { .. } => Some(Reduction::FrequencyL2(value)),
                     AggIntent::FrequencyEntropy { .. } => Some(Reduction::FrequencyEntropy(value)),
                     // A function of each series' time-ordered samples.
-                    _ => None,
+                    _ if crate::operators::range_function::has_range_function_kernel(measure) => {
+                        None
+                    }
+                    _ => {
+                        return Err(invalid(format!(
+                            "node {id}: per-entity aggregate {measure:?} has no native \
+                             implementation"
+                        )))
+                    }
                 };
                 let aggregate = match reduction {
                     Some(reduction) => Operator::aggregate(
@@ -513,19 +516,13 @@ fn compile_internal(
                                 "node {id}: per-entity {measure:?} requires a bounded time range input"
                             ))
                         })?;
-                        let millis = |ms: u64| {
-                            i64::try_from(ms).map_err(|_| invalid("a time window overflows Int64"))
-                        };
                         Operator::window(
                             input.clone(),
                             measure.clone(),
                             coordinate,
                             value,
                             groups,
-                            Some((
-                                millis(window.ends_before_evaluation_ms)?,
-                                millis(window.length_ms)?,
-                            )),
+                            Some(window),
                         )?
                     }
                 };
@@ -557,11 +554,10 @@ fn compile_internal(
                     .fields
                     .iter()
                     .any(|field| field.name == promql_rows::SERIES_IDENTITY_COLUMN)
-                    && !matches!(measure, AggIntent::LastOverTime | AggIntent::FirstOverTime)
+                    && !measure.keeps_metric_name()
                 {
                     // Range functions drop the metric name, as their
-                    // summary evaluations do; `last_over_time` and
-                    // `first_over_time` keep it, as Prometheus does.
+                    // summary evaluations do, unless Prometheus keeps it.
                     physical_dag.add(helper_id(id, 2)?, vec![helper_id(id, 1)?], stamped)?;
                     physical_dag.add(
                         id,

@@ -1,4 +1,6 @@
-//! Windowed computations use Planner intents; deployments supply the input window.
+//! PromQL range functions over each series' samples in a time window
+//! (`rate`, `irate`, `changes`, `mad_over_time`, …), and histogram bucket
+//! quantiles; the deployment supplies the window.
 use crate::{
     operators::{common::Workspace, sort::cooperative_sort},
     runtime::{Cooperative, RunContext},
@@ -12,9 +14,9 @@ use planner_types::ir::operator::{AggIntent, TimeFunc};
 /// histogram quantile; `value` Float64). A group whose value PromQL omits
 /// has no row. The result is the label columns and the value column of
 /// `output_value` type.
-pub(in crate::operators) async fn reduce_batch<C>(
+pub(in crate::operators) async fn reduce_batch(
     batch: &crate::values::Batch,
-    intent: &AggIntent<C>,
+    intent: &AggIntent,
     groups: &[usize],
     coordinate: usize,
     value: usize,
@@ -70,7 +72,12 @@ pub(in crate::operators) async fn reduce_batch<C>(
         let result = if let AggIntent::HistogramQuantile { q, .. } = intent {
             Some(Value::Float64(bucket_quantile(*q, buckets, context).await?))
         } else {
-            let points = cooperative_sort(points, |a, b| a.0.cmp(&b.0), context).await?;
+            // Rows usually arrive in time order; sort only when not.
+            let points = if points.is_sorted_by_key(|p| p.0) {
+                points
+            } else {
+                cooperative_sort(points, |a, b| a.0.cmp(&b.0), context).await?
+            };
             let (start, end) =
                 window.ok_or_else(|| Error::Invalid("missing temporal window".into()))?;
             if points.iter().any(|p| p.0 < start || p.0 > end)
@@ -80,7 +87,7 @@ pub(in crate::operators) async fn reduce_batch<C>(
                     "duplicate or out-of-window timestamp".into(),
                 ));
             }
-            window_value(
+            range_function_value(
                 intent,
                 &points,
                 start,
@@ -102,8 +109,8 @@ pub(in crate::operators) async fn reduce_batch<C>(
     Ok((labels, results))
 }
 
-/// Whether [`window_value`] reduces a series' samples for `intent`.
-pub(in crate::operators) fn has_window_kernel<C>(intent: &AggIntent<C>) -> bool {
+/// Whether [`range_function_value`] reduces a series' samples for `intent`.
+pub(crate) fn has_range_function_kernel(intent: &AggIntent) -> bool {
     matches!(
         intent,
         AggIntent::Rate
@@ -136,8 +143,8 @@ pub(in crate::operators) fn has_window_kernel<C>(intent: &AggIntent<C>) -> bool 
 
 /// One series' value over its sorted samples in the window `(start, end]`.
 /// `None` means PromQL emits no sample for this series.
-pub(in crate::operators) fn window_value<C>(
-    intent: &AggIntent<C>,
+pub(in crate::operators) fn range_function_value(
+    intent: &AggIntent,
     points: &[(i64, f64)],
     start: i64,
     end: i64,
@@ -157,9 +164,9 @@ pub(in crate::operators) fn window_value<C>(
         AggIntent::Sum { .. } | AggIntent::Avg { .. } => {
             let values = points.iter().map(|p| p.1).collect::<Vec<_>>();
             Some(Value::Float64(if matches!(intent, AggIntent::Sum { .. }) {
-                super::promql_sum(0., &values)
+                super::aggregate::promql_sum(0., &values)
             } else {
-                super::promql_avg(&values)
+                super::aggregate::promql_avg(&values)
             }))
         }
         AggIntent::Min { .. } => Some(Value::Float64(points.iter().fold(f64::NAN, |a, p| {
@@ -178,8 +185,7 @@ pub(in crate::operators) fn window_value<C>(
         }))),
         AggIntent::IRate => match points {
             [.., previous, last] => {
-                crate::summary_kernels::increase::instant_rate(*previous, *last)
-                    .map(Value::Float64)
+                crate::summary_kernels::increase::instant_rate(*previous, *last).map(Value::Float64)
             }
             _ => None,
         },
@@ -201,9 +207,9 @@ pub(in crate::operators) fn window_value<C>(
         }
         AggIntent::LastOverTime => points.last().map(|p| Value::Float64(p.1)),
         AggIntent::FirstOverTime => points.first().map(|p| Value::Float64(p.1)),
-        AggIntent::TsOfFirstOverTime => points.first().map(|p| seconds(p.0)),
+        AggIntent::TsOfFirstOverTime => points.first().map(|p| sample_time_seconds(p.0)),
         AggIntent::TsOfLastOverTime | AggIntent::TimeFn(TimeFunc::Timestamp) => {
-            points.last().map(|p| seconds(p.0))
+            points.last().map(|p| sample_time_seconds(p.0))
         }
         // Prometheus keeps the latest of tied extremes, and a NaN only
         // until a number follows.
@@ -220,15 +226,15 @@ pub(in crate::operators) fn window_value<C>(
                         best
                     }
                 })
-                .map(|p| seconds(p.0))
+                .map(|p| sample_time_seconds(p.0))
         }
         // A NaN sample makes the median, and the deviation, undefined.
         AggIntent::MadOverTime if points.iter().any(|p| p.1.is_nan()) => {
             Some(Value::Float64(f64::NAN))
         }
         AggIntent::MadOverTime => (!points.is_empty()).then(|| {
-            let median = super::quantile(0.5, points.iter().map(|p| p.1).collect());
-            Value::Float64(super::quantile(
+            let median = super::aggregate::quantile(0.5, points.iter().map(|p| p.1).collect());
+            Value::Float64(super::aggregate::quantile(
                 0.5,
                 points.iter().map(|p| (p.1 - median).abs()).collect(),
             ))
@@ -237,16 +243,15 @@ pub(in crate::operators) fn window_value<C>(
             double_exponential_smoothing(points, *smoothing, *trend)?.map(Value::Float64)
         }
         AggIntent::PresentOverTime => (!points.is_empty()).then_some(Value::Float64(1.)),
-        AggIntent::Quantile { col: None, q, .. } => Some(Value::Float64(super::quantile(
-            *q,
-            points.iter().map(|p| p.1).collect(),
-        ))),
+        AggIntent::Quantile { col: None, q, .. } => Some(Value::Float64(
+            super::aggregate::quantile(*q, points.iter().map(|p| p.1).collect()),
+        )),
         _ => return Err(Error::Invalid("unsupported temporal intent".into())),
     })
 }
 
 /// A sample time in milliseconds as PromQL's float seconds.
-fn seconds(timestamp_ms: i64) -> Value {
+fn sample_time_seconds(timestamp_ms: i64) -> Value {
     Value::Float64(timestamp_ms as f64 / 1000.)
 }
 
@@ -407,7 +412,7 @@ fn regression(points: &[(i64, f64)], anchor: i64) -> Option<(f64, f64)> {
     for &(timestamp, y) in points {
         let x = (i128::from(timestamp) - i128::from(anchor)) as f64 / 1000.;
         for (acc, value) in sums.iter_mut().zip([x, y, x * y, x * x]) {
-            *acc = super::kahan_inc(value, acc.0, acc.1);
+            *acc = super::aggregate::kahan_inc(value, acc.0, acc.1);
         }
     }
     let [sx, sy, sxy, sxx] = sums.map(|(s, c)| s + c);
@@ -426,6 +431,7 @@ mod tests {
         values::Batch,
     };
     use futures::StreamExt;
+    use planner_types::plan::TimeWindow;
     use planner_types::stages::Lifetime;
 
     use planner_types::ir::schema::{
@@ -433,7 +439,8 @@ mod tests {
     };
     use std::sync::Arc;
 
-    // The same window operator must give the same answer in either engine phase.
+    // The same window operator must give the same answer in either engine
+    // phase, and whatever order its rows arrive in.
     #[test]
     fn temporal_windows_execute_in_both_phases_and_count_is_integer() {
         let schema = Arc::new(Schema {
@@ -467,45 +474,60 @@ mod tests {
                 (AggIntent::Increase, Value::Float64(4.)),
                 (AggIntent::Count, Value::Int64(3)),
             ] {
-                let batch = Batch::try_new(
-                    schema.clone(),
-                    vec![
+                for time_ordered in [true, false] {
+                    let mut rows = vec![
                         vec![Value::Timestamp(0), Value::Float64(2.)],
                         vec![Value::Timestamp(1000), Value::Float64(4.)],
                         vec![Value::Timestamp(2000), Value::Float64(2.)],
-                    ],
-                )
-                .unwrap();
-                let operator =
-                    Operator::window(schema.clone(), intent, 0, 1, vec![], Some((0, 2000)))
-                        .unwrap();
-                let mut dag = PhysicalDAG::default();
-                dag.add(
-                    0,
-                    vec![],
-                    Operator::source(schema.clone(), vec![batch]).unwrap(),
-                    Lifetime::None,
-                )
-                .unwrap();
-                dag.add(1, vec![0], operator, Lifetime::None).unwrap();
-                let context = RunContext::new(scope.clone(), Limits::default()).unwrap();
-                let result = if matches!(scope, Scope::Ingestion { .. }) {
-                    let run = dag.execute_ingestion(&[1], context).unwrap();
-                    futures::executor::block_on(run)
-                        .unwrap()
-                        .remove(0)
-                        .remove(0)
-                } else {
-                    let mut output = dag.execute(&[1], context).unwrap().remove(0);
-                    futures::executor::block_on(output.next()).unwrap().unwrap()
-                };
-                assert_eq!(
-                    format!("{:?}", result.to_rows()[0][0]),
-                    format!("{expected:?}")
-                );
+                    ];
+                    if !time_ordered {
+                        rows.reverse();
+                    }
+                    let batch = Batch::try_new(schema.clone(), rows).unwrap();
+                    let operator = Operator::window(
+                        schema.clone(),
+                        intent.clone(),
+                        0,
+                        1,
+                        vec![],
+                        Some(TimeWindow {
+                            ends_before_evaluation_ms: 0,
+                            length_ms: 2000,
+                        }),
+                    )
+                    .unwrap();
+                    let mut dag = PhysicalDAG::default();
+                    dag.add(
+                        0,
+                        vec![],
+                        Operator::source(schema.clone(), vec![batch]).unwrap(),
+                        Lifetime::None,
+                    )
+                    .unwrap();
+                    dag.add(1, vec![0], operator, Lifetime::None).unwrap();
+                    let context = RunContext::new(scope.clone(), Limits::default()).unwrap();
+                    let result = if matches!(scope, Scope::Ingestion { .. }) {
+                        let run = dag.execute_ingestion(&[1], context).unwrap();
+                        futures::executor::block_on(run)
+                            .unwrap()
+                            .remove(0)
+                            .remove(0)
+                    } else {
+                        let mut output = dag.execute(&[1], context).unwrap().remove(0);
+                        futures::executor::block_on(output.next()).unwrap().unwrap()
+                    };
+                    assert_eq!(
+                        format!("{:?}", result.to_rows()[0][0]),
+                        format!("{expected:?}")
+                    );
+                }
             }
         }
-        assert!(Operator::window(schema, AggIntent::Rate, 0, 1, vec![], Some((0, 0))).is_err());
+        let empty = TimeWindow {
+            ends_before_evaluation_ms: 0,
+            length_ms: 0,
+        };
+        assert!(Operator::window(schema, AggIntent::Rate, 0, 1, vec![], Some(empty)).is_err());
     }
 
     // `rate` and `increase` extrapolate as Prometheus `extrapolatedRate`
@@ -529,14 +551,14 @@ mod tests {
         let (start, end) = (0, 300_000);
         for (intent, kind, params, expected) in [
             (
-                AggIntent::<planner_types::ir::schema::ColumnId>::Increase,
+                AggIntent::Increase,
                 ExactKind::Increase,
                 ExactParams::Increase,
                 16.5,
             ),
             (AggIntent::Rate, ExactKind::Rate, ExactParams::Rate, 0.055),
         ] {
-            let raw = match window_value(&intent, &points, start, end, end).unwrap() {
+            let raw = match range_function_value(&intent, &points, start, end, end).unwrap() {
                 Some(Value::Float64(value)) => value,
                 other => panic!("{other:?}"),
             };
@@ -568,7 +590,7 @@ mod tests {
     #[test]
     fn range_functions_match_prometheus() {
         let points = [(10_000, 1.), (20_000, 4.), (30_000, 2.), (40_000, 4.)];
-        let value = |intent: AggIntent, points: &[(i64, f64)]| match window_value(
+        let value = |intent: AggIntent, points: &[(i64, f64)]| match range_function_value(
             &intent, points, 0, 40_000, 40_000,
         )
         .unwrap()
@@ -630,7 +652,7 @@ mod tests {
         // A factor outside (0, 1) is an error, as Prometheus panics on it.
         for (smoothing, trend) in [(1., 0.5), (0.5, 0.), (f64::NAN, 0.5)] {
             let intent: AggIntent = AggIntent::DoubleExpSmoothing { smoothing, trend };
-            assert!(window_value(&intent, &points, 0, 40_000, 40_000).is_err());
+            assert!(range_function_value(&intent, &points, 0, 40_000, 40_000).is_err());
         }
         // A NaN extreme gives way to the next number; a later NaN does not
         // replace it.

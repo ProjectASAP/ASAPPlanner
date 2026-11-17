@@ -55,7 +55,7 @@ impl Operator {
     /// Output rows keep the input schema, with time `t` and the result value.
     pub fn series_window(
         input: SchemaRef,
-        function: Option<AggIntent<ColumnRef>>,
+        function: Option<AggIntent>,
         range_ms: i64,
         offset_ms: i64,
         at_ms: Option<i64>,
@@ -90,7 +90,7 @@ impl Operator {
         }
         if function
             .as_ref()
-            .is_some_and(|function| !aggregate::temporal::has_window_kernel(function))
+            .is_some_and(|function| !range_function::has_range_function_kernel(function))
         {
             return Err(invalid("unsupported PromQL range function"));
         }
@@ -286,7 +286,7 @@ pub(super) fn execute<'a>(
                         if fresh.is_empty() {
                             None
                         } else {
-                            match aggregate::temporal::window_value(
+                            match range_function::range_function_value(
                                 intent,
                                 &fresh,
                                 start,

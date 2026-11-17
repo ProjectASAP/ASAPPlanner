@@ -30,13 +30,11 @@ pub fn insufficient_counter_raw_data_samples(
     state: &dyn AggregateCore,
     statistic: ExactKind,
 ) -> bool {
-    matches!(
-        statistic,
-        ExactKind::Rate | ExactKind::Increase | ExactKind::IRate
-    ) && state
-        .as_any()
-        .downcast_ref::<ExactAccumulator>()
-        .is_some_and(|state| state.insufficient_counter_raw_data_samples(statistic, None))
+    statistic.tracks_counter_increase()
+        && state
+            .as_any()
+            .downcast_ref::<ExactAccumulator>()
+            .is_some_and(|state| state.insufficient_counter_raw_data_samples(statistic, None))
 }
 
 /// Merge already selected exact tumbling windows and read one population. `None` means

@@ -1,5 +1,5 @@
 use super::*;
-use planner_types::summary_type::ExactParams;
+use planner_types::summary_type::{ExactKind, ExactParams};
 
 // An exact updater charges the buffer it holds (its capacity), the
 // same bytes its sealed column charges.

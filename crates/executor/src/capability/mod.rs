@@ -14,8 +14,8 @@ use crate::summary_kernels::weighted_frequency::{self, FrequencyAlgorithm};
 use crate::Error;
 use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
 use planner_types::summary_type::{
-    ExactKind, ExactParams, SketchAlgorithm, SketchParams, SketchStatistic, StatisticKind,
-    SummaryTypeCapability, SummaryUpdate,
+    SketchAlgorithm, SketchParams, SketchStatistic, StatisticKind, SummaryTypeCapability,
+    SummaryUpdate,
 };
 
 /// Check the same contract used by `create_planner_accumulator` before a plan
@@ -56,20 +56,9 @@ pub fn validate_summary_kernel(
     Ok(())
 }
 
-/// Whether an exact family has a kernel.
+/// Whether an exact family has a kernel: its state can be built.
 fn exact_kernel(family: &SummaryFamilyType) -> bool {
-    use ExactKind as K;
-    use ExactParams as P;
-    matches!(
-        family,
-        SummaryFamilyType::ExactAggregate(K::Sum, P::Sum)
-            | SummaryFamilyType::ExactAggregate(K::Count, P::Count)
-            | SummaryFamilyType::ExactAggregate(K::Min, P::Min)
-            | SummaryFamilyType::ExactAggregate(K::Max, P::Max)
-            | SummaryFamilyType::ExactAggregate(K::Rate, P::Rate)
-            | SummaryFamilyType::ExactAggregate(K::Increase, P::Increase)
-            | SummaryFamilyType::ExactAggregate(K::IRate, P::IRate)
-    )
+    crate::summary_kernels::exact::ScalarState::empty(family).is_ok()
 }
 
 /// Check θ of a per-instance sketch of `algorithm` against what its kernel
@@ -385,12 +374,10 @@ pub fn validate_exact_evaluation(
 ) -> Result<(), Error> {
     validate_native_family(family)?;
     use planner_types::summary_type::ExactKind as E;
+    // `validate_native_family` admits only exact families with a kernel.
     let supported = matches!(
         family,
-        SummaryFamilyType::ExactAggregate(
-            kind @ (E::Sum | E::Count | E::Min | E::Max | E::Rate | E::Increase | E::IRate),
-            _,
-        ) if *kind == evaluation.statistic
+        SummaryFamilyType::ExactAggregate(kind, _) if *kind == evaluation.statistic
     );
     if !supported {
         return Err(Error::Invalid(

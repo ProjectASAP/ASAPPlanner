@@ -808,6 +808,14 @@ async fn per_series_time_functions_install_and_answer_from_raw_samples() {
         // 19 (i + 1) over 285 s, extrapolated 15 s to the window start, as
         // `increase` (counter_queries).
         ("delta(requests_total[5m])", per_series(|n| 20.0 * n)),
+        // Summed by job: j1 holds series 1 and 2, j2 series 3 and 4.
+        (
+            "sum by (job) (delta(requests_total[5m]))",
+            vec![
+                (labels(&[("job", "j1")]), 20.0 * 3.0),
+                (labels(&[("job", "j2")]), 20.0 * 7.0),
+            ],
+        ),
     ] {
         let plan = plan_counter_queries(&[query], 10_000, COUNTERS_INGESTING, true).await;
         let answered = installed_answers(&plan, &samples).remove(0);
