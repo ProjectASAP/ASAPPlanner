@@ -545,27 +545,52 @@ mod tests {
         use crate::summary_kernels::exact::ExactAccumulator;
         use crate::AggregateCore;
         use planner_types::summary_type::{ExactKind, ExactParams};
-        let points = (0..17)
+        let evenly_spaced = (0..17)
             .map(|i| (60_000 + 15_000 * i, (i + 1) as f64))
             .collect::<Vec<_>>();
+        // Irregular samples 2, 5, 6, 8 at 180 s, 240 s, 270 s, 300 s: the
+        // start caps to 20 s, under the 40 s back to zero, so increase is
+        // 6 × 140 / 120 = 7 (Prometheus 3.16.0); zero point first gave 8.
+        let irregular = vec![(180_000, 2.), (240_000, 5.), (270_000, 6.), (300_000, 8.)];
         let (start, end) = (0, 300_000);
-        for (intent, kind, params, expected) in [
+        for (points, intent, kind, params, expected) in [
             (
+                &evenly_spaced,
                 AggIntent::Increase,
                 ExactKind::Increase,
                 ExactParams::Increase,
                 16.5,
             ),
-            (AggIntent::Rate, ExactKind::Rate, ExactParams::Rate, 0.055),
+            (
+                &evenly_spaced,
+                AggIntent::Rate,
+                ExactKind::Rate,
+                ExactParams::Rate,
+                0.055,
+            ),
+            (
+                &irregular,
+                AggIntent::Increase,
+                ExactKind::Increase,
+                ExactParams::Increase,
+                7.,
+            ),
+            (
+                &irregular,
+                AggIntent::Rate,
+                ExactKind::Rate,
+                ExactParams::Rate,
+                7. / 300.,
+            ),
         ] {
-            let raw = match range_function_value(&intent, &points, start, end, end).unwrap() {
+            let raw = match range_function_value(&intent, points, start, end, end).unwrap() {
                 Some(Value::Float64(value)) => value,
                 other => panic!("{other:?}"),
             };
             let mut state =
                 ExactAccumulator::new(SummaryFamilyType::ExactAggregate(kind, params), false)
                     .unwrap();
-            for &(time, value) in &points {
+            for &(time, value) in points {
                 state.update(None, value, time);
             }
             let exact = exact_evaluation(
@@ -660,6 +685,16 @@ mod tests {
         assert_eq!(value(AggIntent::TsOfMaxOverTime, &nan), Some(2.));
         assert_eq!(value(AggIntent::TsOfMinOverTime, &nan), Some(2.));
         assert!(value(AggIntent::MadOverTime, &nan).unwrap().is_nan());
+        // Infinite samples: median 3 of -Inf, 1, 3, 5, +Inf; deviations 0, 2,
+        // 2, +Inf, +Inf have median 2 (Prometheus 3.16.0).
+        let infinite = [
+            (1_000, 1.),
+            (2_000, f64::INFINITY),
+            (3_000, 3.),
+            (4_000, f64::NEG_INFINITY),
+            (5_000, 5.),
+        ];
+        assert_eq!(value(AggIntent::MadOverTime, &infinite), Some(2.));
     }
 
     // Histogram interpolation requires an infinite terminal bucket and coalesces duplicates.

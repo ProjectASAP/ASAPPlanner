@@ -389,6 +389,12 @@ fn interpolated(q: f64, values: &[f64]) -> f64 {
     let low = rank.floor() as usize;
     let high = (low + 1).min(values.len() - 1);
     let weight = rank - low as f64;
+    // A rank on a value reads it alone, as Prometheus does: weighing the
+    // next value by 0 would make an infinite neighbor NaN (1, 2, +Inf at
+    // q = 0.5 is 2).
+    if weight == 0. {
+        return values[low];
+    }
     values[low] * (1. - weight) + values[high] * weight
 }
 
@@ -461,6 +467,10 @@ mod tests {
         assert_eq!(super::quantile(1.1, vec![1.]), f64::INFINITY);
         assert_eq!(super::quantile(1., vec![2., f64::NAN, 1.]), 2.);
         assert!(super::quantile(f64::NAN, vec![1., 2.]).is_nan());
+        // A rank on a value next to an infinity reads that value, not
+        // Inf * 0 = NaN; a single +Inf is +Inf at any q.
+        assert_eq!(super::quantile(0.5, vec![1., 2., f64::INFINITY]), 2.);
+        assert_eq!(super::quantile(0.9, vec![f64::INFINITY]), f64::INFINITY);
     }
 
     // SQL `percentile_cont`: NaN after every number, interpolation between
