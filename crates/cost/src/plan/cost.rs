@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::node::analytical::AnalyticalCostError;
-use crate::node::operations_per_unit::merge_operations_per_state;
+use crate::node::operations_per_unit::merge_terms_per_state;
 use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_state_bytes, state_bytes_per_row, StateInputRows};
 use crate::node::usage::{cost_source, reads_one_batch_of};
@@ -325,7 +325,7 @@ pub fn plan_cost(
     // such as the raw rows a `Filter` or `TimeRange` keeps or an exact
     // `Aggregate`'s values: the executor merges ingest shards only of
     // summary state columns, and partial copies of rows are concatenated.
-    // No per-group term (`merge_output_operations`, 19,000 per KLL group):
+    // No per-group term (`merge_output_terms`, 19,000 per KLL group):
     // the executor merges a shard's states into the existing states in
     // place, group by group, and creates no group's state or output row.
     let merge_ms = |id: PhysicalASAPNodeId| {
@@ -343,7 +343,7 @@ pub fn plan_cost(
             || {
                 // A partial copy merges into a state of the same window.
                 let state_bytes = state_bytes_per_row(output[&id], &nodes[&id].output_schema);
-                merge_operations_per_state(family, state_bytes, state_bytes, None, 1)
+                merge_terms_per_state(family, state_bytes, state_bytes, None, 1).operations()
                     * speed.ms_per_cpu_op
                     * formula_scale
             },

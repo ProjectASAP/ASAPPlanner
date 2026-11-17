@@ -38,6 +38,7 @@ pub use model::{
     CalibrationFit, ClusterLimits, ClusterObjective, CostInputs, CostModel, ResourceSpeed,
     ResourceUnitCost, COST_SOURCE, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
+pub use node::cost_terms::{node_cost_terms, CostConstant, NodeCostTerms};
 pub use node::operator_statistics::EdgeStatistics;
 pub use node::usage::{
     node_resource_usage_and_cost, output_interval_ms, reads_one_batch_of, summary_type_name,

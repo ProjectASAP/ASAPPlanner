@@ -231,7 +231,8 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
     assert_eq!(
         merge_usage.cpu_ops_per_second,
         5_000.0 * crate::node::operations_per_unit::DDSKETCH_MERGE_OPERATIONS_PER_STATE
-            + crate::node::operations_per_unit::merge_output_operations(merge_usage.family, 1_000)
+            + crate::node::operations_per_unit::merge_output_terms(merge_usage.family, 1_000)
+                .operations()
     );
 }
 
@@ -280,7 +281,8 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
     assert_eq!(
         merge_usage.cpu_ops_per_second,
         5_000.0 * crate::node::operations_per_unit::COUNTER_MERGE_OPERATIONS_PER_STATE
-            + crate::node::operations_per_unit::merge_output_operations(merge_usage.family, 1_000)
+            + crate::node::operations_per_unit::merge_output_terms(merge_usage.family, 1_000)
+                .operations()
     );
 }
 
@@ -2316,12 +2318,13 @@ fn a_kll_merge_of_few_states_charges_each_group_its_measured_time() {
 /// Sum and Count states measure about 230.
 #[test]
 fn a_max_merge_charges_its_measured_time_per_state() {
-    use crate::node::operations_per_unit::merge_operations_per_state;
+    use crate::node::operations_per_unit::merge_terms_per_state;
     for kind in [ExactKind::Max, ExactKind::Min] {
-        let max = merge_operations_per_state(StateFamily::Exact(&kind), 56, 56, None, 1);
+        let max = merge_terms_per_state(StateFamily::Exact(&kind), 56, 56, None, 1).operations();
         assert!((100.0..=150.0).contains(&max), "{kind:?}: {max} per state");
     }
-    let sum = merge_operations_per_state(StateFamily::Exact(&ExactKind::Sum), 56, 56, None, 1);
+    let sum =
+        merge_terms_per_state(StateFamily::Exact(&ExactKind::Sum), 56, 56, None, 1).operations();
     assert!((200.0..=260.0).contains(&sum), "Sum: {sum} per state");
 }
 
@@ -2499,4 +2502,865 @@ fn a_kll_estimate_over_a_state_built_by_updates_charges_its_measured_time() {
         many < 2.0 * few,
         "3,000 rows charged {many:.1} µs, 300 rows {few:.1}; measured 1.4x"
     );
+}
+
+// ---------------------------------------------------------------------
+// `node_cost_terms`: the formula CPU split into named per-unit constants.
+// "Formula CPU per execution" is `node_resource_usage_and_cost`'s
+// `cpu_ops_per_second` at one execution per second.
+// ---------------------------------------------------------------------
+
+/// The formula CPU per execution of `node` under `settings`.
+fn formula_cpu_per_execution<'a>(
+    node: &'a PhysicalASAPDAGNode,
+    producers: &[ProducerOutput<'a>],
+    window_ms: Option<u64>,
+    data: &DataWorkload,
+    settings: &'a CostInputs,
+) -> f64 {
+    node_resource_usage_and_cost(node, producers, (1, 1.0), window_ms, data, settings)
+        .unwrap()
+        .cpu_ops_per_second
+}
+
+/// The terms of `node` at the built-in constant values.
+fn charged_by_terms(terms: &crate::NodeCostTerms) -> f64 {
+    terms.operations_with(crate::CostConstant::operations_per_unit)
+}
+
+/// `a`, `b` equal within `relative` of the larger.
+fn assert_close(a: f64, b: f64, relative: f64, what: &str) {
+    assert!(
+        (a - b).abs() <= relative * a.abs().max(b.abs()),
+        "{what}: {a} against {b}"
+    );
+}
+
+/// [`a_grouping_visits_each_group_once_per_raw_batch_of_the_declared_width`]'s
+/// query-time per-series aggregate of `measure` over 5 min of `latency`.
+fn per_series_aggregate(measure: asap_types::ir::operator::AggIntent) -> PhysicalASAPDAGNode {
+    node(Payload::NonASAP(NonASAPOp::Aggregate {
+        reduction: Reduction::PerEntity,
+        measures: vec![measure],
+        output_names: vec![String::new()],
+        filters: vec![],
+        having: None,
+        child: 0,
+    }))
+}
+
+/// A 5 min `TimeRange` (its producer in [`raw_rows`]).
+fn five_minute_range() -> PhysicalASAPDAGNode {
+    node(Payload::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_secs(300),
+        kind: TimeRangeKind::Range,
+        child: 0,
+    }))
+}
+
+/// A per-series `max_over_time(latency[5m])` at query time over 1,000
+/// series at 1 Hz (300,000 rows) is, by hand, one hash-aggregate key and
+/// one measure per row (300,000 each), 1,000 groups visited in each of 30
+/// raw batches of 10 s (30,000), and 1,000 output groups; 16 + 4 = 20 per
+/// row needs no rounding, and the output schema carries no label. At the
+/// built-in values: 4.8 M + 1.2 M + 5.1 M + 2.5 M = 13.6 M, the formula
+/// CPU (observed: 13,600,000, "20 ops per row, 30000 group visits").
+#[test]
+fn a_per_series_max_aggregate_is_rows_visits_and_output_groups() {
+    use crate::CostConstant::*;
+    use asap_types::ir::operator::AggIntent;
+    let settings = CostInputs::default();
+    let data = thousand_series_sampled_every(1_000);
+    let range = five_minute_range();
+    let aggregate = per_series_aggregate(AggIntent::Max { col: None });
+    let rows = || [raw_rows(&range, "latency", 300_000, 300_000)];
+    let terms = crate::node_cost_terms(&aggregate, &rows(), None, &data, &settings).unwrap();
+    assert_eq!(
+        terms.units_per_constant,
+        BTreeMap::from([
+            (HashAggregateOperationsPerRow, 300_000.0),
+            (AggregateMeasureOperationsPerRow, 300_000.0),
+            (OperationsPerGroupPerRawBatch, 30_000.0),
+            (OutputRowOperationsPerGroup, 1_000.0),
+        ])
+    );
+    assert_eq!(terms.operations_without_constant, 0.0);
+    assert_close(charged_by_terms(&terms), 13_600_000.0, 1e-12, "by hand");
+    assert_close(
+        charged_by_terms(&terms),
+        formula_cpu_per_execution(&aggregate, &rows(), None, &data, &settings),
+        1e-9,
+        "the formula",
+    );
+}
+
+/// An ingestion-time per-series KLL chain (k = 547) of 60 s windows
+/// carrying `job`, over one second of 1,000 series at 1 Hz (1,000 rows):
+/// 1,000 KLL updates, 1,000 arriving rows routed to their window, 100
+/// group visits (1,000 groups × 1 s of a 10 s batch, at most one per
+/// row), 1,000 × 1,000 / 60,000 = 16.67 states emitted per second, and
+/// one carried label per row. At the built-in values: 84,000 + 14,000 +
+/// 17,000 + 41,667 + 37,000 = 193,667, the formula CPU (observed:
+/// 193,666.67, "1000 rows x 121 ops, 100 group visits, 16.7 states
+/// emitted").
+#[test]
+fn an_ingestion_time_kll_chain_is_updates_routing_visits_emits_and_a_carried_label() {
+    use crate::CostConstant::*;
+    use asap_types::summary_type::SketchAlgorithm;
+    let settings = CostInputs::default();
+    let data = thousand_series_sampled_every(1_000);
+    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let scan = node(metric_scan("latency"));
+    let chain = PhysicalASAPDAGNode {
+        retention_ms: Some(300_000),
+        output_state: ExecutionDataState::INGESTION_SUMMARY,
+        output_schema: per_series_carrying_job(Some(kll.clone())),
+        parameters: Some(SketchParams::Kll { k: 547 }),
+        ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: 0,
+            summary_type: kll,
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+            tumbling_window_width_ms: 60_000,
+        }))
+    };
+    let rows = || [raw_rows(&scan, "latency", 1_000, 1_000)];
+    let terms = crate::node_cost_terms(&chain, &rows(), None, &data, &settings).unwrap();
+    let units = &terms.units_per_constant;
+    assert_eq!(units.len(), 5, "{units:?}");
+    assert_eq!(units[&KllUpdateOperationsPerRow], 1_000.0);
+    assert_eq!(units[&ChainOperationsPerArrivingRow], 1_000.0);
+    assert_eq!(units[&OperationsPerGroupPerRawBatch], 100.0);
+    assert_close(
+        units[&SketchChainEmitOperationsPerState],
+        1_000.0 * 1_000.0 / 60_000.0,
+        1e-12,
+        "states emitted",
+    );
+    assert_eq!(units[&CarriedLabelOperationsPerRowPerLabel], 1_000.0);
+    assert_eq!(terms.operations_without_constant, 0.0);
+    assert_close(
+        charged_by_terms(&terms),
+        84_000.0 + 14_000.0 + 17_000.0 + 2_500.0 * 1_000.0 / 60.0 + 37_000.0,
+        1e-12,
+        "by hand",
+    );
+    assert_close(
+        charged_by_terms(&terms),
+        formula_cpu_per_execution(&chain, &rows(), None, &data, &settings),
+        1e-9,
+        "the formula",
+    );
+}
+
+/// The per-series aggregate of `quantile_over_time(0.99, latency[5m])`
+/// (300 rows per group) sorts each group: 300,000 × log2(300) =
+/// 2,468,646 units of `SortOperationsPerRowPerLevel`, beside one key and
+/// one measure per row, 30,000 visits and 1,000 output groups. The
+/// formula rounds its per-row operations up, 16 + 4 + 5.5 × log2(300) =
+/// 65.2585 to 66; the 0.7415 × 300,000 ≈ 222,450 operations of that
+/// rounding are charged without a constant, so no charge changes. Sum:
+/// 300,000 × 66 + 5.1 M + 2.5 M = 27.4 M, the formula CPU (observed).
+#[test]
+fn a_quantile_aggregate_keeps_its_rounding_outside_the_constants() {
+    use crate::CostConstant::*;
+    use asap_types::ir::operator::AggIntent;
+    let settings = CostInputs::default();
+    let data = thousand_series_sampled_every(1_000);
+    let range = five_minute_range();
+    let aggregate = per_series_aggregate(AggIntent::Quantile { q: 0.99, col: None });
+    let rows = || [raw_rows(&range, "latency", 300_000, 300_000)];
+    let terms = crate::node_cost_terms(&aggregate, &rows(), None, &data, &settings).unwrap();
+    let units = &terms.units_per_constant;
+    assert_eq!(units.len(), 5, "{units:?}");
+    let levels = 300f64.log2();
+    assert_close(
+        units[&SortOperationsPerRowPerLevel],
+        300_000.0 * levels,
+        1e-12,
+        "sort units",
+    );
+    assert_eq!(units[&HashAggregateOperationsPerRow], 300_000.0);
+    assert_eq!(units[&AggregateMeasureOperationsPerRow], 300_000.0);
+    assert_eq!(units[&OperationsPerGroupPerRawBatch], 30_000.0);
+    assert_eq!(units[&OutputRowOperationsPerGroup], 1_000.0);
+    let rounding = (66.0 - (16.0 + 4.0 + 5.5 * levels)) * 300_000.0;
+    assert_close(
+        terms.operations_without_constant,
+        rounding,
+        1e-9,
+        "rounding",
+    );
+    assert!((222_000.0..223_000.0).contains(&rounding), "{rounding}");
+    assert_close(
+        charged_by_terms(&terms),
+        300_000.0 * 66.0 + 5_100_000.0 + 2_500_000.0,
+        1e-9,
+        "by hand",
+    );
+    assert_close(
+        charged_by_terms(&terms),
+        formula_cpu_per_execution(&aggregate, &rows(), None, &data, &settings),
+        1e-9,
+        "the formula",
+    );
+}
+
+/// A query-time scan of 5 min of `latency` (1,000 series at 1 Hz) charges
+/// one operation per row read, which no named constant multiplies: no
+/// units, 300,000 operations without a constant (observed: 300,000).
+#[test]
+fn a_scan_has_no_constant_terms() {
+    let settings = CostInputs::default();
+    let data = thousand_series_sampled_every(1_000);
+    let scan = node(metric_scan("latency"));
+    let terms = crate::node_cost_terms(&scan, &[], Some(300_000), &data, &settings).unwrap();
+    assert!(
+        terms.units_per_constant.is_empty(),
+        "{:?}",
+        terms.units_per_constant
+    );
+    assert_eq!(terms.operations_without_constant, 300_000.0);
+    assert_close(
+        charged_by_terms(&terms),
+        formula_cpu_per_execution(&scan, &[], Some(300_000), &data, &settings),
+        1e-9,
+        "the formula",
+    );
+}
+
+/// The invariant: for every node these tests cost, the terms at the
+/// built-in values are the formula CPU per execution, so the formula and
+/// its terms cannot drift. Each case is a fixture of a test above.
+#[test]
+fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
+    use asap_types::ir::operator::AggIntent;
+    use asap_types::ir::scalar::{ScalarExpr, ScalarValue, SortKey};
+    use asap_types::ir::schema::{DataType, PROMQL_SERIES_IDENTITY};
+    use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
+    let settings = CostInputs::default();
+    fn check<'a>(
+        what: &str,
+        node: &'a PhysicalASAPDAGNode,
+        producers: &[ProducerOutput<'a>],
+        window_ms: Option<u64>,
+        data: &DataWorkload,
+    ) {
+        let settings = CostInputs::default();
+        let formula = formula_cpu_per_execution(node, producers, window_ms, data, &settings);
+        let terms = crate::node_cost_terms(node, producers, window_ms, data, &settings)
+            .unwrap_or_else(|error| panic!("{what}: {error}"));
+        assert_close(charged_by_terms(&terms), formula, 1e-9, what);
+    }
+    let gauge = thousand_series_sampled_every(1_000);
+    let none = DataWorkload::default();
+
+    // Rate chains, at ingestion time and at query time.
+    let rate = FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate);
+    let counter_scan = node(metric_scan("requests_total"));
+    let rate_chain = |output_state| PhysicalASAPDAGNode {
+        retention_ms: Some(300_000),
+        output_state,
+        output_schema: per_series_carrying_job(Some(rate.clone())),
+        ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: 0,
+            summary_type: rate.clone(),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+            tumbling_window_width_ms: 300_000,
+        }))
+    };
+    for (what, output_state, rows, span_ms) in [
+        (
+            "ingestion-time Rate chain",
+            ExecutionDataState::INGESTION_SUMMARY,
+            1_000,
+            1_000,
+        ),
+        (
+            "query-time Rate chain",
+            ExecutionDataState::QUERY_ROWS,
+            300_000,
+            300_000,
+        ),
+    ] {
+        let chain = rate_chain(output_state);
+        check(
+            what,
+            &chain,
+            &[raw_rows(&counter_scan, "requests_total", rows, span_ms)],
+            None,
+            &gauge,
+        );
+    }
+
+    // Per-series Max and quantile aggregates; a query-time Rate build.
+    let range = five_minute_range();
+    for measure in [
+        AggIntent::Max { col: None },
+        AggIntent::Quantile { q: 0.99, col: None },
+        AggIntent::Sum { col: None },
+    ] {
+        let aggregate = per_series_aggregate(measure.clone());
+        check(
+            &format!("per-series {measure:?}"),
+            &aggregate,
+            &[raw_rows(&range, "latency", 300_000, 300_000)],
+            None,
+            &gauge,
+        );
+    }
+    let rate_build = PhysicalASAPDAGNode {
+        output_schema: per_series_carrying_job(Some(rate.clone())),
+        ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: rate.clone(),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+        }))
+    };
+    check(
+        "query-time Rate build",
+        &rate_build,
+        &[raw_rows(&range, "requests_total", 300_000, 300_000)],
+        None,
+        &gauge,
+    );
+
+    // A `TimeRange` over a chain's windows, and merges over them: exact
+    // Sum, Rate and Max, KLL at k = 547 and 1,404.
+    let kll = |k| SketchParams::Kll { k };
+    let (kll_547, kll_1404) = (kll(547), kll(1_404));
+    let merged_families: [(&str, FieldDataType, StateFamily<'_>, Option<SketchParams>); 5] = [
+        (
+            "Sum",
+            FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            StateFamily::Exact(&ExactKind::Sum),
+            None,
+        ),
+        (
+            "Rate",
+            rate.clone(),
+            StateFamily::Exact(&ExactKind::Rate),
+            None,
+        ),
+        (
+            "Max",
+            FieldDataType::ExactAggregate(ExactKind::Max, ExactParams::Max),
+            StateFamily::Exact(&ExactKind::Max),
+            None,
+        ),
+        (
+            "KLL k = 547",
+            FieldDataType::Sketch(SketchAlgorithm::Kll),
+            StateFamily::Sketch(&kll_547),
+            Some(kll_547.clone()),
+        ),
+        (
+            "KLL k = 1,404",
+            FieldDataType::Sketch(SketchAlgorithm::Kll),
+            StateFamily::Sketch(&kll_1404),
+            Some(kll_1404.clone()),
+        ),
+    ];
+    for (what, state_type, family, parameters) in merged_families {
+        let chain = PhysicalASAPDAGNode {
+            parameters: parameters.clone(),
+            output_schema: state_schema(state_type.clone(), &[PROMQL_SERIES_IDENTITY]),
+            ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                child: 0,
+                summary_type: state_type,
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::PerEntity,
+                filter: None,
+                tumbling_window_width_ms: 60_000,
+            }))
+        };
+        let rows_per_state = StateInputRows {
+            rows_per_state: Some(60),
+            non_negative: true,
+            value_magnitude_range: None,
+        };
+        // A KLL state's bytes grow with its `k`; an exact state is 56 bytes.
+        let state_bytes = parameters.as_ref().map_or(56, |parameters| {
+            crate::node::state_bytes::sketch_state_bytes(parameters, rows_per_state)
+        });
+        let chain_output = ProducerOutput {
+            payload: &chain.payload,
+            output_schema: &chain.output_schema,
+            output: EdgeStatistics {
+                rows: 1_000,
+                bytes: 1_000 * state_bytes,
+            },
+            sources: BTreeSet::from(["latency"]),
+            family,
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1,
+            chain_tumbling_window_width_ms: Some(60_000),
+            raw_rows_span_ms: None,
+            state_input_rows: Some(rows_per_state),
+        };
+        let windows = PhysicalASAPDAGNode {
+            output_schema: chain.output_schema.clone(),
+            ..five_minute_range()
+        };
+        check(
+            &format!("TimeRange over a {what} chain"),
+            &windows,
+            std::slice::from_ref(&chain_output),
+            None,
+            &gauge,
+        );
+        let windows_usage = node_resource_usage_and_cost(
+            &windows,
+            &[chain_output],
+            (1, 1.0),
+            None,
+            &gauge,
+            &settings,
+        )
+        .unwrap();
+        let merge = PhysicalASAPDAGNode {
+            parameters,
+            output_schema: chain.output_schema.clone(),
+            ..node(Payload::ASAP(ASAPOp::SummaryMerge {
+                children: vec![0],
+                group_by: None,
+            }))
+        };
+        check(
+            &format!("merge over a {what} chain's windows"),
+            &merge,
+            &[produced(&windows, &windows_usage)],
+            None,
+            &gauge,
+        );
+    }
+
+    // A KMV build, ungrouped and by `region`, and exact distinct counts,
+    // ungrouped and by `job`.
+    let (distinct_data, distinct_schema) = sql_rows_of_t(100_000);
+    let sql_range = PhysicalASAPDAGNode {
+        output_schema: distinct_schema,
+        ..five_minute_range()
+    };
+    let sql_rows = || {
+        let mut rows = raw_rows(&sql_range, "t", 300_000, 300_000);
+        rows.output_schema = &sql_range.output_schema;
+        rows.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
+        rows
+    };
+    for (keys, k) in [(vec![], 4_323), (vec![2], 26_656)] {
+        let build = PhysicalASAPDAGNode {
+            parameters: Some(SketchParams::Kmv { k }),
+            ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+                child: 0,
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+                input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
+                reduction: Reduction::by(keys.clone()),
+                filter: None,
+            }))
+        };
+        check(
+            &format!("KMV build by {keys:?}"),
+            &build,
+            &[sql_rows()],
+            None,
+            &distinct_data,
+        );
+    }
+    for keys in [vec![], vec![1]] {
+        let count = node(Payload::NonASAP(NonASAPOp::Aggregate {
+            reduction: Reduction::by(keys.clone()),
+            measures: vec![AggIntent::Cardinality { cols: vec![4] }],
+            output_names: vec![String::new()],
+            filters: vec![],
+            having: None,
+            child: 0,
+        }));
+        check(
+            &format!("exact distinct count by {keys:?}"),
+            &count,
+            &[sql_rows()],
+            None,
+            &distinct_data,
+        );
+    }
+
+    // A KMV rollup merge (from `a_kmv_rollup_merge_costs_per_hash_it_inserts`).
+    let rollup_data: DataWorkload = serde_json::from_value(serde_json::json!({
+        "arrival": {"ingesting": {"rows_per_second": 2_000_000.0}},
+        "sources": {"http": {"distinct_values_per_label": {"service": 100, "region": 10}}}
+    }))
+    .unwrap();
+    let kmv = SketchParams::Kmv { k: 106_263 };
+    let kmv_rows = StateInputRows {
+        rows_per_state: Some(12_000),
+        non_negative: false,
+        value_magnitude_range: None,
+    };
+    let kmv_build = PhysicalASAPDAGNode {
+        parameters: Some(kmv.clone()),
+        output_schema: Schema::new(vec![
+            Field::new("region", FieldDataType::Plain(DataType::Utf8), false),
+            Field::new("service", FieldDataType::Plain(DataType::Utf8), false),
+            Field::new("state", FieldDataType::Sketch(SketchAlgorithm::Kmv), false),
+        ]),
+        ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+            input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
+            reduction: Reduction::by(vec![0, 1]),
+            filter: None,
+        }))
+    };
+    let kmv_rollup = PhysicalASAPDAGNode {
+        parameters: Some(kmv.clone()),
+        ..node(Payload::ASAP(ASAPOp::SummaryMerge {
+            children: vec![0],
+            group_by: Some(vec![1]),
+        }))
+    };
+    let kmv_state_bytes = crate::node::state_bytes::sketch_state_bytes(&kmv, kmv_rows);
+    check(
+        "KMV rollup merge",
+        &kmv_rollup,
+        &[ProducerOutput {
+            payload: &kmv_build.payload,
+            output_schema: &kmv_build.output_schema,
+            output: EdgeStatistics {
+                rows: 1_000,
+                bytes: 1_000 * (kmv_state_bytes + 32),
+            },
+            sources: BTreeSet::from(["http"]),
+            family: StateFamily::Sketch(&kmv),
+            unchanged_columns: ["region", "service"].into(),
+            tumbling_windows: 1,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            state_input_rows: Some(kmv_rows),
+        }],
+        None,
+        &rollup_data,
+    );
+
+    // A DDSketch build at α = 0.01 over 600 rows of a scan.
+    let latency_scan = PhysicalASAPDAGNode {
+        output_schema: Schema::new(vec![
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+        ]),
+        ..node(metric_scan("latency"))
+    };
+    let ddsketch_build = PhysicalASAPDAGNode {
+        parameters: Some(SketchParams::DDSketch { alpha: 0.01 }),
+        ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::DDSketch),
+            input: SummaryUpdate::column(ColumnRef::Named("value".to_string())),
+            reduction: Reduction::Reduce(GroupKeys::default()),
+            filter: None,
+        }))
+    };
+    let mut six_hundred_rows = raw_rows(&latency_scan, "latency", 600, 60_000);
+    six_hundred_rows.raw_rows_span_ms = None;
+    check(
+        "DDSketch build",
+        &ddsketch_build,
+        &[six_hundred_rows],
+        None,
+        &gauge,
+    );
+
+    // KLL estimates (k = 547) after updates and after a merge.
+    let estimate = node(Payload::ASAP(ASAPOp::SummaryEstimate {
+        summary_input: 0,
+        query: SketchStatistic::Quantile { q: 0.99 },
+    }));
+    let kll_updates = node(Payload::ASAP(ASAPOp::SummaryAgg {
+        child: 0,
+        summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::PerEntity,
+        filter: None,
+    }));
+    let kll_merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
+        children: vec![0],
+        group_by: None,
+    }));
+    for (what, states, rows_per_state, state_bytes) in [
+        ("KLL estimate after updates", &kll_updates, 3_000, 17_000),
+        ("KLL estimate after a merge", &kll_merge, 300, 4_844),
+    ] {
+        check(
+            what,
+            &estimate,
+            &[ProducerOutput {
+                payload: &states.payload,
+                output_schema: &states.output_schema,
+                output: EdgeStatistics {
+                    rows: 1_000,
+                    bytes: 1_000 * state_bytes,
+                },
+                sources: BTreeSet::new(),
+                family: StateFamily::Sketch(&kll_547),
+                unchanged_columns: BTreeSet::new(),
+                tumbling_windows: 1,
+                chain_tumbling_window_width_ms: None,
+                raw_rows_span_ms: None,
+                state_input_rows: Some(StateInputRows {
+                    rows_per_state: Some(rows_per_state),
+                    non_negative: true,
+                    value_magnitude_range: None,
+                }),
+            }],
+            None,
+            &none,
+        );
+    }
+
+    // `FinalizeExactAccumulator` of 1,000 merged Sum states.
+    let finalize = node(Payload::ASAP(ASAPOp::FinalizeExactAccumulator { child: 0 }));
+    check(
+        "FinalizeExactAccumulator",
+        &finalize,
+        &[ProducerOutput {
+            payload: &kll_merge.payload,
+            output_schema: &kll_merge.output_schema,
+            output: EdgeStatistics {
+                rows: 1_000,
+                bytes: 56_000,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::Exact(&ExactKind::Sum),
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            state_input_rows: None,
+        }],
+        None,
+        &none,
+    );
+
+    // `Sort`, `Limit`, `Dedup` and `Concat` over a 5 min scan.
+    let scan = node(metric_scan("latency"));
+    let scan_usage =
+        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), &gauge, &settings)
+            .unwrap();
+    for payload in [
+        Payload::NonASAP(NonASAPOp::Sort {
+            keys: vec![SortKey {
+                expr: ScalarExpr::Literal(ScalarValue::Float64(1.0)),
+                ascending: true,
+                nulls_first: false,
+            }],
+            partition_by: GroupKeys::default(),
+            child: 0,
+        }),
+        Payload::NonASAP(NonASAPOp::Limit {
+            n: Some(10),
+            offset: 0,
+            partition_by: GroupKeys::default(),
+            child: 0,
+        }),
+        Payload::NonASAP(NonASAPOp::Dedup {
+            cols: vec![],
+            child: 0,
+        }),
+    ] {
+        let operator = node(payload);
+        check(
+            &format!("{:?}", operator.payload),
+            &operator,
+            &[produced(&scan, &scan_usage)],
+            None,
+            &gauge,
+        );
+    }
+    let concat = node(Payload::NonASAP(NonASAPOp::Concat {
+        children: vec![0, 1],
+    }));
+    check(
+        "Concat",
+        &concat,
+        &[produced(&scan, &scan_usage), produced(&scan, &scan_usage)],
+        None,
+        &gauge,
+    );
+
+    // An ingestion-time view of raw rows, kept for 390 s.
+    let mut view_data =
+        DataWorkload::sampled_every(["m".to_string()], asap_types::workload::DurationMs(1_000));
+    for facts in view_data.sources.values_mut() {
+        facts.series_count = Some(1_000);
+    }
+    let m_scan = node(metric_scan("m"));
+    let view = PhysicalASAPDAGNode {
+        output_state: ExecutionDataState::INGESTION_ROWS,
+        lifetime: Lifetime::AcrossEvaluations(StorageMedium::Memory),
+        retention_ms: Some(390_000),
+        output_schema: Schema::new(vec![
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+        ]),
+        ..node(Payload::NonASAP(NonASAPOp::TimeShift {
+            shift: asap_types::ir::operator::arguments::TimeShift {
+                offset_ms: 90_000,
+                at: None,
+            },
+            child: 0,
+        }))
+    };
+    let mut one_second_of_rows = raw_rows(&m_scan, "m", 1_000, 1_000);
+    one_second_of_rows.output.bytes = 64_000;
+    one_second_of_rows.raw_rows_span_ms = None;
+    check(
+        "ingestion-time view of raw rows",
+        &view,
+        &[one_second_of_rows],
+        None,
+        &view_data,
+    );
+}
+
+/// A refit of one constant changes the charge by its units times the
+/// change, i.e. the new charge is the old charge plus the change times the
+/// units: the per-series Max aggregate's 13.6 M with 140 operations per group visit instead of 170 is
+/// 13.6 M − 30 × 30,000 = 12.7 M.
+#[test]
+fn replacing_a_constant_changes_the_charge_by_its_units() {
+    use crate::CostConstant;
+    use asap_types::ir::operator::AggIntent;
+    let settings = CostInputs::default();
+    let data = thousand_series_sampled_every(1_000);
+    let range = five_minute_range();
+    let aggregate = per_series_aggregate(AggIntent::Max { col: None });
+    let terms = crate::node_cost_terms(
+        &aggregate,
+        &[raw_rows(&range, "latency", 300_000, 300_000)],
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
+    let refit = terms.operations_with(|constant| {
+        if constant == CostConstant::OperationsPerGroupPerRawBatch {
+            140.0
+        } else {
+            constant.operations_per_unit()
+        }
+    });
+    assert_close(refit, 12_700_000.0, 1e-12, "refit charge");
+}
+
+/// The terms describe the formulas: a measured table entry for the node
+/// and a frozen calibration factor change its price (`cost_source` becomes
+/// `Measured`) but not its terms. Node: a query-time KLL build at k = 547
+/// over 600 rows.
+#[test]
+fn terms_ignore_the_measured_table_and_the_calibration_factor() {
+    use crate::{MeasuredOperationCosts, OperatorCost, OperatorKind};
+    use asap_types::summary_type::SketchAlgorithm;
+    let data = thousand_series_sampled_every(1_000);
+    let range = five_minute_range();
+    let build = PhysicalASAPDAGNode {
+        parameters: Some(SketchParams::Kll { k: 547 }),
+        ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+        }))
+    };
+    let rows = || [raw_rows(&range, "latency", 600, 300_000)];
+    let formulas = CostInputs::default();
+    let measured = CostInputs {
+        measured_operation_costs: MeasuredOperationCosts {
+            operators: vec![OperatorCost {
+                operator: OperatorKind::SummaryAgg,
+                phase: None,
+                sketch: Some(SketchParams::Kll { k: 547 }),
+                exact: None,
+                measure: None,
+                ns_per_unit: 10.0,
+                ns_per_invocation: 0.0,
+                memory_bytes_per_state: None,
+            }],
+            ..MeasuredOperationCosts::default()
+        },
+        frozen_calibration_factor: Some(2.0),
+        ..CostInputs::default()
+    };
+    let usage =
+        node_resource_usage_and_cost(&build, &rows(), (1, 1.0), None, &data, &measured).unwrap();
+    assert_eq!(usage.cost.cost_source, NodeCostSource::Measured);
+    assert_eq!(
+        crate::node_cost_terms(&build, &rows(), None, &data, &measured).unwrap(),
+        crate::node_cost_terms(&build, &rows(), None, &data, &formulas).unwrap()
+    );
+}
+
+/// A node `node_resource_usage_and_cost` cannot cost has no terms either,
+/// with the same error: a view materialized across evaluations without a
+/// retention (`a_view_without_retention_is_not_costed`).
+#[test]
+fn terms_fail_where_the_node_cannot_be_costed() {
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let scan = node(metric_scan("m"));
+    let mut one_second_of_rows = raw_rows(&scan, "m", 1_000, 1_000);
+    one_second_of_rows.output.bytes = 64_000;
+    one_second_of_rows.sources = BTreeSet::new();
+    one_second_of_rows.raw_rows_span_ms = None;
+    let view = PhysicalASAPDAGNode {
+        output_state: ExecutionDataState::INGESTION_ROWS,
+        lifetime: Lifetime::AcrossEvaluations(StorageMedium::Memory),
+        retention_ms: None,
+        ..node(Payload::NonASAP(NonASAPOp::TimeShift {
+            shift: asap_types::ir::operator::arguments::TimeShift {
+                offset_ms: -300_000,
+                at: None,
+            },
+            child: 0,
+        }))
+    };
+    assert!(matches!(
+        crate::node_cost_terms(&view, &[one_second_of_rows], None, &data, &settings),
+        Err(AnalyticalCostError::MissingOrZero("retention_ms"))
+    ));
+}
+
+/// The group-visit units follow the deployment's raw batch width: the
+/// per-series Max aggregate over 5 min of 1,000 series at 1 Hz visits
+/// each series 300 times in 1 s batches (300,000, one per row) and 30
+/// times in 10 s batches (30,000). The 270,000 visits between them times
+/// 170 are `a_grouping_visits_each_group_once_per_raw_batch_of_the_declared_width`'s
+/// difference.
+#[test]
+fn group_visit_units_follow_the_raw_batch_width() {
+    use crate::CostConstant::OperationsPerGroupPerRawBatch;
+    use asap_types::ir::operator::AggIntent;
+    let data = thousand_series_sampled_every(1_000);
+    let range = five_minute_range();
+    let aggregate = per_series_aggregate(AggIntent::Max { col: None });
+    let visits = |raw_batch_width_ms: u64| {
+        let mut settings = CostInputs::default();
+        settings.resource_speed.raw_batch_width_ms = raw_batch_width_ms;
+        crate::node_cost_terms(
+            &aggregate,
+            &[raw_rows(&range, "latency", 300_000, 300_000)],
+            None,
+            &data,
+            &settings,
+        )
+        .unwrap()
+        .units_per_constant[&OperationsPerGroupPerRawBatch]
+    };
+    assert_eq!(visits(1_000), 300_000.0);
+    assert_eq!(visits(10_000), 30_000.0);
 }

@@ -9,7 +9,7 @@
 > stage read it: physical query lowering (`query_physical_lowering`),
 > `EvidenceBackedPhysicalDAG`, `estimate_physical_dag` and its comparison and
 > cache variants, `ComparisonScope`, `CacheProfile`, and the storage and
-> handoff estimators. Stage 3 prices each node with `estimate_operator` over
+> handoff estimators. Stage 3 prices each node with `estimate_operator_with_terms` over
 > the `OperatorStatistics` it derives for that node. The sections on those
 > deleted parts record the design, not current code.
 > Unsupported operators, arrival modes and missing evidence remain unavailable;
