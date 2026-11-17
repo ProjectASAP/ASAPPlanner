@@ -17,8 +17,11 @@ pub(crate) fn matrix_schema() -> SchemaRef {
 
 impl Operator {
     pub fn range_window(intent: AggIntent<ColumnRef>) -> Result<Self, Error> {
-        // Reuse the window constructor's semantic admission, without fixing request time.
-        Self::window(matrix_schema(), intent.clone(), 1, 2, vec![0], Some((0, 1)))?;
+        if !aggregate::temporal::has_window_kernel(&intent) {
+            return Err(invalid(
+                "unsupported temporal intent or unresolved value column",
+            ));
+        }
         Ok(Self {
             kind: Kind::RangeWindow {
                 intent: Box::new(intent),

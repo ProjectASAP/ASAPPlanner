@@ -68,6 +68,7 @@ fn exact_kernel(family: &SummaryFamilyType) -> bool {
             | SummaryFamilyType::ExactAggregate(K::Max, P::Max)
             | SummaryFamilyType::ExactAggregate(K::Rate, P::Rate)
             | SummaryFamilyType::ExactAggregate(K::Increase, P::Increase)
+            | SummaryFamilyType::ExactAggregate(K::IRate, P::IRate)
     )
 }
 
@@ -387,7 +388,7 @@ pub fn validate_exact_evaluation(
     let supported = matches!(
         family,
         SummaryFamilyType::ExactAggregate(
-            kind @ (E::Sum | E::Count | E::Min | E::Max | E::Rate | E::Increase),
+            kind @ (E::Sum | E::Count | E::Min | E::Max | E::Rate | E::Increase | E::IRate),
             _,
         ) if *kind == evaluation.statistic
     );

@@ -247,7 +247,8 @@ impl Operator {
                 family,
                 SummaryFamilyType::ExactAggregate(
                     planner_types::summary_type::ExactKind::Rate
-                        | planner_types::summary_type::ExactKind::Increase,
+                        | planner_types::summary_type::ExactKind::Increase
+                        | planner_types::summary_type::ExactKind::IRate,
                     _
                 )
             )
@@ -1176,6 +1177,7 @@ fn evaluate_states(
             evaluation.statistic,
             planner_types::summary_type::ExactKind::Rate
                 | planner_types::summary_type::ExactKind::Increase
+                | planner_types::summary_type::ExactKind::IRate
         ) {
             return false;
         }

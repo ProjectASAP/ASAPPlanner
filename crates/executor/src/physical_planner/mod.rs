@@ -56,8 +56,8 @@ pub use compiled::CompiledPhysicalDAG;
 
 mod time_window;
 use time_window::{
-    below_time_shifts, counter_window, first_input, node_below_shifts, time_window_operator,
-    window_below, window_read_above, CompileGraph,
+    below_time_shifts, counter_window, first_input, node_below_shifts, time_range_window,
+    time_window_operator, window_below, window_read_above, CompileGraph,
 };
 
 mod row_values;
@@ -433,9 +433,10 @@ fn compile_internal(
                 continue;
             }
             // An exact per-series range reduction over raw data samples
-            // (`quantile/sum/avg/min/max/count/distinct/l2/entropy_over_time`)
-            // reduces each series' raw data samples in the window natively. Stage 3
-            // selects no other (`agg_has_exact_per_entity_kernel`).
+            // (`rate`, `changes`, `stddev_over_time`, …), or `timestamp(v)`
+            // over an instant selector, reduces each series' raw data samples
+            // in the window natively. Any other fails to compile
+            // (`agg_has_exact_per_entity_kernel`).
             if let Payload::NonASAP(NonASAPOp::Aggregate {
                 reduction: PlannerReduction::PerEntity,
                 measures,
@@ -450,10 +451,11 @@ fn compile_internal(
                 if filters.iter().any(Option::is_some) {
                     return Err(invalid("filtered aggregate has no native implementation"));
                 }
-                let [input] = schemas.as_slice() else {
+                let ([input], [input_id]) = (schemas.as_slice(), inputs.as_slice()) else {
                     return Err(invalid("per-entity aggregate requires one input"));
                 };
-                let value = match measure.input_cols().first() {
+                let columns = measure.input_cols();
+                let value = match columns.first() {
                     Some(column) => *column,
                     None => named_column(input, &ColumnRef::SampleValue)?,
                 };
@@ -462,33 +464,71 @@ fn compile_internal(
                         "node {id}: per-entity aggregate {measure:?} has no native implementation"
                     )));
                 }
-                let reduction = match measure {
-                    AggIntent::Count => Reduction::Count,
-                    AggIntent::Sum { .. } => Reduction::Sum(value),
-                    AggIntent::Avg { .. } => Reduction::Avg(value),
-                    AggIntent::Min { .. } => Reduction::Min(value),
-                    AggIntent::Max { .. } => Reduction::Max(value),
-                    AggIntent::Quantile { q, .. } => Reduction::Quantile {
-                        column: value,
-                        q: *q,
-                    },
-                    AggIntent::Cardinality { .. } => Reduction::Cardinality(vec![value]),
-                    AggIntent::FrequencyL2 { .. } => Reduction::FrequencyL2(value),
-                    AggIntent::FrequencyEntropy { .. } => Reduction::FrequencyEntropy(value),
-                    _ => {
-                        return Err(invalid(format!(
-                            "node {id}: per-entity kernel of {measure:?} is listed but not mapped"
-                        )))
-                    }
-                };
                 let coordinate = input
                     .time_index
                     .ok_or_else(|| invalid("temporal input lacks time"))?;
                 let groups = (0..input.fields.len())
                     .filter(|&column| column != value && column != coordinate)
                     .collect();
-                let aggregate =
-                    Operator::aggregate(input.clone(), groups, vec![("value".into(), reduction)])?;
+                let reduction = match measure {
+                    AggIntent::Count => Some(Reduction::Count),
+                    AggIntent::Sum { .. } => Some(Reduction::Sum(value)),
+                    AggIntent::Avg { .. } => Some(Reduction::Avg(value)),
+                    AggIntent::Min { .. } => Some(Reduction::Min(value)),
+                    AggIntent::Max { .. } => Some(Reduction::Max(value)),
+                    AggIntent::StdDev { population, .. } => Some(Reduction::StdDev {
+                        column: value,
+                        population: *population,
+                    }),
+                    AggIntent::Variance { population, .. } => Some(Reduction::Variance {
+                        column: value,
+                        population: *population,
+                    }),
+                    AggIntent::Quantile { q, .. } => Some(Reduction::Quantile {
+                        column: value,
+                        q: *q,
+                    }),
+                    // A distinct tuple over every listed column.
+                    AggIntent::Cardinality { .. } => {
+                        Some(Reduction::Cardinality(if columns.is_empty() {
+                            vec![value]
+                        } else {
+                            columns
+                        }))
+                    }
+                    AggIntent::FrequencyL2 { .. } => Some(Reduction::FrequencyL2(value)),
+                    AggIntent::FrequencyEntropy { .. } => Some(Reduction::FrequencyEntropy(value)),
+                    // A function of each series' time-ordered samples.
+                    _ => None,
+                };
+                let aggregate = match reduction {
+                    Some(reduction) => Operator::aggregate(
+                        input.clone(),
+                        groups,
+                        vec![("value".into(), reduction)],
+                    )?,
+                    None => {
+                        let window = time_range_window(*input_id, &graph).ok_or_else(|| {
+                            invalid(format!(
+                                "node {id}: per-entity {measure:?} requires a bounded time range input"
+                            ))
+                        })?;
+                        let millis = |ms: u64| {
+                            i64::try_from(ms).map_err(|_| invalid("a time window overflows Int64"))
+                        };
+                        Operator::window(
+                            input.clone(),
+                            measure.clone(),
+                            coordinate,
+                            value,
+                            groups,
+                            Some((
+                                millis(window.ends_before_evaluation_ms)?,
+                                millis(window.length_ms)?,
+                            )),
+                        )?
+                    }
+                };
                 // A PromQL sample is Float64; a count is Int64.
                 let reduced = aggregate.schema();
                 let project = Operator::project(
@@ -517,9 +557,11 @@ fn compile_internal(
                     .fields
                     .iter()
                     .any(|field| field.name == promql_rows::SERIES_IDENTITY_COLUMN)
+                    && !matches!(measure, AggIntent::LastOverTime | AggIntent::FirstOverTime)
                 {
                     // Range functions drop the metric name, as their
-                    // summary evaluations do.
+                    // summary evaluations do; `last_over_time` and
+                    // `first_over_time` keep it, as Prometheus does.
                     physical_dag.add(helper_id(id, 2)?, vec![helper_id(id, 1)?], stamped)?;
                     physical_dag.add(
                         id,
@@ -1103,12 +1145,8 @@ fn bind_operation(
     match &node.payload {
         Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => {
             let state = summary_column(input)?;
-            use planner_types::summary_type::ExactKind as E;
             let statistic = match &input.fields[state].dtype {
-                FieldDataType::ExactAggregate(kind, _) => match kind {
-                    E::Sum | E::Count | E::Min | E::Max | E::Rate | E::Increase => *kind,
-                    _ => return Err(invalid("exact family evaluation is unsupported")),
-                },
+                FieldDataType::ExactAggregate(kind, _) => *kind,
                 _ => return Err(invalid("exact finalization requires exact state")),
             };
             Operator::evaluation(
