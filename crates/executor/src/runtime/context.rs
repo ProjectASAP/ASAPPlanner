@@ -37,6 +37,10 @@ pub(super) struct Control {
 pub struct RunContext {
     pub scope: Scope,
     query_range: Option<(i64, i64)>,
+    /// The data's declared bound on how late a raw row may arrive after a
+    /// later row of its series, in ms (`DataArrival`'s
+    /// `max_out_of_order_ms`); `None` when undeclared.
+    max_out_of_order_ms: Option<u64>,
     pub(super) control: Rc<Control>,
 }
 impl RunContext {
@@ -51,6 +55,7 @@ impl RunContext {
         Ok(Self {
             scope,
             query_range: None,
+            max_out_of_order_ms: None,
             control: Rc::new(Control {
                 cancelled: Cell::new(false),
                 bytes: Cell::new(0),
@@ -76,6 +81,22 @@ impl RunContext {
     }
     pub(crate) fn query_range(&self) -> Option<(i64, i64)> {
         self.query_range
+    }
+    /// Declare that the raw rows this run reads arrive, in the order the
+    /// data store returns them, at most `max_out_of_order_ms` behind a
+    /// later row of their series: the data workload's
+    /// `max_out_of_order_ms`. A counter build (rate, increase) then holds
+    /// each row until the newest row is more than the bound past it and
+    /// folds the rows in time order, so rows of `{t=10 s, 12 s, 11 s}`
+    /// with a 5 s bound build the state `{10 s, 11 s, 12 s}` builds.
+    /// Without it, a counter row not after its series' previous row is an
+    /// operator error.
+    pub fn with_max_out_of_order_ms(mut self, max_out_of_order_ms: u64) -> Self {
+        self.max_out_of_order_ms = Some(max_out_of_order_ms);
+        self
+    }
+    pub(crate) fn max_out_of_order_ms(&self) -> Option<u64> {
+        self.max_out_of_order_ms
     }
     /// This run's context, evaluated at `evaluation_time_ms` instead: the
     /// same limits, cancellation and query range.
