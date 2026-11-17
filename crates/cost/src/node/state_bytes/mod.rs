@@ -352,9 +352,6 @@ const DDSKETCH_ASSUMED_MAGNITUDE_RANGE: ValueMagnitudeRange = ValueMagnitudeRang
     max_abs: 1e9,
 };
 
-/// The Euler–Mascheroni constant γ.
-const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
-
 /// The ratio of the largest to the smallest of `rows` values a DDSketch
 /// state is assumed to span when the workload declares nothing about its
 /// values: `rows` samples of an exponential distribution, as latencies
@@ -371,8 +368,8 @@ const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
 /// exponential (Pareto) are under-charged.
 fn exponential_values_magnitude_ratio(rows: u64) -> f64 {
     let n = rows.max(1) as f64;
-    let harmonic = n.ln() + EULER_GAMMA + 1.0 / (2.0 * n);
-    n * harmonic * EULER_GAMMA.exp()
+    let harmonic = n.ln() + std::f64::consts::EULER_GAMMA + 1.0 / (2.0 * n);
+    n * harmonic * std::f64::consts::EULER_GAMMA.exp()
 }
 
 /// The bytes a DDSketch of relative accuracy `alpha` is expected to hold

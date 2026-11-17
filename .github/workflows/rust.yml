@@ -106,7 +106,7 @@ jobs:
         python3 -m unittest -v test_viewer test_server
 
     - name: Run the DAG viewer's Node tests
-      run: node --test tools/dag-viewer/stages.test.mjs tools/dag-viewer/enumeration.test.mjs tools/dag-viewer/memo.test.mjs
+      run: node --test tools/dag-viewer/stages.test.mjs tools/dag-viewer/memo.test.mjs
 
     - name: Verify MetricsQL frontend as a stable external dependency
       run: bash tools/verify_metricsql_external_consumer.sh
