@@ -18,8 +18,8 @@ asap-stage1-pass2-reuse-candidates = { path = "../stage1-pass2-reuse-candidates"
 asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
 asap-cost = { path = "../cost" }
 asap-stage3-plan-selection = { path = "../stage3-plan-selection" }
-# The installable plan of the selected candidate (`installable_plan_of`),
-# whose stored outputs `asap_planner` writes.
+# The installable plan of the selected candidate (`InstallablePlan`),
+# whose stored outputs and plan file `asap_planner` writes.
 asap-planner = { path = "../planner" }
 # The executor's supported summary families, which `asap_planner` plans
 # with when the deployment declares none, as `plan_installable` does.

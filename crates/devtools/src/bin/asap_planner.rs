@@ -44,12 +44,28 @@
 //     (`supported_summaries`, `raw_data_retained`,
 //     `query_time_results_retained`; an omitted field takes its default).
 //     Without `supported_summaries`, the executor's summary families are
-//     supported, as `plan_installable` defaults it.
+//     supported, as `plan_installable` defaults it, unless
+//     `--executor-check skip`.
 //   - `--ignore-accuracy-guarantees`: Stage 3 accepts every query output
 //     regardless of its accuracy guarantee
 //     (`PlanningModels::ignore_accuracy_guarantees`), comparing candidates
 //     on cost alone. By default it enforces them, as `plan_installable`
 //     does.
+//   - `--executor-check compile|skip`: whether the selected plan must
+//     compile on the Planner's executor (`compile`, the default, as
+//     `plan_installable` checks it), or is for a runtime other than the
+//     Planner's executor (`skip`): then unrestricted `supported_summaries`
+//     stay unrestricted, so the deployment capabilities passed are the only
+//     restriction, and the plan is validated
+//     (`InstallablePlan::of_dag_without_executor_check`) but not compiled.
+//
+// Besides the stage output, `--plan-file <file>` (with `--run-until
+// stage3`) writes the selected plan as an `InstallablePlan` JSON plan file,
+// which a runtime reads with `InstallablePlan::from_json`, checked as
+// `--executor-check` says. When no plan is selected or the plan fails the
+// check, no plan file is written and the run exits 1 after writing the
+// stage output. A plan file left at the path is removed once the arguments
+// are read, so no failed run leaves one there.
 //
 // The document (`--format json`):
 //   - workload: the queries (`id`, `language`, `text`, `requirements`,
@@ -81,7 +97,8 @@
 //     `parameters`, `timing`, `lifetime`) and the `queries` reading it.
 //     `materialized_views` are the plan's materialized views as
 //     `plan_installable` derives them; `materialized_views_error` when the
-//     plan is not installable. `warnings`: a PromQL query applying `rate`, `increase`
+//     plan is not installable (under `--executor-check skip`, not checked
+//     against the Planner's executor). `warnings`: a PromQL query applying `rate`, `increase`
 //     or `irate` to a declared gauge or combining a declared summary's
 //     quantile series across series (`metric_type_warnings`), each data fact the selected
 //     plan assumed because the data workload does not declare it (`assumed_data_facts`,
@@ -136,7 +153,7 @@ use asap_devtools::planning_stages_text::{
 use asap_devtools::stable_output::{rounded_to_12_significant_digits, CanonicalIds};
 use asap_devtools::SqlCatalog;
 use asap_frontend_promql::{metric_type_warnings, promql_metric_names};
-use asap_planner::{assumed_data_facts, installable_plan_of, PlanningModels, SelectionError};
+use asap_planner::{assumed_data_facts, InstallablePlan, PlanningModels, SelectionError};
 use asap_stage3_plan_selection::{large_peak_memory_warning, AcceptedAccuracy, Selection};
 use asap_types::accuracy::{default_metric_for_root, AccuracyTarget};
 use asap_types::deployment_capabilities::DeploymentCapabilities;
@@ -159,7 +176,7 @@ use serde_json::{json, Value};
 const USAGE: &str = "usage: asap_planner (--workload <file>)... \
 --run-until stage0|stage1_pass1|stage1_pass2|stage2|stage3 [--format text|json] [--printing-full-candidates] [--out <file>] \
 [--sql-catalog-table <json>]... [--cost-inputs <file>] [--deployment-capabilities <file>] \
-[--ignore-accuracy-guarantees]";
+[--ignore-accuracy-guarantees] [--executor-check compile|skip] [--plan-file <file>]";
 
 fn main() {
     match run(std::env::args().skip(1).collect()) {
@@ -188,6 +205,17 @@ impl From<String> for Failure {
     }
 }
 
+/// Whether the selected plan must compile on the Planner's executor
+/// (`--executor-check`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExecutorCheck {
+    /// It must, as `plan_installable` checks it (the default).
+    Compile,
+    /// It is for a runtime other than the Planner's executor: validated,
+    /// not compiled, and planned with the summaries the deployment declares.
+    Skip,
+}
+
 /// `path`'s contents as `T`, errors naming `flag` and `path`.
 fn read_json<T: serde::de::DeserializeOwned>(flag: &str, path: &str) -> Result<T, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{flag} {path}: {e}"))?;
@@ -204,6 +232,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut deployment_capabilities = DeploymentCapabilities::default();
     let mut ignore_accuracy_guarantees = false;
     let mut printing_full_candidates = false;
+    let mut executor_check = ExecutorCheck::Compile;
+    let mut plan_file = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let mut value = || {
@@ -228,12 +258,36 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--deployment-capabilities" => deployment_capabilities = read_json(&flag, &value()?)?,
             "--ignore-accuracy-guarantees" => ignore_accuracy_guarantees = true,
             "--printing-full-candidates" => printing_full_candidates = true,
+            "--executor-check" => {
+                executor_check = match value()?.as_str() {
+                    "compile" => ExecutorCheck::Compile,
+                    "skip" => ExecutorCheck::Skip,
+                    other => return Err(Failure::Usage(format!("unknown executor check {other}"))),
+                }
+            }
+            "--plan-file" => plan_file = Some(value()?),
             other => return Err(Failure::Usage(format!("unknown argument {other}"))),
         }
     }
     let run_until = run_until.ok_or(Failure::Usage("--run-until is required".into()))?;
+    if plan_file.is_some() && run_until != RunUntil::Stage3 {
+        return Err(Failure::Usage(
+            "--plan-file needs --run-until stage3".into(),
+        ));
+    }
     if workload_paths.is_empty() {
         return Err(Failure::Usage("--workload is required".into()));
+    }
+    // A plan file an earlier run left at the path is removed first, so a
+    // runtime never installs a plan this run did not select, whichever way
+    // the run fails.
+    if let Some(path) = &plan_file {
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("--plan-file {path}: {e}").into())
+            }
+            _ => {}
+        }
     }
     let mut workloads = Vec::new();
     for path in &workload_paths {
@@ -245,8 +299,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     let (catalog, table_names) = sql_catalog(&tables)?;
     let (described, roots, entries, data) = lowered_together(&workloads, &catalog, &table_names)?;
-    // Plan with the executor's summary families when the deployment declares none.
-    if deployment_capabilities.supported_summaries.is_none() {
+    // Plan with the executor's summary families when the deployment declares
+    // none, unless the plan is for a runtime other than the Planner's executor.
+    if executor_check == ExecutorCheck::Compile
+        && deployment_capabilities.supported_summaries.is_none()
+    {
         deployment_capabilities.supported_summaries =
             Some(asap_executor::supported_summary_families());
     }
@@ -262,14 +319,19 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         .and_then(|run| run.run.selection.as_ref().ok())
         .and_then(|(plan, _)| asap_cost::plan_cost(plan, &entries, &data, &cost_inputs).ok())
         .map(|(cost, _)| cost);
-    // The selected plan's materialized views, as `plan_installable` derives them.
-    let materialized_views = result
+    // The selected plan as installed, checked as `--executor-check` says.
+    let installable = result
         .as_ref()
         .ok()
         .and_then(|run| run.run.selection.as_ref().ok())
-        .map(|(plan, _)| materialized_views_of(plan, &entries));
+        .map(|(plan, _)| installable_plan(plan, &entries, executor_check));
+    // Its materialized views, as `plan_installable` derives them.
+    let materialized_views = installable.as_ref().map(|installable| {
+        let plan = installable.as_ref().map_err(Clone::clone)?;
+        plan.materialized_views().map_err(|e| e.to_string())
+    });
     // A stage that failed: the output is still written, then the run exits 1.
-    let failure = match &result {
+    let mut failure = match &result {
         Err(PlanningStagesError::Pass1(error)) => Some(format!("Pass 1: {error}")),
         Ok(run) => match &run.run.selection {
             Err(SelectionError::NotRun) | Ok(_) => None,
@@ -348,6 +410,17 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     match out {
         Some(path) => std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?,
         None => print!("{text}"),
+    }
+    if let Some(path) = plan_file {
+        match installable {
+            Some(Ok(plan)) => {
+                let json = serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?;
+                std::fs::write(&path, json + "\n").map_err(|e| format!("{path}: {e}"))?;
+            }
+            Some(Err(error)) => failure = Some(format!("--plan-file {path}: {error}")),
+            // No plan was selected: `failure` already says why.
+            None => {}
+        }
     }
     match failure {
         Some(error) => Err(Failure::Other(error)),
@@ -696,16 +769,23 @@ fn arrival_together(earlier: DataArrival, later: DataArrival) -> Option<DataArri
     }
 }
 
-/// The selected plan's materialized views, as the plan
-/// [`installable_plan_of`] (what `plan_installable` returns) derives them
-/// (each view's node id, `refresh`, `coverage`, `inputs` and
-/// `retention_ms`), or why the plan is not installable.
-fn materialized_views_of(
+/// The installable plan of `plan`, Stage 3's plan for a workload whose
+/// entries are `entries`: with `ExecutorCheck::Compile` what
+/// `plan_installable` returns, refused when the Planner's executor cannot
+/// compile it; with `ExecutorCheck::Skip` the same plan, validated only.
+/// `Err` says why it is not installable.
+fn installable_plan(
     plan: &PhysicalASAPDAG,
     entries: &[QueryWorkloadEntry],
-) -> Result<Vec<MaterializedView>, String> {
-    let plan = installable_plan_of(plan.clone(), entries).map_err(|e| e.to_string())?;
-    plan.materialized_views().map_err(|e| e.to_string())
+    executor_check: ExecutorCheck,
+) -> Result<InstallablePlan, String> {
+    let query_texts = entries.iter().map(|entry| entry.query.0.clone()).collect();
+    let plan = InstallablePlan::of_dag_without_executor_check(plan.clone(), query_texts)
+        .map_err(|e| e.to_string())?;
+    if executor_check == ExecutorCheck::Compile {
+        plan.check_compiles()?;
+    }
+    Ok(plan)
 }
 
 /// Stage 2's physical candidates $\mathcal C$: each with its logical

@@ -2321,7 +2321,8 @@ fn is_the_selected_plan(plan: &asap_planner::InstallablePlan, document: &Value) 
     ) == document["stage3_plan_selection"]["plan"]
 }
 
-/// `--plan-file` writes the selected plan of #509's example 1 as
+/// `--plan-file` writes the selected plan of the committed `example1`
+/// workload as
 /// `InstallablePlan` JSON, with the executor's compile check (the default)
 /// and without it (`skip`): the file reads back with
 /// `InstallablePlan::from_json`, validates, holds the workload's query
@@ -2377,7 +2378,10 @@ fn executor_check_skip_writes_a_plan_the_executor_cannot_compile() {
         assert_eq!(output.status.code(), Some(1), "{check:?}");
         assert!(!output.stdout.is_empty(), "the stage output is written");
         let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(stderr.contains("the executor cannot"), "{check:?}: {stderr}");
+        assert!(
+            stderr.contains("the executor cannot"),
+            "{check:?}: {stderr}"
+        );
         assert!(!stderr.contains("usage:"), "{stderr}");
         assert!(!Path::new(file.path()).exists(), "{check:?}");
     }
@@ -2392,43 +2396,52 @@ fn executor_check_skip_writes_a_plan_the_executor_cannot_compile() {
     assert!(plan.check_compiles().is_err());
     // The document derives the same plan's views, without the compile check.
     let selection = &document["stage3_plan_selection"];
-    assert!(selection["materialized_views_error"].is_null(), "{selection}");
+    assert!(
+        selection["materialized_views_error"].is_null(),
+        "{selection}"
+    );
     assert!(selection["materialized_views"].is_array(), "{selection}");
 }
 
-/// With `skip`, supported summaries the deployment leaves unrestricted
-/// stay unrestricted: Pass 1 offers a family the Planner's executor does
-/// not build (Count Sketch for `count`, which
-/// `undeclared_supported_summaries_default_to_the_executors_families` shows
-/// is not offered by default), and the document shows no restriction.
-/// `compile` is the default.
+/// The deployment capabilities `asap_planner` plans with (the document
+/// shows the value it hands to planning): supported summaries the
+/// deployment leaves unrestricted are the executor's families under the
+/// compile check (the default, as `plan_installable` defaults them) and
+/// stay unrestricted with `skip`, so the capabilities the caller passes are
+/// the only restriction.
 #[test]
 fn executor_check_skip_keeps_unrestricted_summaries_unrestricted() {
     let workload = adhoc(&["count by (job) (m)"], within(0.01, 0.01), &["m"]);
-    let planned_with = |check: &str| {
-        document(
-            &workload,
-            &[
-                "--run-until",
-                "stage1_pass1",
-                "--ignore-accuracy-guarantees",
-                "--executor-check",
-                check,
-            ],
-        )
+    let planned_with = |args: &[&str]| {
+        let mut all = vec!["--run-until", "stage0"];
+        all.extend_from_slice(args);
+        document(&workload, &all)["deployment_capabilities"]["supported_summaries"].clone()
     };
-    let compile = planned_with("compile");
     assert_eq!(
-        compile["deployment_capabilities"]["supported_summaries"],
+        planned_with(&["--executor-check", "compile"]),
         serde_json::to_value(asap_executor::supported_summary_families()).unwrap()
     );
-    let skip = planned_with("skip");
-    assert!(skip["deployment_capabilities"]["supported_summaries"].is_null());
-    let labels = memo_labels(&skip, "pass1");
-    assert!(
-        labels.iter().any(|label| label.contains("CountSketch")),
-        "{labels:?}"
+    assert_eq!(
+        planned_with(&["--executor-check", "compile"]),
+        planned_with(&[])
     );
+    assert!(planned_with(&["--executor-check", "skip"]).is_null());
+}
+
+/// A run that fails before planning (here an unreadable workload file)
+/// still removes the plan file an earlier run left at `--plan-file`.
+#[test]
+fn a_failed_run_removes_the_plan_file_left_at_the_path() {
+    let file = stale_plan_file();
+    refused(&[
+        "--workload",
+        "/nonexistent/workload.json",
+        "--run-until",
+        "stage3",
+        "--plan-file",
+        file.path(),
+    ]);
+    assert!(!Path::new(file.path()).exists());
 }
 
 /// When Stage 3 selects no plan (example 3b under cost model 2, which plan

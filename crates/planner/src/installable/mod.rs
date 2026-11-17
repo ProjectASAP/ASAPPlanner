@@ -304,25 +304,36 @@ impl InstallablePlan {
         executor_compiles(&self.dag, &views).map_err(|error| error.to_string())
     }
 
-    /// The plan of `dag`, with each view's and query-time scan's retention
-    /// (which Stage 3 set) checked ([`PhysicalASAPDAG::materialized_views`],
-    /// [`PhysicalASAPDAG::raw_data_retention`]), and each view's refresh
-    /// and the query run compiled ([`executor_compiles`]): a plan the
-    /// executor cannot run is refused here, not installed.
+    /// The plan of `dag`, validated ([`Self::of_dag_without_executor_check`]),
+    /// with each view's refresh and the query run compiled
+    /// ([`executor_compiles`]): a plan the Planner's executor cannot run is
+    /// refused here, not installed.
     pub(crate) fn of_dag(
         dag: PhysicalASAPDAG,
         query_texts: Vec<String>,
     ) -> Result<Self, InstallablePlanError> {
-        let views = dag.materialized_views()?;
-        dag.raw_data_retention()?;
-        check_queries(&dag, &query_texts)?;
-        executor_compiles(&dag, &views)?;
+        let plan = Self::of_dag_without_executor_check(dag, query_texts)?;
+        executor_compiles(&plan.dag, &plan.materialized_views()?)?;
+        Ok(plan)
+    }
+
+    /// The plan of `dag` answering `query_texts` (one per root, in workload
+    /// order) for a runtime other than the Planner's executor: checked as
+    /// [`Self::validate`] checks a plan file (the DAG's validity, one text
+    /// per root, no standalone scalar query, and each view's and query-time
+    /// scan's retention, which Stage 3 set), but not compiled by the
+    /// Planner's executor. E.g. a plan with a `last_over_time` the executor
+    /// has no kernel for is returned here and refused by [`Self::of_dag`].
+    pub fn of_dag_without_executor_check(
+        dag: PhysicalASAPDAG,
+        query_texts: Vec<String>,
+    ) -> Result<Self, InstallablePlanError> {
         let plan = InstallablePlan {
             wire_version: INSTALLABLE_PLAN_WIRE_VERSION,
             dag,
             query_texts,
         };
-        debug_assert!(plan.validate().is_ok());
+        plan.validate()?;
         Ok(plan)
     }
 
