@@ -3649,3 +3649,326 @@ fn aggregate_needs_every_measure() {
         usage.work_ms_per_execution
     );
 }
+
+/// What one counter-matrix sketch (Count-Min or Count Sketch with heap,
+/// UnivMon) measured on the executor did: `groups` states of
+/// `rows_per_state` rows each, every row one of `items` distinct items, as
+/// [`counter_sketch_charges_ms`] charges them.
+struct CounterSketchShape {
+    parameters: SketchParams,
+    groups: u64,
+    rows_per_state: u64,
+    items: u64,
+}
+
+/// What a [`CounterSketchShape`] is charged, in ms per execution: the
+/// query-time build (a `SummaryAgg` keyed by `key`, one state per `g`, over
+/// finalized rows, not raw ones), its readout (a top-10 or an L2), a merge
+/// of every state into one, and the same build at ingestion time (a
+/// tumbling-window chain of 60 s windows, each the shape's rows).
+struct CounterSketchCharges {
+    build_ms: f64,
+    readout_ms: f64,
+    merge_ms: f64,
+    ingestion_build_ms: f64,
+}
+
+fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges {
+    use asap_types::ir::schema::DataType;
+    use asap_types::summary_type::{SketchAlgorithm, SummaryInputExpr};
+    let settings = CostInputs::default();
+    let data: DataWorkload = serde_json::from_value(serde_json::json!({
+        "arrival": {"ingesting": {"rows_per_second": 1000.0}},
+        "sources": {"t": {"distinct_values_per_label": {"g": shape.groups, "key": shape.items}}}
+    }))
+    .unwrap();
+    let keyed = |weight| SummaryUpdate {
+        item: Some(SummaryInputExpr::Column(ColumnRef::Named("key".into()))),
+        weight,
+    };
+    let value = || SummaryInputExpr::Column(ColumnRef::Named("value".into()));
+    let top_10 = SketchStatistic::TopK { k: 10 };
+    let (algorithm, update, statistic) = match shape.parameters {
+        SketchParams::UnivMon { .. } => (
+            SketchAlgorithm::UnivMon,
+            keyed(SummaryInputExpr::Constant(1.0)),
+            SketchStatistic::FrequencyL2,
+        ),
+        SketchParams::CmsWithHeap { .. } => (SketchAlgorithm::CmsWithHeap, keyed(value()), top_10),
+        SketchParams::CountSketchWithHeap { .. } => {
+            (SketchAlgorithm::CountSketchWithHeap, keyed(value()), top_10)
+        }
+        SketchParams::Cms { .. }
+        | SketchParams::CountSketch { .. }
+        | SketchParams::Hydra(_)
+        | SketchParams::Kll { .. }
+        | SketchParams::DDSketch { .. }
+        | SketchParams::Hll { .. }
+        | SketchParams::Kmv { .. } => panic!("a counter-matrix sketch measured on the executor"),
+    };
+    let rows_schema = Schema::new(vec![
+        Field::new("g", FieldDataType::Plain(DataType::Utf8), false),
+        Field::new("key", FieldDataType::Plain(DataType::Utf8), false),
+        Field::new("value", FieldDataType::Plain(DataType::Float64), false),
+    ]);
+    let rows_node = PhysicalASAPDAGNode {
+        output_schema: rows_schema.clone(),
+        ..node(Payload::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(60),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        }))
+    };
+    let rows = |count: u64| ProducerOutput {
+        payload: &rows_node.payload,
+        output_schema: &rows_node.output_schema,
+        output: EdgeStatistics {
+            rows: count,
+            bytes: count * 48,
+        },
+        sources: BTreeSet::from(["t"]),
+        family: StateFamily::None,
+        unchanged_columns: ["g", "key", "value"].into(),
+        tumbling_windows: 1,
+        chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
+        state_input_rows: None,
+    };
+    let family = FieldDataType::Sketch(algorithm);
+    let states_schema = Schema::new(vec![
+        Field::new("g", FieldDataType::Plain(DataType::Utf8), false),
+        Field::new("state", family.clone(), false),
+    ]);
+    let build = PhysicalASAPDAGNode {
+        parameters: Some(shape.parameters.clone()),
+        output_schema: states_schema.clone(),
+        ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: family.clone(),
+            input: update.clone(),
+            reduction: Reduction::by(vec![0]),
+            filter: None,
+        }))
+    };
+    let all_rows = shape.groups * shape.rows_per_state;
+    let build_usage =
+        node_resource_usage_and_cost(&build, &[rows(all_rows)], (1, 1.0), None, &data, &settings)
+            .unwrap();
+    assert_eq!(build_usage.output.rows, shape.groups);
+    let readout = node(Payload::ASAP(ASAPOp::SummaryEstimate {
+        summary_input: 0,
+        query: statistic,
+    }));
+    let readout_usage = node_resource_usage_and_cost(
+        &readout,
+        &[produced(&build, &build_usage)],
+        (1, 1.0),
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
+    let merge = PhysicalASAPDAGNode {
+        parameters: Some(shape.parameters.clone()),
+        ..node(Payload::ASAP(ASAPOp::SummaryMerge {
+            children: vec![0],
+            group_by: Some(vec![]),
+        }))
+    };
+    let merge_usage = node_resource_usage_and_cost(
+        &merge,
+        &[produced(&build, &build_usage)],
+        (1, 1.0),
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
+    assert_eq!(merge_usage.output.rows, 1);
+    // At ingestion time, one second of a 60 s window's rows.
+    let mut chain = PhysicalASAPDAGNode {
+        parameters: Some(shape.parameters.clone()),
+        output_schema: states_schema,
+        ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: 0,
+            summary_type: family,
+            input: update,
+            reduction: Reduction::by(vec![0]),
+            filter: None,
+            tumbling_window_width_ms: 60_000,
+        }))
+    };
+    chain.output_state = ExecutionDataState::INGESTION_ROWS;
+    chain.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
+    chain.retention_ms = Some(60_000);
+    let chain_usage = node_resource_usage_and_cost(
+        &chain,
+        &[rows(all_rows.div_ceil(60))],
+        (1, 1.0),
+        Some(60_000),
+        &data,
+        &settings,
+    )
+    .unwrap();
+    CounterSketchCharges {
+        build_ms: build_usage.work_ms_per_execution,
+        readout_ms: readout_usage.work_ms_per_execution,
+        merge_ms: merge_usage.work_ms_per_execution,
+        ingestion_build_ms: chain_usage.cpu_ops_per_second * 60.0 * 1e-6,
+    }
+}
+
+/// A Count Sketch with heap built at query time costs more the wider it
+/// is, as the executor measures it: the top-10 by `url` over 100 rows of
+/// 100 URLs into one state at depth 81 measures 3.08 ms at width 300 and
+/// 6.35 ms at width 30,000, which allocates and zeroes 2.4 M counters more
+/// (the executor's per-group keyed build, thread CPU, median of 3 runs on
+/// one pinned core). Charged per row alone, both cost 0.15 ms. The ratio
+/// of the charges is within the build fit's leave-one-setting-out error
+/// (0.313 RMS log, a factor of 1.37) of the measured ratio.
+#[test]
+fn a_wider_query_time_count_sketch_costs_more_as_the_executor_measures() {
+    let charged = |width| {
+        counter_sketch_charges_ms(&CounterSketchShape {
+            parameters: SketchParams::CountSketchWithHeap {
+                width,
+                depth: 81,
+                heap_size: 10,
+            },
+            groups: 1,
+            rows_per_state: 100,
+            items: 100,
+        })
+        .build_ms
+    };
+    let (narrow, wide) = (charged(300), charged(30_000));
+    let measured_ratio = 6.351 / 3.076;
+    assert!(
+        wide > narrow && (1.0 / 1.37..=1.37).contains(&(wide / narrow / measured_ratio)),
+        "width 300 charged {narrow:.3} ms (measured 3.076), width 30,000 {wide:.3} ms (measured 6.351)"
+    );
+}
+
+/// Counter-matrix sketches measured on the executor, at query and at
+/// ingestion time, are charged within the fit's range of measured ÷
+/// charged over its whole grid (235 builds, 158 readouts, 126 merges, 17
+/// ingestion builds; see `operations_per_unit`), rounded outwards: builds
+/// 0.54–4.94, readouts of 10 states or more 0.65–2.66, merges 0.79–2.76,
+/// ingestion builds 0.61–2.37.
+/// Charged per row alone, without a state's counters, its heap's
+/// re-estimates or its size, the builds were 12–800x under.
+#[test]
+fn counter_matrix_sketches_are_charged_their_measured_time() {
+    let cms = |width, depth| SketchParams::CmsWithHeap {
+        width,
+        depth,
+        heap_size: 10,
+    };
+    let count_sketch = |width, depth| SketchParams::CountSketchWithHeap {
+        width,
+        depth,
+        heap_size: 10,
+    };
+    let univmon = |sketch_cols| SketchParams::UnivMon {
+        heap_size: 1,
+        sketch_rows: 5,
+        sketch_cols,
+        layers: 1,
+    };
+    let shape = |parameters, groups, rows_per_state, items| CounterSketchShape {
+        parameters,
+        groups,
+        rows_per_state,
+        items,
+    };
+    // (term, shape, measured ms)
+    let points = [
+        ("build", shape(count_sketch(300, 81), 1, 100, 100), 3.076),
+        ("build", shape(count_sketch(30_000, 81), 1, 100, 100), 6.351),
+        (
+            "build",
+            shape(count_sketch(7_500, 81), 100, 100, 100),
+            670.96,
+        ),
+        ("build", shape(cms(272, 5), 100, 100, 100), 32.13),
+        ("build", shape(cms(2_719, 12), 1_000, 10, 10), 150.92),
+        ("build", shape(univmon(624), 1, 100_000, 10_000), 62.29),
+        ("build", shape(univmon(56_817), 100, 1_000, 1_000), 208.99),
+        ("readout", shape(cms(1_360, 12), 1_000, 10, 10), 15.53),
+        (
+            "readout",
+            shape(count_sketch(7_500, 81), 100, 100, 100),
+            7.10,
+        ),
+        ("merge", shape(cms(2_719, 12), 1_000, 10, 10), 91.28),
+        (
+            "merge",
+            shape(count_sketch(7_500, 81), 100, 100, 100),
+            192.73,
+        ),
+        ("merge", shape(univmon(56_817), 100, 100, 100), 97.16),
+        (
+            "ingestion build",
+            shape(cms(2_719, 12), 100, 100, 100),
+            73.09,
+        ),
+        ("ingestion build", shape(univmon(624), 1_000, 10, 10), 9.99),
+        (
+            "ingestion build",
+            shape(count_sketch(300, 81), 100, 100, 100),
+            416.44,
+        ),
+    ];
+    for (term, shape, measured) in points {
+        let charges = counter_sketch_charges_ms(&shape);
+        let (charged, range) = match term {
+            "build" => (charges.build_ms, 0.54..=4.94),
+            "readout" => (charges.readout_ms, 0.65..=2.66),
+            "merge" => (charges.merge_ms, 0.79..=2.76),
+            _ => (charges.ingestion_build_ms, 0.61..=2.37),
+        };
+        assert!(
+            range.contains(&(measured / charged)),
+            "{term} of {:?}, {} states of {} rows of {} items: charged {charged:.3} ms, measured {measured}",
+            shape.parameters,
+            shape.groups,
+            shape.rows_per_state,
+            shape.items
+        );
+    }
+}
+
+/// A heap's top-k read and its merge estimate the items the heap holds,
+/// which are the distinct items its state folded, at most its size: a heap
+/// of 10 over 1,000 rows of 5 URLs holds 5, as its updates count them, not
+/// 10. Its read is charged 55 operations per counter of depth less for each
+/// item it does not hold, its merge 53.
+#[test]
+fn a_heap_over_few_distinct_items_is_read_and_merged_for_the_items_it_holds() {
+    let charges = |items| {
+        counter_sketch_charges_ms(&CounterSketchShape {
+            parameters: SketchParams::CmsWithHeap {
+                width: 272,
+                depth: 10,
+                heap_size: 10,
+            },
+            groups: 10,
+            rows_per_state: 1_000,
+            items,
+        })
+    };
+    let (few, many) = (charges(5), charges(10_000));
+    let fewer_residents_ms = |per_counter: f64| 10.0 * 5.0 * per_counter * 10.0 * 1e-6;
+    assert!(
+        (many.readout_ms - few.readout_ms - fewer_residents_ms(55.0)).abs() < 1e-9,
+        "readout {} ms over 5 items, {} over 10,000",
+        few.readout_ms,
+        many.readout_ms
+    );
+    assert!(
+        (many.merge_ms - few.merge_ms - fewer_residents_ms(53.0)).abs() < 1e-9,
+        "merge {} ms over 5 items, {} over 10,000",
+        few.merge_ms,
+        many.merge_ms
+    );
+}

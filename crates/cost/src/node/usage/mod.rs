@@ -25,8 +25,8 @@ use crate::node::analytical::{
 use crate::node::cost_terms::{CostConstant, NodeCostTerms};
 use crate::node::operations_per_unit::{
     chain_emit_terms_per_state, estimate_terms_per_group, hash_aggregate_terms_per_row,
-    merge_output_terms, merge_terms_per_state, pass_through_merge_terms, update_terms_per_row,
-    StateLastWrittenBy,
+    merge_output_terms, merge_terms_per_state, pass_through_merge_terms, state_allocation_terms,
+    update_terms_per_row, StateLastWrittenBy,
 };
 use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
@@ -240,13 +240,15 @@ pub struct ProducerOutput<'a> {
 }
 
 impl ProducerOutput<'_> {
-    /// The source column `weight` reads, when this producer passes that
-    /// column on unchanged from the sources: the column whose values a
-    /// summary built over this producer folds. E.g. `value` for a DDSketch
-    /// over a scan of `latency` or over a filter on that scan; `None` for a
-    /// computed weight such as a rate.
-    pub(crate) fn unchanged_column(&self, weight: &SummaryInputExpr) -> Option<&str> {
-        let SummaryInputExpr::Column(column) = weight else {
+    /// The source column `expr` reads, when `expr` is a single column this
+    /// producer passes on unchanged from the sources: the column whose
+    /// values a summary built over this producer folds, its weight or a
+    /// keyed summary's item. E.g. `value` for a DDSketch over a scan of
+    /// `latency` or over a filter on that scan, `url` for a top-k heap keyed
+    /// by `url`; `None` for a computed weight such as a rate, or a tuple
+    /// or entity-identity item.
+    pub(crate) fn unchanged_column(&self, expr: &SummaryInputExpr) -> Option<&str> {
+        let SummaryInputExpr::Column(column) = expr else {
             return None;
         };
         let index = resolve_column_ref(column, self.output_schema).ok()?;
@@ -635,13 +637,15 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             Some(total.saturating_add(data.sources.get(*source)?.max_distinct_per_evaluation?))
         })
     };
-    // The values the column a summary built here folds takes in one state:
-    // the fewer of its declared distinct values and the sources' bound per
-    // output row; `None` when neither is declared.
+    // The values the column a summary built here folds takes in one state
+    // (a keyed summary's item column, e.g. the `url` a top-k heap counts;
+    // else its weight column): the fewer of its declared distinct values
+    // and the sources' bound per output row; `None` when neither is
+    // declared.
     let folded_distinct_values = |update: &SummaryUpdate| -> Option<u64> {
-        let column = producers
-            .first()
-            .and_then(|producer| producer.unchanged_column(&update.weight));
+        let column = producers.first().and_then(|producer| {
+            producer.unchanged_column(update.item.as_ref().unwrap_or(&update.weight))
+        });
         [declared_distinct_values(column), distinct_items_per_group()]
             .into_iter()
             .flatten()
@@ -1122,15 +1126,25 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             let group_visits = visits(group_count);
+            // Each group's state allocated and zeroed (a counter-matrix
+            // sketch's counters), before its first row.
+            let allocation_terms = state_allocation_terms(node.parameters.as_ref());
+            let allocation_ops = allocation_terms.operations();
+            let allocation_detail = if allocation_ops > 0.0 {
+                format!(", {allocation_ops} ops to allocate each state")
+            } else {
+                String::new()
+            };
             let terms = update_terms
                 .times(input.rows as f64)
-                .plus(CostConstant::OperationsPerGroupPerRawBatch, group_visits);
+                .plus(CostConstant::OperationsPerGroupPerRawBatch, group_visits)
+                .plus_terms(&allocation_terms.times(group_count as f64));
             (
                 out,
                 Ok(charged(terms, out.bytes, 0)),
                 format!(
                     "build {} into {group_count} states: {} rows x {update_ops} ops, \
-                     {group_visits:.0} group visits",
+                     {group_visits:.0} group visits{allocation_detail}",
                     summary_type_name(family),
                     input.rows
                 ),
@@ -1186,10 +1200,10 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             )
             .plus_terms(&carried_label_terms_per_row(&node.output_schema, reduction));
             let update_ops = update_terms.operations();
-            // The states it completes in one execution: at ingestion time
-            // one second's share of each group's window (a 10 s window: a
-            // tenth of a state per group); at query time every retained
-            // window's.
+            // The states it completes in one execution, each allocated
+            // when its window opens: at ingestion time one second's share
+            // of each group's window (a 10 s window: a tenth of a state per
+            // group); at query time every retained window's.
             let emitted_states = match ingestion {
                 true => {
                     group_count as f64 * ONE_SECOND_MS as f64 / *tumbling_window_width_ms as f64
@@ -1219,7 +1233,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         .times(input.rows as f64)
                         .plus(range_constant, input.rows as f64)
                         .plus(CostConstant::OperationsPerGroupPerRawBatch, group_visits)
-                        .plus_terms(&chain_emit_terms_per_state(family).times(emitted_states)),
+                        .plus_terms(
+                            &chain_emit_terms_per_state(family)
+                                .plus_terms(&state_allocation_terms(node.parameters.as_ref()))
+                                .times(emitted_states),
+                        ),
                     out.bytes,
                     0,
                 )),
@@ -1323,12 +1341,12 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 Some(producer)
                     if matches!(producer.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. })) =>
                 {
-                    StateLastWrittenBy::Merge
+                    StateLastWrittenBy::Merge {
+                        input_rows: producer.state_input_rows,
+                    }
                 }
                 producer => StateLastWrittenBy::Updates {
-                    rows_per_state: producer
-                        .and_then(|producer| producer.state_input_rows)
-                        .and_then(|rows| rows.rows_per_state),
+                    input_rows: producer.and_then(|producer| producer.state_input_rows),
                 },
             };
             let per_group = match query {

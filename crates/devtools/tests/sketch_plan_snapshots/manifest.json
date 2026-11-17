@@ -46,7 +46,7 @@
     },
     {
       "id": "topk-rate-guarantees-ignored-mvp",
-      "covers": "topk of a rate with guarantees ignored selects a CMS heap",
+      "covers": "topk of a rate with guarantees ignored: the exact top-k costs less than a query-time CMS heap",
       "workload": "crates/devtools/tests/sketch_plan_snapshots/workloads/topk-rate.json",
       "deployment": "mvp",
       "accuracy_guarantees": "ignored"

@@ -50,7 +50,7 @@ fn every_per_unit_constant_has_a_cost_constant() {
         .iter()
         .map(|constant| format!("{constant:?}"))
         .collect();
-    assert_eq!(defined.len(), 39, "{defined:?}");
+    assert_eq!(defined.len(), 51, "{defined:?}");
     assert_eq!(
         defined.difference(&variants).collect::<Vec<_>>(),
         Vec::<&String>::new(),
@@ -103,7 +103,7 @@ fn cost_constant_json_names_are_the_full_snake_case_list() {
 }
 
 /// Every constant's JSON name, in declaration order.
-const JSON_NAMES: [&str; 39] = [
+const JSON_NAMES: [&str; 51] = [
     "time_range_operations_per_row",
     "operations_per_group_per_raw_batch",
     "chain_operations_per_arriving_row",
@@ -127,6 +127,13 @@ const JSON_NAMES: [&str; 39] = [
     "exact_distinct_operations_per_inserted_value",
     "exact_distinct_operations_per_inserted_pair",
     "sketch_update_operations_per_counter",
+    "counter_matrix_update_operations_per_counter",
+    "univmon_update_operations_per_counter",
+    "cms_heap_operations_per_estimate",
+    "cms_heap_operations_per_estimated_counter",
+    "count_sketch_heap_operations_per_estimate",
+    "count_sketch_heap_operations_per_estimated_counter",
+    "sketch_allocation_operations_per_counter",
     "exact_merge_operations_per_state",
     "extremum_merge_operations_per_state",
     "counter_merge_operations_per_state",
@@ -136,9 +143,14 @@ const JSON_NAMES: [&str; 39] = [
     "kll_merge_operations_per_merged_byte",
     "merge_operations_per_output_group",
     "sketch_merge_operations_per_byte",
+    "counter_matrix_merge_operations_per_state",
+    "counter_matrix_merge_operations_per_counter",
+    "heap_merge_operations_per_resident_counter",
     "kll_estimate_operations_per_byte",
     "kll_estimate_operations_per_unsorted_item",
     "sketch_estimate_operations_per_group",
+    "heap_read_operations_per_group",
+    "heap_read_operations_per_resident_counter",
     "output_row_operations_per_group",
     "sketch_chain_emit_operations_per_state",
     "exact_chain_emit_operations_per_state",
