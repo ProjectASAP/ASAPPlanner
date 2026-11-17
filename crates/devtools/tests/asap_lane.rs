@@ -77,26 +77,22 @@ fn planning_workload(
     )
 }
 
-/// Writes `plan_file` with `asap_planner --plan-file` for `planning`, checked
-/// as `executor_check` says; whether the planner wrote it.
-fn write_plan_file(planning: &str, plan_file: &Path, executor_check: &str) -> bool {
+/// Writes `plan_file` with `asap_planner --plan-file` for `planning`, which
+/// must select a plan; returns the planner's standard error, which notes
+/// when the Planner's executor cannot run the plan.
+fn write_plan_file(planning: &str, plan_file: &Path) -> String {
     let workload_file = plan_file.with_extension("planning.json");
     std::fs::write(&workload_file, planning).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_asap_planner"))
         .args(["--workload", workload_file.to_str().unwrap()])
         .args(["--run-until", "stage3", "--format", "json"])
-        .args(["--executor-check", executor_check])
         .args(["--plan-file", plan_file.to_str().unwrap()])
         .output()
         .unwrap();
-    let written = plan_file.exists();
-    assert_eq!(
-        output.status.success(),
-        written,
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    written
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{stderr}");
+    assert!(plan_file.exists(), "{stderr}");
+    stderr
 }
 
 /// The query of workload `w`: a 5-minute window, so a plan built at
@@ -332,7 +328,7 @@ fn the_asap_lane_runs_a_planned_sum_over_time_and_answers_exactly() {
         (&at_rest, r#""at_rest""#),
     ] {
         let planning = planning_workload(SUM_QUERY, "m", 1_000, 1_000, arrival);
-        assert!(write_plan_file(&planning, plan_file, "compile"));
+        write_plan_file(&planning, plan_file);
     }
     let run = run_dir(
         &temp,
@@ -391,9 +387,9 @@ fn the_asap_lane_runs_a_planned_sum_over_time_and_answers_exactly() {
 }
 
 /// `absent_over_time(m[10s])`: Stages 1-3 plan it, but the Planner's
-/// executor cannot compile it. The plan file written for a runtime other
-/// than the executor (`--executor-check skip`) is a "not executable" cell
-/// on the ASAP lane, so the other lanes still run that plan.
+/// executor cannot compile it. `asap_planner` still writes the plan file
+/// (with a note), and on the ASAP lane it is a "not executable" cell, so
+/// the other lanes still run that plan.
 #[test]
 fn a_plan_the_executor_cannot_compile_is_a_not_executable_cell() {
     const QUERY: &str = "absent_over_time(m[10s])";
@@ -402,8 +398,11 @@ fn a_plan_the_executor_cannot_compile_is_a_not_executable_cell() {
     let plan_file = temp.0.join("absent.plan.json");
     // Precondition: an executor-only gap. Once the executor runs
     // `absent_over_time`, pick another query it plans but cannot compile.
-    assert!(!write_plan_file(&planning, &plan_file, "compile"));
-    assert!(write_plan_file(&planning, &plan_file, "skip"));
+    let stderr = write_plan_file(&planning, &plan_file);
+    assert!(
+        stderr.contains("note: the Planner's executor cannot run this plan: "),
+        "{stderr}"
+    );
     let workload = harness_workload("w", QUERY, 10_000);
     let run = run_dir(&temp, &[&workload], &[("exact", "w", plan_file)]);
     let cells = run_asap_lane(&run, 0, 1);
@@ -427,7 +426,7 @@ fn a_plan_for_other_queries_is_refused_naming_the_query() {
     let temp = TempDir::new("refusals");
     let planning = planning_workload(SUM_QUERY, "m", 2, 1_000, r#""at_rest""#);
     let plan_file = temp.0.join("sum.plan.json");
-    assert!(write_plan_file(&planning, &plan_file, "compile"));
+    write_plan_file(&planning, &plan_file);
     let arm = |options: serde_json::Value| ArmSpec {
         name: "exact".into(),
         raw_data_retained: true,
@@ -493,7 +492,7 @@ fn asap_run_runs_the_asap_lane_over_a_run_dir() {
     let workload = harness_workload("w", SUM_QUERY, 300_000);
     let plan_file = temp.0.join("sum.plan.json");
     let planning = planning_workload(SUM_QUERY, "m", 2, 1_000, r#""at_rest""#);
-    assert!(write_plan_file(&planning, &plan_file, "compile"));
+    write_plan_file(&planning, &plan_file);
     let run = run_dir(&temp, &[&workload], &[("exact", "w", plan_file)]);
     let asap_run = |lane: &str| {
         Command::new(env!("CARGO_BIN_EXE_asap_run"))
