@@ -333,26 +333,164 @@ fn exact_targets() {
     );
 }
 
-/// A whole-result δ splits over the values one evaluation returns; a
-/// per-value δ does not; no δ, or a whole-result one over an unknown count,
-/// has none.
+fn counts(per_evaluation: Option<u64>, per_output_value: Option<u64>) -> ReadoutValueCounts {
+    ReadoutValueCounts {
+        per_evaluation,
+        per_output_value,
+    }
+}
+
+/// `q * on() group_left e`, `e` one sketched series matched onto 1000:
+/// `R` = 1 is below `V · fan-in` = 1000, so every estimate read bounds the
+/// whole result, at δ itself.
 #[test]
-fn a_whole_result_failure_probability_splits_over_the_output_values() {
+fn a_whole_result_reading_fewer_estimates_than_its_values_bounds_every_estimate_read() {
     let whole = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+    let bound = whole.failure_probability_bound(Some(1_000), counts(Some(1), Some(1)));
     assert_eq!(
-        whole.failure_probability_per_output_value(Some(100)),
-        Some(1e-4)
+        bound,
+        Some(FailureProbabilityBound::EveryEstimateRead { limit: 0.01 })
     );
-    assert_eq!(whole.failure_probability_per_output_value(None), None);
-    let per_value = whole.clone().accuracy_scope(AccuracyScope::PerValue);
     assert_eq!(
-        per_value.failure_probability_per_output_value(None),
+        whole.failure_probability_per_readout_value(Some(1_000), counts(Some(1), Some(1))),
         Some(0.01)
     );
+}
+
+/// `q or r` over 100 series each: 200 estimates read, 100 · 1 a covered
+/// value depends on, so each covered value is checked at δ / 100.
+#[test]
+fn an_or_over_more_estimates_than_its_values_bounds_each_covered_value() {
+    let whole = AccuracyTarget::max_error(0.01).failure_probability(0.01);
     assert_eq!(
-        AccuracyTarget::max_error(0.01).failure_probability_per_output_value(Some(100)),
+        whole.failure_probability_bound(Some(100), counts(Some(200), Some(1))),
+        Some(FailureProbabilityBound::EachCoveredValue {
+            values_covered: 100,
+            limit: 1e-4
+        })
+    );
+    assert_eq!(
+        whole.failure_probability_per_readout_value(Some(100), counts(Some(200), Some(1))),
+        Some(1e-4)
+    );
+}
+
+/// `max(q)` over 1000 series: every estimate read, 1e-5 per readout value.
+#[test]
+fn a_reduction_bounds_every_estimate_read() {
+    let whole = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+    let read = counts(Some(1_000), Some(1_000));
+    assert_eq!(
+        whole.failure_probability_bound(Some(1), read),
+        Some(FailureProbabilityBound::EveryEstimateRead { limit: 0.01 })
+    );
+    assert_eq!(
+        whole.failure_probability_per_readout_value(Some(1), read),
+        Some(1e-5)
+    );
+}
+
+/// A per-value target covers one value: δ is not divided by $n_q$.
+#[test]
+fn a_per_value_target_covers_one_value() {
+    let per_value = AccuracyTarget::max_error(0.01)
+        .failure_probability(0.01)
+        .accuracy_scope(AccuracyScope::PerValue);
+    assert_eq!(
+        per_value.failure_probability_bound(Some(8), counts(Some(8), Some(1))),
+        Some(FailureProbabilityBound::EachCoveredValue {
+            values_covered: 1,
+            limit: 0.01
+        })
+    );
+}
+
+/// At most ⌊1 / 0.05⌋ = 20 groups hold 5% of the records: over 1000
+/// estimates each covered group is checked at 0.01 / 20; over 10, every
+/// estimate read at 0.01 (1e-3 per readout value).
+#[test]
+fn a_record_share_covers_at_most_one_over_its_share() {
+    let share = AccuracyTarget::max_error(0.01)
+        .failure_probability(0.01)
+        .accuracy_scope(AccuracyScope::GroupsWithRecordShareAtLeast(0.05));
+    assert_eq!(
+        share.failure_probability_bound(Some(1_000), counts(Some(1_000), Some(1))),
+        Some(FailureProbabilityBound::EachCoveredValue {
+            values_covered: 20,
+            limit: 5e-4
+        })
+    );
+    assert_eq!(
+        share.failure_probability_bound(Some(1_000), counts(Some(10), Some(1))),
+        Some(FailureProbabilityBound::EveryEstimateRead { limit: 0.01 })
+    );
+    assert_eq!(
+        share.failure_probability_per_readout_value(Some(1_000), counts(Some(10), Some(1))),
+        Some(1e-3)
+    );
+}
+
+/// An unknown count leaves the other bound; with both unknown there is
+/// none, and no target δ gives none either.
+#[test]
+fn an_unbound_count_leaves_the_other_bound() {
+    let whole = AccuracyTarget::max_error(0.01).failure_probability(0.01);
+    assert_eq!(
+        whole.failure_probability_bound(None, counts(Some(1_000), Some(1))),
+        Some(FailureProbabilityBound::EveryEstimateRead { limit: 0.01 })
+    );
+    assert_eq!(
+        whole.failure_probability_bound(Some(100), counts(None, Some(1))),
+        Some(FailureProbabilityBound::EachCoveredValue {
+            values_covered: 100,
+            limit: 1e-4
+        })
+    );
+    assert_eq!(
+        whole.failure_probability_bound(None, counts(None, Some(1))),
         None
     );
+    assert_eq!(
+        AccuracyTarget::max_error(0.01)
+            .failure_probability_bound(Some(1), counts(Some(1), Some(1))),
+        None
+    );
+}
+
+/// Pass 2's per-readout split times the estimates the named bound counts
+/// (`R`, or `V · fan-in`) is δ: readouts at the split meet the bound by
+/// construction.
+#[test]
+fn the_readout_split_meets_the_bound_it_names() {
+    for delta in [1e-2, 1e-6] {
+        for values in [Some(1), Some(7), Some(100), None] {
+            for read in [Some(1), Some(7), Some(200), None] {
+                for fan_in in [Some(1), Some(7), read] {
+                    let target = AccuracyTarget::max_error(0.01).failure_probability(delta);
+                    let readout_values = counts(read, fan_in);
+                    let Some(bound) = target.failure_probability_bound(values, readout_values)
+                    else {
+                        continue;
+                    };
+                    let split = target
+                        .failure_probability_per_readout_value(values, readout_values)
+                        .unwrap();
+                    let total = match bound {
+                        FailureProbabilityBound::EveryEstimateRead { .. } => {
+                            split * read.unwrap().max(1) as f64
+                        }
+                        FailureProbabilityBound::EachCoveredValue { values_covered, .. } => {
+                            split * (values_covered * fan_in.unwrap().max(1)) as f64
+                        }
+                    };
+                    assert!(
+                        (total - delta).abs() <= 1e-12 * delta,
+                        "{values:?} {readout_values:?}: {total}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// δ = 0.01 splits over min(R, V · fan-in) readout values; an unknown term
@@ -420,5 +558,22 @@ fn readout_value_counts_combine_count_by_count() {
     assert_eq!(
         counts(Some(u64::MAX), Some(1)).plus(a),
         counts(None, Some(2))
+    );
+}
+
+/// A bound reads as words in error messages, not as its `Debug` form.
+#[test]
+fn a_failure_probability_bound_reads_as_words() {
+    assert_eq!(
+        FailureProbabilityBound::EveryEstimateRead { limit: 0.01 }.to_string(),
+        "every estimate read fails with at most 0.01 in all"
+    );
+    assert_eq!(
+        FailureProbabilityBound::EachCoveredValue {
+            values_covered: 100,
+            limit: 1e-4
+        }
+        .to_string(),
+        "each of 100 covered values fails with at most 0.0001"
     );
 }

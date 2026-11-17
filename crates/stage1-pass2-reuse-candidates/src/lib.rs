@@ -70,6 +70,10 @@ pub enum Pass2RuleError {
 ///    groups each query may read only exactly
 ///    (`ErrorMetricsOfMemo::exact_only_groups_of_query`).
 ///
+/// Step 3 also records the readout values each query's δ is split over,
+/// whose bound Stage 3 checks
+/// (`LogicalASAPMemoCandidates::readout_values_of_query`).
+///
 /// `entries[i]` is query `i`'s workload entry (its evaluation grid).
 pub fn generate_logical_asap_memo_candidates(
     pass1: Memo,
@@ -151,5 +155,6 @@ pub fn generate_logical_asap_memo_candidates(
         pruned,
         evaluation_grid_of_group,
         exact_only_groups_of_query,
+        readout_values_of_query: readout_requirements.readout_values_of_query,
     })
 }

@@ -178,6 +178,39 @@ impl Memo {
         smaller_known(by_keys, by_rows)
     }
 
+    /// The most estimates (sketch readout values) one evaluation of the
+    /// readout group `group` computes: its values
+    /// ([`Self::max_values_per_evaluation`]), except for a top-k, which
+    /// estimates every distinct item of each state it ranks. That is at
+    /// most its states' count times the distinct items one state counts
+    /// ([`Self::max_distinct_per_evaluation`]), and at most the rows (or
+    /// series) its values are bounded by, as each item comes from a row;
+    /// the smaller known one. This is the `R` a readout's failure
+    /// probability is charged for when an output reads all its values.
+    /// The distinct-item bound is the deployment's contract, as HLL's
+    /// error is: a source declaring fewer distinct items than a state
+    /// counts gives too small an `R`, and a δ split over too few
+    /// estimates.
+    ///
+    /// Example: `topk(10, sum by (dst) (count_over_time(flows[5m])))` as
+    /// one heap per `job`, with 3 jobs and at most 500 distinct `dst` per
+    /// evaluation declared, estimates at most 3 × 500 = 1500 items, while
+    /// it returns 30 values.
+    pub fn max_estimates_per_evaluation(&self, group: MemoGroupId) -> Option<u64> {
+        let Operator::ASAP(ASAPOp::SummaryEstimate {
+            summary_input,
+            query: SketchStatistic::TopK { .. },
+        }) = &self.groups[group.0 as usize].expression
+        else {
+            return self.max_values_per_evaluation(group);
+        };
+        let by_distinct_items = self
+            .max_values_per_evaluation(*summary_input)
+            .zip(self.max_distinct_per_evaluation(group))
+            .and_then(|(states, items)| states.checked_mul(items));
+        smaller_known(by_distinct_items, self.max_values_per_evaluation(group))
+    }
+
     /// The most rows one evaluation of `group` returns, from the facts the
     /// data workload declares; `None` when they bound it in no way. A `Scan`
     /// returns the rows its source holds (`SourceFacts::rows_held`), and a

@@ -128,10 +128,10 @@ pub fn select_plan(
         SelectionMilpError::Solver(reason) => ErrorSelectingPlan::Solver(reason),
         SelectionMilpError::TargetBelowSolverPrecision {
             query,
-            failure_probability_per_output_value,
+            failure_probability_bound,
         } => ErrorSelectingPlan::AccuracyTargetBelowSolverPrecision {
             query: query.0,
-            failure_probability_per_output_value,
+            failure_probability_bound,
         },
     })?;
     let plan = plan_of(physical, &solved, &outputs).map_err(|error| {

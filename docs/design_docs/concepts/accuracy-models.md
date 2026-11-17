@@ -79,7 +79,9 @@ heap size and its value guarantee alone (the contracts table).
 
 Pass 2 gives each sketch readout the error and per-value failure probability
 `δ / min(R, V · fan_in)` it must meet
-(`AccuracyTarget::failure_probability_per_readout_value`): the statement
+(`AccuracyTarget::failure_probability_per_readout_value`, the limit of the
+bound `AccuracyTarget::failure_probability_bound` names split over the
+estimates that bound counts): the statement
 fails only when a readout value one of its `V` covered output values depends
 on does. `R` is the readout values the query reads per evaluation (the
 values per evaluation of every readout group below it, summed), and `fan_in`
@@ -89,7 +91,11 @@ for a global `max`; for `sum by (job)` too, since the declared facts bound
 how many jobs there are, not how many series one job holds), the sum over
 the sides of a binary operator, the larger side of `or` or input of a
 concatenation. A top-k readout chooses its output keys by their estimates,
-so each of its output values depends on every value it ranks. A readout
+so each of its output values depends on every item it ranks, and its `R`
+counts those items, not its output values
+(`Memo::max_estimates_per_evaluation`): at most its states' count times the
+distinct items one state counts (`SourceFacts::max_distinct_per_evaluation`),
+and at most the rows its values come from. A readout
 group whose candidates include a reduction over readouts below it takes the
 larger of the two counts. Both counts are per evaluation, not per subquery
 step. An unknown term drops out of the `min`; with both unknown no per-value
@@ -106,7 +112,14 @@ one: DDSketch's relative error does not depend on δ, so of (5%, 0.01) and
 build per listed θ, and each edge checks the guarantee of its producer's θ
 at the required failure probability, so a build several readers share serves
 the readers whose levels its θ meets. Stage 3 only checks the guarantee; it
-never resizes. At equal δ, the scope covering the most values is the
+never resizes. Stage 3's constraint (K) bounds the same estimates with the
+same counts (`R` and the fan-in, from one walk,
+`asap_accuracy::readout_value_counts_of_queries`, and one test of whether an
+input's error reaches the output), so for each query planned alone a
+readout at this split meets (K). A level another query gave is checked, not
+trusted ("Which estimates a result depends on", below). When two queries
+share an execution and need incompatible levels, no level is given for the
+pair, and the selection may find no sketch plan for one of them. At equal δ, the scope covering the most values is the
 strictest: every group (`G`, when `G` is above 100), then a 1% share (100),
 then a 5% share (20), then a single value (1). A whole-result target with an
 unbound `G` splits over `R`, so `R` must be an upper bound. A readout
@@ -300,17 +313,24 @@ has no value bound, so neither passes through division. Likewise, an exact
 sum above approximate values retains their uncertainty: exact arithmetic does
 not recover information lost below it.
 
-Probability is not propagated through operators. A query's failure
-probability is split into a per-value one for each readout; a composed query
-whose readouts' failure events add up (a ratio of two quantiles) reads each at
-a level of a failure-probability grid, and the levels sum within the query's
-per-value failure probability by the union bound, without assuming
-independence between child errors. Estimator-local assumptions, such as
-independent bucket hashing, must be stated separately. Shared DAG nodes do
-not create independent errors merely because several consumers reference
-them, and sharing does not justify reducing the failure budget. Per-result
-guarantees also do not imply a simultaneous guarantee across every query or
-evaluation time in a dashboard.
+Failure probability is not a contract factor: an operator does not scale
+it. What fails is an estimate, one value a sketch readout returns in one
+evaluation (one series' quantile, one group's distinct count, one key's
+frequency), which misses its error bound with probability at most its
+readout's δ. A query's result fails only when an estimate it depends on
+does, so its failure probability is at most the sum of δ over the estimates
+it can depend on (the union bound, without assuming independence between
+estimates). Pass 2 splits a query's δ over those estimates; selection checks
+the sum for the readouts actually selected ("Which estimates a result
+depends on"). A composed query (a ratio of two quantiles) reads each readout
+at a level of a failure-probability grid and the selection combines them.
+Estimator-local assumptions, such as independent bucket hashing, must be
+stated separately. Shared DAG nodes do not create independent errors merely
+because several consumers reference them. Sharing never earns a larger δ for
+an estimate: an estimate several output values read is one event, which is
+why it is counted once per path, not once per reader. Per-result guarantees
+also do not imply a simultaneous guarantee across every query or evaluation
+time in a dashboard.
 
 ### Sign conditions
 
@@ -425,9 +445,24 @@ each query's target. This is constraint (K).
 
 **Variables.** Per execution `c` (a candidate in one evaluation context)
 that a query with a target reaches, and that is its own original (not in a
-copy of an equivalent context): its error bound `E_{c,m}` per metric `m` and
-its failure probability `D_c`, continuous; per input `i`, `F_{c,i,m}` and
-`H_{c,i}`, what it reads from the producer selected on `i`.
+copy of an equivalent context), all continuous:
+- its error bound `E_{c,m}` per metric `m`;
+- `P_c`, the failure probability of one of its output values: the largest,
+  over its output values, of the summed δ of the estimates that value
+  depends on;
+- `W_c`, the failure probability of its whole output: the summed δ of every
+  estimate any of its output values depends on. It exists only where every
+  readout below `c` bounds its estimates per evaluation (`R` known).
+
+Each exists only where some selection makes it positive and its error is
+not constant. Per input `i`, `F_{c,i,m}`, `HP_{c,i}` and `HW_{c,i}` are what
+`c` reads from the producer selected on `i`. `P` and `W` exist only where a
+query root above checks them, through the rows that read them: a root
+checking each covered value reads `P`, one checking every estimate read
+`W`; `P` reads `P` of an input read value by value and `W` of one read
+whole; `W` reads `W` (`ErrorModel::checked_failure_probabilities`). With
+both created wherever bounded, RangeHeavy-8users solved about 3× slower
+with the same plan.
 
 **Rows.** With `y_{u,c,i}` the edge variables and `z_{q,v}` the choice of
 execution `v` answering query `q`:
@@ -436,45 +471,196 @@ execution `v` answering query `q`:
   `F_{c,i,m} ≥ E_{u,m} − M_{u,m}(1 − y_{u,c,i})` per selectable producer `u`;
   `ε_c` is a readout's own error, its required accuracy
   (`CandidateForMemoGroup::required_accuracy`), 0 for any other candidate.
+  An operator that copies each output value from one input (`or`, a
+  concatenation) has one row per input instead of the sum: its output's
+  error is one input's, `E_{c,m} ≥ ε_c[m = m_c] + β_{c,i,m} F_{c,i,m}` for
+  each `i`.
 - The metric rule on the selected path: `E_{u,m} ≤ M_{u,m}(1 − y_{u,c,i})`
   when `c` has no contract in `m`. An input with `β = 0` passes none.
 - The validity cap: `F_{c,i,m} ≤ b_{c,i}` where the contract's linear bound
   holds only up to `b` (a ratio's denominator).
-- `D_c ≥ δ_c + Σ_i H_{c,i}`, `H_{c,i} ≥ D_u − M_u(1 − y_{u,c,i})`: a union
-  bound over the producers selected.
-- At each output of a query with a target: `E_{v,m} ≤ ε_q + M(1 − z_{q,v})`
+- Failure probabilities, with `HP_{c,i} ≥ P_u − M^P_u(1 − y_{u,c,i})` and
+  `HW_{c,i} ≥ W_u − M^W_u(1 − y_{u,c,i})` per selectable producer `u`, over
+  only the inputs whose estimates reach the output (`β > 0` in a metric of
+  `c`'s contract, or values chosen by estimates, the test Pass 2's split
+  uses; a count's input and the right input of `and` and `unless` add
+  nothing unless a top-k chooses their values):
+  - a readout: `P_c = δ_c` and `W_c = R_c δ_c`, with `δ_c` its required
+    failure probability and `R_c` its estimates per evaluation
+    (`Memo::max_estimates_per_evaluation`); a top-k readout, whose output
+    keys are chosen by every estimate it ranks, has `P_c = W_c = R_c δ_c`.
+    Constants, as a readout's error is;
+  - any other execution:
+    `P_c ≥ Σ_{i read value by value} HP_{c,i} + Σ_{i read whole} HW_{c,i}`,
+    where an operator each of whose output values depends on one input's
+    estimates (`or`, a concatenation, with no top-k choosing an input's
+    values) has instead `P_c ≥ HP_{c,i} + Σ_{i read whole} HW_{c,i}` for
+    each input `i` read value by value; and `W_c ≥ Σ_i HW_{c,i}`. The
+    operator classes are in the table below.
+- At the outputs of a query `q` with a target: `E_{v,m} ≤ ε_q + M(1 − z_{q,v})`
   in each metric the root allows (the target's at an operator root, none for
-  the operands of a scalar expression no contract covers, 0 elsewhere), and
-  `D_v ≤ δ_q / V + M(1 − z_{q,v})` with `V` the values the target's scope
-  covers (`AccuracyTarget::failure_probability_per_output_value`, `n_q` for a
-  whole result); no `D` row without a δ. Each limit is widened as the edge
-  check widens it (`tolerated_limit`).
+  the operands of a scalar expression no contract covers, 0 elsewhere). With
+  a δ, one failure row per query, over every output `v` it may be answered
+  from, by the bound `AccuracyTarget::failure_probability_bound` names from
+  `V` (the values the target's scope covers) and the query's counts `R` and
+  fan-in (Pass 2's `ReadoutValueCounts`). Pass 2 records the counts it split
+  δ by (`LogicalASAPMemoCandidates::readout_values_of_query`), and (K)
+  checks the bound they name:
+  - every estimate read, when `R ≤ V · fan_in` or `V` is unbound:
+    `W_v ≤ δ_q + M(1 − z_{q,v})`;
+  - each covered value, when `V · fan_in < R` or `R` is unbound:
+    `P_v ≤ δ_q / V + M(1 − z_{q,v})`;
+  - neither, when both are unbound: no row. Pass 2 gave the query no level,
+    and constraint (X) makes it read the readout groups below it only
+    exactly; that, not (K), is what keeps it from reading a level another
+    query gave.
 
-`D` adds each selected producer's δ once, not once per readout value an
-output value depends on: `max(q)` over 1,000 series reads 1,000 readout
-values. That is sound because Pass 2's levels already split the query's δ
-over the readout values its output can depend on, so each readout's δ is the
-query's over 1,000.
+  An output whose checked term is unbounded under some selection (a readout
+  below with unknown `R`) is not answered by that execution. A query with
+  several roots (a scalar expression over them) sums its roots' terms in its
+  one row. Each limit is widened as the edge check widens it
+  (`tolerated_limit`).
 
-**Constant errors.** A readout's state is exact, so its error is its own
-requirement under every selection: it has no `E` or `D` variable, and its
-consumers read `Σ_u ε_u y_{u,c,i}` (at most one `y` of an input is 1). This is
+**Which estimates a result depends on.** The union bound is taken over
+estimates, not over readouts or output values.
+
+*Soundness.* Every operator above a readout is deterministic, and its error
+contract holds whenever its inputs are within their bounds. So an output
+value misses `ε_q` only if an estimate it depends on misses its bound. Which
+estimates an output value depends on is decided by the data's series and
+keys (labels, group keys, join keys), not by the estimates. The exceptions
+are operators that choose by estimated value: a top-k readout is charged for
+every value it ranks, and any other such operator (a comparison, a `LIMIT`
+after ordering by an estimate) has no contract. An operator keeping or
+taking values by the keys a top-k chose (`p and topk(3, q)`, `p unless
+topk(3, q)`, `topk(3, q) or p`, also through operators reading the top-k
+value by value) depends on every estimate the top-k ranks: that input's
+estimates count even where `β = 0`, and `or` sums its sides' `P`
+(`asap_accuracy::values_chosen_by_estimate`). So for any data `D` the
+statement fails only on `⋃_{e ∈ S_q(D)} E_e`, where `S_q(D)` is the
+estimates the covered output values depend on and `E_e` is estimate `e`'s
+miss. Hence
+
+    P(fail) ≤ max_D Σ_{e ∈ S_q(D)} δ_e.
+
+Both root rows bound the right side for every `D` the declared facts allow:
+- every estimate read: `S_q(D)` lies in the estimates of the readouts below,
+  at most `R_c` per readout per path, so the sum is at most `W_v`;
+- each covered value: `S_q(D) = ⋃_{v covered} deps(v)`, at most `V` values,
+  each with `Σ_{e ∈ deps(v)} δ_e ≤ P_v`, so the sum is at most `V · P_v`.
+
+The recursions are sound step by step:
+- a value read value by value is one input value, whose estimates sum to at
+  most `P_u`;
+- a value copied from one input (`or`) is that input's value, so the largest
+  of the inputs' `P` bounds it;
+- an input read whole (a reduction) may contribute every estimate of that
+  input, at most `W_u`;
+- a whole output depends on at most the union of its inputs' estimates, at
+  most `Σ W_u`.
+
+An exact input has δ = 0. An input with `β = 0` contributes only which series
+or keys it has. A readout returns exactly the series the exact evaluation
+does, so those estimates cannot make the output miss, except a top-k's,
+whose keys are chosen by its estimates (above).
+
+*The assumption it rests on.* Soundness needs `R_c` to be an upper bound on
+the estimates one evaluation of readout `c` computes, under every dataset
+the declared facts allow; it is the only declared count the bound trusts
+(`n_q` only decides which row is checked). `R_c` is
+`Memo::max_estimates_per_evaluation`: for a readout other than a top-k its
+values, `Memo::max_values_per_evaluation`, the product of the distinct
+values its state's keys' scans declare, at most the series for PromQL
+labels, clamped to the rows its input reads. The declared distinct items
+are the deployment's contract, as HLL's are: declaring fewer than a state
+counts gives a too small `R_c`. Two cases checked against it:
+- A top-k readout ranks every distinct item of each state, more than the
+  values it returns. Its `R_c` is the smaller of its states' count times the
+  declared distinct items per state (`SourceFacts::max_distinct_per_evaluation`)
+  and the series or rows its items come from, both upper bounds on the items
+  (`Memo::max_estimates_per_evaluation`).
+- A time-bucketed SQL grouping (`GROUP BY src, date_trunc('minute', ts)`)
+  returns buckets × keys values. A time or computed key bounds nothing by
+  itself, so `R_c` falls back to the rows the grouping reads, which bounds
+  the groups whatever the buckets. The executed bounds check
+  (`memo_value_bounds`) runs these shapes on data the facts allow.
+
+*Scopes.* `PerValue` covers one value: `V = 1`, so the row is `P_v ≤ δ`, with
+no division by `n_q`. `WholeResult` covers `V = n_q`.
+`GroupsWithRecordShareAtLeast(s)` covers `V = min(⌊1/s⌋, G)` groups. Which
+groups those are is decided by exact record counts, not by estimates, so the
+same two rows hold with that `V`, and `W_v` (all groups) stays a sound
+alternative.
+
+*Operator classes* (shared with Pass 2's split:
+`asap_accuracy::inputs_read_value_by_value`,
+`ErrorMetricsOfMemo::each_value_depends_on_one_input` and the "estimates
+reach the output" test `ErrorMetricsOfMemo::input_estimates_reach_output`):
+
+| Class | Operators | `P_c` | `W_c` |
+|---|---|---|---|
+| Readout | `SummaryEstimate` (not top-k) | `δ_c` | `R_c δ_c` |
+| Readout choosing by estimate | top-k | `R_c δ_c` | `R_c δ_c` |
+| Value by value | filter on copied columns, project, sort, time shift, relabel, label enrichment, series sample; binary arithmetic, one-to-one or many-to-one (`on`, `ignoring`, `group_left`, `group_right`: each output value reads one value of each side, and the "one" side's value is read by many outputs but is one estimate); join | `Σ_i HP` | `Σ_i HW` |
+| Each value from one input | `or`, concatenation (`UNION ALL`); `and`, `unless` (left only, the right has `β = 0`) | `max_i HP`; `Σ_i HP` when a top-k chooses an input's values | `Σ_i HW` |
+| Input read whole | aggregates (`sum`/`max`/`avg` by or without keys), any operator whose output value may read many values of an input, the operand of `scalar` | `Σ_i HW` | `Σ_i HW` |
+| No contract | a subquery, a comparison, a counter rate | none: no error, and so no estimate, passes | none |
+| `β = 0` input | a count's input, the right of `and` and `unless` | adds 0, or as read value by value or whole when a top-k chooses its values | adds 0, or `HW` when a top-k chooses its values |
+
+*Same rule as Pass 2, for a query planned alone.* Pass 2 gives each readout
+of a query one level `δ / min(R, V · fan_in)`. Its `R` and fan-in add, per
+path, the terms `W` and `P` add, and take the largest over a group's
+candidates where the rows take the selected one. So at that level,
+`W_v ≤ R · δ / min(…)` and `V · P_v ≤ V · fan_in · δ / min(…)`. The row the
+root checks is the one whose count is the `min`, so it is at most δ. A level
+a stricter rule gave (any `δ_c ≤ δ / max(V, R)`) meets it too. A level given
+for another query with a looser split does not: `max(q)` over 1,000 series
+cannot read a copy at the 0.01 a per-value query on `q` was given, because
+`W = 1,000 × 0.01 > 0.01`.
+
+*What the rows lose* (all sound; each only asks for a stricter δ than
+needed):
+1. An estimate one query reaches on several paths counts once per path:
+   `max(q) − min(q)` over 1,000 series charges `2,000 δ_c`, although 1,000
+   estimates fail at most. Pass 2's `R` counts it the same way, so no level
+   it gives becomes infeasible.
+2. The root checks one of the two rows, chosen from the counts. When the
+   readouts below have different δs (a composed query), the other row may
+   have been smaller.
+3. An operator that returns fewer values than it reads does not lower the
+   count of a whole input (a label filter above a shared readout, a join
+   dropping unmatched rows), as in Pass 2's `R`.
+
+Counting each estimate exactly once, per query, needs a variable per
+(query, execution) on the query's selected path, and at each `or` a dual
+variable bounding how many output values each side supplies. That is linear
+but grows with queries × executions; it is not used.
+
+**Constant errors.** A readout's state is exact, so its error and failure
+probabilities are its own under every selection: it has no `E`, `P` or `W`
+variable, and its consumers read `Σ_u ε_u y_{u,c,i}`, `Σ_u δ_u y_{u,c,i}` and
+`Σ_u R_u δ_u y_{u,c,i}` (at most one `y` of an input is 1). This is
 exactly the variable form with `E_u = ε_u`, and it removes the big-M rows of
 every readout.
 
-**Ceilings.** `M` is the largest error any selection gives an execution,
+**Ceilings.** `M` (and `M^P`, `M^W`) is the largest error and failure
+probability any selection gives an execution (unbounded for `P` or `W` when
+a readout below has unknown `R`; then the execution has no such variable),
 computed in one pass in the memo's topological order (every selectable edge
 reads a group ordered before the consumer's), each input taking its largest
 producer's ceiling, by the same composition rule as the rows. The rule is
-written once (`AccuracyRules::compose`), and also checks a whole selection
-(`AccuracyRules::selection_meets_targets`): the greedy upper bound that prunes
+written once (`AccuracyRules::compose`, composing `E`, `P` and `W`), and
+also checks a whole selection (`AccuracyRules::selection_meets_targets`, the
+same root row): the greedy upper bound that prunes
 executions dearer than a feasible plan uses its plan only when it meets (K),
 since the cheapest readouts of a ratio may each meet their level and compose
 above the target.
 
 **Solver tolerance.** HiGHS's feasibility tolerances are absolute, 1e-7 by
-default, while a per-value δ is often far smaller: δ = 0.01 over a whole
-result of 1e4 values is 1e-6 per value, of which 1e-7 is a tenth: two
+default. A row checking every estimate read compares sums of the size of δ
+itself (0.01 against 0.01), where 1e-7 is negligible. A row checking each
+covered value compares `P_v` with δ / V, often far smaller: δ = 0.01 over a
+whole result of 1e4 values is 1e-6 per value, of which 1e-7 is a tenth: two
 readouts failing with 5.4e-7 each compose to 1.08e-6 and pass that limit
 within the default tolerance. So HiGHS first solves at its defaults, and the
 selection is then checked exactly (`AccuracyRules::selection_meets_targets`,
@@ -484,20 +670,26 @@ A row may still pass its limit by up to 1e-10, which for a per-value δ near
 or below 1e-10 can be orders of magnitude: at δ = 1e-12 per value (δ = 0.01
 over 1e10 values) the solver may select readouts failing with 1.08e-12 in
 all. A selection that misses a target after the second solve is an error
-naming the query and its per-value δ ("an accuracy target is below the
-solver's precision"); planning never returns a plan that may not meet its
+naming the query and its bound with its limit ("an accuracy target is below
+the solver's precision"); planning never returns a plan that may not meet its
 target. The stricter tolerance is paid for only when the check needs it:
 solving every (K) at 1e-10 made RangeHeavy-8users about 6× slower, deriving
 the tolerance from the smallest limit solved RollupHeavy-8users about 2.8×
 slower, and scaling (K)'s rows by their limits solved RangeHeavy-8users
-about 4× slower.
+about 4× slower, and dividing every failure probability by the smallest
+root limit (so the tightest limit is 1) solved RangeHeavy-8users 10% and
+RangeHeavy-8users-counter 48% slower.
 
 **Context copies.** A copy of an equivalent evaluation context shares its
 original's variables and has no rows of its own. Two contexts are copies only
-when each output's root limits (the tolerated error per metric and failure
-probability per output value) are equal, so the copy's rows would repeat the
-original's: queries at δ = 0.01 per value returning 10 and 100 values are
-copies; over a whole result they are not.
+when each output's root limits (the tolerated error per metric, and the
+failure probability bound's kind and limit, all the rows read of it) are
+equal, so the copy's rows would repeat the original's:
+- queries at δ = 0.01 per value returning 10 and 100 values are copies;
+- over a whole result they are copies when both check every estimate read
+  (a readout of 10 series declaring 10 and 50 values);
+- they are not copies when they check each covered value of 10 and of 100
+  values.
 
 ### Example: allocation in a ratio
 
@@ -516,6 +708,30 @@ levels of the grid up to its cap; with levels 0.02 (cost 1) and 0.01 (cost 3):
 
 (K) selects both 0.01 readouts, cost 6. A greedy plan reading the two
 cheapest readouts (cost 2) misses B's target, so it bounds nothing.
+
+### Example: failure probability in `or`, many-to-one matches and reductions
+
+All at δ = 0.01 over the whole result unless stated.
+
+| Query | Facts | Pass 2's level (`δ / min(R, V · fan_in)`) | Row (K) checks | Value | Estimates that can fail at once |
+|---|---|---|---|---|---|
+| `q or r` | 100 series each, same labels, `n_q` = 100 | `R` = 200, fan-in 1: `0.01 / min(200, 100) = 1e-4` | each covered value: `max(1e-4, 1e-4) ≤ 0.01 / 100` | 1e-4 ✓ | 100 (each output copies one) |
+| `q * on() group_left e` | `q` exact over 1,000 series, `e` one sketched series, `n_q` = 1,000 | `R` = 1, fan-in 1: `0.01 / min(1, 1,000) = 0.01` | every estimate read: `W = 0 + 1 · 0.01` | 0.01 ✓ | 1 (every output reads `e`'s one estimate) |
+| `max(q)` | 1,000 series, `n_q` = 1 | `R` = 1,000, fan-in 1,000: `1e-5` | every estimate read: `1,000 · 1e-5` | 0.01 ✓ | 1,000 |
+| `count(distinct user_id)` by service, per value | δ = 0.05, ε = 0.05 relative, 10,000 services | `R` = 10,000, `V` = 1, fan-in 1: `0.05 / 1 = 0.05` | each covered value, `V` = 1: `P = 0.05` | 0.05 ✓ | 1 per value |
+| `A or B`, `A` = `quantile_over_time(0.99, m{env="prod"}[5m])`, `B` = `quantile_over_time(0.99, m[5m])`, both reading one readout of `m` | 100 series, `n_q` = 100 | `R` = 200 (one readout, two paths), fan-in 1: `1e-4` | each covered value: `max(1e-4, 1e-4) ≤ 0.01 / 100` | 1e-4 ✓ | 100 |
+| `max by (job) (A or B)` | as above, 10 jobs | `R` = 200, fan-in 200: `5e-5` | every estimate read: `W = 200 · 5e-5` | 0.01 ✓ | 100: the rows charge each estimate twice (once per path), so 1e-4 would have sufficed |
+
+Charging the selected readout's δ once against δ / `n_q` would instead:
+- reject `q or r` (`2e-4 > 1e-4`) and the many-to-one match
+  (`0.01 > 0.01 / 1,000`), leaving them no sketch plan;
+- accept for `max(q)` any copy of the readout, including one a per-value
+  query on `q` was given at 0.01, whose 1,000 estimates may fail with up to
+  1,000 × 0.01.
+
+For the distinct count, a split over `max(V, R)` would ask each group's KMV
+for 0.05 / 10,000 = 5e-6, k = 26,656. The per-value row asks only that each
+group's own estimate fail with at most 0.05, which KMV meets at k = 4,323.
 
 ## Evidence and trust boundaries
 

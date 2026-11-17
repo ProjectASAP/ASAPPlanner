@@ -12,6 +12,7 @@ use asap_types::ir::{QueryRoot, ScalarExpr};
 use asap_types::stages::{CandidateForMemoGroupId, Memo, MemoGroupId};
 
 use crate::error_contract::{error_contract, ErrorContract};
+use crate::estimate_dependence::{takes_each_value_from_one_input, values_chosen_by_estimate};
 use crate::readout::sketch_readout_error_metric;
 use crate::readout_caps::caps;
 
@@ -33,6 +34,9 @@ pub struct ErrorMetricsOfMemo {
     /// not a sketch readout, or one whose summary type has no guarantee
     /// for the statistic it reads.
     readout_error_metric: Vec<Vec<Option<AccuracyMetric>>>,
+    /// [group]: whether which values its output holds is chosen by
+    /// estimates ([`values_chosen_by_estimate`]).
+    values_chosen_by_estimate: Vec<bool>,
 }
 
 impl ErrorMetricsOfMemo {
@@ -91,6 +95,7 @@ impl ErrorMetricsOfMemo {
             error_contract,
             error_metrics_allowed_at_output,
             readout_error_metric,
+            values_chosen_by_estimate: values_chosen_by_estimate(memo, order),
         }
     }
 
@@ -102,6 +107,50 @@ impl ErrorMetricsOfMemo {
     ) -> Option<&ErrorContract> {
         self.error_contract[candidate.group.0 as usize][candidate.index_in_group][metric.index()]
             .as_ref()
+    }
+
+    /// Whether an estimate input `input` of `candidate` (of `memo`)
+    /// depends on can make the output miss, so the output's failure
+    /// probability counts it: the input's error reaches the output in some
+    /// metric ($\beta > 0$,
+    /// [`crate::estimate_dependence::input_error_reaches_output`]), or which
+    /// values the input holds is chosen by estimates
+    /// ([`values_chosen_by_estimate`]). Pass 2's failure-probability split
+    /// and Stage 3's constraint (K) both count by it.
+    ///
+    /// Example: in `p90 and r` only `p90`'s estimates count; in `p90 and
+    /// topk(3, q)` the top-k's do too, as they choose the keys `and` keeps.
+    pub fn input_estimates_reach_output(
+        &self,
+        memo: &Memo,
+        candidate: CandidateForMemoGroupId,
+        input: usize,
+    ) -> bool {
+        let child = memo.candidate(candidate).expression.operator.children()[input];
+        self.values_chosen_by_estimate[child.0 as usize]
+            || crate::estimate_dependence::input_error_reaches_output(
+                &self.error_contract[candidate.group.0 as usize][candidate.index_in_group],
+                input,
+            )
+    }
+
+    /// Whether each output value of `candidate` (of `memo`) depends on the
+    /// estimates of one input only: it copies each value from one input
+    /// ([`takes_each_value_from_one_input`]) and no input's values are
+    /// chosen by estimates. `q or r` takes `r`'s value only where `q` has
+    /// no such series, so with `q` a top-k that choice reads all of `q`'s
+    /// estimates.
+    pub fn each_value_depends_on_one_input(
+        &self,
+        memo: &Memo,
+        candidate: CandidateForMemoGroupId,
+    ) -> bool {
+        let operator = &memo.candidate(candidate).expression.operator;
+        takes_each_value_from_one_input(operator)
+            && !operator
+                .children()
+                .iter()
+                .any(|child| self.values_chosen_by_estimate[child.0 as usize])
     }
 
     /// The error metric of `candidate` when it is a sketch readout.
