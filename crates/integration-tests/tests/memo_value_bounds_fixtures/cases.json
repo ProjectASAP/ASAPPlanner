@@ -1,0 +1,835 @@
+{
+ "tables": [
+  {
+   "name": "flows",
+   "time_index": 0,
+   "columns": [
+    {
+     "name": "ts",
+     "type": "timestamp",
+     "nullable": false
+    },
+    {
+     "name": "src",
+     "type": "utf8",
+     "nullable": false
+    },
+    {
+     "name": "dst",
+     "type": "utf8",
+     "nullable": false
+    },
+    {
+     "name": "bytes",
+     "type": "float64",
+     "nullable": false
+    },
+    {
+     "name": "p",
+     "type": "float64",
+     "nullable": false
+    }
+   ]
+  },
+  {
+   "name": "hosts",
+   "time_index": 0,
+   "columns": [
+    {
+     "name": "ts",
+     "type": "timestamp",
+     "nullable": false
+    },
+    {
+     "name": "host",
+     "type": "utf8",
+     "nullable": false
+    },
+    {
+     "name": "region",
+     "type": "utf8",
+     "nullable": false
+    }
+   ]
+  }
+ ],
+ "facts": {
+  "f01": {
+   "m": {
+    "column_signs": {
+     "value": "non_negative"
+    },
+    "distinct_values_per_label": {
+     "job": 10
+    },
+    "metric_type": "gauge",
+    "sample_interval": 5,
+    "series_count": 100
+   }
+  },
+  "f02": {
+   "flows": {
+    "distinct_values_per_label": {
+     "dst": 300,
+     "src": 6
+    },
+    "rows_held": 3600000
+   }
+  },
+  "f03": {
+   "flows": {
+    "distinct_values_per_label": {
+     "dst": 300,
+     "src": 6
+    },
+    "rows_held": 3600000,
+    "series_count": 6
+   }
+  },
+  "f04": {
+   "flows": {
+    "rows_held": 3600000,
+    "series_count": 6
+   }
+  },
+  "f05": {
+   "flows": {
+    "distinct_values_per_label": {
+     "dst": 300,
+     "src": 6
+    },
+    "rows_held": 3600000,
+    "series_count": 1800
+   }
+  },
+  "f06": {
+   "flows": {
+    "column_signs": {
+     "bytes": "non_negative"
+    },
+    "distinct_values_per_label": {
+     "dst": 300,
+     "src": 6
+    },
+    "rows_held": 3600000,
+    "series_count": 6
+   }
+  },
+  "f07": {
+   "flows": {
+    "distinct_values_per_label": {
+     "dst": 300,
+     "src": 6
+    },
+    "rows_held": 3600000,
+    "series_count": 6
+   },
+   "hosts": {
+    "distinct_values_per_label": {
+     "host": 6,
+     "region": 6
+    },
+    "rows_held": 3600000,
+    "series_count": 6
+   }
+  },
+  "f08": {
+   "m_bucket": {
+    "distinct_values_per_label": {
+     "le": 12
+    },
+    "metric_type": "counter",
+    "sample_interval": 5,
+    "series_count": 120
+   }
+  },
+  "f09": {
+   "m": {
+    "column_signs": {
+     "value": "non_negative"
+    },
+    "metric_type": "gauge",
+    "sample_interval": 5,
+    "series_count": 100
+   }
+  },
+  "f10": {
+   "m": {
+    "column_signs": {
+     "value": "non_negative"
+    },
+    "distinct_values_per_label": {
+     "job": 10,
+     "le": 12
+    },
+    "metric_type": "gauge",
+    "sample_interval": 5,
+    "series_count": 100
+   }
+  },
+  "f11": {
+   "flows": {
+    "distinct_values_per_label": {
+     "dst": 300,
+     "src": 6
+    },
+    "rows_held": 3600000,
+    "sample_interval": 60000,
+    "series_count": 6
+   }
+  },
+  "f12": {
+   "flows": {
+    "distinct_values_per_label": {
+     "dst": 300,
+     "src": 6
+    },
+    "rows_held": 3600000,
+    "sample_interval": 60000,
+    "series_count": 6
+   },
+   "hosts": {
+    "distinct_values_per_label": {
+     "host": 6,
+     "region": 6
+    },
+    "rows_held": 3600000,
+    "sample_interval": 60000,
+    "series_count": 6
+   }
+  },
+  "f13": {
+   "a": {
+    "column_signs": {
+     "value": "non_negative"
+    },
+    "distinct_values_per_label": {
+     "instance": 10,
+     "job": 10
+    },
+    "distinct_values_per_label_set": [
+     {
+      "distinct_values": 10,
+      "labels": [
+       "job",
+       "instance"
+      ]
+     }
+    ],
+    "metric_type": "gauge",
+    "sample_interval": 15000,
+    "series_count": 200
+   },
+   "b": {
+    "column_signs": {
+     "value": "non_negative"
+    },
+    "distinct_values_per_label": {
+     "instance": 10,
+     "job": 10
+    },
+    "distinct_values_per_label_set": [
+     {
+      "distinct_values": 10,
+      "labels": [
+       "job",
+       "instance"
+      ]
+     }
+    ],
+    "metric_type": "gauge",
+    "sample_interval": 15000,
+    "series_count": 200
+   }
+  },
+  "f14": {
+   "m": {
+    "column_signs": {
+     "value": "non_negative"
+    },
+    "distinct_values_per_label": {
+     "instance": 10,
+     "job": 10
+    },
+    "distinct_values_per_label_set": [
+     {
+      "distinct_values": 10,
+      "labels": [
+       "job",
+       "instance"
+      ]
+     }
+    ],
+    "metric_type": "gauge",
+    "sample_interval": 15000,
+    "series_count": 200
+   }
+  },
+  "f15": {
+   "m": {
+    "column_signs": {
+     "value": "non_negative"
+    },
+    "distinct_values_per_label": {
+     "instance": 10,
+     "job": 10
+    },
+    "distinct_values_per_label_set": [
+     {
+      "distinct_values": 10,
+      "labels": [
+       "job",
+       "instance"
+      ]
+     }
+    ],
+    "metric_type": "gauge",
+    "sample_interval": 15000,
+    "series_count": 5
+   }
+  },
+  "f16": {
+   "m_bucket": {
+    "distinct_values_per_label": {
+     "job": 10,
+     "le": 12
+    },
+    "metric_type": "counter",
+    "sample_interval": 15000,
+    "series_count": 1200
+   }
+  },
+  "f17": {
+   "flows": {
+    "distinct_values_per_label": {
+     "dst": 300,
+     "src": 6
+    },
+    "series_count": 6
+   }
+  },
+  "f18": {
+   "flows": {
+    "distinct_values_per_label": {
+     "dst": 300,
+     "src": 6
+    },
+    "rows_held": 3600000,
+    "sample_interval": 600000,
+    "series_count": 6
+   }
+  }
+ },
+ "cases": [
+  {
+   "name": "p10_ratio_pv",
+   "language": "promql",
+   "facts": "f01",
+   "query": "quantile_over_time(0.9, m[5m]) / quantile_over_time(0.5, m[5m])"
+  },
+  {
+   "name": "p11_scalar_pv",
+   "language": "promql",
+   "facts": "f01",
+   "query": "quantile_over_time(0.9, m[5m]) / scalar(max(quantile_over_time(0.5, m[5m])))"
+  },
+  {
+   "name": "p12_vector_or",
+   "language": "promql",
+   "facts": "f01",
+   "query": "vector(1) or quantile_over_time(0.9, m[5m])"
+  },
+  {
+   "name": "p13_unless",
+   "language": "promql",
+   "facts": "f13",
+   "query": "quantile_over_time(0.9, a[5m]) unless quantile_over_time(0.5, b[5m])"
+  },
+  {
+   "name": "p14_share",
+   "language": "promql",
+   "facts": "f01",
+   "query": "quantile_over_time(0.9, m[5m])"
+  },
+  {
+   "name": "p15_topk_by_job_or",
+   "language": "promql",
+   "facts": "f01",
+   "query": "topk by (job) (1, quantile_over_time(0.9, m[5m])) or quantile_over_time(0.5, m[5m])"
+  },
+  {
+   "name": "p1_or_pv",
+   "language": "promql",
+   "facts": "f01",
+   "query": "quantile_over_time(0.9, m[5m]) or quantile_over_time(0.5, m[5m])"
+  },
+  {
+   "name": "p2_or_on_job",
+   "language": "promql",
+   "facts": "f01",
+   "query": "quantile_over_time(0.9, m[5m]) or on(job) quantile_over_time(0.5, m[5m])"
+  },
+  {
+   "name": "p3_topk_pv",
+   "language": "promql",
+   "facts": "f01",
+   "query": "topk(5, quantile_over_time(0.9, m[5m]))"
+  },
+  {
+   "name": "p4_group_left_pv",
+   "language": "promql",
+   "facts": "f01",
+   "query": "quantile_over_time(0.9, m[5m]) * on(job) group_left max by (job) (quantile_over_time(0.5, m[5m]))"
+  },
+  {
+   "name": "p6_sum_by_job_pv",
+   "language": "promql",
+   "facts": "f01",
+   "query": "sum by (job) (quantile_over_time(0.9, m[5m]))"
+  },
+  {
+   "name": "p7_quantile_by_job_pv",
+   "language": "promql",
+   "facts": "f01",
+   "query": "quantile by (job) (0.5, m)"
+  },
+  {
+   "name": "p9_offset_or",
+   "language": "promql",
+   "facts": "f01",
+   "query": "quantile_over_time(0.9, m[5m]) offset 5m or quantile_over_time(0.9, m[5m])"
+  },
+  {
+   "name": "s1_bucket_nosc",
+   "language": "sql",
+   "facts": "f02",
+   "query": "SELECT date_trunc('minute', ts) AS m, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY date_trunc('minute', ts)"
+  },
+  {
+   "name": "s1_bucket_sc",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT date_trunc('minute', ts) AS m, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY date_trunc('minute', ts)"
+  },
+  {
+   "name": "s2_src_bucket_sc",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT src, date_trunc('minute', ts) AS m, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY src, date_trunc('minute', ts)"
+  },
+  {
+   "name": "s3_src_undeclared",
+   "language": "sql",
+   "facts": "f04",
+   "query": "SELECT src, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY src"
+  },
+  {
+   "name": "s4_rollup",
+   "language": "sql",
+   "facts": "f05",
+   "query": "SELECT src, dst, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY ROLLUP(src, dst)"
+  },
+  {
+   "name": "s5_unionall",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT src, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY src UNION ALL SELECT src, approx_percentile_cont(bytes, 0.5) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY src"
+  },
+  {
+   "name": "s6_join_pv",
+   "language": "sql",
+   "facts": "f06",
+   "query": "SELECT a.src, a.q / b.q AS r FROM (SELECT src, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY src) a JOIN (SELECT src, approx_percentile_cont(bytes, 0.5) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY src) b ON a.src = b.src"
+  },
+  {
+   "name": "c_alias",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT src AS s, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY s"
+  },
+  {
+   "name": "c_case",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT CASE WHEN bytes > 100 THEN src ELSE dst END AS k, approx_percentile_cont(p, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY CASE WHEN bytes > 100 THEN src ELSE dst END"
+  },
+  {
+   "name": "c_cast_num",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT CAST(bytes AS BIGINT) AS b, approx_percentile_cont(p, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY CAST(bytes AS BIGINT)"
+  },
+  {
+   "name": "c_cast_str",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT CAST(src AS VARCHAR) AS s, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY CAST(src AS VARCHAR)"
+  },
+  {
+   "name": "c_cast_ts",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT CAST(ts AS BIGINT) AS t, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY CAST(ts AS BIGINT)"
+  },
+  {
+   "name": "c_dst",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT dst, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY dst"
+  },
+  {
+   "name": "c_raw_ts",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT ts, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY ts"
+  },
+  {
+   "name": "c_sub_alias",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT k, approx_percentile_cont(bytes, 0.9) AS q FROM (SELECT date_trunc('minute', ts) AS k, bytes FROM flows WHERE ts >= now() - INTERVAL '15 minutes') t GROUP BY k"
+  },
+  {
+   "name": "c_sub_upper",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT k, approx_percentile_cont(bytes, 0.9) AS q FROM (SELECT upper(src) AS k, bytes FROM flows WHERE ts >= now() - INTERVAL '15 minutes') t GROUP BY k"
+  },
+  {
+   "name": "c_value_col",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT bytes, approx_percentile_cont(p, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY bytes"
+  },
+  {
+   "name": "j_self",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT a.src, b.src AS src2, approx_percentile_cont(a.bytes, 0.9) AS q FROM flows a JOIN flows b ON a.dst = b.dst WHERE a.ts >= now() - INTERVAL '15 minutes' AND b.ts >= now() - INTERVAL '15 minutes' GROUP BY a.src, b.src"
+  },
+  {
+   "name": "j_self_1key",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT a.src, approx_percentile_cont(a.bytes, 0.9) AS q FROM flows a JOIN flows b ON a.dst = b.dst WHERE a.ts >= now() - INTERVAL '15 minutes' AND b.ts >= now() - INTERVAL '15 minutes' GROUP BY a.src"
+  },
+  {
+   "name": "j_two",
+   "language": "sql",
+   "facts": "f07",
+   "query": "SELECT f.src, h.region, approx_percentile_cont(f.bytes, 0.9) AS q FROM flows f JOIN hosts h ON f.dst = h.host WHERE f.ts >= now() - INTERVAL '15 minutes' GROUP BY f.src, h.region"
+  },
+  {
+   "name": "j_two_one_side",
+   "language": "sql",
+   "facts": "f07",
+   "query": "SELECT h.region, approx_percentile_cont(f.bytes, 0.9) AS q FROM flows f JOIN hosts h ON f.dst = h.host WHERE f.ts >= now() - INTERVAL '15 minutes' GROUP BY h.region"
+  },
+  {
+   "name": "p_hist_whole",
+   "language": "promql",
+   "facts": "f08",
+   "query": "histogram_quantile(0.9, sum by (le) (rate(m_bucket[5m])))"
+  },
+  {
+   "name": "p_job_undeclared_whole",
+   "language": "promql",
+   "facts": "f09",
+   "query": "quantile by (job) (0.5, m)"
+  },
+  {
+   "name": "p_labelrep_qot_whole",
+   "language": "promql",
+   "facts": "f01",
+   "query": "max(label_replace(quantile_over_time(0.9, m[5m]), \"job\", \"all\", \"\", \"\"))"
+  },
+  {
+   "name": "p_labelrep_whole",
+   "language": "promql",
+   "facts": "f01",
+   "query": "quantile by (x) (0.5, label_replace(m, \"x\", \"$1\", \"job\", \"(.*)\"))"
+  },
+  {
+   "name": "p_le_whole",
+   "language": "promql",
+   "facts": "f10",
+   "query": "quantile by (le) (0.5, m)"
+  },
+  {
+   "name": "s3_src",
+   "language": "sql",
+   "facts": "f03",
+   "query": "SELECT src, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY src"
+  },
+  {
+   "name": "d_distinct",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT DISTINCT src, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY src"
+  },
+  {
+   "name": "g_expr",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT src || dst AS k, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY src || dst"
+  },
+  {
+   "name": "g_two",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT src, dst, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY src, dst"
+  },
+  {
+   "name": "g_two_nowin",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT src, dst, approx_percentile_cont(bytes, 0.9) AS q FROM flows GROUP BY src, dst"
+  },
+  {
+   "name": "h_having",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT dst, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY dst HAVING count(*) > 1"
+  },
+  {
+   "name": "j_full",
+   "language": "sql",
+   "facts": "f12",
+   "query": "SELECT f.src, h.region, approx_percentile_cont(f.bytes, 0.9) AS q FROM flows f FULL JOIN hosts h ON f.dst = h.host WHERE f.ts >= now() - INTERVAL '15 minutes' GROUP BY f.src, h.region"
+  },
+  {
+   "name": "j_left",
+   "language": "sql",
+   "facts": "f12",
+   "query": "SELECT h.region, approx_percentile_cont(f.bytes, 0.9) AS q FROM flows f LEFT JOIN hosts h ON f.dst = h.host WHERE f.ts >= now() - INTERVAL '15 minutes' GROUP BY h.region"
+  },
+  {
+   "name": "j_self_cross",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT a.src, b.dst, approx_percentile_cont(a.bytes, 0.9) AS q FROM flows a JOIN flows b ON a.src = b.src WHERE a.ts >= now() - INTERVAL '15 minutes' AND b.ts >= now() - INTERVAL '15 minutes' GROUP BY a.src, b.dst"
+  },
+  {
+   "name": "j_three",
+   "language": "sql",
+   "facts": "f12",
+   "query": "SELECT a.src, b.src AS s2, c.region, approx_percentile_cont(a.bytes, 0.9) AS q FROM flows a JOIN flows b ON a.dst = b.dst JOIN hosts c ON b.dst = c.host WHERE a.ts >= now() - INTERVAL '15 minutes' GROUP BY a.src, b.src, c.region"
+  },
+  {
+   "name": "l_limit_over",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT dst, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY dst ORDER BY q DESC LIMIT 5"
+  },
+  {
+   "name": "l_limit_under",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT dst, approx_percentile_cont(b, 0.9) AS q FROM (SELECT dst, bytes AS b FROM flows WHERE ts >= now() - INTERVAL '15 minutes' LIMIT 10) t GROUP BY dst"
+  },
+  {
+   "name": "p_and_on",
+   "language": "promql",
+   "facts": "f13",
+   "query": "quantile by (job) (0.5, a and on(job) b)"
+  },
+  {
+   "name": "p_cv_by",
+   "language": "promql",
+   "facts": "f14",
+   "query": "quantile by (job) (0.5, count_values by (job) (\"v\", m))"
+  },
+  {
+   "name": "p_cv_key",
+   "language": "promql",
+   "facts": "f14",
+   "query": "quantile by (job) (0.5, count_values(\"job\", m))"
+  },
+  {
+   "name": "p_few_series",
+   "language": "promql",
+   "facts": "f15",
+   "query": "quantile by (job) (0.5, m)"
+  },
+  {
+   "name": "p_gl_diff",
+   "language": "promql",
+   "facts": "f13",
+   "query": "quantile by (job, instance) (0.5, a * on(x) group_left(instance) b)"
+  },
+  {
+   "name": "p_gl_same",
+   "language": "promql",
+   "facts": "f14",
+   "query": "quantile by (job, instance) (0.5, m{side=\"l\"} * on(x) group_left(instance) m{side=\"r\"})"
+  },
+  {
+   "name": "p_gl_same_offset",
+   "language": "promql",
+   "facts": "f14",
+   "query": "quantile by (job, instance) (0.5, m * on(x) group_left(instance) m offset 1h)"
+  },
+  {
+   "name": "p_gr_same",
+   "language": "promql",
+   "facts": "f14",
+   "query": "quantile by (job, instance) (0.5, m{side=\"l\"} * on(x) group_right(job) m{side=\"r\"})"
+  },
+  {
+   "name": "p_hist",
+   "language": "promql",
+   "facts": "f16",
+   "query": "histogram_quantile(0.9, sum by (le, job) (rate(m_bucket[5m])))"
+  },
+  {
+   "name": "p_hist_qot",
+   "language": "promql",
+   "facts": "f16",
+   "query": "quantile by (le) (0.5, rate(m_bucket[5m]))"
+  },
+  {
+   "name": "p_ignoring_arith",
+   "language": "promql",
+   "facts": "f13",
+   "query": "quantile by (job) (0.5, a + ignoring(side) b)"
+  },
+  {
+   "name": "p_labelrep_other",
+   "language": "promql",
+   "facts": "f14",
+   "query": "quantile by (job) (0.5, label_replace(m, \"x\", \"$1\", \"instance\", \"(.*)\"))"
+  },
+  {
+   "name": "p_labelrep_same",
+   "language": "promql",
+   "facts": "f14",
+   "query": "quantile by (job) (0.5, label_replace(m, \"job\", \"$1\", \"instance\", \"(.*)\"))"
+  },
+  {
+   "name": "p_or_diff",
+   "language": "promql",
+   "facts": "f13",
+   "query": "quantile by (job) (0.5, a or b)"
+  },
+  {
+   "name": "p_or_same",
+   "language": "promql",
+   "facts": "f14",
+   "query": "quantile by (job) (0.5, m{side=\"l\"} or m{side=\"r\"})"
+  },
+  {
+   "name": "p_qby_job",
+   "language": "promql",
+   "facts": "f14",
+   "query": "quantile by (job) (0.5, m)"
+  },
+  {
+   "name": "p_qby_job_inst",
+   "language": "promql",
+   "facts": "f14",
+   "query": "quantile by (job, instance) (0.5, m)"
+  },
+  {
+   "name": "p_subq",
+   "language": "promql",
+   "facts": "f14",
+   "query": "quantile by (job) (0.5, max_over_time(m[30m:1m]))"
+  },
+  {
+   "name": "p_subq_outer",
+   "language": "promql",
+   "facts": "f14",
+   "query": "max_over_time(quantile by (job) (0.5, m)[30m:1m])"
+  },
+  {
+   "name": "p_sum_by_job",
+   "language": "promql",
+   "facts": "f14",
+   "query": "sum by (job) (quantile_over_time(0.9, m[5m]))"
+  },
+  {
+   "name": "p_sum_or_qot",
+   "language": "promql",
+   "facts": "f13",
+   "query": "sum by (job) (quantile_over_time(0.9, a[5m]) or quantile_over_time(0.9, b[5m]))"
+  },
+  {
+   "name": "p_topk_by",
+   "language": "promql",
+   "facts": "f14",
+   "query": "topk by (job) (3, quantile_over_time(0.9, m[5m]))"
+  },
+  {
+   "name": "p_unless",
+   "language": "promql",
+   "facts": "f13",
+   "query": "quantile by (job) (0.5, a unless ignoring(instance) b)"
+  },
+  {
+   "name": "r_bytes_interval",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT bytes, approx_percentile_cont(p, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY bytes"
+  },
+  {
+   "name": "r_bytes_no_rows",
+   "language": "sql",
+   "facts": "f17",
+   "query": "SELECT bytes, approx_percentile_cont(p, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY bytes"
+  },
+  {
+   "name": "r_dst_interval_small",
+   "language": "sql",
+   "facts": "f18",
+   "query": "SELECT dst, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY dst"
+  },
+  {
+   "name": "t_cd_by_src",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT src, count(DISTINCT dst) AS c FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY src"
+  },
+  {
+   "name": "t_topk_count",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT dst, count(*) AS c FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY dst ORDER BY c DESC LIMIT 3"
+  },
+  {
+   "name": "t_topk_sum",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT dst, sum(bytes) AS c FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY dst ORDER BY c DESC LIMIT 3"
+  },
+  {
+   "name": "u_outer_union",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT src, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY src UNION ALL SELECT dst, approx_percentile_cont(bytes, 0.9) AS q FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY dst"
+  },
+  {
+   "name": "u_union_mixed",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT k, approx_percentile_cont(b, 0.9) AS q FROM (SELECT src AS k, bytes AS b FROM flows WHERE ts >= now() - INTERVAL '15 minutes' UNION ALL SELECT dst AS k, bytes AS b FROM flows WHERE ts >= now() - INTERVAL '15 minutes') t GROUP BY k"
+  },
+  {
+   "name": "u_union_same",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT k, approx_percentile_cont(b, 0.9) AS q FROM (SELECT src AS k, bytes AS b FROM flows WHERE ts >= now() - INTERVAL '15 minutes' AND p > 1 UNION ALL SELECT src AS k, bytes AS b FROM flows WHERE ts >= now() - INTERVAL '15 minutes' AND p <= 1) t GROUP BY k"
+  },
+  {
+   "name": "w_window",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT src, approx_percentile_cont(bytes, 0.9) AS q, rank() OVER (ORDER BY src) AS r FROM flows WHERE ts >= now() - INTERVAL '15 minutes' GROUP BY src"
+  },
+  {
+   "name": "w_window_key",
+   "language": "sql",
+   "facts": "f11",
+   "query": "SELECT r, approx_percentile_cont(b, 0.9) AS q FROM (SELECT row_number() OVER (ORDER BY ts) AS r, bytes AS b FROM flows WHERE ts >= now() - INTERVAL '15 minutes') t GROUP BY r"
+  }
+ ]
+}

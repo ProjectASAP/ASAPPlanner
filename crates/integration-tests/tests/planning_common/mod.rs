@@ -89,8 +89,7 @@ pub fn selected_plan(w: &FuzzWorkload, settings: &CostInputs) -> PhysicalASAPDAG
 /// gauge `latency` whose values are declared non-negative (so DDSketch's
 /// quantile guarantee holds over it), 1000 series each.
 pub fn promql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
-    pass2_of(
-        json!("promql"),
+    promql_pass2_over(
         queries,
         json!({
             "m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000},
@@ -98,25 +97,40 @@ pub fn promql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
             "latency": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000,
                 "column_signs": {"value": "non_negative"}},
         }),
-        None,
     )
+}
+
+/// [`promql_pass2`] with the facts `sources` declares.
+pub fn promql_pass2_over(queries: &[(&str, Value)], sources: Value) -> LogicalASAPMemoCandidates {
+    pass2_of(json!("promql"), queries, sources, None)
 }
 
 /// Pass 2's output for SQL `queries` over the table
 /// `flows(ts, src, dst, bytes)` of 1000 groups of rows, each with its
 /// accuracy target, repeating every minute.
 pub fn sql_pass2(queries: &[(&str, Value)]) -> LogicalASAPMemoCandidates {
+    sql_pass2_over(queries, json!({"flows": {"series_count": 1000}}))
+}
+
+/// [`sql_pass2`] with the facts `sources` declares for `flows` and for
+/// `hosts(ts, host, region)`, which a query may join with `flows`.
+pub fn sql_pass2_over(queries: &[(&str, Value)], sources: Value) -> LogicalASAPMemoCandidates {
     let flows = json!({"name": "flows", "time_index": 0, "columns": [
         {"name": "ts", "type": "timestamp"},
         {"name": "src", "type": "utf8"},
         {"name": "dst", "type": "utf8"},
         {"name": "bytes", "type": "float64"},
     ]});
+    let hosts = json!({"name": "hosts", "time_index": 0, "columns": [
+        {"name": "ts", "type": "timestamp"},
+        {"name": "host", "type": "utf8"},
+        {"name": "region", "type": "utf8"},
+    ]});
     pass2_of(
         json!({"sql": "datafusion_sql"}),
         queries,
-        json!({"flows": {"series_count": 1000}}),
-        Some(&[flows.to_string()]),
+        sources,
+        Some(&[flows.to_string(), hosts.to_string()]),
     )
 }
 

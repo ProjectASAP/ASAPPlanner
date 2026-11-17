@@ -15,12 +15,16 @@
 //! much, because inserting a row into a DDSketch costs more than keeping it
 //! and sorting it. The planner must not predict the sketch cheaper.
 
+use std::collections::BTreeSet;
+
 use asap_cost::CostInputs;
-use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
+use asap_devtools::planning_stages::{
+    lower_promql_roots, run_planning_stages_over, PlanningStagesRun,
+};
 use asap_planner::{DeploymentCapabilities, PlanningModels};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::ASAPOp;
+use asap_types::ir::{ASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use asap_types::workload::PlanningWorkload;
 
@@ -85,9 +89,9 @@ fn workload(query: Query, setting: Setting) -> PlanningWorkload {
     .unwrap()
 }
 
-/// The plan Stage 3 selects for `workload` under the default cost inputs,
-/// with raw data kept or not, and its predicted CPU core-seconds per second.
-fn selected(workload: &PlanningWorkload, raw_data_retained: bool) -> (PhysicalASAPDAG, f64) {
+/// The planning stages' run over `workload` under the default cost inputs,
+/// with raw data kept or not.
+fn planning_run(workload: &PlanningWorkload, raw_data_retained: bool) -> PlanningStagesRun {
     let settings = CostInputs::default();
     let capabilities = DeploymentCapabilities {
         raw_data_retained,
@@ -99,7 +103,13 @@ fn selected(workload: &PlanningWorkload, raw_data_retained: bool) -> (PhysicalAS
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap();
     let roots = lower_promql_roots(workload).unwrap();
-    let run = run_planning_stages_over(roots, &entries, &data, models).unwrap();
+    run_planning_stages_over(roots, &entries, &data, models).unwrap()
+}
+
+/// The plan Stage 3 selects for `workload` under the default cost inputs,
+/// with raw data kept or not, and its predicted CPU core-seconds per second.
+fn selected(workload: &PlanningWorkload, raw_data_retained: bool) -> (PhysicalASAPDAG, f64) {
+    let run = planning_run(workload, raw_data_retained);
     let (plan, _) = run.run.selection.as_ref().expect("a plan is selected");
     let cpu = predicted_cpu(plan, workload);
     (plan.clone(), cpu)
@@ -314,21 +324,55 @@ fn with_kll_k(plan: &PhysicalASAPDAG, k: u32) -> PhysicalASAPDAG {
 }
 
 /// `quantile_over_time(0.99, latency[1h])`, 1% rank, at 1 Hz every 10 s and
-/// every 60 s, raw data not kept. Stage 2 offers stored KLL windows at
-/// k = 1,404 and at k = 547; merging 360 windows of 10 rows per series
-/// measures 4.8 ms per series at k = 1,404 and 1.7 ms at k = 547 (the
-/// merged sketch grows towards its `k`). Measured cost per second, k =
-/// 1,404 against k = 547: 589 against 240 every 10 s, 31.4 against 19.4
-/// every 60 s. Charged a flat merge per state, both cost the same to the
-/// last digit and the MILP picked either. It now selects the smaller `k`.
+/// every 60 s, raw data not kept. Stage 1 offers stored KLL windows at
+/// several `k` (269, 547, 1,404 and 2,863: one per split of the failure
+/// probability over the windows' merge). Merging 360 windows of 10 rows per
+/// series measures 4.8 ms per series at k = 1,404 and 1.7 ms at k = 547
+/// (the merged sketch grows towards its `k`). Measured cost per second,
+/// k = 1,404 against k = 547: 589 against 240 every 10 s, 31.4 against 19.4
+/// every 60 s. Charged a flat merge per state, every `k` cost the same to
+/// the last digit and the MILP picked any. The plan now keeps the smallest
+/// `k` offered, k = 1,404 is charged over 1.25x more than k = 547 (the
+/// measured pair), and the next larger `k` than the smallest is charged
+/// more (not measured).
 #[test]
 fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
     use asap_types::summary_type::SketchParams;
     for setting in [ONE_HZ_EVERY_10_S, ONE_HZ_EVERY_60_S] {
         let w = workload(QUANTILE_RANK, setting);
-        let (plan, _) = selected(&w, false);
-        assert_eq!(plan_kind(&plan), PlanKind::StoredStates, "{setting:?}");
-        let kll_ks: Vec<u32> = plan
+        let run = planning_run(&w, false);
+        // The `k`s of the stored KLL windows (tumbling-window chains)
+        // Stage 1 offers, smallest first.
+        let offered_kll_ks: Vec<u32> = run
+            .run
+            .logical_asap_candidates
+            .as_ref()
+            .expect("Stage 1 ran")
+            .memo
+            .groups()
+            .iter()
+            .flat_map(|group| &group.candidates)
+            .filter(|candidate| {
+                matches!(
+                    candidate.expression.operator,
+                    Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+                )
+            })
+            .filter_map(
+                |candidate| match candidate.logical_properties.parameters() {
+                    Some(SketchParams::Kll { k }) => Some(*k),
+                    _ => None,
+                },
+            )
+            .collect::<BTreeSet<u32>>()
+            .into_iter()
+            .collect();
+        let (plan, _) = run.run.selection.as_ref().expect("a plan is selected");
+        assert_eq!(plan_kind(plan), PlanKind::StoredStates, "{setting:?}");
+        let [smallest, next_larger, ..] = offered_kll_ks[..] else {
+            panic!("{setting:?}: Stage 1 offers stored KLL windows at k {offered_kll_ks:?}");
+        };
+        let selected_kll_ks: Vec<u32> = plan
             .nodes
             .iter()
             .filter_map(|node| match node.parameters {
@@ -337,14 +381,14 @@ fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
             })
             .collect();
         assert!(
-            !kll_ks.is_empty() && kll_ks.iter().all(|&k| k == 547),
-            "{setting:?}: selected KLL k {kll_ks:?}, the smallest offered is 547"
+            !selected_kll_ks.is_empty() && selected_kll_ks.iter().all(|&k| k == smallest),
+            "{setting:?}: selected KLL k {selected_kll_ks:?}, offered {offered_kll_ks:?}"
         );
         let entries: Vec<_> = w.query_workload.entries().collect();
         let data = w.data_workload.clone().unwrap();
         let cost = |k| {
             let (cost, _) = asap_cost::plan_cost(
-                &with_kll_k(&plan, k),
+                &with_kll_k(plan, k),
                 &entries,
                 &data,
                 &CostInputs::default(),
@@ -352,10 +396,16 @@ fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
             .unwrap();
             cost.cost_per_second.unwrap()
         };
-        let (large, small) = (cost(1_404), cost(547));
         assert!(
-            large > 1.25 * small,
-            "{setting:?}: k = 1,404 predicted {large}/s, k = 547 {small}/s; measured 1.6-2.5x"
+            cost(1_404) > 1.25 * cost(547),
+            "{setting:?}: k = 1,404 predicted {}/s, k = 547 {}/s; measured 1.6-2.5x",
+            cost(1_404),
+            cost(547)
+        );
+        let (large, small) = (cost(next_larger), cost(smallest));
+        assert!(
+            large > small,
+            "{setting:?}: k = {next_larger} predicted {large}/s, k = {smallest} {small}/s"
         );
     }
 }

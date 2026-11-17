@@ -2,7 +2,7 @@
 //! production lowering: the frontend's `Project`s of a function of the
 //! value keep a readout's error bounded, and a subquery's resolution is the
 //! evaluation grid of the groups below it.
-use crate::planning_common::promql_pass2;
+use crate::planning_common::{promql_pass2, promql_pass2_over};
 use asap_types::ir::operator::asap::summary_type_of_operator;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
@@ -112,4 +112,79 @@ fn a_subquery_s_resolution_is_the_grid_of_the_groups_below_it() {
     assert!(widths.iter().all(|width| 30_000 % width == 0), "{widths:?}");
     let without_resolution = pass2("max_over_time(rate(c[2m])[10m:])", rank);
     assert_eq!(chain_widths(&without_resolution), Vec::<u64>::new());
+}
+
+/// $n_q$ of a PromQL result is the series bound, tightened by the declared
+/// values of its `by` keys: `sum by (job) (rate(m[5m]))` returns one value
+/// per `job`, the 20 `m` declares, or, undeclared, at most `m`'s 1000
+/// series; `rate(m[5m])` one per series, 1000.
+#[test]
+fn a_promql_result_returns_at_most_its_keys_declared_values_or_its_series() {
+    let values_per_evaluation = |query: &str, job_values: Option<u64>| {
+        let distinct_values = job_values.map_or(json!({}), |job| json!({"job": job}));
+        promql_pass2_over(
+            &[(
+                query,
+                json!({"max_error": 0.05, "accuracy_metric": "relative"}),
+            )],
+            json!({"m": {
+                "series_count": 1000,
+                "metric_type": "gauge",
+                "sample_interval": 1000,
+                "distinct_values_per_label": distinct_values,
+            }}),
+        )
+        .memo
+        .queries()[0]
+            .number_of_values_per_query_evaluation
+    };
+    let by_job = "sum by (job) (rate(m[5m]))";
+    assert_eq!(values_per_evaluation(by_job, Some(20)), Some(20));
+    assert_eq!(values_per_evaluation(by_job, None), Some(1000));
+    assert_eq!(values_per_evaluation("rate(m[5m])", None), Some(1000));
+}
+
+/// A many-to-one match between two selectors of one metric pairs labels of
+/// different series: `m{side="l"} * on(x) group_left(instance)
+/// m{side="r"}` keeps each left series' `job` and copies `instance` from
+/// the right series with the same `x`. `m` declares 200 series, 10 `job`
+/// and 10 `instance` values, and 10 (`job`, `instance`) pairs; the left
+/// series `(job_a, instance_a, x = 10a + b)` and the right series
+/// `(job_b, instance_b, x = 10a + b)` give the output pairs
+/// `(job_a, instance_b)`: 100, not the 10 pairs one series holds.
+/// `group_right(job)` and an `offset` on one side pair them the same way.
+#[test]
+fn a_many_to_one_match_within_one_metric_returns_up_to_the_product_of_both_sides_labels() {
+    let values_per_evaluation = |query: &str| {
+        promql_pass2_over(
+            &[(
+                query,
+                json!({"max_error": 0.05, "failure_probability": 0.01, "accuracy_metric": "relative"}),
+            )],
+            json!({"m": {
+                "series_count": 200,
+                "metric_type": "gauge",
+                "sample_interval": 15_000,
+                "distinct_values_per_label": {"job": 10, "instance": 10},
+                "distinct_values_per_label_set": [
+                    {"labels": ["job", "instance"], "distinct_values": 10},
+                ],
+            }}),
+        )
+        .memo
+        .queries()[0]
+            .number_of_values_per_query_evaluation
+    };
+    for query in [
+        r#"quantile by (job, instance) (0.5, m{side="l"} * on(x) group_left(instance) m{side="r"})"#,
+        r#"quantile by (job, instance) (0.5, m{side="l"} * on(x) group_right(job) m{side="r"})"#,
+        r#"quantile by (job, instance) (0.5, m * on(x) group_left(instance) m offset 1h)"#,
+    ] {
+        assert_eq!(values_per_evaluation(query), Some(100), "{query}");
+    }
+    // One series' own labels still count once: 10 pairs.
+    assert_eq!(
+        values_per_evaluation("quantile by (job, instance) (0.5, m)"),
+        Some(10)
+    );
 }

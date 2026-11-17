@@ -354,3 +354,71 @@ fn a_whole_result_failure_probability_splits_over_the_output_values() {
         None
     );
 }
+
+/// δ = 0.01 splits over min(R, V · fan-in) readout values; an unknown term
+/// drops out of the `min`.
+#[test]
+fn failure_probability_splits_over_the_readout_values_covered() {
+    let read = |per_evaluation, per_output_value| ReadoutValueCounts {
+        per_evaluation,
+        per_output_value,
+    };
+    let per_value = AccuracyTarget::max_error(0.05)
+        .failure_probability(0.01)
+        .accuracy_scope(AccuracyScope::PerValue);
+    let whole = per_value.clone().accuracy_scope(AccuracyScope::WholeResult);
+    // (target, n_q, readout values, divisor)
+    let cases = [
+        // 8 series, no reduction.
+        (&per_value, Some(8), read(Some(8), Some(1)), 1),
+        (&whole, Some(8), read(Some(8), Some(1)), 8),
+        // A global `max` over 1000 series.
+        (&per_value, Some(1), read(Some(1000), Some(1000)), 1000),
+        (&whole, Some(1), read(Some(1000), Some(1000)), 1000),
+        // A grouped sum whose groups are known to hold 100 series each.
+        (&per_value, Some(10), read(Some(1000), Some(100)), 100),
+        (&whole, Some(10), read(Some(1000), Some(100)), 1000),
+        // Unknown terms.
+        (&per_value, None, read(None, Some(1)), 1),
+        (&whole, None, read(Some(100), Some(1)), 100),
+        (&whole, Some(8), read(None, Some(1)), 8),
+        (&per_value, Some(1), read(Some(1000), None), 1000),
+    ];
+    for (target, n_q, readout_values, divisor) in cases {
+        let split = target.failure_probability_per_readout_value(n_q, readout_values);
+        assert_eq!(
+            split,
+            Some(0.01 / divisor as f64),
+            "{target:?} {n_q:?} {readout_values:?}"
+        );
+    }
+    assert_eq!(
+        whole.failure_probability_per_readout_value(None, read(None, Some(1))),
+        None
+    );
+    assert_eq!(
+        AccuracyTarget::max_error(0.05)
+            .failure_probability_per_readout_value(None, read(None, None)),
+        Some(1.0)
+    );
+}
+
+/// `larger` and `plus` combine counts field by field; an unknown count
+/// stays unknown.
+#[test]
+fn readout_value_counts_combine_count_by_count() {
+    let counts = |per_evaluation, per_output_value| ReadoutValueCounts {
+        per_evaluation,
+        per_output_value,
+    };
+    let (a, b) = (counts(Some(1000), Some(1)), counts(Some(8), Some(8)));
+    assert_eq!(a.larger(b), counts(Some(1000), Some(8)));
+    assert_eq!(a.plus(b), counts(Some(1008), Some(9)));
+    let unknown_fan_in = counts(Some(8), None);
+    assert_eq!(a.larger(unknown_fan_in), counts(Some(1000), None));
+    assert_eq!(a.plus(unknown_fan_in), counts(Some(1008), None));
+    assert_eq!(
+        counts(Some(u64::MAX), Some(1)).plus(a),
+        counts(None, Some(2))
+    );
+}
