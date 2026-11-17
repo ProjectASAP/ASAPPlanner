@@ -187,6 +187,10 @@ impl Memo {
     /// series) its values are bounded by, as each item comes from a row;
     /// the smaller known one. This is the `R` a readout's failure
     /// probability is charged for when an output reads all its values.
+    /// The distinct-item bound is the deployment's contract, as HLL's
+    /// error is: a source declaring fewer distinct items than a state
+    /// counts gives too small an `R`, and a δ split over too few
+    /// estimates.
     ///
     /// Example: `topk(10, sum by (dst) (count_over_time(flows[5m])))` as
     /// one heap per `job`, with 3 jobs and at most 500 distinct `dst` per

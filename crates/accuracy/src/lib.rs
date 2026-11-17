@@ -33,4 +33,4 @@ pub use evidence::{AccuracyEvidence, NoMeasuredGuarantees};
 pub use guarantee::theoretical_guarantee;
 pub use logical_edge::{tolerated_limit, within_limit};
 pub use metric_rule::{query_roots_with_target, ErrorMetricsOfMemo};
-pub use readout_caps::{readout_levels, readout_value_counts_of_queries, ReadoutRequiredAccuracy};
+pub use readout_caps::{readout_levels, ReadoutLevels, ReadoutRequiredAccuracy};

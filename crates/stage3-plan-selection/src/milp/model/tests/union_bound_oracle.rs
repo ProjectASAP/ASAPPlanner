@@ -24,7 +24,7 @@
 //!
 //! Each readout group gets the level Pass 2's split gives each query
 //! reaching it (`AccuracyTarget::failure_probability_per_readout_value`
-//! over `asap_accuracy::readout_value_counts_of_queries`) and random
+//! over the counts `asap_accuracy::readout_levels` records) and random
 //! further copies, some looser and cheaper, so the solver is tempted by
 //! copies given for another query. Queries are planned alone and in pairs
 //! (a per-value query on a readout with a query over a shape reading it),
@@ -32,7 +32,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use asap_accuracy::{readout_value_counts_of_queries, ErrorMetricsOfMemo};
+use asap_accuracy::{readout_levels, ErrorMetricsOfMemo, NoMeasuredGuarantees};
 use asap_types::workload::bounds::source_name;
 
 use super::*;
@@ -439,9 +439,18 @@ fn check(
     // Pass 2's level per query reaching each readout group, plus random
     // copies at δ from 1e-5 to 0.5.
     let order = memo.topological_order().unwrap();
-    let counts =
-        readout_value_counts_of_queries(&memo, &ErrorMetricsOfMemo::of(&memo, &order), &order);
+    let readout_values_of_query = readout_levels(
+        &memo,
+        &ErrorMetricsOfMemo::of(&memo, &order),
+        &order,
+        &NoMeasuredGuarantees,
+    )
+    .readout_values_of_query;
     for &readout in &readouts {
+        let pass1 = CandidateForMemoGroupId {
+            group: readout,
+            index_in_group: 0,
+        };
         let mut levels: Vec<f64> = memo.groups()[readout.0 as usize]
             .reached_by_queries()
             .iter()
@@ -452,17 +461,13 @@ fn check(
                     .as_ref()?
                     .failure_probability_per_readout_value(
                         memo_query.number_of_values_per_query_evaluation,
-                        counts[&query],
+                        readout_values_of_query[query]?,
                     )
             })
             .collect();
         for _ in 0..2 {
             levels.push([1e-5, 1e-4, 1e-3, 5e-3, 0.01, 0.05, 0.5][rng.below(7) as usize]);
         }
-        let pass1 = CandidateForMemoGroupId {
-            group: readout,
-            index_in_group: 0,
-        };
         let unset = memo.candidate(pass1).clone();
         let requirement = |failure_probability| {
             vec![LogicalRequirements {

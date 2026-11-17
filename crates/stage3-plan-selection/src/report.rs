@@ -210,7 +210,8 @@ pub enum ErrorSelectingPlan {
     /// failure probability of 1e-12 for each covered value (δ = 0.01 over
     /// 1e10 values), below the solver's feasibility tolerance 1e-10.
     #[error(
-        "query {query}: an accuracy target is below the solver's precision (failure probability bound {failure_probability_bound:?}); the solver's plan misses it, so no plan is returned"
+        "query {query}: an accuracy target is below the solver's precision ({}); the solver's plan misses it, so no plan is returned",
+        failure_probability_bound_in_words(.failure_probability_bound)
     )]
     AccuracyTargetBelowSolverPrecision {
         query: usize,
@@ -219,6 +220,16 @@ pub enum ErrorSelectingPlan {
     /// The selection MILP implements cost model 1 only (#1095 §3).
     #[error("the selection MILP does not support {0}")]
     UnsupportedCostModel(String),
+}
+
+/// `bound` in words for [`ErrorSelectingPlan::AccuracyTargetBelowSolverPrecision`]:
+/// "failure probability: each of 100 covered values fails with at most
+/// 0.0001", or "no failure probability bound" without one.
+fn failure_probability_bound_in_words(bound: &Option<FailureProbabilityBound>) -> String {
+    match bound {
+        Some(bound) => format!("failure probability: {bound}"),
+        None => "no failure probability bound".to_string(),
+    }
 }
 
 /// The selection MILP is infeasible, with the reasons executions could not
