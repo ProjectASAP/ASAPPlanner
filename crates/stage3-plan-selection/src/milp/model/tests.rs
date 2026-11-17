@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use asap_types::accuracy::{AccuracyMetric, AccuracyScope, AccuracyTarget};
-use asap_types::ir::operator::Reduction;
+use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
 use asap_types::ir::scalar::ColumnRef;
@@ -25,7 +25,7 @@ use asap_types::summary_type::{
 };
 use asap_types::test_support::memo_builders::{
     group, own_candidate, quantile_over_time_readouts, query, scan_group, sketch_state,
-    try_candidate,
+    try_candidate, with_series,
 };
 use asap_types::test_support::memo_fixtures;
 use asap_types::test_support::memo_fixtures::arithmetic;
@@ -1511,6 +1511,55 @@ fn contexts_whose_queries_split_their_failure_probability_differently_are_not_co
         selected.contains(&physical_of(&physical, readouts[0])),
         "{selected:?}"
     );
+    assert!(
+        selected.contains(&physical_of(&physical, readouts[1])),
+        "{selected:?}"
+    );
+}
+
+/// `q` = p90 over 1,000 series, read per value at δ = 0.5, and `max(q)`
+/// over the whole result at δ = 0.01, with one readout group holding a
+/// copy failing with 5e-4 (cost 1, the level `q` alone needs) and one
+/// failing with 1e-5 (cost 3). `max(q)` may fail when any of the 1,000
+/// estimates it reads does, so the 5e-4 copy gives it a failure
+/// probability up to 1,000 × 5e-4 = 0.5, not 0.01: only the 1e-5 copy
+/// (1,000 × 1e-5 = 0.01) meets its target. A rule adding the selected
+/// readout's δ once accepts the 5e-4 copy for both queries.
+#[test]
+fn k_does_not_let_a_reduction_read_a_level_given_for_a_per_value_query() {
+    let mut memo = Memo::new(&with_series("m", 1_000));
+    let (readout_group, readouts) =
+        ddsketch_readouts(&mut memo, 0.9, &[(0.01, 5e-4), (0.01, 1e-5)]);
+    let max = group(
+        &mut memo,
+        memo_fixtures::aggregate(
+            Reduction::by(vec![]),
+            AggIntent::Max { col: None },
+            readout_group,
+        ),
+    );
+    memo.add_query(MemoQuery {
+        root: QueryRoot::Operator(readout_group),
+        accuracy_target: Some(
+            relative(0.01)
+                .failure_probability(0.5)
+                .accuracy_scope(AccuracyScope::PerValue),
+        ),
+        number_of_values_per_query_evaluation: Some(1_000),
+    });
+    memo.add_query(MemoQuery {
+        root: QueryRoot::Operator(max),
+        accuracy_target: Some(relative(0.01).failure_probability(0.01)),
+        number_of_values_per_query_evaluation: Some(1),
+    });
+    let physical = physical(memo.clone(), &every_candidate(&memo));
+    // The scan costs 10, so neither readout is dearer than a feasible plan.
+    let mut w = vec![0.0; physical.physical_candidates.len()];
+    w[0] = 10.0;
+    w[physical_of(&physical, readouts[0])] = 1.0;
+    w[physical_of(&physical, readouts[1])] = 3.0;
+    let (solved, _) = solve(&physical, &every_10s(2), &w, &[], &[]);
+    let selected = candidates(&solved.unwrap());
     assert!(
         selected.contains(&physical_of(&physical, readouts[1])),
         "{selected:?}"
