@@ -2,28 +2,55 @@ use super::*;
 use planner_types::plan::physical_asap_dag::PhysicalASAPNodeId;
 use std::collections::BTreeMap;
 
-/// An in-memory [`DataStore`], for tests and examples: raw tables by
-/// `Source`, and each materialized view's rows by its node id, time-indexed
-/// and append-only. A run's output for a view is appended with the time
-/// range its rows cover: a chain's window `(window_end - w, window_end]`,
-/// or the range of data another view's state summarizes. Appending drops the
-/// rows older than the view's `retention_ms` before the newest appended
-/// end. A read returns the rows whose time ranges tile the requested range
-/// exactly, and fails when one is missing. Raw tables return every row (the
-/// executor re-applies the raw data request).
+/// An in-memory [`DataStore`]: raw tables by `Source`, and each
+/// materialized view's rows by its node id, time-indexed and append-only.
+/// A run's output for a view is appended with the time range its rows
+/// cover: a chain's window `(window_end - w, window_end]`, or the range of
+/// data another view's state summarizes. Appending drops the rows older
+/// than the view's `retention_ms` before the newest appended end. A read
+/// returns the rows whose time ranges tile the requested range exactly, and
+/// fails when one is missing.
+///
+/// A raw table is bound whole ([`Self::with_raw_data`]): every read returns
+/// every row; or bound for appending ([`Self::with_appended_raw_data`]): a
+/// runtime appends each batch of samples with the `(start, end]` it covers
+/// as it arrives, a read returns the batches overlapping the requested
+/// time range, and appending drops the batches older than the table's
+/// lookback. Either way the executor re-applies the raw data request.
 ///
 /// The store owns the resident batches (a run is not charged for their
 /// states again); each cursor clones only the next batch, not the entire
 /// data set.
 #[derive(Default)]
 pub struct InMemoryDataStore {
-    raw_data: Vec<(Source, SchemaRef, Vec<Batch>)>,
+    raw_data: Vec<RawTable>,
     /// Each view's appended rows, oldest first.
     materialized_views: BTreeMap<PhysicalASAPNodeId, Vec<AppendedRows>>,
 }
 
-/// Rows appended for a view: the `(start, end]` they cover and their batches.
+/// Rows appended for a view or a raw table bound for appending: the
+/// `(start, end]` they cover and their batches.
 type AppendedRows = ((i64, i64), Vec<Batch>);
+
+/// The rows of one raw table.
+struct RawTable {
+    source: Source,
+    schema: SchemaRef,
+    rows: RawRows,
+}
+
+enum RawRows {
+    /// Bound whole: every read returns every row.
+    Whole(Vec<Batch>),
+    /// Appended as samples arrive, oldest first; appending drops the rows
+    /// ending `lookback_ms` or more before the newest end (`None`: kept
+    /// forever).
+    Appended {
+        lookback_ms: Option<u64>,
+        rows: Vec<AppendedRows>,
+    },
+}
+
 impl InMemoryDataStore {
     /// Bind `batches`, all in `schema`, as the rows of `source`. Bad input
     /// when `source` is already bound or a batch is in another schema.
@@ -33,8 +60,107 @@ impl InMemoryDataStore {
         schema: SchemaRef,
         batches: Vec<Batch>,
     ) -> Result<Self, Error> {
+        self.bind_raw_data(source, schema, &batches)?;
+        held_by_store(&batches);
+        self.raw_data.last_mut().expect("just bound").rows = RawRows::Whole(batches);
+        Ok(self)
+    }
+
+    /// Bind `source`, in `schema`, for appending its rows as they arrive
+    /// ([`Self::append_raw_data`]), keeping each batch until the newest
+    /// appended end is `lookback_ms` past its end (`None`: forever). Bad
+    /// input when `source` is already bound. Example: a runtime keeping
+    /// the last 5 minutes of a time series every query-time `Scan` of it
+    /// reads binds it with `Some(300_000)`.
+    pub fn with_appended_raw_data(
+        mut self,
+        source: Source,
+        schema: SchemaRef,
+        lookback_ms: Option<u64>,
+    ) -> Result<Self, Error> {
+        self.bind_raw_data(source, schema, &[])?;
+        self.raw_data.last_mut().expect("just bound").rows = RawRows::Appended {
+            lookback_ms,
+            rows: Vec::new(),
+        };
+        Ok(self)
+    }
+
+    /// Append `batches`, all in the table's schema, as the rows of `source`
+    /// covering `time_range_ms` (`(start, end]`), then drop its batches
+    /// ending `lookback_ms` or more before `end` (the newest are always
+    /// kept). Bad input when `source` is not bound for appending, a batch
+    /// is in another schema, or the range is empty or starts before the end
+    /// of the rows appended last (the store is append-only).
+    pub fn append_raw_data(
+        &mut self,
+        source: &Source,
+        time_range_ms: (i64, i64),
+        batches: Vec<Batch>,
+    ) -> Result<(), Error> {
+        let table = self
+            .raw_data
+            .iter_mut()
+            .find(|table| &table.source == source)
+            .ok_or_else(|| Error::Invalid(format!("unbound raw data: {source:?}")))?;
+        let RawRows::Appended { lookback_ms, rows } = &mut table.rows else {
+            return Err(Error::Invalid(format!(
+                "raw data {source:?} is bound whole, not for appending"
+            )));
+        };
+        if batches.iter().any(|batch| batch.schema() != &table.schema) {
+            return Err(Error::Invalid("raw data batch schema mismatch".into()));
+        }
+        let (start, end) = time_range_ms;
+        if start >= end
+            || rows
+                .last()
+                .is_some_and(|((_, last_end), _)| start < *last_end)
+        {
+            return Err(Error::Invalid(format!(
+                "raw data {source:?}: appended rows ({start}, {end}] are empty or not after the stored ones"
+            )));
+        }
+        held_by_store(&batches);
+        rows.push((time_range_ms, batches));
+        if let Some(lookback_ms) = *lookback_ms {
+            drop_rows_ending_before(rows, end, lookback_ms);
+        }
+        Ok(())
+    }
+
+    /// Bytes of the raw rows held.
+    pub fn raw_data_bytes(&self) -> usize {
+        self.raw_data
+            .iter()
+            .map(|table| match &table.rows {
+                RawRows::Whole(batches) => batches_bytes(batches),
+                RawRows::Appended { rows, .. } => {
+                    rows.iter().map(|(_, batches)| batches_bytes(batches)).sum()
+                }
+            })
+            .sum()
+    }
+
+    /// Bytes of the materialized views' stored rows.
+    pub fn materialized_view_bytes(&self) -> usize {
+        self.materialized_views
+            .values()
+            .flatten()
+            .map(|(_, batches)| batches_bytes(batches))
+            .sum()
+    }
+
+    /// Bind `source` with no rows yet; bad input when it is already bound or
+    /// a batch of `batches` is in another schema than `schema`.
+    fn bind_raw_data(
+        &mut self,
+        source: Source,
+        schema: SchemaRef,
+        batches: &[Batch],
+    ) -> Result<(), Error> {
         crate::values::validate_schema(&schema)?;
-        if self.raw_data.iter().any(|(bound, _, _)| bound == &source) {
+        if self.raw_data.iter().any(|table| table.source == source) {
             return Err(Error::Invalid(format!(
                 "raw data {source:?} is bound twice"
             )));
@@ -42,9 +168,12 @@ impl InMemoryDataStore {
         if batches.iter().any(|batch| batch.schema() != &schema) {
             return Err(Error::Invalid("raw data batch schema mismatch".into()));
         }
-        held_by_store(&batches);
-        self.raw_data.push((source, schema, batches));
-        Ok(self)
+        self.raw_data.push(RawTable {
+            source,
+            schema,
+            rows: RawRows::Whole(Vec::new()),
+        });
+        Ok(())
     }
     /// Append `batches` as the rows of `view` covering `time_range_ms`
     /// (`(start, end]`), then drop its rows ending `view.retention_ms()` or
@@ -71,11 +200,21 @@ impl InMemoryDataStore {
         }
         held_by_store(&batches);
         rows.push((time_range_ms, batches));
-        let oldest_kept_end =
-            end.saturating_sub(i64::try_from(view.retention_ms()).unwrap_or(i64::MAX));
-        rows.retain(|((_, row_end), _)| *row_end > oldest_kept_end || *row_end == end);
+        drop_rows_ending_before(rows, end, view.retention_ms());
         Ok(())
     }
+}
+
+/// Drops the rows of `rows` ending `retention_ms` or more before `end`,
+/// keeping those ending at `end`: retention 15 at end 30 drops `(0, 10]`
+/// and keeps `(10, 20]`.
+fn drop_rows_ending_before(rows: &mut Vec<AppendedRows>, end: i64, retention_ms: u64) {
+    let oldest_kept_end = end.saturating_sub(i64::try_from(retention_ms).unwrap_or(i64::MAX));
+    rows.retain(|((_, row_end), _)| *row_end > oldest_kept_end || *row_end == end);
+}
+
+fn batches_bytes(batches: &[Batch]) -> usize {
+    batches.iter().map(Batch::memory_bytes).sum()
 }
 
 fn held_by_store(batches: &[Batch]) {
@@ -108,17 +247,28 @@ impl DataStore for InMemoryDataStore {
         request: &RawDataRequest,
         context: RunContext,
     ) -> Result<OutputStream<'_, Batch>, Error> {
-        let (_, schema, batches) = self
+        let table = self
             .raw_data
             .iter()
-            .find(|(bound, _, _)| bound == source)
+            .find(|table| &table.source == source)
             .ok_or_else(|| Error::Invalid(format!("unbound raw data: {source:?}")))?;
-        let projection = projection(schema, request.schema)?;
+        let projection = projection(&table.schema, request.schema)?;
         let output = request.schema.clone();
+        // An appended table returns the batches overlapping the requested
+        // range; the executor re-applies it row by row.
+        let batches: Box<dyn Iterator<Item = &Batch>> = match (&table.rows, request.time_range_ms) {
+            (RawRows::Whole(batches), _) => Box::new(batches.iter()),
+            (RawRows::Appended { rows, .. }, None) => {
+                Box::new(rows.iter().flat_map(|(_, batches)| batches))
+            }
+            (RawRows::Appended { rows, .. }, Some((start, end))) => Box::new(
+                rows.iter()
+                    .filter(move |((row_start, row_end), _)| *row_end > start && *row_start < end)
+                    .flat_map(|(_, batches)| batches),
+            ),
+        };
         Ok(stream_batches(
-            batches
-                .iter()
-                .map(move |batch| batch.project(output.clone(), &projection)),
+            batches.map(move |batch| batch.project(output.clone(), &projection)),
             context,
         ))
     }

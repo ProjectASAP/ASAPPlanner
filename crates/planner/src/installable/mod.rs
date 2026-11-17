@@ -26,6 +26,7 @@
 use std::collections::{HashMap, HashSet};
 
 use asap_cost::{NodeCostSource, OperatorKind, PlanCost};
+use asap_executor::physical_planner::CompiledPhysicalDAG;
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::plan::materialized_view::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, RawDataRetention,
@@ -308,6 +309,40 @@ impl InstallablePlan {
         executor_compiles(&self.dag, &views).map_err(|error| error.to_string())
     }
 
+    /// The executor's query run of this plan, as a runtime runs it at each
+    /// evaluation: the roots, in workload order, over the views they read
+    /// (each a materialized view slot of the runtime's store) and the
+    /// `Scan`s they read outside them (raw data slots). `Err` is
+    /// [`InstallablePlanError::QueryRunNotExecutable`] when the executor
+    /// cannot compile it, or why the views cannot be derived.
+    pub fn compile_query_run(&self) -> Result<CompiledPhysicalDAG, InstallablePlanError> {
+        let views = self.materialized_views()?;
+        let views_by_node = views.iter().map(|view| (view.node_id, view)).collect();
+        executor_runs_queries(&IndexedDag::new(&self.dag), &views_by_node)
+    }
+
+    /// The executor's refresh of `group`, one of
+    /// [`Self::ingestion_refresh_groups`], as a runtime runs it in one
+    /// ingestion run per window: the group's views as roots, in group
+    /// order, over the nodes below them, each view of another group they
+    /// read a materialized view slot. `Err` is
+    /// [`InstallablePlanError::MaterializedViewNotExecutable`] when the
+    /// executor cannot compile it, or why the views cannot be derived.
+    pub fn compile_ingestion_refresh(
+        &self,
+        group: &IngestionRefreshGroup,
+    ) -> Result<CompiledPhysicalDAG, InstallablePlanError> {
+        let views = self.materialized_views()?;
+        let views_by_node = views.iter().map(|view| (view.node_id, view)).collect();
+        let refreshed: Vec<&MaterializedView> = group.views.iter().collect();
+        executor_refreshes(
+            &refreshed,
+            &views_by_node,
+            &IndexedDag::new(&self.dag),
+            false,
+        )
+    }
+
     /// The plan of `dag` answering `query_texts` (one per root, in workload
     /// order), checked as [`Self::validate`] checks a plan file: the DAG's
     /// validity, one text per root, no standalone scalar query, and each
@@ -474,7 +509,7 @@ fn executor_compiles(
     for (position, refreshed) in refreshes.enumerate() {
         executor_refreshes(&refreshed, &views_by_node, &indexed, position == 0)?;
     }
-    executor_runs_queries(&indexed, &views_by_node)
+    executor_runs_queries(&indexed, &views_by_node).map(|_| ())
 }
 
 /// Whether the executor compiles the query run: the roots over the views
@@ -484,7 +519,7 @@ fn executor_compiles(
 fn executor_runs_queries(
     indexed: &IndexedDag<'_>,
     views_by_node: &HashMap<PhysicalASAPNodeId, &MaterializedView>,
-) -> Result<(), InstallablePlanError> {
+) -> Result<CompiledPhysicalDAG, InstallablePlanError> {
     use asap_executor::physical_planner::compile;
     let dag = indexed.dag;
     let mut read = Vec::new();
@@ -500,10 +535,8 @@ fn executor_runs_queries(
         }
     }
     let roots: Vec<u64> = dag.roots.iter().map(|&id| id as u64).collect();
-    compile(dag, &read, &roots).map(|_| ()).map_err(|error| {
-        InstallablePlanError::QueryRunNotExecutable {
-            reason: error.to_string(),
-        }
+    compile(dag, &read, &roots).map_err(|error| InstallablePlanError::QueryRunNotExecutable {
+        reason: error.to_string(),
     })
 }
 
@@ -516,7 +549,7 @@ fn executor_refreshes(
     views_by_node: &HashMap<PhysicalASAPNodeId, &MaterializedView>,
     indexed: &IndexedDag<'_>,
     in_whole_plan: bool,
-) -> Result<(), InstallablePlanError> {
+) -> Result<CompiledPhysicalDAG, InstallablePlanError> {
     use asap_executor::physical_planner::compile;
     let roots: Vec<PhysicalASAPNodeId> = refreshed.iter().map(|view| view.node_id).collect();
     // The refresh reads only the nodes below it: compile them, or the whole
@@ -541,17 +574,15 @@ fn executor_refreshes(
         .filter_map(|id| views_by_node.get(id).map(|read| (*read).clone()))
         .collect();
     let root_ids: Vec<u64> = roots.iter().map(|&id| id as u64).collect();
-    compile(below, &read, &root_ids)
-        .map(|_| ())
-        .map_err(
-            |error| InstallablePlanError::MaterializedViewNotExecutable {
-                node_id: roots[0],
-                reason: match roots.as_slice() {
-                    [_] => error.to_string(),
-                    _ => format!("refreshed with views {roots:?}: {error}"),
-                },
+    compile(below, &read, &root_ids).map_err(|error| {
+        InstallablePlanError::MaterializedViewNotExecutable {
+            node_id: roots[0],
+            reason: match roots.as_slice() {
+                [_] => error.to_string(),
+                _ => format!("refreshed with views {roots:?}: {error}"),
             },
-        )
+        }
+    })
 }
 
 /// The data facts the selected `plan` (costed as `cost`) assumed because

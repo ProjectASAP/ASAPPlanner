@@ -7,8 +7,11 @@
 //! query corpora and holds their SQL catalogs. [`rqe_atomic_costs`] converts
 //! sketch-bench's measured per-operation costs into plan selection's
 //! measured table. [`planner_fuzz`] is the metamorphic fuzz tester for
-//! missed reuse and sharing behind the `planner_fuzz` bin.
+//! missed reuse and sharing behind the `planner_fuzz` bin. [`asap_lane`] is
+//! the in-process ASAP lane of the engine comparison behind the `asap_run`
+//! bin.
 
+pub mod asap_lane;
 pub mod candidate_labels;
 pub mod corpora;
 pub mod planner_fuzz;
