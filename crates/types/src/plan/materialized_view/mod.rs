@@ -242,7 +242,11 @@ impl RawDataRetention {
             lookback_ms,
         }
     }
+}
 
+/// What a runtime keeps of each source: e.g. `m` with lookback 5 minutes,
+/// the raw rows its query-time `Scan`s read back.
+impl RawDataRetention {
     /// The source.
     pub fn source(&self) -> &Source {
         &self.source
