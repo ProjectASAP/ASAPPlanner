@@ -225,7 +225,7 @@
     }
     const rows = materializedViewRows(doc);
     $('views-meta').innerHTML = stage3.materialized_views_error
-      ? `<span class="error">no installable plan: ${esc(stage3.materialized_views_error)}</span>`
+      ? `<span class="error">invalid plan: ${esc(stage3.materialized_views_error)}</span>`
       : `<b>${rows.length}</b> materialized view${rows.length === 1 ? '' : 's'}` +
         (rows.length ? '' : ': nothing is materialized across evaluations; every query computes at query time') +
         (stage3.planner_executor_error

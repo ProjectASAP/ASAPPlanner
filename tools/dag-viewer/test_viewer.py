@@ -810,7 +810,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("ingesting", js.eval("__els.dataArrival.textContent"))
         self.assertIn("raw dataretained", self.text(js, "deployment"))
         self.assertIn("every 10 s · predictable", self.text(js, "queries"))
-        self.assertIn(f"no installable plan: {doc['stage3_plan_selection']['materialized_views_error']}", self.text(js, "views-meta"))
+        self.assertIn(f"invalid plan: {doc['stage3_plan_selection']['materialized_views_error']}", self.text(js, "views-meta"))
 
     def test_a_plan_the_planners_executor_cannot_run_lists_its_views_and_says_why(self):
         """A plan the Planner's executor cannot run still lists its views;

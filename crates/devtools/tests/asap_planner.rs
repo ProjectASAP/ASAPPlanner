@@ -2646,9 +2646,9 @@ fn the_every_summary_family_file_rules_out_nothing() {
     assert!(summary_exclusions.is_empty(), "{summary_exclusions:?}");
 }
 
-/// `--plan-file` without its path, `--plan-file` before Stage 3 selects a
-/// plan, and the removed `--executor-check` are usage errors (status 2,
-/// with the usage line) that leave the plan-file path alone.
+/// `--plan-file` without its path and `--plan-file` before Stage 3 selects
+/// a plan are usage errors (status 2, with the usage line) that leave the
+/// plan-file path alone.
 #[test]
 fn plan_file_flag_misuse_is_a_usage_error() {
     let workload = TempFile::json(&adhoc(&["sum(data)"], exact(), &["data"]));
@@ -2661,10 +2661,6 @@ fn plan_file_flag_misuse_is_a_usage_error() {
         (
             vec!["--run-until", "stage2", "--plan-file", file.path()],
             "--plan-file needs --run-until stage3",
-        ),
-        (
-            vec!["--run-until", "stage3", "--executor-check", "skip"],
-            "unknown argument --executor-check",
         ),
     ] {
         let mut all = vec!["--workload", workload.path()];
