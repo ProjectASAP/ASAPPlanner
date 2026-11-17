@@ -768,7 +768,8 @@ fn aws_fargate_prices_example_4_in_dollars() {
 /// the document's `deployment_capabilities` shows (defaults filled in;
 /// without the flag, every summary supported, raw data retained, no
 /// query-time result retained). For Pattern B with KLL only and query-time
-/// results retained: Pass 1 offers no DDSketch candidate. Without raw data, a plan is still selected
+/// results retained: Pass 1 offers no DDSketch candidate (the deployment
+/// excludes every DDSketch state outright). Without raw data, a plan is still selected
 /// with guarantees enforced, from materialized views. A deployment with an
 /// unknown field is refused.
 #[test]
@@ -794,6 +795,9 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
             "supported_summaries": asap_executor::supported_summary_families(),
             "raw_data_retained": true,
             "query_time_results_retained": false,
+            "counter_semantics": { "reset_handling": true, "extrapolation": true },
+            "state_not_mergeable_across_windows": [],
+            "excluded_candidates": [],
         })
     );
     let kll_kept = with_capabilities(
@@ -807,6 +811,9 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
             "supported_summaries": [{ "summary_type": "Kll", "readouts": ["Quantile"] }],
             "raw_data_retained": true,
             "query_time_results_retained": true,
+            "counter_semantics": { "reset_handling": true, "extrapolation": true },
+            "state_not_mergeable_across_windows": [],
+            "excluded_candidates": [],
         })
     );
     let has_ddsketch = |document: &Value| {

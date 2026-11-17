@@ -28,7 +28,7 @@ fn per_series_readouts_keep_the_series_identity() {
         None,
     );
     query(&mut memo, per_series, None);
-    let memo = pass1_memo(memo, None).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     let output = &memo.groups()[per_series.0 as usize].group_properties.schema;
     assert!(output.closed && output.has_promql_series_identity());
     let readouts = &candidates_of(&memo, per_series)[1..];
@@ -81,7 +81,7 @@ fn an_open_per_series_aggregate_offers_no_renamed_readout() {
         None,
     );
     query(&mut memo, per_series, None);
-    let memo = pass1_memo(memo, None).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     assert!(
         !memo.groups()[per_series.0 as usize]
             .group_properties

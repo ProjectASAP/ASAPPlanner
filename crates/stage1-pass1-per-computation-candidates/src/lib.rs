@@ -33,7 +33,7 @@ mod test_fixtures;
 #[cfg(test)]
 mod tests;
 
-use asap_types::deployment_capabilities::SupportedSummary;
+use asap_types::deployment_capabilities::DeploymentExclusion;
 use asap_types::ir::schema::Schema;
 use asap_types::ir::{Operator, SchemaDerivationError};
 use asap_types::stages::{CandidateError, Memo, MemoGroupError, MemoGroupId};
@@ -66,10 +66,13 @@ pub enum PerComputationCandidateError {
 /// Stage 1, Pass 1: the initial candidates of the memo groups of `memo`
 /// (Stage 0's, without candidates). It finds one computation target per
 /// measure of each aggregate group with a realization besides exact
-/// execution, drops the summaries the deployment does not support
-/// (`supported_summaries`, the deployment's
-/// `DeploymentCapabilities::supported_summaries`; `None` supports every
-/// one), and adds each way to compute a group as candidates, through
+/// execution, skips each summary whose sketch algorithm, or the readout
+/// the measure reads from it, one of the deployment's `exclusions`
+/// (`DeploymentCapabilities::exclusions`) rules out outright (e.g. every
+/// KLL build when the executor does not list KLL, or a quantile's KLL when
+/// it lists KLL without `Quantile`; Stage 2 prunes the rest the deployment
+/// cannot run), and adds each way to
+/// compute a group as candidates, through
 /// `Memo::find_or_add_group` and `Memo::add_candidate`: every group's own
 /// expression, exact accumulators, one summary build per configuration of
 /// the algorithm's predefined list with separate readouts, and fused builds.
@@ -77,9 +80,9 @@ pub enum PerComputationCandidateError {
 /// accuracy and eliminates the candidates no query can use.
 pub fn pass1_memo(
     mut memo: Memo,
-    supported_summaries: Option<&[SupportedSummary]>,
+    exclusions: &[DeploymentExclusion],
 ) -> Result<Memo, PerComputationCandidateError> {
-    let targets = computation_targets(&memo, supported_summaries)?;
+    let targets = computation_targets(&memo, exclusions)?;
     add_pass1_candidates(&mut memo, &targets)?;
     Ok(memo)
 }

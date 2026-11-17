@@ -298,7 +298,7 @@ test('the pruned candidates of a group: Pass 2 with its root causes, Stage 2 and
   const pruned = call('memoPrunedLines', doc, 4);
   assert.equal(pruned.pass2.length, 4);
   assert.match(pruned.pass2[0], /^#0: the producer's guarantee exceeds Rank ≤ 0\.01 \(δ 0\.00001\)$/);
-  assert.ok(pruned.stage2.includes('#4 (query_time, AcrossEvaluations(Memory)): query time results not retained'), pruned.stage2.join('\n'));
+  assert.ok(pruned.stage2.includes('#4 (query_time, AcrossEvaluations(Memory)): excluded by the deployment: query time results not retained'), pruned.stage2.join('\n'));
   assert.ok(pruned.stage2.includes('#4 (query_time, None): input has no buildable producer'), pruned.stage2.join('\n'));
   assert.deepEqual(pruned.stage3, []);
   // A cause traced through eliminated consumers names them; a Stage 3

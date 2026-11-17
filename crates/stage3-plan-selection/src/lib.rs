@@ -39,7 +39,7 @@ use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 use crate::cost::execution_costs;
 use crate::milp::model::{solve_selection, SelectionInputs, SelectionMilpError};
 use crate::plan::plan_of;
-use crate::report::{accepted_accuracy, infeasible};
+use crate::report::{accepted_accuracy, excluded_by_deployment, infeasible};
 use crate::selectable::{QueryId, SelectableExecutions};
 
 pub use report::{
@@ -55,8 +55,9 @@ pub use report::{
 /// `entries[q]` is query `q`'s workload entry; `data` the data workload
 /// with its bounds.
 ///
-/// Err: invalid or unsupported cost inputs, an infeasible catalog, or a
-/// solver failure.
+/// Err: invalid or unsupported cost inputs, an infeasible catalog (reported
+/// as excluded by the deployment when Stage 2 pruned some candidate as
+/// such), or a solver failure.
 pub fn select_plan(
     physical: &PhysicalASAPMemoCandidates,
     entries: &[QueryWorkloadEntry],
@@ -103,12 +104,15 @@ pub fn select_plan(
                 physical.physical_candidates[execution.candidate.0].logical_candidate_id,
             )
     });
-    if selectable
+    if let Some((query, _)) = selectable
         .answering()
         .iter()
-        .any(|(_, executions)| executions.is_empty())
+        .find(|(_, executions)| executions.is_empty())
     {
-        return Err(infeasible(&costs));
+        return Err(
+            excluded_by_deployment(&physical.pruned_candidates, Some(query.0), &costs)
+                .unwrap_or_else(|| infeasible(&costs)),
+        );
     }
     let solved = solve_selection(&SelectionInputs {
         physical,
@@ -117,7 +121,10 @@ pub fn select_plan(
         costs: &costs,
     })
     .map_err(|error| match error {
-        SelectionMilpError::Infeasible => infeasible(&costs),
+        SelectionMilpError::Infeasible => {
+            excluded_by_deployment(&physical.pruned_candidates, None, &costs)
+                .unwrap_or_else(|| infeasible(&costs))
+        }
         SelectionMilpError::Solver(reason) => ErrorSelectingPlan::Solver(reason),
         SelectionMilpError::TargetBelowSolverPrecision {
             query,

@@ -114,8 +114,12 @@ test('queries show a fixed interval and its phase', () => {
 });
 
 test('Stage 2 and Stage 3 pruning reasons read as words; dominated_by names its physical candidate', () => {
-  assert.equal(call('prunedReasonText', 'query_time_results_not_retained'), 'query time results not retained');
+  assert.equal(call('prunedReasonText', 'no_ingestion_pipeline'), 'no ingestion pipeline');
   assert.equal(call('prunedReasonText', { dominated_by: 7 }), 'dominated by C7');
+  assert.equal(call('prunedReasonText', { excluded_by_deployment: 'raw_data_not_retained' }),
+    'excluded by the deployment: raw data not retained');
+  assert.equal(call('prunedReasonText', { excluded_by_deployment: { excluded_candidate: { index: 2 } } }),
+    'excluded by the deployment: excluded_candidates[2]');
 });
 
 test('a materialized view row names its plan node, kind, refresh, inputs, cost and the queries reading it', () => {
@@ -187,4 +191,29 @@ test('a node shared by several queries says so; a query keeps its own nodes and 
   const root = new Set(call('stageNeighborhoodIds', elements, `n${plan.roots[0]}`));
   assert.ok(root.has(chain.data.id) && !root.has(`n${plan.roots[1]}`));
   assert.equal(cytoscape(elements).nodes().length, nodesOf(elements).length);
+});
+
+test('the deployment settings name each capability left out and the caller exclusions', () => {
+  const text = call('capabilityLimitsText', {
+    raw_data_retained: true,
+    query_time_results_retained: false,
+    counter_semantics: { reset_handling: true, extrapolation: false },
+    state_not_mergeable_across_windows: [{ exact: 'Rate' }],
+    excluded_candidates: [
+      { timing: 'query_time', operator: 'Scan' },
+      { operator: 'Aggregate', per_entity_reduction: true },
+    ],
+  });
+  assert.match(text, /counter extrapolation not supported/);
+  assert.doesNotMatch(text, /counter resets not handled/);
+  assert.match(text, /not mergeable across windows: exact Rate/);
+  assert.match(text, /excluded candidates: 2/);
+  // Each supported summary by its wire field `summary_type`.
+  const kllOnly = call('settingsRows', {
+    deployment_capabilities: { supported_summaries: [{ summary_type: 'Kll', readouts: ['Quantile'] }] },
+  });
+  assert.deepEqual(kllOnly.find(([name]) => name === 'summaries'), ['summaries', 'Kll (Quantile)']);
+  // The defaults leave nothing out, so the line names none of them.
+  const defaults = call('capabilityLimitsText', { raw_data_retained: true, query_time_results_retained: false });
+  assert.equal(defaults, '');
 });

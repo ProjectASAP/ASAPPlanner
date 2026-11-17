@@ -9,6 +9,7 @@
 //! - [`arguments`] — operator argument types ([`GroupKeys`],
 //!   [`Reduction`], [`Source`], …).
 //! - [`agg_intent`] — the aggregation-intent vocabulary ([`AggIntent`]).
+//! - [`kind`] — an operator's kind without its arguments ([`OperatorKind`]).
 //! - [`maintained_population`] — maintained populations and their evaluations.
 //! - [`tumbling_window_chain`] — what a tumbling-window chain computes.
 //! - [`query`] — a query root: an operator result or a standalone scalar.
@@ -16,6 +17,7 @@ pub mod agg_intent;
 pub mod arguments;
 pub mod asap;
 pub mod input;
+pub mod kind;
 pub mod maintained_population;
 pub mod node;
 pub mod non_asap;
@@ -29,3 +31,4 @@ pub use arguments::{
     VectorGrouping, VectorMatch, VectorMatchKind, WindowFrame, WindowFrameBound, WindowFrameOffset,
     WindowFrameUnits, WindowFuncKind,
 };
+pub use kind::OperatorKind;

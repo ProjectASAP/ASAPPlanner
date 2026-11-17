@@ -5,6 +5,7 @@
 mod time_series;
 
 mod columnar_batches;
+mod deployment_exclusions;
 mod e2e_plan;
 mod exact_only_reads;
 mod metricsql_workloads;

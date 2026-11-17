@@ -11,6 +11,7 @@
 //! type, so no reason names it.
 
 use crate::accuracy::AccuracyMetric;
+use crate::deployment_capabilities::ExclusionSource;
 use crate::stages::{CandidateForMemoGroupId, PhysicalCandidateId, RequiredAccuracy};
 
 /// A candidate eliminated by Pass 2.
@@ -113,22 +114,14 @@ pub struct PrunedCandidate<C> {
 /// Why a stage removed a candidate: first Stage 2's (the physical candidate
 /// cannot be built, run or read by a query output), then Stage 3's, before
 /// its selection MILP. JSON: the snake_case variant name, e.g.
-/// `"raw_data_not_retained"`, or `{"dominated_by": 3}`.
+/// `"no_ingestion_pipeline"`, `{"excluded_by_deployment":
+/// "raw_data_not_retained"}` or `{"dominated_by": 3}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PruneReason {
     /// Stage 2: it runs at ingestion time, and the source has no ingestion
     /// pipeline (its data is at rest or its arrival unknown).
     NoIngestionPipeline,
-    /// Stage 2: it scans raw data at query time, or retains the raw rows it
-    /// scans across evaluations, and the deployment does not retain raw
-    /// data, so no window of it is there to scan or keep.
-    RawDataNotRetained,
-    /// Stage 2: it is a query-time result materialized across evaluations
-    /// (`AcrossEvaluations`), and the deployment retains no query-time
-    /// result across evaluations
-    /// (`DeploymentCapabilities::query_time_results_retained`).
-    QueryTimeResultsNotRetained,
     /// Stage 2: one of its inputs has no producer candidate that can be
     /// built: none is left, or every one depends, directly or through a
     /// cycle, on an input that cannot be built.
@@ -140,6 +133,12 @@ pub enum PruneReason {
     /// weight column's `column_signs` is not `NonNegative`: its estimates are
     /// bounds only for non-negative weights.
     CountMinWeightsNotProvenNonNegative,
+    /// Stage 2: the deployment's capabilities exclude it
+    /// (`DeploymentCapabilities::exclusions`): the executor cannot run it,
+    /// or the caller ruled it out. Names the capability the matching
+    /// exclusion comes from, e.g. `RawDataNotRetained` for a query-time
+    /// scan when raw data is not retained.
+    ExcludedByDeployment(ExclusionSource),
     /// Stage 3: the candidate it names, in the same memo group with the
     /// same producers and consumers, is at least as good in every respect
     /// (guarantee, usage, latency, output, held state), so no optimal plan

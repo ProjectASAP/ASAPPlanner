@@ -45,12 +45,12 @@ use std::mem::discriminant;
 
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
-use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
 use asap_types::summary_type::{ExactKind, SketchParams};
 use serde::{Deserialize, Serialize};
 
 use crate::node::analytical::AnalyticalCostError;
+/// The operator vocabulary the table is keyed by; it lives with the IR.
+pub use asap_types::ir::operator::OperatorKind;
 
 /// The deployment's measured cost table
 /// ([`CostInputs::measured_operation_costs`]). In JSON, an object
@@ -105,7 +105,22 @@ pub struct OperatorCost {
     /// when each of its measures has an entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measure: Option<String>,
-    /// CPU nanoseconds per unit the operator processes ([`OperatorKind`]).
+    /// CPU nanoseconds per unit the operator processes. The unit is the
+    /// row the operator reads unless listed here:
+    ///
+    /// * `Scan`: per sample read. At ingestion time, an arriving sample; at
+    ///   query time, a sample fetched and decoded from the database holding
+    ///   raw data, part of the deployment's cost;
+    /// * `Aggregate`: per input row, for each measure;
+    /// * `SummaryAgg`: per input row inserted into its group's state;
+    /// * `SummaryEstimate`: per group read;
+    /// * `FinalizeExactAccumulator`: per accumulator finalized (one per
+    ///   group);
+    /// * `SummaryMerge`: per input state merged (each tumbling window of a
+    ///   chain is a state);
+    /// * `SummaryTumblingWindowChain`: per input row placed in its tumbling
+    ///   window and inserted into that window's state.
+    ///
     /// It includes what the formulas charge apart, at the measured shape:
     /// the output rows a merge, an aggregate or an estimate builds per
     /// group and the label columns a grouping carries per row. Example: a
@@ -124,98 +139,6 @@ pub struct OperatorCost {
     /// derive from the sketch's parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bytes_per_state: Option<f64>,
-}
-
-/// Every physical operator a physical plan DAG can contain, by the name it
-/// has there. The unit each is priced per is the row it reads unless said
-/// otherwise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum OperatorKind {
-    /// Per sample read. At ingestion time, an arriving sample; at query
-    /// time, a sample fetched and decoded from the database holding raw
-    /// data, part of the deployment's cost.
-    Scan,
-    Values,
-    Filter,
-    Project,
-    /// Per input row, for each measure.
-    Aggregate,
-    Join,
-    SetOp,
-    Concat,
-    Dedup,
-    Sort,
-    Limit,
-    BinaryOp,
-    SQLWindowFunc,
-    TimeRange,
-    TimeShift,
-    PromqlVectorFromScalar,
-    PromqlRelabel,
-    PromqlInfoEnrich,
-    PromqlSeriesSample,
-    PromqlSubquery,
-    /// Per input row inserted into its group's state.
-    SummaryAgg,
-    /// Per group read.
-    SummaryEstimate,
-    /// Per accumulator finalized (one per group).
-    FinalizeExactAccumulator,
-    MaintainPopulation,
-    EvaluatePopulation,
-    /// Per input state merged (each tumbling window of a chain is a state).
-    SummaryMerge,
-    /// Per input row placed in its tumbling window and inserted into that tumbling window's state.
-    // Named `PaneChain` before #1163.
-    #[serde(alias = "PaneChain")]
-    SummaryTumblingWindowChain,
-    SummarySubtract,
-    SummaryDelete,
-    SummaryJoin,
-    Extension,
-}
-
-impl OperatorKind {
-    /// The kind of `payload`.
-    pub fn of(payload: &Payload) -> Self {
-        match payload {
-            Operator::NonASAP(op) => match op {
-                NonASAPOp::Scan { .. } => Self::Scan,
-                NonASAPOp::Values { .. } => Self::Values,
-                NonASAPOp::Filter { .. } => Self::Filter,
-                NonASAPOp::Project { .. } => Self::Project,
-                NonASAPOp::Aggregate { .. } => Self::Aggregate,
-                NonASAPOp::Join { .. } => Self::Join,
-                NonASAPOp::SetOp { .. } => Self::SetOp,
-                NonASAPOp::Concat { .. } => Self::Concat,
-                NonASAPOp::Dedup { .. } => Self::Dedup,
-                NonASAPOp::Sort { .. } => Self::Sort,
-                NonASAPOp::Limit { .. } => Self::Limit,
-                NonASAPOp::BinaryOp { .. } => Self::BinaryOp,
-                NonASAPOp::SQLWindowFunc { .. } => Self::SQLWindowFunc,
-                NonASAPOp::TimeRange { .. } => Self::TimeRange,
-                NonASAPOp::TimeShift { .. } => Self::TimeShift,
-                NonASAPOp::PromqlVectorFromScalar(_) => Self::PromqlVectorFromScalar,
-                NonASAPOp::PromqlRelabel { .. } => Self::PromqlRelabel,
-                NonASAPOp::PromqlInfoEnrich { .. } => Self::PromqlInfoEnrich,
-                NonASAPOp::PromqlSeriesSample { .. } => Self::PromqlSeriesSample,
-                NonASAPOp::PromqlSubquery { .. } => Self::PromqlSubquery,
-            },
-            Operator::ASAP(op) => match op {
-                ASAPOp::SummaryAgg { .. } => Self::SummaryAgg,
-                ASAPOp::SummaryEstimate { .. } => Self::SummaryEstimate,
-                ASAPOp::FinalizeExactAccumulator { .. } => Self::FinalizeExactAccumulator,
-                ASAPOp::MaintainPopulation { .. } => Self::MaintainPopulation,
-                ASAPOp::EvaluatePopulation { .. } => Self::EvaluatePopulation,
-                ASAPOp::SummaryMerge { .. } => Self::SummaryMerge,
-                ASAPOp::SummaryTumblingWindowChain { .. } => Self::SummaryTumblingWindowChain,
-                ASAPOp::SummarySubtract { .. } => Self::SummarySubtract,
-                ASAPOp::SummaryDelete { .. } => Self::SummaryDelete,
-                ASAPOp::SummaryJoin { .. } => Self::SummaryJoin,
-                ASAPOp::Extension { .. } => Self::Extension,
-            },
-        }
-    }
 }
 
 /// The state family a summary node works on, which selects its entries.
@@ -326,7 +249,7 @@ pub(crate) fn aggregate_lookup(
         memory_bytes_per_state: None,
     };
     for measure in measures {
-        let name = measure_name(measure);
+        let name = measure.kind_name();
         let find = |for_phase: Option<ExecutionTiming>| {
             table.operators.iter().find(|e| {
                 e.operator == OperatorKind::Aggregate
@@ -339,14 +262,6 @@ pub(crate) fn aggregate_lookup(
         total.ns_per_invocation += entry.ns_per_invocation;
     }
     (!measures.is_empty()).then_some(total)
-}
-
-/// An aggregate measure's name as an entry states it: its JSON `kind`.
-fn measure_name(measure: &AggIntent) -> String {
-    serde_json::to_value(measure)
-        .ok()
-        .and_then(|value| value.get("kind")?.as_str().map(str::to_owned))
-        .unwrap_or_else(|| format!("{measure:?}"))
 }
 
 fn price_of(entry: &OperatorCost) -> UnitPrice {

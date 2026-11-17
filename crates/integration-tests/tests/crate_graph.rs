@@ -191,6 +191,50 @@ fn workspace_crate_graph_follows_the_target_graph() {
     assert!(violations.is_empty(), "{}", violations.join("\n"));
 }
 
+/// Planning reads its inputs only from its arguments: no planning stage or
+/// the facade reads the process environment, so what a deployment
+/// excludes travels in `DeploymentCapabilities` and cannot come back as an
+/// environment-variable hook patched into a stage (such as a variable
+/// naming candidates Stage 3 must not select). Every `.rs` file under the
+/// stage crates', the shared types' and the facade's `src`.
+#[test]
+fn planning_crates_read_no_environment_variables() {
+    let workspace = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let mut pending: Vec<std::path::PathBuf> = [
+        "types",
+        "stage0-memo",
+        "stage1-pass1-per-computation-candidates",
+        "stage1-pass2-reuse-candidates",
+        "stage2-physical-optimization",
+        "stage3-plan-selection",
+        "planner",
+    ]
+    .iter()
+    .map(|name| {
+        std::path::Path::new(workspace)
+            .join("crates")
+            .join(name)
+            .join("src")
+    })
+    .collect();
+    let mut readers = Vec::new();
+    while let Some(path) = pending.pop() {
+        for entry in std::fs::read_dir(&path).expect("reads the source directory") {
+            let path = entry.expect("reads an entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let text = std::fs::read_to_string(&path).expect("reads a source file");
+                // `env::var` also finds `env::var_os`.
+                if text.contains("env::var") {
+                    readers.push(format!("{}: env::var", path.display()));
+                }
+            }
+        }
+    }
+    assert!(readers.is_empty(), "{}", readers.join("\n"));
+}
+
 /// A package of synthetic `cargo metadata` JSON with `[dependencies]` on
 /// `deps` and `[dev-dependencies]` on `dev_deps`.
 fn package(name: &str, deps: &[&str], dev_deps: &[&str]) -> Value {

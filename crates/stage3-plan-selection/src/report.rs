@@ -7,12 +7,15 @@ use std::collections::{BTreeSet, HashMap};
 use asap_cost::node::analytical::AnalyticalCostError;
 use asap_cost::{summary_type_name, CostModel};
 use asap_types::accuracy::AccuracyMetric;
+use asap_types::deployment_capabilities::ExclusionSource;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
 };
-use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidate, PrunedCandidate};
+use asap_types::stages::{
+    PhysicalASAPMemoCandidates, PhysicalCandidate, PruneReason, PrunedCandidate,
+};
 use thiserror::Error;
 
 use crate::cost::ExecutionCosts;
@@ -90,6 +93,19 @@ pub enum RejectionCause {
     /// catalog's consumer constraints together: the selection MILP is
     /// infeasible. The reason names a query when it has no plan even alone.
     Infeasible,
+    /// No plan is left without the candidates the deployment excludes
+    /// (`DeploymentCapabilities::exclusions`, which Stage 2 pruned as
+    /// `ExcludedByDeployment`) beyond the default deployment's own. The
+    /// reason names the query whose every candidate was excluded, else says
+    /// the selection MILP is infeasible; then each such exclusion source
+    /// that pruned a candidate, by its JSON
+    /// name (`excluded_candidates[i]` for the caller's own), with how many
+    /// it pruned, e.g. `counter_not_extrapolated (7 candidates)`; and that
+    /// the workload may be infeasible without these exclusions too (telling
+    /// would take a second solve); then, as for `Infeasible`, why executions
+    /// could not be costed. Not a failed check: the excluded
+    /// candidates were valid.
+    ExcludedByDeployment,
 }
 
 impl RejectionCause {
@@ -224,6 +240,23 @@ pub enum ErrorSelectingPlan {
 /// The selection MILP is infeasible, with the reasons executions could not
 /// be costed.
 pub(crate) fn infeasible(costs: &ExecutionCosts) -> ErrorSelectingPlan {
+    let reason = format!(
+        "no plan gives every query output a candidate whose every input has an admissible \
+         producer that delivers on its context (the selection MILP is infeasible){}",
+        costing_failures(costs)
+    );
+    ErrorSelectingPlan::NoValidCandidate(vec![Rejection {
+        id: "workload".into(),
+        cause: RejectionCause::Infeasible,
+        reason,
+    }])
+}
+
+/// Why executions could not be costed, each distinct reason once, as a
+/// suffix of a rejection's reason: "; executions left out because they
+/// could not be costed: no cardinality for m"; empty when every execution
+/// was costed.
+fn costing_failures(costs: &ExecutionCosts) -> String {
     let mut reasons: Vec<&str> = Vec::new();
     for reason in costs
         .per_execution
@@ -234,21 +267,82 @@ pub(crate) fn infeasible(costs: &ExecutionCosts) -> ErrorSelectingPlan {
             reasons.push(reason);
         }
     }
-    let mut reason = "no plan gives every query output a candidate whose every input has an \
-                      admissible producer that delivers on its context (the selection MILP is \
-                      infeasible)"
-        .to_string();
-    if !reasons.is_empty() {
-        reason += &format!(
-            "; executions left out because they could not be costed: {}",
-            reasons.join("; ")
-        );
+    if reasons.is_empty() {
+        return String::new();
     }
-    ErrorSelectingPlan::NoValidCandidate(vec![Rejection {
+    format!(
+        "; executions left out because they could not be costed: {}",
+        reasons.join("; ")
+    )
+}
+
+/// When Stage 2 pruned some candidate as excluded by the deployment
+/// (`PruneReason::ExcludedByDeployment`) for a source the default
+/// deployment does not have, why no plan is left: one
+/// [`RejectionCause::ExcludedByDeployment`] whose reason names `query`, the
+/// first query with no candidate left to answer it (else the infeasible
+/// selection MILP), then each exclusion source with how many candidates it
+/// pruned, in the order Stage 2 first recorded it. E.g. "query 0 has no
+/// candidate left to answer it; excluded by the deployment:
+/// counter_not_extrapolated (7 candidates); the workload may be infeasible
+/// without these exclusions too", followed by why executions could not be
+/// costed, as [`infeasible`] reports it ([`costing_failures`]). `None` when no candidate was excluded
+/// beyond the default deployment's exclusions: the selection is infeasible
+/// on its own ([`infeasible`]). Telling
+/// whether the workload has a plan without the exclusions would take a
+/// second solve, so the reason says it may not.
+pub(crate) fn excluded_by_deployment(
+    stage2_pruned_candidates: &[PrunedCandidate<PhysicalCandidate>],
+    query: Option<usize>,
+    costs: &ExecutionCosts,
+) -> Option<ErrorSelectingPlan> {
+    let mut pruned_per_source: Vec<(ExclusionSource, usize)> = Vec::new();
+    for pruned in stage2_pruned_candidates {
+        let PruneReason::ExcludedByDeployment(source) = pruned.reason else {
+            continue;
+        };
+        // The default deployment's own exclusions (query-time results not
+        // kept across evaluations) are planning as it always was, so they
+        // neither cause this rejection nor appear in it.
+        if source.in_default_deployment() {
+            continue;
+        }
+        match pruned_per_source
+            .iter_mut()
+            .find(|(seen, _)| *seen == source)
+        {
+            Some((_, count)) => *count += 1,
+            None => pruned_per_source.push((source, 1)),
+        }
+    }
+    if pruned_per_source.is_empty() {
+        return None;
+    }
+    let what = match query {
+        Some(query) => format!("query {query} has no candidate left to answer it"),
+        None => "no plan is left (the selection MILP is infeasible)".to_string(),
+    };
+    let sources: Vec<String> = pruned_per_source
+        .iter()
+        .map(|(source, count)| {
+            let noun = if *count == 1 {
+                "candidate"
+            } else {
+                "candidates"
+            };
+            format!("{source} ({count} {noun})")
+        })
+        .collect();
+    Some(ErrorSelectingPlan::NoValidCandidate(vec![Rejection {
         id: "workload".into(),
-        cause: RejectionCause::Infeasible,
-        reason,
-    }])
+        cause: RejectionCause::ExcludedByDeployment,
+        reason: format!(
+            "{what}; excluded by the deployment: {}; the workload may be infeasible without \
+             these exclusions too{}",
+            sources.join(", "),
+            costing_failures(costs)
+        ),
+    }]))
 }
 
 /// Per query, the sketches its output reads in `plan` (each sketch build

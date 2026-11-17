@@ -262,14 +262,9 @@ impl<I: OperatorInput> ASAPOp<I> {
                 summary_type: family,
                 ..
             } => Some(family),
-            ASAPOp::SummaryMerge { children, .. } => children.first().and_then(|child| {
-                child
-                    .schema()
-                    .fields
-                    .iter()
-                    .find(|field| !field.is_plain())
-                    .map(|field| &field.dtype)
-            }),
+            ASAPOp::SummaryMerge { children, .. } => children
+                .first()
+                .and_then(|child| child.schema().summary_state_type()),
             _ => None,
         }
     }

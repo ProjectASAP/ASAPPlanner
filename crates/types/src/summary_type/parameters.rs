@@ -268,3 +268,148 @@ impl HydraParams {
         }
     }
 }
+
+/// An inclusive range of one sketch parameter; an unset bound is open.
+/// JSON: `{"kll_k": {"at_most": 1403}}`,
+/// `{"ddsketch_alpha": {"at_least": 0.01}}`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SketchParameterRange {
+    KllK {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_least: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_most: Option<u32>,
+    },
+    KmvK {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_least: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_most: Option<u32>,
+    },
+    #[serde(rename = "ddsketch_alpha")]
+    DDSketchAlpha {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_least: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_most: Option<f64>,
+    },
+}
+
+impl SketchParameterRange {
+    /// The algorithm whose parameter it ranges over (`Kll`, `Kmv`,
+    /// `DDSketch`).
+    pub fn algorithm(&self) -> super::SketchAlgorithm {
+        use super::SketchAlgorithm;
+        match self {
+            Self::KllK { .. } => SketchAlgorithm::Kll,
+            Self::KmvK { .. } => SketchAlgorithm::Kmv,
+            Self::DDSketchAlpha { .. } => SketchAlgorithm::DDSketch,
+        }
+    }
+
+    /// Whether `parameters` are that algorithm's and the parameter is in
+    /// range, both ends included: `KllK { at_most: Some(547) }` contains
+    /// `Kll { k: 547 }`, not `Kll { k: 1404 }` nor any `Kmv`.
+    pub fn contains(&self, parameters: &SketchParams) -> bool {
+        fn within<T: PartialOrd>(value: T, at_least: Option<T>, at_most: Option<T>) -> bool {
+            at_least.is_none_or(|low| value >= low) && at_most.is_none_or(|high| value <= high)
+        }
+        match (*self, parameters) {
+            (Self::KllK { at_least, at_most }, SketchParams::Kll { k })
+            | (Self::KmvK { at_least, at_most }, SketchParams::Kmv { k }) => {
+                within(*k, at_least, at_most)
+            }
+            (Self::DDSketchAlpha { at_least, at_most }, SketchParams::DDSketch { alpha }) => {
+                within(*alpha, at_least, at_most)
+            }
+            _ => false,
+        }
+    }
+
+    /// Why the range is bad input, or `None` when it is valid: `at_least`
+    /// is above `at_most`, so it contains no value (`KllK { at_least: 1404,
+    /// at_most: 547 }`), or a DDSketch α bound is not a number in (0, 1).
+    pub fn invalid_reason(&self) -> Option<String> {
+        let (at_least, at_most) = match *self {
+            Self::KllK { at_least, at_most } | Self::KmvK { at_least, at_most } => {
+                (at_least.map(f64::from), at_most.map(f64::from))
+            }
+            Self::DDSketchAlpha { at_least, at_most } => {
+                if let Some(alpha) = [at_least, at_most]
+                    .into_iter()
+                    .flatten()
+                    .find(|alpha| !(*alpha > 0.0 && *alpha < 1.0))
+                {
+                    return Some(format!("a DDSketch alpha of {alpha} is not in (0, 1)"));
+                }
+                (at_least, at_most)
+            }
+        };
+        match (at_least, at_most) {
+            (Some(low), Some(high)) if low > high => Some(format!(
+                "the range is empty: at_least {low} is above at_most {high}"
+            )),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod sketch_parameter_range_tests {
+    use super::*;
+    use crate::summary_type::SketchAlgorithm;
+
+    /// Both ends of a `k` range are included, an unset end is open, and a
+    /// range over KLL's `k` never contains another algorithm's parameters.
+    #[test]
+    fn kll_k_range_bounds_are_inclusive() {
+        let k547 = SketchParams::Kll { k: 547 };
+        let k1404 = SketchParams::Kll { k: 1404 };
+        let at_most_547 = SketchParameterRange::KllK {
+            at_least: None,
+            at_most: Some(547),
+        };
+        assert!(at_most_547.contains(&k547));
+        assert!(!at_most_547.contains(&k1404));
+        let at_least_1404 = SketchParameterRange::KllK {
+            at_least: Some(1404),
+            at_most: None,
+        };
+        assert!(at_least_1404.contains(&k1404));
+        assert!(!at_least_1404.contains(&k547));
+        let at_most_2863 = SketchParameterRange::KllK {
+            at_least: None,
+            at_most: Some(2863),
+        };
+        assert_eq!(at_most_2863.algorithm(), SketchAlgorithm::Kll);
+        assert!(!at_most_2863.contains(&SketchParams::Kmv { k: 547 }));
+        assert!(!at_most_2863.contains(&SketchParams::DDSketch { alpha: 0.01 }));
+    }
+
+    /// A KMV `k` range and a DDSketch α range each select their own
+    /// algorithm's listed sizes (`parameter_list`), both ends included.
+    #[test]
+    fn kmv_k_and_ddsketch_alpha_ranges_select_their_own_parameter() {
+        let kmv = SketchParameterRange::KmvK {
+            at_least: Some(4323),
+            at_most: None,
+        };
+        assert_eq!(kmv.algorithm(), SketchAlgorithm::Kmv);
+        let kmv_contained: Vec<bool> = [1_118, 4_323, 26_656, 106_263]
+            .into_iter()
+            .map(|k| kmv.contains(&SketchParams::Kmv { k }))
+            .collect();
+        assert_eq!(kmv_contained, [false, true, true, true]);
+        let ddsketch = SketchParameterRange::DDSketchAlpha {
+            at_least: Some(0.01),
+            at_most: Some(0.05),
+        };
+        assert_eq!(ddsketch.algorithm(), SketchAlgorithm::DDSketch);
+        let ddsketch_contained: Vec<bool> = [0.1, 0.05, 0.01, 0.005]
+            .into_iter()
+            .map(|alpha| ddsketch.contains(&SketchParams::DDSketch { alpha }))
+            .collect();
+        assert_eq!(ddsketch_contained, [false, true, true, false]);
+    }
+}

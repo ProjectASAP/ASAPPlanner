@@ -46,7 +46,7 @@ use asap_types::stages::{
     AggregateCoverage, CandidateForMemoGroup, CandidateForMemoGroupId, ColumnLineage,
     EvaluationGrid, LogicalASAPMemoCandidates, LogicalEdge, Memo, MemoGroup, MemoGroupId,
     PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PhysicalEdge,
-    PhysicalProperties, PrunedCandidate, RequiredAccuracy, RootPruneReason,
+    PhysicalProperties, PruneReason, PrunedCandidate, RequiredAccuracy, RootPruneReason,
 };
 use asap_types::summary_type::SketchParams;
 
@@ -1281,13 +1281,14 @@ fn write_physical_pruned(
     if !verbose {
         let reasons: Vec<String> = pruned
             .iter()
-            .map(|pruned| {
-                let reason = format!("{:?}", pruned.reason);
-                reason
+            .map(|pruned| match &pruned.reason {
+                // Counted per capability it comes from.
+                PruneReason::ExcludedByDeployment(_) => prune_reason_text(&pruned.reason),
+                reason => format!("{reason:?}")
                     .split(['(', ' ', '{'])
                     .next()
                     .unwrap_or_default()
-                    .to_owned()
+                    .to_owned(),
             })
             .collect();
         if !reasons.is_empty() {
@@ -1305,7 +1306,7 @@ fn write_physical_pruned(
             vec![
                 candidate_id_text(pruned.candidate.logical_candidate_id),
                 physical_properties_text(&pruned.candidate.physical_properties),
-                format!("{:?}", pruned.reason),
+                prune_reason_text(&pruned.reason),
             ]
         })
         .collect();
@@ -1391,6 +1392,18 @@ fn write_physical_by_logical_candidate(
                 let _ = writeln!(out, "{line}");
             }
         }
+    }
+}
+
+/// A Stage 2 or Stage 3 prune reason: a deployment exclusion names the
+/// capability it comes from as the capabilities' JSON does, e.g.
+/// `ExcludedByDeployment(raw_data_not_retained)` or
+/// `ExcludedByDeployment(excluded_candidates[0])`; any other reason is its
+/// debug form, e.g. `DominatedBy(PhysicalCandidateId(3))`.
+fn prune_reason_text(reason: &PruneReason) -> String {
+    match reason {
+        PruneReason::ExcludedByDeployment(source) => format!("ExcludedByDeployment({source})"),
+        reason => format!("{reason:?}"),
     }
 }
 

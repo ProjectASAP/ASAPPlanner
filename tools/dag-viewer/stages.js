@@ -174,10 +174,19 @@ const isPlainObject = (value) => !!value && typeof value === 'object' && !Array.
 // A pruning reason of Stage 2 or Stage 3 (a serialized `PruneReason`): a
 // snake_case string, e.g. "usage_not_costable" as "usage not costable", or
 // `{"dominated_by": id}` as "dominated by C<id>", the physical candidate
-// that dominates it.
+// that dominates it, or `{"excluded_by_deployment": source}` as "excluded by
+// the deployment: raw data not retained" (the caller's own exclusion `i` as
+// "excluded_candidates[i]").
 function prunedReasonText(reason) {
   if (typeof reason === 'string') return reason.replace(/_/g, ' ');
   if (isPlainObject(reason) && 'dominated_by' in reason) return `dominated by C${reason.dominated_by}`;
+  if (isPlainObject(reason) && 'excluded_by_deployment' in reason) {
+    const source = reason.excluded_by_deployment;
+    const named = typeof source === 'string' ? source.replace(/_/g, ' ')
+      : isPlainObject(source) && isPlainObject(source.excluded_candidate) ? `excluded_candidates[${source.excluded_candidate.index}]`
+        : compactWire(source);
+    return `excluded by the deployment: ${named}`;
+  }
   return compactWire(reason);
 }
 
@@ -732,9 +741,30 @@ function settingsRows(doc) {
     ['summaries', Array.isArray(c.supported_summaries)
       ? c.supported_summaries.map((x) => `${x.summary_type} (${(x.readouts || []).join(', ')})`).join(', ') : 'every summary the planner builds'],
   ] : [['deployment', 'not recorded']];
+  const limits = capabilityLimitsText(c);
+  if (limits) rows.push(['left out', limits]);
   rows.push(['accuracy guarantees', { ignored: 'ignored: every output accepted, candidates compared on cost alone', enforced: 'enforced' }[doc.accuracy_guarantees] || 'not recorded']);
   rows.push(['cost model', cost && cost.source ? cost.source : 'not recorded (no plan was costed)']);
   return rows;
+}
+
+// The capabilities a deployment leaves out and the caller's exclusions, as
+// one line, e.g. "counter extrapolation not supported · not mergeable across
+// windows: exact Rate · excluded candidates: 2"; empty for the defaults.
+function capabilityLimitsText(capabilities) {
+  if (!capabilities || typeof capabilities !== 'object') return '';
+  const parts = [];
+  const counters = capabilities.counter_semantics || {};
+  if (counters.reset_handling === false) parts.push('counter resets not handled');
+  if (counters.extrapolation === false) parts.push('counter extrapolation not supported');
+  const unmergeable = capabilities.state_not_mergeable_across_windows || [];
+  if (unmergeable.length) {
+    const family = (f) => Object.entries(f || {}).map(([kind, name]) => `${kind} ${name}`).join('');
+    parts.push(`not mergeable across windows: ${unmergeable.map(family).join(', ')}`);
+  }
+  const excluded = capabilities.excluded_candidates || [];
+  if (excluded.length) parts.push(`excluded candidates: ${excluded.length}`);
+  return parts.join(' · ');
 }
 // The queries of a `PlanningWorkload` JSON, batch then repeating (the
 // planner's entry order): each query's text, how often it runs and its

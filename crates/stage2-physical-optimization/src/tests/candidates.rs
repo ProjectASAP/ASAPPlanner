@@ -2,15 +2,18 @@
 //! offered, and the prune rules that remove some of them.
 use std::collections::BTreeMap;
 
-use asap_types::deployment_capabilities::DeploymentCapabilities;
+use asap_types::deployment_capabilities::{
+    CandidateExclusion, DeploymentCapabilities, ExclusionSource, SupportedSummary,
+};
 use asap_types::ir::operator::arguments::{AtModifier, Reduction, Source};
+use asap_types::ir::operator::OperatorKind;
 use asap_types::ir::properties::ExecutionTiming::QueryTime;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::stages::{Memo, PhysicalASAPMemoCandidates, PruneReason, ValueSign};
 use asap_types::summary_type::{
-    EntityIdentity, ExactKind, SketchAlgorithm, SummaryInputExpr, SummaryUpdate,
+    EntityIdentity, ExactKind, SketchAlgorithm, StatisticKind, SummaryInputExpr, SummaryUpdate,
 };
 use asap_types::test_support::memo_builders::{group, query, scan_group};
 use asap_types::test_support::memo_fixtures::{range, shift, state};
@@ -144,7 +147,7 @@ fn without_raw_data_only_ingestion_time_builds_read_the_scan() {
         pruned(&physical, example.scan),
         pruned_with(
             &[QT_NONE, QT_ONE, QT_ACROSS, IT_ACROSS],
-            PruneReason::RawDataNotRetained
+            PruneReason::ExcludedByDeployment(ExclusionSource::RawDataNotRetained)
         )
     );
     assert_eq!(
@@ -170,6 +173,129 @@ fn without_raw_data_only_ingestion_time_builds_read_the_scan() {
     );
 }
 
+/// A summary type the deployment does not build is pruned at every
+/// alternative of its builds, so its readout has no producer left; a
+/// listed summary type whose readout the deployment does not answer keeps
+/// its builds, and only the readout is pruned. (Pass 1 offers every
+/// summary the planner can build; this is where the deployment's
+/// `supported_summaries` apply.)
+#[test]
+fn unsupported_summaries_and_readouts_are_pruned() {
+    let example = example();
+    let none_supported = DeploymentCapabilities {
+        supported_summaries: Some(vec![]),
+        ..retaining_everything()
+    };
+    let physical = generate(&example.logical, &ingesting(None), &none_supported);
+    let not_supported = PruneReason::ExcludedByDeployment(ExclusionSource::SummaryNotSupported);
+    assert_eq!(
+        pruned(&physical, example.build),
+        pruned_with(&[QT_NONE, QT_ONE, QT_ACROSS], not_supported)
+    );
+    assert_eq!(
+        pruned(&physical, example.chain),
+        pruned_with(&[QT_NONE, QT_ONE, QT_ACROSS, IT_ACROSS], not_supported)
+    );
+    assert_eq!(
+        pruned(&physical, example.readout),
+        pruned_with(
+            &[QT_NONE, QT_ONE, QT_ACROSS],
+            PruneReason::InputHasNoBuildableProducer
+        )
+    );
+
+    let kll_total_only = DeploymentCapabilities {
+        supported_summaries: Some(vec![SupportedSummary {
+            summary_type: SketchAlgorithm::Kll,
+            readouts: vec![StatisticKind::Total],
+        }]),
+        ..retaining_everything()
+    };
+    let physical = generate(&example.logical, &ingesting(None), &kll_total_only);
+    assert_eq!(
+        pruned(&physical, example.readout),
+        pruned_with(
+            &[QT_NONE, QT_ONE, QT_ACROSS],
+            PruneReason::ExcludedByDeployment(ExclusionSource::ReadoutNotSupported)
+        )
+    );
+    assert!(pruned(&physical, example.build)
+        .iter()
+        .all(|(_, reason)| *reason == PruneReason::ReachesNoQueryOutput));
+}
+
+/// A candidate the caller excludes is pruned as a capability the
+/// deployment lacks would prune it, naming the caller's exclusion by its
+/// index; what reads only it loses its producer. Excluding every chain
+/// leaves the chain's windows unbuildable, while the build over the last
+/// minute is untouched.
+#[test]
+fn a_caller_exclusion_prunes_like_a_missing_capability() {
+    let example = example();
+    let capabilities = DeploymentCapabilities {
+        excluded_candidates: vec![CandidateExclusion {
+            operator: Some(OperatorKind::SummaryTumblingWindowChain),
+            ..Default::default()
+        }],
+        ..retaining_everything()
+    };
+    let physical = generate(&example.logical, &ingesting(None), &capabilities);
+    assert_eq!(
+        pruned(&physical, example.chain),
+        pruned_with(
+            &[QT_NONE, QT_ONE, QT_ACROSS, IT_ACROSS],
+            PruneReason::ExcludedByDeployment(ExclusionSource::ExcludedCandidate { index: 0 })
+        )
+    );
+    assert_eq!(offered(&physical, example.chain), vec![]);
+    assert_eq!(
+        pruned(&physical, example.windows),
+        pruned_with(
+            &[QT_NONE, QT_ONE, QT_ACROSS],
+            PruneReason::InputHasNoBuildableProducer
+        )
+    );
+    assert_eq!(
+        offered(&physical, example.build),
+        physical_properties_list(&[QT_NONE, QT_ONE, QT_ACROSS])
+    );
+}
+
+/// When a capability's exclusion and the caller's both match, the
+/// capability is named: it comes first in `DeploymentCapabilities::exclusions`.
+#[test]
+fn a_capability_is_named_before_a_caller_exclusion_matching_the_same_candidate() {
+    let example = example();
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        excluded_candidates: vec![CandidateExclusion {
+            operator: Some(OperatorKind::Scan),
+            ..Default::default()
+        }],
+        ..retaining_everything()
+    };
+    let physical = generate(&example.logical, &ingesting(None), &capabilities);
+    let scan = pruned(&physical, example.scan);
+    assert_eq!(
+        scan,
+        [
+            pruned_with(
+                &[QT_NONE, QT_ONE, QT_ACROSS],
+                PruneReason::ExcludedByDeployment(ExclusionSource::RawDataNotRetained)
+            ),
+            pruned_with(
+                &[IT_NONE],
+                PruneReason::ExcludedByDeployment(ExclusionSource::ExcludedCandidate { index: 0 })
+            ),
+            pruned_with(
+                &[IT_ACROSS],
+                PruneReason::ExcludedByDeployment(ExclusionSource::RawDataNotRetained)
+            ),
+        ]
+        .concat()
+    );
+}
+
 /// The default deployment retains no query-time result across
 /// evaluations: every (QueryTime, AcrossEvaluations) is pruned, and
 /// `OneEvaluation` stays.
@@ -184,7 +310,10 @@ fn query_time_results_across_evaluations_need_the_deployment_to_retain_them() {
     for candidate in [example.build, example.merge, example.readout] {
         assert_eq!(
             pruned(&physical, candidate),
-            pruned_with(&[QT_ACROSS], PruneReason::QueryTimeResultsNotRetained),
+            pruned_with(
+                &[QT_ACROSS],
+                PruneReason::ExcludedByDeployment(ExclusionSource::QueryTimeResultsNotRetained)
+            ),
             "{candidate:?}"
         );
         assert_eq!(

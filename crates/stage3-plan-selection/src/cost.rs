@@ -79,6 +79,7 @@ use crate::selectable::{Execution, SelectableExecutions};
 /// The objective's coefficients
 /// (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
 /// section 5, "Cost and retention"), per second.
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct ExecutionCosts {
     /// $\rho_\kappa c_{\kappa,v}$ of each execution, $W^{\mathrm{mat}}_v$
     /// of an execution in `Materialized(v)`, by position in

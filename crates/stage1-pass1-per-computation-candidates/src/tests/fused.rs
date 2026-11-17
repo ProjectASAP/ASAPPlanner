@@ -36,7 +36,7 @@ fn whole_expression_topk_heaps_read_the_raw_samples() {
         None,
     );
     query(&mut memo, ranked, None);
-    let memo = pass1_memo(memo, None).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     for algorithm in [
         SketchAlgorithm::CmsWithHeap,
         SketchAlgorithm::CountSketchWithHeap,
@@ -87,7 +87,7 @@ fn whole_expression_topk_heap_candidates() {
         None,
     );
     query(&mut memo, ranked, None);
-    let memo = pass1_memo(memo, None).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     // The top-k group's own expression, then one ranked `Project` per heap.
     let ranked_candidates = candidates_of(&memo, ranked);
     let kinds: Vec<&str> = ranked_candidates
@@ -149,7 +149,7 @@ fn count_ranked_topk_counts_with_unit_weight() {
         None,
     );
     query(&mut memo, ranked, None);
-    let memo = pass1_memo(memo, None).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     let (_, update) = state_group(&memo, SketchAlgorithm::CmsWithHeap);
     assert_eq!(update.weight, SummaryInputExpr::Constant(1.0));
 }
@@ -176,7 +176,7 @@ fn ranked_item_is_the_keys_outside_the_partition() {
         None,
     );
     query(&mut memo, ranked, None);
-    let memo = pass1_memo(memo, None).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     let (_, update) = state_group(&memo, SketchAlgorithm::CountSketchWithHeap);
     assert_eq!(
         update.item,

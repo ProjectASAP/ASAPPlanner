@@ -227,6 +227,7 @@ impl FuzzWorkload {
             ),
             raw_data_retained: self.raw_data_retained,
             query_time_results_retained: self.query_time_results_retained,
+            ..DeploymentCapabilities::default()
         }
     }
 

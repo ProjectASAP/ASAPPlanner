@@ -32,6 +32,10 @@ The memo groups (the distinct logical sub-expressions of the workload), each que
 
 Maintained state, exact or approximate, that can answer some query intent more efficiently than raw data. A sketch is one kind of approximate summary.
 
+## Summary family
+
+A summary state's kind without its parameters: a sketch algorithm (KLL) or an exact accumulator kind (`Sum`). Code: `SummaryFamily` (`asap_types::summary_type`), which deployment exclusions match on. Not `StateFamily` (`asap_cost`), which keeps the sketch's parameters (KLL with k = 200) to pick a node's measured cost entry.
+
 ## Physical plan
 
 A concrete execution and deployment choice: runtime topology of data lifecycle stages, placement of computation, transmission, storage. Physical plans are owned by downstream systems.

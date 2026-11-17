@@ -965,7 +965,7 @@ class AppTests(unittest.TestCase):
         self.assertIn("#0 SummaryAgg Kll · θ Kll(k=26) · pruned by Pass 2", details)
         self.assertIn("pruned by Pass 24", details)
         self.assertIn("#0: the producer", details)
-        self.assertIn("#4 (query_time, AcrossEvaluations(Memory)): query time results not retained", details)
+        self.assertIn("#4 (query_time, AcrossEvaluations(Memory)): excluded by the deployment: query time results not retained", details)
         self.assertIn("#8 (query_time, None): dominated by C5", details)
 
     def test_highlighting_a_query_dims_the_memo_groups_it_does_not_reach(self):
