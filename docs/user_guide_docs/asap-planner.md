@@ -36,7 +36,7 @@ minutes in a debug build.
 asap_planner (--workload <file>)... --run-until stage0|stage1_pass1|stage1_pass2|stage2|stage3
   [--format text|json] [--verbose] [--out <file>] [--sql-catalog-table <json>]...
   [--cost-inputs <file>] [--deployment-capabilities <file>]
-  [--ignore-accuracy-guarantees]
+  [--ignore-accuracy-guarantees] [--plan-file <file>]
 ```
 
 | Option | Meaning |
@@ -50,6 +50,7 @@ asap_planner (--workload <file>)... --run-until stage0|stage1_pass1|stage1_pass2
 | `--cost-inputs <file>` | The cost model and its costs (`CostInputs` JSON). The files in `tools/dag-viewer/cost-inputs/` are ready to use. Without it, the built-in usage-over-time model is used. Stage 3 costs only usage-over-time models (`aws-fargate-us-east-1.json` is one); a provisioned- or cluster-capacity model ends Stage 3 with an `UnsupportedCostModel` error. |
 | `--deployment-capabilities <file>` | What the deployment can do, e.g. `{"raw_data_retained": true, "query_time_results_retained": false}`. Set it to match your deployment; see [Deployment capabilities](#deployment-capabilities). |
 | `--ignore-accuracy-guarantees` | Accept candidates without an accuracy guarantee. By default each query's accuracy requirement is enforced. |
+| `--plan-file <file>` | Also write the plan Stage 3 selects to this file, as `InstallablePlan` JSON; needs `--run-until stage3`. See [Write a plan file](#write-a-plan-file). |
 
 Any other option, or a missing required one, is a usage error (exit
 status 2). An input the planner cannot read exits with status 1. So does a
@@ -57,10 +58,33 @@ run in which a stage failed (for example, Pass 1 rejected a query, or no
 plan meets the requirements): the output is still written, with the error
 under the stage that failed.
 
+With a selected plan, `asap_planner` also compiles it on the Planner's
+executor and reports the result; it never changes the exit status. When the
+executor cannot run the plan, standard error gets one line
+
+```text
+note: the Planner's executor cannot run this plan: <reason>
+```
+
+and the JSON document's `stage3_plan_selection` has
+`"planner_executor_can_run": false` with the reason in
+`planner_executor_error` (otherwise `"planner_executor_can_run": true`).
+
 ## Deployment capabilities
 
 The `--deployment-capabilities` file is a `DeploymentCapabilities` JSON
-object; an omitted field keeps its default. Besides
+object; an omitted field keeps its default.
+
+`supported_summaries` lists the sketch summary types the deployment builds,
+each with the statistics it reads from them, e.g.
+`[{"summary_type": "Kll", "readouts": ["Quantile"]}]`. Without the file, or
+when the file leaves it out, the planner uses the summary types the
+Planner's executor builds. To plan for a runtime that builds every summary
+type, pass the ready-to-use
+[`every-summary-family.json`](../../tools/dag-viewer/deployment-capabilities/every-summary-family.json),
+which lists each one with every statistic it answers.
+
+Besides
 `supported_summaries`, `raw_data_retained` and
 `query_time_results_retained`, three fields say what the executor cannot
 do or what the caller rules out:
@@ -140,6 +164,29 @@ cargo run --release -p asap-devtools --bin asap_planner -- \
 
 See [Run and inspect a query](run-a-query.md) for workload, source-fact and
 SQL examples. To try a single query, write a one-query workload file.
+
+## Write a plan file
+
+`--plan-file <file>` writes the selected plan as an `InstallablePlan` JSON
+file (`wire_version`, the selected DAG and the query texts), the input a
+runtime installs; a runtime reads it with `InstallablePlan::from_json`. The
+plan file is written whether or not the Planner's executor can run the plan:
+another runtime may run it.
+
+```sh
+cargo run --release -p asap-devtools --bin asap_planner -- \
+  --workload tools/dag-viewer/workloads/planner-layering/example1.json \
+  --run-until stage3 --plan-file plan.json
+```
+
+| Run | Exit status | `plan.json` |
+| --- | --- | --- |
+| Stage 3 selects a plan the Planner's executor runs | 0 | written |
+| Stage 3 selects a plan the Planner's executor cannot run | 0, with the `note:` line on standard error | written |
+| Stage 3 selects no plan, or the run fails | 1, with `asap_planner: <why> (no plan file written to plan.json)` when Stage 3 selected none | not written; a file already there is left as it is |
+
+`--plan-file` with a `--run-until` before `stage3` is a usage error (exit
+status 2).
 
 ## Inspect the result
 

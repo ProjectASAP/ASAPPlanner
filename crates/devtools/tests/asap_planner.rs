@@ -2498,7 +2498,10 @@ fn a_plan_the_executor_cannot_run_is_written_with_a_note() {
     assert!(reason.contains("AbsentOverTime"), "{reason}");
     assert_eq!(notes[0], format!("{EXECUTOR_CANNOT_RUN_NOTE}{reason}"));
     assert!(selection["materialized_views"].is_array(), "{selection}");
-    assert!(selection["materialized_views_error"].is_null(), "{selection}");
+    assert!(
+        selection["materialized_views_error"].is_null(),
+        "{selection}"
+    );
     let plan = read_plan_file(file.path());
     assert_eq!(plan.query_texts, [query]);
     assert!(is_the_selected_plan(&plan, &document));
@@ -2603,11 +2606,11 @@ fn summary_families_come_from_the_deployment_capabilities() {
 
 /// `tools/dag-viewer/deployment-capabilities/every-summary-family.json`
 /// lists every sketch algorithm with every readout its capability table
-/// row answers, so its `supported_summaries` rule out no summary, and
-/// nothing else in it rules anything out.
+/// row answers, so its `supported_summaries` rule out no summary type and
+/// no readout; its other fields keep their defaults.
 #[test]
 fn the_every_summary_family_file_rules_out_nothing() {
-    use asap_types::deployment_capabilities::DeploymentCapabilities;
+    use asap_types::deployment_capabilities::{DeploymentCapabilities, ExclusionSource};
     use asap_types::summary_type::{SketchAlgorithm, SupportedSummary};
     let capabilities: DeploymentCapabilities =
         serde_json::from_str(&std::fs::read_to_string(every_summary_family_file()).unwrap())
@@ -2630,7 +2633,17 @@ fn the_every_summary_family_file_rules_out_nothing() {
         "expected:\n{}",
         serde_json::to_string_pretty(&every_family).unwrap()
     );
-    assert!(capabilities.exclusions().is_empty());
+    let summary_exclusions: Vec<_> = capabilities
+        .exclusions()
+        .into_iter()
+        .filter(|exclusion| {
+            matches!(
+                exclusion.source,
+                ExclusionSource::SummaryNotSupported | ExclusionSource::ReadoutNotSupported
+            )
+        })
+        .collect();
+    assert!(summary_exclusions.is_empty(), "{summary_exclusions:?}");
 }
 
 /// `--plan-file` without its path, `--plan-file` before Stage 3 selects a

@@ -105,6 +105,7 @@ def inspect(entry, output, budget, wall=None, exit_code=None):
     selected = selection.get("selected")
     row.update(selected=selected, error=selection.get("error"),
                materialized_views_error=selection.get("materialized_views_error"),
+               planner_executor_error=selection.get("planner_executor_error"),
                artifact_sha256=digest(artifact),
                search=selection.get("search", {}).get("candidate_connections", {}))
     accepted = selection.get("accepted", {}).get(selected, [])
@@ -126,7 +127,8 @@ def inspect(entry, output, budget, wall=None, exit_code=None):
     row["passed"] = bool(row["exit_code"] == 0 and selected and row["guarantees_enforced"]
                          and len(accepted) == row["expected_queries"] and row["cost_certificate_valid"]
                          and row["domain_certificate_valid"] and not row["error"]
-                         and not row["materialized_views_error"])
+                         and not row["materialized_views_error"]
+                         and not row["planner_executor_error"])
     return row
 
 

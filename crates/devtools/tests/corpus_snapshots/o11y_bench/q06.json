@@ -1,7 +1,43 @@
 {
   "accuracy_guarantees": "enforced",
-  "materialized_views": [],
-  "materialized_views_error": "the executor cannot compile the plan's query run: invalid DAG: node 7: invalid DAG: value operation has no native implementation",
+  "materialized_views": [
+    {
+      "coverage": {
+        "definition_id": "be9c29c7ba723e7271224b1879a6c7b4",
+        "selection": [
+          {
+            "columns": [
+              {
+                "column": {
+                  "column": "job",
+                  "scan_ordinal": 0,
+                  "source": {
+                    "TimeSeries": {
+                      "metric": "http_request_duration_seconds_bucket"
+                    }
+                  }
+                },
+                "constraint": {
+                  "in": [
+                    {
+                      "Utf8": "user-service"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": []
+      },
+      "node_id": 1,
+      "refresh": "at_ingestion",
+      "retention_ms": 3900000
+    }
+  ],
+  "planner_executor_error": "the executor cannot compile the plan's query run: invalid DAG: node 7: invalid DAG: value operation has no native implementation",
   "query": "max_over_time(histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"user-service\"}[5m])) by (le))[12h:1m])",
   "selected": {
     "accepted": [

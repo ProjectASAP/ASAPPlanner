@@ -80,6 +80,7 @@ def run(entry):
         result['selected'] = selected
         result['error'] = selection.get('error') or (document.get('stage1_logical_asap_optimization') or {}).get('error')
         result['materialized_views_error'] = selection.get('materialized_views_error')
+        result['planner_executor_error'] = selection.get('planner_executor_error')
         report = selection.get('search_report') or {}
         result['search'] = report
         if selected:
@@ -110,6 +111,7 @@ def run(entry):
         and result.get('guarantees_enforced') and result['cost_certificate_valid']
         and result.get('accepted_queries') == result['expected_queries']
         and not result.get('error') and not result.get('materialized_views_error')
+        and not result.get('planner_executor_error')
     )
     print(json.dumps({k: result.get(k) for k in ['workload', 'wall_seconds', 'selected', 'accepted_queries', 'modeled_cost_per_second', 'error']}), flush=True)
     return result
