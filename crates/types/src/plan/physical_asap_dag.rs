@@ -27,7 +27,7 @@ use crate::ir::properties::execution_data_state::{ExecutionDataState, ExecutionT
 use crate::ir::properties::selection::SelectionBox;
 use crate::ir::schema::Schema;
 use crate::stages::PhysicalCandidateId;
-use crate::stages::{Lifetime, PhysicalPropertiesError, StorageMedium};
+use crate::stages::{Lifetime, PhysicalPropertiesError};
 use crate::summary_type::SketchParams;
 
 /// A node's operator, with each child replaced by its node id.
@@ -750,7 +750,7 @@ pub(crate) fn physical_asap_dag_at_query_time_with_node_ids(
     }
     for node in &mut dag.nodes {
         if consumers[node.id] > 1 {
-            node.lifetime = Lifetime::OneEvaluation(StorageMedium::Memory);
+            node.lifetime = Lifetime::OneEvaluation(crate::stages::StorageMedium::Memory);
         }
     }
     Ok((dag, nodes_by_id))
