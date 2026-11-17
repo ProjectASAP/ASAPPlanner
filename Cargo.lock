@@ -50,7 +50,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "aqpbm-core"
 version = "0.1.0"
-source = "git+https://github.com/ProjectASAP/sketch-bench?rev=671d3997b25cd03f79a927506a492485803d728b#671d3997b25cd03f79a927506a492485803d728b"
+source = "git+https://github.com/ProjectASAP/sketch-bench?rev=7c0d121192beaf3b68b1b1ec36aab8aafc90d0ae#7c0d121192beaf3b68b1b1ec36aab8aafc90d0ae"
 dependencies = [
  "anyhow",
  "aqpbm-datagen",
@@ -61,31 +61,18 @@ dependencies = [
  "rand_xoshiro",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "aqpbm-datagen"
 version = "0.1.0"
-source = "git+https://github.com/ProjectASAP/sketch-bench?rev=671d3997b25cd03f79a927506a492485803d728b#671d3997b25cd03f79a927506a492485803d728b"
+source = "git+https://github.com/ProjectASAP/sketch-bench?rev=7c0d121192beaf3b68b1b1ec36aab8aafc90d0ae#7c0d121192beaf3b68b1b1ec36aab8aafc90d0ae"
 dependencies = [
  "rand 0.9.5",
  "rand_distr",
  "rand_xoshiro",
  "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "aqpbm-harness"
-version = "0.1.0"
-source = "git+https://github.com/ProjectASAP/sketch-bench?rev=671d3997b25cd03f79a927506a492485803d728b#671d3997b25cd03f79a927506a492485803d728b"
-dependencies = [
- "aqpbm-core",
- "aqpbm-datagen",
- "chrono",
- "libc",
- "serde",
- "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -348,8 +335,8 @@ dependencies = [
 name = "asap-devtools"
 version = "0.1.0"
 dependencies = [
+ "aqpbm-core",
  "aqpbm-datagen",
- "aqpbm-harness",
  "asap-cost",
  "asap-executor",
  "asap-frontend-metricsql",

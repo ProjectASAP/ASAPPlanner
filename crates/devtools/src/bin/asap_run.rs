@@ -1,5 +1,5 @@
 // asap_run: runs the Planner's executor as one lane of the engine comparison
-// of sketch-bench's harness (`aqpbm-harness`).
+// of sketch-bench's harness (`aqpbm_core::harness`).
 //
 //   asap_run bench-external --lane asap --run-dir <dir> [--variant <v>]...
 //       [--core <n>] [--warmup <n>] [--runs <n>] [--max-core-busy <f>]
@@ -22,12 +22,12 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use aqpbm_harness::bench_external::{run_lane, LaneSetup};
-use aqpbm_harness::engine::EngineUnderTest;
-use aqpbm_harness::protocol::{
+use aqpbm_core::harness::bench_external::{run_lane, LaneSetup};
+use aqpbm_core::harness::engine::EngineUnderTest;
+use aqpbm_core::harness::protocol::{
     load_probe_for, MeasurementClocks, OsCpuClock, ProcessCpuFiles, Protocol,
 };
-use aqpbm_harness::rundir::RunDir;
+use aqpbm_core::harness::rundir::RunDir;
 use asap_devtools::asap_lane::AsapEngine;
 
 const USAGE: &str =

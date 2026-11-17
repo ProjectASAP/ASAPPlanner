@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use aqpbm_harness::data::{Sample, SampleChunk, SeriesLabels};
+use aqpbm_core::harness::data::{Sample, SampleChunk, SeriesLabels};
 use asap_executor::arrow::array::{
     ArrayRef, DictionaryArray, Float64Array, StringArray, TimestampMillisecondArray, UInt32Array,
 };
