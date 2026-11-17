@@ -9,10 +9,13 @@ use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::summary_type::SketchParams;
 use asap_types::workload::PlanningWorkload;
 
+/// The series of `latency` in the module's example.
+const LATENCY_SERIES: usize = 1_000;
+
 /// PromQL `queries`, each `(query, accuracy JSON)` every 10 s, over
-/// `latency` (1,000 series, one sample per second, ingested, values
-/// declared non-negative).
-fn workload(queries: &[(&str, &str)]) -> PlanningWorkload {
+/// `latency` (`series_count` series, one sample per second each,
+/// ingested, values declared non-negative).
+fn workload(queries: &[(&str, &str)], series_count: usize) -> PlanningWorkload {
     let entries: Vec<String> = queries
         .iter()
         .map(|(query, accuracy)| {
@@ -24,24 +27,32 @@ fn workload(queries: &[(&str, &str)]) -> PlanningWorkload {
         .collect();
     serde_json::from_str(&format!(
         r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}]}},
-            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 1000.0}}}},
-              "sources": {{"latency": {{"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000,
+            "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": {series_count}.0}}}},
+              "sources": {{"latency": {{"series_count": {series_count}, "metric_type": "gauge", "sample_interval": 1000,
                 "column_signs": {{"value": "non_negative"}}}}}}}}}}"#,
         entries.join(",")
     ))
     .unwrap()
 }
 
-/// The plan Stage 3 selects for `queries`, no raw data kept (every query
-/// reads summaries built at ingestion), with accuracy enforced or
-/// ignored.
-fn plan(queries: &[(&str, &str)], ignore_accuracy: bool) -> PhysicalASAPDAG {
-    selection(queries, ignore_accuracy).0
+/// The plan Stage 3 selects for `queries` over `series_count` series of
+/// `latency`, no raw data kept (every query reads summaries built at
+/// ingestion), with accuracy enforced or ignored.
+pub(crate) fn plan(
+    queries: &[(&str, &str)],
+    series_count: usize,
+    ignore_accuracy: bool,
+) -> PhysicalASAPDAG {
+    selection(queries, series_count, ignore_accuracy).0
 }
 
 /// [`plan`], with the accepted accuracy Stage 3 reports per query.
-fn selection(queries: &[(&str, &str)], ignore_accuracy: bool) -> (PhysicalASAPDAG, Vec<String>) {
-    let workload = workload(queries);
+fn selection(
+    queries: &[(&str, &str)],
+    series_count: usize,
+    ignore_accuracy: bool,
+) -> (PhysicalASAPDAG, Vec<String>) {
+    let workload = workload(queries, series_count);
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap();
     let capabilities = DeploymentCapabilities {
@@ -89,7 +100,7 @@ fn sketch_parameters(plan: &PhysicalASAPDAG) -> Vec<SketchParams> {
 /// not.
 #[test]
 fn each_query_meets_its_target_at_its_root() {
-    let (plan, accepted) = selection(&PROBLEM_EXAMPLE, false);
+    let (plan, accepted) = selection(&PROBLEM_EXAMPLE, LATENCY_SERIES, false);
     assert_eq!(
         accepted,
         ["accepted rank (Kll)", "accepted relative (DDSketch)"],
@@ -140,8 +151,11 @@ fn ignoring_accuracy_plans_without_k() {
             .collect::<std::collections::HashSet<_>>()
             .len()
     };
-    assert_eq!(algorithms(&plan(&PROBLEM_EXAMPLE, false)), 2);
-    let (ignored, accepted) = selection(&PROBLEM_EXAMPLE, true);
+    assert_eq!(
+        algorithms(&plan(&PROBLEM_EXAMPLE, LATENCY_SERIES, false)),
+        2
+    );
+    let (ignored, accepted) = selection(&PROBLEM_EXAMPLE, LATENCY_SERIES, true);
     assert_eq!(algorithms(&ignored), 1, "{:?}", sketch_parameters(&ignored));
     assert!(
         accepted
@@ -162,6 +176,7 @@ fn a_whole_result_failure_probability_is_divided_over_the_values() {
             "quantile_over_time(0.95, latency[1h])",
             r#"{"accuracy_metric": "rank", "max_error": 0.01, "failure_probability": 0.01}"#,
         )],
+        LATENCY_SERIES,
         false,
     );
     let parameters = sketch_parameters(&plan);
@@ -191,6 +206,7 @@ fn a_ratio_sharing_its_readouts_with_its_operands_still_meets_its_target() {
                 target,
             ),
         ],
+        LATENCY_SERIES,
         false,
     );
     let alphas: Vec<f64> = sketch_parameters(&plan)
