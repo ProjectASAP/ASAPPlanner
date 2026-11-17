@@ -2005,6 +2005,76 @@ fn k_charges_a_top_k_readout_for_every_estimate_it_ranks() {
     }
 }
 
+/// The top-k readout of 10 series of `m` (CMS with heap, k = 3) failing
+/// with `top_k_level` per estimate, and the p90 readout of 10 series of
+/// `r` failing with `p90_level`, combined by the set operator `kind` with
+/// the p90 readout on the left, read per value at δ = 0.01; `or` with the
+/// top-k on the left. `None` when no plan meets the target.
+fn set_operator_over_top_k(
+    kind: PromQLVectorSetOpKind,
+    top_k_level: f64,
+    p90_level: f64,
+) -> Option<Vec<usize>> {
+    let mut memo = memo_with_series(&[("m", 10), ("r", 10)]);
+    let (top_k, _) = readouts_of(
+        &mut memo,
+        "m",
+        SketchAlgorithm::CmsWithHeap,
+        SketchStatistic::TopK { k: 3 },
+        AccuracyMetric::Relative,
+        &[(0.01, top_k_level)],
+    );
+    let (p90, _) = readouts_of(
+        &mut memo,
+        "r",
+        SketchAlgorithm::DDSketch,
+        SketchStatistic::Quantile { q: 0.9 },
+        AccuracyMetric::Relative,
+        &[(0.01, p90_level)],
+    );
+    let (left, right) = if matches!(kind, PromQLVectorSetOpKind::Or) {
+        (top_k, p90)
+    } else {
+        (p90, top_k)
+    };
+    let set = group(&mut memo, memo_fixtures::set_operator(kind, left, right));
+    add_query(
+        &mut memo,
+        set,
+        relative(0.05)
+            .failure_probability(0.01)
+            .accuracy_scope(AccuracyScope::PerValue),
+        Some(10),
+    );
+    selected_or_infeasible(&memo)
+}
+
+/// `p90 and topk(3, …)` and `p90 unless topk(3, …)` keep a p90 value
+/// only where the top-k's output has (or lacks) its labels, and which
+/// keys the top-k returns is chosen by all 10 estimates it ranks: each
+/// output value fails when its p90 estimate or any of those does. The
+/// top-k at 1e-3 (10 · 1e-3 = 0.01) with the p90 at 0.005 sums to 0.015,
+/// above δ = 0.01; at 1e-4 (0.001) the sum is 0.006, within it.
+/// `topk(3, …) or p90` takes a p90 value only where the top-k returns no
+/// such key, so each value depends on both sides' estimates: the same
+/// sums, not the larger side.
+#[test]
+fn k_charges_a_set_operator_for_the_top_k_choosing_its_values() {
+    for kind in [
+        PromQLVectorSetOpKind::And,
+        PromQLVectorSetOpKind::Unless,
+        PromQLVectorSetOpKind::Or,
+    ] {
+        for (top_k_level, plans) in [(1e-3, false), (1e-4, true)] {
+            assert_eq!(
+                set_operator_over_top_k(kind.clone(), top_k_level, 0.005).is_some(),
+                plans,
+                "{kind:?} {top_k_level}"
+            );
+        }
+    }
+}
+
 /// The p90 and the p50 readouts of 100 series concatenated, per value at
 /// δ = 0.01: each row comes from one readout, so it fails only with that
 /// readout's estimate: readouts at 0.01 meet it, at 0.02 they do not.
