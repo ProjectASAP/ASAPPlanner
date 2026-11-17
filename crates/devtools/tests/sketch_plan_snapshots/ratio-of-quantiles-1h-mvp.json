@@ -81,10 +81,10 @@
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 1.87406134311e-12,
+          "cost_per_second": 1.87400000613e-12,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.66666666667e-7,
-          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 320000 bytes for 0.010 ms",
+          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 0.010 ms",
           "multiplier": 1,
           "operator": "Project",
           "timing": "query_time"
@@ -108,10 +108,10 @@
           "timing": "query_time"
         },
         "8": {
-          "cost_per_second": 1.87400000613e-12,
+          "cost_per_second": 1.87406134311e-12,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.66666666667e-7,
-          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 0.010 ms",
+          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 320000 bytes for 0.010 ms",
           "multiplier": 1,
           "operator": "BinaryOp",
           "timing": "query_time"
@@ -859,9 +859,7 @@
         },
         {
           "id": 5,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1052,7 +1050,9 @@
         },
         {
           "id": 8,
-          "lifetime": "None",
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
           "output_schema": {
             "closed": true,
             "fields": [
