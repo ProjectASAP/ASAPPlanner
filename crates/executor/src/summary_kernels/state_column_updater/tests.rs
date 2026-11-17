@@ -1,3 +1,4 @@
+use super::reorder_buffer::HELD_SAMPLE_BYTES;
 use super::*;
 use planner_types::summary_type::ExactParams;
 
@@ -69,8 +70,7 @@ fn held_counter_samples_are_charged_until_applied() {
     let family = FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate);
     let mut updater = StateColumnUpdater::new(&family, None)
         .unwrap()
-        .with_max_out_of_order_ms(1_000)
-        .unwrap();
+        .with_max_out_of_order_ms(1_000);
     updater.ensure_groups(1).unwrap();
     let states = updater.memory_bytes();
     updater.update(0, 2.0, 2_000).unwrap();
@@ -81,6 +81,6 @@ fn held_counter_samples_are_charged_until_applied() {
     // A duplicate of a held sample, and a sample before an applied one.
     assert!(updater.update(0, 9.0, 2_000).is_err());
     assert!(updater.update(0, 9.0, 1_000).is_err());
-    updater.release_held(i64::MAX).unwrap();
+    updater.release_all_held().unwrap();
     assert_eq!(updater.memory_bytes(), states);
 }
