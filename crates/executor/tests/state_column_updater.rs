@@ -655,6 +655,42 @@ fn counter_samples_are_late_relative_to_their_own_series_only() {
     }
 }
 
+// A 0 bound behaves as no bound: it refuses exactly the samples an
+// updater without a bound refuses (one at or before its group's previous
+// sample) and builds the same states from the rest.
+#[test]
+fn a_zero_bound_refuses_what_no_bound_refuses() {
+    let family = exact(ExactKind::Rate, ExactParams::Rate);
+    let build = |samples: &[(u32, i64, f64)], bound: Option<u64>| {
+        let mut updater = updater(&family);
+        if let Some(bound) = bound {
+            updater = updater.with_max_out_of_order_ms(bound);
+        }
+        updater.ensure_groups(2).unwrap();
+        let refused: Vec<bool> = samples
+            .iter()
+            .map(|&(group, ts, value)| updater.update(group, value, ts).is_err())
+            .collect();
+        let column = updater.seal();
+        let states = [0, 1].map(|group| fingerprint(column.state(group).as_ref()));
+        (refused, states)
+    };
+    for samples in [
+        vec![(0, 10_000, 100.0), (0, 12_000, 120.0), (0, 11_000, 110.0)],
+        vec![(0, 10_000, 100.0), (0, 10_000, 101.0), (0, 13_000, 130.0)],
+        vec![
+            (0, 10_000, 100.0),
+            (1, 5_000, 50.0),
+            (1, 4_000, 40.0),
+            (0, 11_000, 110.0),
+        ],
+    ] {
+        let (refused, states) = build(&samples, Some(0));
+        assert!(refused.iter().any(|&refused| refused), "{samples:?}");
+        assert_eq!((refused, states), build(&samples, None), "{samples:?}");
+    }
+}
+
 // A group number the updater never added is bad input, not a panic.
 #[test]
 fn an_unknown_group_is_bad_input() {

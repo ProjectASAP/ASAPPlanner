@@ -14,7 +14,7 @@ use planner_types::summary_type::{SketchParams, SummaryUpdate};
 use std::sync::Arc;
 
 mod reorder_buffer;
-use reorder_buffer::{CounterOrder, ReorderBuffer};
+use reorder_buffer::CounterOrder;
 
 /// The open summary states of one family, one per group, updated one sample
 /// at a time; sealed into an immutable [`StateColumn`].
@@ -147,9 +147,9 @@ impl StateColumnUpdater {
     /// This updater taking each group's samples in any order within
     /// `max_out_of_order_ms`: the data's declared bound on how late a
     /// sample arrives after a later sample of its series (`DataArrival`'s
-    /// `max_out_of_order_ms`). A counter (rate, increase) holds each sample
-    /// until the newest sample seen in its group is more than the bound
-    /// past it, then applies the group's held samples in time order:
+    /// `max_out_of_order_ms`). A counter (rate, increase, irate) holds each
+    /// sample until the newest sample seen in its group is at least the
+    /// bound past it, then applies the group's held samples in time order:
     /// samples at 10 s, 12 s, 11 s with a 5 s bound build the state of
     /// 10 s, 11 s, 12 s, whatever other groups' samples arrive between
     /// them. A sample further behind is still applied when it follows its
@@ -158,14 +158,12 @@ impl StateColumnUpdater {
     /// [`Self::seal`] and [`Self::merge`] apply every held sample first, so
     /// a runtime seals a tumbling window once the bound has passed after
     /// its end. Any other family needs no order and is returned unchanged.
-    /// A bound beyond Int64 holds every sample until the seal.
+    /// A 0 bound refuses exactly the samples an updater without a bound
+    /// refuses; a bound beyond Int64 holds every sample until the seal.
     pub fn with_max_out_of_order_ms(mut self, max_out_of_order_ms: u64) -> Self {
         if let Some(counter) = &mut self.counter {
             let max_out_of_order_ms = i64::try_from(max_out_of_order_ms).unwrap_or(i64::MAX);
-            counter.reorder_buffer = Some(ReorderBuffer::new(
-                max_out_of_order_ms,
-                counter.latest_applied_ms.len(),
-            ));
+            self.memory_bytes += counter.reorder_within(max_out_of_order_ms);
         }
         self
     }
@@ -293,7 +291,7 @@ impl StateColumnUpdater {
             }
         };
         if let Some(counter) = &mut self.counter {
-            counter.add_group();
+            self.memory_bytes += counter.add_group();
         }
         Ok(group)
     }
@@ -432,8 +430,8 @@ impl StateColumnUpdater {
             ));
         }
         // Held samples are part of each shard's window.
-        self.release_all_held()?;
-        other.release_all_held()?;
+        self.release_all_held();
+        other.release_all_held();
         if let (
             GroupStates::Hydra { grid, names },
             GroupStates::Hydra {
@@ -513,10 +511,7 @@ impl StateColumnUpdater {
     /// The states as an immutable column, state `g` being group `g`'s,
     /// after applying every held sample.
     pub fn seal(mut self) -> StateColumn {
-        // A held sample is valid input after its group's applied samples
-        // (checked when held), so its state takes it.
-        self.release_all_held()
-            .expect("held counter samples apply in time order");
+        self.release_all_held();
         match self.states {
             GroupStates::Exact { states, .. } => StateColumn::from_exact(self.family, states),
             GroupStates::Sketches(states) => StateColumn::from_objects(

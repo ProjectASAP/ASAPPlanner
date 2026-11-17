@@ -99,7 +99,7 @@ impl RunContext {
         self.max_out_of_order_ms
     }
     /// This run's context, evaluated at `evaluation_time_ms` instead: the
-    /// same limits, cancellation and query range.
+    /// same limits, cancellation, query range and `max_out_of_order_ms`.
     pub(crate) fn at_evaluation_time(&self, evaluation_time_ms: i64) -> Self {
         Self {
             scope: Scope::Query { evaluation_time_ms },

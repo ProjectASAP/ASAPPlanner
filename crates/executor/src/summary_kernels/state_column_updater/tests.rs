@@ -62,9 +62,10 @@ fn an_exact_sum_column_takes_non_finite_values() {
     }
 }
 
-// A reordering counter charges each held sample until it is applied: with
-// a 1 s bound, samples at 2 s and 1.5 s are held; a sample at 3 s applies
-// 1.5 s (more than 1 s behind) and is held itself; sealing applies the rest.
+// A reordering counter charges its held-sample queues for their capacity
+// until the seal or a merge frees them: with a 1 s bound, samples at 2 s
+// and 1.5 s are held; a sample at 3 s applies both (at least 1 s behind)
+// and is held itself; releasing everything frees the queue.
 #[test]
 fn held_counter_samples_are_charged_until_applied() {
     let family = FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate);
@@ -73,14 +74,21 @@ fn held_counter_samples_are_charged_until_applied() {
         .with_max_out_of_order_ms(1_000);
     updater.ensure_groups(1).unwrap();
     let states = updater.memory_bytes();
+    let held_bytes = |updater: &StateColumnUpdater| {
+        let counter = updater.counter.as_ref().unwrap();
+        counter.reorder_buffer.as_ref().unwrap().held_bytes()
+    };
     updater.update(0, 2.0, 2_000).unwrap();
     updater.update(0, 1.0, 1_500).unwrap();
-    assert_eq!(updater.memory_bytes(), states + 2 * HELD_SAMPLE_BYTES);
+    assert!(held_bytes(&updater) >= 2 * HELD_SAMPLE_BYTES);
+    assert_eq!(updater.memory_bytes(), states + held_bytes(&updater));
     updater.update(0, 3.0, 3_000).unwrap();
-    assert_eq!(updater.memory_bytes(), states + 2 * HELD_SAMPLE_BYTES);
-    // A duplicate of a held sample, and a sample before an applied one.
+    assert_eq!(updater.memory_bytes(), states + held_bytes(&updater));
+    // A duplicate of a held sample, and samples at or before an applied one.
+    assert!(updater.update(0, 9.0, 3_000).is_err());
     assert!(updater.update(0, 9.0, 2_000).is_err());
     assert!(updater.update(0, 9.0, 1_000).is_err());
-    updater.release_all_held().unwrap();
+    updater.release_all_held();
+    assert_eq!(held_bytes(&updater), 0);
     assert_eq!(updater.memory_bytes(), states);
 }
