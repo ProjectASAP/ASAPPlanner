@@ -93,10 +93,9 @@ impl MeasuredSketchAccuracy {
     pub fn validate(&self) -> Result<(), MeasuredSketchAccuracyError> {
         for (index, entry) in self.entries.iter().enumerate() {
             entry.validate(index)?;
-            if let Some(first) = self.entries[..index]
-                .iter()
-                .position(|earlier| earlier.measures_the_same_as(entry))
-            {
+            if let Some(first) = self.entries[..index].iter().position(|earlier| {
+                earlier.measures(&entry.sketch, &entry.statistic, entry.accuracy_metric)
+            }) {
                 return Err(MeasuredSketchAccuracyError::DuplicateEntry {
                     first,
                     second: index,
@@ -113,11 +112,9 @@ impl MeasuredSketchAccuracy {
         statistic: &SketchStatistic,
         metric: AccuracyMetric,
     ) -> Option<&MeasuredAccuracyEntry> {
-        self.entries.iter().find(|entry| {
-            entry.sketch == *sketch
-                && entry.statistic == *statistic
-                && entry.accuracy_metric == metric
-        })
+        self.entries
+            .iter()
+            .find(|entry| entry.measures(sketch, statistic, metric))
     }
 }
 
@@ -158,11 +155,15 @@ impl MeasuredAccuracyEntry {
         }
     }
 
-    /// Whether `other` measures the same sketch, statistic and metric.
-    fn measures_the_same_as(&self, other: &MeasuredAccuracyEntry) -> bool {
-        self.sketch == other.sketch
-            && self.statistic == other.statistic
-            && self.accuracy_metric == other.accuracy_metric
+    /// Whether this entry measures `sketch` read for `statistic` in
+    /// `metric`: the one key a table holds at most one entry for.
+    fn measures(
+        &self,
+        sketch: &SketchParams,
+        statistic: &SketchStatistic,
+        metric: AccuracyMetric,
+    ) -> bool {
+        self.sketch == *sketch && self.statistic == *statistic && self.accuracy_metric == metric
     }
 
     /// The point at the largest recorded failure probability at most

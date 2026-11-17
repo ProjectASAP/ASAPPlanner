@@ -213,7 +213,9 @@ each operator's error contract (`ErrorContract`, gathered per memo state in
 `ErrorMetricsOfMemo`) and the comparison of a bound with a target
 (`within_limit`); the deployment's measurements
 (`AccuracyEvidence::measured_guarantee`) take precedence over a theoretical
-guarantee. Only a sketch readout introduces error. Every other operator
+guarantee, except for a θ whose theoretical guarantee can be deterministic
+(DDSketch's relative error α): a measurement never replaces a guarantee that
+holds with failure probability zero. Only a sketch readout introduces error. Every other operator
 passes its inputs' errors on through a contract, and the contracts are
 conservative: an operator with no contract for a metric fails the edge of an
 input whose error is in that metric (`RootPruneReason::MetricRule`), so an
@@ -471,7 +473,11 @@ cheapest readouts (cost 2) misses B's target, so it bounds nothing.
 `AccuracyEvidence` supplies the deployment's measured guarantees. The evidence must cover the population to which the
 claimed guarantee applies: sources, filters, grouping, evaluation windows and
 all merged tumbling windows. Evidence for a narrower population cannot silently certify
-a wider one. Data-workload facts are declared: the planner has no clock, so the caller
+a wider one. `MeasuredSketchAccuracy`, the measured table, is keyed per θ
+(sketch parameters, statistic, metric) and does not depend on the population:
+each recorded error is the worst over the merge counts the calibration
+measured. That it covers the populations the deployment plans for is the
+deployment's responsibility, not checked by the planner. Data-workload facts are declared: the planner has no clock, so the caller
 drops facts that no longer hold before planning.
 
 Source contracts are assertions that the source or deployment must establish
@@ -564,6 +570,8 @@ The `asap_accuracy` crate separates these responsibilities:
 accuracy/src/
 ├── lib.rs              # Re-exports: the public interfaces
 ├── evidence.rs         # AccuracyEvidence: the deployment's measured accuracy
+├── measured.rs         # MeasuredSketchAccuracy: the measured table per θ,
+│                       # statistic and metric; its validation and lookup
 ├── error_contract/     # ErrorContract: each operator's error contract per
 │                       # metric
 ├── metric_rule/        # ErrorMetricsOfMemo: the contracts, allowed metrics and

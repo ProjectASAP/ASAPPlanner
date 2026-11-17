@@ -62,7 +62,8 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 
 - A summary's guarantee is the deployment's measurement
   (`AccuracyEvidence::measured_guarantee`) when there is one, else its
-  algorithm's error formula (`theoretical_guarantee`); Pass 2 compares it
+  algorithm's error formula (`theoretical_guarantee`); a θ whose formula can
+  be deterministic (DDSketch's relative error α) keeps its formula; Pass 2 compares it
   with each readout's `RequiredAccuracy`
   (`ErrorMetricsOfMemo::edge_meets_logical_requirements`). It fails closed: no rule
   means no guarantee, and the edge is not admissible.
