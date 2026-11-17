@@ -2239,26 +2239,23 @@ fn contexts_whose_queries_differ_only_in_values_not_split_by_k_are_copies() {
     }
 }
 
-/// p99 / p50 at relative 0.03 with δ = 0.01 over a whole result of
-/// `values` values, over readouts at relative 0.01 failing with
-/// `failure_probabilities` (cheap at cost 1, dear at cost 3) each: how
-/// many readouts of each level the selection reads (cheap, dear) and how
-/// many times HiGHS solved the MILP.
-fn solve_ratio_over_values(
+/// p99 / p50 at `target` over a whole result of `values` values, over
+/// readouts at `levels` (relative error, failure probability; the first
+/// at cost 1, the second at cost 3) each: how many readouts of each level
+/// the selection reads (first, second) and how many times HiGHS solved
+/// the MILP.
+fn solve_ratio(
+    target: AccuracyTarget,
     values: u64,
-    failure_probabilities: [f64; 2],
+    levels: [(f64, f64); 2],
 ) -> Result<(usize, usize, usize), SelectionMilpError> {
     let mut memo = empty_memo();
-    let levels = [
-        (0.01, failure_probabilities[0]),
-        (0.01, failure_probabilities[1]),
-    ];
     let (p99, p99_readouts) = ddsketch_readouts(&mut memo, 0.99, &levels);
     let (p50, p50_readouts) = ddsketch_readouts(&mut memo, 0.5, &levels);
     let ratio = group(&mut memo, arithmetic(ArithmeticOpKind::Div, p99, p50));
     memo.add_query(MemoQuery {
         root: QueryRoot::Operator(ratio),
-        accuracy_target: Some(relative(0.03).failure_probability(0.01)),
+        accuracy_target: Some(target),
         number_of_values_per_query_evaluation: Some(values),
     });
     let physical = physical(memo.clone(), &every_candidate(&memo));
@@ -2279,33 +2276,51 @@ fn solve_ratio_over_values(
     Ok((count(0), count(1), solved.solve_count))
 }
 
+/// [`solve_ratio`] at relative 0.03 with δ = 0.01, over readouts at
+/// relative 0.01 failing with `failure_probabilities`.
+fn solve_ratio_over_values(
+    values: u64,
+    failure_probabilities: [f64; 2],
+) -> Result<(usize, usize, usize), SelectionMilpError> {
+    solve_ratio(
+        relative(0.03).failure_probability(0.01),
+        values,
+        [
+            (0.01, failure_probabilities[0]),
+            (0.01, failure_probabilities[1]),
+        ],
+    )
+}
+
 /// p99 / p50 at relative 0.03 with δ = 0.01 over a whole result of 1e4
 /// values, 1e-6 per value, over readouts at relative 0.01 failing with
-/// 5.4e-7 (cost 1) or 4e-7 (cost 3) each: two at 5.4e-7 fail together with
-/// up to 1.08e-6, above 1e-6 by 8e-8, within HiGHS's default feasibility
-/// tolerance 1e-7, so the first solve selects the two cheap readouts. The
-/// exact check finds the miss, and the second solve, at tolerance 1e-10,
-/// selects one of each (9.4e-7, within the limit).
+/// 5.00000004e-7 (cost 1) or 4e-7 (cost 3) each: two cheap ones fail
+/// together with up to 1.00000008e-6, above 1e-6 by 8e-8 of it. (K) holds
+/// failure probabilities in units of the tightest limit, 1e-6, so that is
+/// 8e-8 above 1, within HiGHS's default feasibility tolerance 1e-7: the
+/// first solve selects the two cheap readouts. The exact check finds the
+/// miss, and the second solve, at tolerance 1e-10, selects one of each
+/// (9.00000004e-7, within the limit).
 #[test]
 fn a_selection_missing_its_target_at_the_default_tolerance_is_solved_again_at_the_least_tolerance()
 {
     assert_eq!(
-        solve_ratio_over_values(10_000, [5.4e-7, 4e-7]),
+        solve_ratio_over_values(10_000, [5.00000004e-7, 4e-7]),
         Ok((1, 1, 2))
     );
 }
 
-/// The same ratio over readouts failing with 5.4e-7 at both costs: the
-/// first solve selects two (1.08e-6, within HiGHS's default tolerance of
-/// the 1e-6 limit), the exact check finds the miss, and at tolerance 1e-10
-/// no plan meets the limit, so HiGHS reports the MILP infeasible. The
-/// error names the query the first solve missed and its bound: each of
-/// the 1e4 covered values at 1e-6 (the readouts' values per evaluation
-/// are unknown, so every estimate read bounds nothing), not a plan-less
+/// The same ratio over readouts failing with 5.00000004e-7 at both costs:
+/// the first solve selects two (within HiGHS's default tolerance of the
+/// limit), the exact check finds the miss, and at tolerance 1e-10 no plan
+/// meets the limit, so HiGHS reports the MILP infeasible. The error names
+/// the query the first solve missed and its bound: each of the 1e4
+/// covered values at 1e-6 (the readouts' values per evaluation are
+/// unknown, so every estimate read bounds nothing), not a plan-less
 /// "infeasible" that never mentions accuracy.
 #[test]
 fn a_target_no_plan_meets_once_solved_at_the_least_tolerance_names_the_missed_query() {
-    let solved = solve_ratio_over_values(10_000, [5.4e-7, 5.4e-7]);
+    let solved = solve_ratio_over_values(10_000, [5.00000004e-7, 5.00000004e-7]);
     let Err(SelectionMilpError::TargetBelowSolverPrecision {
         query,
         failure_probability_bound:
@@ -2332,28 +2347,42 @@ fn a_selection_meeting_its_target_at_the_default_tolerance_is_solved_once() {
 
 /// The same ratio over 1e8 values (1e-10 per value) and 1e10 values
 /// (1e-12 per value), with readouts failing at 5.4e-11 / 4e-11 and
-/// 5.4e-13 / 4e-13: two cheap readouts miss the limit by 8e-12 and 8e-14,
-/// within HiGHS's least feasibility tolerance 1e-10, so both solves, at
-/// the default tolerances and again at 1e-10, select them. The exact check
-/// after the second solve finds the miss, and selection fails rather than
-/// return a plan that may not meet the target.
+/// 5.4e-13 / 4e-13: two cheap readouts miss the limit by 8% of it. In
+/// absolute terms that is 8e-12 and 8e-14, within HiGHS's least
+/// feasibility tolerance 1e-10; in units of the tightest limit it is
+/// 0.08, so the first solve already selects one of each.
 #[test]
-fn a_per_value_failure_probability_below_the_solver_precision_is_an_error() {
-    for (values, failure_probabilities, per_value) in [
-        (100_000_000, [5.4e-11, 4e-11], 1e-10),
-        (10_000_000_000, [5.4e-13, 4e-13], 1e-12),
+fn a_tiny_per_value_failure_probability_is_solved_in_units_of_its_limit() {
+    for (values, failure_probabilities) in [
+        (100_000_000, [5.4e-11, 4e-11]),
+        (10_000_000_000, [5.4e-13, 4e-13]),
     ] {
-        let solved = solve_ratio_over_values(values, failure_probabilities);
-        let Err(SelectionMilpError::TargetBelowSolverPrecision {
-            query,
-            failure_probability_bound: Some(FailureProbabilityBound::EachCoveredValue { limit, .. }),
-        }) = solved
-        else {
-            panic!("{values}: {solved:?}");
-        };
-        assert_eq!(query, QueryId(0));
-        assert!((limit - per_value).abs() <= 1e-6 * per_value, "{limit}");
+        assert_eq!(
+            solve_ratio_over_values(values, failure_probabilities),
+            Ok((1, 1, 1)),
+            "{values}"
+        );
     }
+}
+
+/// p99 / p50 at relative 0.01 without a δ, over readouts at relative
+/// 0.0045000000225 (cost 1) or 0.004 (cost 3): two cheap ones compose to
+/// 1.111 · 0.009000000045 = 0.01000000005, above 0.01 by 5e-11, more than
+/// the exact check's widening (1e-9 of 0.01) but within HiGHS's least
+/// feasibility tolerance 1e-10 (error bounds are not scaled). Both solves
+/// select them, the exact check after the second finds the miss, and
+/// selection fails rather than return a plan that may not meet the
+/// target; the error has no failure-probability bound to name.
+#[test]
+fn an_error_bound_missed_within_the_solver_precision_is_an_error() {
+    let solved = solve_ratio(relative(0.01), 1, [(0.0045000000225, 1.0), (0.004, 1.0)]);
+    assert_eq!(
+        solved,
+        Err(SelectionMilpError::TargetBelowSolverPrecision {
+            query: QueryId(0),
+            failure_probability_bound: None,
+        })
+    );
 }
 
 mod union_bound_oracle;
