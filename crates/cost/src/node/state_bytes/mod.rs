@@ -113,7 +113,9 @@ pub fn summary_state_bytes(
 
 /// What one summary state's bytes depend on besides its parameters (only
 /// a KLL's, a DDSketch's and a KMV's do): the input rows it folds, the
-/// sign of their values and, for a DDSketch, their magnitudes.
+/// sign of their values and, for a DDSketch, their magnitudes; and the
+/// distinct values of the column it folds, which a KMV build's and merge's
+/// CPU depend on.
 /// The rows are whatever its producer emits (raw data samples, rates, sums),
 /// not a summary sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -131,13 +133,20 @@ pub struct StateInputRows {
     /// `DDSKETCH_ASSUMED_MAGNITUDE_RANGE`. E.g. `Some(ValueMagnitudeRange {
     /// min_abs: 0.001, max_abs: 10000.0 })` for a latency in seconds.
     pub value_magnitude_range: Option<ValueMagnitudeRange>,
+    /// The distinct values the folded column takes, each folded row a draw
+    /// from them; `None` when not declared, which takes every row's value
+    /// as new. E.g. `Some(1_000_000)` for `user_id` over 1,000,000 users:
+    /// KMV states of 12,000 rows each then retain hashes of about 11,930
+    /// distinct users, and states merged together share some of them.
+    pub distinct_values: Option<u64>,
 }
 
 impl StateInputRows {
     /// What one state folds when each group merges, from every input, that
     /// input's states (`Some((rows each folds, states per group))`): their
     /// rows summed, non-negative when all are, within the magnitude range
-    /// spanning all of theirs. `None` when any input's is unknown. Example:
+    /// spanning all of theirs, of the most distinct values any declares.
+    /// `None` when any input's is unknown. Example:
     /// 360 states of 10 rows and 60 of 100 merge into one of 9,600 rows.
     pub(crate) fn merged(inputs: impl IntoIterator<Item = Option<(Self, u64)>>) -> Option<Self> {
         let mut merged: Option<Self> = None;
@@ -163,6 +172,10 @@ impl StateInputRows {
                             min_abs: a.min_abs.min(b.min_abs),
                             max_abs: a.max_abs.max(b.max_abs),
                         }),
+                    distinct_values: sum
+                        .distinct_values
+                        .zip(input.distinct_values)
+                        .map(|(a, b)| a.max(b)),
                 },
             });
         }
@@ -174,6 +187,7 @@ impl StateInputRows {
         rows_per_state: None,
         non_negative: false,
         value_magnitude_range: None,
+        distinct_values: None,
     };
 }
 

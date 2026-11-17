@@ -44,7 +44,9 @@ pub enum CostConstant {
     CounterUpdateOperationsPerRow,
     CarriedLabelOperationsPerRowPerLabel,
     KmvUpdateOperationsPerRow,
-    KmvOperationsPerComparedHash,
+    KmvUpdateOperationsPerComparedHash,
+    KmvMergeOperationsPerHash,
+    KmvMergeOperationsPerComparedHash,
     ExactDistinctOperationsPerRow,
     ExactDistinctOperationsPerValueDoubling,
     ExactDistinctOperationsPerRowAtFullValueMiss,
@@ -106,8 +108,12 @@ impl CostConstant {
                 built_in::CARRIED_LABEL_OPERATIONS_PER_ROW_PER_LABEL
             }
             CostConstant::KmvUpdateOperationsPerRow => built_in::KMV_UPDATE_OPERATIONS_PER_ROW,
-            CostConstant::KmvOperationsPerComparedHash => {
-                built_in::KMV_OPERATIONS_PER_COMPARED_HASH
+            CostConstant::KmvUpdateOperationsPerComparedHash => {
+                built_in::KMV_UPDATE_OPERATIONS_PER_COMPARED_HASH
+            }
+            CostConstant::KmvMergeOperationsPerHash => built_in::KMV_MERGE_OPERATIONS_PER_HASH,
+            CostConstant::KmvMergeOperationsPerComparedHash => {
+                built_in::KMV_MERGE_OPERATIONS_PER_COMPARED_HASH
             }
             CostConstant::ExactDistinctOperationsPerRow => {
                 built_in::EXACT_DISTINCT_OPERATIONS_PER_ROW

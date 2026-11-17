@@ -50,7 +50,7 @@ fn every_per_unit_constant_has_a_cost_constant() {
         .iter()
         .map(|constant| format!("{constant:?}"))
         .collect();
-    assert_eq!(defined.len(), 37, "{defined:?}");
+    assert_eq!(defined.len(), 39, "{defined:?}");
     assert_eq!(
         defined.difference(&variants).collect::<Vec<_>>(),
         Vec::<&String>::new(),
@@ -103,7 +103,7 @@ fn cost_constant_json_names_are_the_full_snake_case_list() {
 }
 
 /// Every constant's JSON name, in declaration order.
-const JSON_NAMES: [&str; 37] = [
+const JSON_NAMES: [&str; 39] = [
     "time_range_operations_per_row",
     "operations_per_group_per_raw_batch",
     "chain_operations_per_arriving_row",
@@ -117,7 +117,9 @@ const JSON_NAMES: [&str; 37] = [
     "counter_update_operations_per_row",
     "carried_label_operations_per_row_per_label",
     "kmv_update_operations_per_row",
-    "kmv_operations_per_compared_hash",
+    "kmv_update_operations_per_compared_hash",
+    "kmv_merge_operations_per_hash",
+    "kmv_merge_operations_per_compared_hash",
     "exact_distinct_operations_per_row",
     "exact_distinct_operations_per_value_doubling",
     "exact_distinct_operations_per_row_at_full_value_miss",
@@ -190,16 +192,16 @@ fn defined_constants() -> Vec<(String, f64)> {
 
 /// The charge is the formula's own floating-point value, its terms added
 /// in the order the formula adds them, so it does not move when the
-/// terms are kept per constant: 0.1 compared hashes (0.5 each) and 0.3
+/// terms are kept per constant: 0.1 compared hashes (0.62 each) and 0.3
 /// merged bytes (0.43 each) per row, times 7 rows, charge
-/// (0.1 × 0.5 + 0.3 × 0.43) × 7 = 1.253, where adding the per-constant
-/// products 0.7 × 0.5 + 2.1 × 0.43 gives 1.2530000000000001.
+/// (0.1 × 0.62 + 0.3 × 0.43) × 7 = 1.337, where adding the per-constant
+/// products 0.7 × 0.62 + 2.1 × 0.43 gives 1.3370000000000002.
 #[test]
 fn the_charge_adds_terms_in_the_formula_s_order() {
-    let terms = NodeCostTerms::of(CostConstant::KmvOperationsPerComparedHash, 0.1)
+    let terms = NodeCostTerms::of(CostConstant::KmvUpdateOperationsPerComparedHash, 0.1)
         .plus(CostConstant::KllMergeOperationsPerMergedByte, 0.3)
         .times(7.0);
-    assert_eq!(terms.operations(), (0.1 * 0.5 + 0.3 * 0.43) * 7.0);
+    assert_eq!(terms.operations(), (0.1 * 0.62 + 0.3 * 0.43) * 7.0);
     let by_constant = terms.operations_with(CostConstant::operations_per_unit);
     assert_ne!(by_constant, terms.operations());
     assert!((by_constant - terms.operations()).abs() <= 1e-12 * terms.operations());
@@ -211,7 +213,7 @@ fn the_charge_adds_terms_in_the_formula_s_order() {
 #[test]
 fn attributing_to_constants_keeps_the_charge() {
     let per_row = NodeCostTerms::of(CostConstant::HashAggregateOperationsPerRow, 1.0)
-        .plus(CostConstant::KmvOperationsPerComparedHash, 20.8);
+        .plus(CostConstant::KmvMergeOperationsPerHash, 4.0);
     let operator = NodeCostTerms::without_constant(27_000.0)
         .plus(CostConstant::OutputRowOperationsPerGroup, 10.0);
     let terms = operator
