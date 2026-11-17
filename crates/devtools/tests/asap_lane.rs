@@ -1,23 +1,25 @@
 //! The in-process ASAP lane of the engine comparison: `AsapEngine` installs a
 //! plan file `asap_planner --plan-file` wrote and runs it with the Planner's
-//! executor under the harness of sketch-bench (`aqpbm-harness`), as one
+//! executor under the harness of sketch-bench (`aqpbm_core::harness`), as one
 //! lane of `asap_run bench-external`.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use aqpbm_datagen::{DataDistribution, SeriesLabelSpec, TimeSeriesDescription, UniformParameter};
-use aqpbm_harness::arm_run::ArmSchedule;
-use aqpbm_harness::bench_external::{run_lane, CellOutcome, LaneSetup};
-use aqpbm_harness::conformance::{self, ConformanceCheck};
-use aqpbm_harness::data::{workload_chunks, DataRecord, SeriesLabels};
-use aqpbm_harness::engine::{
+use aqpbm_core::harness::arm_run::ArmSchedule;
+use aqpbm_core::harness::bench_external::{run_lane, CellOutcome, LaneSetup};
+use aqpbm_core::harness::conformance::{self, ConformanceCheck};
+use aqpbm_core::harness::data::{workload_chunks, DataRecord, SeriesLabels};
+use aqpbm_core::harness::engine::{
     ArmSpec, CpuAccounting, EngineDescription, EngineError, EngineUnderTest, InstalledArm,
     QueryLanguage, QueryText, WorkloadQuery, WorkloadSpec,
 };
-use aqpbm_harness::protocol::{LoadProbe, MeasurementClocks, OsCpuClock, Protocol, ProtocolError};
-use aqpbm_harness::records::ArmResult;
-use aqpbm_harness::rundir::RunDir;
+use aqpbm_core::harness::protocol::{
+    LoadProbe, MeasurementClocks, OsCpuClock, Protocol, ProtocolError,
+};
+use aqpbm_core::harness::records::ArmResult;
+use aqpbm_core::harness::rundir::RunDir;
+use aqpbm_datagen::{DataDistribution, SeriesLabelSpec, TimeSeriesDescription, UniformParameter};
 use asap_devtools::asap_lane::AsapEngine;
 use asap_planner::{plan_installable, FrontendInput, PlanningModels, PlanningWorkload, UserInput};
 
@@ -174,7 +176,7 @@ fn run_asap_lane(
     run: &RunDir,
     warmup: u32,
     runs: u32,
-) -> Vec<aqpbm_harness::bench_external::LaneCell> {
+) -> Vec<aqpbm_core::harness::bench_external::LaneCell> {
     let protocol = Protocol {
         warmup_runs: warmup,
         measured_runs: runs,
@@ -508,7 +510,7 @@ fn asap_run_runs_the_asap_lane_over_a_run_dir() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let cell: aqpbm_harness::bench_external::LaneCell = serde_json::from_str(
+    let cell: aqpbm_core::harness::bench_external::LaneCell = serde_json::from_str(
         &std::fs::read_to_string(run.path().join("results/asap/w__exact.cell.json")).unwrap(),
     )
     .unwrap();
