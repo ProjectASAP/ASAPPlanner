@@ -464,6 +464,80 @@ fn max_values_per_evaluation_bounds_a_readout_by_its_states_keys() {
     }
 }
 
+/// A top-k readout estimates every distinct item of each state it ranks:
+/// over `latency` with 1000 series, 20 jobs and at most 30 distinct items
+/// per evaluation declared, a heap per job estimates at most 20 × 30 =
+/// 600 items (fewer than the 1000 series its rows come from), and one
+/// heap over everything 30. Without the distinct bound, the series bound
+/// it: 1000. A quantile estimates its values, one per state.
+#[test]
+fn max_estimates_per_evaluation_counts_every_item_a_top_k_ranks() {
+    for (max_distinct, reduction_is_by_job, estimates) in [
+        (Some(30), true, 600),
+        (Some(30), false, 30),
+        (None, true, 1000),
+    ] {
+        let data = crate::workload::DataWorkload {
+            sources: [(
+                "latency".to_string(),
+                crate::workload::SourceFacts {
+                    series_count: Some(1000),
+                    distinct_values_per_label: [("job".to_string(), 20)].into(),
+                    max_distinct_per_evaluation: max_distinct,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let mut memo = Memo::new(&data);
+        let input = memo
+            .find_or_add_group(scan(
+                "latency",
+                &[("job", crate::ir::schema::DataType::Utf8)],
+                vec![],
+            ))
+            .unwrap();
+        let job = memo.groups()[input.0 as usize]
+            .group_properties
+            .schema
+            .fields
+            .iter()
+            .position(|field| field.name == "job")
+            .expect("the scan lists job");
+        let reduction = if reduction_is_by_job {
+            Reduction::by(vec![job])
+        } else {
+            Reduction::by(vec![])
+        };
+        let state_of = |memo: &mut Memo, algorithm| {
+            memo.find_or_add_group(state_grouped_by(
+                FieldDataType::Sketch(algorithm),
+                reduction.clone(),
+                input,
+            ))
+            .unwrap()
+        };
+        let heap = state_of(&mut memo, SketchAlgorithm::CmsWithHeap);
+        let top_k = memo
+            .find_or_add_group(readout(SketchStatistic::TopK { k: 5 }, heap))
+            .unwrap();
+        assert_eq!(
+            memo.max_estimates_per_evaluation(top_k),
+            Some(estimates),
+            "{max_distinct:?} {reduction_is_by_job}"
+        );
+        let kll = state_of(&mut memo, SketchAlgorithm::Kll);
+        let quantile = memo
+            .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.9 }, kll))
+            .unwrap();
+        assert_eq!(
+            memo.max_estimates_per_evaluation(quantile),
+            memo.max_values_per_evaluation(quantile)
+        );
+    }
+}
+
 /// A distinct count over `events`, bounded at 9,636 distinct items per
 /// evaluation, counts at most 9,636 in every group above the scan; a join
 /// of two bounded sources counts at most their sum; a source without a

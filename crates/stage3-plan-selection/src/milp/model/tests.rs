@@ -4,15 +4,21 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use asap_types::accuracy::{AccuracyMetric, AccuracyScope, AccuracyTarget};
+use asap_types::accuracy::{
+    AccuracyMetric, AccuracyScope, AccuracyTarget, FailureProbabilityBound,
+};
+use asap_types::ir::operator::arguments::{
+    BinaryOpKind, GroupSide, PromQLVectorSetOpKind, VectorGrouping, VectorMatch, VectorMatchKind,
+};
 use asap_types::ir::operator::{AggIntent, Reduction};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
+use asap_types::ir::scalar::expr_ir::CompareOpKind;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::scalar::ExprSemantics;
 use asap_types::ir::scalar::ScalarValue;
 use asap_types::ir::schema::FieldDataType;
-use asap_types::ir::{ASAPOp, Operator};
+use asap_types::ir::{ASAPOp, BinaryOperator, NonASAPOp, Operator};
 use asap_types::ir::{QueryRoot, ScalarExpr};
 use asap_types::stages::{
     CandidateForMemoGroup, CandidateForMemoGroupId, LogicalASAPMemoCandidates, LogicalRequirements,
@@ -29,7 +35,7 @@ use asap_types::test_support::memo_builders::{
 };
 use asap_types::test_support::memo_fixtures;
 use asap_types::test_support::memo_fixtures::arithmetic;
-use asap_types::workload::DataWorkload;
+use asap_types::workload::{DataWorkload, SourceFacts};
 use asap_types::workload::{
     Predictability, Query, QueryRecurrence, QueryRequirements, RepeatedDemand, RepetitionInterval,
     TimestampMs,
@@ -1225,15 +1231,31 @@ fn ddsketch_readouts(
     q: f64,
     levels: &[(f64, f64)],
 ) -> (MemoGroupId, Vec<CandidateForMemoGroupId>) {
-    let m = scan(memo);
-    let window = range(memo, 60, m);
-    let state = sketch_state(
+    readouts_of(
         memo,
-        window,
+        "m",
         SketchAlgorithm::DDSketch,
-        Reduction::PerEntity,
-    );
-    let operator = memo_fixtures::readout(SketchStatistic::Quantile { q }, state);
+        SketchStatistic::Quantile { q },
+        AccuracyMetric::Relative,
+        levels,
+    )
+}
+
+/// `statistic` over a state of `algorithm` over `metric[1m]` per series:
+/// the readout group, one readout per requirement in `error_metric` of
+/// `levels` (ε, δ).
+fn readouts_of(
+    memo: &mut Memo,
+    metric: &str,
+    algorithm: SketchAlgorithm,
+    statistic: SketchStatistic,
+    error_metric: AccuracyMetric,
+    levels: &[(f64, f64)],
+) -> (MemoGroupId, Vec<CandidateForMemoGroupId>) {
+    let rows = scan_group(memo, metric, &["job"], vec![]);
+    let window = range(memo, 60, rows);
+    let state = sketch_state(memo, window, algorithm, Reduction::PerEntity);
+    let operator = memo_fixtures::readout(statistic, state);
     let group = memo.find_or_add_group(operator.clone()).unwrap();
     let readouts = levels
         .iter()
@@ -1246,7 +1268,7 @@ fn ddsketch_readouts(
             );
             readout.input_requirements = vec![LogicalRequirements {
                 required_accuracy: Some(RequiredAccuracy {
-                    metric: AccuracyMetric::Relative,
+                    metric: error_metric,
                     max_error,
                     failure_probability,
                 }),
@@ -1255,6 +1277,25 @@ fn ddsketch_readouts(
         })
         .collect();
     (group, readouts)
+}
+
+/// A memo over sources each declaring only its series count.
+fn memo_with_series(series: &[(&str, u64)]) -> Memo {
+    Memo::new(&DataWorkload {
+        sources: series
+            .iter()
+            .map(|&(metric, series_count)| {
+                (
+                    metric.to_string(),
+                    SourceFacts {
+                        series_count: Some(series_count),
+                        ..SourceFacts::default()
+                    },
+                )
+            })
+            .collect(),
+        ..DataWorkload::default()
+    })
 }
 
 /// Every candidate of `memo` at query time, `OneEvaluation`.
@@ -1297,11 +1338,21 @@ fn relative(max_error: f64) -> AccuracyTarget {
 /// and misses the target, so it bounds nothing: as a bound it would leave
 /// out each 0.01 readout (cost 3 > 2). The same ratio every 10 s and every
 /// 20 s is one context's copy, whose (K) has no rows of its own and
-/// selects alike.
+/// selects alike. The ratio's variables: $E$ and the failure probability
+/// of one value $P$; with `m`'s series declared (`R` bound), also that of
+/// all values $W$.
 #[test]
 fn k_allocates_a_ratio_s_error_among_its_readouts() {
-    for entries in [vec![every(10_000)], vec![every(10_000), every(20_000)]] {
-        let mut memo = empty_memo();
+    for (entries, series_declared) in [
+        (vec![every(10_000)], false),
+        (vec![every(10_000), every(20_000)], false),
+        (vec![every(10_000)], true),
+    ] {
+        let mut memo = if series_declared {
+            memo_with_series(&[("m", 1)])
+        } else {
+            empty_memo()
+        };
         let levels = [(0.02, 1.0), (0.01, 1.0)];
         let (p99, p99_readouts) = ddsketch_readouts(&mut memo, 0.99, &levels);
         let (p50, p50_readouts) = ddsketch_readouts(&mut memo, 0.5, &levels);
@@ -1344,7 +1395,7 @@ fn k_allocates_a_ratio_s_error_among_its_readouts() {
             );
             assert!(!selected.contains(&not_chosen), "{selected:?}");
         }
-        // (K)'s E and D exist only in the 10 s context (the 20 s one is
+        // (K)'s variables exist only in the 10 s context (the 20 s one is
         // its copy), and only for the ratio: a readout's error is fixed.
         let kept = vec![true; selectable.executions().len()];
         let rules = AccuracyRules::of(&inputs).unwrap();
@@ -1359,7 +1410,7 @@ fn k_allocates_a_ratio_s_error_among_its_readouts() {
         );
         let model = ErrorModel::new(&inputs, &rules, &variables.y, &shared);
         let accuracy = AccuracyVariables::new(&model, &mut problem);
-        let one_context = 2;
+        let one_context = if series_declared { 3 } else { 2 };
         assert_eq!(accuracy.variable_count(), one_context, "{entries:?}");
     }
 }
@@ -1402,21 +1453,6 @@ fn k_accepts_error_only_in_the_target_s_metric() {
     assert!(!plans(Some(rank), &level, Some(1), operator));
     let any = AccuracyTarget::max_error(0.01);
     assert!(plans(Some(any), &level, Some(1), operator));
-}
-
-/// A whole-result failure probability 0.01 over 10 values is 1e-3 per
-/// value, which a readout failing with probability 1e-3 meets; over 100
-/// values (1e-4 per value) it does not. With the count unknown no
-/// per-value δ follows, and (K) has no row for it (Pass 2 gives such a
-/// query's readouts no level).
-#[test]
-fn k_divides_a_whole_result_failure_probability_over_the_values() {
-    let level = [(0.01, 1e-3)];
-    let target = relative(0.01).failure_probability(0.01);
-    let operator = QueryRoot::Operator;
-    assert!(plans(Some(target.clone()), &level, Some(10), operator));
-    assert!(!plans(Some(target.clone()), &level, Some(100), operator));
-    assert!(plans(Some(target), &level, None, operator));
 }
 
 /// `scalar(v)` returns the value it reads, so its root accepts the
@@ -1468,8 +1504,9 @@ fn k_caps_a_ratio_s_denominator_at_its_validity_cap() {
 /// 0.01 over the whole result, returning 10 values every 10 s and 100
 /// every 20 s: the readout failing with 1e-3 (cost 1) meets 1e-3 per
 /// value, not 1e-4, where the one failing with 1e-5 (cost 2) is needed.
-/// The contexts differ in what (K) reads ($n_q$), so the 20 s one is not a
-/// copy: each selects its own readout.
+/// The series are undeclared, so each checks each covered value, 10 at
+/// 1e-3 and 100 at 1e-4: the contexts differ in their bounds, so the 20 s
+/// one is not a copy and each selects its own readout.
 #[test]
 fn contexts_whose_queries_split_their_failure_probability_differently_are_not_copies() {
     let mut memo = empty_memo();
@@ -1524,46 +1561,532 @@ fn contexts_whose_queries_split_their_failure_probability_differently_are_not_co
 /// estimates it reads does, so the 5e-4 copy gives it a failure
 /// probability up to 1,000 × 5e-4 = 0.5, not 0.01: only the 1e-5 copy
 /// (1,000 × 1e-5 = 0.01) meets its target. A rule adding the selected
-/// readout's δ once accepts the 5e-4 copy for both queries.
+/// readout's δ once accepts the 5e-4 copy for both queries. The same with
+/// `q` per value at δ = 0.01, whose own level is 0.01 when δ splits over
+/// the estimates one covered value depends on (1,000 × 0.01 = 10 for
+/// `max(q)`). Either way `q` is cheapest reading the 1e-5 copy too, so
+/// only that copy is selected.
 #[test]
 fn k_does_not_let_a_reduction_read_a_level_given_for_a_per_value_query() {
-    let mut memo = Memo::new(&with_series("m", 1_000));
-    let (readout_group, readouts) =
-        ddsketch_readouts(&mut memo, 0.9, &[(0.01, 5e-4), (0.01, 1e-5)]);
+    for (per_value_delta, per_value_level) in [(0.5, 5e-4), (0.01, 0.01)] {
+        let mut memo = Memo::new(&with_series("m", 1_000));
+        let (readout_group, readouts) =
+            ddsketch_readouts(&mut memo, 0.9, &[(0.01, per_value_level), (0.01, 1e-5)]);
+        let max = group(
+            &mut memo,
+            memo_fixtures::aggregate(
+                Reduction::by(vec![]),
+                AggIntent::Max { col: None },
+                readout_group,
+            ),
+        );
+        memo.add_query(MemoQuery {
+            root: QueryRoot::Operator(readout_group),
+            accuracy_target: Some(
+                relative(0.01)
+                    .failure_probability(per_value_delta)
+                    .accuracy_scope(AccuracyScope::PerValue),
+            ),
+            number_of_values_per_query_evaluation: Some(1_000),
+        });
+        memo.add_query(MemoQuery {
+            root: QueryRoot::Operator(max),
+            accuracy_target: Some(relative(0.01).failure_probability(0.01)),
+            number_of_values_per_query_evaluation: Some(1),
+        });
+        let physical = physical(memo.clone(), &every_candidate(&memo));
+        // The scan costs 10, so neither readout is dearer than a feasible
+        // plan.
+        let mut w = vec![0.0; physical.physical_candidates.len()];
+        w[0] = 10.0;
+        w[physical_of(&physical, readouts[0])] = 1.0;
+        w[physical_of(&physical, readouts[1])] = 3.0;
+        let (solved, _) = solve(&physical, &every_10s(2), &w, &[], &[]);
+        let selected = candidates(&solved.unwrap());
+        assert!(
+            selected.contains(&physical_of(&physical, readouts[1])),
+            "{per_value_delta}: {selected:?}"
+        );
+    }
+}
+
+/// Whether a plan meets (K) for `memo`'s queries, every one every 10 s,
+/// with every candidate at cost 1 but the scan of `m` (candidate 0) at
+/// 10: the selected candidates, or `None` when (K) is infeasible.
+fn selected_or_infeasible(memo: &Memo) -> Option<Vec<usize>> {
+    let physical = physical(memo.clone(), &every_candidate(memo));
+    let mut w = vec![1.0; physical.physical_candidates.len()];
+    w[0] = 10.0;
+    match solve(&physical, &every_10s(memo.queries().len()), &w, &[], &[]).0 {
+        Ok(solved) => Some(candidates(&solved)),
+        Err(SelectionMilpError::Infeasible) => None,
+        Err(other) => panic!("{other:?}"),
+    }
+}
+
+/// A query rooted at `root` with `target` and $n_q$ `values`.
+fn add_query(memo: &mut Memo, root: MemoGroupId, target: AccuracyTarget, values: Option<u64>) {
+    memo.add_query(MemoQuery {
+        root: QueryRoot::Operator(root),
+        accuracy_target: Some(target),
+        number_of_values_per_query_evaluation: values,
+    });
+}
+
+/// `q or r`, p90 of `m` and of `r`, 100 series each with the same labels,
+/// over a whole result of $n_q$ = 100 at δ = 0.01: each output value is
+/// copied from one readout value, so the statement fails only when one of
+/// at most 100 estimates does. With both readouts at 1e-4 (Pass 2's split,
+/// 0.01 / min(200, 100 · 1)), each covered value fails with at most
+/// max(1e-4, 1e-4), and 100 of them with 0.01: (K) accepts it. At 2e-4
+/// each, 0.02: it does not. Adding both sides' δ per value (2e-4 against
+/// 1e-4) would leave `or` no sketch plan.
+#[test]
+fn k_accepts_an_or_whose_readouts_meet_delta_over_its_covered_values() {
+    for (level, plans) in [(1e-4, true), (2e-4, false)] {
+        let mut memo = memo_with_series(&[("m", 100), ("r", 100)]);
+        let p90 = SketchStatistic::Quantile { q: 0.9 };
+        let relative_metric = AccuracyMetric::Relative;
+        let (of_m, _) = readouts_of(
+            &mut memo,
+            "m",
+            SketchAlgorithm::DDSketch,
+            p90.clone(),
+            relative_metric,
+            &[(0.05, level)],
+        );
+        let (of_r, _) = readouts_of(
+            &mut memo,
+            "r",
+            SketchAlgorithm::DDSketch,
+            p90,
+            relative_metric,
+            &[(0.05, level)],
+        );
+        let or = group(
+            &mut memo,
+            memo_fixtures::set_operator(PromQLVectorSetOpKind::Or, of_m, of_r),
+        );
+        add_query(
+            &mut memo,
+            or,
+            relative(0.05).failure_probability(0.01),
+            Some(100),
+        );
+        assert_eq!(selected_or_infeasible(&memo).is_some(), plans, "{level}");
+    }
+}
+
+/// `q * on() group_left e`: `q` exact over 1000 series of `m`, `e` the p90
+/// of one series of `e`, over the whole result of 1000 values at δ =
+/// 0.01. Every output value reads `e`'s one estimate, so the result fails
+/// only when that estimate does: a readout failing with 0.01 meets it,
+/// one failing with 0.02 does not. Splitting δ over the 1000 output
+/// values (1e-5 each) would leave it no sketch plan.
+#[test]
+fn k_charges_a_readout_every_series_matches_once() {
+    for (level, plans) in [(0.01, true), (0.02, false)] {
+        let mut memo = memo_with_series(&[("m", 1_000), ("e", 1)]);
+        let rows = scan(&mut memo);
+        let window = range(&mut memo, 60, rows);
+        let q = group(
+            &mut memo,
+            memo_fixtures::aggregate(Reduction::PerEntity, AggIntent::Max { col: None }, window),
+        );
+        let (e, _) = readouts_of(
+            &mut memo,
+            "e",
+            SketchAlgorithm::DDSketch,
+            SketchStatistic::Quantile { q: 0.9 },
+            AccuracyMetric::Relative,
+            &[(0.01, level)],
+        );
+        let matched = group(
+            &mut memo,
+            Operator::NonASAP(NonASAPOp::BinaryOp {
+                operator: BinaryOperator {
+                    checked_relative_division: false,
+                    checked_finite_division: false,
+                    kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
+                    vector_match: Some(VectorMatch {
+                        kind: VectorMatchKind::On,
+                        labels: vec![],
+                        grouping: Some(VectorGrouping {
+                            side: GroupSide::Left,
+                            labels: vec![],
+                        }),
+                    }),
+                },
+                return_bool: false,
+                lhs: q,
+                rhs: e,
+            }),
+        );
+        add_query(
+            &mut memo,
+            matched,
+            relative(0.05).failure_probability(0.01),
+            Some(1_000),
+        );
+        assert_eq!(selected_or_infeasible(&memo).is_some(), plans, "{level}");
+    }
+}
+
+/// `q and r` reads only which series `r` has, and `q / count(r)` none of
+/// `r`'s values (β = 0 on `r`), so `r`'s readout, failing with 0.5 at a
+/// level another query gave it, cannot make the output miss: over one
+/// series at δ = 0.01, `q`'s readout at 0.01 meets the target alone.
+#[test]
+fn k_adds_nothing_for_an_input_whose_values_are_not_read() {
+    for division in [false, true] {
+        let mut memo = memo_with_series(&[("m", 1)]);
+        let (q, _) = ddsketch_readouts(&mut memo, 0.9, &[(0.01, 0.01)]);
+        let (r, _) = ddsketch_readouts(&mut memo, 0.5, &[(0.01, 0.5)]);
+        let root = if division {
+            let count = group(
+                &mut memo,
+                memo_fixtures::aggregate(Reduction::by(vec![]), AggIntent::Count, r),
+            );
+            group(&mut memo, arithmetic(ArithmeticOpKind::Div, q, count))
+        } else {
+            group(
+                &mut memo,
+                memo_fixtures::set_operator(PromQLVectorSetOpKind::And, q, r),
+            )
+        };
+        add_query(
+            &mut memo,
+            root,
+            relative(0.05).failure_probability(0.01),
+            Some(1),
+        );
+        assert!(selected_or_infeasible(&memo).is_some(), "{division}");
+    }
+}
+
+/// `q + r` with `q` exact and `r` a p90 readout at 0.01 (absolute error,
+/// which a sum passes on), one series each:
+/// an exact input has no estimate to fail, so the sum fails only with
+/// `r`, 0.01, within δ = 0.01. The sum is not constant (one of its inputs
+/// is a choice), so it has an error bound $E$ and both failure
+/// probabilities, $P$ and $W$ (`R` is bound): three variables.
+#[test]
+fn k_counts_an_exact_input_as_never_failing() {
+    let mut memo = memo_with_series(&[("m", 1)]);
+    let rows = scan(&mut memo);
+    let window = range(&mut memo, 60, rows);
+    let q = group(
+        &mut memo,
+        memo_fixtures::aggregate(Reduction::PerEntity, AggIntent::Max { col: None }, window),
+    );
+    let (r, _) = readouts_of(
+        &mut memo,
+        "m",
+        SketchAlgorithm::DDSketch,
+        SketchStatistic::Quantile { q: 0.9 },
+        AccuracyMetric::ABSOLUTE,
+        &[(0.01, 0.01)],
+    );
+    let sum = group(&mut memo, arithmetic(ArithmeticOpKind::Add, q, r));
+    add_query(
+        &mut memo,
+        sum,
+        AccuracyTarget::max_error(0.05)
+            .accuracy_metric(AccuracyMetric::ABSOLUTE)
+            .failure_probability(0.01),
+        Some(1),
+    );
+    assert!(selected_or_infeasible(&memo).is_some());
+    let physical = physical(memo.clone(), &every_candidate(&memo));
+    let w = vec![1.0; physical.physical_candidates.len()];
+    let entries = every_10s(1);
+    let (selectable, costs) = selection_inputs(&physical, &entries, &w, &[], &[]);
+    let inputs = SelectionInputs {
+        physical: &physical,
+        entries: &entries,
+        selectable: &selectable,
+        costs: &costs,
+    };
+    let kept = vec![true; selectable.executions().len()];
+    let rules = AccuracyRules::of(&inputs).unwrap();
+    let shared = copies_in_equivalent_contexts(&inputs, &kept, Some(&rules));
+    let mut problem = ProblemVariables::new();
+    let variables = selection_variables(
+        &inputs,
+        &kept,
+        &shared,
+        &Components::of(&inputs),
+        &mut problem,
+    );
+    let model = ErrorModel::new(&inputs, &rules, &variables.y, &shared);
+    assert_eq!(
+        AccuracyVariables::new(&model, &mut problem).variable_count(),
+        3
+    );
+}
+
+/// A readout over 100 series read per value at δ = 0.01: each value fails
+/// only with its own estimate, so the readout at 0.01 meets it, whatever
+/// the 100 values; one at 0.02 does not.
+#[test]
+fn k_does_not_divide_a_per_value_failure_probability_by_the_values() {
+    for (level, plans) in [(0.01, true), (0.02, false)] {
+        let mut memo = memo_with_series(&[("m", 100)]);
+        let (readout, _) = ddsketch_readouts(&mut memo, 0.5, &[(0.01, level)]);
+        add_query(
+            &mut memo,
+            readout,
+            relative(0.01)
+                .failure_probability(0.01)
+                .accuracy_scope(AccuracyScope::PerValue),
+            Some(100),
+        );
+        assert_eq!(selected_or_infeasible(&memo).is_some(), plans, "{level}");
+    }
+}
+
+/// A readout failing with 1e-3 read over the whole result at δ = 0.01.
+/// With its series undeclared, (K) checks each covered value at δ / $n_q$:
+/// 1e-3 over 10 values (10 · 1e-3), not over 100. With $n_q$ unknown too
+/// no bound is known: (K) has no row, and the query reads the readout
+/// group only exactly, by (X), so with only readouts in it no plan
+/// exists. With its 10 series declared and $n_q$ unknown, every estimate
+/// read bounds it: 10 · 1e-3 = 0.01.
+#[test]
+fn k_bounds_a_whole_result_by_its_covered_values_or_every_estimate() {
+    let target = relative(0.01).failure_probability(0.01);
+    let plans_over = |memo: Memo, values: Option<u64>, exact_only: bool| {
+        let mut memo = memo;
+        let (readout, _) = ddsketch_readouts(&mut memo, 0.5, &[(0.01, 1e-3)]);
+        add_query(&mut memo, readout, target.clone(), values);
+        let mut physical = physical(memo.clone(), &every_candidate(&memo));
+        if exact_only {
+            // (X) lists the readout group and every group below it.
+            let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) =
+                memo.groups()[readout.0 as usize].expression
+            else {
+                unreachable!("a readout group")
+            };
+            physical.logical_candidates.exact_only_groups_of_query =
+                vec![[readout, summary_input].into()];
+        }
+        let w = vec![1.0; physical.physical_candidates.len()];
+        match solve(&physical, &every_10s(1), &w, &[], &[]).0 {
+            Ok(_) => true,
+            Err(SelectionMilpError::Infeasible) => false,
+            Err(other) => panic!("{other:?}"),
+        }
+    };
+    assert!(plans_over(empty_memo(), Some(10), false));
+    assert!(!plans_over(empty_memo(), Some(100), false));
+    assert!(!plans_over(empty_memo(), None, true));
+    assert!(plans_over(memo_with_series(&[("m", 10)]), None, false));
+}
+
+/// A readout over 1000 series read over the groups holding at least 5% of
+/// the records, at δ = 0.01: at most 20 groups qualify, so (K) checks
+/// each of them at 0.01 / 20 = 5e-4. A readout at 5e-4 meets it; one at
+/// 1e-3 does not.
+#[test]
+fn k_bounds_a_record_share_scope_by_its_covered_groups() {
+    for (level, plans) in [(5e-4, true), (1e-3, false)] {
+        let mut memo = memo_with_series(&[("m", 1_000)]);
+        let (readout, _) = ddsketch_readouts(&mut memo, 0.5, &[(0.01, level)]);
+        add_query(
+            &mut memo,
+            readout,
+            relative(0.01)
+                .failure_probability(0.01)
+                .accuracy_scope(AccuracyScope::GroupsWithRecordShareAtLeast(0.05)),
+            Some(1_000),
+        );
+        assert_eq!(selected_or_infeasible(&memo).is_some(), plans, "{level}");
+    }
+}
+
+/// `readout or {job="a"}(readout)`, the same p90 readout of 100 series on
+/// both sides, over the whole result of 100 values at δ = 0.01: each
+/// output value copies one estimate, so the readout at 1e-4 meets each
+/// covered value (max(1e-4, 1e-4), 100 values: 0.01), although its two
+/// paths read 200 estimates' worth.
+#[test]
+fn k_charges_an_estimate_both_sides_of_an_or_read_once_per_value() {
+    let mut memo = memo_with_series(&[("m", 100)]);
+    let (readout, _) = ddsketch_readouts(&mut memo, 0.9, &[(0.05, 1e-4)]);
+    let or = or_of_readout_and_its_filter(&mut memo, readout);
+    add_query(
+        &mut memo,
+        or,
+        relative(0.05).failure_probability(0.01),
+        Some(100),
+    );
+    assert!(selected_or_infeasible(&memo).is_some());
+}
+
+/// `readout or {job="a"}(readout)`.
+fn or_of_readout_and_its_filter(memo: &mut Memo, readout: MemoGroupId) -> MemoGroupId {
+    let job_a = memo_fixtures::compare(
+        2,
+        CompareOpKind::Eq,
+        ScalarValue::Utf8("a".into()),
+        ExprSemantics::Promql,
+    );
+    let filtered = group(memo, memo_fixtures::filter(job_a, readout));
+    group(
+        memo,
+        memo_fixtures::set_operator(PromQLVectorSetOpKind::Or, readout, filtered),
+    )
+}
+
+/// `max(readout or {job="a"}(readout))` over 100 series at δ = 0.01: the
+/// max reads every estimate of both sides, 200 by path, so (K) checks
+/// every estimate read and charges each estimate once per path: the
+/// readout at 1e-4 gives 200 · 1e-4 = 0.02, and the dearer one at 5e-5
+/// (0.01) is selected. Only 100 distinct estimates can fail, so 1e-4
+/// would have been enough (`accuracy-models.md`, "What the rows lose",
+/// item 1): a stricter δ than needed, never a missed target.
+#[test]
+fn k_charges_an_estimate_two_paths_reach_once_per_path() {
+    let mut memo = memo_with_series(&[("m", 100)]);
+    let (readout, readouts) = ddsketch_readouts(&mut memo, 0.9, &[(0.05, 1e-4), (0.05, 5e-5)]);
+    let or = or_of_readout_and_its_filter(&mut memo, readout);
     let max = group(
         &mut memo,
-        memo_fixtures::aggregate(
-            Reduction::by(vec![]),
-            AggIntent::Max { col: None },
-            readout_group,
-        ),
+        memo_fixtures::aggregate(Reduction::by(vec![]), AggIntent::Max { col: None }, or),
     );
-    memo.add_query(MemoQuery {
-        root: QueryRoot::Operator(readout_group),
-        accuracy_target: Some(
-            relative(0.01)
-                .failure_probability(0.5)
-                .accuracy_scope(AccuracyScope::PerValue),
-        ),
-        number_of_values_per_query_evaluation: Some(1_000),
-    });
-    memo.add_query(MemoQuery {
-        root: QueryRoot::Operator(max),
-        accuracy_target: Some(relative(0.01).failure_probability(0.01)),
-        number_of_values_per_query_evaluation: Some(1),
-    });
+    add_query(
+        &mut memo,
+        max,
+        relative(0.05).failure_probability(0.01),
+        Some(1),
+    );
     let physical = physical(memo.clone(), &every_candidate(&memo));
-    // The scan costs 10, so neither readout is dearer than a feasible plan.
     let mut w = vec![0.0; physical.physical_candidates.len()];
     w[0] = 10.0;
     w[physical_of(&physical, readouts[0])] = 1.0;
-    w[physical_of(&physical, readouts[1])] = 3.0;
-    let (solved, _) = solve(&physical, &every_10s(2), &w, &[], &[]);
-    let selected = candidates(&solved.unwrap());
+    w[physical_of(&physical, readouts[1])] = 2.0;
+    let selected = candidates(&solve(&physical, &every_10s(1), &w, &[], &[]).0.unwrap());
     assert!(
         selected.contains(&physical_of(&physical, readouts[1])),
         "{selected:?}"
     );
+    assert!(
+        !selected.contains(&physical_of(&physical, readouts[0])),
+        "{selected:?}"
+    );
+}
+
+/// A top-k readout over 10 series, read per value at δ = 0.01: its output
+/// keys are chosen by all 10 estimates it ranks, so one output value
+/// fails when any of them does. The readout at 1e-3 meets it (10 · 1e-3),
+/// at 2e-3 it does not.
+#[test]
+fn k_charges_a_top_k_readout_for_every_estimate_it_ranks() {
+    for (level, plans) in [(1e-3, true), (2e-3, false)] {
+        let mut memo = memo_with_series(&[("m", 10)]);
+        let (top_k, _) = readouts_of(
+            &mut memo,
+            "m",
+            SketchAlgorithm::CmsWithHeap,
+            SketchStatistic::TopK { k: 3 },
+            AccuracyMetric::Relative,
+            &[(0.01, level)],
+        );
+        add_query(
+            &mut memo,
+            top_k,
+            AccuracyTarget::max_error(0.01)
+                .failure_probability(0.01)
+                .accuracy_scope(AccuracyScope::PerValue),
+            Some(30),
+        );
+        assert_eq!(selected_or_infeasible(&memo).is_some(), plans, "{level}");
+    }
+}
+
+/// The p90 and the p50 readouts of 100 series concatenated, per value at
+/// δ = 0.01: each row comes from one readout, so it fails only with that
+/// readout's estimate: readouts at 0.01 meet it, at 0.02 they do not.
+#[test]
+fn k_charges_a_concatenation_one_input_per_value() {
+    for (level, plans) in [(0.01, true), (0.02, false)] {
+        let mut memo = memo_with_series(&[("m", 100)]);
+        let (p90, _) = ddsketch_readouts(&mut memo, 0.9, &[(0.01, level)]);
+        let (p50, _) = ddsketch_readouts(&mut memo, 0.5, &[(0.01, level)]);
+        let both = group(
+            &mut memo,
+            Operator::NonASAP(NonASAPOp::Concat {
+                children: vec![p90, p50],
+            }),
+        );
+        add_query(
+            &mut memo,
+            both,
+            relative(0.01)
+                .failure_probability(0.01)
+                .accuracy_scope(AccuracyScope::PerValue),
+            Some(200),
+        );
+        assert_eq!(selected_or_infeasible(&memo).is_some(), plans, "{level}");
+    }
+}
+
+/// `scalar(p90) + scalar(p50)` over one series at δ = 0.01, each readout
+/// required with no error (the operands of a scalar expression no
+/// contract covers are read exactly) but failing with `level`: the sum
+/// fails when either does, so its one row adds both roots' failure
+/// probabilities. 0.005 each meets 0.01; 0.006 each (0.012) does not,
+/// although each root alone is within 0.01.
+#[test]
+fn k_sums_the_failure_probabilities_of_a_query_s_roots() {
+    for (level, plans) in [(0.005, true), (0.006, false)] {
+        let mut memo = memo_with_series(&[("m", 1)]);
+        let (p90, _) = ddsketch_readouts(&mut memo, 0.9, &[(0.0, level)]);
+        let (p50, _) = ddsketch_readouts(&mut memo, 0.5, &[(0.0, level)]);
+        memo.add_query(MemoQuery {
+            root: QueryRoot::Scalar(ScalarExpr::Arithmetic {
+                op: ArithmeticOpKind::Add,
+                left: Box::new(ScalarExpr::PromqlScalarFromVector(p90)),
+                right: Box::new(ScalarExpr::PromqlScalarFromVector(p50)),
+                semantics: ExprSemantics::Promql,
+            }),
+            accuracy_target: Some(relative(0.01).failure_probability(0.01)),
+            number_of_values_per_query_evaluation: Some(1),
+        });
+        assert_eq!(selected_or_infeasible(&memo).is_some(), plans, "{level}");
+    }
+}
+
+/// The same readout over 10 series every 10 s and every 20 s, declaring
+/// 10 and 50 values, both over the whole result at δ = 0.01: each reads
+/// its 10 estimates (no more than its values), so both check every
+/// estimate read against 0.01, and the 20 s context is a copy.
+#[test]
+fn contexts_whose_queries_bound_every_estimate_read_at_equal_delta_are_copies() {
+    let mut memo = memo_with_series(&[("m", 10)]);
+    let (readout_group, _) = ddsketch_readouts(&mut memo, 0.5, &[(0.01, 1e-3)]);
+    for values in [10, 50] {
+        add_query(
+            &mut memo,
+            readout_group,
+            relative(0.01).failure_probability(0.01),
+            Some(values),
+        );
+    }
+    let physical = physical(memo.clone(), &every_candidate(&memo));
+    let w = vec![1.0; physical.physical_candidates.len()];
+    let entries = [every(10_000), every(20_000)];
+    let (selectable, costs) = selection_inputs(&physical, &entries, &w, &[], &[]);
+    let inputs = SelectionInputs {
+        physical: &physical,
+        entries: &entries,
+        selectable: &selectable,
+        costs: &costs,
+    };
+    let kept = vec![true; selectable.executions().len()];
+    let rules = AccuracyRules::of(&inputs);
+    let shared = copies_in_equivalent_contexts(&inputs, &kept, rules.as_ref());
+    assert_eq!(shared.original_of_query, vec![QueryId(0), QueryId(0)]);
 }
 
 /// The same readout group as `q` every 10 s and as `scalar(q) * 2` every
@@ -1705,20 +2228,26 @@ fn a_selection_missing_its_target_at_the_default_tolerance_is_solved_again_at_th
 /// first solve selects two (1.08e-6, within HiGHS's default tolerance of
 /// the 1e-6 limit), the exact check finds the miss, and at tolerance 1e-10
 /// no plan meets the limit, so HiGHS reports the MILP infeasible. The
-/// error names the query the first solve missed and its per-value δ,
-/// not a plan-less "infeasible" that never mentions accuracy.
+/// error names the query the first solve missed and its bound: each of
+/// the 1e4 covered values at 1e-6 (the readouts' values per evaluation
+/// are unknown, so every estimate read bounds nothing), not a plan-less
+/// "infeasible" that never mentions accuracy.
 #[test]
 fn a_target_no_plan_meets_once_solved_at_the_least_tolerance_names_the_missed_query() {
     let solved = solve_ratio_over_values(10_000, [5.4e-7, 5.4e-7]);
     let Err(SelectionMilpError::TargetBelowSolverPrecision {
         query,
-        failure_probability_per_output_value: Some(delta),
+        failure_probability_bound:
+            Some(FailureProbabilityBound::EachCoveredValue {
+                values_covered: 10_000,
+                limit,
+            }),
     }) = solved
     else {
         panic!("{solved:?}");
     };
     assert_eq!(query, QueryId(0));
-    assert!((delta - 1e-6).abs() <= 1e-12, "{delta}");
+    assert!((limit - 1e-6).abs() <= 1e-12, "{limit}");
 }
 
 /// The same ratio over readouts failing with 4e-7 (cost 1) or 3e-7
@@ -1746,12 +2275,14 @@ fn a_per_value_failure_probability_below_the_solver_precision_is_an_error() {
         let solved = solve_ratio_over_values(values, failure_probabilities);
         let Err(SelectionMilpError::TargetBelowSolverPrecision {
             query,
-            failure_probability_per_output_value: Some(delta),
+            failure_probability_bound: Some(FailureProbabilityBound::EachCoveredValue { limit, .. }),
         }) = solved
         else {
             panic!("{values}: {solved:?}");
         };
         assert_eq!(query, QueryId(0));
-        assert!((delta - per_value).abs() <= 1e-6 * per_value, "{delta}");
+        assert!((limit - per_value).abs() <= 1e-6 * per_value, "{limit}");
     }
 }
+
+mod union_bound_oracle;
