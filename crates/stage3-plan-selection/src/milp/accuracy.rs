@@ -16,8 +16,7 @@ use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Va
 
 use asap_accuracy::{
     inputs_read_value_by_value, query_roots_with_target, ranks_by_estimate,
-    readout_value_counts_of_queries, takes_each_value_from_one_input, tolerated_limit,
-    ErrorContract, ErrorMetricsOfMemo,
+    takes_each_value_from_one_input, tolerated_limit, ErrorContract, ErrorMetricsOfMemo,
 };
 use asap_types::accuracy::{AccuracyMetric, FailureProbabilityBound};
 use asap_types::stages::{CandidateForMemoGroupId, MemoGroupId};
@@ -30,12 +29,13 @@ use crate::selectable::QueryId;
 /// (by [`AccuracyMetric::index`]) and two failure probabilities, each the
 /// summed δ of estimates (one readout value in one evaluation) by the
 /// union bound (`accuracy-models.md`, "Which estimates a result depends
-/// on"). A failure probability is `None` when no declared fact bounds it
-/// (a readout whose values per evaluation are unknown).
+/// on"), in multiples of [`AccuracyRules::of`]'s failure-probability unit.
+/// A failure probability is `None` when no declared fact bounds it (a
+/// readout whose estimates per evaluation are unknown).
 ///
 /// Example: a DDSketch readout over 1000 series required at relative 0.01
 /// with δ = 1e-3 is 0.01 in `Relative`, 0 in every other metric, 1e-3 for
-/// one value and 1000 × 1e-3 = 1 for all of them.
+/// one value and 1000 × 1e-3 = 1 for all of them (in a unit of 1).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ExecutionError {
     /// $E_{c,m}$ per metric.
@@ -118,25 +118,42 @@ impl ExecutionError {
 }
 
 /// How an execution's output values read its inputs, which decides how
-/// (K) composes its failure probabilities (`asap_accuracy`'s operator
-/// classes, the ones Pass 2's split counts by).
-#[derive(Debug, Clone, Copy)]
+/// (K) composes its error and failure probabilities (`asap_accuracy`'s
+/// operator classes, the ones Pass 2's split counts by).
+#[derive(Debug, Clone)]
 struct HowInputsAreRead {
     /// Its first so many inputs are read value by value: each output value
     /// reads one value of each ([`inputs_read_value_by_value`]); every
     /// other input is read whole. `None`: all are read whole (a reduction).
     value_by_value: Option<usize>,
     /// Each output value is copied from one input (`or`, a concatenation:
-    /// [`takes_each_value_from_one_input`]), so the inputs read value by
-    /// value add the largest of their one-value failure probabilities, not
-    /// their sum.
+    /// [`takes_each_value_from_one_input`]), so its error is the largest of
+    /// the inputs', not their sum.
     each_value_from_one_input: bool,
+    /// Each output value depends on the estimates of one input only
+    /// (`ErrorMetricsOfMemo::each_value_depends_on_one_input`): the inputs
+    /// read value by value add the largest of their one-value failure
+    /// probabilities, not their sum. Not for `topk(3, q) or r`, whose
+    /// values from `r` depend on the top-k's choice too.
+    each_value_depends_on_one_input: bool,
+    /// Per input: whether an estimate it depends on can make the output
+    /// miss (`ErrorMetricsOfMemo::input_estimates_reach_output`), so its
+    /// failure probabilities add to the output's. Not a count's input, nor
+    /// the right side of `and` and `unless`, unless a top-k chooses its
+    /// values.
+    estimates_reach_output: Vec<bool>,
 }
 
 impl HowInputsAreRead {
     /// Whether input `input` is read value by value.
     fn reads_value_by_value(&self, input: usize) -> bool {
         self.value_by_value.is_some_and(|count| input < count)
+    }
+
+    /// Whether an estimate input `input` depends on can make the output
+    /// miss ([`Self::estimates_reach_output`]).
+    fn estimates_of_input_reach_output(&self, input: usize) -> bool {
+        self.estimates_reach_output[input]
     }
 }
 
@@ -166,8 +183,9 @@ pub(super) struct AccuracyRules {
     /// Per execution, the error it adds: a readout's requirement
     /// (`CandidateForMemoGroup::required_accuracy`), its δ for one value
     /// (`R` times it for a top-k, which ranks every estimate) and `R`
-    /// times its δ for all values (`Memo::max_estimates_per_evaluation`);
-    /// 0 for any other.
+    /// times its δ for all values (`Memo::max_estimates_per_evaluation`;
+    /// 0 at δ = 0 whatever `R`), in the failure-probability unit; 0 for
+    /// any other.
     own_error_per_execution: Vec<ExecutionError>,
     /// Per execution, how its output values read its inputs.
     how_inputs_are_read: Vec<HowInputsAreRead>,
@@ -183,16 +201,15 @@ pub(super) struct AccuracyRules {
     roots: HashMap<(QueryId, MemoGroupId), RootLimits>,
 }
 
-/// What a root check of (K) bounds one query output by, each limit
-/// already widened by [`tolerated_limit`] as the edge check widens it.
-/// Two outputs with equal limits have the same root rows, so they compare
-/// and hash by the limits' bits.
+/// What a root check of (K) bounds one query output by. The limits are
+/// widened by [`tolerated_limit`] where they are compared, as the edge
+/// check widens them. Two outputs with equal limits have the same root
+/// rows, so they compare and hash by the limits' bits.
 ///
 /// Example: `p99 / p50` at relative 0.03 with δ = 0.01 over a whole result
 /// of 100 values, reading two readouts over 100 series each, allows 0.03
-/// (widened) in `Relative`, 0 in every other metric, and checks each
-/// covered value: its one-value failure probability at most 1e-4
-/// (widened).
+/// in `Relative`, 0 in every other metric, and checks each covered value:
+/// its one-value failure probability at most 1e-4 (1 in a unit of 1e-4).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RootLimits {
     /// Per metric (by [`AccuracyMetric::index`]), the error the output may
@@ -200,25 +217,25 @@ pub(super) struct RootLimits {
     /// ([`query_roots_with_target`]), 0 in any other.
     tolerated_error_per_metric: [f64; AccuracyMetric::COUNT],
     /// The union bound the query's failure probability is checked by, with
-    /// its limit (`AccuracyTarget::failure_probability_bound`, widened by
-    /// [`tolerated_limit`] where it is compared;
-    /// from the readout counts Pass 2 splits δ by); `None` without a δ,
-    /// or with neither bound known (Pass 2 then gives the query's readouts
-    /// no level, and (X) makes it read them exactly).
+    /// its limit in the failure-probability unit (the bound Pass 2 split δ
+    /// by, `LogicalASAPMemoCandidates::failure_probability_bound`);
+    /// `None` without a δ, or with neither bound known (Pass 2 then gives
+    /// the query's readouts no level, and (X) makes it read them exactly).
     failure_probability_bound: Option<FailureProbabilityBound>,
 }
 
 impl RootLimits {
-    /// The limits' bits, which equality, hashing and order compare.
-    fn bits(&self) -> ([u64; AccuracyMetric::COUNT], Option<(u64, u64)>) {
+    /// The limits' bits, which equality, hashing and order compare: the
+    /// error per metric, and the bound's kind and limit (the rows read no
+    /// more of it).
+    fn bits(&self) -> ([u64; AccuracyMetric::COUNT], Option<(bool, u64)>) {
         (
             self.tolerated_error_per_metric.map(f64::to_bits),
-            self.failure_probability_bound.map(|bound| match bound {
-                FailureProbabilityBound::EveryEstimateRead { limit } => (0, limit.to_bits()),
-                FailureProbabilityBound::EachCoveredValue {
-                    values_covered,
-                    limit,
-                } => (values_covered.max(1), limit.to_bits()),
+            self.failure_probability_bound.map(|bound| {
+                (
+                    matches!(bound, FailureProbabilityBound::EachCoveredValue { .. }),
+                    bound.limit().to_bits(),
+                )
             }),
         )
     }
@@ -275,6 +292,23 @@ impl AccuracyRules {
                 physical.physical_candidates[execution.candidate.0].logical_candidate_id
             })
             .collect();
+        let failure_probability_bound_of_query: Vec<Option<FailureProbabilityBound>> =
+            (0..memo.queries().len())
+                .map(|query| physical.logical_candidates.failure_probability_bound(query))
+                .collect();
+        // The smallest positive limit a root checks: (K) holds failure
+        // probabilities in multiples of it, so the tightest limit is 1 and
+        // the solver's absolute tolerances (1e-7, at least 1e-10) are
+        // relative to it. A limit of 1e-12 in absolute terms would sit
+        // below them; the rows are linear and homogeneous in failure
+        // probability, so scaling them all changes no selection.
+        let failure_probability_unit = failure_probability_bound_of_query
+            .iter()
+            .flatten()
+            .map(FailureProbabilityBound::limit)
+            .filter(|&limit| limit > 0.0)
+            .min_by(f64::total_cmp)
+            .unwrap_or(1.0);
         let own_error_per_execution = candidate_of_execution
             .iter()
             .map(|&id| {
@@ -282,10 +316,14 @@ impl AccuracyRules {
                 let candidate = memo.candidate(id);
                 if let Some(required) = candidate.required_accuracy() {
                     own.error_bound_per_metric[required.metric.index()] = required.max_error;
-                    let delta = required.failure_probability;
-                    let of_every_estimate = memo
-                        .max_estimates_per_evaluation(id.group)
-                        .map(|estimates| estimates as f64 * delta);
+                    let delta = required.failure_probability / failure_probability_unit;
+                    // At δ = 0 no estimate can fail, however many there are.
+                    let of_every_estimate = if delta == 0.0 {
+                        Some(0.0)
+                    } else {
+                        memo.max_estimates_per_evaluation(id.group)
+                            .map(|estimates| estimates as f64 * delta)
+                    };
                     own.failure_probability_of_one_value =
                         if ranks_by_estimate(&candidate.expression.operator) {
                             of_every_estimate
@@ -297,6 +335,7 @@ impl AccuracyRules {
                 own
             })
             .collect();
+        let error_metrics = ErrorMetricsOfMemo::of(memo, &order);
         let how_inputs_are_read = candidate_of_execution
             .iter()
             .map(|&id| {
@@ -304,6 +343,11 @@ impl AccuracyRules {
                 HowInputsAreRead {
                     value_by_value: inputs_read_value_by_value(operator),
                     each_value_from_one_input: takes_each_value_from_one_input(operator),
+                    each_value_depends_on_one_input: error_metrics
+                        .each_value_depends_on_one_input(memo, id),
+                    estimates_reach_output: (0..operator.children().len())
+                        .map(|input| error_metrics.input_estimates_reach_output(memo, id, input))
+                        .collect(),
                 }
             })
             .collect();
@@ -324,17 +368,11 @@ impl AccuracyRules {
             (0..candidate_of_execution.len()).collect();
         executions_producers_first
             .sort_by_key(|&c| position_in_order[candidate_of_execution[c].group.0 as usize]);
-        let error_metrics = ErrorMetricsOfMemo::of(memo, &order);
-        let readout_values = readout_value_counts_of_queries(memo, &error_metrics, &order);
         let roots = query_roots_with_target(memo)
             .into_iter()
             .map(|(query, root, target, allowed_metrics)| {
-                let failure_probability_bound = readout_values.get(&query).and_then(|&counts| {
-                    target.failure_probability_bound(
-                        memo.queries()[query].number_of_values_per_query_evaluation,
-                        counts,
-                    )
-                });
+                let failure_probability_bound = failure_probability_bound_of_query[query]
+                    .map(|bound| bound.in_units_of(failure_probability_unit));
                 let mut tolerated_error_per_metric = [0.0; AccuracyMetric::COUNT];
                 for metric in allowed_metrics {
                     tolerated_error_per_metric[metric.index()] = tolerated_limit(target.max_error);
@@ -362,18 +400,6 @@ impl AccuracyRules {
     /// there.
     pub(super) fn root_limits(&self, query: QueryId, group: MemoGroupId) -> Option<&RootLimits> {
         self.roots.get(&(query, group))
-    }
-
-    /// The union bound `query`'s failure probability is checked by, with its
-    /// limit; `None` without one.
-    pub(super) fn failure_probability_bound(
-        &self,
-        query: QueryId,
-    ) -> Option<FailureProbabilityBound> {
-        self.roots
-            .iter()
-            .find(|((root_query, _), _)| *root_query == query)
-            .and_then(|(_, limits)| limits.failure_probability_bound)
     }
 
     /// Execution `c`'s error contract in metric `m` (by
@@ -422,15 +448,12 @@ impl AccuracyRules {
             error: own,
             inputs_admitted: true,
         };
-        let how = self.how_inputs_are_read[c];
+        let how = &self.how_inputs_are_read[c];
         let mut one_value_of_inputs_read_value_by_value = Vec::new();
         let mut all_values_of_inputs_read_whole = Vec::new();
         let mut all_values_of_inputs = Vec::new();
         for (i, read) in inputs_read {
-            if self
-                .error_metrics
-                .input_error_reaches_output(self.candidate_of_execution[c], i)
-            {
+            if how.estimates_of_input_reach_output(i) {
                 all_values_of_inputs.push(read.failure_probability_of_all_values);
                 if how.reads_value_by_value(i) {
                     one_value_of_inputs_read_value_by_value
@@ -465,7 +488,7 @@ impl AccuracyRules {
                 }
             }
         }
-        let of_inputs_read_value_by_value = if how.each_value_from_one_input {
+        let of_inputs_read_value_by_value = if how.each_value_depends_on_one_input {
             largest_of(one_value_of_inputs_read_value_by_value)
         } else {
             sum_of(one_value_of_inputs_read_value_by_value)
@@ -814,12 +837,9 @@ impl<'a> ErrorModel<'a> {
             if !self.has_rows[c] || !(one_value || all_values) {
                 continue;
             }
-            let how = rules.how_inputs_are_read[c];
+            let how = &rules.how_inputs_are_read[c];
             for (i, edges) in self.selectable_edges_per_input[c].iter().enumerate() {
-                if !rules
-                    .error_metrics
-                    .input_error_reaches_output(rules.candidate_of_execution[c], i)
-                {
+                if !how.estimates_of_input_reach_output(i) {
                     continue;
                 }
                 let value_by_value = how.reads_value_by_value(i);
@@ -1002,7 +1022,7 @@ pub(super) fn accuracy_constraints(
         // inputs read whole, and Σ_i HW_{c,i}.
         let has_one_value = accuracy.failure_probability_of_one_value.contains_key(&c);
         let has_all_values = accuracy.failure_probability_of_all_values.contains_key(&c);
-        let how = rules.how_inputs_are_read[c];
+        let how = &rules.how_inputs_are_read[c];
         let mut one_value_of_inputs_read_value_by_value: Vec<Expression> = Vec::new();
         let mut all_values_of_inputs_read_whole = Expression::default();
         let mut all_values_of_inputs = Expression::default();
@@ -1039,12 +1059,10 @@ pub(super) fn accuracy_constraints(
                 }
                 error_of_input.push(contract.error_factor_per_input[i] * of_input);
             }
-            // Only an input whose error reaches the output can make it
-            // miss: a count's input and the right of `and` add nothing.
-            if !rules
-                .error_metrics
-                .input_error_reaches_output(rules.candidate_of_execution[c], i)
-            {
+            // Only an input whose estimates reach the output can make it
+            // miss: a count's input and the right of `and` add nothing,
+            // unless a top-k chooses their values.
+            if !how.estimates_of_input_reach_output(i) {
                 continue;
             }
             let value_by_value = how.reads_value_by_value(i);
@@ -1104,7 +1122,8 @@ pub(super) fn accuracy_constraints(
                 .failure_probability_of_one_value
                 .expect("a bounded ceiling has a bounded own term");
             let whole = all_values_of_inputs_read_whole;
-            if how.each_value_from_one_input && !one_value_of_inputs_read_value_by_value.is_empty()
+            if how.each_value_depends_on_one_input
+                && !one_value_of_inputs_read_value_by_value.is_empty()
             {
                 for of_input in one_value_of_inputs_read_value_by_value {
                     constraints.push(constraint!(of_one_value >= own + of_input + whole.clone()));
@@ -1124,6 +1143,10 @@ pub(super) fn accuracy_constraints(
     }
     let memo = &inputs.physical.logical_candidates.memo;
     let output_groups = memo.output_groups();
+    let mut outputs_per_query = vec![0usize; memo.queries().len()];
+    for &(query, _) in &output_groups {
+        outputs_per_query[query] += 1;
+    }
     // Per query with a bound and several outputs: the bound and, per
     // output, what its answering execution gives.
     let mut several_roots: BTreeMap<QueryId, (FailureProbabilityBound, Expression)> =
@@ -1138,7 +1161,7 @@ pub(super) fn accuracy_constraints(
         let Some(limits) = rules.root_limits(*query_id, group) else {
             continue;
         };
-        let outputs_of_query = output_groups.iter().filter(|(q, _)| *q == query).count();
+        let outputs_of_query = outputs_per_query[query];
         let mut checked_per_execution: Vec<(Variable, ErrorTerm)> = Vec::new();
         for &v in executions {
             let z = z[&(*query_id, v)];

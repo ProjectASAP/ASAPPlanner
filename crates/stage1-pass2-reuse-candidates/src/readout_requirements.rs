@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Pass2RuleError;
 use asap_accuracy::{readout_levels, AccuracyEvidence, ErrorMetricsOfMemo};
+use asap_types::accuracy::ReadoutValueCounts;
 use asap_types::stages::{
     CandidateForMemoGroupId, LogicalRequirements, Memo, MemoGroupId, RequiredAccuracy,
 };
@@ -23,6 +24,9 @@ pub(crate) struct ReadoutRequirementsOutcome {
     /// failure probability, which it may read only exactly (another
     /// query's level says nothing of its own δ).
     pub(crate) exact_only_readout_groups_of_query: BTreeMap<usize, BTreeSet<MemoGroupId>>,
+    /// Per query, by index: the readout values its δ is split over
+    /// (`ReadoutLevels::readout_values_of_query`).
+    pub(crate) readout_values_of_query: Vec<Option<ReadoutValueCounts>>,
 }
 
 /// Gives every sketch readout (`SummaryEstimate` over a sketch state) its
@@ -37,12 +41,14 @@ pub(crate) fn set_readout_requirements(
     order: &[MemoGroupId],
     evidence: &dyn AccuracyEvidence,
 ) -> Result<ReadoutRequirementsOutcome, Pass2RuleError> {
+    let error_metrics = ErrorMetricsOfMemo::of(memo, order);
+    let levels = readout_levels(memo, &error_metrics, order, evidence);
     let mut outcome = ReadoutRequirementsOutcome {
         readouts_without_per_value_failure_probability: BTreeMap::new(),
         exact_only_readout_groups_of_query: BTreeMap::new(),
+        readout_values_of_query: levels.readout_values_of_query,
     };
-    let error_metrics = ErrorMetricsOfMemo::of(memo, order);
-    for (readout, required) in readout_levels(memo, &error_metrics, order, evidence) {
+    for (readout, required) in levels.of_readout {
         for &query in &required.queries_without_per_value_failure_probability {
             outcome
                 .exact_only_readout_groups_of_query

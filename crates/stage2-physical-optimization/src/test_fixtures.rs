@@ -93,6 +93,7 @@ pub fn logical(
 ) -> LogicalASAPMemoCandidates {
     LogicalASAPMemoCandidates {
         exact_only_groups_of_query: vec![BTreeSet::new(); memo.queries().len()],
+        readout_values_of_query: vec![None; memo.queries().len()],
         memo,
         edges,
         failing_logical_edges: vec![],

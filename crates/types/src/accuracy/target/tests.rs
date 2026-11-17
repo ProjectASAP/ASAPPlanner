@@ -560,3 +560,20 @@ fn readout_value_counts_combine_count_by_count() {
         counts(None, Some(2))
     );
 }
+
+/// A bound reads as words in error messages, not as its `Debug` form.
+#[test]
+fn a_failure_probability_bound_reads_as_words() {
+    assert_eq!(
+        FailureProbabilityBound::EveryEstimateRead { limit: 0.01 }.to_string(),
+        "every estimate read fails with at most 0.01 in all"
+    );
+    assert_eq!(
+        FailureProbabilityBound::EachCoveredValue {
+            values_covered: 100,
+            limit: 1e-4
+        }
+        .to_string(),
+        "each of 100 covered values fails with at most 0.0001"
+    );
+}

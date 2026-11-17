@@ -23,6 +23,7 @@ fn levels_of(memo: &Memo, readout: MemoGroupId) -> Vec<RequiredAccuracy> {
         &order,
         &NoMeasuredGuarantees,
     )
+    .of_readout
     .remove(&own_candidate(readout))
     .expect("a sketch readout")
     .levels
@@ -337,6 +338,7 @@ fn failure_probability_of(memo: &Memo, readout: MemoGroupId) -> Option<f64> {
         &order,
         &NoMeasuredGuarantees,
     )
+    .of_readout
     .remove(&own_candidate(readout))
     .expect("a sketch readout");
     if !required

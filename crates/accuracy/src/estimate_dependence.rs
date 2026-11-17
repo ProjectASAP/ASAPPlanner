@@ -10,12 +10,13 @@
 //! operator copies each value from one input
 //! ([`takes_each_value_from_one_input`]), and on every value of any other
 //! input; only through inputs whose error reaches the output
-//! ([`input_error_reaches_output`], which Stage 3 reads through
-//! `ErrorMetricsOfMemo::input_error_reaches_output`).
+//! ([`input_error_reaches_output`]) or whose values are chosen by
+//! estimates ([`values_chosen_by_estimate`]); both read through
+//! `ErrorMetricsOfMemo::input_estimates_reach_output`.
 
 use asap_types::ir::operator::arguments::BinaryOpKind;
 use asap_types::ir::{ASAPOp, BinaryOperator, NonASAPOp, Operator};
-use asap_types::stages::MemoGroupId;
+use asap_types::stages::{Memo, MemoGroupId};
 use asap_types::summary_type::SketchStatistic;
 
 use crate::metric_rule::ErrorContractPerMetric;
@@ -34,6 +35,40 @@ pub(crate) fn input_error_reaches_output(
         .iter()
         .flatten()
         .any(|contract| contract.input_error_reaches_output(input))
+}
+
+/// Per group of `memo`, by id: whether which values its output holds is
+/// chosen by estimates, so that a consumer keeping or dropping a value by
+/// its labels depends on every estimate that choice read. A top-k readout
+/// chooses its keys by all the estimates it ranks
+/// ([`ranks_by_estimate`]), and an operator reading such an input value by
+/// value ([`inputs_read_value_by_value`]) passes the choice on: `topk(3,
+/// q) * 2` holds the 3 keys the top-k chose. A reduction does not: `sum`
+/// returns its one value whichever keys it reads. `order` is the memo's
+/// topological order (`Memo::topological_order`).
+///
+/// Example: in `p90 and topk(3, q)`, the top-k's group and the `and`'s
+/// are chosen by estimate, `p90`'s is not.
+pub fn values_chosen_by_estimate(memo: &Memo, order: &[MemoGroupId]) -> Vec<bool> {
+    let mut chosen = vec![false; memo.groups().len()];
+    for &group in order {
+        chosen[group.0 as usize] =
+            memo.groups()[group.0 as usize]
+                .candidates
+                .iter()
+                .any(|candidate| {
+                    let operator = &candidate.expression.operator;
+                    ranks_by_estimate(operator)
+                        || inputs_read_value_by_value(operator).is_some_and(|value_by_value| {
+                            operator
+                                .children()
+                                .iter()
+                                .take(value_by_value)
+                                .any(|child| chosen[child.0 as usize])
+                        })
+                });
+    }
+    chosen
 }
 
 /// Whether `operator`, a readout, chooses its output values by the

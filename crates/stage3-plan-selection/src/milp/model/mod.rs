@@ -391,10 +391,12 @@ pub(crate) enum SelectionMilpError {
     /// The solver failed.
     Solver(String),
     /// The solver's selection misses `query`'s accuracy target when
-    /// checked exactly: its limits, such as a failure probability of
-    /// 1e-12 for each covered value (δ = 0.01 over 1e10 values), are below the
-    /// solver's least feasibility tolerance,
-    /// [`LEAST_HIGHS_FEASIBILITY_TOLERANCE`], so (K) cannot be trusted.
+    /// checked exactly: it misses by less than the solver's least
+    /// feasibility tolerance, [`LEAST_HIGHS_FEASIBILITY_TOLERANCE`], so (K)
+    /// cannot be trusted. Failure probabilities are scaled so the tightest
+    /// limit is 1 (`AccuracyRules::of`), so it takes an error bound near
+    /// that tolerance (a relative 0.01 missed by 5e-11) or a failure
+    /// probability missed by less than 1e-10 of the tightest limit.
     TargetBelowSolverPrecision {
         query: QueryId,
         /// The union bound the target's δ is checked by, with its limit
@@ -407,8 +409,8 @@ pub(crate) enum SelectionMilpError {
 /// The smallest primal and MIP feasibility tolerance HiGHS accepts, 1e-10
 /// (absolute; HiGHS's default is 1e-7). A second solve uses it when the
 /// selection at the default tolerances misses an accuracy target: a
-/// per-value δ of 1e-6 (δ = 0.01 over 1e4 values) may be passed by up to
-/// 1e-7 at the default, but only by 1e-10 here.
+/// failure-probability limit, 1 in (K)'s unit, may be passed by up to
+/// 1e-7 of it at the default, but only by 1e-10 here.
 const LEAST_HIGHS_FEASIBILITY_TOLERANCE: f64 = 1e-10;
 
 /// Builds and solves the MILP: minimize
@@ -561,9 +563,10 @@ pub(crate) fn solve_selection(
     let mut missed_at_default_tolerance: Option<QueryId> = None;
     let below_solver_precision = |query: QueryId| SelectionMilpError::TargetBelowSolverPrecision {
         query,
-        failure_probability_bound: rules
-            .as_ref()
-            .and_then(|rules| rules.failure_probability_bound(query)),
+        failure_probability_bound: inputs
+            .physical
+            .logical_candidates
+            .failure_probability_bound(query.0),
     };
     let (selected, selected_edges, answering) = loop {
         let started = Instant::now();
@@ -615,9 +618,10 @@ pub(crate) fn solve_selection(
                 (*query, execution)
             })
             .collect();
-        // (K) holds only to the solver's tolerance: at the default 1e-7, a
-        // per-value δ of 1e-6 may be missed by a tenth, and at 1e-10 a δ
-        // near or below 1e-10 by orders of magnitude. The exact check sends
+        // (K) holds only to the solver's tolerance: at the default 1e-7, the
+        // tightest failure-probability limit (1 in (K)'s unit) may be
+        // missed by 1e-7 of it, beyond the exact check's 1e-9. The exact
+        // check sends
         // a selection that misses a target to a second solve at
         // LEAST_HIGHS_FEASIBILITY_TOLERANCE, and refuses one that misses
         // after it rather than return a plan that may not meet its target.
