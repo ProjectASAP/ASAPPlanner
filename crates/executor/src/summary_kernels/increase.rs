@@ -132,50 +132,129 @@ impl IncreaseAccumulator {
         if self.sample_count < 2 || self.last_seen_timestamp <= self.starting_timestamp {
             return Err("at least two ordered counter samples are required".into());
         }
-        let sampled_interval = (self.last_seen_timestamp - self.starting_timestamp) as f64 / 1000.0;
-        let Some((range_start, range_end)) = range_ms else {
+        let Some(range_ms) = range_ms else {
+            let sampled_interval_seconds =
+                (self.last_seen_timestamp - self.starting_timestamp) as f64 / 1000.0;
             return Ok(if is_rate {
-                self.total_increase / sampled_interval
+                self.total_increase / sampled_interval_seconds
             } else {
                 self.total_increase
             });
         };
-        if range_end <= range_start {
+        if range_ms.1 <= range_ms.0 {
             return Err("invalid counter evaluation range".into());
         }
-
-        let mut duration_to_start =
-            (self.starting_timestamp.saturating_sub(range_start)) as f64 / 1000.0;
-        let duration_to_end = (range_end.saturating_sub(self.last_seen_timestamp)) as f64 / 1000.0;
-        let average_sample_interval = sampled_interval / (self.sample_count - 1) as f64;
-        let extrapolation_threshold = average_sample_interval * 1.1;
-
-        if self.total_increase > 0.0 && self.starting_value >= 0.0 {
-            let duration_to_zero = sampled_interval * (self.starting_value / self.total_increase);
-            duration_to_start = duration_to_start.min(duration_to_zero);
-        }
-        let mut extrapolate_to = sampled_interval;
-        extrapolate_to += if duration_to_start < extrapolation_threshold {
-            duration_to_start.max(0.0)
-        } else {
-            average_sample_interval / 2.0
-        };
-        extrapolate_to += if duration_to_end < extrapolation_threshold {
-            duration_to_end.max(0.0)
-        } else {
-            average_sample_interval / 2.0
-        };
-        let mut factor = extrapolate_to / sampled_interval;
-        if is_rate {
-            factor /= (range_end - range_start) as f64 / 1000.0;
-        }
-        Ok(self.total_increase * factor)
+        extrapolated_rate(
+            SampledDelta {
+                first_sample: (self.starting_timestamp, self.starting_value),
+                last_sample_ms: self.last_seen_timestamp,
+                sample_count: self.sample_count,
+                delta: self.total_increase,
+            },
+            range_ms,
+            true,
+            is_rate,
+        )
+        .ok_or_else(|| "at least two ordered counter samples are required".into())
     }
+}
+
+/// What PromQL's `rate`, `increase` and `delta` read of one series' samples
+/// in a range: the first sample `(time_ms, value)`, the last sample's time,
+/// the number of samples, and the change from first to last (for a counter,
+/// with each reset adding the value before it). Example: samples 1, 2, …,
+/// 17 every 15 s from 60 s are `first_sample: (60_000, 1.)`,
+/// `last_sample_ms: 300_000`, `sample_count: 17`, `delta: 16.`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SampledDelta {
+    pub(crate) first_sample: (i64, f64),
+    pub(crate) last_sample_ms: i64,
+    pub(crate) sample_count: u64,
+    pub(crate) delta: f64,
+}
+
+/// Prometheus `extrapolatedRate` (promql/functions.go, v3.16.0) over float
+/// samples: `sampled`'s delta extrapolated to the range `(start_ms,
+/// end_ms]`, per second of the range when `is_rate`. A side whose nearest
+/// sample lies more than 1.1 average sample intervals from the range bound
+/// extrapolates half an interval only; then, for a `counter`, the start
+/// extrapolates no further back than where the counter would reach zero.
+/// `None` under two samples or with no time between them, as Prometheus
+/// emits no sample.
+///
+/// Example: samples 1, 2, …, 17 every 15 s from 60 s, `increase(x[5m])` at
+/// 300 s: 60 s before the first sample exceeds 16.5 s, so the start
+/// extrapolates 7.5 s; the zero point lies 15 s back, farther. The result
+/// is 16 × (240 + 7.5) / 240 = 16.5.
+pub(crate) fn extrapolated_rate(
+    sampled: SampledDelta,
+    (start_ms, end_ms): (i64, i64),
+    counter: bool,
+    is_rate: bool,
+) -> Option<f64> {
+    let SampledDelta {
+        first_sample: (first_ms, first_value),
+        last_sample_ms,
+        sample_count,
+        delta,
+    } = sampled;
+    let sampled_interval_seconds = (last_sample_ms as f64 - first_ms as f64) / 1000.;
+    if sample_count < 2 || sampled_interval_seconds <= 0. {
+        return None;
+    }
+    let average_interval_seconds = sampled_interval_seconds / (sample_count - 1) as f64;
+    let extrapolation_threshold_seconds = average_interval_seconds * 1.1;
+    let mut to_start_seconds = (first_ms as f64 - start_ms as f64) / 1000.;
+    let mut to_end_seconds = (end_ms as f64 - last_sample_ms as f64) / 1000.;
+    if to_start_seconds >= extrapolation_threshold_seconds {
+        to_start_seconds = average_interval_seconds / 2.;
+    }
+    // After the half-interval cap, as Prometheus 3.x orders it.
+    if counter && delta > 0. && first_value >= 0. {
+        to_start_seconds = to_start_seconds.min(sampled_interval_seconds * first_value / delta);
+    }
+    if to_end_seconds >= extrapolation_threshold_seconds {
+        to_end_seconds = average_interval_seconds / 2.;
+    }
+    let mut factor = (sampled_interval_seconds + to_start_seconds + to_end_seconds)
+        / sampled_interval_seconds;
+    if is_rate {
+        factor /= (end_ms as f64 - start_ms as f64) / 1000.;
+    }
+    Some(delta * factor)
+}
+
+/// PromQL `irate` over a series' last two samples `(time_ms, value)`,
+/// `previous` older than `last`: the increase per second, the newer value
+/// being the increase after a counter reset. `None` when both share a time,
+/// as Prometheus `instantValue` emits no sample then. Example: 8 then 3
+/// 10 s later is a reset, 3 / 10 = 0.3.
+pub(crate) fn instant_rate(previous: (i64, f64), last: (i64, f64)) -> Option<f64> {
+    let interval_ms = last.0 - previous.0;
+    if interval_ms == 0 {
+        return None;
+    }
+    let increase = if last.1 < previous.1 {
+        last.1
+    } else {
+        last.1 - previous.1
+    };
+    Some(increase / (interval_ms as f64 / 1000.))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // PromQL `irate` of the last two samples: their increase per second, the
+    // newer value after a counter reset, and no value when both share a time
+    // (Prometheus `instantValue` avoids dividing by zero).
+    #[test]
+    fn instant_rate_is_promql_irate() {
+        assert_eq!(instant_rate((10_000, 5.), (20_000, 8.)), Some(0.3));
+        assert_eq!(instant_rate((10_000, 8.), (20_000, 3.)), Some(0.3));
+        assert_eq!(instant_rate((20_000, 5.), (20_000, 8.)), None);
+    }
 
     #[test]
     fn test_increase_accumulator_creation() {

@@ -298,10 +298,8 @@ impl ScalarState {
                 .extrapolated_value(range_ms, statistic == ExactKind::Rate)
                 .map(Some),
             ScalarState::Counter(None) => Err("empty counter population".into()),
-            // A counter reset makes the newer value the increase.
-            ScalarState::LastTwoSamples([Some((t0, v0)), Some((t1, v1))]) => {
-                let increase = if v1 < v0 { *v1 } else { v1 - v0 };
-                Ok(Some(increase / ((t1 - t0) as f64 / 1000.)))
+            ScalarState::LastTwoSamples([Some(previous), Some(last)]) => {
+                Ok(super::increase::instant_rate(*previous, *last))
             }
             ScalarState::LastTwoSamples(_) => Err("irate population lacks two samples".into()),
         }

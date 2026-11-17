@@ -148,11 +148,9 @@ pub(in crate::operators) fn window_value<C>(
             .map(|(slope, _)| Value::Float64(slope)),
         AggIntent::PredictLinear { seconds } => regression(points, evaluation_time)
             .map(|(slope, intercept)| Value::Float64(slope * seconds + intercept)),
-        AggIntent::Rate => rate(points, start, end, true).map(Value::Float64),
-        AggIntent::Delta => rate(points, start, end, false)
-            .map(|v| Value::Float64(v * (end as f64 - start as f64) / 1000.)),
-        AggIntent::Increase => rate(points, start, end, true)
-            .map(|v| Value::Float64(v * (end as f64 - start as f64) / 1000.)),
+        AggIntent::Rate => extrapolated(points, start, end, true, true).map(Value::Float64),
+        AggIntent::Delta => extrapolated(points, start, end, false, false).map(Value::Float64),
+        AggIntent::Increase => extrapolated(points, start, end, true, false).map(Value::Float64),
         AggIntent::Count => Some(Value::Int64(
             i64::try_from(points.len()).map_err(|_| Error::Invalid("count overflow".into()))?,
         )),
@@ -178,19 +176,18 @@ pub(in crate::operators) fn window_value<C>(
                 a
             }
         }))),
-        AggIntent::IRate | AggIntent::IDelta => {
-            let [.., (t0, v0), (t1, v1)] = points else {
-                return Ok(None);
-            };
-            let rate = matches!(intent, AggIntent::IRate);
-            // A counter reset makes the last value the increase.
-            let delta = if rate && v1 < v0 { *v1 } else { v1 - v0 };
-            match (rate, t1 - t0) {
-                (_, 0) => None,
-                (true, interval) => Some(Value::Float64(delta / (interval as f64 / 1000.))),
-                (false, _) => Some(Value::Float64(delta)),
+        AggIntent::IRate => match points {
+            [.., previous, last] => {
+                crate::summary_kernels::increase::instant_rate(*previous, *last)
+                    .map(Value::Float64)
             }
-        }
+            _ => None,
+        },
+        // As Prometheus `instantValue`: no value for two samples at one time.
+        AggIntent::IDelta => match points {
+            [.., (t0, v0), (t1, v1)] if t0 != t1 => Some(Value::Float64(v1 - v0)),
+            _ => None,
+        },
         AggIntent::Changes | AggIntent::Resets => {
             let changed = |(a, b): (f64, f64)| match intent {
                 AggIntent::Changes => a != b && !(a.is_nan() && b.is_nan()),
@@ -283,37 +280,37 @@ fn double_exponential_smoothing(
     Ok(Some(level))
 }
 
-/// Prometheus `extrapolatedRate`; `counter` enables reset correction and the zero bound.
-fn rate(points: &[(i64, f64)], start: i64, end: i64, counter: bool) -> Option<f64> {
-    if points.len() < 2 {
-        return None;
-    }
-    let (first_t, first) = points[0];
-    let (last_t, last) = *points.last()?;
-    let span = (last_t as f64 - first_t as f64) / 1000.;
-    if span <= 0. {
-        return None;
-    }
+/// Prometheus `extrapolatedRate` over a series' sorted samples in `(start,
+/// end]`; `counter` adds each reset's prior value and bounds the start by
+/// the zero point, `is_rate` reads per second.
+fn extrapolated(
+    points: &[(i64, f64)],
+    start: i64,
+    end: i64,
+    counter: bool,
+    is_rate: bool,
+) -> Option<f64> {
+    let (&(first_ms, first), &(last_ms, last)) = (points.first()?, points.last()?);
+    // Each reset adds the value before it, in sample order as Prometheus sums.
     let mut delta = last - first;
-    for pair in points.windows(2) {
-        if counter && pair[1].1 < pair[0].1 {
-            delta += pair[0].1;
+    if counter {
+        for pair in points.windows(2) {
+            if pair[1].1 < pair[0].1 {
+                delta += pair[0].1;
+            }
         }
     }
-    let average = span / (points.len() - 1) as f64;
-    let mut to_start = (first_t as f64 - start as f64) / 1000.;
-    let mut to_end = (end as f64 - last_t as f64) / 1000.;
-    if to_start >= average * 1.1 {
-        to_start = average / 2.;
-    }
-    // Apply the zero bound after the sparse-window half-interval cap.
-    if counter && delta > 0. && first >= 0. {
-        to_start = to_start.min(span * first / delta);
-    }
-    if to_end >= average * 1.1 {
-        to_end = average / 2.;
-    }
-    Some(delta * (span + to_start + to_end) / span / ((end as f64 - start as f64) / 1000.))
+    crate::summary_kernels::increase::extrapolated_rate(
+        crate::summary_kernels::increase::SampledDelta {
+            first_sample: (first_ms, first),
+            last_sample_ms: last_ms,
+            sample_count: points.len() as u64,
+            delta,
+        },
+        (start, end),
+        counter,
+        is_rate,
+    )
 }
 
 pub(in crate::operators) async fn bucket_quantile(
@@ -511,6 +508,61 @@ mod tests {
         assert!(Operator::window(schema, AggIntent::Rate, 0, 1, vec![], Some((0, 0))).is_err());
     }
 
+    // `rate` and `increase` extrapolate as Prometheus `extrapolatedRate`
+    // (promql/functions.go, v3.16.0) in both kernels: a raw-sample window
+    // and an exact counter state. Samples 1, 2, …, 17 every 15 s from 60 s,
+    // read by `increase(x[5m])` at 300 s: the first sample lies 60 s after
+    // the window start, beyond 1.1 average intervals, so the start
+    // extrapolates half an interval (7.5 s); the zero point (15 s back) is
+    // farther, so it does not shorten that. Prometheus 3.16.0 returns 16.5
+    // and 0.055; bounding by the zero point before the half-interval cap
+    // returned 17.
+    #[test]
+    fn rate_and_increase_extrapolate_as_prometheus_in_both_kernels() {
+        use crate::evaluation::exact_evaluation;
+        use crate::summary_kernels::exact::ExactAccumulator;
+        use crate::AggregateCore;
+        use planner_types::summary_type::{ExactKind, ExactParams};
+        let points = (0..17)
+            .map(|i| (60_000 + 15_000 * i, (i + 1) as f64))
+            .collect::<Vec<_>>();
+        let (start, end) = (0, 300_000);
+        for (intent, kind, params, expected) in [
+            (
+                AggIntent::<planner_types::ir::schema::ColumnId>::Increase,
+                ExactKind::Increase,
+                ExactParams::Increase,
+                16.5,
+            ),
+            (AggIntent::Rate, ExactKind::Rate, ExactParams::Rate, 0.055),
+        ] {
+            let raw = match window_value(&intent, &points, start, end, end).unwrap() {
+                Some(Value::Float64(value)) => value,
+                other => panic!("{other:?}"),
+            };
+            let mut state =
+                ExactAccumulator::new(SummaryFamilyType::ExactAggregate(kind, params), false)
+                    .unwrap();
+            for &(time, value) in &points {
+                state.update(None, value, time);
+            }
+            let exact = exact_evaluation(
+                [Arc::new(state) as Arc<dyn AggregateCore>],
+                kind,
+                Some((start, end)),
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            for value in [raw, exact] {
+                assert!(
+                    (value - expected).abs() <= 1e-12 * expected,
+                    "{intent:?}: {value} != {expected}"
+                );
+            }
+        }
+    }
+
     // Each range function gives the value of its PromQL definition. Samples
     // 1, 4, 2, 4 at 10 s to 40 s; their two maxima tie.
     #[test]
@@ -560,6 +612,10 @@ mod tests {
             value(AggIntent::IRate, &[(10_000, 8.), (20_000, 3.)]),
             Some(0.3)
         );
+        // Two samples at one time: no instant rate or delta.
+        let same_time = [(20_000, 5.), (20_000, 8.)];
+        assert_eq!(value(AggIntent::IRate, &same_time), None);
+        assert_eq!(value(AggIntent::IDelta, &same_time), None);
         // One sample: no instant rate, no smoothing; one value has no change.
         let single = [(10_000, 5.)];
         assert_eq!(value(AggIntent::IRate, &single), None);
