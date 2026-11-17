@@ -569,7 +569,7 @@ fn counter_samples_late_within_the_declared_bound_build_the_in_order_state() {
         let build = |samples: &[(i64, f64)], bound: Option<u64>| {
             let mut updater = updater(&family);
             if let Some(bound) = bound {
-                updater = updater.with_max_out_of_order_ms(bound).unwrap();
+                updater = updater.with_max_out_of_order_ms(bound);
             }
             let group = updater.add_group().unwrap();
             let refused: Vec<bool> = samples
@@ -612,7 +612,7 @@ fn counter_samples_late_within_the_declared_bound_build_the_in_order_state() {
     let build_sum = |bound: Option<u64>| {
         let mut updater = updater(&sum);
         if let Some(bound) = bound {
-            updater = updater.with_max_out_of_order_ms(bound).unwrap();
+            updater = updater.with_max_out_of_order_ms(bound);
         }
         let group = updater.add_group().unwrap();
         updater.update(group, 2.0, 12_000).unwrap();
@@ -620,6 +620,39 @@ fn counter_samples_late_within_the_declared_bound_build_the_in_order_state() {
         fingerprint(updater.seal().state(0).as_ref())
     };
     assert_eq!(build_sum(Some(5_000)), build_sum(None));
+}
+
+// The bound applies per series, as `DataArrival` declares it: a sample
+// is late relative to later samples of its own series only. With a 5 s
+// bound, series A's sample at 12 s, then series B's at 30 s, then A's at
+// 11 s: B's newer sample does not push A's 12 s sample out of the buffer,
+// so A's 11 s sample (1 s behind A's newest) is folded in time order.
+#[test]
+fn counter_samples_are_late_relative_to_their_own_series_only() {
+    for family in [
+        exact(ExactKind::Rate, ExactParams::Rate),
+        exact(ExactKind::Increase, ExactParams::Increase),
+    ] {
+        let build = |samples: &[(u32, i64, f64)], bound: Option<u64>| {
+            let mut updater = updater(&family);
+            if let Some(bound) = bound {
+                updater = updater.with_max_out_of_order_ms(bound);
+            }
+            updater.ensure_groups(2).unwrap();
+            for &(group, ts, value) in samples {
+                updater.update(group, value, ts).unwrap();
+            }
+            let column = updater.seal();
+            [0, 1].map(|group| fingerprint(column.state(group).as_ref()))
+        };
+        let arrival = [(0, 12_000, 120.0), (1, 30_000, 300.0), (0, 11_000, 110.0)];
+        let in_order = [(0, 11_000, 110.0), (0, 12_000, 120.0), (1, 30_000, 300.0)];
+        assert_eq!(
+            build(&arrival, Some(5_000)),
+            build(&in_order, None),
+            "{family:?}"
+        );
+    }
 }
 
 // A group number the updater never added is bad input, not a panic.
