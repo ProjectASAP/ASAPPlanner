@@ -1,10 +1,6 @@
 //! Developer tools over the planner: the `asap_planner` inspection CLI and
 //! the other bins, plus the helpers they and the integration tests share.
 //!
-//! Re-exports both language paths so a caller can depend on a single crate for
-//! PromQL *and* SQL. Both front ends end at the canonical intent algebra via
-//! the same unified operator IR ([`asap_types::ir::OperatorNode`]).
-//!
 //! [`planning_stages`] holds the one pipeline that `asap_planner` and the
 //! integration tests share; [`candidate_labels`] names the
 //! candidates for the viewer document. [`corpora`] splits the checked-in

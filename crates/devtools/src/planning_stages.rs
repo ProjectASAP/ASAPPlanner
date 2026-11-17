@@ -1,6 +1,7 @@
-//! The four planner stages of #509 run over one workload: the facade's
-//! search for the integration tests, and
-//! [`run_stages_until`] for `asap_planner`.
+//! The planner stages run over one workload: [`run_search_over`] and
+//! [`run_planning_stages_over`] run the facade's search for the integration
+//! tests and `planner_fuzz`, and [`run_stages_until`] stops after a chosen
+//! stage for `asap_planner`.
 
 use asap_frontend_sql::SqlCatalog;
 use asap_planner::{
@@ -134,7 +135,7 @@ pub fn lower_sql_roots(
         .collect()
 }
 
-/// Why [`run_planning_stages_over`] produced no run.
+/// Why a planning run produced no result.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanningStagesError {
     /// Pass 1 failed: there are no candidates, only the frontends' roots.
