@@ -70,6 +70,18 @@ pub enum CostConstant {
     SketchChainEmitOperationsPerState,
     ExactChainEmitOperationsPerState,
     KllMergeOperationsPerOutputGroup,
+    CounterMatrixUpdateOperationsPerCounter,
+    UnivmonUpdateOperationsPerCounter,
+    CmsHeapOperationsPerEstimate,
+    CmsHeapOperationsPerEstimatedCounter,
+    CountSketchHeapOperationsPerEstimate,
+    CountSketchHeapOperationsPerEstimatedCounter,
+    SketchAllocationOperationsPerCounter,
+    CounterMatrixMergeOperationsPerState,
+    CounterMatrixMergeOperationsPerCounter,
+    HeapMergeOperationsPerResidentCounter,
+    HeapReadOperationsPerGroup,
+    HeapReadOperationsPerResidentCounter,
 }
 
 impl CostConstant {
@@ -179,6 +191,40 @@ impl CostConstant {
             }
             CostConstant::KllMergeOperationsPerOutputGroup => {
                 built_in::KLL_MERGE_OPERATIONS_PER_OUTPUT_GROUP
+            }
+            CostConstant::CounterMatrixUpdateOperationsPerCounter => {
+                built_in::COUNTER_MATRIX_UPDATE_OPERATIONS_PER_COUNTER
+            }
+            CostConstant::UnivmonUpdateOperationsPerCounter => {
+                built_in::UNIVMON_UPDATE_OPERATIONS_PER_COUNTER
+            }
+            CostConstant::CmsHeapOperationsPerEstimate => {
+                built_in::CMS_HEAP_OPERATIONS_PER_ESTIMATE
+            }
+            CostConstant::CmsHeapOperationsPerEstimatedCounter => {
+                built_in::CMS_HEAP_OPERATIONS_PER_ESTIMATED_COUNTER
+            }
+            CostConstant::CountSketchHeapOperationsPerEstimate => {
+                built_in::COUNT_SKETCH_HEAP_OPERATIONS_PER_ESTIMATE
+            }
+            CostConstant::CountSketchHeapOperationsPerEstimatedCounter => {
+                built_in::COUNT_SKETCH_HEAP_OPERATIONS_PER_ESTIMATED_COUNTER
+            }
+            CostConstant::SketchAllocationOperationsPerCounter => {
+                built_in::SKETCH_ALLOCATION_OPERATIONS_PER_COUNTER
+            }
+            CostConstant::CounterMatrixMergeOperationsPerState => {
+                built_in::COUNTER_MATRIX_MERGE_OPERATIONS_PER_STATE
+            }
+            CostConstant::CounterMatrixMergeOperationsPerCounter => {
+                built_in::COUNTER_MATRIX_MERGE_OPERATIONS_PER_COUNTER
+            }
+            CostConstant::HeapMergeOperationsPerResidentCounter => {
+                built_in::HEAP_MERGE_OPERATIONS_PER_RESIDENT_COUNTER
+            }
+            CostConstant::HeapReadOperationsPerGroup => built_in::HEAP_READ_OPERATIONS_PER_GROUP,
+            CostConstant::HeapReadOperationsPerResidentCounter => {
+                built_in::HEAP_READ_OPERATIONS_PER_RESIDENT_COUNTER
             }
         }
     }
