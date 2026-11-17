@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 thread_local! {
     /// The plan nodes handed to the executor's compiler by the views'
-    /// refreshes in [`InstallablePlan::of_dag`] and
+    /// refreshes in [`installable_plan_of`] and
     /// [`InstallablePlan::check_compiles`], summed over their compiles.
     pub(super) static COMPILED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -49,6 +49,7 @@ async fn view_refreshes_compile_only_the_nodes_below_them() {
     COMPILED_NODES.with(|count| count.set(0));
     let rebuilt = InstallablePlan::of_dag(plan.dag.clone(), plan.query_texts.clone()).unwrap();
     assert_eq!(rebuilt.materialized_views().unwrap().len(), views);
+    rebuilt.check_compiles().unwrap();
     plan.check_compiles().unwrap();
     let compiled = COMPILED_NODES.with(std::cell::Cell::get);
     assert!(
@@ -374,12 +375,12 @@ fn a_root_time_shift_is_read_whole_by_the_installer_not_by_the_cost() {
 }
 
 /// `absent_over_time(data[1m])` every 10 s, exact: Stages 1-3
-/// plan it, but the Planner's executor has no `absent_over_time` kernel, so
-/// its compile check refuses the plan. A runtime other than the Planner's
-/// executor still gets the plan, validated, from
-/// [`InstallablePlan::of_dag_without_executor_check`].
+/// plan it, but the Planner's executor has no `absent_over_time` kernel.
+/// [`InstallablePlan::of_dag`] still returns the plan, validated, for any
+/// runtime; [`InstallablePlan::check_compiles`] reports the executor's gap,
+/// and [`installable_plan_of`] (what `plan_installable` returns) refuses it.
 #[tokio::test]
-async fn a_plan_only_the_executor_cannot_compile_is_built_without_its_check() {
+async fn of_dag_validates_a_plan_the_executor_cannot_compile_without_refusing_it() {
     let workload: crate::PlanningWorkload = serde_json::from_str(
         r#"{"query_workload": {"language": "promql", "repeating_queries": [{
               "query": "absent_over_time(data[1m])",
@@ -399,9 +400,14 @@ async fn a_plan_only_the_executor_cannot_compile_is_built_without_its_check() {
     .await
     .expect("Stages 1-3 plan absent_over_time");
     let query_texts = vec!["absent_over_time(data[1m])".to_owned()];
+    let plan = InstallablePlan::of_dag(output.plan.clone(), query_texts)
+        .expect("validated without the executor's compile check");
+    plan.validate().unwrap();
     // Precondition: an executor-only gap. Once the executor runs
     // `absent_over_time`, pick another query it plans but cannot compile.
-    let refused = InstallablePlan::of_dag(output.plan.clone(), query_texts.clone()).unwrap_err();
+    assert!(plan.check_compiles().is_err());
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let refused = installable_plan_of(output.plan.clone(), &entries).unwrap_err();
     assert!(
         matches!(
             refused,
@@ -410,13 +416,9 @@ async fn a_plan_only_the_executor_cannot_compile_is_built_without_its_check() {
         ),
         "{refused}"
     );
-    let plan = InstallablePlan::of_dag_without_executor_check(output.plan.clone(), query_texts)
-        .expect("validated without the executor's compile check");
-    plan.validate().unwrap();
-    assert!(plan.check_compiles().is_err());
     // Still validated: one query text per root.
     assert!(matches!(
-        InstallablePlan::of_dag_without_executor_check(output.plan, Vec::new()),
+        InstallablePlan::of_dag(output.plan, Vec::new()),
         Err(InstallablePlanError::QueriesDoNotMatchRoots { roots: 1 })
     ));
 }
