@@ -242,7 +242,9 @@ impl RawDataRetention {
             lookback_ms,
         }
     }
+}
 
+impl RawDataRetention {
     /// The source.
     pub fn source(&self) -> &Source {
         &self.source

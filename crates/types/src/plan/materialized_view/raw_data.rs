@@ -1,13 +1,16 @@
 //! How far back a runtime keeps each raw-data source for the DAG's raw-data
 //! scans ([`PhysicalASAPDAG::raw_data_retention`]), which nodes keep rows
-//! ([`PhysicalASAPDAGNode::retains_rows`]), and the shape checks of every
-//! raw-data window ([`PhysicalASAPDAG::check_raw_data_windows`]).
+//! ([`PhysicalASAPDAGNode::retains_rows`]), the shape checks of every
+//! raw-data window ([`PhysicalASAPDAG::check_raw_data_windows`]), and the
+//! columns a runtime keeps of each source ([`PhysicalASAPDAG::raw_data_schemas`]).
 
 use super::views::ViewIndex;
 use super::{InstallableDagError, RawDataRetention};
+use crate::ir::operator::arguments::Source;
 use crate::ir::operator::node::Operator;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
+use crate::ir::schema::Schema;
 use crate::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId};
 use crate::stages::Lifetime;
 
@@ -53,6 +56,31 @@ impl PhysicalASAPDAG {
             }
         }
         Ok(retention)
+    }
+
+    /// Each raw-data source the DAG's `Scan`s read (at query or ingestion
+    /// time), in the order of its first `Scan`, with the union of those
+    /// `Scan`s' columns by name, in first-seen order: the raw table a
+    /// runtime binds for the source. Example: `sum by (job) (m)` and
+    /// `sum_over_time(m[5m])` together read `m` as `(ts, value,
+    /// $promql_series_identity, job)`.
+    pub fn raw_data_schemas(&self) -> Vec<(Source, Schema)> {
+        let mut schemas: Vec<(Source, Schema)> = Vec::new();
+        for node in &self.nodes {
+            let Operator::NonASAP(NonASAPOp::Scan { source, schema, .. }) = &node.payload else {
+                continue;
+            };
+            let Some((_, known)) = schemas.iter_mut().find(|(known, _)| known == source) else {
+                schemas.push((source.clone(), schema.clone()));
+                continue;
+            };
+            for field in &schema.fields {
+                if !known.fields.iter().any(|known| known.name == field.name) {
+                    known.fields.push(field.clone());
+                }
+            }
+        }
+        schemas
     }
 
     /// Checks that every raw-data window the DAG reads (each `TimeRange`,

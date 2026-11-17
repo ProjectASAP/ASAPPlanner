@@ -994,3 +994,115 @@ fn a_materialized_view_is_requested_for_the_window_it_summarizes() {
         );
     }
 }
+
+/// Rows `(ts, value)` with one row at each of `times`, in `schema`.
+fn rows_at(schema: &SchemaRef, times: &[i64]) -> Batch {
+    Batch::try_new(
+        schema.clone(),
+        times
+            .iter()
+            .map(|&ts| vec![Value::Timestamp(ts), Value::Float64(ts as f64)])
+            .collect(),
+    )
+    .unwrap()
+}
+
+/// The times of the rows `store` returns for `source` read over `range`.
+fn times_read(
+    store: &InMemoryDataStore,
+    source: &Source,
+    schema: &SchemaRef,
+    range: Option<(i64, i64)>,
+) -> Vec<i64> {
+    let request = RawDataRequest {
+        time_range_ms: range,
+        schema,
+        predicates: &[],
+    };
+    let batches: Vec<Batch> = block_on(
+        store
+            .read_raw_data(source, &request, context())
+            .unwrap()
+            .map(Result::unwrap)
+            .collect(),
+    );
+    batches
+        .iter()
+        .flat_map(Batch::to_rows)
+        .map(|row| match row[0] {
+            Value::Timestamp(ts) => ts,
+            ref other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+/// A runtime appends a time series' raw rows as they arrive, each batch with
+/// the `(start, end]` it covers: a read returns the batches overlapping the
+/// requested range (the executor re-applies the range), and appending drops
+/// the batches ending `lookback_ms` or more before the newest end. E.g.
+/// lookback 15 ms at end 30 drops `(0, 10]` and keeps `(10, 20]`, which
+/// holds rows a window `(15, 30]` reads.
+#[test]
+fn appended_raw_data_is_read_by_range_and_dropped_after_its_lookback() {
+    let schema = Arc::new(planner_types::ir::schema::Schema {
+        unique_keys: vec![],
+        closed: false,
+        fields: vec![
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+        ],
+        time_index: Some(0),
+    });
+    let source = Source::TimeSeries { metric: "m".into() };
+    let mut store = InMemoryDataStore::default()
+        .with_appended_raw_data(source.clone(), schema.clone(), Some(15))
+        .unwrap();
+    assert_eq!(store.raw_data_bytes(), 0);
+    for (start, end) in [(0, 10), (10, 20)] {
+        store
+            .append_raw_data(&source, (start, end), vec![rows_at(&schema, &[end])])
+            .unwrap();
+    }
+    assert_eq!(
+        times_read(&store, &source, &schema, Some((5, 20))),
+        [10, 20]
+    );
+    assert_eq!(times_read(&store, &source, &schema, Some((10, 20))), [20]);
+    store
+        .append_raw_data(&source, (20, 30), vec![rows_at(&schema, &[25, 30])])
+        .unwrap();
+    assert_eq!(times_read(&store, &source, &schema, None), [20, 25, 30]);
+    assert_eq!(
+        times_read(&store, &source, &schema, Some((15, 30))),
+        [20, 25, 30]
+    );
+    assert_eq!(
+        times_read(&store, &source, &schema, Some((20, 30))),
+        [25, 30]
+    );
+    let held = rows_at(&schema, &[20]).memory_bytes() + rows_at(&schema, &[25, 30]).memory_bytes();
+    assert_eq!(store.raw_data_bytes(), held);
+    assert_eq!(store.materialized_view_bytes(), 0);
+
+    // Append-only, to a source bound for appending.
+    assert!(store
+        .append_raw_data(&source, (25, 40), vec![rows_at(&schema, &[40])])
+        .is_err());
+    let other = Source::TimeSeries {
+        metric: "other".into(),
+    };
+    assert!(store
+        .append_raw_data(&other, (30, 40), vec![rows_at(&schema, &[40])])
+        .is_err());
+    let fixed = Source::TimeSeries {
+        metric: "fixed".into(),
+    };
+    let mut store = store
+        .with_raw_data(fixed.clone(), schema.clone(), vec![rows_at(&schema, &[1])])
+        .unwrap();
+    assert!(store
+        .append_raw_data(&fixed, (30, 40), vec![rows_at(&schema, &[40])])
+        .is_err());
+    // Rows bound whole are returned whatever the range.
+    assert_eq!(times_read(&store, &fixed, &schema, Some((20, 30))), [1]);
+}
