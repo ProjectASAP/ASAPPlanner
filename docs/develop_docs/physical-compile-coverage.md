@@ -103,7 +103,7 @@ and is not compiled as instant selection.
 | Row | Change |
 |---|---|
 | 1 | Supported shapes: selectors with `offset`; `rate`, `increase`, `delta`, and `sum`/`avg`/`min`/`max`/`count_over_time`; `by` aggregation; `sort`; `topk`/`limit`; `scalar()`; `vector(literal)`; arithmetic with one literal. Now Partial. |
-| 9 | `scalar()` compiles to `VectorToScalar`. |
+| 9 | `scalar()` compiles to `VectorToScalar`. (Since the relational section below, `scalar(v)` is a read of another operator, bound as a column; see there.) |
 | 11 | Range functions over the raw selector rows. |
 | 12 | `f(sel[R:S])` and `f(g(sel[r])[R:S])`, with subquery `offset`, evaluate on the aligned step grid. The frontend now retains subquery `offset`/`@` as a `TimeShift`; it previously dropped them. Now Partial. |
 
@@ -196,11 +196,13 @@ An argument whose output provably lacks `le`, such as
 `sum by (job) (rate(x_bucket[5m]))`, is rejected at lowering. Prometheus
 returns an empty vector for it. Candidate search keeps the classic form as one
 retained exact ordinary sub-DAG for every accuracy target; it has no sketch
-candidate. `histogram_quantiles` lowers each branch the same way, but
-`compile` does not yet bind its `Concat` of relabeled branches. Nested
-aggregation, such as `sum(histogram_quantile(…))`, does not compile either:
-the outer aggregate looks for a value column named `value`, while the
-quantile's is named `histogram_quantile`. Both are tracked in issue #911.
+candidate. `histogram_quantiles` lowers each branch the same way, and
+`compile` binds its `Concat` of relabeled branches (see the relational
+section below): `histogram_quantiles(x_bucket, "q", 0.5, 0.9)` answers one
+series per φ, `{q="0.5"}` and `{q="0.9"}`. Nested aggregation, such as
+`sum(histogram_quantile(…))`, does not compile: the outer aggregate looks for
+a value column named `value`, while the quantile's is named
+`histogram_quantile`. It is tracked in issue #911.
 
 Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 
@@ -214,6 +216,29 @@ Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 | 29 | SQL `STDDEV`, `STDDEV_SAMP`, `STDDEV_POP`, `VAR_SAMP`, `VAR_POP` and `corr` over Float64 or Int64 columns: NULL for fewer than two values (sample forms) or none (population forms), `corr` NULL for a constant input. |
 
 Totals are unchanged: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
+
+## Covered by relational operators, window functions, series operators and scalar reads
+
+Shapes the SQL and PromQL frontends emit for ordinary queries. A node one
+native operator implements lowers in `bind_operation`, so `compile_node`
+compiles it too; a node that lowers to several operators (helpers, then its
+own) lowers only in `compile`.
+
+| Shape | IR node | Lowering |
+|---|---|---|
+| SQL `SELECT DISTINCT` | `Dedup` | One `Limit` of 1 row per distinct value (`compile_node` too). |
+| SQL `INTERSECT` / `EXCEPT` [ALL] | `SetOp` Intersect / Except | One `set_operation` (`compile_node` too). The SQL frontend lowers these to semi / anti joins today, so only an IR built directly reaches it. |
+| SQL `UNION ALL`, `GROUP BY ROLLUP` / `GROUPING SETS` levels | `SetOp` Union all, `Concat` | A union of the branches, each projected to the output schema when its names or nullability differ. `UNION` lowers to a `Dedup` over a `UNION ALL`; a `SetOp` Union without `ALL` adds a distinct `Limit`. |
+| SQL window functions (`row_number`, `rank`, `dense_rank`, `lag` / `lead`, `first_value` / `last_value` / `nth_value`, `sum` / `avg` / `count` / `min` / `max`) with `ROWS` / `RANGE` frames | `SQLWindowFunc` | Expression arguments and order keys projected first, then `sql_window`. Aggregates slide their frame (rows enter at the end and leave at the start): O(n) per partition for frames whose bounds only grow, MIN / MAX by a monotonic queue. They reduce a frame's rows as the `Aggregate` reduces a group's: MAX over {1, NaN} is 1, an Int64 sum fails only when its result leaves Int64. `RANGE` offsets read one numeric or timestamp order key; NULL and NaN keys sort before or after every number. |
+| SQL `ORDER BY` an expression | `Sort` with an expression key | The keys projected after the input's columns, the sort, then a projection back. |
+| SQL scalar subquery, `IN` / `EXISTS` (uncorrelated, kept as a scalar read, for example inside `OR`); PromQL `scalar(v)` | `ScalarRef` edges of a `Filter`, `Project` or `PromqlVectorFromScalar` | One `bind_scalar_ref` per distinct read, chained over the input, each appending the read's value as a column, then the node over the widened rows. `IN` follows SQL's three-valued logic; `scalar(v)` reads `v`'s one sample (Float64, or `count`'s Int64), NaN unless exactly one. `m / scalar(count(m))`, `vector(scalar(n))`. |
+| SQL `LIKE` / `ILIKE`, `CASE x WHEN`, casts between Int64, Float64, Utf8 and Bool | scalar expressions | `LIKE` against a literal pattern runs Arrow's `like` kernels over the batch; casts follow DataFusion (a float truncates to an integer). |
+| PromQL `vector(s)`, `time()`, `hour()` | `PromqlVectorFromScalar`, `EvalTimestamp` | The evaluation time (one row), `s` projected over it, then the sample's timestamp. |
+| PromQL `label_replace`, `label_join` | `PromqlRelabel` | One `series_relabel` (`compile_node` too). Two series that end with one label set at one time are an error, as in Prometheus. |
+| PromQL `limitk`, `limit_ratio` | `PromqlSeriesSample` | One `series_sample` (`compile_node` too): `limitk` keeps each group's first k series in label-set order, per step; `limit_ratio` keeps the series Prometheus keeps (its label hash). |
+
+`info(m)` (`PromqlInfoEnrich`) still fails to compile: the IR does not carry
+the info metric as an input.
 
 ## Remaining
 

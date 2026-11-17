@@ -347,6 +347,7 @@ pub(super) fn execute<'a>(
 }
 
 mod columnar;
+pub(super) mod running;
 pub(super) mod temporal;
 // Matches Prometheus `quantile`: NaN for no values or a NaN q, ±Inf outside
 // [0, 1], and NaN samples ordered first.
@@ -414,11 +415,7 @@ pub(in crate::operators) fn promql_sum(start: f64, values: &[f64]) -> f64 {
     let (sum, c) = values
         .iter()
         .fold((start, 0.), |(sum, c), &v| kahan_inc(v, sum, c));
-    if sum.is_infinite() {
-        sum
-    } else {
-        sum + c
-    }
+    running::compensated_sum_value(sum, c)
 }
 
 /// Prometheus `avg` and `avg_over_time`: a compensated sum divided by the

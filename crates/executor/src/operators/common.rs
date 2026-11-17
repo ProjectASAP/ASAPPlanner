@@ -18,6 +18,24 @@ pub(super) fn result_field(name: &str, dtype: DataType, nullable: bool) -> Summa
     }
 }
 
+/// `input`'s schema with one more plain column, `name`, after its own: a
+/// window function's value, or a bound scalar read.
+pub(super) fn appended_schema(
+    input: &SchemaRef,
+    name: &str,
+    dtype: DataType,
+    nullable: bool,
+) -> SchemaRef {
+    let mut fields = input.fields.clone();
+    fields.push(result_field(name, dtype, nullable));
+    Arc::new(Schema {
+        fields,
+        unique_keys: vec![],
+        closed: false,
+        time_index: input.time_index,
+    })
+}
+
 pub(super) fn validate_groups(input: &SchemaRef, groups: &[usize]) -> Result<(), Error> {
     for &i in groups {
         plain(input, i)?;

@@ -647,22 +647,39 @@ pub(super) fn execute<'a>(
                         labels
                     })
                     .collect::<Vec<_>>();
-                // The source of each (time, label set) output so far: rows of
-                // one source are samples of one series.
-                let mut source_of_output = BTreeMap::new();
+                // Each source's relabelled set as an id, one id per distinct
+                // set. Two sources sharing an id are one series twice, an
+                // error where both have a sample at one time: relabelling
+                // `m{src="a"}` and `m{src="b"}` to drop `src` fails at a
+                // step both are present.
+                let mut id_of_set = ahash::AHashMap::<&Labels, u32>::new();
+                let set_id: Vec<u32> = relabelled
+                    .iter()
+                    .map(|labels| {
+                        let next = id_of_set.len() as u32;
+                        *id_of_set.entry(labels).or_insert(next)
+                    })
+                    .collect();
+                if id_of_set.len() < relabelled.len() {
+                    // The source of each (time, set id) so far: rows of one
+                    // source are samples of one series.
+                    let mut source_of_output = ahash::AHashMap::new();
+                    for row in 0..rows.len() {
+                        let source = rows.source_of_row[row];
+                        if *source_of_output
+                            .entry((rows.time(row), set_id[source as usize]))
+                            .or_insert(source)
+                            != source
+                        {
+                            return Err(invalid(
+                                "vector cannot contain metrics with the same labelset",
+                            ));
+                        }
+                    }
+                }
                 let mut out = Vec::with_capacity(rows.len());
                 for row in 0..rows.len() {
-                    let source = rows.source_of_row[row];
-                    let labels = &relabelled[source as usize];
-                    if *source_of_output
-                        .entry((rows.time(row), labels))
-                        .or_insert(source)
-                        != source
-                    {
-                        return Err(invalid(
-                            "vector cannot contain metrics with the same labelset",
-                        ));
-                    }
+                    let labels = &relabelled[rows.source_of_row[row] as usize];
                     workspace.grow(label_bytes(labels) + 32)?;
                     out.push((rows.time(row), labels.clone(), rows.value(row)));
                 }

@@ -316,14 +316,10 @@ fn window_ends(
         .iter()
         .map(|t| t.map(|t| end - (end - t) / width_ms * width_ms))
         .collect();
-    let rows = batch.num_rows();
-    let mut arrays = batch.record_batch().columns().to_vec();
-    let mut states: Vec<_> = (0..arrays.len())
-        .map(|column| batch.state_column(column).cloned())
-        .collect();
-    arrays.push(std::sync::Arc::new(ends) as arrow::array::ArrayRef);
-    states.push(None);
-    Batch::from_parts(output.clone(), arrays, states, rows)
+    batch.with_appended_column(
+        output.clone(),
+        std::sync::Arc::new(ends) as arrow::array::ArrayRef,
+    )
 }
 
 #[cfg(test)]

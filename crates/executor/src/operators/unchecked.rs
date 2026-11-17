@@ -90,8 +90,8 @@ impl TryFrom<UncheckedOperator> for Operator {
             Kind::SeriesSample { groups, kind } => {
                 Operator::series_sample(input(0)?, groups, kind)?
             }
-            Kind::SetOperation { except, all } => {
-                Operator::set_operation(input(0)?, input(1)?, except, all)?
+            Kind::SetOperation { kind, all } => {
+                Operator::set_operation(input(0)?, input(1)?, kind, all)?
             }
             Kind::SqlWindow(spec) => Operator::sql_window(
                 input(0)?,
@@ -102,7 +102,7 @@ impl TryFrom<UncheckedOperator> for Operator {
                     .ok_or_else(|| invalid("window output"))?
                     .name,
             )?,
-            Kind::BindSubquery(read) => Operator::bind_subquery(
+            Kind::BindScalarRef { read, .. } => Operator::bind_scalar_ref(
                 input(0)?,
                 input(1)?,
                 read,

@@ -615,3 +615,178 @@ fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
         equal_rows(output, vec![row(&[("instance", "two")], expected)]);
     }
 }
+
+mod scalar_reads_and_series_samples {
+    //! PromQL `scalar(v)` bound as a column, and `limitk` / `limit_ratio`.
+    use super::super::common::{planner_node, run_over_sources};
+    use asap_executor::{
+        operators::{Operator, ScalarRefRead},
+        physical_planner::compile_node,
+        values::{SchemaRef, Value},
+    };
+    use planner_types::ir::operator::{GroupKeys, SampleKind};
+    use planner_types::ir::schema::{DataType, Field, Schema};
+    use planner_types::ir::NonASAPOp;
+    use std::sync::Arc;
+
+    // `scalar(v)` is the value of v's one sample as a float, NaN with none
+    // or more: `scalar(count(m))` reads `count`'s Int64 sample.
+    #[test]
+    fn scalar_of_a_vector_is_nan_unless_one_sample() {
+        let input = Arc::new(Schema::new(vec![Field::plain(
+            "x",
+            DataType::Float64,
+            true,
+        )]));
+        for dtype in [DataType::Float64, DataType::Int64] {
+            let vector = Arc::new(Schema::new(vec![Field::plain(
+                "value",
+                dtype.clone(),
+                false,
+            )]));
+            let sample = |v: f64| match dtype {
+                DataType::Int64 => Value::Int64(v as i64),
+                _ => Value::Float64(v),
+            };
+            for (samples, expected) in
+                [(vec![], f64::NAN), (vec![2.], 2.), (vec![2., 3.], f64::NAN)]
+            {
+                let operator = Operator::bind_scalar_ref(
+                    input.clone(),
+                    vector.clone(),
+                    ScalarRefRead::VectorScalar { value: 0 },
+                    "scalar",
+                )
+                .unwrap();
+                let rows = run_over_sources(
+                    vec![
+                        (input.clone(), vec![vec![Value::Float64(1.)]]),
+                        (
+                            vector.clone(),
+                            samples.iter().map(|v| vec![sample(*v)]).collect(),
+                        ),
+                    ],
+                    operator,
+                )
+                .unwrap();
+                let Value::Float64(value) = rows[0][1] else {
+                    panic!("{dtype:?}: {:?}", rows[0][1])
+                };
+                assert!(
+                    value == expected || (value.is_nan() && expected.is_nan()),
+                    "{dtype:?} {samples:?}"
+                );
+            }
+        }
+    }
+
+    /// `limitk` / `limit_ratio` by the `by` columns, compiled as a Planner
+    /// node, over `rows` of `input`.
+    fn sample(
+        input: &SchemaRef,
+        by: Vec<usize>,
+        kind: SampleKind,
+        rows: Vec<Vec<Value>>,
+    ) -> Vec<String> {
+        let operator = compile_node(
+            &planner_node(
+                NonASAPOp::PromqlSeriesSample {
+                    by: GroupKeys::by(by),
+                    kind,
+                    child: 0,
+                },
+                input,
+            ),
+            std::slice::from_ref(input),
+            false,
+        )
+        .unwrap();
+        let mut kept: Vec<_> = run_over_sources(vec![(input.clone(), rows)], operator)
+            .unwrap()
+            .iter()
+            .map(|row| format!("{row:?}"))
+            .collect();
+        kept.sort();
+        kept
+    }
+
+    fn text(s: &str) -> Value {
+        Value::Utf8(s.into())
+    }
+
+    // `limitk by (g)` keeps each group's first k series in label order; a
+    // NaN `limit_ratio` is bad input.
+    #[test]
+    fn limitk_keeps_each_groups_first_series() {
+        let input = Arc::new(Schema::new(vec![
+            Field::plain("g", DataType::Utf8, true),
+            Field::plain("i", DataType::Utf8, true),
+            Field::plain("value", DataType::Float64, false),
+        ]));
+        let rows = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(g, s)| vec![text(g), text(s), Value::Float64(1.)])
+                .collect::<Vec<_>>()
+        };
+        let mut expected: Vec<_> = rows(&[("x", "a"), ("x", "b"), ("y", "a"), ("y", "b")])
+            .iter()
+            .map(|row| format!("{row:?}"))
+            .collect();
+        expected.sort();
+        assert_eq!(
+            sample(
+                &input,
+                vec![0],
+                SampleKind::LimitK(2),
+                rows(&[("x", "c"), ("y", "b"), ("x", "a"), ("y", "a"), ("x", "b")])
+            ),
+            expected
+        );
+        assert!(compile_node(
+            &planner_node(
+                NonASAPOp::PromqlSeriesSample {
+                    by: GroupKeys::none(),
+                    kind: SampleKind::LimitRatio(f64::NAN),
+                    child: 0,
+                },
+                &input,
+            ),
+            std::slice::from_ref(&input),
+            false,
+        )
+        .is_err());
+    }
+
+    // A range query's steps are sampled one by one, as Prometheus evaluates
+    // each step: `limitk(1, m)` over steps 1 (series a, b) and 2 (series b
+    // only) keeps a at step 1 and b at step 2.
+    #[test]
+    fn limitk_samples_each_step() {
+        let input = Arc::new(Schema {
+            fields: vec![
+                Field::plain("i", DataType::Utf8, true),
+                Field::plain("t", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
+            ],
+            unique_keys: vec![],
+            closed: false,
+            time_index: Some(1),
+        });
+        let row = |i: &str, t: i64| vec![text(i), Value::Timestamp(t), Value::Float64(1.)];
+        let mut expected: Vec<_> = [row("a", 1), row("b", 2)]
+            .iter()
+            .map(|row| format!("{row:?}"))
+            .collect();
+        expected.sort();
+        assert_eq!(
+            sample(
+                &input,
+                vec![],
+                SampleKind::LimitK(1),
+                vec![row("b", 1), row("a", 1), row("b", 2)]
+            ),
+            expected
+        );
+    }
+}

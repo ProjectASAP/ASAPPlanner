@@ -1,15 +1,22 @@
 //! SQL analytic window functions (`f(…) OVER (PARTITION BY … ORDER BY …
 //! frame)`): each row gets its function's value over its partition, as
 //! DataFusion computes it.
+use super::aggregate::kahan_inc;
+use super::aggregate::running::{
+    compensated_sum_value, extremum_replaces, integer_sum_value, RunningAvg,
+};
 use super::*;
 use planner_types::ir::operator::{
     WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
 };
 use planner_types::ir::scalar::ScalarValue;
 
-/// One window function over its input's partitions.
+/// One SQL window function over its input's partitions: `sum(v) OVER
+/// (PARTITION BY k ORDER BY t ROWS 2 PRECEDING)` is `Sum` over column `v`,
+/// partitioned by `k`, ordered by `t`, with that frame.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct WindowSpec {
+pub struct SqlWindowSpec {
+    /// The function, as the IR's `WindowFuncKind` names it.
     pub function: WindowFuncKind,
     /// The column of the function's value argument; `None` for the ranking
     /// functions and `COUNT(*)`.
@@ -30,7 +37,7 @@ pub struct WindowSpec {
 
 impl Operator {
     /// `input` with one more column, `name`: each row's `spec` value.
-    pub fn sql_window(input: SchemaRef, spec: WindowSpec, name: &str) -> Result<Self, Error> {
+    pub fn sql_window(input: SchemaRef, spec: SqlWindowSpec, name: &str) -> Result<Self, Error> {
         use WindowFuncKind as F;
         validate_groups(&input, &spec.partition)?;
         for key in &spec.order {
@@ -86,14 +93,7 @@ impl Operator {
                 frame_offset(frame, offset, &spec.order, &input)?;
             }
         }
-        let mut fields = input.fields.clone();
-        fields.push(result_field(name, dtype, nullable));
-        let output = Arc::new(Schema {
-            fields,
-            unique_keys: vec![],
-            closed: false,
-            time_index: input.time_index,
-        });
+        let output = appended_schema(&input, name, dtype, nullable);
         Ok(Self {
             kind: Kind::SqlWindow(Box::new(spec)),
             inputs: vec![input],
@@ -185,6 +185,10 @@ pub(super) fn execute<'a>(
             .iter()
             .map(|key| decoded(batch, key.column))
             .collect::<Result<Vec<_>, _>>()?;
+        let argument_type = spec
+            .argument
+            .map(|column| plain(&operator.inputs[0], column).map(|(dtype, _)| dtype.clone()))
+            .transpose()?;
         let arguments = spec
             .argument
             .map(|column| decoded(batch, column))
@@ -217,19 +221,31 @@ pub(super) fn execute<'a>(
         )
         .await?;
         let (dtype, _) = plain(&operator.output, operator.output.fields.len() - 1)?;
+        // The results by row, their references for the encoder, and each
+        // partition's peer groups and frames (buffers reused across
+        // partitions, sized for the largest).
+        let largest = largest_partition(&order, &group_of_row);
+        workspace.grow(
+            rows * (std::mem::size_of::<Value>() + std::mem::size_of::<&Value>())
+                + largest * PARTITION_BYTES_PER_ROW,
+        )?;
         let mut results = vec![Value::Null; rows];
+        let mut buffers = PartitionBuffers::default();
         let mut work = Cooperative::new(&context);
         let mut start = 0;
         while start < rows {
             let group = group_of_row[order[start]];
             let end = start + order[start..].partition_point(|&row| group_of_row[row] == group);
             let partition = &order[start..end];
-            for (position, value) in evaluate_partition(spec, partition, &keys, &arguments, dtype)?
-                .into_iter()
-                .enumerate()
-            {
-                results[partition[position]] = value;
-            }
+            evaluate_partition(
+                spec,
+                partition,
+                &keys,
+                &arguments,
+                &argument_type,
+                &mut buffers,
+                &mut results,
+            )?;
             work.checkpoint_rows(partition.len()).await?;
             start = end;
         }
@@ -238,26 +254,48 @@ pub(super) fn execute<'a>(
             crate::values::arrow_columns::ColumnDepth::BatchColumn,
             &results.iter().collect::<Vec<_>>(),
         )?;
-        let mut arrays = batch.record_batch().columns().to_vec();
-        let mut states: Vec<_> = (0..arrays.len())
-            .map(|column| batch.state_column(column).cloned())
-            .collect();
-        arrays.push(column);
-        states.push(None);
-        Batch::from_parts(operator.output.clone(), arrays, states, rows)
+        batch.with_appended_column(operator.output.clone(), column)
     })
     .boxed_local())
 }
 
-/// Each row's value of `spec` over one partition: `partition` holds its
-/// rows in window order; `keys` and `arguments` are indexed by row.
+/// The bytes a partition's working state holds per row at most: its
+/// buffers ([`PartitionBuffers`]) and a MIN / MAX frame's candidates
+/// ([`FrameAggregate`]).
+const PARTITION_BYTES_PER_ROW: usize = 2 * std::mem::size_of::<usize>()
+    + std::mem::size_of::<(i64, i64)>()
+    + std::mem::size_of::<(i64, Value)>();
+
+/// The rows of the largest partition: `order` holds the rows by partition.
+fn largest_partition(order: &[usize], group_of_row: &[u32]) -> usize {
+    order
+        .chunk_by(|&a, &b| group_of_row[a] == group_of_row[b])
+        .map(<[usize]>::len)
+        .max()
+        .unwrap_or(0)
+}
+
+/// One partition's working state, reused by the next: each position's
+/// first and last peer, and its frame.
+#[derive(Default)]
+struct PartitionBuffers {
+    first_peer: Vec<usize>,
+    last_peer: Vec<usize>,
+    frames: Vec<(i64, i64)>,
+}
+
+/// Each row's value of `spec` over one partition, written to `results` (by
+/// row): `partition` holds its rows in window order; `keys` and
+/// `arguments` (of `argument_type`) are indexed by row.
 fn evaluate_partition(
-    spec: &WindowSpec,
+    spec: &SqlWindowSpec,
     partition: &[usize],
     keys: &[Vec<Value>],
     arguments: &[Value],
-    dtype: &DataType,
-) -> Result<Vec<Value>, Error> {
+    argument_type: &Option<DataType>,
+    buffers: &mut PartitionBuffers,
+    results: &mut [Value],
+) -> Result<(), Error> {
     use WindowFuncKind as F;
     let n = partition.len();
     let peers = |a: usize, b: usize| {
@@ -266,8 +304,15 @@ fn evaluate_partition(
         })
     };
     // Each position's peer group: its first and last position.
-    let mut first_peer = vec![0; n];
-    let mut last_peer = vec![0; n];
+    let PartitionBuffers {
+        first_peer,
+        last_peer,
+        frames,
+    } = buffers;
+    first_peer.clear();
+    first_peer.resize(n, 0);
+    last_peer.clear();
+    last_peer.resize(n, 0);
     for i in 1..n {
         first_peer[i] = if peers(i - 1, i) {
             first_peer[i - 1]
@@ -283,24 +328,25 @@ fn evaluate_partition(
         };
     }
     let argument = |position: usize| arguments[partition[position]].clone();
+    let mut write = |position: usize, value: Value| results[partition[position]] = value;
     match &spec.function {
-        F::RowNumber => return Ok((1..=n as i64).map(Value::Int64).collect()),
+        F::RowNumber => {
+            (0..n).for_each(|i| write(i, Value::Int64(i as i64 + 1)));
+            return Ok(());
+        }
         F::Rank => {
-            return Ok(first_peer
-                .iter()
-                .map(|&first| Value::Int64(first as i64 + 1))
-                .collect())
+            (0..n).for_each(|i| write(i, Value::Int64(first_peer[i] as i64 + 1)));
+            return Ok(());
         }
         F::DenseRank => {
             let mut rank = 0;
-            return Ok((0..n)
-                .map(|i| {
-                    if first_peer[i] == i {
-                        rank += 1;
-                    }
-                    Value::Int64(rank)
-                })
-                .collect());
+            for (i, &first) in first_peer.iter().enumerate() {
+                if first == i {
+                    rank += 1;
+                }
+                write(i, Value::Int64(rank));
+            }
+            return Ok(());
         }
         F::Lag | F::Lead => {
             let step = if spec.function == F::Lag {
@@ -308,30 +354,39 @@ fn evaluate_partition(
             } else {
                 spec.offset
             };
-            return Ok((0..n)
-                .map(|i| {
-                    match (i as i64)
-                        .checked_add(step)
-                        .filter(|&j| j >= 0 && j < n as i64)
-                    {
-                        Some(j) => argument(j as usize),
-                        None => spec.default.clone(),
-                    }
-                })
-                .collect());
+            for i in 0..n {
+                let value = match (i as i64)
+                    .checked_add(step)
+                    .filter(|&j| j >= 0 && j < n as i64)
+                {
+                    Some(j) => argument(j as usize),
+                    None => spec.default.clone(),
+                };
+                write(i, value);
+            }
+            return Ok(());
         }
         _ => {}
     }
-    let frames = frames(spec, partition, keys, &first_peer, &last_peer)?;
-    let counts_rows = spec.argument.is_none();
-    let mut results = Vec::with_capacity(n);
-    // The aggregate of the positions `from..to`, kept while frames share
-    // their start: a frame's end only grows, so it extends.
-    let mut running: Option<(i64, i64, Accumulator)> = None;
+    fill_frames(spec, partition, keys, first_peer, last_peer, frames)?;
+    if matches!(spec.function, F::Sum | F::Avg | F::Count | F::Min | F::Max) {
+        // `COUNT(*)` reads no argument: each row counts as a NULL value.
+        let null = Value::Null;
+        let at = |position: i64| arguments.get(partition[position as usize]).unwrap_or(&null);
+        let mut aggregate = FrameAggregate::new(
+            &spec.function,
+            spec.argument.is_none(),
+            *argument_type == Some(DataType::Int64),
+        );
+        for (i, &(start, end)) in frames.iter().enumerate() {
+            write(i, aggregate.slide_to(start, end, at)?);
+        }
+        return Ok(());
+    }
     for (i, &(start, end)) in frames.iter().enumerate() {
         let in_frame = |position: i64| (start..=end).contains(&position);
         let at = |position: i64| argument(position as usize);
-        results.push(match &spec.function {
+        let value = match &spec.function {
             F::FirstValue if start <= end => at(start),
             F::LastValue if start <= end => at(end),
             F::FirstValue | F::LastValue => Value::Null,
@@ -354,99 +409,262 @@ fn evaluate_partition(
                     _ => spec.default.clone(),
                 }
             }
-            F::Sum | F::Avg | F::Count | F::Min | F::Max => {
-                let (from, mut accumulator) = match running.take() {
-                    Some((from, to, accumulator)) if from == start => (to, accumulator),
-                    _ => (start, Accumulator::default()),
-                };
-                for position in from..=end {
-                    accumulator.add(arguments.get(partition[position as usize]))?;
-                }
-                let value = accumulator.value(&spec.function, dtype, counts_rows);
-                running = Some((start, end.max(from - 1) + 1, accumulator));
-                value
-            }
-            _ => unreachable!("ranking and offset functions returned above"),
-        });
-    }
-    Ok(results)
-}
-
-/// A frame's aggregate: its rows, and its non-null values' count, sum and
-/// extremes.
-#[derive(Default)]
-struct Accumulator {
-    rows: i64,
-    count: i64,
-    integer_sum: i64,
-    float_sum: f64,
-    min: Option<Value>,
-    max: Option<Value>,
-}
-
-impl Accumulator {
-    /// Add one row's value; `None` for `COUNT(*)`, which reads none.
-    fn add(&mut self, value: Option<&Value>) -> Result<(), Error> {
-        self.rows += 1;
-        let Some(value) = value.filter(|value| !matches!(value, Value::Null)) else {
-            return Ok(());
+            _ => unreachable!("rankings, offsets and aggregates returned above"),
         };
+        write(i, value);
+    }
+    Ok(())
+}
+
+/// An aggregate window function (`SUM`, `AVG`, `COUNT`, `MIN`, `MAX`) over
+/// a frame that slides: rows enter at its end and leave at its start, so a
+/// partition's frames take O(n) steps in all while their starts and ends
+/// only grow (every `ROWS` frame, and `RANGE` frames over the numbered
+/// order keys); a frame that moves back is rebuilt. The values follow the
+/// `Aggregate`'s rules ([`super::aggregate::running`]): over the frame
+/// {1, NaN}, MAX is 1, as `SELECT max(v)` over those rows is.
+///
+/// `ROWS 2 PRECEDING` over 1, 2, 3, 4 holds {1}, {1, 2}, {1, 2, 3}, then 1
+/// leaves and 4 enters: {2, 3, 4}.
+struct FrameAggregate {
+    function: WindowFuncKind,
+    /// `COUNT(*)`: rows, not values, count.
+    counts_rows: bool,
+    /// Whether the argument is Int64 (summed exactly), not Float64.
+    integer_argument: bool,
+    /// The positions in the frame: `start..end`.
+    start: i64,
+    end: i64,
+    /// Rows, and non-NULL values, in the frame.
+    rows: i64,
+    values: i64,
+    /// The Int64 values' exact sum.
+    integer_sum: i128,
+    /// The finite Float64 values' compensated sum, and how many NaN and
+    /// infinite values the frame holds besides.
+    finite_sum: f64,
+    compensation: f64,
+    nan_values: i64,
+    positive_infinities: i64,
+    negative_infinities: i64,
+    /// For a Float64 `AVG`: the values as the `Aggregate`'s `AVG` reduces
+    /// them, valid while no value has left the frame since it was rebuilt.
+    average: RunningAvg,
+    /// Whether a value has left the frame since it was last rebuilt.
+    values_left: bool,
+    /// For MIN / MAX: the frame's positions (and values) that no later
+    /// value replaces ([`extremum_replaces`]), in order; the first holds
+    /// the extremum. MIN over 3, 1, 2 keeps (1, 2): 3 is replaced by 1.
+    extremum_candidates: std::collections::VecDeque<(i64, Value)>,
+}
+
+impl FrameAggregate {
+    fn new(function: &WindowFuncKind, counts_rows: bool, integer_argument: bool) -> Self {
+        Self {
+            function: function.clone(),
+            counts_rows,
+            integer_argument,
+            start: 0,
+            end: 0,
+            rows: 0,
+            values: 0,
+            integer_sum: 0,
+            finite_sum: 0.,
+            compensation: 0.,
+            nan_values: 0,
+            positive_infinities: 0,
+            negative_infinities: 0,
+            average: RunningAvg::default(),
+            values_left: false,
+            extremum_candidates: Default::default(),
+        }
+    }
+
+    /// Empty the frame, to grow again from position `at`.
+    fn rebuild_at(&mut self, at: i64) {
+        let mut candidates = std::mem::take(&mut self.extremum_candidates);
+        candidates.clear();
+        *self = Self {
+            start: at,
+            end: at,
+            extremum_candidates: candidates,
+            ..Self::new(&self.function, self.counts_rows, self.integer_argument)
+        };
+    }
+
+    /// The function's value over the frame of positions `start..=end`
+    /// (empty when `start > end`), `at` giving a position's value.
+    fn slide_to<'v>(
+        &mut self,
+        start: i64,
+        end: i64,
+        at: impl Fn(i64) -> &'v Value,
+    ) -> Result<Value, Error> {
+        if start > end {
+            return Ok(match self.function {
+                WindowFuncKind::Count => Value::Int64(0),
+                _ => Value::Null,
+            });
+        }
+        let end = end + 1;
+        if start < self.start || end < self.end || start >= self.end {
+            self.rebuild_at(start);
+        }
+        while self.end < end {
+            self.enter(self.end, at(self.end))?;
+            self.end += 1;
+        }
+        while self.start < start {
+            self.leave(self.start, at(self.start));
+            self.start += 1;
+        }
+        if let Some(value) = self.value()? {
+            return Ok(value);
+        }
+        // A Float64 sum that overflowed before values left: sum again.
+        self.rebuild_at(start);
+        while self.end < end {
+            self.enter(self.end, at(self.end))?;
+            self.end += 1;
+        }
+        Ok(self.value()?.expect("a rebuilt frame has its value"))
+    }
+
+    /// For MIN / MAX: whether it is MIN.
+    fn extremum_is_min(&self) -> Option<bool> {
+        match self.function {
+            WindowFuncKind::Min => Some(true),
+            WindowFuncKind::Max => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Position `position`, of value `value`, enters at the frame's end.
+    fn enter(&mut self, position: i64, value: &Value) -> Result<(), Error> {
+        self.rows += 1;
+        if matches!(value, Value::Null) {
+            return Ok(());
+        }
+        self.values += 1;
         match value {
-            Value::Int64(v) => {
-                self.integer_sum = self
-                    .integer_sum
-                    .checked_add(*v)
-                    .ok_or_else(|| Error::Operator("window sum overflows Int64".into()))?;
-                self.float_sum += *v as f64;
+            Value::Int64(v) => self.integer_sum += i128::from(*v),
+            Value::Float64(v) if v.is_nan() => self.nan_values += 1,
+            Value::Float64(v) if *v == f64::INFINITY => self.positive_infinities += 1,
+            Value::Float64(v) if *v == f64::NEG_INFINITY => self.negative_infinities += 1,
+            Value::Float64(v) => {
+                (self.finite_sum, self.compensation) =
+                    kahan_inc(*v, self.finite_sum, self.compensation)
             }
-            Value::Float64(v) => self.float_sum += v,
             _ => {}
         }
-        self.count += 1;
-        // NaN is the largest float, as DataFusion's MIN and MAX order it.
-        if self
-            .min
-            .as_ref()
-            .is_none_or(|min| value.compare(min).is_ok_and(|o| o.is_lt()))
-        {
-            self.min = Some(value.clone());
-        }
-        if self
-            .max
-            .as_ref()
-            .is_none_or(|max| value.compare(max).is_ok_and(|o| o.is_gt()))
-        {
-            self.max = Some(value.clone());
+        match (value, self.extremum_is_min()) {
+            (Value::Float64(v), None) if self.function == WindowFuncKind::Avg => {
+                self.average.add(*v)
+            }
+            (_, Some(min)) => {
+                while let Some((_, kept)) = self.extremum_candidates.back() {
+                    if extremum_replaces(kept, value, min)? {
+                        break;
+                    }
+                    self.extremum_candidates.pop_back();
+                }
+                self.extremum_candidates
+                    .push_back((position, value.clone()));
+            }
+            _ => {}
         }
         Ok(())
     }
 
-    /// `function` of the rows added; NULL over no value, but a count.
-    fn value(&self, function: &WindowFuncKind, dtype: &DataType, counts_rows: bool) -> Value {
-        use WindowFuncKind as F;
-        match function {
-            F::Count if counts_rows => Value::Int64(self.rows),
-            F::Count => Value::Int64(self.count),
-            _ if self.count == 0 => Value::Null,
-            F::Sum if *dtype == DataType::Int64 => Value::Int64(self.integer_sum),
-            F::Sum => Value::Float64(self.float_sum),
-            F::Avg => Value::Float64(self.float_sum / self.count as f64),
-            F::Min => self.min.clone().unwrap_or(Value::Null),
-            F::Max => self.max.clone().unwrap_or(Value::Null),
-            _ => unreachable!("an aggregate window function"),
+    /// Position `position`, of value `value`, leaves at the frame's start.
+    fn leave(&mut self, position: i64, value: &Value) {
+        self.rows -= 1;
+        if matches!(value, Value::Null) {
+            return;
         }
+        self.values -= 1;
+        self.values_left = true;
+        match value {
+            Value::Int64(v) => self.integer_sum -= i128::from(*v),
+            Value::Float64(v) if v.is_nan() => self.nan_values -= 1,
+            Value::Float64(v) if *v == f64::INFINITY => self.positive_infinities -= 1,
+            Value::Float64(v) if *v == f64::NEG_INFINITY => self.negative_infinities -= 1,
+            Value::Float64(v) => {
+                (self.finite_sum, self.compensation) =
+                    kahan_inc(-*v, self.finite_sum, self.compensation)
+            }
+            _ => {}
+        }
+        if self
+            .extremum_candidates
+            .front()
+            .is_some_and(|(kept, _)| *kept == position)
+        {
+            self.extremum_candidates.pop_front();
+        }
+    }
+
+    /// The Float64 values' sum: NaN with a NaN or both infinities, else an
+    /// infinity, else the finite values' sum. `None` when that sum
+    /// overflowed and values left since: it may be finite again.
+    fn float_sum(&self) -> Option<f64> {
+        if self.values_left && !self.finite_sum.is_finite() {
+            return None;
+        }
+        let finite = compensated_sum_value(self.finite_sum, self.compensation);
+        let positive = self.positive_infinities > 0 || finite == f64::INFINITY;
+        let negative = self.negative_infinities > 0 || finite == f64::NEG_INFINITY;
+        Some(match (self.nan_values > 0, positive, negative) {
+            (true, _, _) | (_, true, true) => f64::NAN,
+            (_, true, _) => f64::INFINITY,
+            (_, _, true) => f64::NEG_INFINITY,
+            _ => finite,
+        })
+    }
+
+    /// The function's value over the frame; `None` when the frame must be
+    /// summed again ([`Self::float_sum`]).
+    fn value(&self) -> Result<Option<Value>, Error> {
+        use WindowFuncKind as F;
+        let count = self.values as f64;
+        Ok(Some(match self.function {
+            F::Count if self.counts_rows => Value::Int64(self.rows),
+            F::Count => Value::Int64(self.values),
+            _ if self.values == 0 => Value::Null,
+            F::Sum if self.integer_argument => integer_sum_value(self.integer_sum)?,
+            F::Avg if self.integer_argument => Value::Float64(self.integer_sum as f64 / count),
+            F::Avg if !self.values_left => Value::Float64(self.average.value()),
+            F::Sum | F::Avg => {
+                let Some(sum) = self.float_sum() else {
+                    return Ok(None);
+                };
+                Value::Float64(match self.function {
+                    // The `Aggregate`'s `AVG` before its sum overflows.
+                    F::Avg if sum.is_finite() => {
+                        self.finite_sum / count + self.compensation / count
+                    }
+                    _ => sum,
+                })
+            }
+            F::Min | F::Max => self
+                .extremum_candidates
+                .front()
+                .map_or(Value::Null, |(_, value)| value.clone()),
+            _ => unreachable!("an aggregate window function"),
+        }))
     }
 }
 
 /// Each position's frame in `partition`, as first and last position
-/// (empty when first > last).
-fn frames(
-    spec: &WindowSpec,
+/// (empty when first > last), into `frames`.
+fn fill_frames(
+    spec: &SqlWindowSpec,
     partition: &[usize],
     keys: &[Vec<Value>],
     first_peer: &[usize],
     last_peer: &[usize],
-) -> Result<Vec<(i64, i64)>, Error> {
+    frames: &mut Vec<(i64, i64)>,
+) -> Result<(), Error> {
     let n = partition.len() as i64;
     let unbounded = || WindowFrameOffset::Scalar(ScalarValue::Null);
     let default = WindowFrame {
@@ -519,26 +737,37 @@ fn frames(
                         key - distance
                     };
                     let value = |p: &usize| number(*p).expect("a numbered position");
+                    // NULL and NaN keys sort before or after every number,
+                    // so the positions before the numbered run precede every
+                    // limit and those after it follow every limit: over
+                    // NULL, 8, 5 (NULLs first, descending), `1 PRECEDING`
+                    // ends 8's frame at the NULL.
                     if is_start {
-                        // The first numbered position at or past the limit.
+                        // The first numbered position at or past the limit,
+                        // else the first after the numbered run.
                         let index = numbered.partition_point(|p| value(p) < limit);
-                        numbered.get(index).map_or(n, |&p| p as i64)
+                        match numbered.get(index) {
+                            Some(&position) => position as i64,
+                            None => numbered.last().map_or(n, |&last| last as i64 + 1),
+                        }
                     } else {
-                        // The last numbered position up to the limit.
+                        // The last numbered position up to the limit, else
+                        // the last before the numbered run.
                         let index = numbered.partition_point(|p| value(p) <= limit);
-                        index
-                            .checked_sub(1)
-                            .map_or(-1, |index| numbered[index] as i64)
+                        match index.checked_sub(1) {
+                            Some(index) => numbered[index] as i64,
+                            None => numbered.first().map_or(-1, |&first| first as i64 - 1),
+                        }
                     }
                 }
             },
         })
     };
-    (0..partition.len())
-        .map(|i| {
-            let start = bound(i, &frame.start_bound, true)?.max(0);
-            let end = bound(i, &frame.end_bound, false)?.min(n - 1);
-            Ok((start, end))
-        })
-        .collect()
+    frames.clear();
+    for i in 0..partition.len() {
+        let start = bound(i, &frame.start_bound, true)?.max(0);
+        let end = bound(i, &frame.end_bound, false)?.min(n - 1);
+        frames.push((start, end));
+    }
+    Ok(())
 }

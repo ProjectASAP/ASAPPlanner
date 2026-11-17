@@ -10,11 +10,13 @@ impl Operator {
     /// reads from storage, which depends on ingestion order); label-set
     /// order is one of those answers, and the same on every run: of
     /// `m{i="d"}`, `m{i="b"}`, `m{i="a"}`, `limitk(2, m)` keeps `a` and
-    /// `b`. `limit_ratio(r)` keeps a series when its sampling
+    /// `b`. A vector with a time column (a range query's steps) is sampled
+    /// per step, as Prometheus evaluates each step on its own: each step
+    /// keeps the first `k` of the series it has. `limit_ratio(r)` keeps a series when its sampling
     /// offset ([`sampling_offset`]) is below `r` (for `r >= 0`) or at least
     /// `1 + r` (for `r < 0`), with `r` clamped to `[-1, 1]`, as Prometheus
     /// does; a NaN ratio is bad input.
-    pub fn series_sample(
+    pub(crate) fn series_sample(
         input: SchemaRef,
         groups: Vec<usize>,
         kind: SampleKind,
@@ -69,30 +71,46 @@ pub(super) fn execute<'a>(
         let (source_of_row, sets) =
             super::series_labels::label_sources(batch, &layout, &operator.inputs[0])?;
         workspace.grow(sets.iter().map(super::series_labels::label_bytes).sum())?;
-        let mut table = super::group_table::GroupTable::new(groups.clone());
-        let group_of_row = table.group_ids(batch)?;
-        workspace.grow(table.memory_bytes() + 8 * source_of_row.len())?;
-        // Whether each label source (series) is kept.
-        let kept: Vec<bool> = match *kind {
+        let keep = match *kind {
             SampleKind::LimitK(k) => {
-                // Each group's series, in label-set order.
-                let mut series = std::collections::BTreeSet::new();
+                // Groups by the `groups` columns, then the step.
+                let columns = groups.iter().copied().chain(operator.inputs[0].time_index);
+                let mut table = super::group_table::GroupTable::new(columns.collect());
+                let group_of_row = table.group_ids(batch)?;
+                workspace.grow(table.memory_bytes() + 8 * source_of_row.len())?;
+                // Each (group, series) once, then each group's series in
+                // label-set order; the first `k` of each group are kept.
+                let mut members = ahash::AHashSet::new();
                 for (&group, &source) in group_of_row.iter().zip(&source_of_row) {
-                    series.insert((group, &sets[source as usize], source));
+                    members.insert((group, source));
                 }
-                let mut kept = vec![false; sets.len()];
+                workspace.grow(members.len() * 16)?;
+                let mut ordered: Vec<(u32, u32)> = members.iter().copied().collect();
+                ordered.sort_unstable_by(|(group_a, a), (group_b, b)| {
+                    group_a
+                        .cmp(group_b)
+                        .then_with(|| sets[*a as usize].cmp(&sets[*b as usize]))
+                });
                 let mut taken = vec![0usize; table.len()];
-                for (group, _, source) in series {
+                members.clear();
+                for (group, source) in ordered {
                     if taken[group as usize] < k {
                         taken[group as usize] += 1;
-                        kept[source as usize] = true;
+                        members.insert((group, source));
                     }
                 }
-                kept
+                group_of_row
+                    .iter()
+                    .zip(&source_of_row)
+                    .map(|(&group, &source)| Some(members.contains(&(group, source))))
+                    .collect::<arrow::array::BooleanArray>()
             }
             SampleKind::LimitRatio(ratio) => {
+                // Whether each label source (series) is kept: its hash
+                // decides, the same at every step.
                 let ratio = ratio.clamp(-1.0, 1.0);
-                sets.iter()
+                let kept: Vec<bool> = sets
+                    .iter()
                     .map(|labels| {
                         let offset = sampling_offset(labels);
                         match ratio {
@@ -101,13 +119,13 @@ pub(super) fn execute<'a>(
                             ratio => offset >= 1.0 + ratio,
                         }
                     })
-                    .collect()
+                    .collect();
+                source_of_row
+                    .iter()
+                    .map(|&source| Some(kept[source as usize]))
+                    .collect::<arrow::array::BooleanArray>()
             }
         };
-        let keep = source_of_row
-            .iter()
-            .map(|&source| Some(kept[source as usize]))
-            .collect::<arrow::array::BooleanArray>();
         batch.filter(&keep)
     })
     .boxed_local())
