@@ -98,10 +98,11 @@
 //     `parameters`, `timing`, `lifetime`) and the `queries` reading it.
 //     `materialized_views` are the plan's materialized views as
 //     `plan_installable` derives them; `materialized_views_error` when the
-//     plan is not installable. `planner_executor_can_run`: whether the
-//     Planner's executor compiles the plan, with `planner_executor_error`,
-//     its reason, when it does not. `warnings`: a PromQL query applying `rate`, `increase`
-//     or `irate` to a declared gauge or combining a declared summary's
+//     plan fails `InstallablePlan::validate` (its views cannot be derived).
+//     `planner_executor_can_run`: whether the Planner's executor compiles
+//     the plan, with `planner_executor_error`, its reason, when it does
+//     not. `warnings`: a PromQL query applying `rate`, `increase` or
+//     `irate` to a declared gauge or combining a declared summary's
 //     quantile series across series (`metric_type_warnings`), each data fact the selected
 //     plan assumed because the data workload does not declare it (`assumed_data_facts`,
 //     saying whether answers may then be wrong beyond the accuracy target), and a peak
@@ -407,7 +408,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         match installable {
             Some(Ok(plan)) => {
                 let json = serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?;
-                std::fs::write(&path, json + "\n").map_err(|e| format!("{path}: {e}"))?;
+                std::fs::write(&path, json + "\n")
+                    .map_err(|e| format!("--plan-file {path}: {e}"))?;
             }
             Some(Err(error)) => failure = Some(format!("--plan-file {path}: {error}")),
             // No plan was selected: `failure` already says why.
