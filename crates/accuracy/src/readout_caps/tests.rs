@@ -4,7 +4,7 @@ use asap_types::accuracy::AccuracyScope;
 use asap_types::ir::operator::arguments::{PromQLVectorSetOpKind, Reduction};
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::expr_ir::ArithmeticOpKind;
-use asap_types::ir::QueryRoot;
+use asap_types::ir::{NonASAPOp, QueryRoot};
 use asap_types::stages::{MemoQuery, ValueSign};
 use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
 use asap_types::test_support::memo_builders::{
@@ -616,12 +616,7 @@ fn a_per_value_ratio_splits_over_the_two_readout_values_of_each_output_value() {
     with_query(&mut memo, ratio, target.clone(), Some(8));
     let order = memo.topological_order().expect("acyclic");
     let error_metrics = ErrorMetricsOfMemo::of(&memo, &order);
-    let read = readouts_read_by_queries(
-        &memo,
-        &error_metrics.error_contract,
-        &order,
-        &[p90, p50].into(),
-    );
+    let read = readouts_read_by_queries(&memo, &error_metrics, &order);
     assert!(read.composed.contains(&0));
     let counts = read.readout_values[&0];
     assert_eq!(

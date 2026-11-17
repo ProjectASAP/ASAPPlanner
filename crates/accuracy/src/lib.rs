@@ -18,6 +18,7 @@
 //! can use it.
 
 mod error_contract;
+mod estimate_dependence;
 mod evidence;
 mod guarantee;
 mod logical_edge;
@@ -27,6 +28,9 @@ mod readout;
 mod readout_caps;
 
 pub use error_contract::ErrorContract;
+pub use estimate_dependence::{
+    inputs_read_value_by_value, ranks_by_estimate, takes_each_value_from_one_input,
+};
 pub use evidence::{AccuracyEvidence, NoMeasuredGuarantees};
 pub use guarantee::theoretical_guarantee;
 pub use logical_edge::{tolerated_limit, within_limit};
@@ -35,4 +39,4 @@ pub use measured::{
     MeasuredSketchAccuracyError,
 };
 pub use metric_rule::{query_roots_with_target, ErrorMetricsOfMemo};
-pub use readout_caps::{readout_levels, ReadoutRequiredAccuracy};
+pub use readout_caps::{readout_levels, readout_value_counts_of_queries, ReadoutRequiredAccuracy};
