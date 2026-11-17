@@ -48,6 +48,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "aqpbm-core"
+version = "0.1.0"
+source = "git+https://github.com/ProjectASAP/sketch-bench?rev=af7fa57c917696815937f7cdd84f48c3391e1c89#af7fa57c917696815937f7cdd84f48c3391e1c89"
+dependencies = [
+ "anyhow",
+ "aqpbm-datagen",
+ "bitflags",
+ "chrono",
+ "libc",
+ "rand 0.9.5",
+ "rand_xoshiro",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "aqpbm-datagen"
+version = "0.1.0"
+source = "git+https://github.com/ProjectASAP/sketch-bench?rev=af7fa57c917696815937f7cdd84f48c3391e1c89#af7fa57c917696815937f7cdd84f48c3391e1c89"
+dependencies = [
+ "rand 0.9.5",
+ "rand_distr",
+ "rand_xoshiro",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "aqpbm-harness"
+version = "0.1.0"
+source = "git+https://github.com/ProjectASAP/sketch-bench?rev=af7fa57c917696815937f7cdd84f48c3391e1c89#af7fa57c917696815937f7cdd84f48c3391e1c89"
+dependencies = [
+ "aqpbm-core",
+ "aqpbm-datagen",
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ar_archive_writer"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -306,6 +348,8 @@ dependencies = [
 name = "asap-devtools"
 version = "0.1.0"
 dependencies = [
+ "aqpbm-datagen",
+ "aqpbm-harness",
  "asap-cost",
  "asap-executor",
  "asap-frontend-metricsql",
@@ -318,6 +362,7 @@ dependencies = [
  "asap-stage2-physical-optimization",
  "asap-stage3-plan-selection",
  "asap-types",
+ "futures",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2580,6 +2625,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
+]
+
+[[package]]
+name = "rand_distr"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8615d50dcf34fa31f7ab52692afec947c4dd0ab803cc87cb3b0b4570ff7463"
+dependencies = [
+ "num-traits",
+ "rand 0.9.5",
+]
+
+[[package]]
+name = "rand_xoshiro"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f703f4665700daf5512dcca5f43afa6af89f09db47fb56be587f80636bda2d41"
+dependencies = [
+ "rand_core 0.9.5",
 ]
 
 [[package]]

@@ -20,6 +20,12 @@ asap-planner = { path = "../planner" }
 # The executor's supported summary families, which `asap_planner` plans
 # with when the deployment declares none, as `plan_installable` does.
 asap-executor = { path = "../executor" }
+# The engine-comparison harness of sketch-bench: `asap_run bench-external
+# --lane asap` runs the Planner's executor as an engine under test
+# (`asap_lane::AsapEngine`). Pinned to a sketch-bench commit; sketch-bench
+# never depends on the planner.
+aqpbm-harness = { git = "https://github.com/ProjectASAP/sketch-bench", rev = "af7fa57c917696815937f7cdd84f48c3391e1c89" }
+futures = "0.3"
 
 # Used by the asap_planner / variant_coverage bins (catalog schemas,
 # async SQL path, JSON output) and by the topk_ir / canonical_examples
@@ -31,6 +37,8 @@ serde_yaml = "0.9"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 
 [dev-dependencies]
+# The data generator of the harness's workloads, at the harness's pin.
+aqpbm-datagen = { git = "https://github.com/ProjectASAP/sketch-bench", rev = "af7fa57c917696815937f7cdd84f48c3391e1c89" }
 asap-types = { path = "../types", features = ["test-support"] }
 asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
 
