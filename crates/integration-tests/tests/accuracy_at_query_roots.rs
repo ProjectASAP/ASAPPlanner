@@ -4,7 +4,8 @@
 //! error 0.01, and B, the ratio of its p99 and p50 at relative error 0.03.
 
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
-use asap_planner::{DeploymentCapabilities, PlanningModels};
+use asap_planner::{DeploymentCapabilities, PlanningModels, PlanningRun};
+use asap_types::ir::{ASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::summary_type::SketchParams;
 use asap_types::workload::PlanningWorkload;
@@ -13,6 +14,12 @@ use asap_types::workload::PlanningWorkload;
 /// `latency` (1,000 series, one sample per second, ingested, values
 /// declared non-negative).
 fn workload(queries: &[(&str, &str)]) -> PlanningWorkload {
+    workload_with_sources(queries, "")
+}
+
+/// [`workload`] with `more_sources`, JSON members of `sources` after
+/// `latency`'s (each starting with a comma).
+fn workload_with_sources(queries: &[(&str, &str)], more_sources: &str) -> PlanningWorkload {
     let entries: Vec<String> = queries
         .iter()
         .map(|(query, accuracy)| {
@@ -26,7 +33,7 @@ fn workload(queries: &[(&str, &str)]) -> PlanningWorkload {
         r#"{{"query_workload": {{"language": "promql", "repeating_queries": [{}]}},
             "data_workload": {{"arrival": {{"ingesting": {{"rows_per_second": 1000.0}}}},
               "sources": {{"latency": {{"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000,
-                "column_signs": {{"value": "non_negative"}}}}}}}}}}"#,
+                "column_signs": {{"value": "non_negative"}}}}{more_sources}}}}}}}"#,
         entries.join(",")
     ))
     .unwrap()
@@ -41,7 +48,19 @@ fn plan(queries: &[(&str, &str)], ignore_accuracy: bool) -> PhysicalASAPDAG {
 
 /// [`plan`], with the accepted accuracy Stage 3 reports per query.
 fn selection(queries: &[(&str, &str)], ignore_accuracy: bool) -> (PhysicalASAPDAG, Vec<String>) {
-    let workload = workload(queries);
+    let run = planning_run(workload(queries), ignore_accuracy);
+    let (plan, selection) = run.selection.as_ref().expect("a plan is selected");
+    let accepted = selection
+        .accepted_accuracy_per_query
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    (plan.clone(), accepted)
+}
+
+/// Every planning stage over `workload`, no raw data kept, with accuracy
+/// enforced or ignored.
+fn planning_run(workload: PlanningWorkload, ignore_accuracy: bool) -> PlanningRun {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap();
     let capabilities = DeploymentCapabilities {
@@ -52,14 +71,31 @@ fn selection(queries: &[(&str, &str)], ignore_accuracy: bool) -> (PhysicalASAPDA
         .with_deployment_capabilities(&capabilities)
         .with_ignore_accuracy_guarantees(ignore_accuracy);
     let roots = lower_promql_roots(&workload).unwrap();
-    let run = run_planning_stages_over(roots, &entries, &data, models).unwrap();
-    let (plan, selection) = run.run.selection.as_ref().expect("a plan is selected");
-    let accepted = selection
-        .accepted_accuracy_per_query
+    run_planning_stages_over(roots, &entries, &data, models)
+        .unwrap()
+        .run
+}
+
+/// The failure probability each readout the selected plan reads was
+/// required to meet (`CandidateForMemoGroup::required_accuracy`), in node
+/// order.
+fn readout_failure_probabilities(run: &PlanningRun) -> Vec<f64> {
+    let (plan, _) = run.selection.as_ref().expect("a plan is selected");
+    let physical = run.physical_asap_candidates.as_ref().expect("Stage 2 ran");
+    plan.nodes
         .iter()
-        .map(ToString::to_string)
-        .collect();
-    (plan.clone(), accepted)
+        .filter(|node| matches!(node.payload, Operator::ASAP(ASAPOp::SummaryEstimate { .. })))
+        .filter_map(|node| {
+            let candidate = physical.physical_candidates[node.selected_physical_candidate?.0]
+                .logical_candidate_id;
+            let required = physical
+                .logical_candidates
+                .memo
+                .candidate(candidate)
+                .required_accuracy()?;
+            Some(required.failure_probability)
+        })
+        .collect()
 }
 
 /// Queries A and B of the module's example.
@@ -203,5 +239,87 @@ fn a_ratio_sharing_its_readouts_with_its_operands_still_meets_its_target() {
     assert!(
         alphas.iter().any(|&alpha| alpha <= 0.02),
         "the ratio reads readouts composing within 0.05: {alphas:?}"
+    );
+}
+
+/// The p90 of `latency{side="a"}` or of `latency{side="b"}`, over the
+/// whole result at relative 0.05 with δ = 0.01. Stage 0 bounds the result
+/// by the series both branches read, 2,000, and the readouts read 2,000
+/// estimates, one per output value: every estimate read bounds it, so
+/// Pass 2 gives each readout 0.01 / 2,000 = 5e-6 and (K) accepts them
+/// (2,000 × 5e-6 = 0.01). Adding both sides' δ per output value against
+/// 0.01 / 2,000 left this query no sketch plan.
+#[test]
+fn an_or_of_two_quantiles_reads_sketches() {
+    let run = planning_run(
+        workload(&[(
+            r#"quantile_over_time(0.9, latency{side="a"}[5m]) or quantile_over_time(0.9, latency{side="b"}[5m])"#,
+            r#"{"accuracy_metric": "relative", "max_error": 0.05, "failure_probability": 0.01}"#,
+        )]),
+        false,
+    );
+    let (_, selection) = run.selection.as_ref().expect("a plan is selected");
+    assert_eq!(
+        selection.accepted_accuracy_per_query[0].to_string(),
+        "accepted relative (DDSketch)"
+    );
+    let levels = readout_failure_probabilities(&run);
+    assert!(!levels.is_empty());
+    for level in levels {
+        assert!((level - 5e-6).abs() <= 1e-12, "{level}");
+    }
+}
+
+/// `max_over_time(latency[5m]) * on() group_left
+/// quantile_over_time(0.99, reference[5m])`, `reference` one series
+/// matched onto each of `latency`'s 1,000 (read exactly), over the
+/// whole result at relative 0.01 with δ = 0.01: every output value reads
+/// the one estimate, so the readout keeps δ = 0.01 and (K) accepts it.
+/// Splitting δ over the 1,000 output values left it no sketch plan.
+#[test]
+fn a_quantile_matched_onto_every_series_reads_a_sketch() {
+    let run = planning_run(
+        workload_with_sources(
+            &[(
+                "max_over_time(latency[5m]) * on() group_left quantile_over_time(0.99, reference[5m])",
+                r#"{"accuracy_metric": "relative", "max_error": 0.02, "failure_probability": 0.01}"#,
+            )],
+            r#", "reference": {"series_count": 1, "metric_type": "gauge", "sample_interval": 1000,
+                "column_signs": {"value": "non_negative"}}"#,
+        ),
+        false,
+    );
+    let (_, selection) = run.selection.as_ref().expect("a plan is selected");
+    assert_eq!(
+        selection.accepted_accuracy_per_query[0].to_string(),
+        "accepted relative (DDSketch)"
+    );
+    assert_eq!(readout_failure_probabilities(&run), [0.01]);
+}
+
+/// The p90 of `latency` per value at δ = 0.01 (its own level 0.01) and
+/// `max` of it over the whole result at δ = 0.01 (its own level 1e-5):
+/// `max` reads all 1,000 estimates, so the readout it reads must fail
+/// with at most 1e-5, whatever level the per-value query was given.
+#[test]
+fn a_max_reads_the_level_its_own_split_gives() {
+    let run = planning_run(
+        workload(&[
+            (
+                "quantile_over_time(0.9, latency[5m])",
+                r#"{"accuracy_metric": "relative", "max_error": 0.05, "failure_probability": 0.01, "accuracy_scope": "per_value"}"#,
+            ),
+            (
+                "max(quantile_over_time(0.9, latency[5m]))",
+                r#"{"accuracy_metric": "relative", "max_error": 0.05, "failure_probability": 0.01}"#,
+            ),
+        ]),
+        false,
+    );
+    let levels = readout_failure_probabilities(&run);
+    assert!(!levels.is_empty());
+    assert!(
+        levels.iter().all(|&level| level <= 1e-5 * (1.0 + 1e-9)),
+        "{levels:?}"
     );
 }
