@@ -378,17 +378,20 @@ fn vector_match(modifier: &BinModifier) -> VectorMatch {
         None => (VectorMatchKind::Ignoring, &[][..]),
     };
     let grouping = match &modifier.card {
-        VectorMatchCardinality::ManyToOne(labels) => Some((GroupSide::Left, labels)),
-        VectorMatchCardinality::OneToMany(labels) => Some((GroupSide::Right, labels)),
+        VectorMatchCardinality::ManyToOne(labels) => Some(VectorGrouping {
+            side: GroupSide::Left,
+            labels: labels.as_ref().to_vec(),
+        }),
+        VectorMatchCardinality::OneToMany(labels) => Some(VectorGrouping {
+            side: GroupSide::Right,
+            labels: labels.as_ref().to_vec(),
+        }),
         VectorMatchCardinality::OneToOne | VectorMatchCardinality::ManyToMany => None,
     };
     VectorMatch {
         kind,
         labels: labels.to_vec(),
-        grouping: grouping.map(|(side, labels)| VectorGrouping {
-            side,
-            labels: labels.as_ref().to_vec(),
-        }),
+        grouping,
     }
 }
 
