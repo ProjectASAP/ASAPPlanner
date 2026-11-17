@@ -801,16 +801,29 @@ class AppTests(unittest.TestCase):
         """A planned workload fills the data workload and deployment panels;
         a plan that is not installable says why under materialized views."""
         doc = example1()
-        # Example 1's plan installs; a plan the executor cannot compile has
+        # Example 1's plan installs; a plan whose views cannot be derived has
         # this error instead of its views.
         doc["stage3_plan_selection"].pop("materialized_views")
-        doc["stage3_plan_selection"]["materialized_views_error"] = "the executor cannot compile the plan's query run"
+        doc["stage3_plan_selection"]["materialized_views_error"] = "materialized view 3 reads a view refreshed later"
         js = self.page("?doc=s.json", {"s.json": json.dumps(doc)})
         self.assertIn("q1, q2", self.text(js, "dataSources"))
         self.assertIn("ingesting", js.eval("__els.dataArrival.textContent"))
         self.assertIn("raw dataretained", self.text(js, "deployment"))
         self.assertIn("every 10 s · predictable", self.text(js, "queries"))
-        self.assertIn(f"no installable plan: {doc['stage3_plan_selection']['materialized_views_error']}", self.text(js, "views-meta"))
+        self.assertIn(f"invalid plan: {doc['stage3_plan_selection']['materialized_views_error']}", self.text(js, "views-meta"))
+
+    def test_a_plan_the_planners_executor_cannot_run_lists_its_views_and_says_why(self):
+        """A plan the Planner's executor cannot run still lists its views;
+        the views line says why the executor cannot run it."""
+        doc = example1()
+        doc["stage3_plan_selection"].pop("materialized_views_error", None)
+        doc["stage3_plan_selection"]["materialized_views"] = [materialized_view(2)]
+        doc["stage3_plan_selection"]["planner_executor_can_run"] = False
+        doc["stage3_plan_selection"]["planner_executor_error"] = "AbsentOverTime has no native implementation"
+        js = self.page("?doc=s.json", {"s.json": json.dumps(doc)})
+        self.assertIn("1 materialized view", self.text(js, "views-meta"))
+        self.assertIn("the Planner's executor cannot run this plan: AbsentOverTime has no native implementation",
+                      self.text(js, "views-meta"))
 
     def test_materialized_views_table_has_one_row_per_view_and_a_row_selects_its_node(self):
         """The materialized views table has one row per view; clicking it

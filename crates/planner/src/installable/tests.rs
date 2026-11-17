@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 thread_local! {
     /// The plan nodes handed to the executor's compiler by the views'
-    /// refreshes in [`InstallablePlan::of_dag`] and
+    /// refreshes in [`installable_plan_of`] and
     /// [`InstallablePlan::check_compiles`], summed over their compiles.
     pub(super) static COMPILED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -49,6 +49,7 @@ async fn view_refreshes_compile_only_the_nodes_below_them() {
     COMPILED_NODES.with(|count| count.set(0));
     let rebuilt = InstallablePlan::of_dag(plan.dag.clone(), plan.query_texts.clone()).unwrap();
     assert_eq!(rebuilt.materialized_views().unwrap().len(), views);
+    rebuilt.check_compiles().unwrap();
     plan.check_compiles().unwrap();
     let compiled = COMPILED_NODES.with(std::cell::Cell::get);
     assert!(
@@ -371,4 +372,53 @@ fn a_root_time_shift_is_read_whole_by_the_installer_not_by_the_cost() {
     let retention = dag.raw_data_retention().unwrap();
     assert_eq!(retention.len(), 1);
     assert_eq!(retention[0].lookback_ms(), None);
+}
+
+/// `absent_over_time(data[1m])` every 10 s, exact: Stages 1-3
+/// plan it, but the Planner's executor has no `absent_over_time` kernel.
+/// [`InstallablePlan::of_dag`] still returns the plan, validated, for any
+/// runtime; [`InstallablePlan::check_compiles`] reports the executor's gap,
+/// and [`installable_plan_of`] (what `plan_installable` returns) refuses it.
+#[tokio::test]
+async fn of_dag_validates_a_plan_the_executor_cannot_compile_without_refusing_it() {
+    let workload: crate::PlanningWorkload = serde_json::from_str(
+        r#"{"query_workload": {"language": "promql", "repeating_queries": [{
+              "query": "absent_over_time(data[1m])",
+              "demand": {"fixed_interval_at": {"interval": 10000, "evaluation_phase": 0}},
+              "requirements": {"accuracy": {"max_error": 0.0, "failure_probability": 0.0}},
+              "predictability": {"predictable": {"known_at": null}}}]},
+            "data_workload": {"arrival": {"ingesting": {"rows_per_second": 10000.0}},
+              "sources": {"data": {"series_count": 1000, "metric_type": "gauge",
+                  "sample_interval": 100}}}}"#,
+    )
+    .unwrap();
+    let output = crate::e2e_plan(crate::UserInput::new(
+        &workload,
+        crate::FrontendInput::Promql,
+        crate::PlanningModels::builtin(),
+    ))
+    .await
+    .expect("Stages 1-3 plan absent_over_time");
+    let query_texts = vec!["absent_over_time(data[1m])".to_owned()];
+    let plan = InstallablePlan::of_dag(output.plan.clone(), query_texts)
+        .expect("validated without the executor's compile check");
+    plan.validate().unwrap();
+    // Precondition: an executor-only gap. Once the executor runs
+    // `absent_over_time`, pick another query it plans but cannot compile.
+    assert!(plan.check_compiles().is_err());
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let refused = installable_plan_of(output.plan.clone(), &entries).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            InstallablePlanError::QueryRunNotExecutable { .. }
+                | InstallablePlanError::MaterializedViewNotExecutable { .. }
+        ),
+        "{refused}"
+    );
+    // Still validated: one query text per root.
+    assert!(matches!(
+        InstallablePlan::of_dag(output.plan, Vec::new()),
+        Err(InstallablePlanError::QueriesDoNotMatchRoots { roots: 1 })
+    ));
 }

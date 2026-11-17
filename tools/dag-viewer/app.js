@@ -225,9 +225,12 @@
     }
     const rows = materializedViewRows(doc);
     $('views-meta').innerHTML = stage3.materialized_views_error
-      ? `<span class="error">no installable plan: ${esc(stage3.materialized_views_error)}</span>`
+      ? `<span class="error">invalid plan: ${esc(stage3.materialized_views_error)}</span>`
       : `<b>${rows.length}</b> materialized view${rows.length === 1 ? '' : 's'}` +
-        (rows.length ? '' : ': nothing is materialized across evaluations; every query computes at query time');
+        (rows.length ? '' : ': nothing is materialized across evaluations; every query computes at query time') +
+        (stage3.planner_executor_error
+          ? ` · <span class="error">the Planner's executor cannot run this plan: ${esc(stage3.planner_executor_error)}</span>`
+          : '');
     $('materializedViews').innerHTML = rows.length ? table(
       ['plan node', 'definition', 'kind', 'refresh', 'reads', 'retention', 'Stage 3 cost', 'read by'],
       rows.map((r) => `<tr class="clickable" tabindex="0" data-node="${esc(r.nodeId)}"><td>${esc(r.nodeId)}</td>` +

@@ -122,7 +122,12 @@ fn plan_snapshot(document: &Value) -> Map<String, Value> {
                 "accepted": stage3["accepted_accuracy_per_query"],
             }),
         );
-        for key in ["materialized_views", "materialized_views_error", "warnings"] {
+        for key in [
+            "materialized_views",
+            "materialized_views_error",
+            "planner_executor_error",
+            "warnings",
+        ] {
             if let Some(value) = stage3.get(key) {
                 snapshot.insert(key.into(), value.clone());
             }

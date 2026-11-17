@@ -2377,3 +2377,302 @@ fn the_default_text_is_the_terse_form_and_verbose_adds_the_details() {
         }
     }
 }
+
+// ── Plan file (`--plan-file`) and the Planner's executor check ──────────────
+
+/// What a plan-file path holds before a run: a file an earlier run left.
+const EARLIER_PLAN_FILE: &str = "a plan file an earlier run left";
+
+/// A plan-file path holding [`EARLIER_PLAN_FILE`]: a run that selects a
+/// plan overwrites it; any other run leaves it as it is.
+fn earlier_plan_file() -> TempFile {
+    TempFile::new(EARLIER_PLAN_FILE)
+}
+
+/// The plan file at `path`, read back as a runtime reads it and validated.
+fn read_plan_file(path: &str) -> asap_planner::InstallablePlan {
+    let text = std::fs::read_to_string(path).unwrap();
+    let plan = asap_planner::InstallablePlan::from_json(&text).unwrap();
+    plan.validate().unwrap();
+    assert_eq!(
+        plan.wire_version,
+        asap_planner::INSTALLABLE_PLAN_WIRE_VERSION
+    );
+    plan
+}
+
+/// Whether `plan`'s DAG is the plan `document` selected; the document's
+/// numbers are rounded to 12 significant digits, so the file's are too.
+fn is_the_selected_plan(plan: &asap_planner::InstallablePlan, document: &Value) -> bool {
+    asap_devtools::stable_output::rounded_to_12_significant_digits(
+        serde_json::to_value(&plan.dag).unwrap(),
+    ) == document["stage3_plan_selection"]["plan"]
+}
+
+/// The note `asap_planner` writes on standard error when the Planner's
+/// executor cannot run the selected plan.
+const EXECUTOR_CANNOT_RUN_NOTE: &str = "note: the Planner's executor cannot run this plan: ";
+
+/// The ready-to-use capabilities file that supports every summary family
+/// with every readout it answers.
+fn every_summary_family_file() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/dag-viewer/deployment-capabilities/every-summary-family.json")
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// `--plan-file` writes the selected plan of the committed `example1`
+/// workload as `InstallablePlan` JSON: the file reads back with
+/// `InstallablePlan::from_json`, validates, holds the workload's query
+/// texts in order, and its DAG is the plan the document selected. The
+/// Planner's executor runs it: the document says so and there is no note.
+#[test]
+fn plan_file_round_trips_the_selected_plan() {
+    let workload: PlanningWorkload =
+        serde_json::from_str(&std::fs::read_to_string(example("example1")).unwrap()).unwrap();
+    let query_texts: Vec<String> = workload
+        .query_workload
+        .entries()
+        .map(|entry| entry.query.0.clone())
+        .collect();
+    let file = earlier_plan_file();
+    let path = example("example1");
+    let args = [
+        "--workload",
+        path.as_str(),
+        "--run-until",
+        "stage3",
+        "--plan-file",
+        file.path(),
+        "--format",
+        "json",
+    ];
+    let output = planner(&args);
+    assert_eq!(output.status.code(), Some(0));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains(EXECUTOR_CANNOT_RUN_NOTE), "{stderr}");
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let plan = read_plan_file(file.path());
+    assert_eq!(plan.query_texts, query_texts);
+    assert!(is_the_selected_plan(&plan, &document));
+    let selection = &document["stage3_plan_selection"];
+    assert_eq!(selection["planner_executor_can_run"], json!(true));
+    assert!(selection["planner_executor_error"].is_null(), "{selection}");
+}
+
+/// `absent_over_time(data[1m])`: Stages 1-3 plan it, but the Planner's
+/// executor has no `absent_over_time` kernel. The plan file is still
+/// written and the run exits 0; the executor's gap is only reported: in
+/// the document (`planner_executor_can_run: false` with its reason) and in
+/// one note on standard error. The document lists the plan's views.
+#[test]
+fn a_plan_the_executor_cannot_run_is_written_with_a_note() {
+    let query = "absent_over_time(data[1m])";
+    let workload = TempFile::json(&adhoc(&[query], exact(), &["data"]));
+    let file = earlier_plan_file();
+    let output = planner(&[
+        "--workload",
+        workload.path(),
+        "--run-until",
+        "stage3",
+        "--plan-file",
+        file.path(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let notes: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with(EXECUTOR_CANNOT_RUN_NOTE))
+        .collect();
+    assert_eq!(notes.len(), 1, "{stderr}");
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let selection = &document["stage3_plan_selection"];
+    // Precondition: an executor-only gap. Once the executor runs
+    // `absent_over_time`, pick another query it plans but cannot compile.
+    assert_eq!(selection["planner_executor_can_run"], json!(false));
+    let reason = selection["planner_executor_error"].as_str().unwrap();
+    assert!(reason.contains("AbsentOverTime"), "{reason}");
+    assert_eq!(notes[0], format!("{EXECUTOR_CANNOT_RUN_NOTE}{reason}"));
+    assert!(selection["materialized_views"].is_array(), "{selection}");
+    assert!(
+        selection["materialized_views_error"].is_null(),
+        "{selection}"
+    );
+    let plan = read_plan_file(file.path());
+    assert_eq!(plan.query_texts, [query]);
+    assert!(is_the_selected_plan(&plan, &document));
+    assert_eq!(plan.check_compiles().unwrap_err(), reason);
+}
+
+/// When Stage 3 selects no plan (example 3b under cost model 2, which plan
+/// selection does not implement), the run exits 1, writes no plan file,
+/// says so, and leaves the file already at the path as it is.
+#[test]
+fn no_selected_plan_exits_1_and_leaves_the_plan_file_path_alone() {
+    let cost = cost_inputs(&asap_cost::CostInputs {
+        cost_model: asap_cost::CostModel::ProvisionedCapacity(
+            asap_cost::ResourceUnitCost::illustrative(),
+        ),
+        ..Default::default()
+    });
+    let file = earlier_plan_file();
+    let path = example("example3b");
+    let output = planner(&[
+        "--workload",
+        path.as_str(),
+        "--run-until",
+        "stage3",
+        "--cost-inputs",
+        cost.path(),
+        "--plan-file",
+        file.path(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!selects_a_plan(&document["stage3_plan_selection"]));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(&format!("no plan file written to {}", file.path())),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(file.path()).unwrap(),
+        EARLIER_PLAN_FILE
+    );
+}
+
+/// A run that fails before planning (here an unreadable workload file)
+/// leaves the file already at `--plan-file` as it is.
+#[test]
+fn a_failed_run_leaves_the_plan_file_path_alone() {
+    let file = earlier_plan_file();
+    refused(&[
+        "--workload",
+        "/nonexistent/workload.json",
+        "--run-until",
+        "stage3",
+        "--plan-file",
+        file.path(),
+    ]);
+    assert_eq!(
+        std::fs::read_to_string(file.path()).unwrap(),
+        EARLIER_PLAN_FILE
+    );
+}
+
+/// The summary families `asap_planner` plans with (the document shows the
+/// capabilities it hands to planning) come from `--deployment-capabilities`
+/// alone. Without the file, or with a file that does not list
+/// `supported_summaries`, they are the Planner's executor's families, as
+/// `plan_installable` defaults them; a file that lists them is used as it
+/// is: here the ready-to-use file with every summary family, and a file
+/// with KLL only.
+#[test]
+fn summary_families_come_from_the_deployment_capabilities() {
+    let workload = adhoc(&["count by (job) (m)"], within(0.01, 0.01), &["m"]);
+    let planned_with = |args: &[&str]| {
+        let mut all = vec!["--run-until", "stage0"];
+        all.extend_from_slice(args);
+        document(&workload, &all)["deployment_capabilities"]["supported_summaries"].clone()
+    };
+    let executor_families =
+        serde_json::to_value(asap_executor::supported_summary_families()).unwrap();
+    assert_eq!(planned_with(&[]), executor_families);
+    let without_summaries = TempFile::json(&json!({"raw_data_retained": true}));
+    assert_eq!(
+        planned_with(&["--deployment-capabilities", without_summaries.path()]),
+        executor_families
+    );
+    let every_family = every_summary_family_file();
+    let declared: Value =
+        serde_json::from_str(&std::fs::read_to_string(&every_family).unwrap()).unwrap();
+    assert_eq!(
+        planned_with(&["--deployment-capabilities", &every_family]),
+        declared["supported_summaries"]
+    );
+    let kll = json!([{"summary_type": "Kll", "readouts": ["Quantile"]}]);
+    let kll_only = TempFile::json(&json!({ "supported_summaries": kll }));
+    assert_eq!(
+        planned_with(&["--deployment-capabilities", kll_only.path()]),
+        kll
+    );
+}
+
+/// `tools/dag-viewer/deployment-capabilities/every-summary-family.json`
+/// lists every sketch algorithm with every readout its capability table
+/// row answers, so its `supported_summaries` rule out no summary type and
+/// no readout; its other fields keep their defaults.
+#[test]
+fn the_every_summary_family_file_rules_out_nothing() {
+    use asap_types::deployment_capabilities::{DeploymentCapabilities, ExclusionSource};
+    use asap_types::summary_type::{SketchAlgorithm, SupportedSummary};
+    let capabilities: DeploymentCapabilities =
+        serde_json::from_str(&std::fs::read_to_string(every_summary_family_file()).unwrap())
+            .unwrap();
+    let every_family: Vec<SupportedSummary> = SketchAlgorithm::ALL
+        .iter()
+        .map(|&algorithm| SupportedSummary {
+            summary_type: algorithm,
+            readouts: algorithm
+                .capability()
+                .readouts
+                .iter()
+                .map(|&(statistic, _)| statistic)
+                .collect(),
+        })
+        .collect();
+    assert_eq!(
+        capabilities.supported_summaries.as_ref(),
+        Some(&every_family),
+        "expected:\n{}",
+        serde_json::to_string_pretty(&every_family).unwrap()
+    );
+    let summary_exclusions: Vec<_> = capabilities
+        .exclusions()
+        .into_iter()
+        .filter(|exclusion| {
+            matches!(
+                exclusion.source,
+                ExclusionSource::SummaryNotSupported | ExclusionSource::ReadoutNotSupported
+            )
+        })
+        .collect();
+    assert!(summary_exclusions.is_empty(), "{summary_exclusions:?}");
+}
+
+/// `--plan-file` without its path and `--plan-file` before Stage 3 selects
+/// a plan are usage errors (status 2, with the usage line) that leave the
+/// plan-file path alone.
+#[test]
+fn plan_file_flag_misuse_is_a_usage_error() {
+    let workload = TempFile::json(&adhoc(&["sum(data)"], exact(), &["data"]));
+    let file = earlier_plan_file();
+    for (args, message) in [
+        (
+            vec!["--run-until", "stage3", "--plan-file"],
+            "--plan-file needs a value",
+        ),
+        (
+            vec!["--run-until", "stage2", "--plan-file", file.path()],
+            "--plan-file needs --run-until stage3",
+        ),
+    ] {
+        let mut all = vec!["--workload", workload.path()];
+        all.extend(args);
+        let output = planner(&all);
+        assert_eq!(output.status.code(), Some(2), "{all:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(message), "{stderr}");
+        assert!(stderr.contains("usage: asap_planner"), "{stderr}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(file.path()).unwrap(),
+        EARLIER_PLAN_FILE
+    );
+}

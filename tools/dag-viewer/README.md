@@ -151,7 +151,10 @@ whole document):
   `pruned_candidates` (as Stage 2's), `milp_variables`,
   `milp_constraints`, `materialized_views` (`node_id`, a plan node, `refresh`,
   `coverage.definition_id`, `inputs` and `retention_ms`),
-  `materialized_views_error`, `warnings` and `error`;
+  `materialized_views_error` (the plan is invalid: its views cannot be
+  derived), `planner_executor_can_run` (whether the
+  Planner's executor compiles the plan) with `planner_executor_error` when
+  it does not, `warnings` and `error`;
 - `memo.steps[].groups[]`: `id`, `label`, `operator` (the group's
   expression as `Operator` JSON, children as group ids), `children`,
   `parents`, `queries`, `roots_of`, `candidate_count`,
