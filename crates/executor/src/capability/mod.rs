@@ -223,23 +223,6 @@ pub(crate) fn hydra_cms_shape(
     ))
 }
 
-/// A filtered `SummaryAgg` never runs at ingestion time. An ingestion-time
-/// build reads raw data samples (`$population`, `$timestamp`, `value`), which carry
-/// none of the query's columns for the filter predicate to read, so only a
-/// query-time build can apply it. The ingestion-time compiler and the
-/// binding of any ingestion-timed `SummaryAgg` apply this check. The planner
-/// offers a filtered build at ingestion time when its input is produced at
-/// ingestion time; this check refuses it until the executor feeds such a
-/// build its input rows.
-pub fn validate_ingestion_time_summary<C>(
-    filter: Option<&planner_types::ir::Predicate<C>>,
-) -> Result<(), String> {
-    match filter {
-        Some(_) => Err("a filtered summary update runs only at query time".into()),
-        None => Ok(()),
-    }
-}
-
 fn valid_matrix(width: u32, depth: u32) -> bool {
     // Construction uses the kernel's native row hashing, so no encoded-size
     // limit applies here.

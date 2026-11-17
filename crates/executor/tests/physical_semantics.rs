@@ -1577,10 +1577,10 @@ fn filtered_summary_build_keeps_empty_groups() {
     }
 }
 
-/// A filtered `SummaryAgg` timed at ingestion does not bind: only a
-/// query-time build applies its filter. The same build unfiltered binds.
+/// A filtered `SummaryAgg` timed at ingestion binds, as the same build
+/// unfiltered does: an ingestion run reads the rows its filter reads.
 #[test]
-fn filtered_summary_build_is_rejected_at_ingestion_time() {
+fn filtered_summary_build_binds_at_ingestion_time() {
     use asap_executor::physical_planner::compile_node;
     use planner_types::ir::operator::{GroupKeys, Reduction as Plan};
     use planner_types::ir::properties::ExecutionDataState;
@@ -1607,8 +1607,7 @@ fn filtered_summary_build_is_rejected_at_ingestion_time() {
         compile_node(&node, std::slice::from_ref(&input), true)
     };
     assert!(build(None).is_ok());
-    let error = build(keep()).err().expect("filtered ingestion-time build");
-    assert!(error.to_string().contains("only at query time"), "{error}");
+    assert!(build(keep()).is_ok());
 }
 
 /// PromQL never emits per-measure filters, and over PromQL series identity a
