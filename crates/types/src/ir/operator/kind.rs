@@ -49,7 +49,7 @@ pub enum OperatorKind {
     /// Per input state merged (each tumbling window of a chain is a state).
     SummaryMerge,
     /// Per input row placed in its tumbling window and inserted into that tumbling window's state.
-    // Named `PaneChain` before #1163.
+    // Formerly named `PaneChain`; old JSON still loads.
     #[serde(alias = "PaneChain")]
     SummaryTumblingWindowChain,
     SummarySubtract,

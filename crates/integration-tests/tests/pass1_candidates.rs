@@ -92,7 +92,7 @@ fn stage0(root: QueryRoot) -> Memo {
 
 /// Pass 1's memo of the one query `root`.
 fn pass1(root: QueryRoot) -> Memo {
-    pass1_memo(stage0(root)).unwrap()
+    pass1_memo(stage0(root), &[]).unwrap()
 }
 
 /// The one `Aggregate` group of `memo`.
@@ -107,7 +107,7 @@ fn root_group(memo: &Memo) -> MemoGroupId {
 /// have. Each outputs its group's schema, or `Memo::add_candidate` would
 /// have rejected it and Pass 1 failed.
 fn candidates_of_aggregates(label: &str, root: QueryRoot) -> usize {
-    let memo = pass1_memo(stage0(root)).unwrap_or_else(|e| panic!("{label}: {e}"));
+    let memo = pass1_memo(stage0(root), &[]).unwrap_or_else(|e| panic!("{label}: {e}"));
     aggregate_groups(&memo)
         .iter()
         .map(|group| memo.groups()[group.0 as usize].candidates.len())
@@ -624,7 +624,7 @@ async fn an_unsupported_way_under_a_key_only_having_adds_no_group() {
     .await
     .unwrap();
     let stage0 = stage0(QueryRoot::Operator(root));
-    let memo = pass1_memo(stage0.clone()).unwrap();
+    let memo = pass1_memo(stage0.clone(), &[]).unwrap();
     assert_eq!(memo.groups().len(), stage0.groups().len());
     assert!(memo
         .groups()
@@ -643,7 +643,7 @@ async fn a_multi_measure_aggregates_part_is_the_equal_stage0_group() {
     ];
     let stage0 =
         asap_stage0_memo::memo_of_queries(&roots, &[None, None], &DataWorkload::default()).unwrap();
-    let memo = pass1_memo(stage0).unwrap();
+    let memo = pass1_memo(stage0, &[]).unwrap();
     let counts = memo
         .groups()
         .iter()

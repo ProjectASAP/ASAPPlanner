@@ -33,6 +33,7 @@ mod test_fixtures;
 #[cfg(test)]
 mod tests;
 
+use asap_types::deployment_capabilities::DeploymentExclusion;
 use asap_types::ir::schema::Schema;
 use asap_types::ir::{Operator, SchemaDerivationError};
 use asap_types::stages::{CandidateError, Memo, MemoGroupError, MemoGroupId};
@@ -65,15 +66,21 @@ pub enum PerComputationCandidateError {
 /// Stage 1, Pass 1: the initial candidates of the memo groups of `memo`
 /// (Stage 0's, without candidates). It finds one computation target per
 /// measure of each aggregate group with a realization besides exact
-/// execution (every summary the planner can build; Stage 2 prunes those the
-/// deployment does not support), and adds each way to compute a group as candidates, through
+/// execution, skips each summary whose sketch algorithm one of the
+/// deployment's `exclusions` (`DeploymentCapabilities::exclusions`) rules
+/// out outright (e.g. every KLL build when the executor does not list KLL;
+/// Stage 2 prunes the rest the deployment cannot run), and adds each way to
+/// compute a group as candidates, through
 /// `Memo::find_or_add_group` and `Memo::add_candidate`: every group's own
 /// expression, exact accumulators, one summary build per configuration of
 /// the algorithm's predefined list with separate readouts, and fused builds.
 /// Accuracy prunes nothing here: Pass 2 gives each readout its required
 /// accuracy and eliminates the candidates no query can use.
-pub fn pass1_memo(mut memo: Memo) -> Result<Memo, PerComputationCandidateError> {
-    let targets = computation_targets(&memo)?;
+pub fn pass1_memo(
+    mut memo: Memo,
+    exclusions: &[DeploymentExclusion],
+) -> Result<Memo, PerComputationCandidateError> {
+    let targets = computation_targets(&memo, exclusions)?;
     add_pass1_candidates(&mut memo, &targets)?;
     Ok(memo)
 }

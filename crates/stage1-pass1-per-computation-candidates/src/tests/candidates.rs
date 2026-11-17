@@ -19,7 +19,7 @@ fn every_group_offers_its_own_expression() {
     let s = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![sum()], None);
     query(&mut memo, s, None);
     let stage0 = memo.groups().len();
-    let memo = pass1_memo(memo).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     for index in 0..stage0 {
         let group = &memo.groups()[index];
         let own = &group.candidates[0];
@@ -37,7 +37,7 @@ fn exact_accumulator_is_a_state_group_and_a_finalize() {
     let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);
     let s = aggregate_group(&mut memo, rows, Reduction::by(vec![2]), vec![sum()], None);
     query(&mut memo, s, None);
-    let memo = pass1_memo(memo).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     let states = groups_where(&memo, |e| {
         matches!(
             e,
@@ -103,7 +103,7 @@ fn multi_measure_candidate_joins_single_measure_groups() {
         None,
     );
     query(&mut memo, both, None);
-    let memo = pass1_memo(memo).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     let single = groups_where(
         &memo,
         |e| matches!(e, Operator::NonASAP(NonASAPOp::Aggregate { measures, .. }) if measures.len() == 1),
@@ -150,7 +150,7 @@ fn pass1_sets_no_input_requirement() {
     );
     query(&mut memo, ranked, None);
     query(&mut memo, p, None);
-    let memo = pass1_memo(memo).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     // The top-k readout is offered, and has no input requirement either.
     assert!(!groups_where(&memo, |e| matches!(
         e,

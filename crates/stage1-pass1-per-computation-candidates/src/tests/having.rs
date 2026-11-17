@@ -55,7 +55,7 @@ fn key_only_having_is_pushed_below_into_the_filter_group() {
     );
     query(&mut memo, having, None);
     query(&mut memo, by_job, None);
-    let memo = pass1_memo(memo).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     let below = pushed_below(&memo, rows);
     assert_eq!(below.len(), 1, "{}", memo_printout(&memo));
     // The Filter group: its own expression, then one readout per algorithm
@@ -83,7 +83,7 @@ fn value_having_stays_above() {
         compare(1, CompareOpKind::Gt, ScalarValue::Float64(10.0)),
     );
     query(&mut memo, having, None);
-    let memo = pass1_memo(memo).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     assert!(pushed_below(&memo, rows).is_empty());
     assert_eq!(candidates_of(&memo, having).len(), 1);
 }
@@ -107,7 +107,7 @@ fn global_aggregate_having_stays_above() {
         Predicate(ScalarExpr::Literal(ScalarValue::Boolean(false))),
     );
     query(&mut memo, having, None);
-    let memo = pass1_memo(memo).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     assert!(pushed_below(&memo, rows).is_empty());
 }
 
@@ -173,7 +173,7 @@ fn a_constant_having_of_a_grouped_aggregate_is_pushed_below() {
         }),
     );
     query(&mut memo, having, None);
-    let memo = pass1_memo(memo).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     assert_eq!(
         pushed_below(&memo, rows).len(),
         1,
@@ -197,7 +197,7 @@ fn own_value_having_filters_each_readout() {
         Some(compare(1, CompareOpKind::Gt, ScalarValue::Float64(10.0))),
     );
     query(&mut memo, by_job, None);
-    let memo = pass1_memo(memo).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     let kinds: Vec<&str> = candidates_of(&memo, by_job)
         .iter()
         .map(|c| c.expression.operator.kind_name())

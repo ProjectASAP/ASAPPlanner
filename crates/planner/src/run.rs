@@ -106,9 +106,10 @@ pub fn run_planning(
         })
         .collect();
     let initial = memo_of_queries(&roots, &accuracy_targets, data)?;
-    // Pass 1: the initial candidates (Stage 2 prunes those the deployment
-    // cannot run). A query Pass 1 cannot plan is an input error.
-    let pass1 = pass1_memo(initial)?;
+    // Pass 1: the initial candidates, without the summaries of a sketch
+    // algorithm the deployment excludes outright (Stage 2 prunes the rest it cannot run).
+    // A query Pass 1 cannot plan is an input error.
+    let pass1 = pass1_memo(initial, &models.deployment_capabilities.exclusions())?;
     let mut report = PlanningReport {
         pass1_ms: elapsed_ms(started),
         ..PlanningReport::default()
