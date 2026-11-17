@@ -82,7 +82,7 @@ same pipeline behind the `OptimizationPass` trait.
 | The analytical per-operator resource model Stage 3 measures with | `asap-cost`, `node/analytical.rs` and `node/operator_statistics.rs` |
 | The accuracy rules: per-family guarantees, each operator's error contract, the metric rule, each readout's required accuracy, α^log of a logical edge | `asap-accuracy` (`AccuracyEvidence`, `theoretical_guarantee`, `guarantee/`, `evidence.rs`, `error_contract/`, `metric_rule/`, `readout_caps/`, `logical_edge/`) |
 | The statistic a summary is read for an aggregation intent (`SketchStatistic::for_intent`) | `asap-types`, `summary_type/statistic.rs` |
-| What the executor supports (`DeploymentCapabilities`) | `asap-types`, `deployment_capabilities/`; Stage 2 reads it as the one list of exclusions it expands into (`DeploymentCapabilities::exclusions`); Pass 1 and Stage 3 read none of it |
+| What the executor supports (`DeploymentCapabilities`) | `asap-types`, `deployment_capabilities/`; Stage 2 reads it as the one list of exclusions it expands into (`DeploymentCapabilities::exclusions`); Pass 1 reads the same list only to skip a summary whose sketch algorithm one exclusion rules out outright (a `summary_family`-only exclusion); Stage 3 reads none of it |
 | The inputs every stage reads (`PlanningModels`: accuracy evidence, cost inputs, deployment capabilities) and the `OptimizationPass` trait | `asap-planner`, `models.rs` (`PlanningModels`) and `pass.rs` (the trait); the facade gives Pass 2 the evidence and Stage 3 only `CostInputs` |
 
 The current production search organizes these computations in memo result/state

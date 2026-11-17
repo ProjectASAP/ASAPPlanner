@@ -56,7 +56,7 @@ fn running_example_gives_one_build_per_theta_and_separate_readouts() {
     );
     query(&mut memo, g3, None);
     query(&mut memo, g6, None);
-    let memo = pass1_memo(memo).unwrap();
+    let memo = pass1_memo(memo, &[]).unwrap();
     println!("{}", memo_printout(&memo));
     let (kll, _) = state_group(&memo, SketchAlgorithm::Kll);
     let (ddsketch, _) = state_group(&memo, SketchAlgorithm::DDSketch);

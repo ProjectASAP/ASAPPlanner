@@ -39,7 +39,7 @@ fn nested_distributive_aggregate_merges_into_the_outer_state_group() {
             None,
         );
         query(&mut memo, by_job, None);
-        let memo = pass1_memo(memo).unwrap();
+        let memo = pass1_memo(memo, &[]).unwrap();
         let outer_state = groups_where(
             &memo,
             |e| matches!(e, Operator::ASAP(ASAPOp::SummaryAgg { child, summary_type: FieldDataType::ExactAggregate(state, _), .. }) if *child == per_series && *state == kind),
@@ -77,7 +77,7 @@ fn nested_merge_needs_the_same_distributive_aggregate() {
             None,
         );
         query(&mut memo, by_job, None);
-        let memo = pass1_memo(memo).unwrap();
+        let memo = pass1_memo(memo, &[]).unwrap();
         assert!(memo
             .groups()
             .iter()

@@ -129,7 +129,7 @@ pub(super) fn offered_physical_properties(
             } else {
                 exclusions
                     .iter()
-                    .find(|exclusion| exclusion.candidates.matches(&description))
+                    .find(|exclusion| exclusion.exclusion.matches(&description))
                     .map(|exclusion| PruneReason::ExcludedByDeployment(exclusion.source))
             };
             offered.push(OfferedPhysicalProperties {

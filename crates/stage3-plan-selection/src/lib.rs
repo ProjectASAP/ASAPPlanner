@@ -110,7 +110,7 @@ pub fn select_plan(
         .find(|(_, executions)| executions.is_empty())
     {
         return Err(
-            excluded_by_deployment(&physical.pruned_candidates, Some(query.0))
+            excluded_by_deployment(&physical.pruned_candidates, Some(query.0), &costs)
                 .unwrap_or_else(|| infeasible(&costs)),
         );
     }
@@ -121,8 +121,10 @@ pub fn select_plan(
         costs: &costs,
     })
     .map_err(|error| match error {
-        SelectionMilpError::Infeasible => excluded_by_deployment(&physical.pruned_candidates, None)
-            .unwrap_or_else(|| infeasible(&costs)),
+        SelectionMilpError::Infeasible => {
+            excluded_by_deployment(&physical.pruned_candidates, None, &costs)
+                .unwrap_or_else(|| infeasible(&costs))
+        }
         SelectionMilpError::Solver(reason) => ErrorSelectingPlan::Solver(reason),
         SelectionMilpError::TargetBelowSolverPrecision {
             query,

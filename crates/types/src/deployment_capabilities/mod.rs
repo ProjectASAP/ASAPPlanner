@@ -164,7 +164,7 @@ pub enum ExclusionSource {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeploymentExclusion {
     pub source: ExclusionSource,
-    pub candidates: CandidateExclusion,
+    pub exclusion: CandidateExclusion,
 }
 
 impl DeploymentCapabilities {
@@ -178,8 +178,8 @@ impl DeploymentCapabilities {
     /// `{operator: Scan, kept_across_evaluations: true}`.
     pub fn exclusions(&self) -> Vec<DeploymentExclusion> {
         let mut exclusions = Vec::new();
-        let mut exclude = |source, candidates| {
-            exclusions.push(DeploymentExclusion { source, candidates });
+        let mut exclude = |source, exclusion| {
+            exclusions.push(DeploymentExclusion { source, exclusion });
         };
         if let Some(supported) = &self.supported_summaries {
             // A sketch algorithm not listed: none of its states is built.
@@ -276,10 +276,10 @@ impl DeploymentCapabilities {
                 },
             );
         }
-        for (index, candidates) in self.excluded_candidates.iter().enumerate() {
+        for (index, exclusion) in self.excluded_candidates.iter().enumerate() {
             exclude(
                 ExclusionSource::ExcludedCandidate { index },
-                candidates.clone(),
+                exclusion.clone(),
             );
         }
         exclusions
@@ -290,9 +290,11 @@ impl DeploymentCapabilities {
     /// contradicts `raw_data_retained: false`. Plan selection refuses such
     /// inputs before measuring any candidate. An exclusion of
     /// `excluded_candidates` that sets no field (it would exclude every
-    /// candidate), whose range is empty or names an α outside (0, 1), whose
-    /// `summary_family` its `sketch_parameters` contradict, or whose
-    /// `aggregate_measure` names no aggregate is bad input too
+    /// candidate), two of whose fields match no operator in common (a
+    /// `readout` with an `operator: SummaryAgg`), whose range is empty or
+    /// names an α outside (0, 1), whose `summary_family` its
+    /// `sketch_parameters` contradict, or whose `aggregate_measure` names no
+    /// aggregate is bad input too
     /// ([`DeploymentCapabilitiesError::InvalidExclusion`]).
     pub fn validate(&self, data: &DataWorkload) -> Result<(), DeploymentCapabilitiesError> {
         if let DataArrival::AtRest | DataArrival::Mixed { .. } = &data.arrival {

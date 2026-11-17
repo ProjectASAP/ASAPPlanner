@@ -442,7 +442,7 @@ fn readout_matches_an_estimate_by_statistic_and_the_state_it_reads() {
 fn query_time_results_exclusion() -> DeploymentExclusion {
     DeploymentExclusion {
         source: ExclusionSource::QueryTimeResultsNotRetained,
-        candidates: CandidateExclusion {
+        exclusion: CandidateExclusion {
             timing: Some(QueryTime),
             kept_across_evaluations: Some(true),
             ..Default::default()
@@ -487,7 +487,7 @@ fn each_capability_left_out_expands_into_its_exclusions() {
         excluded_candidates: vec![stored_only.clone()],
         ..Default::default()
     };
-    let exclusion = |source, candidates| DeploymentExclusion { source, candidates };
+    let exclusion = |source, exclusion| DeploymentExclusion { source, exclusion };
     assert_eq!(
         capabilities.exclusions(),
         vec![
@@ -552,14 +552,14 @@ fn supported_summaries_expand_into_family_and_readout_exclusions() {
     let exclusions = capabilities.exclusions();
     let family = |algorithm| DeploymentExclusion {
         source: ExclusionSource::SummaryNotSupported,
-        candidates: CandidateExclusion {
+        exclusion: CandidateExclusion {
             summary_family: Some(SummaryFamily::Sketch(algorithm)),
             ..Default::default()
         },
     };
     let readout = |statistic| DeploymentExclusion {
         source: ExclusionSource::ReadoutNotSupported,
-        candidates: CandidateExclusion {
+        exclusion: CandidateExclusion {
             readout: Some(SketchReadout {
                 summary_type: SketchAlgorithm::Kll,
                 statistic,
@@ -663,6 +663,144 @@ fn invalid_excluded_candidates_are_rejected() {
         ..Default::default()
     };
     assert_eq!(valid_only.validate(&data), Ok(()));
+}
+
+/// An exclusion whose fields match no operator in common contradicts
+/// itself and matches nothing, so it is bad input: a state family, θ range
+/// or `merged_across_windows` (state builds only) with another operator, an
+/// `aggregate_measure` (an `Aggregate` only) with another operator, a
+/// `readout` (a `SummaryEstimate` only) with another operator or with a
+/// build-only field, and `per_entity_reduction` with an operator that has
+/// no reduction. Fields that do share an operator are accepted.
+#[test]
+fn self_contradicting_exclusions_are_rejected() {
+    let data = crate::workload::DataWorkload::default();
+    let kll_readout = SketchReadout {
+        summary_type: SketchAlgorithm::Kll,
+        statistic: StatisticKind::Quantile,
+    };
+    let with_operator = |operator, exclusion: CandidateExclusion| CandidateExclusion {
+        operator: Some(operator),
+        ..exclusion
+    };
+    let family = CandidateExclusion {
+        summary_family: Some(SummaryFamily::Exact(ExactKind::Rate)),
+        ..Default::default()
+    };
+    let parameters = CandidateExclusion {
+        sketch_parameters: Some(SketchParameterRange::KllK {
+            at_least: None,
+            at_most: Some(1403),
+        }),
+        ..Default::default()
+    };
+    let merged = CandidateExclusion {
+        merged_across_windows: Some(true),
+        ..Default::default()
+    };
+    let measure = CandidateExclusion {
+        aggregate_measure: Some("rate".to_string()),
+        ..Default::default()
+    };
+    let readout = CandidateExclusion {
+        readout: Some(kll_readout),
+        ..Default::default()
+    };
+    let per_entity = CandidateExclusion {
+        per_entity_reduction: Some(true),
+        ..Default::default()
+    };
+    let contradicting = [
+        // The review's repro: `{"operator": "SummaryMerge", "summary_family":
+        // {"exact": "Rate"}}`.
+        with_operator(OperatorKind::SummaryMerge, family.clone()),
+        with_operator(OperatorKind::SummaryEstimate, parameters.clone()),
+        with_operator(OperatorKind::Aggregate, merged.clone()),
+        with_operator(OperatorKind::SummaryAgg, measure.clone()),
+        with_operator(OperatorKind::SummaryAgg, readout.clone()),
+        CandidateExclusion {
+            readout: Some(kll_readout),
+            ..family.clone()
+        },
+        CandidateExclusion {
+            readout: Some(kll_readout),
+            ..merged.clone()
+        },
+        with_operator(OperatorKind::Scan, per_entity.clone()),
+    ];
+    for bad in contradicting {
+        let capabilities = DeploymentCapabilities {
+            excluded_candidates: vec![bad.clone()],
+            ..Default::default()
+        };
+        let result = capabilities.validate(&data);
+        assert!(
+            matches!(
+                result,
+                Err(DeploymentCapabilitiesError::InvalidExclusion { index: 0, .. })
+            ),
+            "{bad:?}: {result:?}"
+        );
+    }
+    let consistent = [
+        with_operator(OperatorKind::SummaryTumblingWindowChain, family.clone()),
+        with_operator(OperatorKind::SummaryAgg, merged),
+        with_operator(OperatorKind::Aggregate, measure.clone()),
+        with_operator(OperatorKind::SummaryEstimate, readout),
+        with_operator(OperatorKind::SummaryAgg, per_entity.clone()),
+        CandidateExclusion {
+            per_entity_reduction: Some(true),
+            ..measure
+        },
+        CandidateExclusion {
+            per_entity_reduction: Some(true),
+            ..family
+        },
+    ];
+    for good in consistent {
+        let capabilities = DeploymentCapabilities {
+            excluded_candidates: vec![good.clone()],
+            ..Default::default()
+        };
+        assert_eq!(capabilities.validate(&data), Ok(()), "{good:?}");
+    }
+}
+
+/// Only an exclusion that sets `summary_family` and nothing else rules a
+/// family out outright, as `supported_summaries` does for an algorithm it
+/// does not list; any further field narrows it.
+#[test]
+fn a_family_is_excluded_outright_only_by_a_family_only_exclusion() {
+    let kll = SummaryFamily::Sketch(SketchAlgorithm::Kll);
+    let family_only = CandidateExclusion {
+        summary_family: Some(kll),
+        ..Default::default()
+    };
+    assert_eq!(family_only.family_excluded_outright(), Some(kll));
+    let narrower = CandidateExclusion {
+        merged_across_windows: Some(true),
+        ..family_only
+    };
+    assert_eq!(narrower.family_excluded_outright(), None);
+    let scans = CandidateExclusion {
+        operator: Some(OperatorKind::Scan),
+        ..Default::default()
+    };
+    assert_eq!(scans.family_excluded_outright(), None);
+    let exact_only = DeploymentCapabilities {
+        supported_summaries: Some(vec![]),
+        ..Default::default()
+    };
+    let outright: Vec<SummaryFamily> = exact_only
+        .exclusions()
+        .iter()
+        .filter_map(|e| e.exclusion.family_excluded_outright())
+        .collect();
+    let every_sketch: Vec<SummaryFamily> = SketchAlgorithm::ALL
+        .iter()
+        .map(|&algorithm| SummaryFamily::Sketch(algorithm))
+        .collect();
+    assert_eq!(outright, every_sketch);
 }
 
 /// The sweep's "stored" arm, written as the caller writes it, plus a KLL

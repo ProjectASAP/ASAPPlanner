@@ -14,13 +14,14 @@ use asap_planner::{
     SelectionError, SketchAlgorithm, SketchParameterRange, SketchParams, SummaryFamily,
 };
 use asap_types::deployment_capabilities::CandidateDescription;
+use asap_types::ir::flat::NodeId;
 use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::properties::ExecutionTiming::{self, IngestionTime, QueryTime};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
-use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
-use asap_types::stages::PruneReason;
+use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGNode};
+use asap_types::stages::{PhysicalProperties, PruneReason};
 use asap_types::summary_type::ExactKind;
 use asap_types::workload::PlanningWorkload;
 
@@ -158,11 +159,35 @@ fn pruned_by(run: &PlanningRun, source: ExclusionSource) -> usize {
         .count()
 }
 
+/// `node` of `plan` as Stage 2 described its candidate: its payload,
+/// `parameters`, `output_state.timing` and `lifetime`, and for a
+/// `SummaryEstimate` the state field type of its input node's schema.
+fn description_of_plan_node<'a>(
+    plan: &'a PhysicalASAPDAG,
+    node: &'a PhysicalASAPDAGNode,
+) -> CandidateDescription<'a, NodeId> {
+    let read_summary_type = match &node.payload {
+        Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => plan
+            .nodes
+            .iter()
+            .find(|state| state.id == *summary_input)
+            .and_then(|state| state.output_schema.summary_state_type()),
+        _ => None,
+    };
+    CandidateDescription {
+        operator: &node.payload,
+        parameters: node.parameters.as_ref(),
+        physical_properties: PhysicalProperties::new(node.output_state.timing, node.lifetime)
+            .expect("a plan node's timing and lifetime go together"),
+        read_summary_type,
+    }
+}
+
 /// Whether some node of `plan` matches `exclusion`.
 fn some_node_matches(plan: &PhysicalASAPDAG, exclusion: &CandidateExclusion) -> bool {
     plan.nodes
         .iter()
-        .any(|node| exclusion.matches(&CandidateDescription::of_plan_node(plan, node)))
+        .any(|node| exclusion.matches(&description_of_plan_node(plan, node)))
 }
 
 /// Asserts the selected plan costs `expected` per second, as observed (six

@@ -767,11 +767,8 @@ fn aws_fargate_prices_example_4_in_dollars() {
 /// the document's `deployment_capabilities` shows (defaults filled in;
 /// without the flag, every summary supported, raw data retained, no
 /// query-time result retained). For Pattern B with KLL only and query-time
-/// results retained: Pass 1 offers DDSketch candidates too (it offers every
-/// summary the planner builds), and Stage 2 prunes every alternative of the
-/// DDSketch states: the builds as `{"excluded_by_deployment":
-/// "summary_not_supported"}`, the merges over them as having no buildable
-/// producer, so none is a physical candidate. Without raw data, a plan is still selected
+/// results retained: Pass 1 offers no DDSketch candidate (the deployment
+/// excludes every DDSketch state outright). Without raw data, a plan is still selected
 /// with guarantees enforced, from materialized views. A deployment with an
 /// unknown field is refused.
 #[test]
@@ -823,49 +820,8 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
             .iter()
             .any(|l| l.contains("DDSketch"))
     };
-    assert!(has_ddsketch(&kll_kept));
+    assert!(!has_ddsketch(&kll_kept));
     assert!(has_ddsketch(&default));
-    // The groups of DDSketch states, and the Stage 2 alternatives in them.
-    let ddsketch_groups: Vec<Value> = kll_kept["memo"]["steps"]
-        .as_array()
-        .unwrap()
-        .last()
-        .unwrap()["groups"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|g| {
-            g["label"]
-                .as_str()
-                .unwrap()
-                .starts_with("SummaryAgg DDSketch")
-        })
-        .map(|g| g["id"].clone())
-        .collect();
-    assert!(!ddsketch_groups.is_empty());
-    let stage2 = &kll_kept["stage2_physical_asap_optimization"];
-    let in_ddsketch_groups = |list: &str| -> Vec<Value> {
-        stage2[list]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|c| ddsketch_groups.contains(&c["group"]))
-            .cloned()
-            .collect()
-    };
-    assert_eq!(
-        in_ddsketch_groups("physical_candidates"),
-        Vec::<Value>::new()
-    );
-    // The builds are excluded; the merges over them then have no producer.
-    let not_supported = json!({ "excluded_by_deployment": "summary_not_supported" });
-    let pruned = in_ddsketch_groups("pruned_candidates");
-    assert!(pruned.iter().any(|c| c["reason"] == not_supported));
-    assert!(
-        pruned.iter().all(|c| c["reason"] == not_supported
-            || c["reason"] == json!("input_has_no_buildable_producer")),
-        "{pruned:?}"
-    );
     assert!(selects_a_plan(&kll_kept["stage3_plan_selection"]));
     assert!(!kll_kept["stage3_plan_selection"]["plan"]
         .to_string()

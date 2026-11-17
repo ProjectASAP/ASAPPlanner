@@ -19,7 +19,6 @@ use crate::ir::operator::{AggIntent, OperatorKind};
 use crate::ir::properties::ExecutionTiming;
 use crate::ir::schema::FieldDataType;
 use crate::ir::{ASAPOp, NonASAPOp, Operator};
-use crate::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGNode};
 use crate::stages::PhysicalProperties;
 use crate::summary_type::{
     ExactKind, SketchAlgorithm, SketchParameterRange, SketchParams, StatisticKind, SummaryFamily,
@@ -102,7 +101,8 @@ pub struct SketchReadout {
 
 /// One physical candidate (or plan node) as an exclusion matches it: its
 /// operator, θ and physical properties, and, for a `SummaryEstimate`, the
-/// summary type of the state it reads.
+/// summary type of the state it reads. `C` is how the operator names its
+/// inputs: memo groups in Stage 2, plan node ids in a selected plan.
 #[derive(Debug, Clone, Copy)]
 pub struct CandidateDescription<'a, C> {
     pub operator: &'a Operator<C>,
@@ -114,28 +114,21 @@ pub struct CandidateDescription<'a, C> {
     pub read_summary_type: Option<&'a FieldDataType>,
 }
 
-impl<'a> CandidateDescription<'a, crate::ir::flat::NodeId> {
-    /// `node` of `plan` as Stage 2 described its candidate: its payload,
-    /// `parameters`, `output_state.timing` and `lifetime`, and for a
-    /// `SummaryEstimate` the state field type of its input node's schema.
-    pub fn of_plan_node(plan: &'a PhysicalASAPDAG, node: &'a PhysicalASAPDAGNode) -> Self {
-        let read_summary_type = match &node.payload {
-            Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => plan
-                .nodes
-                .iter()
-                .find(|state| state.id == *summary_input)
-                .and_then(|state| state.output_schema.summary_state_type()),
-            _ => None,
-        };
-        Self {
-            operator: &node.payload,
-            parameters: node.parameters.as_ref(),
-            physical_properties: PhysicalProperties::new(node.output_state.timing, node.lifetime)
-                .expect("a plan node's timing and lifetime go together"),
-            read_summary_type,
-        }
-    }
-}
+/// The state builds: the operators the family, θ and
+/// `merged_across_windows` fields match.
+const STATE_BUILDS: &[OperatorKind] = &[
+    OperatorKind::SummaryAgg,
+    OperatorKind::SummaryTumblingWindowChain,
+];
+
+/// An `Aggregate` or a state build: the operators with a reduction
+/// (`per_entity_reduction`), and those a counter semantics can be needed by
+/// (an `Aggregate`'s counter function, a counter state's build).
+const AGGREGATE_OR_STATE_BUILD: &[OperatorKind] = &[
+    OperatorKind::Aggregate,
+    OperatorKind::SummaryAgg,
+    OperatorKind::SummaryTumblingWindowChain,
+];
 
 impl CandidateExclusion {
     /// Whether `candidate` matches every field that is set.
@@ -185,15 +178,46 @@ impl CandidateExclusion {
             }))
     }
 
+    /// The family this exclusion rules out outright, when it sets
+    /// `summary_family` and no other field: every state of the family, as
+    /// `supported_summaries` does for an algorithm it does not list. Pass 1
+    /// offers no way to compute through such a family. `None` for any
+    /// narrower exclusion, e.g. KLL only when merged across windows.
+    pub fn family_excluded_outright(&self) -> Option<SummaryFamily> {
+        let family = self.summary_family?;
+        let family_only = Self {
+            summary_family: Some(family),
+            ..Self::default()
+        };
+        (*self == family_only).then_some(family)
+    }
+
     /// Why this exclusion is bad input, or `None` when it can be applied:
-    /// it sets no field (so it would exclude every candidate), its θ range
-    /// is invalid ([`SketchParameterRange::invalid_reason`]) or ranges over
-    /// another algorithm than its `summary_family` (a KLL `k` range of a
-    /// DDSketch family matches nothing), or its `aggregate_measure` is no
-    /// measure's kind (`"rte"`).
+    /// it sets no field (so it would exclude every candidate), two of its
+    /// fields match no operator in common (`{"operator": "SummaryMerge",
+    /// "summary_family": {"exact": "Rate"}}` matches nothing, since a
+    /// family matches state builds only), its θ range is invalid
+    /// ([`SketchParameterRange::invalid_reason`]) or ranges over another
+    /// algorithm than its `summary_family` (a KLL `k` range of a DDSketch
+    /// family matches nothing), or its `aggregate_measure` is no measure's
+    /// kind (`"rte"`).
     pub fn invalid_reason(&self) -> Option<String> {
         if *self == Self::default() {
             return Some("it sets no field, so it would exclude every candidate".to_string());
+        }
+        let fields = self.operators_each_field_matches();
+        for (index, (first, first_operators)) in fields.iter().enumerate() {
+            for (second, second_operators) in &fields[index + 1..] {
+                if !first_operators
+                    .iter()
+                    .any(|operator| second_operators.contains(operator))
+                {
+                    return Some(format!(
+                        "its {first} matches {first_operators:?} only and its {second} \
+                         {second_operators:?} only, so it matches no candidate"
+                    ));
+                }
+            }
         }
         if let Some(range) = &self.sketch_parameters {
             if let Some(reason) = range.invalid_reason() {
@@ -214,6 +238,55 @@ impl CandidateExclusion {
             }
         }
         None
+    }
+
+    /// Each field that is set and matches only some operators, by its JSON
+    /// name, with those operators, as [`Self::matches`] tests them. E.g.
+    /// `{"operator": "SummaryMerge", "summary_family": {"exact": "Rate"}}`
+    /// gives `[("operator", [SummaryMerge]), ("summary_family",
+    /// [SummaryAgg, SummaryTumblingWindowChain])]`.
+    fn operators_each_field_matches(&self) -> Vec<(&'static str, &[OperatorKind])> {
+        let set = |field_is_set: bool, operators| field_is_set.then_some(operators);
+        [
+            ("operator", self.operator.as_ref().map(std::slice::from_ref)),
+            (
+                "per_entity_reduction",
+                set(
+                    self.per_entity_reduction.is_some(),
+                    AGGREGATE_OR_STATE_BUILD,
+                ),
+            ),
+            (
+                "aggregate_measure",
+                set(
+                    self.aggregate_measure.is_some(),
+                    &[OperatorKind::Aggregate][..],
+                ),
+            ),
+            (
+                "counter_semantics",
+                set(self.counter_semantics.is_some(), AGGREGATE_OR_STATE_BUILD),
+            ),
+            (
+                "summary_family",
+                set(self.summary_family.is_some(), STATE_BUILDS),
+            ),
+            (
+                "sketch_parameters",
+                set(self.sketch_parameters.is_some(), STATE_BUILDS),
+            ),
+            (
+                "merged_across_windows",
+                set(self.merged_across_windows.is_some(), STATE_BUILDS),
+            ),
+            (
+                "readout",
+                set(self.readout.is_some(), &[OperatorKind::SummaryEstimate][..]),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(field, operators)| Some((field, operators?)))
+        .collect()
     }
 }
 

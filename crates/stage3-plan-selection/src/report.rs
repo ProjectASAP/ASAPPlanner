@@ -102,7 +102,8 @@ pub enum RejectionCause {
     /// name (`excluded_candidates[i]` for the caller's own), with how many
     /// it pruned, e.g. `counter_not_extrapolated (7 candidates)`; and that
     /// the workload may be infeasible without these exclusions too (telling
-    /// would take a second solve). Not a failed check: the excluded
+    /// would take a second solve); then, as for `Infeasible`, why executions
+    /// could not be costed. Not a failed check: the excluded
     /// candidates were valid.
     ExcludedByDeployment,
 }
@@ -239,6 +240,23 @@ pub enum ErrorSelectingPlan {
 /// The selection MILP is infeasible, with the reasons executions could not
 /// be costed.
 pub(crate) fn infeasible(costs: &ExecutionCosts) -> ErrorSelectingPlan {
+    let reason = format!(
+        "no plan gives every query output a candidate whose every input has an admissible \
+         producer that delivers on its context (the selection MILP is infeasible){}",
+        costing_failures(costs)
+    );
+    ErrorSelectingPlan::NoValidCandidate(vec![Rejection {
+        id: "workload".into(),
+        cause: RejectionCause::Infeasible,
+        reason,
+    }])
+}
+
+/// Why executions could not be costed, each distinct reason once, as a
+/// suffix of a rejection's reason: "; executions left out because they
+/// could not be costed: no cardinality for m"; empty when every execution
+/// was costed.
+fn costing_failures(costs: &ExecutionCosts) -> String {
     let mut reasons: Vec<&str> = Vec::new();
     for reason in costs
         .per_execution
@@ -249,21 +267,13 @@ pub(crate) fn infeasible(costs: &ExecutionCosts) -> ErrorSelectingPlan {
             reasons.push(reason);
         }
     }
-    let mut reason = "no plan gives every query output a candidate whose every input has an \
-                      admissible producer that delivers on its context (the selection MILP is \
-                      infeasible)"
-        .to_string();
-    if !reasons.is_empty() {
-        reason += &format!(
-            "; executions left out because they could not be costed: {}",
-            reasons.join("; ")
-        );
+    if reasons.is_empty() {
+        return String::new();
     }
-    ErrorSelectingPlan::NoValidCandidate(vec![Rejection {
-        id: "workload".into(),
-        cause: RejectionCause::Infeasible,
-        reason,
-    }])
+    format!(
+        "; executions left out because they could not be costed: {}",
+        reasons.join("; ")
+    )
 }
 
 /// When Stage 2 pruned some candidate as excluded by the deployment
@@ -275,7 +285,8 @@ pub(crate) fn infeasible(costs: &ExecutionCosts) -> ErrorSelectingPlan {
 /// pruned, in the order Stage 2 first recorded it. E.g. "query 0 has no
 /// candidate left to answer it; excluded by the deployment:
 /// counter_not_extrapolated (7 candidates); the workload may be infeasible
-/// without these exclusions too". `None` when no candidate was excluded
+/// without these exclusions too", followed by why executions could not be
+/// costed, as [`infeasible`] reports it ([`costing_failures`]). `None` when no candidate was excluded
 /// beyond the default deployment's exclusions: the selection is infeasible
 /// on its own ([`infeasible`]). Telling
 /// whether the workload has a plan without the exclusions would take a
@@ -283,6 +294,7 @@ pub(crate) fn infeasible(costs: &ExecutionCosts) -> ErrorSelectingPlan {
 pub(crate) fn excluded_by_deployment(
     stage2_pruned_candidates: &[PrunedCandidate<PhysicalCandidate>],
     query: Option<usize>,
+    costs: &ExecutionCosts,
 ) -> Option<ErrorSelectingPlan> {
     // The default deployment's own exclusions (query-time results not
     // kept across evaluations) are planning as it always was, so they
@@ -331,8 +343,9 @@ pub(crate) fn excluded_by_deployment(
         cause: RejectionCause::ExcludedByDeployment,
         reason: format!(
             "{what}; excluded by the deployment: {}; the workload may be infeasible without \
-             these exclusions too",
-            sources.join(", ")
+             these exclusions too{}",
+            sources.join(", "),
+            costing_failures(costs)
         ),
     }]))
 }

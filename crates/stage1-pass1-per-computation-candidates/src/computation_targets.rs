@@ -14,6 +14,7 @@
 //! The input must be a logical memo: a group whose expression is an ASAP
 //! operator is rejected. No cost model and no accuracy target is read.
 
+use asap_types::deployment_capabilities::DeploymentExclusion;
 use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::operator::arguments::Source;
 use asap_types::ir::operator::non_asap::any_measure_filtered;
@@ -23,7 +24,8 @@ use asap_types::ir::schema::{ColumnId, Schema};
 use asap_types::ir::{NonASAPOp, Operator, OperatorResultKind, ScalarExpr};
 use asap_types::stages::{Memo, MemoGroupId};
 use asap_types::summary_type::{
-    ExactKind, SketchAlgorithm, SketchStatistic, StatisticKind, SummaryInputExpr, SummaryUpdate,
+    ExactKind, SketchAlgorithm, SketchStatistic, StatisticKind, SummaryFamily, SummaryInputExpr,
+    SummaryUpdate,
 };
 
 use crate::candidates::having::has_having;
@@ -82,9 +84,9 @@ pub(crate) struct FusedComputation {
     /// the groups any of these targets' own fused computations replace.
     pub absorbed_groups: Vec<MemoGroupId>,
     /// How the fused computation is computed: by an exact accumulator or a
-    /// summary. Empty
-    /// when Pass 1 pruned every one (today only for an algorithm the deployment
-    /// does not support); the fusion is then not offered.
+    /// summary. Empty when Pass 1 skipped every one (today only for a sketch
+    /// algorithm the deployment excludes outright); the fusion is then not
+    /// offered.
     pub ways_to_compute: Vec<HowToComputeAggregateMeasure>,
 }
 
@@ -140,11 +142,13 @@ fn nullable_avg_input(input: &Schema, intent: &AggIntent) -> bool {
 /// Pass 1 walks the groups, so an aggregate several queries read is one
 /// target per measure. An aggregate measure is eligible when it has a
 /// realization besides exact execution, even if every such realization is
-/// pruned. Every summary the planner can build is offered: Stage 2 prunes
-/// those the deployment does not support. Measure filters and `HAVING`
+/// pruned. A summary whose sketch algorithm one of the deployment's
+/// `exclusions` rules out outright is skipped ([`without_excluded_families`]); Stage 2
+/// prunes the rest the deployment cannot run. Measure filters and `HAVING`
 /// keep every candidate.
 pub(crate) fn computation_targets(
     memo: &Memo,
+    exclusions: &[DeploymentExclusion],
 ) -> Result<Vec<ComputationTarget>, PerComputationCandidateError> {
     if memo
         .groups()
@@ -193,7 +197,39 @@ pub(crate) fn computation_targets(
     prune_topk_heaps_over_one_row_per_item(memo, &mut targets);
     add_nested_distributive_targets(memo, &mut targets);
     close_absorptions(&mut targets);
+    without_excluded_families(&mut targets, exclusions);
     Ok(targets)
+}
+
+/// Drops from `targets`, and from their fused computations, each summary
+/// whose sketch algorithm one of `exclusions` rules out outright
+/// (`CandidateExclusion::family_excluded_outright`): Stage 2 would prune
+/// every build of it, and everything that reads only them. E.g. under
+/// `supported_summaries: []` a quantile keeps no summary, only its exact
+/// expression. A narrower exclusion (KLL not mergeable across windows, or
+/// KLL's quantile readout) keeps the summary: Stage 2 decides per
+/// candidate. Exact accumulators are left to Stage 2 too.
+fn without_excluded_families(
+    targets: &mut [ComputationTarget],
+    exclusions: &[DeploymentExclusion],
+) {
+    let excluded: Vec<SummaryFamily> = exclusions
+        .iter()
+        .filter_map(|exclusion| exclusion.exclusion.family_excluded_outright())
+        .collect();
+    if excluded.is_empty() {
+        return;
+    }
+    let buildable = |way: &HowToComputeAggregateMeasure| {
+        !matches!(way, HowToComputeAggregateMeasure::Summary(algorithm)
+            if excluded.contains(&SummaryFamily::Sketch(*algorithm)))
+    };
+    for target in targets.iter_mut() {
+        target.ways_to_compute.retain(buildable);
+        if let Some(fused) = &mut target.fused_computation {
+            fused.ways_to_compute.retain(buildable);
+        }
+    }
 }
 
 /// Adds to each fused computation's `absorbed_groups` the groups its

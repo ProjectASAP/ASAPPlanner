@@ -257,7 +257,7 @@ pub fn run_stages_until(
         return Ok(stages);
     }
     let run = &mut stages.run;
-    let pass1 = pass1_memo(stage0_dag)
+    let pass1 = pass1_memo(stage0_dag, &models.deployment_capabilities.exclusions())
         // As `run_planning`: a query Pass 1 cannot plan is reported before
         // contradictory deployment capabilities.
         .map_err(|error| PlanningStagesError::Pass1(error.to_string()))?;

@@ -60,12 +60,13 @@ fn pruned_as(reasons: &[PruneReason]) -> Vec<PrunedCandidate<PhysicalCandidate>>
 /// caller's own by index, and names the query.
 #[test]
 fn only_exclusions_beyond_the_default_deployments_make_the_rejection() {
+    let no_costing_failure = ExecutionCosts::default();
     let default_only = pruned_as(&[
         PruneReason::ExcludedByDeployment(ExclusionSource::QueryTimeResultsNotRetained),
         PruneReason::NoIngestionPipeline,
     ]);
-    assert!(excluded_by_deployment(&default_only, Some(0)).is_none());
-    assert!(excluded_by_deployment(&[], None).is_none());
+    assert!(excluded_by_deployment(&default_only, Some(0), &no_costing_failure).is_none());
+    assert!(excluded_by_deployment(&[], None, &no_costing_failure).is_none());
 
     let restricted = pruned_as(&[
         PruneReason::ExcludedByDeployment(ExclusionSource::QueryTimeResultsNotRetained),
@@ -74,7 +75,7 @@ fn only_exclusions_beyond_the_default_deployments_make_the_rejection() {
         PruneReason::ExcludedByDeployment(ExclusionSource::CounterNotExtrapolated),
     ]);
     let Some(ErrorSelectingPlan::NoValidCandidate(rejections)) =
-        excluded_by_deployment(&restricted, Some(0))
+        excluded_by_deployment(&restricted, Some(0), &no_costing_failure)
     else {
         panic!("expected a rejection");
     };
@@ -86,4 +87,40 @@ fn only_exclusions_beyond_the_default_deployments_make_the_rejection() {
          counter_not_extrapolated (2 candidates), excluded_candidates[1] (1 candidate); \
          the workload may be infeasible without these exclusions too"
     );
+}
+
+/// The rejection keeps why executions could not be costed, as
+/// `Infeasible` does: an exclusion that pruned something elsewhere does not
+/// hide the costing diagnostics of the query that failed.
+#[test]
+fn the_exclusion_rejection_keeps_the_costing_failures() {
+    let costs = ExecutionCosts {
+        per_execution: vec![
+            Ok(1.0),
+            Err("no cardinality for m".to_string()),
+            Err("no cardinality for m".to_string()),
+        ],
+        ..ExecutionCosts::default()
+    };
+    let restricted = pruned_as(&[PruneReason::ExcludedByDeployment(
+        ExclusionSource::RawDataNotRetained,
+    )]);
+    let Some(ErrorSelectingPlan::NoValidCandidate(rejections)) =
+        excluded_by_deployment(&restricted, None, &costs)
+    else {
+        panic!("expected a rejection");
+    };
+    assert_eq!(
+        rejections[0].reason,
+        "no plan is left (the selection MILP is infeasible); excluded by the deployment: \
+         raw_data_not_retained (1 candidate); the workload may be infeasible without these \
+         exclusions too; executions left out because they could not be costed: no \
+         cardinality for m"
+    );
+    let ErrorSelectingPlan::NoValidCandidate(infeasible) = infeasible(&costs) else {
+        panic!("expected a rejection");
+    };
+    assert!(infeasible[0]
+        .reason
+        .ends_with("; executions left out because they could not be costed: no cardinality for m"));
 }

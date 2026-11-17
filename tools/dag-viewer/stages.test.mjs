@@ -107,7 +107,7 @@ test('the header shows why a stage failed and the selection\'s warnings', () => 
 
 test('the counts line counts each stage\'s candidates and pruned candidates', () => {
   assert.equal(call('candidateCountsText', fixture()),
-    'Candidates per stage: 30 logical (13 pruned by Pass 2) → 20 physical (36 pruned by Stage 2, 0 by Stage 3) → plan selected');
+    'Candidates per stage: 21 logical (4 pruned by Pass 2) → 20 physical (36 pruned by Stage 2, 0 by Stage 3) → plan selected');
 });
 
 test('the search header names the search and the MILP\'s size', () => {
@@ -219,6 +219,11 @@ test('the deployment line names each capability left out and the caller exclusio
   assert.doesNotMatch(text, /counter resets not handled/);
   assert.match(text, /not mergeable across windows: exact Rate/);
   assert.match(text, /excluded candidates: 2/);
+  // Each supported summary by its wire field `summary_type`.
+  const kllOnly = call('deploymentText', {
+    supported_summaries: [{ summary_type: 'Kll', readouts: ['Quantile'] }],
+  });
+  assert.match(kllOnly, /summaries: Kll \(Quantile\)/);
   // The defaults leave nothing out, so the line names none of them.
   const defaults = call('deploymentText', { raw_data_retained: true, query_time_results_retained: false });
   assert.doesNotMatch(defaults, /counter|mergeable|excluded/);
