@@ -13,6 +13,7 @@ use asap_executor::physical_planner::compile;
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::{DataStore, InMemoryDataStore};
 use asap_executor::values::{Batch, Value};
+use asap_executor::Error;
 use asap_planner::{InstallablePlan, MaterializedView};
 use asap_types::ir::operator::Source;
 use asap_types::ir::schema::{DataType, FieldDataType, Schema, PROMQL_SERIES_IDENTITY};
@@ -180,35 +181,44 @@ pub fn run(
     ids: &[u64],
     scope: Scope,
 ) -> Vec<Vec<Batch>> {
+    let context = RunContext::new(scope, Limits::default()).unwrap();
+    try_run(dag, store, views, ids, context).expect("the run succeeds")
+}
+
+/// [`run`] in `context` (its scope, limits and the data's declared
+/// `max_out_of_order_ms`), returning the executor's error.
+pub fn try_run(
+    dag: &PhysicalASAPDAG,
+    store: impl DataStore + 'static,
+    views: &[MaterializedView],
+    ids: &[u64],
+    context: RunContext,
+) -> Result<Vec<Vec<Batch>>, Error> {
     // The executor's plan for `ids`; every `Scan` it reaches and every view
     // in `views` is a slot of `store`.
     let compiled = compile(dag, views, ids).expect("the executor compiles the plan");
     let instance = compiled.instantiate(Arc::new(store)).unwrap();
-    let ingestion = matches!(scope, Scope::Ingestion { .. });
+    let ingestion = matches!(context.scope, Scope::Ingestion { .. });
     block_on(async {
-        // The run's scope (ingestion window or query time) and limits.
-        let context = RunContext::new(scope, Limits::default()).unwrap();
         if ingestion {
             // An ingestion run: every id's batches, for the runtime to store.
             let outputs = instance
-                .execute_ingestion(compiled.roots(), context)
-                .unwrap()
-                .await
-                .unwrap();
-            return outputs
+                .execute_ingestion(compiled.roots(), context)?
+                .await?;
+            return Ok(outputs
                 .into_iter()
                 .map(|batches| batches.iter().map(|batch| (**batch).clone()).collect())
-                .collect();
+                .collect());
         }
         // A query run: one output stream per id.
-        let outputs = instance.execute(compiled.roots(), context).unwrap();
-        futures::future::join_all(outputs.into_iter().map(|mut output| async move {
+        let outputs = instance.execute(compiled.roots(), context)?;
+        futures::future::try_join_all(outputs.into_iter().map(|mut output| async move {
             // Its batches, collected.
             let mut batches = Vec::new();
             while let Some(batch) = output.next().await {
-                batches.push((*batch.unwrap()).clone());
+                batches.push((*batch?).clone());
             }
-            batches
+            Ok(batches)
         }))
         .await
     })

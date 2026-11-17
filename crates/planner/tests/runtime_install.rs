@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::time_series;
-use asap_executor::runtime::Scope;
+use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::values::{Batch, Value};
 use asap_planner::{
     plan_installable, CostInputs, DeploymentCapabilities, ExecutionTiming, FrontendInput,
@@ -17,8 +17,8 @@ use asap_planner::{
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 
 use time_series::{
-    answers, assert_answers_near, labels, query_roots, run, sample, time_series_tables, Answer,
-    RawDataSample,
+    answers, assert_answers_near, labels, query_roots, run, sample, time_series_tables, try_run,
+    Answer, RawDataSample,
 };
 
 /// Example 4b's evaluation time: the end of the 60-minute window.
@@ -674,7 +674,26 @@ fn counter_queries() -> Vec<(&'static str, Vec<Answer>)> {
 /// window its retention keeps, ending at T, and stored; the query run at
 /// T reads those views (and the raw samples the plan reads at query time).
 fn installed_answers(plan: &InstallablePlan, samples: &[RawDataSample]) -> Vec<Vec<Answer>> {
+    try_installed_answers(plan, samples, None).unwrap()
+}
+
+/// [`installed_answers`] for `samples` in arrival order, each run told the
+/// data's declared `max_out_of_order_ms`; the executor's error when a run
+/// fails.
+fn try_installed_answers(
+    plan: &InstallablePlan,
+    samples: &[RawDataSample],
+    max_out_of_order_ms: Option<u64>,
+) -> Result<Vec<Vec<Answer>>, asap_executor::Error> {
     let dag = &plan.dag;
+    // A run in `scope`, told the declared bound.
+    let context = |scope| {
+        let context = RunContext::new(scope, Limits::default()).unwrap();
+        match max_out_of_order_ms {
+            Some(bound) => context.with_max_out_of_order_ms(bound),
+            None => context,
+        }
+    };
     // The raw samples, then each view's stored windows.
     let mut store = time_series_tables(dag, samples);
     let views = plan.materialized_views().unwrap();
@@ -696,13 +715,13 @@ fn installed_answers(plan: &InstallablePlan, samples: &[RawDataSample]) -> Vec<V
                 window_start_ms: end - width_ms,
                 window_end_ms: end,
             };
-            let batches = run(
+            let batches = try_run(
                 dag,
                 time_series_tables(dag, samples),
                 &[],
                 &[view.node_id as u64],
-                ingestion,
-            )
+                context(ingestion),
+            )?
             .remove(0);
             let rows = batches.iter().flat_map(|batch| batch.to_rows()).collect();
             let schema = Arc::new(node.output_schema.clone());
@@ -715,10 +734,12 @@ fn installed_answers(plan: &InstallablePlan, samples: &[RawDataSample]) -> Vec<V
     let query = Scope::Query {
         evaluation_time_ms: EVALUATION_MS,
     };
-    run(dag, store, &views, &query_roots(plan), query)
-        .iter()
-        .map(|batches| answers(batches))
-        .collect()
+    Ok(
+        try_run(dag, store, &views, &query_roots(plan), context(query))?
+            .iter()
+            .map(|batches| answers(batches))
+            .collect(),
+    )
 }
 
 /// Each counter query of [`counter_queries`], planned on a deployment that
@@ -769,6 +790,67 @@ async fn counter_rates_and_increases_answer_from_views_built_at_ingestion_time()
 async fn counter_rates_and_increases_answer_at_query_time_from_raw_samples() {
     let mismatches = counter_query_mismatches(query_answers).await;
     assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// Counter samples that arrive out of order within the data's declared
+/// `max_out_of_order_ms` (20 s) answer as in-order samples do. The
+/// deployment keeps no raw samples, so `rate(requests_total[5m])` is
+/// answered from rate states built in one-minute ingestion runs. Each
+/// series' sample at T - 210 s arrives after its sample at T - 195 s
+/// (15 s late, in the run of (T - 240 s, T - 180 s]); the store keeps the
+/// samples in arrival order. Every run is told the bound, and the answers
+/// are the hand-worked Prometheus rates of [`counter_queries`]. Untold,
+/// the run fails, as it did before runs took the bound. A sample 45 s
+/// late, behind a sample of its series already applied, fails the
+/// ingestion run of its window.
+#[tokio::test]
+async fn counter_samples_late_within_the_declared_bound_answer_as_in_order() {
+    const LATE_ARRIVAL: &str =
+        r#"{"ingesting": {"rows_per_second": 1000.0, "max_out_of_order_ms": 20000}}"#;
+    let (query, expected) = counter_queries().swap_remove(1);
+    assert_eq!(query, "rate(requests_total[5m])");
+    let plan = plan_counter_queries(&[query], 60_000, LATE_ARRIVAL, false).await;
+    // The rate states are built at ingestion time.
+    assert!(plan.dag.nodes.iter().any(|node| {
+        node.output_state.timing == ExecutionTiming::IngestionTime
+            && matches!(
+                node.payload,
+                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+    }));
+    // The samples in arrival order: by time, the sample at `late_step`
+    // (step 17 is T - 225 s) of each series `late` picks arriving
+    // `delay_ms` after its time.
+    let arrival = |late_step: i64, late: &dyn Fn(&RawDataSample) -> bool, delay_ms: i64| {
+        let mut samples = counter_samples();
+        let late_ms = EVALUATION_MS - 480_000 + late_step * 15_000;
+        samples.sort_by_key(|sample| {
+            let delayed = sample.timestamp_ms == late_ms && late(sample);
+            sample.timestamp_ms + if delayed { delay_ms } else { 0 }
+        });
+        samples
+    };
+    let within = arrival(18, &|_| true, 15_001);
+    assert!(within
+        .windows(2)
+        .any(|pair| pair[1].timestamp_ms < pair[0].timestamp_ms));
+    let answered = try_installed_answers(&plan, &within, Some(20_000))
+        .unwrap()
+        .remove(0);
+    assert_answers_near(&answered, &expected, 1e-9);
+    // Untold, the late samples fail the run.
+    assert!(try_installed_answers(&plan, &within, None).is_err());
+
+    // Series `a`'s sample at T - 225 s arrives after T - 180 s, when its
+    // sample at T - 210 s is applied: refused, failing its window's run.
+    let beyond = arrival(17, &|sample| sample.labels["instance"] == "a", 45_001);
+    let error = try_installed_answers(&plan, &beyond, Some(20_000)).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not after its group's last applied sample"),
+        "{error}"
+    );
 }
 
 /// `rate(requests_total[5m] offset 1m)` and `rate(requests_total[5m])`,

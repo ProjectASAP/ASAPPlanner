@@ -60,3 +60,27 @@ fn an_exact_sum_column_takes_non_finite_values() {
         assert!(updater.update(0, stale, 0).is_err(), "{column:?}");
     }
 }
+
+// A reordering counter charges each held sample until it is applied: with
+// a 1 s bound, samples at 2 s and 1.5 s are held; a sample at 3 s applies
+// 1.5 s (more than 1 s behind) and is held itself; sealing applies the rest.
+#[test]
+fn held_counter_samples_are_charged_until_applied() {
+    let family = FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate);
+    let mut updater = StateColumnUpdater::new(&family, None)
+        .unwrap()
+        .with_max_out_of_order_ms(1_000)
+        .unwrap();
+    updater.ensure_groups(1).unwrap();
+    let states = updater.memory_bytes();
+    updater.update(0, 2.0, 2_000).unwrap();
+    updater.update(0, 1.0, 1_500).unwrap();
+    assert_eq!(updater.memory_bytes(), states + 2 * HELD_SAMPLE_BYTES);
+    updater.update(0, 3.0, 3_000).unwrap();
+    assert_eq!(updater.memory_bytes(), states + 2 * HELD_SAMPLE_BYTES);
+    // A duplicate of a held sample, and a sample before an applied one.
+    assert!(updater.update(0, 9.0, 2_000).is_err());
+    assert!(updater.update(0, 9.0, 1_000).is_err());
+    updater.release_held(i64::MAX).unwrap();
+    assert_eq!(updater.memory_bytes(), states);
+}
