@@ -144,10 +144,12 @@ enum Kind {
         fetch: Option<u64>,
     },
     Window {
-        intent: Box<planner_types::ir::operator::AggIntent<ColumnRef>>,
+        intent: Box<planner_types::ir::operator::AggIntent>,
         coordinate: usize,
         value: usize,
         groups: Vec<usize>,
+        /// `(end_offset_ms, width_ms)` back from the evaluation time
+        /// (`Operator::window`).
         window: Option<(i64, i64)>,
     },
     Aggregate {
