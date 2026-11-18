@@ -11,9 +11,9 @@ use super::member::{column_of, Member};
 
 /// The per-column constraints that narrow `fine`'s selection to
 /// `coarse`'s: `coarse`'s constraint on each column where it selects fewer
-/// rows. `None` when `coarse`'s selection
-/// is not inside `fine`'s or narrows a column that is not one of `fine`'s
-/// keys (a `Filter` over `fine`'s result could not apply it).
+/// rows. `None` when `coarse`'s selection is not inside `fine`'s or
+/// narrows a column that is not one of `fine`'s keys (a `Filter` over
+/// `fine`'s result could not apply it).
 pub(super) fn compensation(
     coarse: &Member,
     fine: &Member,

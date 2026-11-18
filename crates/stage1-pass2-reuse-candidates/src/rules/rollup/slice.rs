@@ -16,8 +16,7 @@ use super::member::Member;
 /// have the same keys, in the same order, and `narrow`'s selection lies
 /// inside `wide`'s, narrower only on those keys. Then the same one level
 /// up: to each group computed from `narrow` by a row-wise operator
-/// ([`is_row_wise`], as its expression or a candidate's that no rule
-/// added), from the group computed from `wide` by the same operator, and so
+/// ([`is_row_wise`], as its expression or a Pass 1 candidate's), from the group computed from `wide` by the same operator, and so
 /// on. Returns whether `narrow` got its candidate.
 ///
 /// For W = `sum by (pod) (rate(x[5m]))` and q' = `sum by (pod)
@@ -91,16 +90,16 @@ pub(super) fn slice_from(
     Ok(memo.groups()[narrow.group.0 as usize].candidates.len() > candidates_before)
 }
 
-/// The operators computing `group` before Pass 2's rules: its expression
-/// and its candidates' that no rule added (not `Rollup`), so the walk never
-/// reads a `Filter` a rule added.
+/// The operators computing `group` as Pass 1 wrote it: its expression and
+/// its `Pass1` candidates', so the walk never reads a `Filter` a rule
+/// added.
 fn operators_of(memo: &Memo, group: MemoGroupId) -> impl Iterator<Item = &Operator<MemoGroupId>> {
     let group = &memo.groups()[group.0 as usize];
     std::iter::once(&group.expression).chain(
         group
             .candidates
             .iter()
-            .filter(|candidate| candidate.origin != OriginOfCandidateForMemoGroup::Rollup)
+            .filter(|candidate| candidate.origin == OriginOfCandidateForMemoGroup::Pass1)
             .map(|candidate| &candidate.expression.operator),
     )
 }

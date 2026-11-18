@@ -24,14 +24,13 @@ use rewrite::rollup_from;
 use slice::slice_from;
 
 /// Adds, to each aggregate group $G_c$, a candidate computing it from each
-/// finer group $G_f$ of its cluster ([`rollup_from`]); a group of the same
-/// keys over fewer rows, and its readouts, instead get a `Filter` over the
-/// wider one's ([`slice_from`]), and the rollup only when the memo rejects
-/// that `Filter` (the two name their columns differently). All after
-/// synthesizing each cluster's finest common group
-/// ([`finest_common_group`]). A cluster
-/// is the summary state groups (`SummaryAgg` of a summary type whose
-/// states merge across groups) or exact `Aggregate` groups (of sums,
+/// finer group $G_f$ of its cluster, after synthesizing each cluster's
+/// finest common group ([`finest_common_group`]): a slice when the two
+/// have the same keys and $G_c$ selects fewer rows ([`slice_from`]: a
+/// `Filter` over $G_f$, and over each of its row-wise readouts), else a
+/// rollup ([`rollup_from`]), which also runs when `slice_from` adds none. A
+/// cluster is the summary state groups (`SummaryAgg` of a summary type
+/// whose states merge across groups) or exact `Aggregate` groups (of sums,
 /// counts, minima and maxima) with equal definitions apart from their keys
 /// ([`Member::definition`]) and equal interval constraints (the time
 /// window).
