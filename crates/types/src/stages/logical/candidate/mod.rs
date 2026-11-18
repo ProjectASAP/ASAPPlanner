@@ -87,7 +87,8 @@ pub fn listed_build_parameters(build: &Operator<MemoGroupId>) -> Vec<Option<Sket
     }
 }
 
-/// Which rule added a candidate. Nothing in planning reads it. JSON: the
+/// Which rule added a candidate. In planning, only Pass 2's slice walk reads
+/// it, to follow Pass 1's operators only. JSON: the
 /// snake_case variant name, e.g. `"top_k_reuse"`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -97,7 +98,9 @@ pub enum OriginOfCandidateForMemoGroup {
     /// A tumbling-window chain, or a merge reading one, of a summary state group.
     TumblingWindows,
     /// A coarse group rolled up from a finer one, the compensating `Filter`
-    /// it reads, or a build of a finest common group.
+    /// it reads, a build of a finest common group, or a slice: a `Filter`
+    /// over a group of the same keys over more rows, or over a row-wise
+    /// readout of it.
     Rollup,
     /// A top-k read from another group's ranking.
     TopKReuse,

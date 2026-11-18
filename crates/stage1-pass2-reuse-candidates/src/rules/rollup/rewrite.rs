@@ -5,11 +5,10 @@
 use crate::rules::candidates::{add_candidates_per_input_parameters, add_group_computing_itself};
 use crate::Pass2RuleError;
 use asap_types::ir::operator::{AggIntent, Reduction};
-use asap_types::ir::properties::selection::Constraint;
-use asap_types::ir::scalar::{CompareOpKind, ExprSemantics, Predicate, ScalarExpr, ScalarValue};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 
+use super::compensation::{compensation, conjunction, selecting_columns};
 use super::member::{column_of, Member};
 
 /// Adds to `coarse` the candidate computing it from `fine` when (concepts
@@ -31,50 +30,18 @@ pub(super) fn rollup_from(
     if !coarse.keys.iter().all(|key| fine.keys.contains(key)) {
         return Ok(());
     }
-    let mut compensation = Vec::new();
-    for column in coarse.selection.keys().chain(fine.selection.keys()) {
-        match (coarse.selection.get(column), fine.selection.get(column)) {
-            (Some(narrow), wide) if Some(narrow) != wide => {
-                let within = match (narrow, wide) {
-                    (_, None) => true,
-                    (Constraint::In(values), Some(Constraint::In(wider))) => {
-                        values.iter().all(|value| wider.contains(value))
-                    }
-                    _ => false,
-                };
-                if !within || !fine.keys.contains(column) {
-                    return Ok(());
-                }
-                if !compensation.iter().any(|(known, _)| known == column) {
-                    compensation.push((column.clone(), narrow.clone()));
-                }
-            }
-            (None, Some(_)) => return Ok(()),
-            _ => {}
-        }
-    }
+    let Some(compensation) = compensation(coarse, fine) else {
+        return Ok(());
+    };
     if compensation.is_empty() && coarse.keys.len() == fine.keys.len() {
         return Ok(());
     }
     let lineage = &memo.groups()[fine.group.0 as usize]
         .group_properties
         .column_lineage;
-    let mut conjuncts = Vec::new();
-    for (column, constraint) in &compensation {
-        let Some(at) = column_of(lineage, column) else {
-            return Ok(());
-        };
-        // The comparison of the frontend that reads the column's source.
-        let semantics = if column.source.is_time_series() {
-            ExprSemantics::Promql
-        } else {
-            ExprSemantics::Sql
-        };
-        let Some(conjunct) = selecting(at, constraint, semantics) else {
-            return Ok(());
-        };
-        conjuncts.push(conjunct);
-    }
+    let Some(conjuncts) = selecting_columns(lineage, &compensation) else {
+        return Ok(());
+    };
     let Some(group_by) = coarse
         .keys
         .iter()
@@ -89,11 +56,7 @@ pub(super) fn rollup_from(
     // memo would reject adds no group.
     let filter = (!conjuncts.is_empty()).then(|| {
         Operator::NonASAP(NonASAPOp::Filter {
-            pred: Predicate(if conjuncts.len() == 1 {
-                conjuncts.remove(0)
-            } else {
-                ScalarExpr::BoolAnd(conjuncts)
-            }),
+            pred: conjunction(conjuncts),
             child: fine.group,
         })
     });
@@ -182,39 +145,5 @@ pub(super) fn rolled_up(measure: &AggIntent, column: usize) -> Option<AggIntent>
         AggIntent::Min { .. } => AggIntent::Min { col },
         AggIntent::Max { .. } => AggIntent::Max { col },
         _ => return None,
-    })
-}
-
-/// The predicate selecting the rows whose column `at` meets `constraint`,
-/// with the comparison `semantics` of the frontend reading the column's
-/// source: `at = v`, `at != v`, or their disjunction (`IN`) or conjunction
-/// (`NOT IN`) over several values. A PromQL `!=` keeps a series without the
-/// label (its value is the empty string), which only the frontend's
-/// comparison says. `None` for an interval (never a compensation: the time
-/// window is equal across a cluster).
-fn selecting(
-    at: usize,
-    constraint: &Constraint,
-    semantics: ExprSemantics,
-) -> Option<ScalarExpr<MemoGroupId>> {
-    let compare = |op: CompareOpKind, value: &ScalarValue| ScalarExpr::Compare {
-        left: Box::new(ScalarExpr::Column(at)),
-        op,
-        right: Box::new(ScalarExpr::Literal(value.clone())),
-        semantics,
-    };
-    let (op, values, combine): (_, _, fn(Vec<_>) -> _) = match constraint {
-        Constraint::In(values) => (CompareOpKind::Eq, values, ScalarExpr::BoolOr),
-        Constraint::NotIn(values) => (CompareOpKind::Ne, values, ScalarExpr::BoolAnd),
-        Constraint::Interval { .. } => return None,
-    };
-    Some(match &values[..] {
-        [value] => compare(op, value),
-        values => combine(
-            values
-                .iter()
-                .map(|value| compare(op.clone(), value))
-                .collect(),
-        ),
     })
 }

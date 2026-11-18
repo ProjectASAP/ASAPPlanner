@@ -6,22 +6,31 @@
 //! - `member`: one aggregate group as the rule reads it, and its cluster.
 //! - `finest_common_group`: a cluster's finest common group $G^*$.
 //! - `rewrite`: the candidate computing a coarse group from a finer one.
+//! - `slice`: the candidate computing a group from one of the same keys
+//!   over more rows, a `Filter` on those keys over it.
+//! - `compensation`: the compensating `Filter` both build.
 
+mod compensation;
 mod finest_common_group;
 mod member;
 mod rewrite;
+mod slice;
 
 use crate::Pass2RuleError;
 use asap_types::stages::{Memo, MemoGroupId};
 use finest_common_group::finest_common_group;
 use member::Member;
 use rewrite::rollup_from;
+use slice::slice_from;
 
 /// Adds, to each aggregate group $G_c$, a candidate computing it from each
-/// finer group $G_f$ of its cluster ([`rollup_from`]), after synthesizing
-/// each cluster's finest common group ([`finest_common_group`]). A cluster
-/// is the summary state groups (`SummaryAgg` of a summary type whose
-/// states merge across groups) or exact `Aggregate` groups (of sums,
+/// finer group $G_f$ of its cluster, after synthesizing each cluster's
+/// finest common group ([`finest_common_group`]): a slice when the two
+/// have the same keys and $G_c$ selects fewer rows ([`slice_from`]: a
+/// `Filter` over $G_f$, and over each of its row-wise readouts), else a
+/// rollup ([`rollup_from`]), which also runs when `slice_from` adds none. A
+/// cluster is the summary state groups (`SummaryAgg` of a summary type
+/// whose states merge across groups) or exact `Aggregate` groups (of sums,
 /// counts, minima and maxima) with equal definitions apart from their keys
 /// ([`Member::definition`]) and equal interval constraints (the time
 /// window).
@@ -47,7 +56,7 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<(), Pass2RuleErro
         }
         for coarse in &cluster {
             for fine in &cluster {
-                if coarse.group != fine.group {
+                if coarse.group != fine.group && !slice_from(memo, coarse, fine)? {
                     rollup_from(memo, coarse, fine)?;
                 }
             }

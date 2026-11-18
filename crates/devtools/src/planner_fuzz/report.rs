@@ -354,10 +354,8 @@ pub fn draft_key(check: &Check, measurement: &Measurement) -> String {
 
 /// The open issue a violation of `relation` most likely duplicates.
 fn possibly_known_issue(relation: Relation, check: &Check) -> Option<&'static str> {
-    let sql = check.workload.language == Language::Sql;
     match relation {
-        Relation::FilterOnGroupKey if sql => Some("#902"),
-        Relation::FilterOnGroupKey => Some("#891"),
+        Relation::FilterOnGroupKey if check.workload.language == Language::Sql => Some("#1358"),
         _ => None,
     }
 }
