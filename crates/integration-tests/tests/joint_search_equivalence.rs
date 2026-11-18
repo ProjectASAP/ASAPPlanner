@@ -9,7 +9,7 @@ use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel};
 use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots};
 use asap_planner::{
     run_planning, CandidateExclusion, ErrorSelectingPlan, PlanSearchSettings, PlanningModels,
-    PlanningRun, SelectionError,
+    PlanningRun, RejectionCause, SelectionError,
 };
 use asap_types::accuracy::AccuracyTarget;
 use asap_types::deployment_capabilities::DeploymentCapabilities;
@@ -430,7 +430,21 @@ fn unsupported_exact_operation_declared_by_the_deployment_returns_no_plan() {
             .with_deployment_capabilities(&deployment),
         false,
     );
-    assert!(refused.selection.is_err());
+    let Err(SelectionError::Selection(ErrorSelectingPlan::NoValidCandidate(rejections))) =
+        &refused.selection
+    else {
+        panic!(
+            "expected no valid candidate, got {:?}",
+            refused.selection.as_ref().map(|(plan, _)| plan)
+        );
+    };
+    assert!(
+        !rejections.is_empty()
+            && rejections
+                .iter()
+                .all(|rejection| rejection.cause == RejectionCause::ExcludedByDeployment),
+        "{rejections:?}"
+    );
 }
 
 // Deterministic small mixed workloads exercise exact temporal operators, counter
