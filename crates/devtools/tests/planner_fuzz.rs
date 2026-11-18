@@ -34,15 +34,31 @@ fn check(relation: Relation, workload: FuzzWorkload, target: usize) -> Outcome {
     )
 }
 
-/// #902: Q3 = p90 per city; the same query for `city = 'city1'` should
-/// select its group from Q3's finished result. The witness does (one
-/// `Filter` over Q3's estimates, about 0.00001/s). The planner has no such
-/// candidate (#891): its plan filters Q3's KLL states, merges them by city
-/// and reads out a quantile again, about 0.080/s more than W, past the
-/// tolerance (1% of the larger side, 0.0197/s). Before the measured unit
-/// costs, that path fit the tolerance.
+/// Asserts the related plan reads W's finished result through a `Filter`,
+/// as the witness does: it holds, and the planner's plan costs no more than
+/// the witness's, up to rounding.
+fn assert_reads_the_finished_result_through_a_filter(outcome: Outcome) {
+    let Outcome::Holds(m) = outcome else {
+        panic!("expected the filtered query to read the grouped result, got {outcome:?}");
+    };
+    let witness = m.witness.expect("a marginal relation has a witness");
+    assert!(matches!(witness.derivation, Some(Witness::Filter { .. })));
+    assert!(m.related_plan.contains("Filter"), "{}", m.related_plan);
+    assert!(
+        m.related_cost_per_second <= witness.cost_per_second + 1e-9,
+        "the planner's plan costs {}/s, the witness's {}/s\nplanner: {}\nwitness: {}",
+        m.related_cost_per_second,
+        witness.cost_per_second,
+        m.related_plan,
+        witness.plan
+    );
+}
+
+/// Q3 = p90 per city; the same query for `city = 'city1'` selects its
+/// group from Q3's finished result: one `Filter` over Q3's estimates, as
+/// the witness does (about 0.00001/s), not a filter of Q3's KLL states
+/// merged by city and read out again (about 0.080/s).
 #[test]
-#[ignore = "planner bug: #891"]
 fn finds_issue_902_filter_on_group_key_not_reading_the_grouped_result() {
     let mut workload = seed("issue902.json");
     let per_city = SqlSpec {
@@ -56,24 +72,19 @@ fn finds_issue_902_filter_on_group_key_not_reading_the_grouped_result() {
         workload.queries[0].clone(),
         workload.queries[2].with_spec(QuerySpec::Sql(per_city)),
     ];
-    let outcome = check(Relation::FilterOnGroupKey, workload, 1);
-    assert!(
-        matches!(outcome, Outcome::Holds(_)),
-        "expected #902's case to hold, got {outcome:?}"
-    );
+    assert_reads_the_finished_result_through_a_filter(check(
+        Relation::FilterOnGroupKey,
+        workload,
+        1,
+    ));
 }
 
-/// #891: the per-container CPU rate filtered on `cluster` should read the
-/// grouped rate's finished result through one `Filter`. The witness does:
-/// it adds 0.000039/s to W's 0.421706/s. The planner's closest candidate is
-/// the rollup over that `Filter`, a `Filter` and then a sum by the same
-/// four labels, which regroups 1,000 rows into the same 1,000 groups. At
-/// the measured unit costs that sum is charged 104 operations per row plus
-/// one visit per group, 0.092468/s at one run every 30 s, so the planner's
-/// plan adds 0.092502/s, past the tolerance (1% of 0.514207/s, 0.005142/s).
-/// A candidate that is the `Filter` alone is missing (#891).
+/// The per-container CPU rate filtered on `cluster` reads the grouped
+/// rate's finished result through one `Filter`, as the witness does
+/// (0.000039/s over W's 0.421706/s), not a `Filter` and then a sum by the
+/// same four labels, which regroups 1,000 rows into the same 1,000 groups
+/// (0.092502/s).
 #[test]
-#[ignore = "planner bug: #891"]
 fn issue_891_filtered_rate_reads_the_grouped_rate() {
     let mut workload = seed("issue891.workload.json");
     let grouped = PromqlSpec {
@@ -93,21 +104,11 @@ fn issue_891_filtered_rate_reads_the_grouped_rate() {
         }),
     };
     workload.queries = vec![workload.queries[0].with_spec(QuerySpec::Promql(grouped))];
-    match check(Relation::FilterOnGroupKey, workload, 0) {
-        Outcome::Holds(m) => {
-            let witness = m.witness.expect("a marginal relation has a witness");
-            assert!(matches!(witness.derivation, Some(Witness::Filter { .. })));
-            assert!(m.related_plan.contains("Filter"), "{}", m.related_plan);
-            let gap_per_second = m.related_cost_per_second - witness.cost_per_second;
-            assert!(
-                gap_per_second <= m.tolerance_per_second,
-                "the planner's plan costs {gap_per_second}/s more than the witness's, over the \
-                 tolerance {}/s",
-                m.tolerance_per_second
-            );
-        }
-        other => panic!("expected the filtered rate to read the grouped rate, got {other:?}"),
-    }
+    assert_reads_the_finished_result_through_a_filter(check(
+        Relation::FilterOnGroupKey,
+        workload,
+        0,
+    ));
 }
 
 /// A relation that holds: an exact duplicate of a query the planner shares.

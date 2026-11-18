@@ -299,3 +299,100 @@ fn a_rejected_rollup_leaves_no_compensating_filter() {
         .collect();
     assert!(orphans.is_empty(), "groups without a reader: {orphans:?}");
 }
+
+/// Whether `group` has a candidate `Filter(..., wide)`.
+fn filters_over(memo: &Memo, group: MemoGroupId, wide: MemoGroupId) -> bool {
+    candidates_of(memo, group).iter().any(|c| {
+        matches!(
+            &c.expression.operator,
+            Operator::NonASAP(NonASAPOp::Filter { child, .. }) if *child == wide
+        )
+    })
+}
+
+/// `quantile by (job, host)(latency{job="api"}[5m])` has the keys of
+/// `quantile by (job, host)(latency[5m])` over fewer rows: its state is a
+/// `Filter(job = "api")` over the wider state, and its estimate a `Filter`
+/// over the wider estimate, with no merge or second readout.
+#[test]
+fn a_narrower_group_of_the_same_keys_filters_the_wider_state_and_estimate() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let labels = ["job", "host"];
+    let all = scan_group(&mut memo, "latency", &labels, vec![]);
+    let api = scan_group(
+        &mut memo,
+        "latency",
+        &labels,
+        vec![compare(
+            2,
+            CompareOpKind::Eq,
+            ScalarValue::Utf8("api".into()),
+            ExprSemantics::Promql,
+        )],
+    );
+    let wide_window = group(&mut memo, range(300_000, all));
+    let narrow_window = group(&mut memo, range(300_000, api));
+    let [wide, narrow] = [wide_window, narrow_window].map(|window| {
+        sketch_state(
+            &mut memo,
+            window,
+            SketchAlgorithm::Kll,
+            Reduction::by(vec![2, 3]),
+        )
+    });
+    let [wide_estimate, narrow_estimate] = [wide, narrow].map(|state| {
+        let readout = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.99 });
+        query(&mut memo, readout, None);
+        readout
+    });
+    let logical = pass2(memo, &[entry(60_000), entry(60_000)]);
+    let memo = &logical.memo;
+    assert!(filters_over(memo, narrow, wide));
+    assert!(filters_over(memo, narrow_estimate, wide_estimate));
+    assert!(!filters_over(memo, wide, narrow));
+    assert!(!filters_over(memo, wide_estimate, narrow_estimate));
+}
+
+/// `sum by (job, instance)(x{job="a"})` is a `Filter(job = "a")` over
+/// `sum by (job, instance)(x)`'s exact result, not only a sum regrouping
+/// it by the same keys.
+#[test]
+fn a_narrower_exact_sum_of_the_same_keys_filters_the_wider_result() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let labels = ["job", "instance"];
+    let job_a = compare(
+        2,
+        CompareOpKind::Eq,
+        ScalarValue::Utf8("a".into()),
+        ExprSemantics::Promql,
+    );
+    let all = scan_group(&mut memo, "x", &labels, vec![]);
+    let a = scan_group(&mut memo, "x", &labels, vec![job_a]);
+    let [wide, narrow] = [all, a].map(|scan| {
+        let rows = instant(&mut memo, scan);
+        let sum = group(
+            &mut memo,
+            aggregate(
+                Reduction::by(vec![2, 3]),
+                AggIntent::Sum { col: None },
+                rows,
+            ),
+        );
+        query(&mut memo, sum, Some(AccuracyTarget::exact()));
+        sum
+    });
+    let logical = pass2(memo, &[entry(60_000), entry(60_000)]);
+    let memo = &logical.memo;
+    assert!(candidates_of(memo, narrow)
+        .iter()
+        .any(|c| c.expression.operator
+            == Operator::NonASAP(NonASAPOp::Filter {
+                pred: Predicate(compare(
+                    0,
+                    CompareOpKind::Eq,
+                    ScalarValue::Utf8("a".into()),
+                    ExprSemantics::Promql,
+                )),
+                child: wide,
+            })));
+}

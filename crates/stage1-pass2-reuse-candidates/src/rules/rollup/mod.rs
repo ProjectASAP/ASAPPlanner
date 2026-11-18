@@ -6,19 +6,25 @@
 //! - `member`: one aggregate group as the rule reads it, and its cluster.
 //! - `finest_common_group`: a cluster's finest common group $G^*$.
 //! - `rewrite`: the candidate computing a coarse group from a finer one.
+//! - `filter_over_result`: the candidate computing a group from one of the
+//!   same keys over more rows, a `Filter` over its result.
 
+mod filter_over_result;
 mod finest_common_group;
 mod member;
 mod rewrite;
 
 use crate::Pass2RuleError;
 use asap_types::stages::{Memo, MemoGroupId};
+use filter_over_result::filter_from;
 use finest_common_group::finest_common_group;
 use member::Member;
 use rewrite::rollup_from;
 
 /// Adds, to each aggregate group $G_c$, a candidate computing it from each
-/// finer group $G_f$ of its cluster ([`rollup_from`]), after synthesizing
+/// finer group $G_f$ of its cluster ([`rollup_from`]), and to each group of
+/// the same keys over fewer rows, and the same per-group readouts of it, a
+/// `Filter` over the wider one's ([`filter_from`]), after synthesizing
 /// each cluster's finest common group ([`finest_common_group`]). A cluster
 /// is the summary state groups (`SummaryAgg` of a summary type whose
 /// states merge across groups) or exact `Aggregate` groups (of sums,
@@ -49,6 +55,7 @@ pub(crate) fn add_rollup_candidates(memo: &mut Memo) -> Result<(), Pass2RuleErro
             for fine in &cluster {
                 if coarse.group != fine.group {
                     rollup_from(memo, coarse, fine)?;
+                    filter_from(memo, coarse, fine)?;
                 }
             }
         }

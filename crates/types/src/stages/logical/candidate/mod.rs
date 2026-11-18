@@ -97,7 +97,9 @@ pub enum OriginOfCandidateForMemoGroup {
     /// A tumbling-window chain, or a merge reading one, of a summary state group.
     TumblingWindows,
     /// A coarse group rolled up from a finer one, the compensating `Filter`
-    /// it reads, or a build of a finest common group.
+    /// it reads, a build of a finest common group, or a `Filter` over a
+    /// group of the same keys over more rows (or over a per-group readout
+    /// of it).
     Rollup,
     /// A top-k read from another group's ranking.
     TopKReuse,
