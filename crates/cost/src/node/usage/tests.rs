@@ -1173,6 +1173,103 @@ fn a_kmv_build_costs_per_retained_hash_it_compares() {
     }
 }
 
+/// The cost detail of an `algorithm` sketch over `user_id` (`parameters`), built by a
+/// `SummaryAgg` or, with `chain`, a 60 s tumbling-window chain, from
+/// 300,000 rows of a 5 min time range over 100,000 users.
+fn user_id_sketch_detail(
+    parameters: SketchParams,
+    algorithm: asap_types::summary_type::SketchAlgorithm,
+    chain: bool,
+) -> String {
+    let settings = CostInputs::default();
+    let (data, schema) = sql_rows_of_t(100_000);
+    let range = PhysicalASAPDAGNode {
+        output_schema: schema,
+        ..node(Payload::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(300),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        }))
+    };
+    let mut rows = raw_rows(&range, "t", 300_000, 300_000);
+    rows.output_schema = &range.output_schema;
+    rows.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
+    let summary_type = FieldDataType::Sketch(algorithm);
+    let input = SummaryUpdate::column(ColumnRef::Named("user_id".into()));
+    let reduction = Reduction::by(vec![]);
+    let build = PhysicalASAPDAGNode {
+        parameters: Some(parameters),
+        ..node(Payload::ASAP(if chain {
+            ASAPOp::SummaryTumblingWindowChain {
+                child: 0,
+                summary_type,
+                input,
+                reduction,
+                filter: None,
+                tumbling_window_width_ms: 60_000,
+            }
+        } else {
+            ASAPOp::SummaryAgg {
+                child: 0,
+                summary_type,
+                input,
+                reduction,
+                filter: None,
+            }
+        }))
+    };
+    node_resource_usage_and_cost(&build, &[rows], (1, 1.0), None, &data, &settings)
+        .unwrap()
+        .cost
+        .detail
+}
+
+/// An operation count prints to three decimals without trailing zeros:
+/// whole counts as before, fractional ones with their value, float noise
+/// hidden.
+#[test]
+fn an_operation_count_prints_to_three_decimals() {
+    assert_eq!(operations_text(121.0), "121");
+    assert_eq!(operations_text(304.925_613_569_675_9), "304.926");
+    assert_eq!(operations_text(69.999_933_338_068_93), "70");
+    assert_eq!(operations_text(14.700_000_000_000_001), "14.7");
+    assert_eq!(operations_text(0.3), "0.3");
+}
+
+/// A build's detail prints its fractional operations per row (a KMV's
+/// compared hashes) through `operations_text`, not in full.
+#[test]
+fn a_build_detail_prints_its_operations_per_row_to_three_decimals() {
+    use asap_types::summary_type::SketchAlgorithm;
+    let detail = user_id_sketch_detail(SketchParams::Kmv { k: 4_323 }, SketchAlgorithm::Kmv, false);
+    assert!(detail.contains("300000 rows x 304.926 ops"), "{detail}");
+}
+
+/// A tumbling-window chain's detail prints its operations per row the same
+/// way.
+#[test]
+fn a_chain_detail_prints_its_operations_per_row_to_three_decimals() {
+    use asap_types::summary_type::SketchAlgorithm;
+    let detail = user_id_sketch_detail(SketchParams::Kmv { k: 4_323 }, SketchAlgorithm::Kmv, true);
+    assert!(detail.contains("300000 rows x 714.976 ops"), "{detail}");
+}
+
+/// A Count-Min state's allocation, 7 counters at 2.1 operations each, is
+/// 14.700000000000001 in floating point and prints as 14.7.
+#[test]
+fn a_state_allocation_prints_to_three_decimals() {
+    use asap_types::summary_type::SketchAlgorithm;
+    let detail = user_id_sketch_detail(
+        SketchParams::Cms { width: 7, depth: 1 },
+        SketchAlgorithm::Cms,
+        false,
+    );
+    assert!(
+        detail.contains(", 14.7 ops to allocate each state"),
+        "{detail}"
+    );
+}
+
 /// A KMV build's time per row, measured on the executor (median of 3 runs
 /// on one pinned core) over `user_id`s drawn from 1,000,000 values, in 10
 /// states by `job` and 1,000 by `instance`, from 1,200 to 60,000 rows per

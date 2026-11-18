@@ -1131,7 +1131,10 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let allocation_terms = state_allocation_terms(node.parameters.as_ref());
             let allocation_ops = allocation_terms.operations();
             let allocation_detail = if allocation_ops > 0.0 {
-                format!(", {allocation_ops} ops to allocate each state")
+                format!(
+                    ", {} ops to allocate each state",
+                    operations_text(allocation_ops)
+                )
             } else {
                 String::new()
             };
@@ -1143,10 +1146,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 out,
                 Ok(charged(terms, out.bytes, 0)),
                 format!(
-                    "build {} into {group_count} states: {} rows x {update_ops} ops, \
+                    "build {} into {group_count} states: {} rows x {} ops, \
                      {group_visits:.0} group visits{allocation_detail}",
                     summary_type_name(family),
-                    input.rows
+                    input.rows,
+                    operations_text(update_ops)
                 ),
             )
         }
@@ -1243,10 +1247,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 )),
                 format!(
                     "build {} in tumbling windows of {tumbling_window_width_ms} ms for \
-                     {group_count} groups: {} rows x {update_ops} ops, {group_visits:.0} \
+                     {group_count} groups: {} rows x {} ops, {group_visits:.0} \
                      group visits, {emitted_states:.1} states emitted",
                     summary_type_name(family),
-                    input.rows
+                    input.rows,
+                    operations_text(update_ops)
                 ),
             )
         }
@@ -1814,6 +1819,15 @@ fn merged_states(producers: &[ProducerOutput<'_>]) -> Result<u64, AnalyticalCost
             .checked_add(producer.output.rows)
             .ok_or(AnalyticalCostError::Overflow)
     })
+}
+
+/// An operation count for a cost detail: three decimals, trailing zeros
+/// dropped, so whole counts print as before ("121"), a fractional one keeps
+/// its value ("304.926") and float noise does not show ("69.99993" is
+/// "70").
+fn operations_text(operations: f64) -> String {
+    let text = format!("{operations:.3}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// A summary type's name in reports: a sketch by its algorithm, e.g.
