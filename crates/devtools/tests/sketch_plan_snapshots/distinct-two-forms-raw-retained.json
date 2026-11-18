@@ -73,7 +73,7 @@
           "cost_per_second": 1.08178905869e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000953999724464,
-          "detail": "build Kmv into 10000 states: 200000 rows x 116.19991733920547 ops, 200000 group visits; x 0.0167/s; holds 83040000 bytes for 57.240 ms",
+          "detail": "build Kmv into 10000 states: 200000 rows x 116.2 ops, 200000 group visits; x 0.0167/s; holds 83040000 bytes for 57.240 ms",
           "multiplier": 1,
           "operator": "SummaryAgg",
           "timing": "query_time"
