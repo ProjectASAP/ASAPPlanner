@@ -905,10 +905,12 @@ fn with_operator(node: &OperatorNode, operator: Operator) -> Rc<OperatorNode> {
 }
 
 /// `q`'s estimate when it is `q`'s root or the only input of a root
-/// `Project` of plain column references: the shapes in which another
+/// `Project` of plain column references (or of a chain of them, folded by
+/// [`column_projections_folded`]): the shapes in which another
 /// estimate can stand in for it without changing what the nodes above
 /// compute. Returns its state and statistic.
 fn root_estimate(root: &Rc<OperatorNode>) -> Result<(Rc<OperatorNode>, SketchStatistic), String> {
+    let root = &column_projections_folded(root);
     let estimate = match root.non_asap() {
         Some(NonASAPOp::Project { cols, child, .. })
             if cols
@@ -931,6 +933,56 @@ fn root_estimate(root: &Rc<OperatorNode>) -> Result<(Rc<OperatorNode>, SketchSta
     }
 }
 
+/// `root` with a chain of `Project`s of plain column references folded
+/// into one: SQL puts a grouped estimate under two (`Project [city, host,
+/// v]` over `Project [city, host, quantile AS "percentile_cont(...)"]` over
+/// the `SummaryEstimate`), and the outer one picks columns of the inner
+/// one's output. A folded column keeps the outer alias, else the inner one. A
+/// root that is not such a chain is returned as it is.
+fn column_projections_folded(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+    let plain_columns = |cols: &[ProjectItem]| {
+        cols.iter()
+            .map(|item| match item.expr {
+                ScalarExpr::Column(index) => Some(index),
+                _ => None,
+            })
+            .collect::<Option<Vec<usize>>>()
+    };
+    let Some(NonASAPOp::Project { cols, child }) = root.non_asap() else {
+        return root.clone();
+    };
+    let child = column_projections_folded(child);
+    let (
+        Some(outer),
+        Some(NonASAPOp::Project {
+            cols: inner_cols,
+            child: grandchild,
+        }),
+    ) = (plain_columns(cols), child.non_asap())
+    else {
+        return root.clone();
+    };
+    let Some(inner) = plain_columns(inner_cols) else {
+        return root.clone();
+    };
+    let folded = outer
+        .iter()
+        .zip(cols)
+        .map(|(&index, item)| ProjectItem {
+            alias: item
+                .alias
+                .clone()
+                .or_else(|| inner_cols[index].alias.clone()),
+            expr: ScalarExpr::Column(inner[index]),
+        })
+        .collect();
+    OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Project {
+        cols: folded,
+        child: grandchild.clone(),
+    }))
+    .unwrap_or_else(|_| root.clone())
+}
+
 /// `root` with its root estimate ([`root_estimate`]) replaced by
 /// `estimate`; a root `Project` keeps its columns by name, except the
 /// `dropped` group labels (a rollup's), which it loses. Any other column
@@ -940,6 +992,7 @@ fn with_root_estimate(
     estimate: Rc<OperatorNode>,
     dropped: &[String],
 ) -> Result<Rc<OperatorNode>, String> {
+    let root = &column_projections_folded(root);
     let Some(NonASAPOp::Project { cols, child }) = root.non_asap() else {
         return Ok(estimate);
     };
