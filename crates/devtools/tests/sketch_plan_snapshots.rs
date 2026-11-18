@@ -9,6 +9,12 @@
 //! sizes, sharing, timing, lifetime or cost shows up as a snapshot
 //! diff.
 //!
+//! Small multi-query workloads (#1278) each exercise one planner behavior:
+//! rollup across label sets, top-k reuse, chain widths and sharing, avg as
+//! Sum / Count, and which sketches an accuracy target or a declared value
+//! sign admits. Their `covers` line says what the workload exercises, not
+//! which plan is selected.
+//!
 //! `tests/sketch_plan_snapshots/manifest.json` lists each workload by id:
 //! its `workload` file relative to the repository root, SQL `tables`,
 //! `deployment` (the `asap_planner` arguments of its deployment
