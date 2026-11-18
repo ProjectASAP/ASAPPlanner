@@ -396,3 +396,102 @@ fn a_narrower_exact_sum_of_the_same_keys_filters_the_wider_result() {
                 child: wide,
             })));
 }
+
+/// `x > scalar(sum by (job)(x{job="a"}))` reads the narrower sum only
+/// through a scalar, so a filter on `job` does not commute with it: it gets
+/// no `Filter` over `x > scalar(sum by (job)(x))`.
+#[test]
+fn a_reader_of_the_narrower_group_through_a_scalar_gets_no_filter() {
+    use asap_types::ir::ScalarExpr;
+    let mut memo = Memo::new(&DataWorkload::default());
+    let labels = ["job", "instance"];
+    let job_a = compare(
+        2,
+        CompareOpKind::Eq,
+        ScalarValue::Utf8("a".into()),
+        ExprSemantics::Promql,
+    );
+    let all = scan_group(&mut memo, "x", &labels, vec![]);
+    let a = scan_group(&mut memo, "x", &labels, vec![job_a]);
+    let all_rows = instant(&mut memo, all);
+    let [wide, narrow] = [all, a].map(|scan| {
+        let rows = instant(&mut memo, scan);
+        group(
+            &mut memo,
+            aggregate(Reduction::by(vec![2]), AggIntent::Sum { col: None }, rows),
+        )
+    });
+    let [wide_reader, narrow_reader] = [wide, narrow].map(|sum| {
+        let reader = group(
+            &mut memo,
+            Operator::NonASAP(NonASAPOp::Filter {
+                pred: Predicate(ScalarExpr::Compare {
+                    left: Box::new(ScalarExpr::Column(1)),
+                    op: CompareOpKind::Gt,
+                    right: Box::new(ScalarExpr::PromqlScalarFromVector(sum)),
+                    semantics: ExprSemantics::Promql,
+                }),
+                child: all_rows,
+            }),
+        );
+        query(&mut memo, reader, Some(AccuracyTarget::exact()));
+        reader
+    });
+    let logical = pass2(memo, &[entry(60_000), entry(60_000)]);
+    assert!(filters_over(&logical.memo, narrow, wide));
+    assert!(!filters_over(&logical.memo, narrow_reader, wide_reader));
+}
+
+/// Nested selections, `job = "a"` inside `job IN ("a", "b")` inside every
+/// job, each a KLL by `job` read by an estimate: Pass 2 finishes, each
+/// narrower state and estimate filters each wider one, and no group reads
+/// itself.
+#[test]
+fn nested_selections_of_the_same_keys_each_filter_every_wider_one() {
+    use asap_types::ir::ScalarExpr;
+    let mut memo = Memo::new(&DataWorkload::default());
+    let labels = ["job", "host"];
+    let job_is = |value: &str| {
+        compare(
+            2,
+            CompareOpKind::Eq,
+            ScalarValue::Utf8(value.into()),
+            ExprSemantics::Promql,
+        )
+    };
+    let scans = [
+        scan_group(&mut memo, "latency", &labels, vec![]),
+        scan_group(
+            &mut memo,
+            "latency",
+            &labels,
+            vec![ScalarExpr::BoolOr(vec![job_is("a"), job_is("b")])],
+        ),
+        scan_group(&mut memo, "latency", &labels, vec![job_is("a")]),
+    ];
+    let mut states = Vec::new();
+    let mut estimates = Vec::new();
+    for scan in scans {
+        let window = group(&mut memo, range(300_000, scan));
+        let state = sketch_state(
+            &mut memo,
+            window,
+            SketchAlgorithm::Kll,
+            Reduction::by(vec![2]),
+        );
+        let readout = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.99 });
+        query(&mut memo, readout, None);
+        states.push(state);
+        estimates.push(readout);
+    }
+    let logical = pass2(memo, &[entry(60_000), entry(60_000), entry(60_000)]);
+    let memo = &logical.memo;
+    for (narrow, wide) in [(1, 0), (2, 0), (2, 1)] {
+        assert!(filters_over(memo, states[narrow], states[wide]));
+        assert!(filters_over(memo, estimates[narrow], estimates[wide]));
+    }
+    for index in 0..memo.groups().len() {
+        let group = MemoGroupId(index as u32);
+        assert!(!filters_over(memo, group, group), "{group:?} reads itself");
+    }
+}

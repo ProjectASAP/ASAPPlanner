@@ -199,7 +199,7 @@ status column, "conclusive" means the check either held or was violated.
 | Pattern | Doc reference | Relation | Status on main (one-hour run) |
 |---|---|---|---|
 | Looser accuracy target reads the tighter build (an exact result meets any ε) | accuracy-models.md "Sharing across consumers" L308–368; planner-layering.md L530–533, L640–641 | — | not checked: the fuzzer plans with accuracy not enforced (an earlier run with accuracy enforced found #903) |
-| Slice: a filter on a group key over a grouped result or summary (planned) | asap-primitive-schema.md "Other uses of coverage" L846–848, L118 | `b-filter-on-group-key` | VIOLATED (995 of 1,003): #891, #902 (#689 for approximate inputs) |
+| Slice: a filter on a group key over a grouped result or summary | asap-primitive-schema.md "Other uses of coverage" L846–848, L118 | `b-filter-on-group-key` | implemented (Pass 2 `slice_from`); an exact grouped quantile is not a rollup member: #1358 (#689 for approximate inputs) |
 | Rollup to a coarser grouping: exact, or sketch `SummaryMerge{group_by}` | planner-layering.md rule table L588; asap-primitive-schema.md §5.6 L670, L754–794, L830–844; joint-planning-search.md L324 | `c-coarser-grouping` | VIOLATED (167 of 389): new drafts (exact rollup; sketch rollup over an inner range function) |
 | Scan widening: scans of one metric with different labels share one scan | planner-layering.md Pass 2 L597–607 | `c-coarser-grouping` (sketch rollup witness) | covered by c; no separate violation |
 | Nested window: a shorter window merges the newest tumbling windows of a longer window's chain | planner-layering.md L790–807; asap-primitive-schema.md §5.6 L669 | `d-nested-shorter-window` | VIOLATED (73 of 250): new draft (exact sums); compare #873 (rate/increase) |

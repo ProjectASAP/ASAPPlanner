@@ -59,7 +59,7 @@ fn assert_reads_the_finished_result_through_a_filter(outcome: Outcome) {
 /// the witness does (about 0.00001/s), not a filter of Q3's KLL states
 /// merged by city and read out again (about 0.080/s).
 #[test]
-fn finds_issue_902_filter_on_group_key_not_reading_the_grouped_result() {
+fn filter_on_group_key_reads_the_grouped_quantile() {
     let mut workload = seed("issue902.json");
     let per_city = SqlSpec {
         table: "metrics".into(),
