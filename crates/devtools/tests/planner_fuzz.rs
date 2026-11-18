@@ -219,13 +219,12 @@ fn witness_of(relation: Relation, workload: FuzzWorkload) -> Witness {
 
 /// The sketch rollup witness builds and costs for a grouped quantile:
 /// a `SummaryMerge` with `group_by` over the finer per-group KLL. The
-/// query must select a KLL, or there is no sketch to roll up. A quantile
-/// selects a sketch only over many rows per group and evaluation: the
-/// generated PromQL `quantile by (job, instance)` reads 40 latest samples
-/// per group, and #902's p90 per city over 5 min at 666.67 rows/s, so
-/// both plan exact. p90 per (city, host) over 1 h at 100,000 rows/s
+/// query must select a KLL, or there is no sketch to roll up. The
+/// generated PromQL `quantile by (job, instance)` reads only each series'
+/// latest samples (a 15 s range), too few rows for a sketch, and plans an
+/// exact quantile. p90 per (city, host) over 1 h at 100,000 rows/s
 /// (4 cities x 5 hosts, ε 0.05, δ 0.01) reads a KLL tumbling-window
-/// chain (k = 132), and p90 per city rolls up from it.
+/// chain, and p90 per city rolls up from it.
 #[test]
 fn sketch_rollup_witness_costs_for_a_grouped_quantile() {
     use asap_types::accuracy::AccuracyTarget;

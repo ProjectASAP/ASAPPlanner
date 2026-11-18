@@ -905,7 +905,8 @@ fn with_operator(node: &OperatorNode, operator: Operator) -> Rc<OperatorNode> {
 }
 
 /// `q`'s estimate when it is `q`'s root or the only input of a root
-/// `Project` of plain column references: the shapes in which another
+/// `Project` of plain column references (or of a chain of them, folded by
+/// [`column_projections_folded`]): the shapes in which another
 /// estimate can stand in for it without changing what the nodes above
 /// compute. Returns its state and statistic.
 fn root_estimate(root: &Rc<OperatorNode>) -> Result<(Rc<OperatorNode>, SketchStatistic), String> {
@@ -933,10 +934,11 @@ fn root_estimate(root: &Rc<OperatorNode>) -> Result<(Rc<OperatorNode>, SketchSta
 }
 
 /// `root` with a chain of `Project`s of plain column references folded
-/// into one: SQL puts a grouped estimate under two (`Project [city, v]`
-/// over `Project [v, city]` over the `SummaryEstimate`), and the outer one
-/// picks columns of the inner one's output. A root that is not such a
-/// chain is returned as it is.
+/// into one: SQL puts a grouped estimate under two (`Project [city, host,
+/// v]` over `Project [city, host, quantile AS "percentile_cont(...)"]` over
+/// the `SummaryEstimate`), and the outer one picks columns of the inner
+/// one's output. A folded column keeps the outer alias, else the inner one. A
+/// root that is not such a chain is returned as it is.
 fn column_projections_folded(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
     let plain_columns = |cols: &[ProjectItem]| {
         cols.iter()
@@ -967,7 +969,10 @@ fn column_projections_folded(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         .iter()
         .zip(cols)
         .map(|(&index, item)| ProjectItem {
-            alias: item.alias.clone(),
+            alias: item
+                .alias
+                .clone()
+                .or_else(|| inner_cols[index].alias.clone()),
             expr: ScalarExpr::Column(inner[index]),
         })
         .collect();
