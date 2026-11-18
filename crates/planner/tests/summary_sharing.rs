@@ -188,14 +188,18 @@ fn unique_deployments(output: &PlanOutput) -> usize {
     seen.len()
 }
 
-/// Two identical ungrouped queries: their identical producers (rate, then
-/// sum) are shared.
+/// Two identical ungrouped queries: their identical producers are shared,
+/// so the plan deploys one state for both. That state is the per-series
+/// rate's exact accumulator. The sum over the 1,000 finalized rates is a
+/// plain query-time `Aggregate`, not a second state: an exact Sum state
+/// over the same 1,000 values does the same additions and also builds and
+/// finalizes a state, so it never costs less.
 #[tokio::test]
 async fn identical_ungrouped_queries_share_their_producers() {
     let query = ("sum(rate(x[5m]))", 0.01);
     let output = plan_promql(&[query, query]).await;
     assert!(same_states(&states(&output)));
-    assert_eq!(unique_deployments(&output), 2);
+    assert_eq!(unique_deployments(&output), 1);
 }
 
 /// The SQL frontend reaches the same sharing for two copies of one filtered

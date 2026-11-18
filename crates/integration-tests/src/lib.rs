@@ -240,6 +240,22 @@ pub mod planning {
         selected_operator_roots(&run_all_stages(root, accuracy))
     }
 
+    /// [`logical_candidates`] with summaries' CPU costed free
+    /// ([`summary_cpu_free`]) and accuracy enforced: the plan reads a summary
+    /// candidate wherever Stage 1 offers one that meets `accuracy`, whether
+    /// or not the default unit costs make it cheaper than the exact plan.
+    /// For tests of a summary plan's shape. Example: `quantile(0.99,
+    /// rate(c[5m]))` at 1,000 series selects the exact sort under the
+    /// default costs and the KLL over the finalized Rate here.
+    pub fn logical_candidates_with_summary_cpu_free(
+        root: Rc<OperatorNode>,
+        accuracy: AccuracyTarget,
+    ) -> Vec<Rc<OperatorNode>> {
+        let settings = summary_cpu_free();
+        let models = asap_planner::PlanningModels::builtin().with_cost_inputs(&settings);
+        selected_operator_roots(&run_all_stages_with(root, accuracy, models))
+    }
+
     /// [`logical_candidates`] with accuracy not enforced
     /// (`ignore_accuracy_guarantees`): no readout gets a required accuracy.
     /// For tests of a rewrite's structure or execution over a summary whose
