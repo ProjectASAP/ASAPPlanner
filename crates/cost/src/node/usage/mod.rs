@@ -1131,7 +1131,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let allocation_terms = state_allocation_terms(node.parameters.as_ref());
             let allocation_ops = allocation_terms.operations();
             let allocation_detail = if allocation_ops > 0.0 {
-                format!(", {allocation_ops} ops to allocate each state")
+                format!(", {allocation_ops:.0} ops to allocate each state")
             } else {
                 String::new()
             };
@@ -1143,7 +1143,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 out,
                 Ok(charged(terms, out.bytes, 0)),
                 format!(
-                    "build {} into {group_count} states: {} rows x {update_ops} ops, \
+                    "build {} into {group_count} states: {} rows x {update_ops:.0} ops, \
                      {group_visits:.0} group visits{allocation_detail}",
                     summary_type_name(family),
                     input.rows
@@ -1243,7 +1243,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 )),
                 format!(
                     "build {} in tumbling windows of {tumbling_window_width_ms} ms for \
-                     {group_count} groups: {} rows x {update_ops} ops, {group_visits:.0} \
+                     {group_count} groups: {} rows x {update_ops:.0} ops, {group_visits:.0} \
                      group visits, {emitted_states:.1} states emitted",
                     summary_type_name(family),
                     input.rows

@@ -1173,6 +1173,48 @@ fn a_kmv_build_costs_per_retained_hash_it_compares() {
     }
 }
 
+/// A build's detail prints its operations per row as a whole number, as a
+/// hash aggregate's does: a KMV's compared hashes per row are fractional
+/// and printed in full made the planner's output unreadable and its
+/// snapshots sensitive to float noise.
+#[test]
+fn a_build_detail_prints_whole_operations_per_row() {
+    use asap_types::summary_type::SketchAlgorithm;
+    let settings = CostInputs::default();
+    let (data, schema) = sql_rows_of_t(100_000);
+    let range = PhysicalASAPDAGNode {
+        output_schema: schema,
+        ..node(Payload::NonASAP(NonASAPOp::TimeRange {
+            range: Duration::from_secs(300),
+            kind: TimeRangeKind::Range,
+            child: 0,
+        }))
+    };
+    let mut rows = raw_rows(&range, "t", 300_000, 300_000);
+    rows.output_schema = &range.output_schema;
+    rows.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
+    let build = PhysicalASAPDAGNode {
+        parameters: Some(SketchParams::Kmv { k: 4_323 }),
+        ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+            input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
+            reduction: Reduction::by(vec![]),
+            filter: None,
+        }))
+    };
+    let detail = node_resource_usage_and_cost(&build, &[rows], (1, 1.0), None, &data, &settings)
+        .unwrap()
+        .cost
+        .detail;
+    let ops = detail
+        .split(" rows x ")
+        .nth(1)
+        .and_then(|rest| rest.split(" ops").next())
+        .unwrap_or_else(|| panic!("no operations per row in {detail}"));
+    assert!(ops.parse::<u64>().is_ok(), "{detail}");
+}
+
 /// A KMV build's time per row, measured on the executor (median of 3 runs
 /// on one pinned core) over `user_id`s drawn from 1,000,000 values, in 10
 /// states by `job` and 1,000 by `instance`, from 1,200 to 60,000 rows per
