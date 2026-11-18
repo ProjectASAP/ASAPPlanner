@@ -26,7 +26,7 @@ source**.
 | Curated golden | Spec: this input plans like *this* | Only as good as its reviewer |
 | Stability snapshot | Nothing changed unless explained | Says nothing about correctness |
 | Structural invariants | Schemas stable, DAG valid, memo consistent | Not semantic |
-| Metamorphic relations | Cost/reuse relations between related workloads | Needs a witness per relation |
+| Input mutations (metamorphic) | Change the input in a known way; the plan must change (or not) in a known way | Needs a witness per mutation |
 | Differential (planner vs itself) | Two configurations agree | Both can be wrong the same way |
 | Execution | Plan's answers within claimed ε/δ of exact | **Deferred** |
 
@@ -83,7 +83,7 @@ Logic: front ends (`asap-frontend-promql`, `asap-frontend-sql`,
   - Oracle: curated golden.
   - Today: no Stage 0 golden; ~10 devtools tests check fields by hand;
     400+ front-end tests check the front-end tree, not the memo.
-  - Blocked by: the JSON printer (#1207 PR 9) and the golden runner (D5).
+  - Blocked by: #1239 (JSON printer) and the golden runner (D5).
 - **T2 PromQL ≡ SQL ≡ MetricsQL (cross language)**
   - Tests: equivalent queries in different languages share one memo group.
   - Input → output: a golden case with one workload file per language and
@@ -128,7 +128,7 @@ exercises them.
   - Oracle: always-on invariant at each stage boundary (DataFusion checks
     the schema after every optimizer rule).
   - Today: none.
-  - Blocked by: #1207 PRs 5–6 for the Stage 2 and 3 checks.
+  - Blocked by: none (#1207 PRs 5–6 have landed).
 - **T5 Memo consistency**
   - Tests: expressions in a group agree on schema and properties; no
     duplicate expressions; re-inserting the memo reproduces the same group
@@ -163,7 +163,7 @@ Logic: `asap-stage1-pass2-reuse-candidates::rules::{rollup, topk, chains}`.
     `.noMat()`): finer window → coarser query must reuse, coarser → finer
     must not; top-k reused by a smaller k, not a larger one.
   - Today: none; the crate has 0 tests; no top-k reuse test anywhere.
-  - Blocked by: #1207 PR 4, `--only-rules`.
+  - Blocked by: the `Rule` enum and `--only-rules` (D9), the golden runner.
 - **T24 Rule removal**
   - Tests: each rule earns its place; nothing else silently covers for it.
   - Input → output: T8's positive cases planned with and without
@@ -172,7 +172,7 @@ Logic: `asap-stage1-pass2-reuse-candidates::rules::{rollup, topk, chains}`.
     positive cases the plan loses the reuse (cost strictly higher), or the
     case documents why another rule covers it.
   - Today: none.
-  - Blocked by: #1207 PR 6, `--disable-rule`.
+  - Blocked by: `--disable-rule` (D9), the golden runner.
 
 ### `asap_planner --run-until stage2`
 
@@ -185,7 +185,7 @@ Logic: `asap-stage2-physical-optimization::generate_physical_asap_memo_candidate
   - Oracle: curated golden, plus `validate()` always on in the driver and
     in snapshot runs.
   - Today: none; the crate has 0 tests; snapshots never call `validate()`.
-  - Blocked by: #1207 PR 5.
+  - Blocked by: #1239 and the golden runner.
 
 ### `asap_planner --run-until stage3` (whole planner)
 
@@ -198,7 +198,7 @@ Logic: everything above plus `asap-stage3-plan-selection::select_plan`
   - Input → output: workload → "who shares what" list per prefix.
   - Oracle: curated golden.
   - Today: none.
-  - Blocked by: #1207 PR 6.
+  - Blocked by: #1239 and the golden runner; #1207 PR 8 for cases with accuracy targets.
 - **T11 Search differential**
   - Tests: plan selection finds the optimum over the candidates it has.
   - Input → output: small generated workloads → selected cost under the
@@ -207,7 +207,7 @@ Logic: everything above plus `asap-stage3-plan-selection::select_plan`
     exhaustive optimum.
   - Today: none; `joint_search_equivalence.rs` ignores its `_exhaustive`
     parameter (`:76`).
-  - Blocked by: #1207 PR 6.
+  - Blocked by: #1239 and the golden runner; #1207 PR 8 for cases with accuracy targets.
 - **T9 Missed reuse (`planner_fuzz`)**
   - Tests: no reuse is missed between related workloads.
   - Input → output: generated workload pairs → costs and witness plans.
@@ -215,39 +215,39 @@ Logic: everything above plus `asap-stage3-plan-selection::select_plan`
     relation.
   - Today: 23 relations; (d), (i), (k) and all 8 cost relations never run
     in a committed test.
-  - Blocked by: #1207 PRs 4–6.
+  - Blocked by: #1239 (rewrites `planner_fuzz`); #1207 PR 8 for accuracy targets.
 - **T13 Accuracy monotonicity**
   - Tests: a tighter accuracy target is never cheaper.
   - Input → output: workload and a copy with tighter targets → costs.
   - Oracle: metamorphic.
   - Today: none.
-  - Blocked by: #1207 PR 6.
+  - Blocked by: #1239 and the golden runner; #1207 PR 8 for cases with accuracy targets.
 - **T15 Order invariance**
   - Tests: reordering queries does not change the plan.
   - Input → output: workload and a permutation → plans.
   - Oracle: metamorphic.
   - Today: fuzz `Reordered` relation exists, never runs.
-  - Blocked by: #1207 PR 6.
+  - Blocked by: #1239 and the golden runner; #1207 PR 8 for cases with accuracy targets.
 - **T16 Separability**
   - Tests: workloads over disjoint sources do not interact.
   - Input → output: W1, W2, W1 ∪ W2 → plans and costs.
   - Oracle: metamorphic: plan of the union is the two plans side by side;
     cost is the sum.
   - Today: none.
-  - Blocked by: #1207 PR 6.
+  - Blocked by: #1239 and the golden runner; #1207 PR 8 for cases with accuracy targets.
 - **T17 Renaming invariance**
   - Tests: no behavior depends on names.
   - Input → output: workload and a consistently renamed copy (metrics,
     labels, tables, columns) → plans.
   - Oracle: metamorphic: same plan up to names.
   - Today: none.
-  - Blocked by: #1207 PR 6 (the Stage 0 part can run now).
+  - Blocked by: #1239 and the golden runner (the Stage 0 part needs only those).
 - **T19 Plan cost relations**
   - Tests: plan-level cost behaves as expected (e.g. joint ≤ separate).
   - Input → output: workload and its per-query split → costs.
   - Oracle: metamorphic; one shared helper instead of the 4 copies today.
   - Today: 38 per-operator arithmetic tests; `plan/cost.rs` has no tests.
-  - Blocked by: #1207 PR 6.
+  - Blocked by: #1239 and the golden runner; #1207 PR 8 for cases with accuracy targets.
 
 - **T26 Plan-changing inputs**
   - Tests: each non-query input changes the plan the way it should:
@@ -258,7 +258,7 @@ Logic: everything above plus `asap-stage3-plan-selection::select_plan`
     changed → Stage 3 JSON of each.
   - Oracle: curated golden of both plans.
   - Today: none found by the audit.
-  - Blocked by: #1207 PR 6.
+  - Blocked by: #1239 and the golden runner; #1207 PR 8 for cases with accuracy targets.
 - **T23 Corpus snapshots**
   - Tests: real-corpus plans do not change unless explained.
   - Input → output: `crates/devtools/tests/corpus_snapshots/` corpora →
@@ -268,7 +268,7 @@ Logic: everything above plus `asap-stage3-plan-selection::select_plan`
     stages.
   - To do: re-bless once #1207 lands; decide whether to snapshot each
     stage, not just Stage 3.
-  - Blocked by: #1207 PR 6.
+  - Blocked by: #1239 and the golden runner; #1207 PR 8 for cases with accuracy targets.
 
 ### `asap-accuracy`
 
@@ -279,7 +279,7 @@ Logic: everything above plus `asap-stage3-plan-selection::select_plan`
     `function_rules.rs` tests.
   - Today: 32 hand-written tests of dormant pre-memo code;
     `guarantee/ddsketch.rs` has 0 tests.
-  - Blocked by: #1207 PR 4+ (the memo-design rewrite of propagation).
+  - Blocked by: #1207 PR 8 (constraint (K)); check whether propagation's memo rewrite has landed.
 - **T14 Composition algebra (`asap-accuracy::composition`, `asap-accuracy::guarantee`)**
   - Tests: how ε/δ combine.
   - Input → output: generated guarantees → composed guarantee.
@@ -390,9 +390,8 @@ listed overlaps, stale tests and ignored tests. Its gaps are items under
 
 ## Design decisions
 
-All decided (2026-11-15). Timing constraints: group A shapes the JSON
-printer, stubbed until #1207 PR 9 (`asap_planner.rs:742`); D18 shapes the
-solver setup written in #1207 PR 6.
+All decided (2026-11-15; `case.toml` spec 2026-11-18). Group A shapes the
+JSON printer, written in #1207 PR 9 (#1239).
 
 ### A. Golden content (before #1207 PR 9)
 
@@ -432,10 +431,11 @@ solver setup written in #1207 PR 6.
   ```
   tests/goldens/<area>/<case>/      e.g. rules/rollup/coarse_sum_from_fine/
     case.toml       why (one line); args (--run-until, --only-rules, ...);
-                    stage3 = "exact" | "cost" (D18); pending (D22);
+                    workloads;
                     tier (D19); assertions (D15)
     workload.json   passed to --workload
-    cost_inputs.json, deployment_capabilities.json, tables/*.sql (optional)
+    cost_inputs.json, deployment_capabilities.json, tables/*.json (optional;
+                    each table passed as one --sql-catalog-table)
     expected.json   the --format json output, written by UPDATE_SNAPSHOTS=1
   ```
 - **D7 Invocation. Decided: subprocess.** The runner runs the
@@ -446,6 +446,47 @@ solver setup written in #1207 PR 6.
   `expected.json` instead of comparing; goldens are pretty-printed JSON
   with sorted keys, so failures and PR diffs are line diffs. E.g.
   `UPDATE_SNAPSHOTS=1 cargo test --release --test goldens rollup/`.
+
+#### `case.toml` spec
+
+- **`why`** (required): one line saying what the case checks, read by
+  reviewers (D20); a case without it fails to load. Every other field is
+  optional. Every case has an `expected.json`; a case without one fails
+  unless `UPDATE_SNAPSHOTS=1` writes it.
+- **`args`**: the case's `asap_planner` flags as a raw list, e.g.
+  `args = ["--run-until", "stage1_pass2", "--only-rules", "rollup"]`. The
+  runner adds `--workload`, `--format json`, one `--sql-catalog-table`
+  per `tables/*.json`, and the defaults' paths; the
+  binary rejects unknown flags. Default `["--run-until", "stage3"]`.
+- **`workloads`**: workload files in order, each passed as `--workload`;
+  queries are numbered `q1..qN` across them in this order. Default
+  `["workload.json"]`. Assertions name queries by these numbers; the
+  workload format gains no query names.
+- No Stage 3 mode field: a large case (D18) adds `--summary` to `args`,
+  and `asap_planner` prints only the plan's cost, feasibility and sharing
+  summary, without the per-stage memo.
+- **`rule_fires = ["rollup"]`**: Pass 2 added at least one candidate whose
+  recorded `Rule` (D9) is `rollup`, anywhere in the memo;
+  `rule_does_not_fire`: none. Where and what is left to `expected.json`.
+  The runner rejects both in a case whose `args` stop before
+  `stage1_pass2`.
+- **`mutations`** (D16): the input mutations to apply, replacing the
+  default `["shuffle", "rename"]` when present, e.g.
+  `["shuffle", "rename", "rule_removal"]` or `["shuffle"]`. Names:
+  `shuffle` (T15), `rename` (T17), `added_query` (T9),
+  `tighter_accuracy` (T13), `separability` (T16), `rule_removal` (T24).
+- **`same_group`, `different_group`** (D15): lists of query pairs whose
+  root groups must (not) be the same.
+- **`tier`**: `"nightly"`, added only once a case proves slow (D19).
+
+Example (a T2 case):
+```toml
+why = "sum(rate(...)) in PromQL and its SQL equivalent share one group"
+args = ["--run-until", "stage0"]
+workloads = ["promql.json", "sql.json"]   # plus tables/http_requests.json
+same_group = [["q1", "q2"]]
+mutations = ["shuffle"]  # rename would break the table-to-metric link
+```
 
 ### C. `asap_planner` command line
 
@@ -479,7 +520,7 @@ solver setup written in #1207 PR 6.
   invariant violation is `InvariantViolation { rule, check, group }`
   (D13), and `asap_planner` exits with a dedicated code (e.g. 3). The
   golden runner always fails such a case, even under `UPDATE_SNAPSHOTS=1`,
-  unless it is pending (D22), so a bug is never blessed. The fuzzer counts
+  so a bug is never blessed. The fuzzer counts
   it as a finding, separate from crashes. Planning errors (infeasible,
   invalid input) stay ordinary outcomes a golden may record.
 
@@ -496,12 +537,15 @@ solver setup written in #1207 PR 6.
   ```
   New kinds are added only when a test needs one; no generic JSON-path
   assertions.
-- **D16 Relations (T9, T13, T15–T17, T24). Decided: on golden cases and
-  generated workloads.** Relations live in one shared module. The golden
-  runner re-plans every case shuffled (T15) and renamed (T17) and checks
-  the plan is unchanged; T9, T13, T16 and T24 run on a case only when its
-  `case.toml` lists them (`relations = [...]`). `planner_fuzz` applies all
-  of them to generated workloads, with a committed fixed-seed run on every
+- **D16 Input mutations (T9, T13, T15–T17, T24). Decided: on golden
+  cases and generated workloads.** An input mutation changes a case's input
+  in a known way, re-plans it, and checks how the plan must relate (e.g.
+  shuffled query order → same plan). `planner_fuzz` calls these
+  "relations"; not to be confused with mutation testing, which mutates the
+  planner's code. Mutations live in one shared module. The golden runner
+  applies `shuffle` (T15) and `rename` (T17) to every case by default; the
+  others run when `case.toml` lists them. `planner_fuzz` applies all of
+  them to generated workloads, with a committed fixed-seed run on every
   PR.
 - **D17 Property tests (T14). Decided: `proptest`,** a dev-dependency of
   `asap-accuracy` only. Generators list edge values explicitly (−0.0,
@@ -512,13 +556,14 @@ solver setup written in #1207 PR 6.
 
 - **D18 Stage 3 determinism. Decided: two kinds of Stage 3 golden.** A
   MILP can return a different plan of equal cost (ties), or stop at a
-  different plan under a time limit or several threads. Settle before
-  #1207 PR 6 writes the solver setup.
+  different plan under a time limit or several threads. #1207 PR 6
+  already solves with one thread and zero gap; the tie-break remains.
   - Small cases: one thread, fixed seed, no time limit, solved to proven
     optimality, with a deterministic tie-break (e.g. a tiny penalty
     preferring lower canonical ids). The golden stores the exact plan.
   - Large cases (corpus, nightly; may hit the time limit): the golden
-    stores only the plan's cost and the sharing summary (T22).
+    stores only the plan's cost and the sharing summary (T22), printed by
+    `asap_planner --summary`.
 - **D19 Tiers. Decided: everything on PRs, in release.** Every golden
   runs on every PR in release mode. A case found to be slow moves to the
   nightly workflow then (e.g. a `tier: nightly` field in its metadata);
@@ -535,11 +580,10 @@ solver setup written in #1207 PR 6.
 
 ### H. More
 
-- **D22 Pending cases. Decided: yes.** A case can be committed before the
-  code it tests exists, marked "pending until #1207 PR N". The runner
-  expects it to fail while pending and fails if it starts passing, so the
-  marker is removed when the PR lands. Lets acceptance cases (e.g. T8) be
-  written before the implementation.
+- **D22 Pending cases. Decided: no** (revised 2026-11-18). They were for
+  writing T8 cases before #1207 PR 4 implemented the rules; PRs 4–7 have
+  landed. A bug's case is committed in the PR that fixes it; cases that
+  need #1239 are written after it merges.
 - **D23 Whole workload and per query. Decided: both.** Goldens plan the
   whole workload, since sharing is the point; per-query planning stays
   where it is useful (e.g. corpus snapshots today).
@@ -554,12 +598,11 @@ solver setup written in #1207 PR 6.
 - **D26 Fuzz findings become cases. Decided: the fuzzer writes the case.**
   Next to each finding's issue draft, `planner_fuzz` writes a golden case
   directory (D6): the shrunk `workload.json`, non-default inputs, and
-  `case.toml` with `why = "planner_fuzz finding <id>"` and
-  `pending = "<issue>"`. The fix PR copies it to `tests/goldens/fuzz/` and
-  removes `pending`.
+  `case.toml` with `why = "planner_fuzz finding <id>"`. The fix PR copies
+  it to `tests/goldens/fuzz/`.
 - **D27 Corpus snapshots. Decided: migrate into the golden runner,** as a
   follow-up once the runner exists. Each `o11y_bench` query becomes
-  `tests/goldens/corpus/o11y_bench/qNN/` with `stage3 = "cost"` (D18); the
+  `tests/goldens/corpus/o11y_bench/qNN/` with `--summary` (D18); the
   corpus's data facts are copied into each `workload.json` by the script
   that generates the corpus. `corpus_snapshots.rs` is then deleted.
 
