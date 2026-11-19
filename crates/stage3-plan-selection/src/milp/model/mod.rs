@@ -411,6 +411,17 @@ pub(crate) enum SelectionMilpError {
 /// 1e-7 at the default, but only by 1e-10 here.
 const LEAST_HIGHS_FEASIBILITY_TOLERANCE: f64 = 1e-10;
 
+/// The objective's largest coefficient once scaled, 1e6. HiGHS ends its
+/// search when no branch can beat the best plan found by more than its MIP
+/// feasibility tolerance (absolute, 1e-6), so plans within 1e-6 of each
+/// other after scaling tie, and which one it returns depends on its search
+/// path (row order, build). At 1e6 that margin is 1e-12 of the largest
+/// coefficient. Example: two quantiles over the same 5 minutes, raw data
+/// retained, have three plans within 5.5e-10 of each other (relative);
+/// scaled to 1,000 their differences (6e-7) were ties, and two machines
+/// returned different plans; at 1e6 every row order returns the cheapest.
+const LARGEST_SCALED_OBJECTIVE_COEFFICIENT: f64 = 1e6;
+
 /// Builds and solves the MILP: minimize
 /// $\sum_v W^{\mathrm{mat}}_v x^{\mathrm{mat}}_v + \sum_{\kappa,v}
 /// \rho_\kappa c_{\kappa,v} x_{\kappa,v} + \sum \rho_\kappa c_{\kappa,u,c,i}
@@ -424,7 +435,8 @@ const LEAST_HIGHS_FEASIBILITY_TOLERANCE: f64 = 1e-10;
 /// [`copies_in_equivalent_contexts`]), with
 /// the $h_v$ of a candidate whose
 /// executions are all left out, then the coefficients kept are scaled so
-/// the largest is 1,000 (HiGHS's tolerances are absolute). HiGHS solves
+/// the largest is [`LARGEST_SCALED_OBJECTIVE_COEFFICIENT`] (HiGHS's
+/// tolerances are absolute). HiGHS solves
 /// at its default tolerances and the selection is then checked exactly
 /// ([`AccuracyRules::selection_meets_targets`]); a selection that misses a
 /// target is solved once more at [`LEAST_HIGHS_FEASIBILITY_TOLERANCE`],
@@ -494,7 +506,7 @@ pub(crate) fn solve_selection(
         .chain(raw_data_rows.iter().map(|&(_, coefficient, _)| coefficient))
         .fold(0.0_f64, |largest, cost| largest.max(cost.abs()));
     let scale = match largest > 0.0 && largest.is_finite() {
-        true => 1_000.0 / largest,
+        true => LARGEST_SCALED_OBJECTIVE_COEFFICIENT / largest,
         false => 1.0,
     };
     let constraints: Vec<Constraint> = [

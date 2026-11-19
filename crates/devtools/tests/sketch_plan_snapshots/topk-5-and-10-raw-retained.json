@@ -19,7 +19,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 5.47244698969e-11,
+      "cost_per_second": 5.47244698968e-11,
       "cpu_core_seconds_per_second": 4.86691666667e-6,
       "per_node": {
         "0": {
@@ -59,10 +59,10 @@
           "timing": "query_time"
         },
         "4": {
-          "cost_per_second": 9.37000015336e-16,
+          "cost_per_second": 9.37000003067e-16,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 8.33333333333e-11,
-          "detail": "limit to 5 rows; x 0.0167/s; holds 160 bytes for 0.000 ms",
+          "detail": "limit to 5 rows; x 0.0167/s; holds 32 bytes for 0.000 ms",
           "multiplier": 1,
           "operator": "Limit",
           "timing": "query_time"
@@ -70,11 +70,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 0.746747752,
+        "average_memory_bytes": 0.746747741333,
         "cpu_ops_per_second": 4333.58333333,
         "disk_bytes": 320000,
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 320256,
+        "peak_memory_bytes": 320128,
         "scanned_bytes_per_second": 5333.33333333
       }
     },
@@ -511,9 +511,7 @@
         },
         {
           "id": 4,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
