@@ -1,4 +1,5 @@
 use super::*;
+use crate::values::arrow_columns::float64_array;
 impl Operator {
     pub(crate) fn evaluation_time() -> Self {
         Self {
@@ -131,11 +132,7 @@ pub(super) fn execute<'a>(
                 let batch = batch?;
                 work.checkpoint_rows(batch.num_rows()).await?;
                 count = count.saturating_add(batch.num_rows());
-                if let Some(values) = batch
-                    .column(*column)
-                    .as_any()
-                    .downcast_ref::<arrow::array::Float64Array>()
-                {
+                if let Some(values) = float64_array(batch.column(*column)) {
                     if let Some(last) = values.len().checked_sub(1) {
                         value = values.value(last);
                     }

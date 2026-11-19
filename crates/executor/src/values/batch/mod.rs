@@ -2,6 +2,7 @@
 //! with summary states held beside them.
 use super::arrow_columns::{self, ColumnDepth};
 use super::{validate_schema, validate_state, SchemaRef, StateColumn, Value};
+use crate::values::arrow_columns::text_dictionary_array;
 use crate::{AggregateCore, Error};
 use arrow::array::{Array, ArrayRef, BooleanArray, UInt32Array};
 use arrow::datatypes::{DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema};
@@ -178,9 +179,7 @@ impl Batch {
                 (BatchColumn::Plain(array), FieldDataType::Plain(dtype)) => {
                     // A NULL is a NULL key, never a NULL dictionary value,
                     // so every dictionary read finds a text.
-                    if array
-                        .as_any()
-                        .downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::UInt32Type>>()
+                    if text_dictionary_array(&*array)
                         .is_some_and(|dictionary| dictionary.values().null_count() > 0)
                     {
                         return Err(Error::Invalid(format!(

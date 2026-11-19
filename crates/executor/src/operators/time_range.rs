@@ -4,6 +4,7 @@
 //! end-of-series NaN) are never rows; an ordinary NaN is. And a `TimeShift`
 //! with an `@` anchor, which evaluates its input at the anchor's time.
 use super::*;
+use crate::values::arrow_columns::{float64_array, timestamp_array};
 use crate::values::is_stale_marker;
 use arrow::array::Array;
 use planner_types::ir::operator::AtModifier;
@@ -220,17 +221,11 @@ pub(super) fn execute<'a>(
     // stale marker.
     let kept =
         move |batch: &Batch, drop_stale: bool| -> Result<arrow::array::BooleanArray, Error> {
-            let times = batch
-                .column(time)
-                .as_any()
-                .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+            let times = timestamp_array(batch.column(time))
                 .ok_or_else(|| invalid("time range column is not a timestamp"))?;
             let values = match sample_value.filter(|_| drop_stale) {
                 Some(value) => Some(
-                    batch
-                        .column(value)
-                        .as_any()
-                        .downcast_ref::<arrow::array::Float64Array>()
+                    float64_array(batch.column(value))
                         .ok_or_else(|| invalid("sample value is not Float64"))?,
                 ),
                 None => None,
@@ -274,10 +269,7 @@ pub(super) fn execute<'a>(
         // The rows in the window, stale markers included: a series whose
         // latest sample is one has ended.
         let in_window = input.batch.filter(&kept(&input.batch, false)?)?;
-        let times = in_window
-            .column(time)
-            .as_any()
-            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+        let times = timestamp_array(in_window.column(time))
             .expect("checked timestamps")
             .clone();
         let mut table = super::group_table::GroupTable::new(series);
@@ -318,10 +310,7 @@ fn window_ends(
     end: i64,
     width_ms: i64,
 ) -> Result<Batch, Error> {
-    let times = batch
-        .column(time)
-        .as_any()
-        .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+    let times = timestamp_array(batch.column(time))
         .ok_or_else(|| invalid("time range column is not a timestamp"))?;
     // `end - t` is in `[k · width_ms, (k+1) · width_ms)` for the window
     // ending at `end - k · width_ms`.

@@ -1,4 +1,5 @@
 //! Label matching and scalar broadcasting are physical computation, not source binding.
+use super::series_labels::label_bytes;
 use super::*;
 use crate::expressions::binary::BinaryOpKind;
 use crate::expressions::binary::BinaryOperator;
@@ -102,9 +103,6 @@ fn identity(mut labels: Labels) -> Labels {
     labels.remove("__name__");
     labels.retain(|_, value| !value.is_empty());
     labels
-}
-fn label_bytes(labels: &Labels) -> usize {
-    labels.iter().map(|(k, v)| 64 + k.len() + v.len()).sum()
 }
 
 /// One operand's columns: label maps (none for a scalar) and values.

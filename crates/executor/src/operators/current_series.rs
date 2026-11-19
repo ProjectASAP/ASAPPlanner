@@ -1,5 +1,6 @@
 //! A bounded instant-vector snapshot: select latest before removing stale markers.
 use super::*;
+use crate::values::arrow_columns::{float64_array, timestamp_array};
 use crate::values::is_stale_marker;
 
 impl Operator {
@@ -51,16 +52,10 @@ pub(super) fn execute<'a>(
     Ok(futures::stream::once(async move {
         let input = collect_batch(input, &operator.inputs[0], &context).await?;
         let batch = &input.batch;
-        let times = batch
-            .column(coordinate)
-            .as_any()
-            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+        let times = timestamp_array(batch.column(coordinate))
             .expect("timestamps")
             .clone();
-        let values = batch
-            .column(value)
-            .as_any()
-            .downcast_ref::<arrow::array::Float64Array>()
+        let values = float64_array(batch.column(value))
             .expect("Float64 values")
             .clone();
         // Each series' latest row in the window, by its identity.

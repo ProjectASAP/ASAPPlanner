@@ -9,15 +9,14 @@
 //! batch, so a series' group is found once per batch, not once per row.
 //! A group is labelled with its own first row's values, as the row
 //! operators labelled it.
+use crate::values::arrow_columns::text_dictionary_array;
 use crate::values::arrow_columns::{self, ColumnDepth};
 use crate::values::{Batch, Value};
 use crate::Error;
 use ahash::AHashMap as HashMap;
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, DictionaryArray, Float64Array, Int64Array, StringArray,
-    TimestampMillisecondArray,
+    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
-use arrow::datatypes::UInt32Type;
 use planner_types::ir::schema::{DataType, FieldDataType};
 
 /// Approximate bytes of one hash-map entry beyond its key, for accounting.
@@ -105,7 +104,7 @@ fn float_key(value: f64, out: &mut Vec<u8>) {
 /// dictionary.
 fn value_at(batch: &Batch, column: usize, row: usize) -> Value {
     let array = batch.column(column);
-    if let Some(dictionary) = array.as_any().downcast_ref::<DictionaryArray<UInt32Type>>() {
+    if let Some(dictionary) = text_dictionary_array(array) {
         let keys = dictionary.keys();
         if keys.is_null(row) {
             return Value::Null;
@@ -203,7 +202,7 @@ impl GroupTable {
         let parts = &mut self.parts[index];
         let rows = batch.num_rows();
         let mut key = Vec::with_capacity(16);
-        if let Some(dictionary) = array.as_any().downcast_ref::<DictionaryArray<UInt32Type>>() {
+        if let Some(dictionary) = text_dictionary_array(array) {
             // One lookup per distinct dictionary entry the batch uses: a
             // dense slot per entry, or a map when the dictionary is much
             // larger than the batch (a slice of a large batch).
@@ -573,9 +572,7 @@ mod tests {
             table.group_ids(&batch).unwrap();
             let groups = (0..table.len() as u32).collect::<Vec<_>>();
             let labels = table.label_arrays(&schema, &groups).unwrap();
-            let floats = labels[0]
-                .as_any()
-                .downcast_ref::<Float64Array>()
+            let floats = crate::values::arrow_columns::float64_array(&*labels[0])
                 .unwrap()
                 .values()
                 .iter()

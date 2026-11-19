@@ -1,5 +1,6 @@
 //! Exact summary state identified by Planner family, independent of keyed layout.
 use super::increase::IncreaseAccumulator;
+use crate::summary_kernels::traits::{aggregate_core_object_methods, downcast_peer};
 use crate::AggregateCore;
 use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
 use planner_types::summary_type::{ExactKind, ExactParams};
@@ -417,20 +418,9 @@ fn merge_scalar(left: &ScalarState, right: &ScalarState) -> Result<ScalarState, 
 }
 
 impl AggregateCore for ExactAccumulator {
-    fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
-        Box::new(self.clone())
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
+    aggregate_core_object_methods!();
     fn merge_with(&self, other: &dyn AggregateCore) -> Result<Box<dyn AggregateCore>, Error> {
-        let other = other
-            .as_any()
-            .downcast_ref::<Self>()
-            .ok_or("merge requires Planner exact state")?;
+        let other = downcast_peer::<Self>(other, "merge requires Planner exact state")?;
         let mut merged = self.clone();
         merged.merge_from(other)?;
         Ok(Box::new(merged))

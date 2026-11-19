@@ -11,6 +11,7 @@ use crate::operators::common::{row_chunks, Workspace};
 use crate::operators::group_table::GroupTable;
 use crate::operators::{Kind, Operator};
 use crate::runtime::{Cooperative, Input, RunContext};
+use crate::values::arrow_columns::float64_array;
 use crate::values::arrow_columns::{self, ColumnDepth};
 use crate::values::{Batch, SchemaRef, Value};
 use crate::Error;
@@ -229,10 +230,7 @@ fn update_measure(
     workspace_bytes: &mut usize,
 ) -> Result<(), Error> {
     let floats = |column: usize| -> Result<Float64Array, Error> {
-        batch
-            .column(column)
-            .as_any()
-            .downcast_ref::<Float64Array>()
+        float64_array(batch.column(column))
             .cloned()
             .ok_or_else(|| invalid("floating aggregate value required"))
     };
@@ -371,7 +369,7 @@ fn update_measure(
             *workspace_bytes += identities.memory_bytes() - before;
             let array = batch.column(*column);
             let nulls = array.logical_nulls();
-            let floats = array.as_any().downcast_ref::<Float64Array>();
+            let floats = float64_array(array);
             for (row, &group) in groups.iter().enumerate() {
                 if !selected(row) || logically_null(&nulls, row) {
                     continue;

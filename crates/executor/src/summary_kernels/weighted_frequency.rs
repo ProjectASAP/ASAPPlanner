@@ -2,6 +2,7 @@
 //! regular-path matrices, with a top-k heap or, at capacity 0, without one.
 //!
 //! An identity tuple is one `TupleKey`, hashed and retained as its bytes.
+use crate::summary_kernels::traits::{aggregate_core_object_methods, downcast_peer};
 use crate::AggregateCore;
 use crate::{values::Value, Error};
 use asap_sketchlib::{
@@ -336,23 +337,12 @@ impl WeightedFrequency {
 }
 
 impl AggregateCore for WeightedFrequency {
-    fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
-        Box::new(self.clone())
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
+    aggregate_core_object_methods!();
     fn merge_with(
         &self,
         other: &dyn AggregateCore,
     ) -> Result<Box<dyn AggregateCore>, Box<dyn std::error::Error + Send + Sync>> {
-        let other = other
-            .as_any()
-            .downcast_ref::<Self>()
-            .ok_or("weighted frequency state type mismatch")?;
+        let other = downcast_peer::<Self>(other, "weighted frequency state type mismatch")?;
         Ok(Box::new(self.merge(other)?))
     }
     /// This adapter's fields plus sketchlib's count of the sketch, which

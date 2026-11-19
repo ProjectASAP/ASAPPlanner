@@ -72,6 +72,22 @@ pub(crate) fn arrow_type(dtype: &DataType, depth: ColumnDepth) -> ArrowType {
     }
 }
 
+/// A `Timestamp` column's array, or `None` when `array` is another type.
+pub(crate) fn timestamp_array(array: &dyn Array) -> Option<&TimestampMillisecondArray> {
+    array.as_any().downcast_ref()
+}
+
+/// A `Float64` column's array, or `None` when `array` is another type.
+pub(crate) fn float64_array(array: &dyn Array) -> Option<&Float64Array> {
+    array.as_any().downcast_ref()
+}
+
+/// A `Utf8` batch column's dictionary array, or `None` when `array` is
+/// another type.
+pub(crate) fn text_dictionary_array(array: &dyn Array) -> Option<&DictionaryArray<UInt32Type>> {
+    array.as_any().downcast_ref()
+}
+
 fn list_field(name: &str, element: &DataType) -> Arc<ArrowField> {
     Arc::new(ArrowField::new(
         name,
@@ -429,10 +445,7 @@ pub(crate) fn decode(array: &dyn Array, dtype: &DataType, depth: ColumnDepth) ->
             .map(|row| decode_cell(array, dtype, row).expect("a type read by the cell"))
             .collect(),
         DataType::Utf8 if depth == ColumnDepth::BatchColumn => {
-            let typed = array
-                .as_any()
-                .downcast_ref::<DictionaryArray<UInt32Type>>()
-                .expect("batch text columns are dictionaries");
+            let typed = text_dictionary_array(array).expect("batch text columns are dictionaries");
             let mut texts = DictionaryTexts::new(typed, length);
             let keys = typed.keys();
             (0..length)

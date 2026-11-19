@@ -1,5 +1,6 @@
 //! PromQL per-series evaluation over the samples before an evaluation instant.
 use super::*;
+use crate::values::arrow_columns::{float64_array, timestamp_array};
 use crate::values::is_stale_marker;
 use planner_types::ir::operator::{AggIntent, AtModifier};
 
@@ -206,16 +207,10 @@ pub(super) fn execute<'a>(
         let batch = &input.batch;
         let mut work = Cooperative::new(&context);
         let mut workspace = Workspace::new(&context)?;
-        let times = batch
-            .column(coordinate)
-            .as_any()
-            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+        let times = timestamp_array(batch.column(coordinate))
             .expect("timestamps")
             .clone();
-        let values = batch
-            .column(value)
-            .as_any()
-            .downcast_ref::<arrow::array::Float64Array>()
+        let values = float64_array(batch.column(value))
             .expect("Float64 values")
             .clone();
         // A series is every column but the time and the value.

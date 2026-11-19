@@ -1,5 +1,6 @@
 //! One frequency state shared by count, distinct, L2 and entropy evaluations.
 
+use crate::summary_kernels::traits::{aggregate_core_object_methods, downcast_peer};
 use crate::AggregateCore;
 use asap_sketchlib::{DataInput, UnivMon};
 use planner_types::ir::scalar::ColumnRef;
@@ -185,21 +186,10 @@ impl AggregateCore for UnivMonAccumulator {
             ))
             .saturating_add(key_bytes)
     }
-    fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
-        Box::new(self.clone())
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
+    aggregate_core_object_methods!();
 
     fn merge_with(&self, other: &dyn AggregateCore) -> Result<Box<dyn AggregateCore>, Error> {
-        let other = other
-            .as_any()
-            .downcast_ref::<Self>()
-            .ok_or("expected UnivMon state")?;
+        let other = downcast_peer::<Self>(other, "expected UnivMon state")?;
         let mut merged = self.clone();
         merged.merge_in_place(other)?;
         Ok(Box::new(merged))

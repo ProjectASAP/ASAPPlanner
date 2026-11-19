@@ -1,9 +1,10 @@
 use super::group_table::GroupTable;
 use super::*;
 use crate::values::arrow_columns::ColumnDepth;
+use crate::values::arrow_columns::{float64_array, timestamp_array};
 use crate::values::StateColumn;
 use crate::StateColumnUpdater;
-use arrow::array::{Array, BooleanArray, Float64Array, TimestampMillisecondArray, UInt32Array};
+use arrow::array::{Array, BooleanArray, UInt32Array};
 use planner_types::summary_type::{MergeInputRule, SummaryTypeCapability};
 use std::num::NonZeroU32;
 
@@ -624,16 +625,13 @@ async fn build_per_group_summary(
             workspace.set_bytes(updater.memory_bytes() + table.memory_bytes())?;
             let mask = filter_mask(filter.as_deref(), &batch)?;
             let times = build.time.map(|time| {
-                batch
-                    .column(time)
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
+                timestamp_array(batch.column(time))
                     .expect("summary time columns are timestamps")
                     .clone()
             });
             let time_at = |row: usize| times.as_ref().map_or(0, |times| times.value(row));
             let values = batch.column(build.value);
-            if let Some(values) = values.as_any().downcast_ref::<Float64Array>() {
+            if let Some(values) = float64_array(values) {
                 for (row, &group) in groups.iter().enumerate() {
                     // SQL aggregates ignore NULL samples while retaining the group.
                     if !kept(&mask, row) || values.is_null(row) {

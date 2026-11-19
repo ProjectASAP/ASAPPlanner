@@ -278,14 +278,12 @@ pub(super) fn evaluate(
                 else {
                     return Err(Error::Invalid("series identity must be Utf8".into()));
                 };
-                let mut labels: std::collections::BTreeMap<String, String> =
-                    serde_json::from_str(&encoded).map_err(|e| Error::Invalid(e.to_string()))?;
+                use crate::physical_planner::promql_rows::{
+                    decode_series_identity, encode_series_identity,
+                };
+                let mut labels = decode_series_identity(&encoded)?;
                 labels.remove("__name__");
-                return Ok(Value::Utf8(
-                    serde_json::to_string(&labels)
-                        .map_err(|e| Error::Invalid(e.to_string()))?
-                        .into(),
-                ));
+                return Ok(Value::Utf8(encode_series_identity(&labels)?.into()));
             }
             if name.eq_ignore_ascii_case("asap_struct_field") {
                 expr.scalar_type(schema)

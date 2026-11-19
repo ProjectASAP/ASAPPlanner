@@ -2,6 +2,7 @@
 use super::*;
 use crate::expressions::binary::BinaryOpKind;
 use crate::expressions::binary::BinaryOperator;
+use crate::values::arrow_columns::float64_array;
 
 use std::collections::BTreeSet;
 
@@ -80,7 +81,7 @@ pub(super) fn matchable_rows(keys: &Batch) -> Vec<bool> {
     let mut matchable = vec![true; keys.num_rows()];
     for column in keys.record_batch().columns() {
         let nulls = column.logical_nulls();
-        let floats = column.as_any().downcast_ref::<arrow::array::Float64Array>();
+        let floats = float64_array(column);
         for (row, slot) in matchable.iter_mut().enumerate() {
             if nulls.as_ref().is_some_and(|nulls| nulls.is_null(row))
                 || floats.is_some_and(|floats| floats.value(row).is_nan())
@@ -128,10 +129,7 @@ pub(super) fn execute<'a>(
         let right_keys = key_batch(right, &keys.iter().map(|&(_, r)| r).collect::<Vec<_>>())?;
         let mut table = super::group_table::GroupTable::new((0..keys.len()).collect());
         let float_values = |batch: &Batch, column: usize| {
-            batch
-                .column(column)
-                .as_any()
-                .downcast_ref::<arrow::array::Float64Array>()
+            float64_array(batch.column(column))
                 .cloned()
                 .ok_or_else(|| invalid("invalid aligned value"))
         };
