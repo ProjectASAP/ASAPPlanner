@@ -22,6 +22,18 @@ impl Operator {
             output: left,
         })
     }
+    /// Require every candidate key to have an authoritative value at
+    /// execution. A fixture for the Planner's own tests (`test-support`);
+    /// a deployment receives a certified semi join in its stored form.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn certified_semi_join(
+        left: SchemaRef,
+        right: SchemaRef,
+        keys: Vec<(usize, usize)>,
+    ) -> Result<Self, Error> {
+        Ok(Self::semi_join(left, right, keys)?.require_complete_right())
+    }
+
     pub(crate) fn require_complete_right(mut self) -> Self {
         if let Kind::SemiJoin {
             require_complete_right,

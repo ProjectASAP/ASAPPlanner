@@ -754,10 +754,6 @@ fn state_columns(
     Some((schema, columns))
 }
 
-/// A readout of summary state: the state's plain columns are copied in
-/// place, and the value read out is computed, with `value(the state's
-/// recorded sign, the state column's type)`. All computed with no sign
-/// when the output does not keep the state's layout (a top-k's rows).
 /// The sign of a value finalized from a sampling summary's state: unknown
 /// until one is built.
 fn sampling_finalized_sign(_kind: &SamplingKind, _params: &SamplingParams) -> ValueSign {
@@ -779,6 +775,10 @@ fn stat_model_finalized_sign(_kind: &StatModelKind, _params: &StatModelParams) -
     Unknown
 }
 
+/// A readout of summary state: the state's plain columns are copied in
+/// place, and the value read out is computed, with `value(the state's
+/// recorded sign, the state column's type)`. All computed with no sign
+/// when the output does not keep the state's layout (a top-k's rows).
 fn readout_columns(
     state: &Input<'_>,
     output: &Schema,

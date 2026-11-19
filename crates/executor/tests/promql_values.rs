@@ -799,3 +799,20 @@ mod scalar_reads_and_series_samples {
         );
     }
 }
+
+// The schema fixtures are the operators' own: `histogram_quantile` reads a
+// scalar and a vector, and `rate` reads a matrix and writes a vector.
+#[test]
+fn schema_fixtures_match_the_operators_schemas() {
+    let histogram = Operator::histogram_quantile();
+    assert_eq!(
+        serde_json::to_value(&histogram).unwrap()["inputs"],
+        serde_json::to_value(vec![scalar_schema(), vector_schema()]).unwrap()
+    );
+    let rate = Operator::range_window(AggIntent::Rate).unwrap();
+    assert_eq!(rate.schema(), vector_schema());
+    assert_eq!(
+        serde_json::to_value(&rate).unwrap()["inputs"],
+        serde_json::to_value(vec![matrix_schema()]).unwrap()
+    );
+}
