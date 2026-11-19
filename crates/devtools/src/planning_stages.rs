@@ -6,6 +6,7 @@
 use asap_frontend_sql::SqlCatalog;
 pub use asap_planner::RunUntil;
 use asap_planner::{run_planning_until, PlanSearchSettings, PlanningModels, PlanningRun};
+use asap_stage1_pass1_per_computation_candidates::PerComputationCandidateError;
 use asap_types::ir::schema::series_identity::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
@@ -72,7 +73,8 @@ pub fn lower_sql_roots(
 /// Why a planning run produced no result.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanningStagesError {
-    /// Pass 1 failed: there are no candidates, only the frontends' roots.
+    /// Stage 0 (`memo_of_queries`) or Pass 1 failed: there are no
+    /// candidates, only the frontends' roots.
     Pass1(String),
     /// The frontends' roots or a composed candidate failed validation.
     Validation(String),
@@ -147,21 +149,20 @@ fn run_until(
     settings: PlanSearchSettings,
     until: RunUntil,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
-    validate(&roots)?;
-    let run = run_planning_until(roots.clone(), entries, data, models, settings, until)
-        .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
+    let run =
+        run_planning_until(&roots, entries, data, models, settings, until).map_err(|error| {
+            match error {
+                PerComputationCandidateError::Structure(error) => {
+                    PlanningStagesError::Validation(error.to_string())
+                }
+                error => PlanningStagesError::Pass1(error.to_string()),
+            }
+        })?;
     Ok(PlanningStagesRun {
         run_until: until,
         stage0_query_language_frontends: roots,
         run,
     })
-}
-
-fn validate(roots: &[QueryRoot]) -> Result<(), PlanningStagesError> {
-    roots
-        .iter()
-        .try_for_each(|root| root.validate_structure())
-        .map_err(|e| PlanningStagesError::Validation(e.to_string()))
 }
 
 /// The SQL catalog of the tables `tables` declare, each a `asap_planner

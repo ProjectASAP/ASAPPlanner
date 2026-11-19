@@ -143,13 +143,13 @@ pub fn run_planning(
     models: PlanningModels<'_>,
     settings: PlanSearchSettings,
 ) -> Result<PlanningRun, PerComputationCandidateError> {
-    run_planning_until(roots, entries, data, models, settings, RunUntil::Stage3)
+    run_planning_until(&roots, entries, data, models, settings, RunUntil::Stage3)
 }
 
 /// [`run_planning`], stopped after the stage `until`: the stages after it
 /// do not run.
 pub fn run_planning_until(
-    roots: Vec<QueryRoot>,
+    roots: &[QueryRoot],
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
@@ -157,7 +157,7 @@ pub fn run_planning_until(
     until: RunUntil,
 ) -> Result<PlanningRun, PerComputationCandidateError> {
     let started = Instant::now();
-    for root in &roots {
+    for root in roots {
         root.validate_structure()?;
     }
     // Stage 0: the memo of logical groups, each query with its accuracy
@@ -168,7 +168,7 @@ pub fn run_planning_until(
             (!models.ignore_accuracy_guarantees).then(|| entry.requirements.accuracy.clone())
         })
         .collect();
-    let initial = memo_of_queries(&roots, &accuracy_targets, data)?;
+    let initial = memo_of_queries(roots, &accuracy_targets, data)?;
     let mut run = PlanningRun {
         stage0_memo: settings.inspect.then(|| initial.clone()),
         pass1_memo: None,

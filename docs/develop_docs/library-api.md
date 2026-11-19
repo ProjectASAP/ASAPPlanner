@@ -16,6 +16,7 @@ plan, and a serializable DAG is not evidence of runtime readiness.
 | Pre-ASAP IR | Frontend `lower_*` | [Lower a query](#lower-a-query-into-pre-asap-ir) |
 | Selected plan for a workload (Stages 0–3) | `asap_planner::e2e_plan` | [Plan a workload](#plan-a-workload-through-the-stages) |
 | Every stage's candidates for already lowered roots | `asap_planner::run_planning` | [Plan a workload](#plan-a-workload-through-the-stages) |
+| The stages up to a chosen one (Stage 0, Pass 1, Pass 2, Stage 2 or Stage 3) | `asap_planner::run_planning_until` with a `RunUntil` | [Plan a workload](#plan-a-workload-through-the-stages) |
 | Physical DAG for an executor | `PlanOutput::physical_asap_dag`, or timing and export functions | [Export](#export) |
 
 Each recipe ends at a different artifact. Use only the stages needed for that
@@ -56,6 +57,7 @@ tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 | `asap_frontend_metricsql::lower_metricsql` | Query string, `AccuracyTarget` | `Result<Rc<OperatorNode>, MetricsqlError>` |
 | `asap_frontend_sql::lower_sql` | Query string, `SqlCatalog`, accuracy | Async `Result<Rc<OperatorNode>, SqlError>`; default SQL dialect is DataFusionSQL |
 | `asap_frontend_sql::lower_sql_dialect` | Same inputs plus `SqlDialect` | Async resolved Pre-ASAP query or error |
+| `asap_frontend_sql::lower_sql_workload` | SQL `PlanningWorkload`, `SqlCatalog`; the workload's `SqlDialect` (DataFusionSQL when the language is not SQL) | Async `Result<Vec<QueryRoot>, (usize, SqlError)>`, one root per entry in `QueryWorkload::entries()` order; the error is the first failing entry's index and its error |
 
 Lowering resolves the supported source language into the canonical query
 representation: an `asap_types::ir::OperatorNode` DAG containing only
@@ -183,6 +185,17 @@ asap_planner::run_planning(
     settings: PlanSearchSettings,     // inspect, default off
 ) -> Result<PlanningRun, PerComputationCandidateError>
 
+// The same stages, stopped after `until`: the run's fields for later stages
+// stay empty and `selection` is `Err(SelectionError::NotRun)` before Stage 3.
+asap_planner::run_planning_until(
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    settings: PlanSearchSettings,
+    until: RunUntil,                  // Stage0 | Pass1 | Pass2 | Stage2 | Stage3
+) -> Result<PlanningRun, PerComputationCandidateError>
+
 // Stage 3 alone, over Stage 2's output:
 asap_stage3_plan_selection::select_plan(
     physical: &PhysicalASAPMemoCandidates,
@@ -202,7 +215,8 @@ asap_stage3_plan_selection::select_plan(
 | `CostModel::ProvisionedCapacity(ResourceUnitCost)` | Cost model 2: unit cost × peak memory, peak CPU cores and disk; the cheapest valid candidate wins |
 | `CostModel::ClusterCapacity(ClusterLimits)` | Cost model 3: memory, disk and optional CPU cores are hard limits; `ClusterObjective::{LowestLatency, LeastMemory}` chooses among the candidates that fit |
 | `PlanOutput.plan` | The selected plan, one `PhysicalASAPDAG`: `roots` answer the operator queries and `scalar_roots` the standalone scalar queries, in `QueryWorkload::entries()` order; each materialized node carries its `retention_ms`. Its cost is `asap_cost::plan_cost` of it |
-| `PlanningRun` | `pass1_memo`, `logical_asap_candidates`, `physical_asap_candidates`, `selection` (the plan and Stage 3's `Selection`: `accepted_accuracy_per_query`, `pruned_candidates`, `milp_variables`, `milp_constraints`, `milp_construction_ms`, `milp_solve_ms`, `milp_solve_count`) and `report` (Pass 2's and Stage 2's counts and each stage's time); `pass1_memo` is kept only with `PlanSearchSettings::inspect` |
+| `RunUntil` | The last stage `run_planning_until` runs: `Stage0`, `Pass1`, `Pass2`, `Stage2`, `Stage3`; `name()` is its `asap_planner --run-until` value (`stage0`, `stage1_pass1`, `stage1_pass2`, `stage2`, `stage3`), parsed back by `FromStr` |
+| `PlanningRun` | `stage0_memo` (Stage 0's memo groups, without candidates), `pass1_memo`, `logical_asap_candidates`, `physical_asap_candidates`, `selection` (the plan and Stage 3's `Selection`: `accepted_accuracy_per_query`, `pruned_candidates`, `milp_variables`, `milp_constraints`, `milp_construction_ms`, `milp_solve_ms`, `milp_solve_count`) and `report` (Pass 2's and Stage 2's counts and each stage's time); `stage0_memo` and `pass1_memo` are kept only with `PlanSearchSettings::inspect`; a field for a stage that did not run is `None` |
 
 Each candidate's `ResourceUsage` holds its usage without prices:
 `cpu_ops_per_second`, `scanned_bytes_per_second`, `average_memory_bytes`,
