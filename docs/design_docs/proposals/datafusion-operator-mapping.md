@@ -25,9 +25,6 @@ efficiency. There is no executor benchmark yet. Five operator files
 (`group_table`, `joins`, `time_range`, `range_function`, `series_labels`)
 convert batches to rows (`Batch::to_rows`), the likely hot spots.
 
-**Prior attempt:** `asap-fusion/_deprecated/` built ASAP operators as
-DataFusion `ExecutionPlan`s and aggregate UDFs. Why it was dropped is not
-recorded.
 
 ## 2. Decisions
 
@@ -233,7 +230,3 @@ Unchecked. Needs a pass over the scalar IR before migrating `project` and
 The crate pulls in DataFusion's runtime crates at compile time, unused.
 Recommendation: depend on it first; copy only if build time or version
 conflicts hurt.
-
-**Q8. Why was the `asap-fusion` DataFusion attempt dropped?**
-
-Ask its authors before starting; the reason may apply here.
