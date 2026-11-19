@@ -70,6 +70,27 @@ convert batches to rows (`Batch::to_rows`), the likely hot spots.
    accumulators hand states to the next operator in memory, through our own
    methods beside `GroupsAccumulator`; `state` (encoded Arrow arrays) is used
    only to store a state.
+8. **`advance(t)`: `t` is the end of the ingestion window that just
+   completed**, which the runtime already knows. Event-time watermarks only
+   if out-of-order data within a window becomes a problem. The runtime
+   advances operators in DAG order, delivering each operator's output
+   downstream before advancing the next.
+9. **Evaluation time enters at `open`.** Each operator is an immutable
+   definition, kept in the compiled plan, and per-run state created by
+   `definition.open(ctx)`, where `ctx` holds the evaluation time. `@`
+   (`evaluate_at`) stays a runtime action: the runtime opens the operator's
+   inputs with a shifted `ctx`.
+10. **Only operators that ingestion-time plans use support `advance`.** All
+    others are batch-only, and the runtime rejects a streaming plan that
+    contains one. Two-input operators are batch-only unless that list
+    contains one.
+11. **Migration is incremental.** A generic driver runs any `OperatorLogic`
+    as today's `PhysicalOperator`, so operators move one at a time and the
+    existing executor tests check each move. Order: stateless operators,
+    aggregates and summaries, sort and join, PromQL operators.
+12. **Depend on `datafusion-physical-plan` for `GroupValues`**, although it
+    pulls in DataFusion's runtime crates at compile time. Copy `GroupValues`
+    only if build time or version conflicts hurt.
 
 ## 3. Wrap, copy or implement
 
@@ -162,71 +183,17 @@ Operators are in `crates/executor/src/operators/`.
   clones batches (cheap, since arrays are `Arc`s) to each consumer.
   Accumulator state does: see the non-resetting reads in §4.
 - **Version churn.** These are low-level DataFusion APIs. Pin the version.
-
+- **Arrow version.** DataFusion and our crate must use the same Arrow major
+  version. We use Arrow 58; the DataFusion `main` checked here uses Arrow 60.
+  `evaluate_preserving` / `state_preserving` may not be in a released
+  DataFusion yet.
 
 ## 7. Open questions
 
-Each question lists the options and a recommendation.
+**Q1. Which operators do ingestion-time plans use?** This is the set that
+must support `advance` (decision 10). To be listed from the physical
+compiler.
 
-**Q1. What does `t` in `advance(t)` mean, and who produces it?**
-
-- (a) The end of the ingestion window that just completed. The runtime
-  already knows it: today "end of input" means "window complete".
-- (b) An event-time watermark computed from the data.
-
-Recommendation: (a) now; (b) only if out-of-order data within a window
-becomes a problem. Either way, the runtime advances operators in DAG order,
-delivering each operator's output downstream before advancing the next.
-
-**Q2. Where does an operator get the evaluation time, now that it no longer
-receives a `RunContext`?**
-
-- (a) As an argument to every `push` and `finish`.
-- (b) Split each operator into an immutable definition (kept in the compiled
-  plan) and per-run state created by `definition.open(ctx)`, where `ctx`
-  holds the evaluation time.
-
-Recommendation: (b). `OperatorLogic` holds mutable state, so each run needs a
-fresh instance anyway, and `open` is where it is created. `evaluate_at` (`@`)
-stays a runtime action: the runtime opens its inputs with a shifted `ctx`,
-as `input_context` does today.
-
-**Q3. Which operators must support `advance` (streaming) in the first
-version?**
-
-- (a) Only those that ingestion-time plans use today (to be listed from the
-  physical compiler); every other operator is batch-only, and the runtime
-  rejects a streaming plan containing one.
-- (b) All operators.
-
-Recommendation: (a). Sort and join can only emit at `finish`, and PromQL
-operators such as `series_window` and `current_series` run only at query
-time.
-
-**Q4. How do two-input operators (joins, PromQL binary operators) stream?**
-
-- (a) They do not: batch-only in the first version.
-- (b) Define per operator what `push` buffers and when it emits; e.g. a
-  binary operator emits a window once both inputs have advanced past it.
-
-Recommendation: (a), unless the answer to Q3 lists one of them.
-
-**Q5. In what order do operators move to the new interface?**
-
-Recommendation: write one generic driver that runs an `OperatorLogic` as
-today's `PhysicalOperator`, so operators move one at a time and the existing
-executor tests check each move. Order: stateless operators, then aggregates
-and summaries, then sort and join, then PromQL operators.
-
-**Q6. How much of `Expression::Planner` (the Planner's full scalar IR) can be
-lowered to DataFusion's `PhysicalExpr` and built-in functions?**
-
-Unchecked. Needs a pass over the scalar IR before migrating `project` and
-`filter`.
-
-**Q7. Depend on `datafusion-physical-plan` for `GroupValues`, or copy
-`GroupValues`?**
-
-The crate pulls in DataFusion's runtime crates at compile time, unused.
-Recommendation: depend on it first; copy only if build time or version
-conflicts hurt.
+**Q2. How much of `Expression::Planner` (the Planner's full scalar IR) can be
+lowered to DataFusion's `PhysicalExpr` and built-in functions?** Needs a pass
+over the scalar IR before migrating `project` and `filter`.
