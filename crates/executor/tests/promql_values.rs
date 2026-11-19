@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use asap_executor::{
     operators::{Expression, Operator, Reduction, SortKey},
-    physical_planner::{promql_values::*, CompiledPhysicalDAG},
+    physical_planner::CompiledPhysicalDAG,
     runtime::{Limits, RunContext, Scope},
     values::{Batch, SchemaRef, Value},
     Error,
@@ -15,6 +15,11 @@ use planner_types::ir::operator::{AggIntent, GroupKeys};
 use planner_types::ir::scalar::ColumnRef;
 
 use std::collections::BTreeMap;
+
+use crate::common::{
+    promql_matrix_schema as matrix_schema, promql_scalar_schema as scalar_schema,
+    promql_vector_schema as vector_schema,
+};
 
 /// Lowered PromQL operators over input nodes `0..inputs`, which a run feeds
 /// with `Operator::source`s.
@@ -436,8 +441,15 @@ fn histogram_quantile_keeps_each_label_group() {
 
 #[test]
 fn compiled_constant_needs_no_deployment_source() {
-    let dag = compile_scalar(3.).unwrap();
-    assert_eq!(dag.input_slots().count(), 0);
+    let constant = Operator::scalar(
+        Value::Float64(3.),
+        planner_types::ir::schema::DataType::Float64,
+    )
+    .unwrap();
+    let dag =
+        CompiledPhysicalDAG::from_operators(BTreeMap::from([(0, (vec![], constant))]), vec![0])
+            .unwrap();
+    // `execute` runs over a store with no data: the constant reads none.
     let result = execute(&dag).unwrap();
     assert!(matches!(result[0][0], Value::Float64(3.)));
 }

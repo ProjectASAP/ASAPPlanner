@@ -59,7 +59,9 @@ fn population_dag(
     statistic: PopulationStatistic,
     grouping: &[&str],
 ) -> PhysicalASAPDAG {
-    let root = promql_rows::with_series_identity(&lower(query)).unwrap();
+    let root =
+        planner_types::ir::schema::series_identity::with_promql_series_identity(&lower(query))
+            .unwrap();
     let selected = planner_types::test_support::forwarders::population_over_selector(
         &root, statistic, grouping,
     );

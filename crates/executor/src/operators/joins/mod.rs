@@ -22,15 +22,6 @@ impl Operator {
             output: left,
         })
     }
-    /// Require every candidate key to have an authoritative value at execution.
-    pub fn certified_semi_join(
-        left: SchemaRef,
-        right: SchemaRef,
-        keys: Vec<(usize, usize)>,
-    ) -> Result<Self, Error> {
-        Ok(Self::semi_join(left, right, keys)?.require_complete_right())
-    }
-
     pub(crate) fn require_complete_right(mut self) -> Self {
         if let Kind::SemiJoin {
             require_complete_right,

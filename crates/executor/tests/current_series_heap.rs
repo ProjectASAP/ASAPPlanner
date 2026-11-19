@@ -302,7 +302,8 @@ fn identity_encoding_is_lossless_and_rejects_noncanonical_inputs() {
 // and ranks the raw samples bound at its scan.
 #[test]
 fn population_fixture_compiles_with_dynamic_identity() {
-    use asap_executor::physical_planner::{compile, promql_rows::with_series_identity};
+    use asap_executor::physical_planner::compile;
+    use planner_types::ir::schema::series_identity::with_promql_series_identity;
     use planner_types::workload::*;
     use std::rc::Rc;
     let workload = PlanningWorkload {
@@ -334,7 +335,7 @@ fn population_fixture_compiles_with_dynamic_identity() {
         .expect("operator root");
     let topk =
         planner_types::ir::operator::maintained_population::PopulationStatistic::TopK { k: 1 };
-    let root = Rc::new(with_series_identity(&original).unwrap());
+    let root = Rc::new(with_promql_series_identity(&original).unwrap());
     let selected =
         planner_types::test_support::forwarders::population_over_selector(&root, topk, &["job"]);
     let logical =

@@ -43,7 +43,7 @@ pub mod tutorials;
 pub use models::PlanningModels;
 pub use pass::{
     optimize, OptimizationInput, OptimizationInputError, OptimizationPass, OptimizeError,
-    PassNameConflict, PassRegistry, PlanOutput,
+    PlanOutput,
 };
 pub use run::{
     run_planning, PlanSearchSettings, PlanningReport, PlanningRun, SelectionError,
@@ -103,8 +103,6 @@ pub struct UserInput<'a> {
     pub workload: &'a PlanningWorkload,
     pub frontend_specific: FrontendInput<'a>,
     pub models: PlanningModels<'a>,
-    /// `None` uses [`Stage1ToStage3Pass`]. A black-box caller never sets this.
-    pub pass: Option<&'a dyn OptimizationPass>,
 }
 
 impl<'a> UserInput<'a> {
@@ -117,13 +115,7 @@ impl<'a> UserInput<'a> {
             workload,
             frontend_specific,
             models,
-            pass: None,
         }
-    }
-
-    pub fn with_pass(mut self, pass: &'a dyn OptimizationPass) -> Self {
-        self.pass = Some(pass);
-        self
     }
 
     /// Fail before lowering on anything the two stages would otherwise only
@@ -213,7 +205,7 @@ pub enum PlanError {
 // ── Entry point ──────────────────────────────────────────────────────────
 
 /// Lower every query (the query-language frontends), then run the
-/// optimization pass over the result: by default [`Stage1ToStage3Pass`], the
+/// optimization pass over the result: [`Stage1ToStage3Pass`], the
 /// planning stages in order.
 ///
 /// Async because the SQL frontend plans through DataFusion. One failed query
@@ -225,11 +217,8 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
     let exprs = lower(&input).await?;
     let parsed = ParsedWorkload::from_roots(input.workload.clone(), exprs)?;
 
-    let default_pass = Stage1ToStage3Pass;
-    let pass: &dyn OptimizationPass = input.pass.unwrap_or(&default_pass);
-
     let optimization = OptimizationInput::new(&parsed, input.models);
-    optimize(pass, optimization).map_err(PlanError::Optimize)
+    optimize(&Stage1ToStage3Pass, optimization).map_err(PlanError::Optimize)
 }
 
 /// One expression per normalized entry, in `QueryWorkload::entries()` order.

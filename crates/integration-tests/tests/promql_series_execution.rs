@@ -39,7 +39,8 @@ fn promql(query: &str, samples: &[Sample]) -> Vec<Sample> {
 /// [`promql`], or the run's error.
 fn try_promql(query: &str, samples: &[Sample]) -> Result<Vec<Sample>, String> {
     let root = lower_promql(query, AccuracyTarget::exact()).unwrap();
-    let root = promql_rows::with_series_identity(&root).unwrap_or(root);
+    let root =
+        asap_types::ir::schema::series_identity::with_promql_series_identity(&root).unwrap_or(root);
     let root = selected_dag(root, AccuracyTarget::exact());
     let (schema, rows) = run(&root, EVALUATION_MS, |source, schema| {
         let Source::TimeSeries { metric } = source else {

@@ -8,14 +8,8 @@ pub(crate) struct PhysicalResources<Cpu, Bytes> {
     pub(crate) cpu: Cpu,
     /// Maximum simultaneously live memory within the reported scope.
     pub(crate) peak_memory_bytes: Option<Bytes>,
-    /// Memory still retained at the end of the reported scope.
-    pub(crate) retained_memory_bytes: Option<Bytes>,
     /// Bytes read by scan operations, not storage occupancy.
     pub(crate) scan_bytes: Option<Bytes>,
-    /// Logical encoded snapshot size, not in-memory state size.
-    pub(crate) serialized_bytes: Option<Bytes>,
-    /// Allocated filesystem space, not bytes read or written over time.
-    pub(crate) disk_bytes: Option<Bytes>,
 }
 
 impl<Cpu: Default, Bytes> Default for PhysicalResources<Cpu, Bytes> {
@@ -23,10 +17,7 @@ impl<Cpu: Default, Bytes> Default for PhysicalResources<Cpu, Bytes> {
         Self {
             cpu: Cpu::default(),
             peak_memory_bytes: None,
-            retained_memory_bytes: None,
             scan_bytes: None,
-            serialized_bytes: None,
-            disk_bytes: None,
         }
     }
 }

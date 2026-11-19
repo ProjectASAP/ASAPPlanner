@@ -154,24 +154,12 @@ impl OptimizationPass for MyPass {
 }
 ```
 
-Then select it. Directly, when the caller knows which pass it wants:
+Then run it over the lowered workload; `e2e_plan` always runs
+`Stage1ToStage3Pass`:
 
 ```rust
-let output = optimize(&my_pass, optimization_input)?;          // the stage alone
-let output = e2e_plan(user_input.with_pass(&my_pass)).await?;  // the whole pipeline
+let output = optimize(&my_pass, optimization_input)?;
 ```
-
-Or through an optimization pass registry:
-
-```rust
-let mut registry = PassRegistry::with_builtin();   // holds "stage1-to-stage3"
-registry.register(Box::new(my_pass))?;
-for name in registry.names() {
-    optimize(registry.get(name).unwrap(), optimization_input)?;
-}
-```
-
-`PassRegistry` is caller-owned, not a link-time global, so two tests in one binary cannot see each other's registrations.
 
 ### 3.3 The existing workflows, in this shape
 
@@ -234,7 +222,7 @@ pass no longer runs these steps; another pass need not run any of them.
 |---|---|
 | `asap-types` | `ParsedWorkload` |
 | `asap-stage3-plan-selection` | Stage 3: `select_plan`, `Selection` |
-| `asap-planner` *(new)* | `e2e_plan`, `UserInput`, `FrontendInput`, lowering dispatch; `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `PassRegistry`, `Stage1ToStage3Pass`, `run_planning` |
+| `asap-planner` *(new)* | `e2e_plan`, `UserInput`, `FrontendInput`, lowering dispatch; `OptimizationPass`, `OptimizationInput`, `PlanOutput`, `PlanningModels`, `optimize`, `Stage1ToStage3Pass`, `run_planning` |
 
 ```text
 asap-planner ──┬──> asap-frontend-{sql, promql, metricsql}

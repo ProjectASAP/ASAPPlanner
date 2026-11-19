@@ -87,14 +87,6 @@ pub struct QueryLatency {
     pub query_ms: f64,
 }
 
-impl QueryLatency {
-    /// `compaction_ms + query_ms`: what is checked against the query's
-    /// `max_latency_ms`.
-    pub fn total_ms(&self) -> f64 {
-        self.compaction_ms + self.query_ms
-    }
-}
-
 /// Measure every node of `dag` per second of wall time (module doc, "Cost
 /// model") and cost it under `settings.cost_model`. Nodes are exported
 /// children first, so each node's input statistics are known when it is

@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 
-use asap_executor::physical_planner::promql_rows;
 use asap_executor::values::Value;
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::accuracy::AccuracyTarget;
@@ -36,7 +35,7 @@ const SERIES: [(&str, &str, f64); 5] = [
 /// [`SERIES`]: each answer's labels and value.
 fn execute(query: &str) -> Vec<Answer> {
     let root = lower_promql(query, AccuracyTarget::exact()).unwrap();
-    let root = promql_rows::with_series_identity(&root).unwrap();
+    let root = asap_types::ir::schema::series_identity::with_promql_series_identity(&root).unwrap();
     let samples: Vec<RawDataSample> = SERIES
         .iter()
         .map(|(job, instance, value)| RawDataSample {

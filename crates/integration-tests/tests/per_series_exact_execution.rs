@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use asap_executor::physical_planner::promql_rows;
 use asap_executor::values::Value;
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::planning::selected_dag;
@@ -30,7 +29,7 @@ const STALE_MARKER: f64 = f64::from_bits(0x7ff0_0000_0000_0002);
 /// runs it.
 fn per_entity_plan(query: &str) -> Rc<OperatorNode> {
     let root = lower_promql(query, AccuracyTarget::exact()).unwrap();
-    let root = promql_rows::with_series_identity(&root).unwrap();
+    let root = asap_types::ir::schema::series_identity::with_promql_series_identity(&root).unwrap();
     assert!(
         matches!(
             root.non_asap(),
@@ -70,7 +69,7 @@ fn series(instance: &str, values: &[f64]) -> Vec<RawDataSample> {
 /// with series identity as the planner receives it.
 fn planned(query: &str) -> Rc<OperatorNode> {
     let root = lower_promql(query, AccuracyTarget::exact()).unwrap();
-    let root = promql_rows::with_series_identity(&root).unwrap();
+    let root = asap_types::ir::schema::series_identity::with_promql_series_identity(&root).unwrap();
     selected_dag(root, AccuracyTarget::exact())
 }
 

@@ -6,7 +6,6 @@
 
 use crate::node::cost_terms::{CostConstant, NodeCostTerms};
 use crate::resources::ModeledCpu;
-use asap_types::summary_type::{SketchAlgorithm, SketchParams};
 use serde::{Deserialize, Serialize};
 
 use crate::node::operator_statistics::{
@@ -52,10 +51,7 @@ impl ResourceEstimate {
             resources: crate::resources::PhysicalResources {
                 cpu: ModeledCpu { cpu_ops },
                 peak_memory_bytes: Some(peak_memory_bytes),
-                retained_memory_bytes: None,
                 scan_bytes: Some(scan_bytes),
-                serialized_bytes: None,
-                disk_bytes: None,
             },
         }
     }
@@ -1498,12 +1494,6 @@ fn validate_promql_series_sample(
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AnalyticalCostError {
-    #[error("ingestion rate must be finite and non-negative, got {0}")]
-    InvalidIngestionRate(f64),
-    #[error("bootstrap row and byte evidence must either both be zero or both be non-zero")]
-    InconsistentBootstrapEvidence,
-    #[error("required summary operation cost {0} must be finite and positive, got {1}")]
-    InvalidOperationCost(&'static str, f64),
     #[error("required analytical input {0} is missing or zero")]
     MissingOrZero(&'static str),
     #[error("required analytical evidence {0} is missing or stale")]
@@ -1514,20 +1504,12 @@ pub enum AnalyticalCostError {
     InvalidCalibration(&'static str, f64),
     #[error("at least one calibration coefficient must be positive")]
     ZeroCalibration,
-    #[error("algorithm {0:?} does not match parameters {1:?}")]
-    ParameterMismatch(SketchAlgorithm, SketchParams),
-    #[error("{0} needs a value-range/bin-count model before it can be estimated")]
-    UnsupportedWithoutDistribution(&'static str),
     #[error("analytical arithmetic overflowed")]
     Overflow,
     #[error("candidate has no supported exact or sketch state")]
     UnsupportedCandidate,
     #[error("inconsistent operator statistics: {0}")]
     InconsistentOperatorStatistics(&'static str),
-    #[error("summary operation {0} has no cost formula")]
-    UnsupportedSummaryOperation(&'static str),
-    #[error("invalid operator statistics for {node}: {reason}")]
-    InvalidOperatorStatistics { node: String, reason: &'static str },
     /// Bad input: plan selection's measured table has two entries for one
     /// operator, phase and family (named in the message).
     #[error("measured_operation_costs has two entries for {0}")]
@@ -1577,7 +1559,7 @@ mod tests {
     };
 
     /// Analytical estimates reuse the shared dimensions while preserving exact
-    /// integer bytes and keeping unmodeled storage quantities unavailable.
+    /// integer bytes.
     #[test]
     fn analytical_estimate_uses_shared_resources() {
         let estimate = ResourceEstimate::new(12.5, u64::MAX, 0);
@@ -1588,9 +1570,6 @@ mod tests {
         assert_eq!(shared.cpu.cpu_ops, 12.5);
         assert_eq!(shared.peak_memory_bytes, Some(u64::MAX));
         assert_eq!(shared.scan_bytes, Some(0));
-        assert_eq!(shared.retained_memory_bytes, None);
-        assert_eq!(shared.serialized_bytes, None);
-        assert_eq!(shared.disk_bytes, None);
     }
 
     /// Existing JSON retains its three required fields; omitted or null

@@ -262,7 +262,9 @@ impl WeightedFrequency {
     }
 
     /// Point estimate for one identity tuple: the minimum over rows for
-    /// Count-Min, the sign-corrected median over rows for CountSketch.
+    /// Count-Min, the sign-corrected median over rows for CountSketch. Only
+    /// the Planner's own tests read one key's estimate (`test-support`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn point_estimate(&self, values: &[Value]) -> Result<f64, Error> {
         Ok(self.estimate_key(&identity_key(values)?))
     }

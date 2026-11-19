@@ -201,7 +201,8 @@ fn native_run(
     states: Vec<Arc<dyn asap_executor::AggregateCore>>,
     context: RunContext,
 ) -> Result<Vec<Vec<Value>>, asap_executor::Error> {
-    let (_, schema) = program.input_slots().next().unwrap();
+    // The stored view is node 0 (`views_at(.., &[0])`).
+    let schema = program.output_schema(0)?;
     let rows = states
         .into_iter()
         .map(|state| {

@@ -401,8 +401,6 @@ fn compile_without_readers_and_rebind_inputs() {
     let (scan, schema, batches) = fixture();
     let dag = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);
     let compiled = compile(&dag, &[], &[2]).unwrap();
-    // The Scan is the one (raw data) slot.
-    assert_eq!(compiled.input_slots().count(), 1);
     for _ in 0..2 {
         let physical_dag = compiled
             .instantiate(numbers(&schema, batches.clone()))

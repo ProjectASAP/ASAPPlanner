@@ -215,7 +215,6 @@ pub async fn plan_installable(
         workload: input.workload,
         frontend_specific: input.frontend_specific,
         models,
-        pass: input.pass,
     };
     let data = input.workload.data_workload.clone().unwrap_or_default();
     let cost_inputs = input.models.cost_inputs;

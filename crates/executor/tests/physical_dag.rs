@@ -1313,10 +1313,15 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             selected_physical_candidate: None,
             view_coverage: None,
         };
+        let join = compile_node(&node, &[schema.clone(), schema.clone()], true).unwrap();
+        // A certified semi join is restored from its stored form, the one way
+        // an executor receives it.
         let join = if certified {
-            Operator::certified_semi_join(schema.clone(), schema.clone(), vec![(0, 0)]).unwrap()
+            let mut wire = serde_json::to_value(&join).unwrap();
+            wire["kind"]["SemiJoin"]["require_complete_right"] = serde_json::json!(true);
+            serde_json::from_value::<Operator>(wire).unwrap()
         } else {
-            compile_node(&node, &[schema.clone(), schema.clone()], true).unwrap()
+            join
         };
         // Each side is a leaf holding its keys.
         let plan = |left: Vec<&str>, right: Vec<&str>| {

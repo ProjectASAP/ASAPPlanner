@@ -5,7 +5,6 @@
 use std::rc::Rc;
 
 use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
-use asap_executor::physical_planner::promql_rows;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_planner::{run_planning, PlanSearchSettings, PlanningModels, PlanningRun};
@@ -211,7 +210,10 @@ fn production_binary_queries_use_joint_prices_with_mixed_schedules() {
         .iter()
         .map(|query| {
             let root = lower_promql(query, accuracy.clone()).unwrap();
-            QueryRoot::Operator(promql_rows::with_series_identity(&root).unwrap())
+            QueryRoot::Operator(
+                asap_types::ir::schema::series_identity::with_promql_series_identity(&root)
+                    .unwrap(),
+            )
         })
         .collect();
     let mut entries: Vec<_> = [59_000, 61_000, 67_000, 71_000, 73_000]

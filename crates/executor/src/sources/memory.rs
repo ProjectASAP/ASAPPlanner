@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 /// returns the rows whose time ranges tile the requested range exactly, and
 /// fails when one is missing.
 ///
-/// A raw table is bound whole ([`Self::with_raw_data`]): every read returns
+/// A raw table is bound whole (`with_raw_data`, `test-support`): every read returns
 /// every row; or bound for appending ([`Self::with_appended_raw_data`]): a
 /// runtime appends each batch of samples with the `(start, end]` it covers
 /// as it arrives, a read returns the batches overlapping the requested
@@ -40,7 +40,9 @@ struct RawTable {
 }
 
 enum RawRows {
-    /// Bound whole: every read returns every row.
+    /// Bound whole: every read returns every row. Only the Planner's own
+    /// tests bind a table whole (`InMemoryDataStore::with_raw_data`).
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     Whole(Vec<Batch>),
     /// Appended as samples arrive, oldest first; appending drops the rows
     /// ending `lookback_ms` or more before the newest end (`None`: kept
@@ -53,7 +55,10 @@ enum RawRows {
 
 impl InMemoryDataStore {
     /// Bind `batches`, all in `schema`, as the rows of `source`. Bad input
-    /// when `source` is already bound or a batch is in another schema.
+    /// when `source` is already bound or a batch is in another schema. A
+    /// fixture for the Planner's own tests (`test-support`); a runtime binds
+    /// raw data for appending ([`Self::with_appended_raw_data`]).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_raw_data(
         mut self,
         source: Source,

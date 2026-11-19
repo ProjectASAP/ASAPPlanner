@@ -167,11 +167,10 @@ fn duplicate_matching_identity_is_rejected() {
 // Scalar broadcasting and comparison filtering keep the vector operand's value.
 #[test]
 fn scalar_broadcast_and_bool_comparison_are_distinct() {
-    use asap_executor::physical_planner::promql_values;
     use planner_types::ir::scalar::CompareOpKind;
     for return_bool in [false, true] {
-        let scalar = promql_values::scalar_schema();
-        let vector = promql_values::vector_schema();
+        let scalar = crate::common::promql_scalar_schema();
+        let vector = crate::common::promql_vector_schema();
         // `2 < v` (a scalar left of a vector), as PromQL lowers it.
         let binary = Operator::vector_binary(
             scalar.clone(),

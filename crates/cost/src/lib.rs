@@ -48,5 +48,4 @@ pub use plan::cost::{
     plan_cost, raw_data_disk_cost_per_second, request_overhead_cost_per_second, PlanCost,
     QueryLatency,
 };
-pub use plan::ranking::{cheaper, worst_latency_ms, PlanRanking};
 pub use resources::ResourceUsage;

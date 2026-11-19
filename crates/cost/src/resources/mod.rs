@@ -49,22 +49,16 @@ mod tests {
         let resources = PhysicalResources::<Option<f64>, u64>::default();
         assert_eq!(resources.cpu, None);
         assert_eq!(resources.peak_memory_bytes, None);
-        assert_eq!(resources.retained_memory_bytes, None);
         assert_eq!(resources.scan_bytes, None);
-        assert_eq!(resources.serialized_bytes, None);
-        assert_eq!(resources.disk_bytes, None);
     }
 
-    /// Storage occupancy and scan traffic are independent even though both use bytes.
+    /// Peak memory and scan traffic are independent even though both use bytes.
     #[test]
     fn byte_dimensions_round_trip_independently() {
         let resources = PhysicalResources {
             cpu: Some(12.0),
             peak_memory_bytes: Some(100),
-            retained_memory_bytes: Some(70),
             scan_bytes: Some(200),
-            serialized_bytes: Some(40),
-            disk_bytes: Some(4096),
         };
         let json = serde_json::to_value(resources).unwrap();
         let decoded: PhysicalResources<Option<f64>, u64> = serde_json::from_value(json).unwrap();
