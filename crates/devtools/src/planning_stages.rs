@@ -4,62 +4,13 @@
 //! stage for `asap_planner`.
 
 use asap_frontend_sql::SqlCatalog;
-use asap_planner::{
-    run_planning, PlanSearchSettings, PlanningModels, PlanningReport, PlanningRun, SelectionError,
-};
-use asap_stage0_memo::memo_of_queries;
-use asap_stage1_pass1_per_computation_candidates::pass1_memo;
-use asap_stage1_pass2_reuse_candidates::generate_logical_asap_memo_candidates;
-use asap_stage2_physical_optimization::generate_physical_asap_memo_candidates;
-use asap_stage3_plan_selection::select_plan;
+pub use asap_planner::RunUntil;
+use asap_planner::{run_planning_until, PlanSearchSettings, PlanningModels, PlanningRun};
 use asap_types::ir::schema::series_identity::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
-use asap_types::stages::Memo;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
 use serde_json::Value;
-
-/// The last stage a run runs (`asap_planner --run-until`); the run's
-/// fields for later stages are left empty.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RunUntil {
-    Stage0,
-    Pass1,
-    Pass2,
-    Stage2,
-    Stage3,
-}
-
-impl RunUntil {
-    const ALL: [Self; 5] = [
-        Self::Stage0,
-        Self::Pass1,
-        Self::Pass2,
-        Self::Stage2,
-        Self::Stage3,
-    ];
-
-    /// The `--run-until` value, also written as the JSON `run_until`.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Stage0 => "stage0",
-            Self::Pass1 => "stage1_pass1",
-            Self::Pass2 => "stage1_pass2",
-            Self::Stage2 => "stage2",
-            Self::Stage3 => "stage3",
-        }
-    }
-}
-
-impl std::str::FromStr for RunUntil {
-    type Err = String;
-    fn from_str(stage: &str) -> Result<Self, String> {
-        Self::ALL
-            .into_iter()
-            .find(|until| until.name() == stage)
-            .ok_or_else(|| format!("unknown stage {stage}"))
-    }
-}
 
 #[derive(Debug)]
 pub struct PlanningStagesRun {
@@ -67,10 +18,8 @@ pub struct PlanningStagesRun {
     pub run_until: RunUntil,
     /// The query-language frontends' roots, one per workload entry.
     pub stage0_query_language_frontends: Vec<QueryRoot>,
-    /// Stage 0's memo groups (the roots hash-consed), without candidates;
-    /// built by `run_stages_until` only (`asap_planner` prints them).
-    pub stage0_memo_groups: Option<Memo>,
-    /// The stages' outputs: Pass 1, Pass 2, Stage 2 and the selection.
+    /// The stages' outputs: Stage 0's memo, Pass 1, Pass 2, Stage 2 and
+    /// the selection.
     pub run: PlanningRun,
 }
 
@@ -112,27 +61,12 @@ pub fn lower_sql_roots(
     workload: &PlanningWorkload,
     catalog: &asap_frontend_sql::SqlCatalog,
 ) -> Result<Vec<QueryRoot>, String> {
-    let dialect = match &workload.query_workload.language {
-        asap_types::workload::QueryLanguage::SQL(dialect) => dialect.clone(),
-        _ => asap_types::workload::SqlDialect::DataFusionSQL,
-    };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(|e| e.to_string())?;
-    workload
-        .query_workload
-        .entries()
-        .map(|entry| {
-            runtime
-                .block_on(asap_frontend_sql::lower_sql_dialect(
-                    &entry.query.0,
-                    catalog,
-                    dialect.clone(),
-                ))
-                .map(QueryRoot::Operator)
-                .map_err(|e| format!("lowering: {e}"))
-        })
-        .collect()
+    runtime
+        .block_on(asap_frontend_sql::lower_sql_workload(workload, catalog))
+        .map_err(|(_, e)| format!("lowering: {e}"))
 }
 
 /// Why a planning run produced no result.
@@ -188,21 +122,12 @@ pub fn run_search_over(
     models: PlanningModels<'_>,
     settings: PlanSearchSettings,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
-    validate(&roots)?;
-    let run = run_planning(roots.clone(), entries, data, models, settings)
-        .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
-    Ok(PlanningStagesRun {
-        run_until: RunUntil::Stage3,
-        stage0_memo_groups: None,
-        stage0_query_language_frontends: roots,
-        run,
-    })
+    run_until(roots, entries, data, models, settings, RunUntil::Stage3)
 }
 
 /// The stages over `roots` up to and including `until`, as the facade runs
-/// them. A stage's failure is reported in the run, as the facade does.
-// ponytail: copies run_planning's stage order, which has no stop point;
-// #1169 moves the stop point into run_planning.
+/// them (`run_planning_until`), each stage's output kept. A failure after
+/// Pass 1 is reported in the run, as the facade does.
 pub fn run_stages_until(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
@@ -210,70 +135,26 @@ pub fn run_stages_until(
     models: PlanningModels<'_>,
     until: RunUntil,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
+    let settings = PlanSearchSettings { inspect: true };
+    run_until(roots, entries, data, models, settings, until)
+}
+
+fn run_until(
+    roots: Vec<QueryRoot>,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    settings: PlanSearchSettings,
+    until: RunUntil,
+) -> Result<PlanningStagesRun, PlanningStagesError> {
     validate(&roots)?;
-    // As `run_planning`: each query with its accuracy target, or none when
-    // accuracy is not enforced.
-    let accuracy_targets: Vec<_> = entries
-        .iter()
-        .map(|entry| {
-            (!models.ignore_accuracy_guarantees).then(|| entry.requirements.accuracy.clone())
-        })
-        .collect();
-    let stage0_dag = memo_of_queries(&roots, &accuracy_targets, data)
-        .map_err(|e| PlanningStagesError::Validation(e.to_string()))?;
-    let mut stages = PlanningStagesRun {
+    let run = run_planning_until(roots.clone(), entries, data, models, settings, until)
+        .map_err(|e| PlanningStagesError::Pass1(e.to_string()))?;
+    Ok(PlanningStagesRun {
         run_until: until,
-        stage0_memo_groups: Some(stage0_dag.clone()),
-        stage0_query_language_frontends: roots.clone(),
-        run: PlanningRun {
-            pass1_memo: None,
-            logical_asap_candidates: None,
-            physical_asap_candidates: None,
-            selection: Err(SelectionError::NotRun),
-            report: PlanningReport::default(),
-        },
-    };
-    if until == RunUntil::Stage0 {
-        return Ok(stages);
-    }
-    let run = &mut stages.run;
-    // As `run_planning`: the exclusions are expanded once, for Pass 1 and
-    // Stage 2.
-    let exclusions = models.deployment_capabilities.exclusions();
-    let pass1 = pass1_memo(stage0_dag, &exclusions)
-        // As `run_planning`: a query Pass 1 cannot plan is reported before
-        // contradictory deployment capabilities.
-        .map_err(|error| PlanningStagesError::Pass1(error.to_string()))?;
-    if let Err(error) = models.deployment_capabilities.validate(data) {
-        run.selection = Err(SelectionError::InvalidDeploymentCapabilities(error));
-        return Ok(stages);
-    }
-    run.pass1_memo = Some(pass1.clone());
-    if until == RunUntil::Pass1 {
-        return Ok(stages);
-    }
-    let logical = match generate_logical_asap_memo_candidates(pass1, entries, models.evidence) {
-        Ok(logical) => logical,
-        Err(error) => {
-            run.selection = Err(SelectionError::LogicalASAPCandidates(error.to_string()));
-            return Ok(stages);
-        }
-    };
-    let run = &mut stages.run;
-    run.logical_asap_candidates = Some(logical);
-    if until == RunUntil::Pass2 {
-        return Ok(stages);
-    }
-    let logical = run.logical_asap_candidates.as_ref().expect("set above");
-    let physical = generate_physical_asap_memo_candidates(logical, data, &exclusions);
-    if until == RunUntil::Stage2 {
-        run.physical_asap_candidates = Some(physical);
-        return Ok(stages);
-    }
-    run.selection = select_plan(&physical, entries, data, models.cost_inputs)
-        .map_err(SelectionError::Selection);
-    run.physical_asap_candidates = Some(physical);
-    Ok(stages)
+        stage0_query_language_frontends: roots,
+        run,
+    })
 }
 
 fn validate(roots: &[QueryRoot]) -> Result<(), PlanningStagesError> {

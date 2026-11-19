@@ -29,12 +29,11 @@
 //! 6. [Extending the planner](tutorials::_06_extending)
 
 use asap_types::workload::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
-use asap_types::workload::SqlDialect;
 use asap_types::workload::{QueryLanguage, WorkloadError};
 
 use asap_frontend_metricsql::{lower_metricsql_query_workload, MetricsqlError};
 use asap_frontend_promql::{lower_promql_query_workload, PromqlError};
-use asap_frontend_sql::{lower_sql_dialect, SqlError};
+use asap_frontend_sql::{lower_sql_workload, SqlError};
 
 mod models;
 mod pass;
@@ -46,8 +45,8 @@ pub use pass::{
     PlanOutput,
 };
 pub use run::{
-    run_planning, PlanSearchSettings, PlanningReport, PlanningRun, SelectionError,
-    Stage1ToStage3Pass,
+    run_planning, run_planning_until, PlanSearchSettings, PlanningReport, PlanningRun, RunUntil,
+    SelectionError, Stage1ToStage3Pass,
 };
 
 mod installable;
@@ -226,24 +225,12 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
 /// The SQL frontend lowers one entry at a time.
 async fn lower(input: &UserInput<'_>) -> Result<Vec<asap_types::ir::QueryRoot>, PlanError> {
     match &input.frontend_specific {
-        FrontendInput::Sql { catalog } => {
-            let dialect = match &input.workload.query_workload.language {
-                QueryLanguage::SQL(dialect) => dialect.clone(),
-                // `DataFusion` is the legacy alias for `SQL(DataFusionSQL)`.
-                _ => SqlDialect::DataFusionSQL,
-            };
-            let mut lowered = Vec::new();
-            for (index, entry) in input.workload.query_workload.entries().enumerate() {
-                let expr = lower_sql_dialect(&entry.query.0, catalog, dialect.clone())
-                    .await
-                    .map_err(|source| PlanError::Lowering {
-                        entry_index: Some(index),
-                        source: LoweringError::Sql(source),
-                    })?;
-                lowered.push(expr.into());
-            }
-            Ok(lowered)
-        }
+        FrontendInput::Sql { catalog } => lower_sql_workload(input.workload, catalog)
+            .await
+            .map_err(|(index, source)| PlanError::Lowering {
+                entry_index: Some(index),
+                source: LoweringError::Sql(source),
+            }),
         FrontendInput::Promql => {
             lower_promql_query_workload(input.workload).map_err(|source| PlanError::Lowering {
                 entry_index: None,

@@ -95,7 +95,7 @@ pub fn planning_stages_text(
         "Stage 0 → Stage 1: Memo (the roots hash-consed, without candidates)",
         MEMO_LEGEND,
     );
-    if let Some(memo) = &stages.stage0_memo_groups {
+    if let Some(memo) = &stages.run.stage0_memo {
         write_memo(&mut out, memo, None, verbose);
     }
     if until == RunUntil::Stage0 {
