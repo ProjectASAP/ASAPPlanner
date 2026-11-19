@@ -17,8 +17,8 @@ pub mod test_support;
 use std::rc::Rc;
 
 use asap_frontend_common::resolve_root;
-use asap_types::ir::OperatorNode;
-use asap_types::workload::SqlDialect;
+use asap_types::ir::{OperatorNode, QueryRoot};
+use asap_types::workload::{PlanningWorkload, QueryLanguage, SqlDialect};
 
 pub use error::SqlError;
 pub use sql::SqlCatalog;
@@ -32,6 +32,29 @@ use sql::SqlLowerer;
 /// DAG).
 pub async fn lower_sql(query: &str, catalog: &SqlCatalog) -> Result<Rc<OperatorNode>, SqlError> {
     lower_sql_dialect(query, catalog, SqlDialect::DataFusionSQL).await
+}
+
+/// Lower every entry of a SQL `workload` over the tables of `catalog`, batch
+/// and repeating, in `QueryWorkload::entries()` order, under the workload's
+/// dialect (`SqlDialect::DataFusionSQL` when the language is not SQL: the
+/// legacy `DataFusion` alias). The first entry that fails stops the
+/// lowering: its index and its error.
+pub async fn lower_sql_workload(
+    workload: &PlanningWorkload,
+    catalog: &SqlCatalog,
+) -> Result<Vec<QueryRoot>, (usize, SqlError)> {
+    let dialect = match &workload.query_workload.language {
+        QueryLanguage::SQL(dialect) => dialect.clone(),
+        _ => SqlDialect::DataFusionSQL,
+    };
+    let mut roots = Vec::new();
+    for (entry_index, entry) in workload.query_workload.entries().enumerate() {
+        let root = lower_sql_dialect(&entry.query.0, catalog, dialect.clone())
+            .await
+            .map_err(|error| (entry_index, error))?;
+        roots.push(QueryRoot::Operator(root));
+    }
+    Ok(roots)
 }
 
 /// Lower a single SQL query string under an explicit [`SqlDialect`].

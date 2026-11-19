@@ -14,8 +14,9 @@
 // prints every candidate, edge with its reason, group's properties and
 // pruned candidate.
 //
-// The stages run as `run_planning` runs them
-// (`asap_devtools::planning_stages::run_stages_until`), so the selected plan
+// The stages run through the facade's own pipeline
+// (`asap_planner::run_planning_until`, called by
+// `asap_devtools::planning_stages::run_stages_until`), so the selected plan
 // is the one `run_planning` selects.
 //
 // Inputs, one flag per field of the planner's `UserInput`:
@@ -513,8 +514,8 @@ fn canonical_ids_of(run: &PlanningStagesRun) -> CanonicalIds {
     let memo = logical
         .map(|logical| &logical.memo)
         .or(run.run.pass1_memo.as_ref())
-        .or(run.stage0_memo_groups.as_ref())
-        .expect("run_stages_until builds Stage 0's memo");
+        .or(run.run.stage0_memo.as_ref())
+        .expect("run_stages_until keeps Stage 0's memo");
     CanonicalIds::of(memo, run.run.physical_asap_candidates.as_ref())
 }
 
@@ -546,9 +547,10 @@ fn stage3_json(
 /// used through several candidates). Ids are `ids`' canonical ones.
 fn memo_json(run: &PlanningStagesRun, ids: &CanonicalIds) -> Value {
     let stage0 = run
-        .stage0_memo_groups
+        .run
+        .stage0_memo
         .as_ref()
-        .expect("run_stages_until builds Stage 0's memo");
+        .expect("run_stages_until keeps Stage 0's memo");
     let mut steps = vec![json!({
         "step": "stage0",
         "title": "Stage 0, the frontends' DAG hash-consed",

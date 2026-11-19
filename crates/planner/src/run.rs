@@ -25,8 +25,9 @@ use crate::pass::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput
 /// How the facade searches.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PlanSearchSettings {
-    /// Keep Pass 1's output for inspection (`asap_planner`, the DAG
-    /// viewer): [`PlanningRun::pass1_memo`]. Default off:
+    /// Keep Stage 0's and Pass 1's output for inspection (`asap_planner`,
+    /// the DAG viewer): [`PlanningRun::stage0_memo`] and
+    /// [`PlanningRun::pass1_memo`]. Default off:
     /// production planning copies no memo.
     pub inspect: bool,
 }
@@ -45,7 +46,7 @@ pub enum SelectionError {
     /// Stage 3 selected no plan.
     #[error("plan selection: {0}")]
     Selection(ErrorSelectingPlan),
-    /// The run stopped before plan selection (`asap_planner --run-until`).
+    /// The run stopped before plan selection ([`run_planning_until`]).
     #[error("plan selection did not run")]
     NotRun,
 }
@@ -66,26 +67,75 @@ pub struct PlanningReport {
     pub stage3_ms: f64,
 }
 
+/// The last stage a run runs ([`run_planning_until`]); the run's fields
+/// for later stages are left empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RunUntil {
+    Stage0,
+    Pass1,
+    Pass2,
+    Stage2,
+    Stage3,
+}
+
+impl RunUntil {
+    const ALL: [Self; 5] = [
+        Self::Stage0,
+        Self::Pass1,
+        Self::Pass2,
+        Self::Stage2,
+        Self::Stage3,
+    ];
+
+    /// The stage's name: `asap_planner --run-until`'s value, also written
+    /// as the JSON `run_until`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Stage0 => "stage0",
+            Self::Pass1 => "stage1_pass1",
+            Self::Pass2 => "stage1_pass2",
+            Self::Stage2 => "stage2",
+            Self::Stage3 => "stage3",
+        }
+    }
+}
+
+impl std::str::FromStr for RunUntil {
+    type Err = String;
+    fn from_str(stage: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|until| until.name() == stage)
+            .ok_or_else(|| format!("unknown stage {stage}"))
+    }
+}
+
 /// Every stage's output for one workload ([`run_planning`]).
 #[derive(Debug)]
 pub struct PlanningRun {
+    /// Stage 0's output: the memo groups (the roots hash-consed), without
+    /// candidates. `None` without [`PlanSearchSettings::inspect`].
+    pub stage0_memo: Option<Memo>,
     /// Stage 1, Pass 1's output: the memo groups with their per-computation
     /// candidates and the pruned candidates.
-    /// `None` when Pass 1 failed or without [`PlanSearchSettings::inspect`].
+    /// `None` when Pass 1 did not run, when the deployment's capabilities
+    /// contradict the data workload, or without
+    /// [`PlanSearchSettings::inspect`].
     pub pass1_memo: Option<Memo>,
     /// Pass 2's output, when it ran.
     pub logical_asap_candidates: Option<LogicalASAPMemoCandidates>,
     /// Stage 2's output, when it ran: the catalog `selection`'s candidate
     /// ids index.
     pub physical_asap_candidates: Option<PhysicalASAPMemoCandidates>,
-    /// Stage 3's plan and its report of the selection.
+    /// Stage 3's plan and its report of the selection
+    /// ([`SelectionError::NotRun`] when the run stopped before Stage 3).
     pub selection: Result<(PhysicalASAPDAG, Selection), SelectionError>,
     pub report: PlanningReport,
 }
 
 /// Run the planning stages over the frontends' `roots` (query `i` is
-/// `roots[i]`, with workload entry `entries[i]`). Only a Pass 1 failure is
-/// an error; a failed selection is reported in the run.
+/// `roots[i]`, with workload entry `entries[i]`). Only a Stage 0 or Pass 1
+/// failure is an error; a failed selection is reported in the run.
 pub fn run_planning(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
@@ -93,8 +143,21 @@ pub fn run_planning(
     models: PlanningModels<'_>,
     settings: PlanSearchSettings,
 ) -> Result<PlanningRun, PerComputationCandidateError> {
+    run_planning_until(&roots, entries, data, models, settings, RunUntil::Stage3)
+}
+
+/// [`run_planning`], stopped after the stage `until`: the stages after it
+/// do not run.
+pub fn run_planning_until(
+    roots: &[QueryRoot],
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    models: PlanningModels<'_>,
+    settings: PlanSearchSettings,
+    until: RunUntil,
+) -> Result<PlanningRun, PerComputationCandidateError> {
     let started = Instant::now();
-    for root in &roots {
+    for root in roots {
         root.validate_structure()?;
     }
     // Stage 0: the memo of logical groups, each query with its accuracy
@@ -105,7 +168,18 @@ pub fn run_planning(
             (!models.ignore_accuracy_guarantees).then(|| entry.requirements.accuracy.clone())
         })
         .collect();
-    let initial = memo_of_queries(&roots, &accuracy_targets, data)?;
+    let initial = memo_of_queries(roots, &accuracy_targets, data)?;
+    let mut run = PlanningRun {
+        stage0_memo: settings.inspect.then(|| initial.clone()),
+        pass1_memo: None,
+        logical_asap_candidates: None,
+        physical_asap_candidates: None,
+        selection: Err(SelectionError::NotRun),
+        report: PlanningReport::default(),
+    };
+    if until == RunUntil::Stage0 {
+        return Ok(run);
+    }
     // The deployment's capabilities as exclusions, expanded once for Pass 1
     // and Stage 2.
     let exclusions = models.deployment_capabilities.exclusions();
@@ -113,18 +187,24 @@ pub fn run_planning(
     // excludes outright (Stage 2 prunes the rest it cannot run). A query
     // Pass 1 cannot plan is an input error.
     let pass1 = pass1_memo(initial, &exclusions)?;
-    let mut report = PlanningReport {
-        pass1_ms: elapsed_ms(started),
-        ..PlanningReport::default()
-    };
-    let pass1_memo = settings.inspect.then(|| pass1.clone());
-    let mut logical_asap_candidates = None;
-    let mut physical_asap_candidates = None;
-    let selection = (|| {
+    run.report.pass1_ms = elapsed_ms(started);
+    let report = &mut run.report;
+    let kept_pass1_memo = &mut run.pass1_memo;
+    let logical_asap_candidates = &mut run.logical_asap_candidates;
+    let physical_asap_candidates = &mut run.physical_asap_candidates;
+    run.selection = (|| {
+        // A query Pass 1 cannot plan is reported before contradictory
+        // deployment capabilities.
         models
             .deployment_capabilities
             .validate(data)
             .map_err(SelectionError::InvalidDeploymentCapabilities)?;
+        if settings.inspect {
+            *kept_pass1_memo = Some(pass1.clone());
+        }
+        if until == RunUntil::Pass1 {
+            return Err(SelectionError::NotRun);
+        }
         // Pass 2: the reuse rules, readout requirements and logical edges.
         let started = Instant::now();
         let logical = generate_logical_asap_memo_candidates(pass1, entries, models.evidence);
@@ -139,6 +219,9 @@ pub fn run_planning(
             .iter()
             .map(|group| group.candidates.len())
             .sum();
+        if until == RunUntil::Pass2 {
+            return Err(SelectionError::NotRun);
+        }
         // Stage 2.
         let started = Instant::now();
         let physical = generate_physical_asap_memo_candidates(logical, data, &exclusions);
@@ -146,19 +229,16 @@ pub fn run_planning(
         let physical = physical_asap_candidates.insert(physical);
         report.physical_candidates = physical.physical_candidates.len();
         report.stage2_pruned_candidates = physical.pruned_candidates.len();
+        if until == RunUntil::Stage2 {
+            return Err(SelectionError::NotRun);
+        }
         // Stage 3: the selection and the plan it builds.
         let started = Instant::now();
         let selection = select_plan(physical, entries, data, models.cost_inputs);
         report.stage3_ms = elapsed_ms(started);
         selection.map_err(SelectionError::Selection)
     })();
-    Ok(PlanningRun {
-        pass1_memo,
-        logical_asap_candidates,
-        physical_asap_candidates,
-        selection,
-        report,
-    })
+    Ok(run)
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
