@@ -29,6 +29,7 @@ pub mod node;
 pub mod plan;
 mod resources;
 
+pub use asap_types::plan::time_window::read_back_ms;
 pub(crate) use measured::aggregate_lookup;
 pub use measured::{
     lookup, MeasuredOperationCosts, NodeCostSource, OperatorCost, OperatorKind, StateFamily,
@@ -48,5 +49,4 @@ pub use plan::cost::{
     QueryLatency,
 };
 pub use plan::ranking::{cheaper, worst_latency_ms, PlanRanking};
-pub use plan::read_back::read_back_ms;
 pub use resources::ResourceUsage;

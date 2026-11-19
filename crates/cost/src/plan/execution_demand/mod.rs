@@ -13,7 +13,9 @@ use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::Operator;
 use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use asap_types::stages::{queries_of_context, query_reads, Lifetime};
-use asap_types::workload::{QueryRecurrence, QueryWorkloadEntry, RangeEvaluation, RepeatedDemand};
+use asap_types::workload::{
+    greatest_common_divisor, QueryRecurrence, QueryWorkloadEntry, RangeEvaluation, RepeatedDemand,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// How a [`ScheduleGroup`]'s evaluations add to the others'.
@@ -172,21 +174,13 @@ pub fn evaluation_rate<'r>(
 /// means only offset zero is shared. Kept in costing so both evaluator and
 /// MILP demand atoms use the same integer arithmetic without layer inversion.
 pub fn offset_intersection_count(geometries: &[(u64, u64)]) -> i128 {
-    fn gcd(mut a: u64, mut b: u64) -> u64 {
-        while b != 0 {
-            let remainder = a % b;
-            a = b;
-            b = remainder;
-        }
-        a
-    }
     let Some(span) = geometries.iter().map(|(_, span)| *span).min() else {
         return 0;
     };
     let mut lcm = 1u64;
     for &(step, _) in geometries {
         let step = step.max(1);
-        match (lcm / gcd(lcm, step)).checked_mul(step) {
+        match (lcm / greatest_common_divisor(lcm, step)).checked_mul(step) {
             Some(next) if next <= span => lcm = next,
             _ => return 1,
         }

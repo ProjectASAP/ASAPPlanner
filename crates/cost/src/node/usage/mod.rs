@@ -373,7 +373,7 @@ pub fn output_interval_ms<C>(payload: &Operator<C>, window_ms: Option<u64>) -> u
 /// window one execution covers: an ingestion-time node's refresh window
 /// width (`RefreshWindow::computed_from`, the rule the installed plan
 /// refreshes it on), or a query-time `Scan`'s read, the
-/// most offset + range its consumers read ([`read_back_ms`] without a span;
+/// most offset + range its consumers read ([`read_back_ms`](crate::read_back_ms) without a span;
 /// `None`: it reads what it retains). A materialized node keeps what its
 /// `retention_ms` ($h_v$) covers: a tumbling-window chain its windows in
 /// it, a query-time `Scan` and raw rows materialized at ingestion time (a
@@ -684,6 +684,42 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 column: column.map(str::to_string),
                 assumed_range,
             },
+        })
+    };
+    // What a summary built here over `rows_per_state` input rows per state
+    // (`None`: unbounded, at ingestion time) holds and costs per row: its
+    // input rows, its bytes per state (the measured table's when it has
+    // them), its update terms per row (with the labels it carries), and the
+    // magnitude range it assumed.
+    let summary_state_build = |family: &FieldDataType,
+                               update: &SummaryUpdate,
+                               reduction: &Reduction,
+                               rows_per_state: Option<u64>|
+     -> Result<SummaryStateBuild, AnalyticalCostError> {
+        let (column, non_negative, value_magnitude_range) = folded_values(update);
+        let input_rows = StateInputRows {
+            rows_per_state,
+            non_negative,
+            value_magnitude_range,
+            distinct_values: folded_distinct_values(update),
+        };
+        let state_bytes = measured_state_bytes.unwrap_or(summary_state_bytes(
+            family,
+            node.parameters.as_ref(),
+            input_rows,
+        )?);
+        let update_terms_per_row = update_terms_per_row(
+            family,
+            node.parameters.as_ref(),
+            input_rows.rows_per_state,
+            input_rows.distinct_values,
+        )
+        .plus_terms(&carried_label_terms_per_row(&node.output_schema, reduction));
+        Ok(SummaryStateBuild {
+            input_rows,
+            state_bytes,
+            update_terms_per_row,
+            assumed_magnitude_range_fact: assumed_magnitude_range_fact(column, input_rows),
         })
     };
     let unary = |output| UnaryEdgeStatistics {
@@ -1097,27 +1133,19 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             // At query time, each state sees its group's input rows; at
             // ingestion time, the rows of a window one second of
             // arriving rows does not bound.
-            let (column, non_negative, value_magnitude_range) = folded_values(update);
-            let input_rows = StateInputRows {
-                rows_per_state: (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
-                non_negative,
-                value_magnitude_range,
-                distinct_values: folded_distinct_values(update),
-            };
-            built_state_input_rows = Some(input_rows);
-            let state_bytes = measured_state_bytes.unwrap_or(summary_state_bytes(
-                family,
-                node.parameters.as_ref(),
+            let SummaryStateBuild {
                 input_rows,
-            )?);
-            assumed_data_facts.extend(assumed_magnitude_range_fact(column, input_rows));
-            let update_terms = update_terms_per_row(
+                state_bytes,
+                update_terms_per_row: update_terms,
+                assumed_magnitude_range_fact,
+            } = summary_state_build(
                 family,
-                node.parameters.as_ref(),
-                input_rows.rows_per_state,
-                input_rows.distinct_values,
-            )
-            .plus_terms(&carried_label_terms_per_row(&node.output_schema, reduction));
+                update,
+                reduction,
+                (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
+            )?;
+            built_state_input_rows = Some(input_rows);
+            assumed_data_facts.extend(assumed_magnitude_range_fact);
             let update_ops = update_terms.operations();
             let out = EdgeStatistics {
                 rows: group_count,
@@ -1182,27 +1210,19 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                             .clamp(1, input.rows.max(1))
                     }),
             };
-            let (column, non_negative, value_magnitude_range) = folded_values(update);
-            let input_rows = StateInputRows {
-                rows_per_state: Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
-                non_negative,
-                value_magnitude_range,
-                distinct_values: folded_distinct_values(update),
-            };
-            built_state_input_rows = Some(input_rows);
-            let state_bytes = measured_state_bytes.unwrap_or(summary_state_bytes(
-                family,
-                node.parameters.as_ref(),
+            let SummaryStateBuild {
                 input_rows,
-            )?);
-            assumed_data_facts.extend(assumed_magnitude_range_fact(column, input_rows));
-            let update_terms = update_terms_per_row(
+                state_bytes,
+                update_terms_per_row: update_terms,
+                assumed_magnitude_range_fact,
+            } = summary_state_build(
                 family,
-                node.parameters.as_ref(),
-                input_rows.rows_per_state,
-                input_rows.distinct_values,
-            )
-            .plus_terms(&carried_label_terms_per_row(&node.output_schema, reduction));
+                update,
+                reduction,
+                Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
+            )?;
+            built_state_input_rows = Some(input_rows);
+            assumed_data_facts.extend(assumed_magnitude_range_fact);
             let update_ops = update_terms.operations();
             // The states it completes in one execution, each allocated
             // when its window opens: at ingestion time one second's share
@@ -1689,6 +1709,15 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
 
 /// A formula estimate whose CPU operations are `terms` at the built-in
 /// values, holding `peak_memory_bytes` and scanning `scan_bytes`.
+/// A summary build's per-state results shared by `SummaryAgg` and
+/// `SummaryTumblingWindowChain`.
+struct SummaryStateBuild {
+    input_rows: StateInputRows,
+    state_bytes: u64,
+    update_terms_per_row: NodeCostTerms,
+    assumed_magnitude_range_fact: Option<AssumedDataFact>,
+}
+
 fn charged(
     terms: NodeCostTerms,
     peak_memory_bytes: u64,

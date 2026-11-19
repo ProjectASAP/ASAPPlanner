@@ -312,7 +312,7 @@ impl<'a> ViewIndex<'a> {
     }
 
     /// How far back from the evaluation time the readers of `node` read it
-    /// ([`time_window::windows_readers_need`]): the most any reaches back.
+    /// ([`time_window::read_back_ms`] without a span): the most any reaches back.
     /// `None`, unbounded, when `node` is a root, a root reads it through
     /// nodes that read what their readers read ([`Self::read_through_a_root`]),
     /// a reader at a time not relative to the evaluation (`@`) reads it, or,
@@ -324,14 +324,7 @@ impl<'a> ViewIndex<'a> {
         if self.dag.roots.contains(&node) || self.read_through_a_root(node) {
             return None;
         }
-        let windows = time_window::windows_readers_need(self.dag, node)?;
-        Some(
-            windows
-                .iter()
-                .map(|(_, window)| window.reaches_back_ms())
-                .max()
-                .unwrap_or(0),
-        )
+        time_window::read_back_ms(self.dag, node, |_| 0)
     }
 
     /// Whether a query root reads `node` through nodes that each read what

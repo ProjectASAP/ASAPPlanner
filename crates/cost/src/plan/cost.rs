@@ -14,7 +14,6 @@ use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_state_bytes, state_bytes_per_row, StateInputRows};
 use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
-use crate::plan::read_back::read_back_ms;
 use crate::{lookup, StateFamily};
 use crate::{node_resource_usage_and_cost, NodeResourceUsageAndCost, ProducerOutput};
 use crate::{
@@ -28,6 +27,7 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload,
 };
+use asap_types::plan::time_window::read_back_ms;
 use asap_types::stages::Lifetime;
 use asap_types::summary_type::SketchParams;
 use asap_types::workload::{AssumedDataFact, DataWorkload, QueryWorkloadEntry};
