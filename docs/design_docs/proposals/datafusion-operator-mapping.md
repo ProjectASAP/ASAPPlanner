@@ -22,8 +22,9 @@ path. §7 onwards is detail to read once the overview is clear.
 ## 2. Glossary
 
 - **Batch:** a set of rows in columnar form. DataFusion uses Arrow's
-  `RecordBatch`. Our `Batch` is a `RecordBatch` plus, for summary columns,
-  the in-memory sketch objects.
+  `RecordBatch`. Our `Batch` is a `RecordBatch` plus a list of in-memory
+  sketch objects; a summary column of the `RecordBatch` holds, per row, an
+  index into that list.
 - **Operator:** the computation of one plan node, e.g. "filter rows where
   `x > 5`" or "build a KLL sketch of `latency` per `job`".
 - **Runtime:** the code that runs a whole plan: it decides which operator
@@ -33,16 +34,19 @@ path. §7 onwards is detail to read once the overview is clear.
   collects its output, by calling the operator's methods (§4).
 - **Query time / ingestion time:** a node runs either when a query is
   evaluated, or as data arrives, ahead of queries.
-- **Window:** a fixed time interval, e.g. each 1-minute interval aligned to
-  the clock. Ingestion-time plans build one result per window.
-- **Mini-batch:** one of the batches in which a window's data arrives.
-- **Batch mode / streaming mode:** in batch mode an operator receives all of
-  its input and then produces its result. In streaming mode it receives
-  mini-batches over time and produces each window's result when that window
-  closes.
-- **Summary:** a per-group state that is built from rows, merged and then
-  read, either a sketch (KLL, DDSketch, HLL, CMS) or an exact state (sum,
-  count).
+- **Window:** a fixed time interval, e.g. each 10-minute interval aligned to
+  the clock. At ingestion time, each run of a plan covers one window.
+- **Mini-batch:** one of the batches in which an operator's input arrives.
+- **Batch mode / streaming mode:** in batch mode an operator's whole input
+  already exists (e.g. read from storage for a query). In streaming mode it
+  arrives over time as mini-batches (e.g. a window's data during
+  ingestion). Either way the operator should process each mini-batch as it
+  comes, without first collecting all of them (§5.1).
+- **Aggregate:** an operator that outputs one final value per group, e.g.
+  `sum by (job)`.
+- **Summary:** a per-group state output as a column, to be merged or read
+  later: a sketch (KLL, DDSketch, HLL, CMS) or an exact state (a running sum
+  or count).
 - **Accumulator:** the object that holds a group's state (e.g. its sketch)
   and is updated with values.
 - **DataFusion component:** a public DataFusion building block that works
@@ -52,8 +56,6 @@ path. §7 onwards is detail to read once the overview is clear.
   the `ExecutionPlan` trait, `TaskContext` and `RuntimeEnv` (memory pool,
   spill files), async streams and tokio. Each DataFusion operator, named
   `*Exec` (`SortExec`, `HashJoinExec`, `AggregateExec`), is built on it.
-- **Wrap / copy / implement:** the three ways an operator of ours can be
-  built (§5.3).
 
 ## 3. Today
 
@@ -80,10 +82,11 @@ Two consequences:
 - **Computation and running are mixed** in every operator, so no
   computation can be swapped for DataFusion's without rewriting the
   operator.
-- **We maintain everything.** Some operators also work one row at a time
-  (they convert batches to rows with `Batch::to_rows`): `group_table`,
-  `joins`, `time_range`, `range_function`, `series_labels`. These are the
-  likely efficiency hot spots; there is no benchmark yet.
+- **We maintain everything.** Some code also works one row at a time (it
+  converts batches to rows with `Batch::to_rows`): `group_table`, `joins`,
+  `time_range`, `range_function`, `series_labels` and
+  `expressions/columnar.rs`. These are the likely efficiency hot spots
+  (a hypothesis; there is no benchmark yet).
 
 ### DataFusion
 
@@ -105,38 +108,44 @@ from any code.
 ```text
 runtime (ours): runs the plan, connects operators, reads storage
   │
-  └─ driver (ours): calls an operator's  open → push … → advance … → finish
+  └─ driver (ours): open → push … push → finish
        │
-       └─ operator (OperatorLogic): only the computation
+       └─ operator: only the computation
             ├─ wrap:      calls DataFusion components (expressions, grouping, SQL aggregates)
             ├─ copy:      DataFusion code ported into our crate (sort, hash-join probe)
             └─ implement: our own code (PromQL, sketches, trivial operators)
 ```
 
-The operator interface:
+The operator interface has two parts: an immutable definition, kept in the
+compiled plan, and the per-run state it opens.
 
 ```rust
+trait OperatorDefinition {
+    fn open(&self, ctx: &RunContext) -> Box<dyn OperatorLogic>;           // ctx: evaluation time
+}
 trait OperatorLogic {
     fn push(&mut self, input: usize, batch: Batch) -> Result<Vec<Batch>>;  // one batch of input i
-    fn advance(&mut self, t: Timestamp) -> Result<Vec<Batch>>;             // emit windows closed before t
     fn finish(&mut self, input: usize) -> Result<Vec<Batch>>;              // input i has ended
 }
 ```
 
-Example: a KLL sketch of `latency` per `job`, over two batches.
+Example: a KLL sketch of `latency` per `job` over a 10-minute window, whose
+data arrives as mini-batches.
 
 ```text
 Today:     for each row:  find its group in group_table → sketch[group].update(latency)
 
-End state: open(ctx)                        new GroupValues + KLL GroupsAccumulator
-           push(batch 1)                    GroupValues: [api, db, api] → [0, 1, 0]
-                                            accumulator.update_batch([12, 40, 15], [0, 1, 0])
-           push(batch 2)                    same
-           finish  (batch mode)             emit one sketch per job
-           advance(t) (streaming mode)      emit the sketches of windows that ended before t
+End state: open(ctx)        new GroupValues + KLL GroupsAccumulator
+           push(batch 1)    GroupValues: [api, db, api] → [0, 1, 0]
+                            accumulator.update_batch([12, 40, 15], [0, 1, 0])
+                            the rows are then dropped; only the sketches remain
+           push(batch 2)    same
+           …
+           finish           emit one sketch per job
 ```
 
-The same operator runs in both modes; only the driver's calls differ.
+The same operator runs in batch and streaming mode; only when the driver's
+`push` calls happen differs.
 
 ## 5. Decisions
 
@@ -147,23 +156,27 @@ its drivers own everything else. This is what makes the rest possible:
 once an operator is only computation, its computation can come from
 DataFusion.
 
-It also answers batch vs streaming with one interface instead of two:
+One interface serves batch and streaming mode. The driver calls `push` for
+each mini-batch, as soon as it is available, then `finish` when an input
+has ended: at the end of a query's input, or at the end of an ingestion
+window. An operator that can update its state per mini-batch must do so,
+and not keep the rows: a 10-minute KLL sketch is updated with each
+mini-batch, never built from 10 minutes of buffered rows. Some operators
+cannot avoid keeping rows until `finish`: sort, a join's build side, set
+operations. (`compute(batch)` and `init / update / finalize`, an earlier
+two-interface idea, are a `push` returning one batch and an accumulator,
+§5.4.)
 
-- Batch mode (queries): the driver calls `push` for every batch, then
-  `finish`.
-- Streaming mode (ingestion): the driver calls `push` as mini-batches
-  arrive, and `advance(t)` when time passes a window end.
-
-An earlier idea was two interfaces: `compute(batch) -> batch` for batch and
-`init / update / finalize` for streaming. `compute` only fits stateless
-operators (filter, project); with this interface such an operator is a
-`push` that returns one batch. `init / update / finalize` is the shape of an
-accumulator, which §5.4 keeps.
+The driver orders the inputs of a two-input operator: a join receives every
+build-side batch and `finish` for that input before its first probe-side
+batch.
 
 ### 5.2 Remove memory accounting, yielding and cancellation
 
 From operators and from the runtime, to keep both simple. The runtime stays
 async only because storage reads are async; operator calls are synchronous.
+Operators run one at a time; parallel execution is out of scope for the
+first version.
 
 ### 5.3 Use DataFusion's components, never its execution layer
 
@@ -216,34 +229,26 @@ window states instead.
 
 DataFusion's `state` encodes states as bytes. Passing sketches between our
 operators that way would encode and decode them at every step. Instead,
-`push` takes our `Batch`, whose summary columns hold the sketch objects, and
-our accumulators hand sketches to the next operator in memory. Encoding
-happens only when a state is stored. Wrapped DataFusion components receive
-the `Batch`'s `RecordBatch`.
+`push` takes our `Batch`, whose summary columns index into its in-memory
+sketch list (§2), and our accumulators hand sketches to the next operator
+in memory. Encoding happens only when a state is stored. Wrapped DataFusion
+components receive the `Batch`'s `RecordBatch`.
 
 ### 5.6 Evaluation time enters at `open`
 
-Operators no longer receive a run context. Instead each operator has an
-immutable definition, kept in the compiled plan, and per-run state created
-by `definition.open(ctx)`, where `ctx` holds the evaluation time. PromQL's
+`OperatorDefinition::open(ctx)` (§4) creates each run's state, and `ctx`
+holds the evaluation time; operators receive no other run context. PromQL's
 `@` (evaluate at another time) stays a runtime action: the runtime opens the
 operator's inputs with a shifted `ctx`.
 
-### 5.7 Streaming
+### 5.7 Later: results per window within one run
 
-- `advance(t)`: `t` is the end of the ingestion window that just completed,
-  which the runtime already knows. The runtime advances operators in plan
-  order, passing each one's output downstream before advancing the next.
-- Late data, arriving after its window was emitted, is dropped.
-- Operator state is not checkpointed.
-- *Proposed, not yet agreed:* each operator declares whether it computes on
-  each mini-batch and keeps only state (filter, project, aggregates, sketch
-  builds) or must keep rows until `finish` (sort, a join's build side, set
-  operations). And in the first version only the operators found in
-  today's ingestion plans support `advance` (§10): `filter`, `project`,
-  `time_range`, `per_group_summary_build` and `window_end_timestamp`.
-  Every other operator still runs at ingestion time in batch mode, one
-  window per run, as today.
+Not in the first version. Each ingestion run covers one window, and
+`finish` emits its result. An `advance(t)` method, emitting the windows that
+end at or before `t` without ending the run, would let one operator
+instance span many windows. If added: `t` is a window end the runtime
+already knows, late data is dropped, and operator state is not
+checkpointed.
 
 ## 6. Path
 
@@ -251,20 +256,22 @@ Each step keeps the executor working, and its existing tests must pass
 unchanged.
 
 1. **Add the dependency:** DataFusion 54.2.0 (§9).
-2. **Split computation from running:** add `OperatorLogic` and a driver
-   that runs any `OperatorLogic` inside today's runtime. Remove memory
-   accounting, yielding and cancellation. Operators can then move one at a
-   time.
+2. **Split computation from running:** add `OperatorDefinition` /
+   `OperatorLogic` and a driver that runs them inside today's runtime.
+   Remove memory accounting, yielding and cancellation, with the tests that
+   cover them. Operators can then move one at a time.
 3. **Stateless operators:** `project` and `filter` on `PhysicalExpr` (§11).
 4. **Grouped operators:** aggregates, summary builds and merges on
    `GroupValues` + `GroupsAccumulator`.
 5. **Sort and joins:** copied DataFusion code.
 6. **PromQL operators:** our code, moved to `OperatorLogic`.
-7. **Streaming driver:** `advance` for the operators in §5.7.
 
 ## 7. Per-operator mapping
 
-Operators are in `crates/executor/src/operators/`.
+The names below are the `Operator` constructors; their code is in
+`crates/executor/src/operators/`, mostly in a file of the same name (e.g.
+`union`, `scalar` and `absent` are in `source.rs`, `window` in
+`aggregate/`, `evaluate_at` in `time_range.rs`).
 
 | Operator | How | Detail |
 | --- | --- | --- |
@@ -285,15 +292,15 @@ Operators are in `crates/executor/src/operators/`.
 - **Semantics.** PromQL differs from DataFusion (NaN ordering, compensated
   sums, overflow as an error; §11). Wrapped and copied operators must pass
   our existing tests unchanged.
-- **Reading a state twice.** `evaluate` and `state` reset the state they
-  emit. A sliding window reads the same window state several times, so our
-  sketch accumulators also provide non-resetting reads, which our operators
-  call directly.
+- **Reading a state twice.** `GroupsAccumulator::evaluate(EmitTo)` and
+  `state(EmitTo)` reset the groups they emit. A sliding window reads the
+  same window state several times, so our sketch accumulators also provide
+  non-resetting reads, which our operators call directly.
 - **One producer, several consumers.** DataFusion's streams and
   accumulators cannot be cloned, while a node of our plan can have several
-  readers. Streams do not matter, since we use no `*Exec`, and our runtime
-  gives each reader a cheap clone of each batch. Accumulator state is
-  covered by the non-resetting reads above.
+  readers. Streams do not matter, since we use no `*Exec`. Our runtime gives
+  each reader a cheap clone of each batch: the Arrow arrays and the sketch
+  list are shared, not copied, and no reader modifies them.
 
 ## 9. Implementation details
 
@@ -315,8 +322,7 @@ Every ingestion-time plan in the corpus snapshots is a scan followed by a
 summary chain: `filter` / `project`, then `time_range` (one window's rows),
 `per_group_summary_build` (a sketch per group) and `window_end_timestamp`
 (stamps each result with its window end). The planner does not restrict
-which operators may run at ingestion time, so others can appear later; they
-run in batch mode, one window per run (§5.7).
+which operators may run at ingestion time, so others can appear later.
 
 ## 11. Finding: expressions on DataFusion `PhysicalExpr`
 
@@ -349,3 +355,16 @@ classified against DataFusion.
   `LabelIdentity`, `drop_metric_name`), PromQL float-to-text formatting,
   the checks that fail a query (`FiniteFloat64`, checked division, exact
   Int64→Float64), `mapconcat` and `days_in_month`.
+
+## 12. Open questions
+
+- **Why remove memory accounting and cancellation (§5.2)?** The reason
+  should be stated: what bounds a runaway query or ends one whose client
+  disconnected, and whether a long synchronous `push` on an async thread is
+  acceptable.
+- **How is "less code" measured?** E.g. lines removed against lines copied
+  in, and the size of the DataFusion dependency.
+- **How are semantic differences checked** beyond existing tests, e.g. by
+  running our evaluator and DataFusion's on the same inputs for the
+  expressions in §11 that differ?
+- **Benchmark** before and after, for the secondary goal.
