@@ -5,10 +5,10 @@
 //! sketches (KLL, DDSketch, a CMS heap), share a sketch tumbling-window chain between
 //! queries or nested windows, answer a ratio of two quantiles from one tumbling window
 //! chain, and materialize tumbling windows, under the MVP deployment (raw data not
-//! retained) and raw data retained. A change to sketch kinds, parameters,
-//! sizes, sharing, timing, lifetime or cost shows up as a snapshot
-//! diff, and fails unless the selected plan's cost equals the committed
-//! one's (see the corpus snapshot module docs).
+//! retained) and raw data retained. A change to cost, accuracy, warnings
+//! or errors fails. A change to sketch kinds, parameters, sizes, sharing,
+//! timing or lifetime alone, at the committed plan's cost, passes (see the
+//! corpus snapshot module docs).
 //!
 //! Small multi-query workloads (#1278) each exercise one planner behavior:
 //! rollup across label sets, top-k reuse, chain widths and sharing, avg as

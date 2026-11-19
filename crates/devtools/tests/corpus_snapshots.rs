@@ -4,8 +4,8 @@
 //! instead: each corpus query's selected plan (default search) is compared
 //! with the committed one, and any change fails until the snapshot is
 //! regenerated and the change explained in the PR. A changed plan whose
-//! cost equals the committed plan's (relative difference at most 1e-9)
-//! passes: the selection may return any of several equal-cost plans, and
+//! cost equals the committed plan's (relative difference at most 1e-9),
+//! with the same accuracy, warnings and errors, passes: the selection may return any of several equal-cost plans, and
 //! which one can differ between machines.
 //!
 //! Each `tests/corpus_snapshots/<corpus>/corpus.json` declares the shared
@@ -162,17 +162,35 @@ fn equal_cost_plan(expected: &str, actual: &str) -> bool {
     }
 }
 
-/// Whether both snapshots select a plan and their costs per second are
-/// equal within [`EQUAL_COST_RELATIVE_TOLERANCE`].
+/// Whether both snapshots select a plan, their costs per second are equal
+/// within [`EQUAL_COST_RELATIVE_TOLERANCE`], and they agree on everything
+/// but the plan itself ([`without_the_plan`]): accuracy guarantees, the
+/// accepted accuracy per query, warnings, errors and the queries.
 fn same_selected_cost(expected: &Value, actual: &Value) -> bool {
     let cost = |snapshot: &Value| snapshot["selected"]["cost"]["cost_per_second"].as_f64();
-    match (cost(expected), cost(actual)) {
+    let equal_cost = match (cost(expected), cost(actual)) {
         (Some(expected), Some(actual)) => {
             (expected - actual).abs()
                 <= EQUAL_COST_RELATIVE_TOLERANCE * expected.abs().max(actual.abs())
         }
         _ => false,
+    };
+    equal_cost && without_the_plan(expected) == without_the_plan(actual)
+}
+
+/// `snapshot` without the selected plan's DAG, its cost breakdown and the
+/// materialized views derived from it: the parts that differ between two
+/// equal-cost plans.
+fn without_the_plan(snapshot: &Value) -> Value {
+    let mut rest = snapshot.clone();
+    if let Some(selected) = rest["selected"].as_object_mut() {
+        selected.remove("dag");
+        selected.remove("cost");
     }
+    if let Some(fields) = rest.as_object_mut() {
+        fields.remove("materialized_views");
+    }
+    rest
 }
 
 /// The first line where `expected` and `actual` differ, for the failure message.
@@ -415,5 +433,27 @@ fn equal_cost_plans_pass() {
     assert!(!same_selected_cost(
         &json!({"selected": null}),
         &json!({"selected": null})
+    ));
+    // Equal cost, different plan and views: passes.
+    let with = |dag: Value, accepted: Value, warnings: Value| {
+        json!({
+            "selected": {"cost": {"cost_per_second": 1.0e-6}, "dag": dag, "accepted": accepted},
+            "materialized_views": dag,
+            "warnings": warnings,
+        })
+    };
+    let committed = with(json!({"k": 1404}), json!([0.01]), json!([]));
+    assert!(same_selected_cost(
+        &committed,
+        &with(json!({"k": 2863}), json!([0.01]), json!([]))
+    ));
+    // Equal cost, but weaker accepted accuracy or a new warning: fails.
+    assert!(!same_selected_cost(
+        &committed,
+        &with(json!({"k": 1404}), json!([0.05]), json!([]))
+    ));
+    assert!(!same_selected_cost(
+        &committed,
+        &with(json!({"k": 1404}), json!([0.01]), json!(["w"]))
     ));
 }
