@@ -17,7 +17,8 @@ they exist. Efficiency is a secondary goal.
 
 How to read this doc: §2 defines terms. §3 shows the code today, §4 the end
 state, and §5 the decisions that take us from one to the other. §6 is the
-path. §7 onwards is detail to read once the overview is clear.
+path, and §12 its PRs. §7–§11 are detail to read once the overview is
+clear.
 
 ## 2. Glossary
 
@@ -124,11 +125,12 @@ runtime (ours): runs the plan, connects operators, reads storage
             └─ implement: our own code (PromQL, sketches, trivial operators)
 ```
 
-The operator interface has two parts: an immutable definition, kept in the
-compiled plan, and the per-run state it opens.
+The operator interface has two parts: the immutable `Operator` the compiled
+plan already holds, and the per-run state it opens. Sources (`Scan`) stay
+async streams: reading storage is the runtime's job.
 
 ```rust
-trait OperatorDefinition {
+impl Operator {
     fn open(&self, ctx: &RunContext) -> Box<dyn OperatorLogic>;           // ctx: evaluation time
 }
 trait OperatorLogic {
@@ -287,7 +289,7 @@ components receive the `Batch`'s `RecordBatch`.
 
 ### 5.7 Evaluation time enters at `open`
 
-`OperatorDefinition::open(ctx)` (§4) creates each run's state, and `ctx`
+`Operator::open(ctx)` (§4) creates each run's state, and `ctx`
 holds the evaluation time; operators receive no other run context. PromQL's
 `@` (evaluate at another time) stays a runtime action: the runtime opens the
 operator's inputs with a shifted `ctx`.
@@ -301,21 +303,26 @@ instance span many windows. If added: `t` is a window end the runtime
 already knows, late data is dropped, and operator state is not
 checkpointed.
 
+### 5.9 DataFusion's expression semantics win
+
+Where our expression semantics differ from DataFusion's (§11), we adopt
+DataFusion's and accept the changed query results. This includes PromQL
+functions: they map onto the nearest DataFusion built-in, and become our own
+UDF only when no built-in is close enough. The checks that fail a query
+(`FiniteFloat64`, checked division, exact Int64→Float64) are dropped.
+
 ## 6. Path
 
-Each step keeps the executor working, and its existing tests must pass
-unchanged.
+Two phases, so that the interface change and the DataFusion change are never
+reviewed together. §12 lists the PRs.
 
-1. **Add the dependency:** DataFusion 54.2.0 (§9).
-2. **Split computation from running:** add `OperatorDefinition` /
-   `OperatorLogic` and a driver that runs them inside today's runtime.
-   Remove memory accounting, yielding and cancellation, with the tests that
-   cover them. Operators can then move one at a time.
-3. **Stateless operators:** `project` and `filter` on `PhysicalExpr` (§11).
-4. **Grouped operators:** aggregates, summary builds and merges on
-   `GroupValues` + `GroupsAccumulator`.
-5. **Sort and joins:** copied DataFusion code.
-6. **PromQL operators:** our code, moved to `OperatorLogic`.
+- **Phase A: new interface, same internals.** Remove memory accounting,
+  yielding and cancellation, then move every operator to `OperatorLogic`
+  with its current code, then delete the old path. Existing tests pass
+  unchanged.
+- **Phase B: DataFusion internals.** Replace one component per PR:
+  grouping, accumulators, sort, joins, expressions. Expressions go last
+  because they change query results (§5.9).
 
 ## 7. Per-operator mapping
 
@@ -340,9 +347,10 @@ The names below are the `Operator` constructors; their code is in
 
 ## 8. Risks
 
-- **Semantics.** PromQL differs from DataFusion (NaN ordering, compensated
-  sums, overflow as an error; §11). Wrapped and copied operators must pass
-  our existing tests unchanged.
+- **Semantics.** Adopting DataFusion's expression semantics (§5.9) changes
+  query results, including PromQL edge cases (NaN, rounding, overflow) where
+  we will then differ from Prometheus. Grouping, accumulators, sort and
+  joins must not change results.
 - **Reading a state twice.** `GroupsAccumulator::evaluate(EmitTo)` and
   `state(EmitTo)` reset the groups they emit. A sliding window reads the
   same window state several times, so our sketch accumulators also provide
@@ -377,6 +385,8 @@ which operators may run at ingestion time, so others can appear later.
 
 ## 11. Finding: expressions on DataFusion `PhysicalExpr`
 
+We adopt DataFusion's semantics for every difference below (§5.9).
+
 Each expression form of our `Expression` enum and the Planner scalar IR was
 classified against DataFusion.
 
@@ -390,8 +400,7 @@ classified against DataFusion.
   - *Float comparison.* Arrow compares floats by IEEE total order: NaN
     equals NaN and is greater than every number, and -0.0 < 0.0. We use
     IEEE comparison: any comparison with NaN is false. This affects every
-    comparison, `IN` and `CASE x WHEN`. One wrapper around comparisons
-    fixes it.
+    comparison, `IN` and `CASE x WHEN`.
   - *Integer overflow.* DataFusion wraps unless
     `BinaryExpr::with_fail_on_overflow(true)` is set, and negation always
     wraps. We raise an error.
@@ -406,3 +415,33 @@ classified against DataFusion.
   `LabelIdentity`, `drop_metric_name`), PromQL float-to-text formatting,
   the checks that fail a query (`FiniteFloat64`, checked division, exact
   Int64→Float64), `mapconcat` and `days_in_month`.
+
+## 12. Implementation plan
+
+Every PR keeps the executor working. "Tests unchanged" means the existing
+executor tests and corpus snapshots pass without edits.
+
+### Phase A: new interface, same internals
+
+| # | PR | Done when |
+| --- | --- | --- |
+| A1 | Remove memory accounting, yielding and cancellation: `Limits`, budgets, `cooperative.rs`, their checks in operators, and their tests. `RunContext::new` loses its `Limits` argument. File issues in ASAPQuery-backend and sketch-bench for the API break. | Remaining tests unchanged. |
+| A2 | Add `OperatorLogic`, `Operator::open` and `drive`; port `filter`. `drive` feeds inputs in index order: every batch of input 0, `finish(0)`, then input 1. Sources (`Scan`, `UnboundInput`) stay async streams. | Tests unchanged. |
+| A3 | Port the stateless operators (projection, `time_range`, `scope_timestamp`, `bind_scalar_ref`, `unchecked`, `limit`, `series_labels`, `series_sample`). | Tests unchanged. |
+| A4 | Port the per-group-state operators (aggregate, summary builds and merge, `range_function`, `series_window`, `vector_window`, `current_series`). | Tests unchanged, plus a new test: a KLL sketch built from many mini-batches equals one built from a single batch. |
+| A5 | Port the per-row-state and two-input operators (sort, joins, `aligned_binary`, `vector_binary`, `set_operation`, `sql_window`). The semi-join builds on input 1, so it buffers input 0 until Phase B. | Tests unchanged. |
+| A6 | Delete the old path: `PhysicalOperator::start` for operators and the per-operator `execute` functions. Test operators implement `OperatorLogic`. | Tests unchanged. |
+
+### Phase B: DataFusion internals
+
+| # | PR | Done when |
+| --- | --- | --- |
+| B1 | Add DataFusion 54.2.0 (§9); `GroupValues` replaces `group_table`. The PR states the added clean-build time and crates, and one before/after timing of a grouped aggregate. | Tests unchanged. |
+| B2 | Built-in SQL aggregates use DataFusion's `GroupsAccumulator`s; our sketches implement the same trait (§5.5). | Tests unchanged. |
+| B3 | Sort on `lexsort_to_indices` and `take`; top-k copied from DataFusion's `TopK`. | Tests unchanged. |
+| B4 | Joins on `JoinHashMap`, probe copied from `HashJoinExec`. The build side moves to input 0, which ends the semi-join's buffering. | Tests unchanged. |
+| B5 | Expressions lowered to `PhysicalExpr` with DataFusion's semantics (§5.9); PromQL functions on built-ins or our UDFs. | Tests updated only for the result changes listed under the PR's **Verification**, each traced to a §11 difference. |
+| B6 | Re-measure per-operator unit costs on the new executor and update `operations_per_unit` in `asap-cost`. | Before/after timings reported; any planner snapshot changes listed with why. |
+
+Efficiency gates no PR before B6: the main goal is less code to maintain.
+
