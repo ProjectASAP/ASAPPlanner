@@ -69,7 +69,7 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedOp) -> Vec<String> {
     use UnresolvedOp as U;
     fn named(expr: &UnresolvedScalar, out: &mut Vec<String>) {
         for c in expr.columns_referenced() {
-            push_ref_name(c, out);
+            push_ref_name(&c, out);
         }
         for op in expr.operator_refs() {
             walk(op, out);

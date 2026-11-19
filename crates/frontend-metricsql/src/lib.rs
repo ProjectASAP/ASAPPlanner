@@ -2,14 +2,12 @@
 
 use std::{rc::Rc, time::Duration};
 
-use asap_frontend_common::{
-    resolve_root, UnresolvedOp as U, UnresolvedPredicate, UnresolvedScalar,
-};
+use asap_frontend_common::{resolve_root, UnresolvedOp as U, UnresolvedScalar};
 use asap_types::ir::operator::{
     AggIntent, BinaryOpKind, GroupKeys, GroupSide, PromQLVectorSetOpKind, Reduction, Source,
     VectorGrouping, VectorMatch, VectorMatchKind,
 };
-use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
+use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, Predicate, ScalarValue};
 use asap_types::ir::{ExprSemantics, TimeRangeKind};
 use asap_types::workload::{DurationMs, PlanningWorkload, QueryLanguage, WorkloadError};
 use metricsql_parser::ast::{
@@ -152,10 +150,7 @@ impl Lowerer<'_> {
             source: Source::TimeSeries {
                 metric: name.to_owned(),
             },
-            predicates: filters
-                .into_iter()
-                .map(|f| UnresolvedPredicate(matcher(f)))
-                .collect(),
+            predicates: filters.into_iter().map(|f| Predicate(matcher(f))).collect(),
             schema: None,
             qualifier: None,
         })

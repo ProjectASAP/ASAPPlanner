@@ -70,7 +70,7 @@ use promql_parser::parser::{
 };
 
 use asap_frontend_common::{
-    UnresolvedOp as Unresolved, UnresolvedPredicate, UnresolvedScalar as Scalar, UnresolvedSortKey,
+    UnresolvedOp as Unresolved, UnresolvedScalar as Scalar, UnresolvedSortKey,
 };
 use asap_types::ir::operator::agg_intent::{topk, AggIntent, TimeFunc};
 use asap_types::ir::operator::arguments::{
@@ -80,7 +80,7 @@ use asap_types::ir::operator::arguments::{
 use asap_types::ir::{ExprSemantics, TimeRangeKind};
 
 use asap_types::ir::operator::{InfoMatcher, SampleKind};
-use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
+use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, Predicate, ScalarValue};
 use asap_types::workload::{PrometheusMetricType, WorkloadError};
 
 /// Every scalar expression this front end builds follows PromQL's numeric rules.
@@ -1567,7 +1567,7 @@ fn clamp_bounds_filter(min: &Scalar, max: &Scalar, child: Unresolved) -> Unresol
         }
     }
     Unresolved::Filter {
-        pred: UnresolvedPredicate(Scalar::Not(Box::new(Scalar::Compare {
+        pred: Predicate(Scalar::Not(Box::new(Scalar::Compare {
             left: Box::new(max.clone()),
             op: CompareOpKind::Lt,
             right: Box::new(min.clone()),
@@ -1655,7 +1655,7 @@ fn per_series_aggregate(
 fn filtered_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> Unresolved {
     let scan = Unresolved::Scan {
         source: Source::TimeSeries { metric },
-        predicates: matchers.into_iter().map(UnresolvedPredicate).collect(),
+        predicates: matchers.into_iter().map(Predicate).collect(),
         // Usage-derived (PromQL is schemaless) — the schema resolver fills this in.
         schema: None,
         qualifier: None,
