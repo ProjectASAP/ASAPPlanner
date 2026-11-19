@@ -1,3 +1,4 @@
+use crate::summary_kernels::traits::{aggregate_core_object_methods, downcast_peer};
 use crate::AggregateCore;
 use asap_sketchlib::input::{HydraCounter, HydraQuery};
 use asap_sketchlib::{DataInput, Hydra, Kll};
@@ -35,25 +36,16 @@ impl HydraKllSketchAccumulator {
 }
 
 impl AggregateCore for HydraKllSketchAccumulator {
-    fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
-        Box::new(self.clone())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
+    aggregate_core_object_methods!();
 
     fn merge_with(
         &self,
         other: &dyn AggregateCore,
     ) -> Result<Box<dyn AggregateCore>, Box<dyn std::error::Error + Send + Sync>> {
-        let hk = other
-            .as_any()
-            .downcast_ref::<HydraKllSketchAccumulator>()
-            .ok_or("Failed to downcast to HydraKllSketchAccumulator")?;
+        let hk = downcast_peer::<HydraKllSketchAccumulator>(
+            other,
+            "Failed to downcast to HydraKllSketchAccumulator",
+        )?;
 
         let mut merged = self.clone();
         merged.inner.merge(&hk.inner)?;

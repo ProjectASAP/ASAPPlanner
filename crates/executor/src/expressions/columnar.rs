@@ -25,6 +25,7 @@
 use super::planner::{LocalTyping, ScalarExpr};
 use super::{arithmetic, Expression};
 use crate::values::arrow_columns::{self, ColumnDepth};
+use crate::values::arrow_columns::{float64_array, text_dictionary_array};
 use crate::values::{Batch, Value};
 use crate::Error;
 use ahash::AHashMap as HashMap;
@@ -415,9 +416,7 @@ impl FloatOperand {
     fn of(value: Evaluated) -> Self {
         match value {
             Evaluated::Column(array) => Self::Column(
-                array
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
+                float64_array(&*array)
                     .expect("Float64 operands are Float64 arrays")
                     .clone(),
             ),
@@ -470,9 +469,7 @@ fn evaluate_vector(expression: &VectorExpr, batch: &Batch) -> Result<Evaluated, 
             }
             constant @ Evaluated::Constant(..) => constant,
             Evaluated::Column(array) => Evaluated::Column(Arc::new(
-                array
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
+                float64_array(&*array)
                     .expect("Float64 operand")
                     .unary::<_, arrow::datatypes::Float64Type>(|v| -v),
             )),
@@ -632,13 +629,7 @@ fn evaluate_per_input(
         .collect::<Vec<_>>();
     let dictionaries = columns
         .iter()
-        .map(|&column| {
-            batch
-                .column(column)
-                .as_any()
-                .downcast_ref::<DictionaryArray<UInt32Type>>()
-                .cloned()
-        })
+        .map(|&column| text_dictionary_array(batch.column(column)).cloned())
         .collect::<Option<Vec<_>>>();
     if let Some(dictionaries) = dictionaries {
         // Once per distinct combination of keys, in order of first appearance.
@@ -787,10 +778,7 @@ fn identity_without_per_entry(
     column: usize,
     excluding: &[String],
 ) -> Option<ArrayRef> {
-    let dictionary = batch
-        .column(column)
-        .as_any()
-        .downcast_ref::<DictionaryArray<UInt32Type>>()?;
+    let dictionary = text_dictionary_array(batch.column(column))?;
     let texts = dictionary
         .values()
         .as_any()

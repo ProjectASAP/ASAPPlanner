@@ -4,6 +4,7 @@
 //! a merge keeps the `k` smallest distinct hashes of both states, so merging
 //! two states equals building one over the union of their inputs.
 use crate::summary_kernels::factory::AccumulatorUpdater;
+use crate::summary_kernels::traits::{aggregate_core_object_methods, downcast_peer};
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::{DataInput, Kmv};
 use planner_types::summary_type::SketchStatistic;
@@ -34,22 +35,10 @@ impl KmvAccumulator {
 }
 
 impl AggregateCore for KmvAccumulator {
-    fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
-        Box::new(self.clone())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
+    aggregate_core_object_methods!();
 
     fn merge_with(&self, other: &dyn AggregateCore) -> Result<Box<dyn AggregateCore>, KernelError> {
-        let other = other
-            .as_any()
-            .downcast_ref::<Self>()
-            .ok_or("KMV merges only with KMV")?;
+        let other = downcast_peer::<Self>(other, "KMV merges only with KMV")?;
         if self.inner.k != other.inner.k {
             return Err(format!(
                 "KMV merges only with the same k ({} vs {})",

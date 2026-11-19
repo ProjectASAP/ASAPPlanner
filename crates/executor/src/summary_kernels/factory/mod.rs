@@ -10,6 +10,15 @@ use crate::AggregateCore;
 use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
 use planner_types::summary_type::{SketchAlgorithm, SketchParams};
 
+/// `update_single` for a keyed updater, which takes only `update_keyed`.
+macro_rules! keyed_updater_refuses_update_single {
+    () => {
+        fn update_single(&mut self, _value: f64, _timestamp_ms: i64) -> Result<(), String> {
+            Err("update_single called on a keyed updater; use update_keyed".into())
+        }
+    };
+}
+
 /// Generate the clone-based `AccumulatorUpdater` methods for updaters whose
 /// inner `acc` field implements `Clone + AggregateCore`.
 macro_rules! impl_clone_accumulator_methods {
@@ -330,9 +339,7 @@ impl CmsAccumulatorUpdater {
 }
 
 impl AccumulatorUpdater for CmsAccumulatorUpdater {
-    fn update_single(&mut self, _value: f64, _timestamp_ms: i64) -> Result<(), String> {
-        Err("update_single called on a keyed updater; use update_keyed".into())
-    }
+    keyed_updater_refuses_update_single!();
 
     fn update_keyed(
         &mut self,
@@ -401,9 +408,7 @@ impl AccumulatorUpdater for WeightedFrequencyUpdater {
             .map_err(|error| error.to_string())
     }
 
-    fn update_single(&mut self, _value: f64, _timestamp_ms: i64) -> Result<(), String> {
-        Err("update_single called on a keyed updater; use update_keyed".into())
-    }
+    keyed_updater_refuses_update_single!();
 
     fn update_keyed(
         &mut self,
@@ -456,9 +461,7 @@ impl HydraKllAccumulatorUpdater {
 }
 
 impl AccumulatorUpdater for HydraKllAccumulatorUpdater {
-    fn update_single(&mut self, _value: f64, _timestamp_ms: i64) -> Result<(), String> {
-        Err("update_single called on a keyed updater; use update_keyed".into())
-    }
+    keyed_updater_refuses_update_single!();
 
     fn update_keyed(
         &mut self,

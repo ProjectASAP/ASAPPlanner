@@ -1,4 +1,5 @@
 //! Count-Min Sketch frequency summary over `asap_sketchlib::CountMinF64`.
+use crate::summary_kernels::traits::{aggregate_core_object_methods, downcast_peer};
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::{CountMinF64, CountMinSketch, DataInput};
 use planner_types::summary_type::SketchStatistic;
@@ -29,22 +30,11 @@ impl CountMinSketchAccumulator {
 }
 
 impl AggregateCore for CountMinSketchAccumulator {
-    fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
-        Box::new(self.clone())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
+    aggregate_core_object_methods!();
 
     fn merge_with(&self, other: &dyn AggregateCore) -> Result<Box<dyn AggregateCore>, KernelError> {
-        let other = other
-            .as_any()
-            .downcast_ref::<Self>()
-            .ok_or("Count-Min Sketch merges only with Count-Min Sketch")?;
+        let other =
+            downcast_peer::<Self>(other, "Count-Min Sketch merges only with Count-Min Sketch")?;
         // sketchlib's merge panics on a shape mismatch.
         if (self.inner.rows(), self.inner.cols()) != (other.inner.rows(), other.inner.cols()) {
             return Err("Count-Min Sketch merges only with the same shape".into());

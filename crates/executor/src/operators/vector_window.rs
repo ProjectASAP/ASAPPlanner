@@ -1,5 +1,6 @@
 //! Window bounds are typed input data; aggregation and histogram semantics stay native.
 use super::*;
+use crate::values::arrow_columns::timestamp_array;
 use planner_types::ir::operator::AggIntent;
 
 pub(crate) fn matrix_schema() -> SchemaRef {
@@ -57,10 +58,7 @@ pub(super) fn execute<'a>(
                 let batch = &input.batch;
                 // Every row shares one nonempty window.
                 let bounds = |column: usize| {
-                    batch
-                        .column(column)
-                        .as_any()
-                        .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+                    timestamp_array(batch.column(column))
                         .cloned()
                         .ok_or_else(|| invalid("missing matrix window bounds"))
                 };

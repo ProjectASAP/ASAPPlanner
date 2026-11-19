@@ -2,6 +2,7 @@
 //! `Source` a `Scan` names, and stored materialized views by their
 //! [`MaterializedView`]. The executor's `Scan` owns the Planner's time-range
 //! and predicate semantics over the raw rows a store returns.
+use crate::values::arrow_columns::timestamp_array;
 use crate::{
     expressions::CompiledExpression,
     plan::PhysicalOperator,
@@ -283,13 +284,9 @@ impl Scan {
                 let mut batch = batch;
                 // The requested time range, whether or not the store applied it.
                 if let Some((time, (start_ms, end_ms))) = time_filter {
-                    let times = batch
-                        .column(time)
-                        .as_any()
-                        .downcast_ref::<arrow::array::TimestampMillisecondArray>()
-                        .ok_or_else(|| {
-                            Error::Invalid("Scan time column is not a timestamp".into())
-                        })?;
+                    let times = timestamp_array(batch.column(time)).ok_or_else(|| {
+                        Error::Invalid("Scan time column is not a timestamp".into())
+                    })?;
                     let keep: arrow::array::BooleanArray = times
                         .iter()
                         .map(|t| Some(t.is_some_and(|t| t > start_ms && t <= end_ms)))

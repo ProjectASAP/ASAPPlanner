@@ -47,6 +47,36 @@ pub trait AggregateCore: Send + Sync {
     }
 }
 
+/// The three [`AggregateCore`] methods every kernel writes the same way, for
+/// an `impl AggregateCore` block of a `Clone` state: a boxed copy and the
+/// two `Any` views of the state itself.
+macro_rules! aggregate_core_object_methods {
+    () => {
+        fn clone_boxed_core(&self) -> Box<dyn $crate::AggregateCore> {
+            Box::new(self.clone())
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    };
+}
+pub(crate) use aggregate_core_object_methods;
+
+/// `other` as the state type `T` that a `T` state's
+/// [`AggregateCore::merge_with`] requires, or the error `mismatch`.
+pub(crate) fn downcast_peer<'a, T: 'static>(
+    other: &'a dyn AggregateCore,
+    mismatch: &'static str,
+) -> Result<&'a T, KernelError> {
+    other
+        .as_any()
+        .downcast_ref::<T>()
+        .ok_or_else(|| mismatch.into())
+}
+
 impl Clone for Box<dyn AggregateCore> {
     fn clone(&self) -> Self {
         self.clone_boxed_core()

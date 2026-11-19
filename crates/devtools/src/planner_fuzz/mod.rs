@@ -61,8 +61,8 @@ use asap_types::plan::physical_asap_dag::{
 use asap_types::stages::{Lifetime, StorageMedium};
 use asap_types::summary_type::SketchAlgorithm;
 use asap_types::workload::{
-    DataArrival, DataWorkload, PlanningWorkload, QueryLanguage, QueryWorkload, QueryWorkloadEntry,
-    RepeatingEntry, SqlDialect,
+    DataArrival, DataWorkload, PlanningWorkload, QueryLanguage, QueryWorkload, RepeatingEntry,
+    SqlDialect,
 };
 
 use crate::planning_stages::{lower_promql_roots, lower_sql_roots, run_search_over, sql_catalog};
@@ -449,15 +449,6 @@ fn plan_label(plan: &PhysicalASAPDAG) -> String {
         .join(", ")
 }
 
-/// The grid of Stage 3's evaluation context of `entry`'s query: its
-/// evaluation grid, or 1 ms when its evaluation times are not known.
-fn evaluation_grid_ms(entry: &QueryWorkloadEntry) -> u64 {
-    entry
-        .recurrence
-        .evaluation_grid_ms(entry.range_evaluation)
-        .unwrap_or(1)
-}
-
 /// Plans and costs workloads, caching each workload's plan and the
 /// reference cost of its selected plan.
 pub struct Planner {
@@ -590,11 +581,11 @@ impl Planner {
         let (last, others) = reached_by_root.split_last().ok_or("no roots")?;
         let shared: BTreeSet<usize> = match last_root_is_derived {
             true => {
-                let grid = evaluation_grid_ms(&entries[entries.len() - 1]);
+                let grid = entries[entries.len() - 1].evaluation_grid_ms();
                 others
                     .iter()
                     .zip(&entries)
-                    .filter(|(_, entry)| evaluation_grid_ms(entry) == grid)
+                    .filter(|(_, entry)| entry.evaluation_grid_ms() == grid)
                     .flat_map(|(reached, _)| reached.intersection(last).copied())
                     .collect()
             }

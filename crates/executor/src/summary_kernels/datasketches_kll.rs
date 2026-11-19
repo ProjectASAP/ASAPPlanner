@@ -1,4 +1,5 @@
 //! KLL quantile summary over `asap_sketchlib::Kll`.
+use crate::summary_kernels::traits::{aggregate_core_object_methods, downcast_peer};
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::Kll;
 use planner_types::summary_type::SketchStatistic;
@@ -38,22 +39,10 @@ impl std::fmt::Debug for DatasketchesKLLAccumulator {
 }
 
 impl AggregateCore for DatasketchesKLLAccumulator {
-    fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
-        Box::new(self.clone())
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
+    aggregate_core_object_methods!();
 
     fn merge_with(&self, other: &dyn AggregateCore) -> Result<Box<dyn AggregateCore>, KernelError> {
-        let other = other
-            .as_any()
-            .downcast_ref::<Self>()
-            .ok_or("KLL merges only with KLL")?;
+        let other = downcast_peer::<Self>(other, "KLL merges only with KLL")?;
         // sketchlib's merge panics on a different k or m.
         let (k, m) = (self.inner.k(), self.inner.m());
         if (k, m) != (other.inner.k(), other.inner.m()) {

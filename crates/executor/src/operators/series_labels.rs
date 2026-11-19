@@ -3,6 +3,8 @@
 use super::*;
 use crate::expressions::binary::BinaryOpKind;
 use crate::expressions::binary::BinaryOperator;
+use crate::physical_planner::promql_rows::{decode_series_identity, encode_series_identity};
+use crate::values::arrow_columns::{float64_array, text_dictionary_array, timestamp_array};
 use planner_types::ir::operator::VectorMatchKind;
 use planner_types::ir::schema::PROMQL_SERIES_IDENTITY;
 
@@ -81,8 +83,7 @@ impl Layout {
             let Value::Utf8(encoded) = &row[i] else {
                 return Err(invalid("series identity must be Utf8"));
             };
-            let mut labels: Labels =
-                serde_json::from_str(encoded).map_err(|e| invalid(&e.to_string()))?;
+            let mut labels = decode_series_identity(encoded)?;
             // PromQL treats an empty label value as an absent label.
             labels.retain(|_, v| !v.is_empty());
             return Ok(labels);
@@ -109,7 +110,7 @@ impl Layout {
         labels: &Labels,
     ) -> Result<(), Error> {
         if let Some(i) = self.identity {
-            let encoded = serde_json::to_string(labels).map_err(|e| invalid(&e.to_string()))?;
+            let encoded = encode_series_identity(labels)?;
             row[i] = Value::Utf8(encoded.into());
         }
         for &i in &self.labels {
@@ -328,8 +329,12 @@ pub(super) fn signature(kind: &VectorMatchKind, names: &[String], mut labels: La
     labels
 }
 
-pub(super) fn label_bytes(labels: &Labels) -> usize {
-    labels.iter().map(|(k, v)| 64 + k.len() + v.len()).sum()
+/// The bytes a label set is charged: 64 per label plus its name and value.
+pub(super) fn label_bytes<Text: AsRef<str>>(labels: &BTreeMap<Text, Text>) -> usize {
+    labels
+        .iter()
+        .map(|(k, v)| 64 + k.as_ref().len() + v.as_ref().len())
+        .sum()
 }
 
 pub(super) fn apply(
@@ -396,15 +401,11 @@ pub(super) fn label_sources(
     layout: &Layout,
     schema: &SchemaRef,
 ) -> Result<(Vec<u32>, Vec<Labels>), Error> {
-    use arrow::array::{DictionaryArray, StringArray};
-    use arrow::datatypes::UInt32Type;
+    use arrow::array::StringArray;
     let rows = batch.num_rows();
     match layout.identity {
         Some(identity) => {
-            let dictionary = batch
-                .column(identity)
-                .as_any()
-                .downcast_ref::<DictionaryArray<UInt32Type>>()
+            let dictionary = text_dictionary_array(batch.column(identity))
                 .expect("batch text columns are dictionaries");
             let texts = dictionary
                 .values()
@@ -420,8 +421,7 @@ pub(super) fn label_sources(
                 let source = match source_of_entry.get(&entry) {
                     Some(&source) => source,
                     None => {
-                        let mut labels: Labels = serde_json::from_str(texts.value(entry as usize))
-                            .map_err(|e| invalid(&e.to_string()))?;
+                        let mut labels = decode_series_identity(texts.value(entry as usize))?;
                         // PromQL treats an empty label value as an absent label.
                         labels.retain(|_, v| !v.is_empty());
                         sets.push(labels);
@@ -460,17 +460,11 @@ pub(super) fn label_sources(
 fn series_rows(batch: &Batch, schema: &SchemaRef) -> Result<SeriesRows, Error> {
     let layout = layout(schema)?;
     let (source_of_row, sets) = label_sources(batch, &layout, schema)?;
-    let values = batch
-        .column(layout.value)
-        .as_any()
-        .downcast_ref::<arrow::array::Float64Array>()
+    let values = float64_array(batch.column(layout.value))
         .cloned()
         .ok_or_else(|| invalid("vector value must be Float64"))?;
     let times = schema.time_index.map(|index| {
-        batch
-            .column(index)
-            .as_any()
-            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+        timestamp_array(batch.column(index))
             .expect("series timestamps are timestamps")
             .clone()
     });
@@ -513,9 +507,7 @@ fn render(output: &SchemaRef, rows: &[(Option<i64>, Labels, f64)]) -> Result<Bat
     if let Some(identity) = to.identity {
         arrays[identity] = Some(interned_texts(
             rows.iter()
-                .map(|(_, labels, _)| {
-                    serde_json::to_string(labels).map_err(|e| invalid(&e.to_string()))
-                })
+                .map(|(_, labels, _)| encode_series_identity(labels))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter(),
         )?);
@@ -977,10 +969,7 @@ async fn rewrite_label_sets(
     unique: bool,
     context: RunContext,
 ) -> Result<Batch, Error> {
-    use super::group_table::GroupTable;
-    use arrow::array::{
-        Array, DictionaryArray, StringArray, TimestampMillisecondArray, UInt32Array,
-    };
+    use arrow::array::{DictionaryArray, StringArray, UInt32Array};
     use arrow::datatypes::UInt32Type;
     let output = operator.output.clone();
     let layout = layout(&operator.inputs[0])?;
@@ -996,64 +985,11 @@ async fn rewrite_label_sets(
         let rows = batch.num_rows();
         // Each row's distinct label source, and each distinct source's
         // rewritten label set.
-        let (source_of_row, sets): (Vec<u32>, Vec<Labels>) = match layout.identity {
-            Some(identity) => {
-                let dictionary = batch
-                    .column(identity)
-                    .as_any()
-                    .downcast_ref::<DictionaryArray<UInt32Type>>()
-                    .expect("batch text columns are dictionaries");
-                let texts = dictionary
-                    .values()
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("dictionaries over strings");
-                let keys = dictionary.keys();
-                let mut source_of_entry = ahash::AHashMap::<u32, u32>::new();
-                let mut sets = Vec::new();
-                let mut source_of_row = Vec::with_capacity(rows);
-                for row in 0..rows {
-                    let entry = keys.value(row);
-                    let source = match source_of_entry.get(&entry) {
-                        Some(&source) => source,
-                        None => {
-                            let mut labels: Labels =
-                                serde_json::from_str(texts.value(entry as usize))
-                                    .map_err(|e| invalid(&e.to_string()))?;
-                            // PromQL treats an empty label value as an absent label.
-                            labels.retain(|_, v| !v.is_empty());
-                            sets.push(signature(kind, names, labels));
-                            let source = (sets.len() - 1) as u32;
-                            source_of_entry.insert(entry, source);
-                            source
-                        }
-                    };
-                    source_of_row.push(source);
-                }
-                (source_of_row, sets)
-            }
-            None => {
-                let mut table = GroupTable::new(layout.labels.clone());
-                let source_of_row = table.group_ids(&batch)?;
-                let sets = (0..table.len() as u32)
-                    .map(|group| {
-                        let mut labels = Labels::new();
-                        for (index, &column) in layout.labels.iter().enumerate() {
-                            match table.label(group, index) {
-                                Value::Utf8(v) if !v.is_empty() => {
-                                    labels
-                                        .insert(output.fields[column].name.clone(), v.to_string());
-                                }
-                                Value::Utf8(_) | Value::Null => {}
-                                _ => return Err(invalid("label must be Utf8")),
-                            }
-                        }
-                        Ok(signature(kind, names, labels))
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?;
-                (source_of_row, sets)
-            }
-        };
+        let (source_of_row, sets) = label_sources(&batch, &layout, &output)?;
+        let sets: Vec<Labels> = sets
+            .into_iter()
+            .map(|labels| signature(kind, names, labels))
+            .collect();
         work.checkpoint_rows(rows).await?;
         // A text column whose row `i` reads `text(source_of_row[i])`.
         let text_column = |text: &dyn Fn(&Labels) -> Result<String, Error>| -> Result<arrow::array::ArrayRef, Error> {
@@ -1078,9 +1014,7 @@ async fn rewrite_label_sets(
         };
         let mut arrays = batch.record_batch().columns().to_vec();
         if let Some(identity) = layout.identity {
-            arrays[identity] = text_column(&|set| {
-                serde_json::to_string(set).map_err(|e| invalid(&e.to_string()))
-            })?;
+            arrays[identity] = text_column(&|set| encode_series_identity(set))?;
         }
         for &column in &layout.labels {
             let name = &output.fields[column].name;
@@ -1097,16 +1031,13 @@ async fn rewrite_label_sets(
             let ids = sets
                 .iter()
                 .map(|set| {
-                    let key = serde_json::to_string(set).map_err(|e| invalid(&e.to_string()))?;
+                    let key = encode_series_identity(set)?;
                     let next = label_set_ids.len() as u32;
                     Ok(*label_set_ids.entry(key).or_insert(next))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
             let times = output.time_index.map(|index| {
-                rewritten
-                    .column(index)
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
+                timestamp_array(rewritten.column(index))
                     .expect("series timestamps are timestamps")
                     .clone()
             });
@@ -1337,6 +1268,46 @@ mod columnar_tests {
             }
         }
         assert!(errors > 0, "the repeated-label-set error is exercised");
+    }
+
+    /// A series identity is read through the series identity codec: the
+    /// canonical text `{"__name__":"m","job":"a"}` reads as its labels, and
+    /// the same labels in another order, which the executor never writes,
+    /// are refused.
+    #[test]
+    fn label_sources_read_only_canonical_series_identities() {
+        let schema = Arc::new(Schema {
+            fields: vec![
+                field("value", DataType::Float64, false),
+                field(PROMQL_SERIES_IDENTITY, DataType::Utf8, false),
+            ],
+            time_index: None,
+            unique_keys: vec![],
+            closed: false,
+        });
+        let layout = layout(&schema).unwrap();
+        let read = |identity: &str| {
+            let batch = Batch::try_new(
+                schema.clone(),
+                vec![vec![Value::Float64(1.0), Value::Utf8(identity.into())]],
+            )
+            .unwrap();
+            label_sources(&batch, &layout, &schema)
+        };
+        let (source_of_row, sets) = read(r#"{"__name__":"m","job":"a"}"#).unwrap();
+        assert_eq!(source_of_row, vec![0]);
+        assert_eq!(
+            sets,
+            vec![Labels::from([
+                ("__name__".to_string(), "m".to_string()),
+                ("job".to_string(), "a".to_string()),
+            ])]
+        );
+        let error = read(r#"{"job":"a","__name__":"m"}"#).unwrap_err();
+        assert!(
+            error.to_string().contains("not canonically encoded"),
+            "{error}"
+        );
     }
 
     /// `count without (instance) (m)` outputs `[identity, count: Int64]`: a

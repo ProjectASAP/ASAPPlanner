@@ -1,6 +1,7 @@
 //! PromQL range functions over each series' samples in a time window
 //! (`rate`, `irate`, `changes`, `mad_over_time`, …), and histogram bucket
 //! quantiles; the deployment supplies the window.
+use crate::values::arrow_columns::{float64_array, timestamp_array};
 use crate::{
     operators::{common::Workspace, sort::cooperative_sort},
     runtime::{Cooperative, RunContext},
@@ -23,7 +24,7 @@ pub(in crate::operators) async fn reduce_batch(
     window: Option<(i64, i64)>,
     context: &RunContext,
 ) -> Result<(Vec<arrow::array::ArrayRef>, Vec<Value>), Error> {
-    use arrow::array::{Array, Float64Array, TimestampMillisecondArray};
+    use arrow::array::Array;
     let mut work = Cooperative::new(context);
     let mut workspace = Workspace::new(context)?;
     let mut table = crate::operators::group_table::GroupTable::new(groups.to_vec());
@@ -35,16 +36,11 @@ pub(in crate::operators) async fn reduce_batch(
         &mut work,
     )
     .await?;
-    let values = batch
-        .column(value)
-        .as_any()
-        .downcast_ref::<Float64Array>()
+    let values = float64_array(batch.column(value))
         .ok_or_else(|| Error::Invalid("window value must be Float64".into()))?;
     let coordinates = batch.column(coordinate);
-    let times = coordinates
-        .as_any()
-        .downcast_ref::<TimestampMillisecondArray>();
-    let bounds = coordinates.as_any().downcast_ref::<Float64Array>();
+    let times = timestamp_array(coordinates);
+    let bounds = float64_array(coordinates);
     let (mut buckets, mut points) = (vec![Vec::new(); table.len()], vec![Vec::new(); table.len()]);
     for (row, &group) in ids.iter().enumerate() {
         if values.is_null(row) {
