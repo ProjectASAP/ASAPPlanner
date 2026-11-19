@@ -1,14 +1,19 @@
-//! The front-end-emitted, name-based operator tree: a mirror of the unified
-//! IR ([`NonASAPOp`](asap_types::ir::NonASAPOp) / [`ScalarExpr`](asap_types::ir::ScalarExpr))
-//! before name resolution.
+//! The front-end-emitted, name-based operator tree: the unified IR
+//! ([`NonASAPOp`](asap_types::ir::NonASAPOp) / [`ScalarExpr`]) before name
+//! resolution. Scalar expressions are the IR's own generic types with
+//! [`ColumnRef`] columns; the operator tree is a mirror of `NonASAPOp`.
 //!
-//! Differences from the resolved IR, and nothing else:
+//! Differences of [`UnresolvedOp`] from `NonASAPOp`:
 //! - every `ColumnId` is a name-based [`ColumnRef`];
 //! - `Scan.schema` is `Option<Schema>` — a front end knows the schema only for
 //!   a catalog-backed SQL leaf; `None` (PromQL) defers to the usage-derived
 //!   [`resolve_schema_with_inherited`](crate::schema_resolver::resolve_schema_with_inherited);
 //! - children are `Rc<UnresolvedOp>` rather than `Rc<OperatorNode>` — no
-//!   derived schema exists yet.
+//!   derived schema exists yet;
+//! - `Scan` and `Project` carry the SQL `qualifier` qualified references
+//!   resolve by;
+//! - `PromqlMap` and `PromqlScalarOp` exist only here: resolution lowers them
+//!   to `Project` / `Filter` once the vector schema is known.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -19,90 +24,23 @@ use asap_types::ir::operator::{
     AggIntent, BinaryOpKind, GroupKeys, InfoMatcher, JoinKind, Reduction, RelationalSetOpKind,
     SampleKind, Source, TimeShift, VectorMatch, WindowFrame, WindowFuncKind,
 };
-use asap_types::ir::scalar::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
-use asap_types::ir::schema::{DataType, Schema};
+use asap_types::ir::scalar::{ColumnRef, Predicate, ProjectItem, ScalarExpr, SortKey};
+use asap_types::ir::schema::Schema;
 use asap_types::ir::BinaryOperator;
-use asap_types::ir::{ExprSemantics, TimeRangeKind};
+use asap_types::ir::TimeRangeKind;
+
+/// A name-based scalar expression: the resolved IR's [`ScalarExpr`] with
+/// [`ColumnRef`] columns and operator reads that point into the unresolved
+/// tree.
+pub type UnresolvedScalar = ScalarExpr<Rc<UnresolvedOp>, ColumnRef>;
 
 /// A row-level filter predicate (WHERE clause / PromQL label matcher).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UnresolvedPredicate(pub UnresolvedScalar);
+pub type UnresolvedPredicate = Predicate<Rc<UnresolvedOp>, ColumnRef>;
 
 /// One item in a SELECT projection list.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UnresolvedProjectItem {
-    pub alias: Option<String>,
-    pub expr: UnresolvedScalar,
-}
+pub type UnresolvedProjectItem = ProjectItem<Rc<UnresolvedOp>, ColumnRef>;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UnresolvedSortKey {
-    pub expr: UnresolvedScalar,
-    pub ascending: bool,
-    pub nulls_first: bool,
-}
-
-/// A name-based scalar expression; see
-/// [`ScalarExpr`](asap_types::ir::ScalarExpr) for the meaning of each variant.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum UnresolvedScalar {
-    Column(ColumnRef),
-    Literal(ScalarValue),
-    Negative {
-        expr: Box<UnresolvedScalar>,
-        semantics: ExprSemantics,
-    },
-    Compare {
-        left: Box<UnresolvedScalar>,
-        op: CompareOpKind,
-        right: Box<UnresolvedScalar>,
-        semantics: ExprSemantics,
-    },
-    BoolAnd(Vec<UnresolvedScalar>),
-    BoolOr(Vec<UnresolvedScalar>),
-    Not(Box<UnresolvedScalar>),
-    IsNull(Box<UnresolvedScalar>),
-    IsNotNull(Box<UnresolvedScalar>),
-    Cast {
-        expr: Box<UnresolvedScalar>,
-        to: DataType,
-        try_cast: bool,
-    },
-    InList {
-        expr: Box<UnresolvedScalar>,
-        list: Vec<UnresolvedScalar>,
-        negated: bool,
-    },
-    FunctionCall {
-        name: String,
-        args: Vec<UnresolvedScalar>,
-    },
-    Arithmetic {
-        op: ArithmeticOpKind,
-        left: Box<UnresolvedScalar>,
-        right: Box<UnresolvedScalar>,
-        semantics: ExprSemantics,
-    },
-    Case {
-        operand: Option<Box<UnresolvedScalar>>,
-        branches: Vec<(UnresolvedScalar, UnresolvedScalar)>,
-        else_expr: Option<Box<UnresolvedScalar>>,
-    },
-    CurrentTimestamp,
-    EvalTimestamp,
-    /// PromQL `scalar(v)`. The operator is resolved as a root in its own scope.
-    PromqlScalarFromVector(Rc<UnresolvedOp>),
-    ScalarSubquery(Rc<UnresolvedOp>),
-    Exists {
-        subquery: Rc<UnresolvedOp>,
-        negated: bool,
-    },
-    InSubquery {
-        expr: Box<UnresolvedScalar>,
-        subquery: Rc<UnresolvedOp>,
-        negated: bool,
-    },
-}
+pub type UnresolvedSortKey = SortKey<Rc<UnresolvedOp>, ColumnRef>;
 
 /// The name-based operator tree; see [`NonASAPOp`](asap_types::ir::NonASAPOp)
 /// for the meaning of each variant.
@@ -231,91 +169,6 @@ pub enum UnresolvedOp {
         scalar_left: bool,
         return_bool: bool,
     },
-}
-
-impl UnresolvedScalar {
-    /// The direct scalar sub-expressions (not the operators this expression
-    /// reads — see [`operator_refs`](Self::operator_refs)).
-    pub(crate) fn children(&self) -> Vec<&UnresolvedScalar> {
-        use UnresolvedScalar::*;
-        match self {
-            Column(_)
-            | Literal(_)
-            | CurrentTimestamp
-            | EvalTimestamp
-            | PromqlScalarFromVector(_)
-            | ScalarSubquery(_)
-            | Exists { .. } => vec![],
-            Negative { expr, .. }
-            | Not(expr)
-            | IsNull(expr)
-            | IsNotNull(expr)
-            | Cast { expr, .. }
-            | InSubquery { expr, .. } => vec![expr],
-            Compare { left, right, .. } | Arithmetic { left, right, .. } => vec![left, right],
-            BoolAnd(parts) | BoolOr(parts) => parts.iter().collect(),
-            InList { expr, list, .. } => {
-                let mut v = vec![expr.as_ref()];
-                v.extend(list.iter());
-                v
-            }
-            FunctionCall { args, .. } => args.iter().collect(),
-            Case {
-                operand,
-                branches,
-                else_expr,
-            } => {
-                let mut v = Vec::new();
-                if let Some(op) = operand {
-                    v.push(op.as_ref());
-                }
-                for (when, then) in branches {
-                    v.push(when);
-                    v.push(then);
-                }
-                if let Some(e) = else_expr {
-                    v.push(e.as_ref());
-                }
-                v
-            }
-        }
-    }
-
-    /// Every column referenced in this expression, not inside the operators
-    /// it reads (those have their own scope).
-    pub(crate) fn columns_referenced(&self) -> Vec<&ColumnRef> {
-        let mut out = Vec::new();
-        self.collect_columns(&mut out);
-        out
-    }
-
-    fn collect_columns<'a>(&'a self, out: &mut Vec<&'a ColumnRef>) {
-        if let UnresolvedScalar::Column(c) = self {
-            out.push(c);
-        }
-        for child in self.children() {
-            child.collect_columns(out);
-        }
-    }
-
-    /// The operators this expression (transitively) reads.
-    pub(crate) fn operator_refs(&self) -> Vec<&Rc<UnresolvedOp>> {
-        let mut out = Vec::new();
-        self.collect_operator_refs(&mut out);
-        out
-    }
-
-    fn collect_operator_refs<'a>(&'a self, out: &mut Vec<&'a Rc<UnresolvedOp>>) {
-        use UnresolvedScalar::*;
-        match self {
-            PromqlScalarFromVector(op) | ScalarSubquery(op) => out.push(op),
-            Exists { subquery, .. } | InSubquery { subquery, .. } => out.push(subquery),
-            _ => {}
-        }
-        for child in self.children() {
-            child.collect_operator_refs(out);
-        }
-    }
 }
 
 impl UnresolvedOp {

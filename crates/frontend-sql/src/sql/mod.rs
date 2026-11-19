@@ -54,8 +54,8 @@ use datafusion::sql::parser::DFParser;
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 
 use asap_frontend_common::{
-    resolve_root, UnresolvedOp as Unresolved, UnresolvedPredicate as Predicate,
-    UnresolvedProjectItem as ProjectItem, UnresolvedScalar as Scalar, UnresolvedSortKey as SortKey,
+    resolve_root, UnresolvedOp as Unresolved, UnresolvedProjectItem as ProjectItem,
+    UnresolvedScalar as Scalar, UnresolvedSortKey as SortKey,
 };
 use asap_sql_function_catalog::{AggSemantic, Arity, RewriteKind};
 use asap_types::ir::operator::agg_intent::AggIntent;
@@ -67,7 +67,9 @@ use asap_types::ir::schema::{DataType, FieldDataType, Schema};
 use asap_types::ir::TimeRangeKind;
 
 use asap_types::ir::operator::{JoinKind, RelationalSetOpKind, WindowFuncKind};
-use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, CompareOpKind, ScalarValue};
+use asap_types::ir::scalar::{
+    resolve_column_ref, ColumnRef, CompareOpKind, Predicate, ScalarValue,
+};
 use asap_types::workload::SqlDialect;
 
 use crate::error::SqlError as LoweringError;

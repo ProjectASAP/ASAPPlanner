@@ -36,58 +36,60 @@ pub enum ExprSemantics {
 }
 
 /// A scalar expression over the owning operator's input schema. Column
-/// references are positional [`ColumnId`]s.
+/// references are `Col`: positional [`ColumnId`]s once resolved, name-based
+/// [`ColumnRef`]s in a front end's unresolved tree. `C` is how an
+/// operator-reading variant refers to the operator it reads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ScalarExpr<C = Rc<OperatorNode>> {
-    Column(ColumnId),
+pub enum ScalarExpr<C = Rc<OperatorNode>, Col = ColumnId> {
+    Column(Col),
     Literal(ScalarValue),
     /// Unary minus.
     Negative {
-        expr: Box<ScalarExpr<C>>,
+        expr: Box<ScalarExpr<C, Col>>,
         semantics: ExprSemantics,
     },
     Compare {
-        left: Box<ScalarExpr<C>>,
+        left: Box<ScalarExpr<C, Col>>,
         op: CompareOpKind,
-        right: Box<ScalarExpr<C>>,
+        right: Box<ScalarExpr<C, Col>>,
         semantics: ExprSemantics,
     },
     /// Flat conjunction (logical AND). An empty list is vacuously true.
-    BoolAnd(Vec<ScalarExpr<C>>),
+    BoolAnd(Vec<ScalarExpr<C, Col>>),
     /// Flat disjunction (logical OR). An empty list is vacuously false.
-    BoolOr(Vec<ScalarExpr<C>>),
-    Not(Box<ScalarExpr<C>>),
-    IsNull(Box<ScalarExpr<C>>),
-    IsNotNull(Box<ScalarExpr<C>>),
+    BoolOr(Vec<ScalarExpr<C, Col>>),
+    Not(Box<ScalarExpr<C, Col>>),
+    IsNull(Box<ScalarExpr<C, Col>>),
+    IsNotNull(Box<ScalarExpr<C, Col>>),
     /// `CAST(expr AS to)`; `try_cast` for SQL `TRY_CAST` (NULL on failure).
     Cast {
-        expr: Box<ScalarExpr<C>>,
+        expr: Box<ScalarExpr<C, Col>>,
         to: DataType,
         try_cast: bool,
     },
     /// `expr [NOT] IN (v1, v2, …)`.
     InList {
-        expr: Box<ScalarExpr<C>>,
-        list: Vec<ScalarExpr<C>>,
+        expr: Box<ScalarExpr<C, Col>>,
+        list: Vec<ScalarExpr<C, Col>>,
         negated: bool,
     },
     /// Scalar function call, e.g. `LOWER(col)`, `ABS(x)`.
     FunctionCall {
         name: String,
-        args: Vec<ScalarExpr<C>>,
+        args: Vec<ScalarExpr<C, Col>>,
     },
     Arithmetic {
         op: ArithmeticOpKind,
-        left: Box<ScalarExpr<C>>,
-        right: Box<ScalarExpr<C>>,
+        left: Box<ScalarExpr<C, Col>>,
+        right: Box<ScalarExpr<C, Col>>,
         semantics: ExprSemantics,
     },
     /// SQL `CASE` (both searched and simple forms). `operand` present for the
     /// simple form (`CASE expr WHEN …`), absent for searched.
     Case {
-        operand: Option<Box<ScalarExpr<C>>>,
-        branches: Vec<(ScalarExpr<C>, ScalarExpr<C>)>,
-        else_expr: Option<Box<ScalarExpr<C>>>,
+        operand: Option<Box<ScalarExpr<C, Col>>>,
+        branches: Vec<(ScalarExpr<C, Col>, ScalarExpr<C, Col>)>,
+        else_expr: Option<Box<ScalarExpr<C, Col>>>,
     },
     /// SQL `NOW()` / `CURRENT_TIMESTAMP`: the statement evaluation time.
     CurrentTimestamp,
@@ -106,7 +108,7 @@ pub enum ScalarExpr<C = Rc<OperatorNode>> {
     },
     /// SQL `expr [NOT] IN (subquery)` over a one-column relation.
     InSubquery {
-        expr: Box<ScalarExpr<C>>,
+        expr: Box<ScalarExpr<C, Col>>,
         subquery: C,
         negated: bool,
     },
@@ -114,18 +116,18 @@ pub enum ScalarExpr<C = Rc<OperatorNode>> {
 
 /// A row-level filter predicate (WHERE clause / PromQL label matcher).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Predicate<C = Rc<OperatorNode>>(pub ScalarExpr<C>);
+pub struct Predicate<C = Rc<OperatorNode>, Col = ColumnId>(pub ScalarExpr<C, Col>);
 
 /// One item in a SELECT projection list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProjectItem<C = Rc<OperatorNode>> {
+pub struct ProjectItem<C = Rc<OperatorNode>, Col = ColumnId> {
     pub alias: Option<String>,
-    pub expr: ScalarExpr<C>,
+    pub expr: ScalarExpr<C, Col>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SortKey<C = Rc<OperatorNode>> {
-    pub expr: ScalarExpr<C>,
+pub struct SortKey<C = Rc<OperatorNode>, Col = ColumnId> {
+    pub expr: ScalarExpr<C, Col>,
     pub ascending: bool,
     pub nulls_first: bool,
 }
@@ -141,9 +143,9 @@ impl ScalarExpr {
     }
 }
 
-impl<C> ScalarExpr<C> {
+impl<C, Col> ScalarExpr<C, Col> {
     /// If this expression is a `BoolAnd`, its elements; otherwise `self` alone.
-    pub fn conjuncts(&self) -> &[ScalarExpr<C>] {
+    pub fn conjuncts(&self) -> &[Self] {
         match self {
             ScalarExpr::BoolAnd(v) => v.as_slice(),
             _ => std::slice::from_ref(self),
@@ -151,7 +153,7 @@ impl<C> ScalarExpr<C> {
     }
 
     /// The direct scalar sub-expressions.
-    pub fn children(&self) -> Vec<&ScalarExpr<C>> {
+    pub fn children(&self) -> Vec<&Self> {
         match self {
             ScalarExpr::Column(_)
             | ScalarExpr::Literal(_)
@@ -227,6 +229,163 @@ impl<C> ScalarExpr<C> {
         }
     }
 
+    /// Every column referenced anywhere in this expression (not inside
+    /// referenced operator subgraphs, which have their own scope).
+    pub fn columns_referenced(&self) -> Vec<Col>
+    where
+        Col: Clone,
+    {
+        let mut out = Vec::new();
+        self.collect_columns(&mut out);
+        out
+    }
+
+    fn collect_columns(&self, out: &mut Vec<Col>)
+    where
+        Col: Clone,
+    {
+        if let ScalarExpr::Column(column) = self {
+            out.push(column.clone());
+        }
+        for child in self.children() {
+            child.collect_columns(out);
+        }
+    }
+
+    /// One walk over this expression that rebuilds it with every column
+    /// reference mapped by `column` and every operator node it reads mapped
+    /// by `f`, stopping at the first error. A sub-expression for which
+    /// `replace` gives a result is replaced whole by it instead of walked.
+    /// A front end binds name-based columns to positions with it.
+    pub fn try_rewrite_parts<D, Col2, E>(
+        &self,
+        column: &mut impl FnMut(&Col) -> Result<Col2, E>,
+        f: &mut impl FnMut(&C) -> Result<D, E>,
+        replace: &mut impl FnMut(&Self) -> Option<Result<ScalarExpr<D, Col2>, E>>,
+    ) -> Result<ScalarExpr<D, Col2>, E> {
+        if let Some(replaced) = replace(self) {
+            return replaced;
+        }
+        macro_rules! walk {
+            ($e:expr) => {
+                $e.try_rewrite_parts(column, f, replace)?
+            };
+        }
+        macro_rules! walk_box {
+            ($e:expr) => {
+                Box::new(walk!($e))
+            };
+        }
+        macro_rules! walk_all {
+            ($es:expr) => {
+                $es.iter()
+                    .map(|e| e.try_rewrite_parts(column, f, replace))
+                    .collect::<Result<Vec<_>, E>>()?
+            };
+        }
+        Ok(match self {
+            ScalarExpr::Column(c) => ScalarExpr::Column(column(c)?),
+            ScalarExpr::Literal(v) => ScalarExpr::Literal(v.clone()),
+            ScalarExpr::CurrentTimestamp => ScalarExpr::CurrentTimestamp,
+            ScalarExpr::EvalTimestamp => ScalarExpr::EvalTimestamp,
+            ScalarExpr::PromqlScalarFromVector(node) => {
+                ScalarExpr::PromqlScalarFromVector(f(node)?)
+            }
+            ScalarExpr::ScalarSubquery(node) => ScalarExpr::ScalarSubquery(f(node)?),
+            ScalarExpr::Exists { subquery, negated } => ScalarExpr::Exists {
+                subquery: f(subquery)?,
+                negated: *negated,
+            },
+            ScalarExpr::InSubquery {
+                expr,
+                subquery,
+                negated,
+            } => {
+                // The subquery first, as `operator_refs` lists it.
+                let subquery = f(subquery)?;
+                ScalarExpr::InSubquery {
+                    expr: walk_box!(expr),
+                    subquery,
+                    negated: *negated,
+                }
+            }
+            ScalarExpr::Negative { expr, semantics } => ScalarExpr::Negative {
+                expr: walk_box!(expr),
+                semantics: *semantics,
+            },
+            ScalarExpr::Compare {
+                left,
+                op,
+                right,
+                semantics,
+            } => ScalarExpr::Compare {
+                left: walk_box!(left),
+                op: op.clone(),
+                right: walk_box!(right),
+                semantics: *semantics,
+            },
+            ScalarExpr::BoolAnd(parts) => ScalarExpr::BoolAnd(walk_all!(parts)),
+            ScalarExpr::BoolOr(parts) => ScalarExpr::BoolOr(walk_all!(parts)),
+            ScalarExpr::Not(e) => ScalarExpr::Not(walk_box!(e)),
+            ScalarExpr::IsNull(e) => ScalarExpr::IsNull(walk_box!(e)),
+            ScalarExpr::IsNotNull(e) => ScalarExpr::IsNotNull(walk_box!(e)),
+            ScalarExpr::Cast { expr, to, try_cast } => ScalarExpr::Cast {
+                expr: walk_box!(expr),
+                to: to.clone(),
+                try_cast: *try_cast,
+            },
+            ScalarExpr::InList {
+                expr,
+                list,
+                negated,
+            } => ScalarExpr::InList {
+                expr: walk_box!(expr),
+                list: walk_all!(list),
+                negated: *negated,
+            },
+            ScalarExpr::FunctionCall { name, args } => ScalarExpr::FunctionCall {
+                name: name.clone(),
+                args: walk_all!(args),
+            },
+            ScalarExpr::Arithmetic {
+                op,
+                left,
+                right,
+                semantics,
+            } => ScalarExpr::Arithmetic {
+                op: op.clone(),
+                left: walk_box!(left),
+                right: walk_box!(right),
+                semantics: *semantics,
+            },
+            ScalarExpr::Case {
+                operand,
+                branches,
+                else_expr,
+            } => ScalarExpr::Case {
+                operand: match operand {
+                    Some(e) => Some(walk_box!(e)),
+                    None => None,
+                },
+                branches: branches
+                    .iter()
+                    .map(|(when, then)| {
+                        Ok((
+                            when.try_rewrite_parts(column, f, replace)?,
+                            then.try_rewrite_parts(column, f, replace)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, E>>()?,
+                else_expr: match else_expr {
+                    Some(e) => Some(walk_box!(e)),
+                    None => None,
+                },
+            },
+        })
+    }
+}
+
+impl<C> ScalarExpr<C> {
     /// Rebuild this expression with `f` applied to every operator node it
     /// reads (recursively through scalar children). `f` may change the
     /// reference type, e.g. from `Rc<OperatorNode>` to a node id.
@@ -269,148 +428,21 @@ impl<C> ScalarExpr<C> {
         })
     }
 
-    /// [`Self::map_parts`], with each sub-expression for which `replace`
-    /// gives a replacement replaced whole.
+    /// [`Self::try_rewrite_parts`] that cannot fail.
     fn rewrite_parts<D>(
         &self,
         column: &mut impl FnMut(ColumnId) -> ColumnId,
         f: &mut impl FnMut(&C) -> D,
         replace: &mut impl FnMut(&ScalarExpr<C>) -> Option<ScalarExpr<D>>,
     ) -> ScalarExpr<D> {
-        fn map_box<C, D>(
-            e: &ScalarExpr<C>,
-            column: &mut impl FnMut(ColumnId) -> ColumnId,
-            f: &mut impl FnMut(&C) -> D,
-            replace: &mut impl FnMut(&ScalarExpr<C>) -> Option<ScalarExpr<D>>,
-        ) -> Box<ScalarExpr<D>> {
-            Box::new(e.rewrite_parts(column, f, replace))
-        }
-        if let Some(replaced) = replace(self) {
-            return replaced;
-        }
-        match self {
-            ScalarExpr::Column(c) => ScalarExpr::Column(column(*c)),
-            ScalarExpr::Literal(v) => ScalarExpr::Literal(v.clone()),
-            ScalarExpr::CurrentTimestamp => ScalarExpr::CurrentTimestamp,
-            ScalarExpr::EvalTimestamp => ScalarExpr::EvalTimestamp,
-            ScalarExpr::PromqlScalarFromVector(node) => ScalarExpr::PromqlScalarFromVector(f(node)),
-            ScalarExpr::ScalarSubquery(node) => ScalarExpr::ScalarSubquery(f(node)),
-            ScalarExpr::Exists { subquery, negated } => ScalarExpr::Exists {
-                subquery: f(subquery),
-                negated: *negated,
-            },
-            ScalarExpr::InSubquery {
-                expr,
-                subquery,
-                negated,
-            } => {
-                // The subquery first, as `operator_refs` lists it.
-                let subquery = f(subquery);
-                ScalarExpr::InSubquery {
-                    expr: map_box(expr, column, f, replace),
-                    subquery,
-                    negated: *negated,
-                }
-            }
-            ScalarExpr::Negative { expr, semantics } => ScalarExpr::Negative {
-                expr: map_box(expr, column, f, replace),
-                semantics: *semantics,
-            },
-            ScalarExpr::Compare {
-                left,
-                op,
-                right,
-                semantics,
-            } => ScalarExpr::Compare {
-                left: map_box(left, column, f, replace),
-                op: op.clone(),
-                right: map_box(right, column, f, replace),
-                semantics: *semantics,
-            },
-            ScalarExpr::BoolAnd(parts) => ScalarExpr::BoolAnd(
-                parts
-                    .iter()
-                    .map(|p| p.rewrite_parts(column, f, replace))
-                    .collect(),
-            ),
-            ScalarExpr::BoolOr(parts) => ScalarExpr::BoolOr(
-                parts
-                    .iter()
-                    .map(|p| p.rewrite_parts(column, f, replace))
-                    .collect(),
-            ),
-            ScalarExpr::Not(e) => ScalarExpr::Not(map_box(e, column, f, replace)),
-            ScalarExpr::IsNull(e) => ScalarExpr::IsNull(map_box(e, column, f, replace)),
-            ScalarExpr::IsNotNull(e) => ScalarExpr::IsNotNull(map_box(e, column, f, replace)),
-            ScalarExpr::Cast { expr, to, try_cast } => ScalarExpr::Cast {
-                expr: map_box(expr, column, f, replace),
-                to: to.clone(),
-                try_cast: *try_cast,
-            },
-            ScalarExpr::InList {
-                expr,
-                list,
-                negated,
-            } => ScalarExpr::InList {
-                expr: map_box(expr, column, f, replace),
-                list: list
-                    .iter()
-                    .map(|p| p.rewrite_parts(column, f, replace))
-                    .collect(),
-                negated: *negated,
-            },
-            ScalarExpr::FunctionCall { name, args } => ScalarExpr::FunctionCall {
-                name: name.clone(),
-                args: args
-                    .iter()
-                    .map(|p| p.rewrite_parts(column, f, replace))
-                    .collect(),
-            },
-            ScalarExpr::Arithmetic {
-                op,
-                left,
-                right,
-                semantics,
-            } => ScalarExpr::Arithmetic {
-                op: op.clone(),
-                left: map_box(left, column, f, replace),
-                right: map_box(right, column, f, replace),
-                semantics: *semantics,
-            },
-            ScalarExpr::Case {
-                operand,
-                branches,
-                else_expr,
-            } => ScalarExpr::Case {
-                operand: operand.as_ref().map(|e| map_box(e, column, f, replace)),
-                branches: branches
-                    .iter()
-                    .map(|(w, t)| {
-                        (
-                            w.rewrite_parts(column, f, replace),
-                            t.rewrite_parts(column, f, replace),
-                        )
-                    })
-                    .collect(),
-                else_expr: else_expr.as_ref().map(|e| map_box(e, column, f, replace)),
-            },
-        }
-    }
-
-    /// Every column referenced anywhere in this expression (not inside
-    /// referenced operator subgraphs, which have their own scope).
-    pub fn columns_referenced(&self) -> Vec<ColumnId> {
-        let mut out = Vec::new();
-        self.collect_columns(&mut out);
-        out
-    }
-
-    fn collect_columns(&self, out: &mut Vec<ColumnId>) {
-        if let ScalarExpr::Column(id) = self {
-            out.push(*id);
-        }
-        for child in self.children() {
-            child.collect_columns(out);
+        let result: Result<_, std::convert::Infallible> = self.try_rewrite_parts(
+            &mut |&id| Ok(column(id)),
+            &mut |node| Ok(f(node)),
+            &mut |expr| replace(expr).map(Ok),
+        );
+        match result {
+            Ok(expr) => expr,
+            Err(never) => match never {},
         }
     }
 }

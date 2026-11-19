@@ -685,113 +685,31 @@ fn resolve_expr_in(
     scope: Scope,
     enclosing: &Schema,
 ) -> Result<ScalarExpr, ResolveDAGError> {
-    use UnresolvedScalar as S;
-    let bx = |e: &UnresolvedScalar| -> Result<Box<ScalarExpr>, ResolveDAGError> {
-        Ok(Box::new(resolve_expr_in(e, scope, enclosing)?))
-    };
-    let each = |es: &[UnresolvedScalar]| -> Result<Vec<ScalarExpr>, ResolveDAGError> {
-        es.iter()
-            .map(|e| resolve_expr_in(e, scope, enclosing))
-            .collect()
-    };
-    let op = |o: &UnresolvedOp| resolve_nested_root(o, enclosing);
-    Ok(match expr {
-        S::Column(c) => ScalarExpr::Column(scope.resolve(c)?),
-        S::Literal(s) => ScalarExpr::Literal(s.clone()),
-        S::EvalTimestamp => ScalarExpr::EvalTimestamp,
-        S::CurrentTimestamp => ScalarExpr::CurrentTimestamp,
-        S::Negative { expr, semantics } => ScalarExpr::Negative {
-            expr: bx(expr)?,
-            semantics: *semantics,
-        },
-        S::Compare {
-            left,
-            op,
-            right,
-            semantics,
-        } => ScalarExpr::Compare {
-            left: bx(left)?,
-            op: op.clone(),
-            right: bx(right)?,
-            semantics: *semantics,
-        },
-        S::BoolAnd(v) => ScalarExpr::BoolAnd(each(v)?),
-        S::BoolOr(v) => ScalarExpr::BoolOr(each(v)?),
-        S::Not(e) => ScalarExpr::Not(bx(e)?),
-        S::IsNull(e) => ScalarExpr::IsNull(bx(e)?),
-        S::IsNotNull(e) => ScalarExpr::IsNotNull(bx(e)?),
-        // A cast to the type its operand already has is the operand: SQL's
-        // `ts >= '2026-11-01'` casts the Timestamp column `ts` to DataFusion's
-        // nanosecond timestamp, which is the same IR type.
-        S::Cast { expr, to, try_cast } => {
-            let operand = bx(expr)?;
-            if matches!(operand.scalar_type(scope.schema), Ok((dtype, _)) if dtype == *to) {
-                *operand
-            } else {
-                ScalarExpr::Cast {
-                    expr: operand,
-                    to: to.clone(),
-                    try_cast: *try_cast,
+    expr.try_rewrite_parts(
+        &mut |column| Ok(scope.resolve(column)?),
+        &mut |op| resolve_nested_root(op, enclosing),
+        &mut |expr| match expr {
+            // A cast to the type its operand already has is the operand:
+            // SQL's `ts >= '2026-11-01'` casts the Timestamp column `ts` to
+            // DataFusion's nanosecond timestamp, which is the same IR type.
+            ScalarExpr::Cast {
+                expr: operand,
+                to,
+                try_cast,
+            } => Some(resolve_expr_in(operand, scope, enclosing).map(|operand| {
+                if matches!(operand.scalar_type(scope.schema), Ok((dtype, _)) if dtype == *to) {
+                    operand
+                } else {
+                    ScalarExpr::Cast {
+                        expr: Box::new(operand),
+                        to: to.clone(),
+                        try_cast: *try_cast,
+                    }
                 }
-            }
-        }
-        S::InList {
-            expr,
-            list,
-            negated,
-        } => ScalarExpr::InList {
-            expr: bx(expr)?,
-            list: each(list)?,
-            negated: *negated,
+            })),
+            _ => None,
         },
-        S::FunctionCall { name, args } => ScalarExpr::FunctionCall {
-            name: name.clone(),
-            args: each(args)?,
-        },
-        S::Arithmetic {
-            op,
-            left,
-            right,
-            semantics,
-        } => ScalarExpr::Arithmetic {
-            op: op.clone(),
-            left: bx(left)?,
-            right: bx(right)?,
-            semantics: *semantics,
-        },
-        S::Case {
-            operand,
-            branches,
-            else_expr,
-        } => ScalarExpr::Case {
-            operand: operand.as_deref().map(bx).transpose()?,
-            branches: branches
-                .iter()
-                .map(|(w, t)| {
-                    Ok((
-                        resolve_expr_in(w, scope, enclosing)?,
-                        resolve_expr_in(t, scope, enclosing)?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, ResolveDAGError>>()?,
-            else_expr: else_expr.as_deref().map(bx).transpose()?,
-        },
-        S::PromqlScalarFromVector(o) => ScalarExpr::PromqlScalarFromVector(op(o)?),
-        S::ScalarSubquery(o) => ScalarExpr::ScalarSubquery(op(o)?),
-        S::Exists { subquery, negated } => ScalarExpr::Exists {
-            subquery: op(subquery)?,
-            negated: *negated,
-        },
-        S::InSubquery {
-            expr,
-            subquery,
-            negated,
-        } => ScalarExpr::InSubquery {
-            expr: bx(expr)?,
-            subquery: op(subquery)?,
-            negated: *negated,
-        },
-    })
+    )
 }
 
 /// Resolve name-based group keys positionally, preserving `by`/`without`.
@@ -1046,10 +964,10 @@ fn project_sample(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::unresolved::UnresolvedPredicate;
     use asap_types::ir::operator::{
         BinaryOpKind, JoinKind, PromQLVectorSetOpKind, Source, VectorMatch,
     };
+    use asap_types::ir::scalar::Predicate;
 
     use asap_types::ir::scalar::{CompareOpKind, ScalarValue};
     use asap_types::ir::schema::{DataType, Field};
@@ -1272,7 +1190,7 @@ mod tests {
             }],
             output_names: vec!["total".into()],
             filters: vec![],
-            having: Some(UnresolvedPredicate(UnresolvedScalar::Compare {
+            having: Some(Predicate(UnresolvedScalar::Compare {
                 left: Box::new(named("total")),
                 op: CompareOpKind::Gt,
                 right: Box::new(UnresolvedScalar::Literal(ScalarValue::Float64(1.0))),
@@ -1319,7 +1237,7 @@ mod tests {
         };
         let unresolved = UnresolvedOp::Join {
             kind: JoinKind::Inner,
-            pred: UnresolvedPredicate(UnresolvedScalar::Compare {
+            pred: Predicate(UnresolvedScalar::Compare {
                 left: Box::new(qualified("b")),
                 op: CompareOpKind::Eq,
                 right: Box::new(qualified("a")),
@@ -1347,7 +1265,7 @@ mod tests {
     fn scalar_from_vector_operand_binds_in_its_own_scope() {
         let x = UnresolvedOp::Scan {
             source: Source::TimeSeries { metric: "x".into() },
-            predicates: vec![UnresolvedPredicate(eq_lit(named("a"), "1"))],
+            predicates: vec![Predicate(eq_lit(named("a"), "1"))],
             schema: None,
             qualifier: None,
         };
