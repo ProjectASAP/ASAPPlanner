@@ -53,31 +53,6 @@ impl UnivMonAccumulator {
         })
     }
 
-    /// Adopt a decoded sketch, e.g. one a deployment restored from its stored
-    /// bytes. Rejects dimensions [`Self::new`] rejects and terminal-mode
-    /// sketches, which do not accept this accumulator's updates.
-    pub fn from_sketch(sketch: UnivMon) -> Result<Self, Error> {
-        check_shape(sketch.heap_size, sketch.rows, sketch.cols, sketch.layers)?;
-        if !sketch.accepts_standard_updates() {
-            return Err("terminal-mode UnivMon state cannot accept standard updates".into());
-        }
-        // One walk of the decoded heaps, not one per charge.
-        let keys: Vec<usize> = (0..sketch.layers)
-            .flat_map(|layer| sketch.layer_heaps[layer].heap())
-            .map(|item| match &item.key {
-                asap_sketchlib::OwnedDataInput::String(key) => key.capacity(),
-                asap_sketchlib::OwnedDataInput::Bytes(key) => key.capacity(),
-                _ => 0,
-            })
-            .collect();
-        Ok(Self {
-            inner: sketch,
-            max_key_bytes: keys.iter().copied().max().unwrap_or(0),
-            // The retained keys themselves (already counted per layer).
-            inserted_key_bytes: keys.iter().fold(0, |a, &b| a.saturating_add(b)),
-        })
-    }
-
     /// The underlying sketch, so a deployment can encode it with sketchlib's codec.
     pub fn sketch(&self) -> &UnivMon {
         &self.inner
@@ -240,53 +215,16 @@ mod tests {
             .is_err());
     }
 
-    // A sketch taken out and adopted back answers the same evaluations.
-    #[test]
-    fn adopted_sketch_keeps_evaluations() {
-        let mut state = UnivMonAccumulator::new(32, 5, 1024, 4).unwrap();
-        for value in [1.0, 2.0, 2.0] {
-            state.insert_sample(value).unwrap();
-        }
-        let adopted = UnivMonAccumulator::from_sketch(state.sketch().clone()).unwrap();
-        assert_eq!(adopted.dimensions(), state.dimensions());
-        for query in [
-            count(),
-            SketchStatistic::Cardinality,
-            SketchStatistic::FrequencyEntropy,
-        ] {
-            assert_eq!(
-                adopted.estimate(&query).unwrap(),
-                state.estimate(&query).unwrap()
-            );
-        }
-    }
-
-    // Adoption rejects terminal-mode sketches and dimensions `new` rejects.
-    #[test]
-    fn adoption_rejects_terminal_or_invalid_sketches() {
-        let mut terminal = UnivMon::new(4, 3, 16, 2);
-        terminal.update_weighted_terminal(&DataInput::U64(1), 1);
-        assert!(UnivMonAccumulator::from_sketch(terminal.clone()).is_err());
-        terminal.clear();
-        assert!(UnivMonAccumulator::from_sketch(terminal).is_ok());
-        // `UnivMon::new` refuses 26 rows of 16 columns (130 hash bits); a
-        // state claiming them is refused too.
-        let mut misshapen = UnivMon::new(4, 3, 16, 2);
-        misshapen.rows = 26;
-        assert!(UnivMonAccumulator::from_sketch(misshapen).is_err());
-    }
-
     // A 21-row UnivMon fits the hash budget (21 · (5 + 1) = 126 at 32
     // columns) and sketchlib builds it, but its ASAPv1 encoding refuses more
     // than MATRIX_MAX_ROWS rows, so a deployment could not store it: the
-    // executor refuses it, building or adopting.
+    // executor refuses to build it.
     #[test]
     fn rejects_rows_past_what_the_state_encodes() {
         assert!(UnivMon::new(4, 21, 32, 1).to_asapv1().is_err());
         assert!(UnivMon::new(4, 20, 32, 1).to_asapv1().is_ok());
         assert!(UnivMonAccumulator::new(4, 21, 32, 1).is_err());
         assert!(UnivMonAccumulator::new(4, 20, 32, 1).is_ok());
-        assert!(UnivMonAccumulator::from_sketch(UnivMon::new(4, 21, 32, 1)).is_err());
     }
 
     // Shapes whose hashes are not independent are errors, not library

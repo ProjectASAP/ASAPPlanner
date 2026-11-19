@@ -153,3 +153,45 @@ pub fn planner_node(
         view_coverage: None,
     }
 }
+
+/// A PromQL vector's rows: the full label set (`labels`, a string map) and the
+/// sample `value`, as the executor's vector operators read and write them.
+pub fn promql_vector_schema() -> SchemaRef {
+    use planner_types::ir::schema::{DataType, Field, Schema};
+    let labels = DataType::Map {
+        key: Box::new(DataType::Utf8),
+        value: Box::new(DataType::Utf8),
+        value_nullable: false,
+    };
+    std::sync::Arc::new(Schema::new(vec![
+        Field::plain("labels", labels, false),
+        Field::plain("value", DataType::Float64, false),
+    ]))
+}
+
+/// A PromQL scalar: one `$promql_scalar` value and no labels.
+pub fn promql_scalar_schema() -> SchemaRef {
+    use planner_types::ir::schema::{DataType, Field, Schema};
+    std::sync::Arc::new(Schema::new(vec![Field::plain(
+        "$promql_scalar",
+        DataType::Float64,
+        false,
+    )]))
+}
+
+/// A PromQL range vector's samples: [`promql_vector_schema`] with each
+/// sample's `timestamp` (the time index) and the `window_start` and
+/// `window_end` of the range it belongs to.
+pub fn promql_matrix_schema() -> SchemaRef {
+    use planner_types::ir::schema::{DataType, Field, Schema};
+    let mut fields = promql_vector_schema().fields.clone();
+    fields.insert(1, Field::plain("timestamp", DataType::Timestamp, false));
+    fields.push(Field::plain("window_start", DataType::Timestamp, false));
+    fields.push(Field::plain("window_end", DataType::Timestamp, false));
+    std::sync::Arc::new(Schema {
+        fields,
+        unique_keys: vec![],
+        closed: false,
+        time_index: Some(1),
+    })
+}

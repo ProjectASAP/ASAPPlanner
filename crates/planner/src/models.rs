@@ -64,11 +64,6 @@ impl<'a> PlanningModels<'a> {
         self
     }
 
-    pub fn with_evidence(mut self, evidence: &'a dyn AccuracyEvidence) -> Self {
-        self.evidence = evidence;
-        self
-    }
-
     /// These models with the deployment's cost inputs (cost
     /// model, resource speed, non-repeating query horizon).
     pub fn with_cost_inputs(mut self, cost_inputs: &'a CostInputs) -> Self {

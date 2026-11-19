@@ -125,6 +125,9 @@ impl RunContext {
     pub fn is_cancelled(&self) -> bool {
         self.control.cancelled.get()
     }
+    /// Bytes reserved and not yet released: the Planner's own tests check
+    /// that a finished run releases everything (`test-support`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn retained_bytes(&self) -> usize {
         self.control.bytes.get()
     }

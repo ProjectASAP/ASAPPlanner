@@ -22,7 +22,10 @@ impl Operator {
             output: left,
         })
     }
-    /// Require every candidate key to have an authoritative value at execution.
+    /// Require every candidate key to have an authoritative value at
+    /// execution. A fixture for the Planner's own tests (`test-support`);
+    /// a deployment receives a certified semi join in its stored form.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn certified_semi_join(
         left: SchemaRef,
         right: SchemaRef,

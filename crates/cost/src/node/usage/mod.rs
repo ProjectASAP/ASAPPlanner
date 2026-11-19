@@ -49,7 +49,10 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
 use asap_types::stages::{Lifetime, StorageMedium};
-use asap_types::summary_type::{SketchParams, SketchStatistic, SummaryInputExpr, SummaryUpdate};
+use asap_types::summary_type::{
+    SamplingKind, SamplingParams, SketchParams, SketchStatistic, StatModelKind, StatModelParams,
+    SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams,
+};
 use asap_types::workload::bounds::{
     declared_non_negative, declared_series, declared_value_magnitude_range, group_count_bound,
     source_name, source_rows_per_ms, unchanged_source_columns,
@@ -120,10 +123,16 @@ fn state_family<'a>(
                 .map(StateFamily::Sketch)
                 .ok_or(AnalyticalCostError::UnsupportedCandidate)?,
             FieldDataType::ExactAggregate(kind, _) => StateFamily::Exact(kind),
-            FieldDataType::Plain(_)
-            | FieldDataType::SummarySample(..)
-            | FieldDataType::Wavelet(..)
-            | FieldDataType::StatModel(..) => StateFamily::None,
+            FieldDataType::SummarySample(kind, params) => {
+                sampling_state_family(kind, params).unwrap_or(StateFamily::None)
+            }
+            FieldDataType::Wavelet(kind, params) => {
+                wavelet_state_family(kind, params).unwrap_or(StateFamily::None)
+            }
+            FieldDataType::StatModel(kind, params) => {
+                stat_model_state_family(kind, params).unwrap_or(StateFamily::None)
+            }
+            FieldDataType::Plain(_) => StateFamily::None,
         },
         // A merge over a time range of a chain's windows reads states whose
         // producer (the time range) has no family: they are its own θ's, or
@@ -181,13 +190,42 @@ fn merged_state_family(
         .iter()
         .find_map(|field| match &field.dtype {
             FieldDataType::ExactAggregate(kind, _) => Some(StateFamily::Exact(kind)),
-            FieldDataType::Plain(_)
-            | FieldDataType::Sketch(..)
-            | FieldDataType::SummarySample(..)
-            | FieldDataType::Wavelet(..)
-            | FieldDataType::StatModel(..) => None,
+            FieldDataType::SummarySample(kind, params) => sampling_state_family(kind, params),
+            FieldDataType::Wavelet(kind, params) => wavelet_state_family(kind, params),
+            FieldDataType::StatModel(kind, params) => stat_model_state_family(kind, params),
+            FieldDataType::Plain(_) | FieldDataType::Sketch(..) => None,
         })
         .unwrap_or(StateFamily::None)
+}
+
+/// The measured-cost family of a sampling summary's states: none yet, so
+/// its nodes are costed without a family's entries.
+fn sampling_state_family<'a>(
+    _kind: &SamplingKind,
+    _params: &SamplingParams,
+) -> Option<StateFamily<'a>> {
+    // TODO: implement when an executor builds sampling summaries.
+    None
+}
+
+/// The measured-cost family of a wavelet summary's states: none yet, so its
+/// nodes are costed without a family's entries.
+fn wavelet_state_family<'a>(
+    _kind: &WaveletKind,
+    _params: &WaveletParams,
+) -> Option<StateFamily<'a>> {
+    // TODO: implement when an executor builds wavelet summaries.
+    None
+}
+
+/// The measured-cost family of a statistical-model summary's states: none
+/// yet, so its nodes are costed without a family's entries.
+fn stat_model_state_family<'a>(
+    _kind: &StatModelKind,
+    _params: &StatModelParams,
+) -> Option<StateFamily<'a>> {
+    // TODO: implement when an executor builds statistical-model summaries.
+    None
 }
 
 /// One producer of a node being costed ([`node_resource_usage_and_cost`]): its payload and

@@ -1,7 +1,5 @@
 //! The whole physical plan DAG: how often each node is computed
-//! ([`execution_demand`]), the plan's cost (`cost`) and how plans rank
-//! (`ranking`).
+//! ([`execution_demand`]) and the plan's cost (`cost`).
 
 pub(crate) mod cost;
 pub mod execution_demand;
-pub(crate) mod ranking;

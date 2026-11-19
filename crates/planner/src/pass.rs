@@ -5,21 +5,19 @@
 //! none of the stages' candidate types, so an algorithm with no
 //! candidate-generation phase at all (a greedy MQO loop, say) can implement it
 //! without pretending to have phases it does not have. The shipped algorithm is
-//! one implementation, [`Stage1ToStage3Pass`]: the planning stages in order
+//! one implementation, [`Stage1ToStage3Pass`](crate::Stage1ToStage3Pass): the planning stages in order
 //! ([`run_planning`](crate::run_planning)).
 //!
 //! Call [`optimize`] rather than [`OptimizationPass::optimize`] directly: it
 //! validates the input once for every pass and checks the output contract that
 //! downstream consumers rely on.
 
-use std::collections::BTreeMap;
-
 use asap_types::ir::schema::series_identity::SeriesIdentityError;
 use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
 use crate::models::PlanningModels;
-use crate::run::{SelectionError, Stage1ToStage3Pass};
+use crate::run::SelectionError;
 use asap_stage1_pass1_per_computation_candidates::PerComputationCandidateError;
 use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGValidationError};
 
@@ -150,71 +148,9 @@ fn check_contract(
     Ok(())
 }
 
-// ── Registry ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, thiserror::Error)]
-#[error("a pass named `{0}` is already registered")]
-pub struct PassNameConflict(pub &'static str);
-
-/// Name-keyed lookup, for callers that choose a pass from a string: a CLI flag,
-/// a config file, or a harness sweeping every registered pass over one input.
-///
-/// Deliberately caller-owned rather than a link-time global: two tests in one
-/// binary must not see each other's registrations.
-#[derive(Default)]
-pub struct PassRegistry {
-    passes: BTreeMap<&'static str, Box<dyn OptimizationPass>>,
-}
-
-impl PassRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Only [`Stage1ToStage3Pass`], under the name `stage1-to-stage3`.
-    pub fn with_builtin() -> Self {
-        let mut registry = Self::new();
-        registry
-            .register(Box::new(Stage1ToStage3Pass))
-            .expect("empty registry cannot conflict");
-        registry
-    }
-
-    /// Keyed by `pass.name()`. Registering a name twice is an error rather
-    /// than an overwrite: silently replacing one baseline with another would
-    /// make a comparison run measure the same pass twice.
-    pub fn register(&mut self, pass: Box<dyn OptimizationPass>) -> Result<(), PassNameConflict> {
-        let name = pass.name();
-        if self.passes.contains_key(name) {
-            return Err(PassNameConflict(name));
-        }
-        self.passes.insert(name, pass);
-        Ok(())
-    }
-
-    pub fn get(&self, name: &str) -> Option<&dyn OptimizationPass> {
-        self.passes.get(name).map(AsRef::as_ref)
-    }
-
-    /// Registered names, sorted.
-    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.passes.keys().copied()
-    }
-
-    pub fn len(&self) -> usize {
-        self.passes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.passes.is_empty()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct Stub(&'static str);
 
     fn empty_plan() -> PlanOutput {
         PlanOutput::new(PhysicalASAPDAG {
@@ -223,15 +159,6 @@ mod tests {
             roots: vec![],
             scalar_roots: vec![],
         })
-    }
-
-    impl OptimizationPass for Stub {
-        fn name(&self) -> &'static str {
-            self.0
-        }
-        fn optimize(&self, _input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
-            Ok(empty_plan())
-        }
     }
 
     /// Dropping a query is rejected: the plan's roots answer the workload's
@@ -270,29 +197,5 @@ mod tests {
     #[test]
     fn contract_accepts_an_empty_workload() {
         assert!(check_contract(&empty_plan(), "stub", 0).is_ok());
-    }
-
-    /// Registering a name twice fails instead of overwriting, so a comparison
-    /// run cannot silently measure one pass twice.
-    #[test]
-    fn registry_refuses_a_duplicate_name() {
-        let mut registry = PassRegistry::with_builtin();
-        assert!(registry.register(Box::new(Stub("greedy"))).is_ok());
-        let err = registry.register(Box::new(Stub("greedy"))).unwrap_err();
-        assert_eq!(err.0, "greedy");
-    }
-
-    /// The builtin registry resolves `stage1-to-stage3`, and names come back
-    /// sorted so a sweep over every registered pass is reproducible.
-    #[test]
-    fn registry_resolves_builtin_and_lists_names_in_order() {
-        let mut registry = PassRegistry::with_builtin();
-        registry.register(Box::new(Stub("alpha"))).unwrap();
-        assert!(registry.get("stage1-to-stage3").is_some());
-        assert!(registry.get("absent").is_none());
-        assert_eq!(
-            registry.names().collect::<Vec<_>>(),
-            vec!["alpha", "stage1-to-stage3"]
-        );
     }
 }

@@ -43,7 +43,8 @@ use crate::ir::schema::topk::{ranked_row_projection, topk_output_name};
 use crate::ir::schema::{ColumnId, FieldDataType, Schema};
 use crate::ir::{ASAPOp, NonASAPOp, Operator};
 use crate::summary_type::{
-    SketchStatistic, SummaryInputExpr, SummaryTypeCapability, SummaryUpdate,
+    SamplingKind, SamplingParams, SketchStatistic, StatModelKind, StatModelParams,
+    SummaryInputExpr, SummaryTypeCapability, SummaryUpdate, WaveletKind, WaveletParams,
 };
 use crate::workload::bounds::{declared_column_sign, source_name};
 use crate::workload::{series_facts, SourceFacts};
@@ -526,11 +527,10 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
         FinalizeExactAccumulator { child } => {
             readout_columns(child, output, |state, summary_type| match summary_type {
                 FieldDataType::ExactAggregate(kind, _) => measure_sign(&kind.measure(None), state),
-                FieldDataType::Plain(_)
-                | FieldDataType::Sketch(_)
-                | FieldDataType::SummarySample(..)
-                | FieldDataType::Wavelet(..)
-                | FieldDataType::StatModel(..) => Unknown,
+                FieldDataType::SummarySample(kind, params) => sampling_finalized_sign(kind, params),
+                FieldDataType::Wavelet(kind, params) => wavelet_finalized_sign(kind, params),
+                FieldDataType::StatModel(kind, params) => stat_model_finalized_sign(kind, params),
+                FieldDataType::Plain(_) | FieldDataType::Sketch(_) => Unknown,
             })
         }
         MaintainPopulation { child, .. } => columns_of(child),
@@ -752,6 +752,27 @@ fn state_columns(
     };
     let columns = columns_from_sources(child, &sources, |_, _| updated_with);
     Some((schema, columns))
+}
+
+/// The sign of a value finalized from a sampling summary's state: unknown
+/// until one is built.
+fn sampling_finalized_sign(_kind: &SamplingKind, _params: &SamplingParams) -> ValueSign {
+    // TODO: implement when an executor builds sampling summaries.
+    Unknown
+}
+
+/// The sign of a value finalized from a wavelet summary's state: unknown
+/// until one is built.
+fn wavelet_finalized_sign(_kind: &WaveletKind, _params: &WaveletParams) -> ValueSign {
+    // TODO: implement when an executor builds wavelet summaries.
+    Unknown
+}
+
+/// The sign of a value finalized from a statistical-model summary's state:
+/// unknown until one is built.
+fn stat_model_finalized_sign(_kind: &StatModelKind, _params: &StatModelParams) -> ValueSign {
+    // TODO: implement when an executor builds statistical-model summaries.
+    Unknown
 }
 
 /// A readout of summary state: the state's plain columns are copied in

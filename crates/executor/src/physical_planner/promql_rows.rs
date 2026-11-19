@@ -1,14 +1,6 @@
 //! A bounded PromQL source row carries the entire label set, not just labels
 //! mentioned by the query. The source adapter owns this lossless encoding.
-// Some helpers here serve only the Planner's own tests (`test-support`).
-#![cfg_attr(
-    not(any(test, feature = "test-support")),
-    allow(dead_code, unused_imports)
-)]
 use super::*;
-use planner_types::ir::schema::DataType;
-use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
-use std::rc::Rc;
 
 /// Not a legal PromQL label name, so it cannot shadow a user label.
 pub use planner_types::ir::schema::PROMQL_SERIES_IDENTITY as SERIES_IDENTITY_COLUMN;
@@ -37,7 +29,7 @@ pub fn decode_series_identity(encoded: &str) -> Result<BTreeMap<String, String>,
 /// (JSON escapes only `"`, `\` and control characters), so it is compared
 /// with the excluded names byte for byte; a token with one is compared with
 /// each excluded name's encoding. The input must be canonical, as every
-/// identity the executor writes is (through `series_row`): only its
+/// identity the executor writes is (through [`encode_series_identity`]): only its
 /// structure is checked, so input that is not a JSON object of string
 /// labels is an error, but a non-canonical one (`{"b":"1","a":"2"}`,
 /// `{"a":"\/"}`) or an invalid escape inside a string is copied as it is:
@@ -106,15 +98,10 @@ pub fn series_identity_without(identity: &str, excluding: &[String]) -> Result<S
     Ok(out)
 }
 
-/// Resolve the row representation before candidate search; see
-/// [`planner_types::ir::schema::series_identity::with_promql_series_identity`].
-pub fn with_series_identity(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, Error> {
-    planner_types::ir::schema::series_identity::with_promql_series_identity(root)
-        .map_err(|error| invalid(error.to_string()))
-}
-
 /// Construct source rows only from full identities. The named label columns
 /// are projections of that same identity and cannot independently redefine it.
+/// A fixture for the Planner's own tests (`test-support`).
+#[cfg(any(test, feature = "test-support"))]
 pub fn series_row(
     schema: &SchemaRef,
     labels: &BTreeMap<String, String>,
@@ -122,6 +109,7 @@ pub fn series_row(
     value: f64,
 ) -> Result<Vec<crate::values::Value>, Error> {
     use crate::values::Value;
+    use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
     let identity = encode_series_identity(labels)?;
     let mut found = false;
     let row = schema

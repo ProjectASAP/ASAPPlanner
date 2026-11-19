@@ -19,7 +19,10 @@
 //! have. Which readouts an executor evaluates is its own declaration
 //! (`DeploymentCapabilities::supported_summaries`), not this table's.
 
-use super::{ExactKind, SketchAlgorithm, SketchStatistic};
+use super::{
+    ExactKind, SamplingKind, SamplingParams, SketchAlgorithm, SketchStatistic, StatModelKind,
+    StatModelParams, WaveletKind, WaveletParams,
+};
 use crate::ir::schema::FieldDataType;
 pub use asap_sketchlib::{MergedError, StatisticKind};
 
@@ -216,15 +219,52 @@ impl SummaryTypeCapability {
                         readouts: row.readouts,
                     };
                 }
-                FieldDataType::Plain(_)
-                | FieldDataType::SummarySample(..)
-                | FieldDataType::Wavelet(..)
-                | FieldDataType::StatModel(..) => (None, &[]),
+                FieldDataType::SummarySample(kind, params) => {
+                    return sampling_capability(kind, params)
+                }
+                FieldDataType::Wavelet(kind, params) => return wavelet_capability(kind, params),
+                FieldDataType::StatModel(kind, params) => {
+                    return stat_model_capability(kind, params)
+                }
+                FieldDataType::Plain(_) => (None, &[]),
             };
         Self {
             merge_inputs,
             readouts,
         }
+    }
+}
+
+/// The capability of a sampling summary: none yet (no merge, no readout), so
+/// the planner never chooses one.
+fn sampling_capability(_kind: &SamplingKind, _params: &SamplingParams) -> SummaryTypeCapability {
+    // TODO: implement when an executor builds sampling summaries.
+    SummaryTypeCapability {
+        merge_inputs: None,
+        readouts: &[],
+    }
+}
+
+/// The capability of a wavelet summary: none yet (no merge, no readout), so
+/// the planner never chooses one.
+fn wavelet_capability(_kind: &WaveletKind, _params: &WaveletParams) -> SummaryTypeCapability {
+    // TODO: implement when an executor builds wavelet summaries.
+    SummaryTypeCapability {
+        merge_inputs: None,
+        readouts: &[],
+    }
+}
+
+/// The capability of a statistical-model summary: none yet (no merge, no
+/// readout), so the planner never chooses one.
+fn stat_model_capability(
+    _kind: &StatModelKind,
+    _params: &StatModelParams,
+) -> SummaryTypeCapability {
+    // TODO: implement when an executor builds statistical-model summaries.
+    SummaryTypeCapability {
+        merge_inputs: None,
+        readouts: &[],
     }
 }
 

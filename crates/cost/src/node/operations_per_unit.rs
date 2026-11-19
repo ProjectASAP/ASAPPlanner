@@ -58,7 +58,10 @@
 
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::FieldDataType;
-use asap_types::summary_type::{ExactKind, SketchParams};
+use asap_types::summary_type::{
+    ExactKind, SamplingKind, SamplingParams, SketchParams, StatModelKind, StatModelParams,
+    WaveletKind, WaveletParams,
+};
 
 use crate::node::cost_terms::{CostConstant, NodeCostTerms};
 use crate::node::state_bytes::StateInputRows;
@@ -1093,14 +1096,47 @@ pub(crate) fn chain_emit_terms_per_state(summary_type: &FieldDataType) -> NodeCo
         FieldDataType::ExactAggregate(..) => {
             NodeCostTerms::of(CostConstant::ExactChainEmitOperationsPerState, 1.0)
         }
-        FieldDataType::Sketch(..)
-        | FieldDataType::Plain(..)
-        | FieldDataType::SummarySample(..)
-        | FieldDataType::Wavelet(..)
-        | FieldDataType::StatModel(..) => {
+        FieldDataType::SummarySample(kind, params) => {
+            sampling_chain_emit_terms_per_state(kind, params)
+        }
+        FieldDataType::Wavelet(kind, params) => wavelet_chain_emit_terms_per_state(kind, params),
+        FieldDataType::StatModel(kind, params) => {
+            stat_model_chain_emit_terms_per_state(kind, params)
+        }
+        FieldDataType::Sketch(..) | FieldDataType::Plain(..) => {
             NodeCostTerms::of(CostConstant::SketchChainEmitOperationsPerState, 1.0)
         }
     }
+}
+
+/// The operations per state a chain of sampling summaries costs to emit
+/// each window's state: a sketch's 2,500 until one is measured.
+fn sampling_chain_emit_terms_per_state(
+    _kind: &SamplingKind,
+    _params: &SamplingParams,
+) -> NodeCostTerms {
+    // TODO: implement when an executor builds sampling summaries.
+    NodeCostTerms::of(CostConstant::SketchChainEmitOperationsPerState, 1.0)
+}
+
+/// The operations per state a chain of wavelet summaries costs to emit each
+/// window's state: a sketch's 2,500 until one is measured.
+fn wavelet_chain_emit_terms_per_state(
+    _kind: &WaveletKind,
+    _params: &WaveletParams,
+) -> NodeCostTerms {
+    // TODO: implement when an executor builds wavelet summaries.
+    NodeCostTerms::of(CostConstant::SketchChainEmitOperationsPerState, 1.0)
+}
+
+/// The operations per state a chain of statistical-model summaries costs to
+/// emit each window's state: a sketch's 2,500 until one is measured.
+fn stat_model_chain_emit_terms_per_state(
+    _kind: &StatModelKind,
+    _params: &StatModelParams,
+) -> NodeCostTerms {
+    // TODO: implement when an executor builds statistical-model summaries.
+    NodeCostTerms::of(CostConstant::SketchChainEmitOperationsPerState, 1.0)
 }
 
 /// How the summary state an estimate reads was last written, which a

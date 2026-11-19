@@ -129,6 +129,9 @@ impl CompiledPhysicalDAG {
             Node::MaterializedView(_) | Node::RawData(_) => None,
         }
     }
+    /// The operator node `id` runs, by name: the Planner's own tests check
+    /// which operator lowering chose (`test-support`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn operator_name(&self, id: NodeId) -> Option<&str> {
         match self.nodes.get(&id)? {
             Node::MaterializedView(_) => Some("MaterializedView"),
@@ -139,14 +142,6 @@ impl CompiledPhysicalDAG {
 
     pub fn roots(&self) -> &[NodeId] {
         &self.roots
-    }
-    /// Each input slot (raw data and materialized view) and its schema.
-    pub fn input_slots(&self) -> impl Iterator<Item = (NodeId, &SchemaRef)> {
-        self.nodes.iter().filter_map(|(&id, node)| match node {
-            Node::MaterializedView(MaterializedViewSlot { schema, .. })
-            | Node::RawData(RawDataSlot { schema, .. }) => Some((id, schema)),
-            Node::Operator { .. } => None,
-        })
     }
     /// The schema of a node's output, without opening deployment readers.
     pub fn output_schema(&self, id: NodeId) -> Result<SchemaRef, Error> {

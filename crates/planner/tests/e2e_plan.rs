@@ -5,11 +5,12 @@ use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::PlanningModels;
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
 use asap_planner::{
-    run_planning, OptimizationInput, OptimizationPass, OptimizeError, PlanOutput,
+    optimize, run_planning, OptimizationInput, OptimizationPass, OptimizeError, PlanOutput,
     Stage1ToStage3Pass,
 };
 use asap_types::accuracy::{AccuracyMetric, AccuracyTarget};
 use asap_types::ir::schema::{DataType, Field, Schema};
+use asap_types::workload::parsed_workload::ParsedWorkload;
 use asap_types::workload::{
     BatchEntry, DataArrival, DataWorkload, DurationMs, PlanningWorkload, Predictability, Query,
     QueryLanguage, QueryRequirements, QueryWorkload, RepeatedDemand, RepeatingEntry,
@@ -104,6 +105,19 @@ async fn plans_every_query_in_entry_order() {
     assert!(output.plan.scalar_roots.is_empty());
 }
 
+/// `workload`'s SQL entries lowered by the SQL frontend, in entry order: the
+/// input an optimization pass receives.
+async fn parsed_sql_workload(workload: &PlanningWorkload, catalog: &SqlCatalog) -> ParsedWorkload {
+    let mut roots = Vec::new();
+    for entry in workload.query_workload.entries() {
+        let expr = lower_sql_dialect(&entry.query.0, catalog, SqlDialect::DataFusionSQL)
+            .await
+            .expect("lowers");
+        roots.push(expr.into());
+    }
+    ParsedWorkload::from_roots(workload.clone(), roots).expect("one root per entry")
+}
+
 /// The facade returns the plan the planning stages build over the frontends'
 /// roots ([`run_planning`]).
 #[tokio::test]
@@ -194,7 +208,8 @@ async fn lowers_repeating_sql_entries_too() {
 }
 
 /// A caller-supplied pass replaces the shipped algorithm entirely: the trait is
-/// the whole optimization stage, not a rule inside it.
+/// the whole optimization stage, not a rule inside it, and [`optimize`] runs
+/// it over the frontends' roots.
 #[tokio::test]
 async fn runs_a_caller_supplied_pass_instead_of_the_shipped_one() {
     struct CountingPass;
@@ -218,23 +233,18 @@ async fn runs_a_caller_supplied_pass_instead_of_the_shipped_one() {
         None,
     );
     let catalog = lineitem_catalog();
-    let pass = CountingPass;
-    let input = UserInput::new(
-        &workload,
-        FrontendInput::Sql { catalog: &catalog },
-        PlanningModels::builtin(),
-    )
-    .with_pass(&pass);
+    let parsed = parsed_sql_workload(&workload, &catalog).await;
+    let input = OptimizationInput::new(&parsed, PlanningModels::builtin());
 
-    let err = e2e_plan(input).await.unwrap_err();
-    let PlanError::Optimize(OptimizeError::ContractViolation { pass, detail }) = err else {
+    let err = optimize(&CountingPass, input).unwrap_err();
+    let OptimizeError::ContractViolation { pass, detail } = err else {
         panic!("expected the caller's pass to have run");
     };
     assert_eq!(pass, "counting");
     assert_eq!(detail, "saw 1 entry/entries");
 }
 
-/// The harness catches a pass whose plan answers fewer queries than the
+/// [`optimize`] catches a pass whose plan answers fewer queries than the
 /// workload has, rather than letting the plan reach a deployment.
 #[tokio::test]
 async fn harness_rejects_a_pass_that_drops_a_query() {
@@ -256,22 +266,17 @@ async fn harness_rejects_a_pass_that_drops_a_query() {
         None,
     );
     let catalog = lineitem_catalog();
-    let pass = Mangling;
-    let input = UserInput::new(
-        &workload,
-        FrontendInput::Sql { catalog: &catalog },
-        PlanningModels::builtin(),
-    )
-    .with_pass(&pass);
+    let parsed = parsed_sql_workload(&workload, &catalog).await;
+    let input = OptimizationInput::new(&parsed, PlanningModels::builtin());
 
-    let err = e2e_plan(input).await.unwrap_err();
+    let err = optimize(&Mangling, input).unwrap_err();
     assert!(
         matches!(
             err,
-            PlanError::Optimize(OptimizeError::ContractViolation {
+            OptimizeError::ContractViolation {
                 pass: "mangling",
                 ..
-            })
+            }
         ),
         "got {err}"
     );

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 /// returns the rows whose time ranges tile the requested range exactly, and
 /// fails when one is missing.
 ///
-/// A raw table is bound whole ([`Self::with_raw_data`]): every read returns
+/// A raw table is bound whole (`with_raw_data`, `test-support`): every read returns
 /// every row; or bound for appending ([`Self::with_appended_raw_data`]): a
 /// runtime appends each batch of samples with the `(start, end]` it covers
 /// as it arrives, a read returns the batches overlapping the requested
@@ -40,7 +40,9 @@ struct RawTable {
 }
 
 enum RawRows {
-    /// Bound whole: every read returns every row.
+    /// Bound whole: every read returns every row. Only the Planner's own
+    /// tests bind a table whole (`InMemoryDataStore::with_raw_data`).
+    #[cfg(any(test, feature = "test-support"))]
     Whole(Vec<Batch>),
     /// Appended as samples arrive, oldest first; appending drops the rows
     /// ending `lookback_ms` or more before the newest end (`None`: kept
@@ -53,7 +55,10 @@ enum RawRows {
 
 impl InMemoryDataStore {
     /// Bind `batches`, all in `schema`, as the rows of `source`. Bad input
-    /// when `source` is already bound or a batch is in another schema.
+    /// when `source` is already bound or a batch is in another schema. A
+    /// fixture for the Planner's own tests (`test-support`); a runtime binds
+    /// raw data for appending ([`Self::with_appended_raw_data`]).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_raw_data(
         mut self,
         source: Source,
@@ -105,10 +110,14 @@ impl InMemoryDataStore {
             .iter_mut()
             .find(|table| &table.source == source)
             .ok_or_else(|| Error::Invalid(format!("unbound raw data: {source:?}")))?;
-        let RawRows::Appended { lookback_ms, rows } = &mut table.rows else {
-            return Err(Error::Invalid(format!(
-                "raw data {source:?} is bound whole, not for appending"
-            )));
+        let (lookback_ms, rows) = match &mut table.rows {
+            RawRows::Appended { lookback_ms, rows } => (lookback_ms, rows),
+            #[cfg(any(test, feature = "test-support"))]
+            RawRows::Whole(_) => {
+                return Err(Error::Invalid(format!(
+                    "raw data {source:?} is bound whole, not for appending"
+                )))
+            }
         };
         if batches.iter().any(|batch| batch.schema() != &table.schema) {
             return Err(Error::Invalid("raw data batch schema mismatch".into()));
@@ -136,10 +145,12 @@ impl InMemoryDataStore {
         self.raw_data
             .iter()
             .map(|table| match &table.rows {
+                #[cfg(any(test, feature = "test-support"))]
                 RawRows::Whole(batches) => batches_bytes(batches),
-                RawRows::Appended { rows, .. } => {
-                    rows.iter().map(|(_, batches)| batches_bytes(batches)).sum()
-                }
+                RawRows::Appended { rows, .. } => rows
+                    .iter()
+                    .map(|(_, batches)| batches_bytes(batches))
+                    .sum::<usize>(),
             })
             .sum()
     }
@@ -256,6 +267,7 @@ impl DataStore for InMemoryDataStore {
         // An appended table returns the batches overlapping the requested
         // range; the executor re-applies it row by row.
         let batches: Box<dyn Iterator<Item = &Batch>> = match (&table.rows, request.time_range_ms) {
+            #[cfg(any(test, feature = "test-support"))]
             (RawRows::Whole(batches), _) => Box::new(batches.iter()),
             (RawRows::Appended { rows, .. }, None) => {
                 Box::new(rows.iter().flat_map(|(_, batches)| batches))

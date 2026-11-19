@@ -14,6 +14,9 @@ use planner_types::ir::operator::asap::evaluated_rows_kind;
 use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as PlannerReduction};
 use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
 use planner_types::ir::schema::{DataType, FieldDataType};
+use planner_types::ir::{
+    ASAPOp, NonASAPOp, OperatorNode, OperatorResultKind, ScalarExpr, TimeRangeKind,
+};
 use planner_types::plan::materialized_view::MaterializedView;
 use planner_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
@@ -23,12 +26,6 @@ use planner_types::plan::time_window::{InputRows, TimeIndexedPlan};
 use planner_types::plan::TimeWindow;
 use planner_types::summary_type::{
     SketchParams, SketchStatistic, SummaryInputExpr, SummaryTypeCapability,
-};
-// `promql_rows` reads `OperatorNode` through `super::*` only in its
-// test-support helpers.
-#[cfg_attr(not(any(test, feature = "test-support")), allow(unused_imports))]
-use planner_types::ir::{
-    ASAPOp, NonASAPOp, OperatorNode, OperatorResultKind, ScalarExpr, TimeRangeKind,
 };
 mod logical;
 use std::{
@@ -47,7 +44,6 @@ fn invalid(message: impl Into<String>) -> Error {
 pub mod promql_rows;
 #[cfg(not(feature = "test-support"))]
 pub(crate) mod promql_rows;
-pub mod promql_values;
 
 mod compiled;
 pub use compiled::CompiledPhysicalDAG;

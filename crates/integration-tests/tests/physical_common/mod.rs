@@ -141,7 +141,7 @@ pub fn labels(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, Stri
 }
 
 /// Run `root`, lowered with its series identity
-/// (`promql_rows::with_series_identity`), at query time
+/// (`with_promql_series_identity`), at query time
 /// `evaluation_time_ms` over `samples`, bound at each of its `Scan`s as a
 /// runtime binds them: the root's batches.
 #[allow(dead_code)]
