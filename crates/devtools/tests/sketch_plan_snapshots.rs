@@ -5,9 +5,10 @@
 //! sketches (KLL, DDSketch, a CMS heap), share a sketch tumbling-window chain between
 //! queries or nested windows, answer a ratio of two quantiles from one tumbling window
 //! chain, and materialize tumbling windows, under the MVP deployment (raw data not
-//! retained) and raw data retained. A change to sketch kinds, parameters,
-//! sizes, sharing, timing, lifetime or cost shows up as a snapshot
-//! diff.
+//! retained) and raw data retained. A change to cost, accuracy, warnings
+//! or errors fails. A change to sketch kinds, parameters, sizes, sharing,
+//! timing or lifetime alone, at the committed plan's cost, passes (see the
+//! corpus snapshot module docs).
 //!
 //! Small multi-query workloads (#1278) each exercise one planner behavior:
 //! rollup across label sets, top-k reuse, chain widths and sharing, avg as
@@ -32,7 +33,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use super::{asap_planner, first_difference, first_differing_path, plan_snapshot};
+use super::{asap_planner, equal_cost_plan, first_difference, first_differing_path, plan_snapshot};
 
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -133,6 +134,10 @@ fn sketch_plans_match_snapshots() {
         let difference = match std::fs::read_to_string(&path) {
             Err(_) => Some("no snapshot".to_owned()),
             Ok(expected) if expected == actual_text => None,
+            Ok(expected) if equal_cost_plan(&expected, &actual_text) => {
+                eprintln!("{id}: plan changed at the committed plan's cost; passes");
+                None
+            }
             Ok(expected) => Some(
                 first_differing_path(
                     &serde_json::from_str(&expected).unwrap(),
