@@ -93,17 +93,20 @@ convert batches to rows (`Batch::to_rows`), the likely hot spots.
    `definition.open(ctx)`, where `ctx` holds the evaluation time. `@`
    (`evaluate_at`) stays a runtime action: the runtime opens the operator's
    inputs with a shifted `ctx`.
-10. **Every operator can run at ingestion time in per-window batch mode;
-    only the tumbling-window chain's operators support `advance`** (proposed,
-    not yet agreed). The planner places a node at ingestion time when its
-    result does not depend on the evaluation time, not by operator kind, so
-    almost any operator, including joins and `aligned_binary`, can reach an
-    ingestion plan (§8). Per-window batch mode is what runs today: a fresh
-    instance per ingestion window, `push` all, `finish`. `advance` is needed
-    only to keep state across windows; in the first version it is supported
-    by `filter`, `project`, `time_range`, `per_group_summary_build` and
-    `window_end_timestamp`, which make up every ingestion-time chain in the
-    corpus snapshots. Two-input operators stay per-window batch.
+10. **Two separate properties per operator** (proposed, not yet agreed):
+    - *Incremental or buffering, within a window.* Every operator receives
+      input as mini-batches through `push`. Some compute on each batch and
+      keep only state: stateless operators and aggregates, e.g. a KLL build
+      keeps the sketch, not the rows. Others must buffer rows until
+      `finish`: sort, a join's build side, set operations. Each operator
+      declares which it is (DataFusion's `EmissionType`, our `Emission`).
+    - *State across windows (`advance`).* Every operator can run at
+      ingestion time with state that lives for one window, as today. In the
+      first version only the operators of an ingestion-time summary chain
+      support `advance`: the chain's `time_range`, `per_group_summary_build`
+      and `window_end_timestamp`, plus the `filter` and `project` between
+      the scan and the chain. These are the only operators in the
+      ingestion-time plans of the corpus snapshots (§8).
 11. **Migration is incremental.** A generic driver runs any `OperatorLogic`
     as today's `PhysicalOperator`, so operators move one at a time and the
     existing executor tests check each move. Order: stateless operators,
@@ -219,12 +222,16 @@ None open. §8 and §9 record the investigations that answered them.
 
 ## 8. Finding: operators at ingestion time
 
-- **Placement rule.** A node may run at ingestion time if its result does
-  not depend on the evaluation time (no `TimeRange` relative to it, no
-  `now()`, `time()` or `@ start()`/`@ end()`), or if it feeds such a node
-  (`ingestion_time_offered_per_group` in
-  `crates/stage2-physical-optimization/src/group.rs`). Stage 2 does not
-  filter by operator kind.
+- **Placement rule.** The planner places a node at ingestion time if its
+  result does not depend on the query's evaluation time, or if it feeds such
+  a node (`ingestion_time_offered_per_group` in
+  `crates/stage2-physical-optimization/src/group.rs`). It does not check the
+  operator kind. A summary chain does not depend on the evaluation time: its
+  tumbling windows are fixed in absolute time. A logical `TimeRange`
+  relative to the evaluation time does. Example: in
+  `sum_over_time(m[5m])` over 1-minute chain windows, the chain runs at
+  ingestion time, and the `TimeRange(5m)` that merges the last five windows
+  runs at query time.
 - **Observed.** Every ingestion-time node in the corpus snapshots is a
   `Scan` or a tumbling-window summary chain. A chain lowers to `time_range`
   → `per_group_summary_build` → `window_end_timestamp`, with `filter` and
