@@ -61,16 +61,18 @@ convert batches to rows (`Batch::to_rows`), the likely hot spots.
    built on it. For example, `SortExec` (`physical-plan/src/sorts/sort.rs`)
    pulls its input by calling `execute()` on a child plan, reserves memory
    from the `MemoryPool`, spills to disk through `RuntimeEnv`, and uses tokio
-   for spill I/O. To run it on our data we would build a small plan per run:
+   for spill I/O. Running a `*Exec` on our data (rejected) would need a
+   small DataFusion plan per run:
 
    ```text
    our batches ──▶ StreamLeaf (an ExecutionPlan we write) ──▶ SortExec ──▶ output stream
    ```
 
    That buffers all input until `finish`, needs an async driver, and brings
-   back the memory accounting decision 2 removes. So we use only DataFusion
-   components that do not need this layer (§3), and copy logic that is only
-   available inside a `*Exec`.
+   back the memory accounting decision 2 removes. So we never run a
+   `*Exec`: we call only DataFusion components that do not need this layer
+   ("wrap", §3), and copy logic that is only available inside a `*Exec`
+   ("copy"), e.g. sort and the hash-join probe (§5).
 4. **Late data is dropped:** an emitted window is final.
 5. **No checkpointing** of operator state for now.
 6. **First step:** split operator logic from the runtime (decision 1)
@@ -109,7 +111,7 @@ convert batches to rows (`Batch::to_rows`), the likely hot spots.
 12. **Depend on `datafusion-physical-plan` for `GroupValues`**, although it
     pulls in DataFusion's runtime crates at compile time. Copy `GroupValues`
     only if build time or version conflicts hurt.
-13. **Pin DataFusion 54.2.0** (proposed, not yet agreed). It is the newest release on our Arrow major
+13. **Pin DataFusion 54.2.0.** It is the newest release on our Arrow major
     version (58), so no Arrow upgrade is needed. Releases and their Arrow
     versions: 54.x → 58, 55.x → 59, 56 (release candidate, Nov 2026) → 60.
     The APIs this doc uses are public in 54.2.0; `TopK` and `ExternalSorter`
@@ -118,7 +120,7 @@ convert batches to rows (`Batch::to_rows`), the likely hot spots.
 ## 3. Wrap, copy or implement
 
 - **Wrap:** call a public DataFusion component that needs no DataFusion
-  runtime. No measurable overhead: it is a direct call on the `RecordBatch`
+  runtime (never a `*Exec`). No measurable overhead: it is a direct call on the `RecordBatch`
   our `Batch` already holds.
 - **Copy:** port DataFusion code into our crate, for logic that is either
   private (`TopK`) or reachable only through an `ExecutionPlan` (hash join
