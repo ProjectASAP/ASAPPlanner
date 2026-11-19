@@ -1,7 +1,8 @@
 # Reusing DataFusion Operator Implementations
 
 > Status: proposal, not implemented. Audience: executor designers.
-> Checked against `asap-executor` on `main` and DataFusion 57.
+> Checked against `asap-executor` on `main`, DataFusion `main` (57.0.0-dev)
+> and the DataFusion 54.2.0 release.
 
 ## 1. Context
 
@@ -49,17 +50,27 @@ convert batches to rows (`Batch::to_rows`), the likely hot spots.
    streaming. `compute` covers only stateless operators: here it is a `push`
    that returns one batch. `init / update / finalize` is the shape of an
    aggregation's state, which §4 keeps and extends.
-2. **No reservations, yields or cancellation** in operators.
-3. **No DataFusion runtime** (`ExecutionPlan`, `TaskContext`, async
-   streams). A DataFusion operator pulls its input from child plans. To run
-   `SortExec` on our data we would build a small plan per run:
+2. **No memory accounting, cooperative yields or cancellation**, in
+   operators or in the runtime. The runtime's `MemoryLimit` failure and run
+   cancellation are removed. The runtime stays async only because store reads
+   are async; operators are synchronous calls.
+3. **No DataFusion execution layer.** By "DataFusion's runtime" this doc means
+   the machinery DataFusion's own operators run on: the `ExecutionPlan`
+   trait, `TaskContext` and `RuntimeEnv` (memory pool, spill files), async
+   record-batch streams, and tokio. Every DataFusion `*Exec` operator is
+   built on it. For example, `SortExec` (`physical-plan/src/sorts/sort.rs`)
+   pulls its input by calling `execute()` on a child plan, reserves memory
+   from the `MemoryPool`, spills to disk through `RuntimeEnv`, and uses tokio
+   for spill I/O. To run it on our data we would build a small plan per run:
 
    ```text
    our batches ──▶ StreamLeaf (an ExecutionPlan we write) ──▶ SortExec ──▶ output stream
    ```
 
-   That buffers all input until `finish`, needs an async driver, and does
-   not fit decision 1.
+   That buffers all input until `finish`, needs an async driver, and brings
+   back the memory accounting decision 2 removes. So we use only DataFusion
+   components that do not need this layer (§3), and copy logic that is only
+   available inside a `*Exec`.
 4. **Late data is dropped:** an emitted window is final.
 5. **No checkpointing** of operator state for now.
 6. **First step:** split operator logic from the runtime (decision 1)
@@ -80,10 +91,17 @@ convert batches to rows (`Batch::to_rows`), the likely hot spots.
    `definition.open(ctx)`, where `ctx` holds the evaluation time. `@`
    (`evaluate_at`) stays a runtime action: the runtime opens the operator's
    inputs with a shifted `ctx`.
-10. **Only operators that ingestion-time plans use support `advance`.** All
-    others are batch-only, and the runtime rejects a streaming plan that
-    contains one. Two-input operators are batch-only unless that list
-    contains one.
+10. **Every operator can run at ingestion time in per-window batch mode;
+    only the tumbling-window chain's operators support `advance`** (proposed,
+    not yet agreed). The planner places a node at ingestion time when its
+    result does not depend on the evaluation time, not by operator kind, so
+    almost any operator, including joins and `aligned_binary`, can reach an
+    ingestion plan (§8). Per-window batch mode is what runs today: a fresh
+    instance per ingestion window, `push` all, `finish`. `advance` is needed
+    only to keep state across windows; in the first version it is supported
+    by `filter`, `project`, `time_range`, `per_group_summary_build` and
+    `window_end_timestamp`, which make up every ingestion-time chain in the
+    corpus snapshots. Two-input operators stay per-window batch.
 11. **Migration is incremental.** A generic driver runs any `OperatorLogic`
     as today's `PhysicalOperator`, so operators move one at a time and the
     existing executor tests check each move. Order: stateless operators,
@@ -91,6 +109,11 @@ convert batches to rows (`Batch::to_rows`), the likely hot spots.
 12. **Depend on `datafusion-physical-plan` for `GroupValues`**, although it
     pulls in DataFusion's runtime crates at compile time. Copy `GroupValues`
     only if build time or version conflicts hurt.
+13. **Pin DataFusion 54.2.0** (proposed, not yet agreed). It is the newest release on our Arrow major
+    version (58), so no Arrow upgrade is needed. Releases and their Arrow
+    versions: 54.x → 58, 55.x → 59, 56 (release candidate, Nov 2026) → 60.
+    The APIs this doc uses are public in 54.2.0; `TopK` and `ExternalSorter`
+    are private there too.
 
 ## 3. Wrap, copy or implement
 
@@ -149,9 +172,10 @@ built-ins. Consequences:
   emit (`EmitTo::First(n)`) does not work here, because group ids follow
   arrival order, not window order.
 - `evaluate` and `state` reset what they emit. A sliding window reads the
-  same tumbling-window state several times, so our accumulators implement
-  the non-resetting `evaluate_preserving` / `state_preserving` (DataFusion
-  PR #24714).
+  same tumbling-window state several times, so our sketch accumulators also
+  provide non-resetting reads. Our operators call these directly, so we do
+  not need DataFusion's own version of them (`evaluate_preserving` /
+  `state_preserving`, first released in DataFusion 56).
 - HydraCms (one state shared by all groups) does not fit and stays ours.
 
 ## 5. Per-operator mapping
@@ -160,7 +184,7 @@ Operators are in `crates/executor/src/operators/`.
 
 | Operator | How | Detail |
 | --- | --- | --- |
-| `project`, `filter`, scalar `Expression` | Wrap | Expressions are lowered to DataFusion `PhysicalExpr`s; `filter` then applies Arrow's `filter` kernel. PromQL label expressions (`LabelSet`, `Label`, `LabelIdentity`) have no DataFusion equivalent and become our own `PhysicalExpr`s. |
+| `project`, `filter`, scalar `Expression` | Wrap + implement | Expressions are lowered to DataFusion `PhysicalExpr`s; `filter` then applies Arrow's `filter` kernel. About half of our expression forms map directly, a third need care when lowering, and the rest are ours (§9). |
 | `aggregate` | Wrap + implement | Grouping uses `GroupValues`, and SQL aggregates use DataFusion's accumulators. PromQL `avg`, `quantile`, compensated `sum` and the NaN rules of `min`/`max` differ from DataFusion's, so they are our own `GroupsAccumulator`s. |
 | `sql_window` | Wrap | SQL window functions use DataFusion's built-in implementations (`PartitionEvaluator`), whose semantics `sql_window` already follows. |
 | `sort` (grouped, optional top-k) | Copy | Sorting uses Arrow's `lexsort_to_indices` and `take`. Top-k is copied from DataFusion's `TopK`, which is private. |
@@ -184,16 +208,59 @@ Operators are in `crates/executor/src/operators/`.
   Accumulator state does: see the non-resetting reads in §4.
 - **Version churn.** These are low-level DataFusion APIs. Pin the version.
 - **Arrow version.** DataFusion and our crate must use the same Arrow major
-  version. We use Arrow 58; the DataFusion `main` checked here uses Arrow 60.
-  `evaluate_preserving` / `state_preserving` may not be in a released
-  DataFusion yet.
+  version (decision 13). Each DataFusion upgrade may force an Arrow upgrade,
+  which reaches every deployment that builds against `asap-executor`.
 
 ## 7. Open questions
 
-**Q1. Which operators do ingestion-time plans use?** This is the set that
-must support `advance` (decision 10). To be listed from the physical
-compiler.
+None open. §8 and §9 record the investigations that answered them.
 
-**Q2. How much of `Expression::Planner` (the Planner's full scalar IR) can be
-lowered to DataFusion's `PhysicalExpr` and built-in functions?** Needs a pass
-over the scalar IR before migrating `project` and `filter`.
+## 8. Finding: operators at ingestion time
+
+- **Placement rule.** A node may run at ingestion time if its result does
+  not depend on the evaluation time (no `TimeRange` relative to it, no
+  `now()`, `time()` or `@ start()`/`@ end()`), or if it feeds such a node
+  (`ingestion_time_offered_per_group` in
+  `crates/stage2-physical-optimization/src/group.rs`). Stage 2 does not
+  filter by operator kind.
+- **Observed.** Every ingestion-time node in the corpus snapshots is a
+  `Scan` or a tumbling-window summary chain. A chain lowers to `time_range`
+  → `per_group_summary_build` → `window_end_timestamp`, with `filter` and
+  `project` between scan and chain.
+- **Possible but not observed.** Any operator over time-independent input:
+  aggregates, sort, SQL joins and set operations without `now()`, `union`.
+  `aligned_binary` is the ingestion-time lowering of `BinaryOp`
+  (`physical_planner/mod.rs`); `series_binary` and `vector_binary` are
+  query-time only.
+
+## 9. Finding: expressions on DataFusion `PhysicalExpr`
+
+Each expression form of our `Expression` enum and the Planner scalar IR was
+classified against DataFusion.
+
+- **Same semantics (about half).** Columns, literals, the evaluation time
+  (bound as a literal), Boolean and NULL logic, `LIKE`, searched `CASE`,
+  Float64 arithmetic, casts (ours already follow DataFusion's), struct
+  field access, and most PromQL math functions (`abs`, `ln`, `sqrt`, trig,
+  `sgn`, `deg`, `rad`). PromQL `=~` / `!~` also match once the pattern is
+  anchored (`^(?s:p)$`) when lowering.
+- **Different semantics (about a third).** The causes repeat:
+  - *Float comparison.* Arrow compares floats by IEEE total order: NaN
+    equals NaN and is greater than every number, and -0.0 < 0.0. We use
+    IEEE comparison: any comparison with NaN is false. This affects every
+    comparison, `IN` and `CASE x WHEN`. One wrapper around comparisons
+    fixes it.
+  - *Integer overflow.* DataFusion wraps unless
+    `BinaryExpr::with_fail_on_overflow(true)` is set, and negation always
+    wraps. We raise an error.
+  - *Int64 vs Float64 comparison.* DataFusion casts the integer to float and
+    loses precision; we compare exactly.
+  - *Missing map key or list element.* DataFusion returns NULL; we return
+    the type's default when the value is non-nullable.
+  - *PromQL functions.* `clamp` must return NaN for NaN input, `round` takes
+    a "to nearest" step, and the date functions take float seconds. Each is
+    a short composition of built-ins or a small UDF.
+- **No equivalent (ours).** PromQL label operations (`LabelSet`,
+  `LabelIdentity`, `drop_metric_name`), PromQL float-to-text formatting,
+  the checks that fail a query (`FiniteFloat64`, checked division, exact
+  Int64→Float64), `mapconcat` and `days_in_month`.
