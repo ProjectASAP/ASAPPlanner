@@ -49,9 +49,17 @@ path. §7 onwards is detail to read once the overview is clear.
   or count).
 - **Accumulator:** the object that holds a group's state (e.g. its sketch)
   and is updated with values.
+- **Grouped:** state kept per value of the group-by columns, e.g. one sketch
+  per `job` (`by (job)`). A global aggregate is grouped with a single group.
+  Streaming systems such as Flink call this "keyed".
+- **Keyed (in our code):** not the same as grouped. A *keyed* summary
+  (`per_group_keyed_summary_build`, `keyed_evaluation`) is a sketch over
+  item keys *within* a group, e.g. a Count-Min sketch of the most frequent
+  `path`s per `job`. This doc says "grouped" for per-group state and keeps
+  "keyed" for this meaning.
 - **DataFusion component:** a public DataFusion building block that works
   on its own, given a `RecordBatch` or arrays, e.g. `PhysicalExpr`
-  (evaluates an expression) or `GroupsAccumulator` (§5.4).
+  (evaluates an expression) or `GroupsAccumulator` (§5.5).
 - **DataFusion execution layer:** what DataFusion's own operators run on:
   the `ExecutionPlan` trait, `TaskContext` and `RuntimeEnv` (memory pool,
   spill files), async streams and tokio. Each DataFusion operator, named
@@ -162,10 +170,9 @@ has ended: at the end of a query's input, or at the end of an ingestion
 window. An operator that can update its state per mini-batch must do so,
 and not keep the rows: a 10-minute KLL sketch is updated with each
 mini-batch, never built from 10 minutes of buffered rows. Some operators
-cannot avoid keeping rows until `finish`: sort, a join's build side, set
-operations. (`compute(batch)` and `init / update / finalize`, an earlier
+cannot avoid keeping rows until `finish` (§5.4). (`compute(batch)` and `init / update / finalize`, an earlier
 two-interface idea, are a `push` returning one batch and an accumulator,
-§5.4.)
+§5.5.)
 
 The driver orders the inputs of a two-input operator: a join receives every
 build-side batch and `finish` for that input before its first probe-side
@@ -201,7 +208,51 @@ spill files. So every operator of ours is built in one of three ways:
 
 §7 lists which operator is which.
 
-### 5.4 Grouped state through `GroupsAccumulator`
+### 5.4 Operator categories
+
+Every operator falls into one of three categories, by what it keeps between
+`push` calls. The category says how much memory an operator needs and
+whether it can work on mini-batches without keeping them.
+
+| Category | In `push` | Memory | Operators |
+| --- | --- | --- | --- |
+| **Stateless** | outputs a batch, keeps nothing | none | `filter`, `project`, `time_range`, `evaluate_at` (time shift), `union`, `series_labels`, `series_relabel`, `window_end_timestamp`, scalar expressions |
+| **Bounded state** | updates per-group state, drops the rows; outputs at `finish` | grows with the number of groups, not rows | `aggregate` with bounded accumulators (below), sketch builds, `summary_merge`, `current_series` (latest sample per series), `limit` |
+| **Row-keeping** | keeps the rows; computes at `finish` | grows with the number of rows | `sort`, joins, `set_operation`, `sql_window`, `aggregate` with a holistic accumulator, `range_window` / `series_window` (PromQL range functions keep each series' samples) |
+
+Accumulators (the per-group state inside aggregates and summary builds)
+have their own, classic classification, by how their state relates to the
+input:
+
+| Accumulator class | State | Examples |
+| --- | --- | --- |
+| **Distributive** | a fixed-size value; two states combine with the same function | sum, count, min, max |
+| **Algebraic** | a fixed number of distributive values | avg (sum + count), stddev |
+| **Holistic** | must keep all values; no fixed-size state exists | exact quantile, median, exact distinct count |
+| **Sketch** | fixed-size approximation of a holistic function; mergeable | KLL, DDSketch (quantiles), HLL (distinct count), CMS (frequencies) |
+
+How the two relate:
+
+- **Different subjects.** An accumulator class describes one aggregate
+  function's state. An operator category describes a whole operator's
+  memory behaviour, including operators with no accumulator (sort, join).
+- **The accumulators decide an aggregate operator's category.** An
+  aggregate whose accumulators are all distributive, algebraic or sketches
+  has bounded state. One holistic accumulator, e.g. an exact PromQL
+  `quantile`, makes it row-keeping.
+- **Mergeability is an accumulator property**, not an operator category. It
+  is what ASAP needs to combine 1-minute window states into longer windows
+  (`merge_batch`, §5.5). Distributive, algebraic and sketch states are
+  mergeable at fixed size; holistic states merge only by concatenating
+  their values.
+- **This is why ASAP uses sketches:** a sketch turns a holistic function
+  into a bounded, mergeable one, so it can be built from mini-batches at
+  ingestion time and merged across windows at query time.
+- **Grouping is orthogonal to both.** Any category can be grouped (`sum by
+  (job)`, `topk by (job)`). For accumulators, `GroupValues` +
+  `GroupsAccumulator` (§5.5) handle grouped and global state alike.
+
+### 5.5 Grouped state through `GroupsAccumulator`
 
 Aggregates, summary builds and summary merges all keep one state per
 group. DataFusion splits this into two components:
@@ -225,7 +276,7 @@ is then `GroupValues` + accumulators, with no grouping code of ours.
 not needed: most sketches cannot remove values, so sliding windows merge
 window states instead.
 
-### 5.5 Sketches stay in memory between operators
+### 5.6 Sketches stay in memory between operators
 
 DataFusion's `state` encodes states as bytes. Passing sketches between our
 operators that way would encode and decode them at every step. Instead,
@@ -234,14 +285,14 @@ sketch list (§2), and our accumulators hand sketches to the next operator
 in memory. Encoding happens only when a state is stored. Wrapped DataFusion
 components receive the `Batch`'s `RecordBatch`.
 
-### 5.6 Evaluation time enters at `open`
+### 5.7 Evaluation time enters at `open`
 
 `OperatorDefinition::open(ctx)` (§4) creates each run's state, and `ctx`
 holds the evaluation time; operators receive no other run context. PromQL's
 `@` (evaluate at another time) stays a runtime action: the runtime opens the
 operator's inputs with a shifted `ctx`.
 
-### 5.7 Later: results per window within one run
+### 5.8 Later: results per window within one run
 
 Not in the first version. Each ingestion run covers one window, and
 `finish` emits its result. An `advance(t)` method, emitting the windows that
@@ -273,19 +324,19 @@ The names below are the `Operator` constructors; their code is in
 `union`, `scalar` and `absent` are in `source.rs`, `window` in
 `aggregate/`, `evaluate_at` in `time_range.rs`).
 
-| Operator | How | Detail |
-| --- | --- | --- |
-| `project`, `filter`, scalar `Expression` | Wrap + implement | Expressions are lowered to DataFusion `PhysicalExpr`s; `filter` then applies Arrow's `filter` kernel. About half of our expression forms map directly, a third need care when lowering, and the rest are ours (§11). |
-| `aggregate` | Wrap + implement | Grouping uses `GroupValues`, and SQL aggregates use DataFusion's accumulators. PromQL `avg`, `quantile`, compensated `sum` and the NaN rules of `min`/`max` differ from DataFusion's, so they are our own `GroupsAccumulator`s. |
-| `sql_window` | Wrap | SQL window functions use DataFusion's built-in implementations (`PartitionEvaluator`), whose semantics `sql_window` already follows. |
-| `sort` (grouped, optional top-k) | Copy | Sorting uses Arrow's `lexsort_to_indices` and `take`. Top-k is copied from DataFusion's `TopK`, which is private. |
-| `relational_join`, `semi_join` | Wrap + copy | The build side uses DataFusion's public `JoinHashMap`. The probe and the output of each join kind (inner, outer, semi, anti, non-equality predicates) are copied from `HashJoinExec`. |
-| `certified_semi_join`, `set_operation` | Implement | Both are built on the copied join: the first adds a check that the right side is complete, the second adds a distinct, as DataFusion plans INTERSECT and EXCEPT. |
-| `union`, `limit`, `scalar`, `source`, `absent`, `vector_to_scalar`, `bind_scalar_ref` | Implement | These are a few lines each on Arrow's `concat` and `slice`, so reuse saves nothing. |
-| `per_group_summary_build`, `per_group_keyed_summary_build`, `summary_merge` | Wrap + implement | Grouping uses `GroupValues`; each sketch family is our own `GroupsAccumulator` (§5.4). |
-| `all_groups_summary_build` | Implement | HydraCms keeps one state shared by all groups, which `GroupsAccumulator` cannot express. |
-| `evaluation`, `keyed_evaluation` | Implement | They read a value (a quantile, a count) from a summary state, which is sketch-specific. |
-| PromQL and time: `time_range`, `evaluate_at`, `scope_timestamp`, `current_series`, `series_window`, `range_window`, `window`, `*_binary`, `series_labels`, `series_relabel`, `series_sample`, `*histogram_quantile` | Implement | DataFusion has no PromQL or time-series operators. Their grouping and label matching can use `GroupValues` and Arrow's `RowConverter`. |
+| Operator | Category | How | Detail |
+| --- | --- | --- | --- |
+| `project`, `filter`, scalar `Expression` | Stateless | Wrap + implement | Expressions are lowered to DataFusion `PhysicalExpr`s; `filter` then applies Arrow's `filter` kernel. About half of our expression forms map directly, a third need care when lowering, and the rest are ours (§11). |
+| `aggregate` | Bounded or row-keeping | Wrap + implement | Grouping uses `GroupValues`, and SQL aggregates use DataFusion's accumulators. PromQL `avg`, `quantile`, compensated `sum` and the NaN rules of `min`/`max` differ from DataFusion's, so they are our own `GroupsAccumulator`s. |
+| `sql_window` | Row-keeping | Wrap | SQL window functions use DataFusion's built-in implementations (`PartitionEvaluator`), whose semantics `sql_window` already follows. |
+| `sort` (grouped, optional top-k) | Row-keeping | Copy | Sorting uses Arrow's `lexsort_to_indices` and `take`. Top-k is copied from DataFusion's `TopK`, which is private. |
+| `relational_join`, `semi_join` | Row-keeping | Wrap + copy | The build side uses DataFusion's public `JoinHashMap`. The probe and the output of each join kind (inner, outer, semi, anti, non-equality predicates) are copied from `HashJoinExec`. |
+| `certified_semi_join`, `set_operation` | Row-keeping | Implement | Both are built on the copied join: the first adds a check that the right side is complete, the second adds a distinct, as DataFusion plans INTERSECT and EXCEPT. |
+| `union`, `limit`, `scalar`, `source`, `absent`, `vector_to_scalar`, `bind_scalar_ref` | Stateless (`limit`: bounded) | Implement | These are a few lines each on Arrow's `concat` and `slice`, so reuse saves nothing. |
+| `per_group_summary_build`, `per_group_keyed_summary_build`, `summary_merge` | Bounded | Wrap + implement | Grouping uses `GroupValues`; each sketch family is our own `GroupsAccumulator` (§5.5). |
+| `all_groups_summary_build` | Bounded | Implement | HydraCms keeps one state shared by all groups, which `GroupsAccumulator` cannot express. |
+| `evaluation`, `keyed_evaluation` | Stateless | Implement | They read a value (a quantile, a count) from a summary state, which is sketch-specific. |
+| PromQL and time: `time_range`, `evaluate_at`, `scope_timestamp`, `current_series`, `series_window`, `range_window`, `window`, `*_binary`, `series_labels`, `series_relabel`, `series_sample`, `*histogram_quantile` | Varies (§5.4) | Implement | DataFusion has no PromQL or time-series operators. Their grouping and label matching can use `GroupValues` and Arrow's `RowConverter`. |
 
 ## 8. Risks
 
@@ -355,16 +406,3 @@ classified against DataFusion.
   `LabelIdentity`, `drop_metric_name`), PromQL float-to-text formatting,
   the checks that fail a query (`FiniteFloat64`, checked division, exact
   Int64→Float64), `mapconcat` and `days_in_month`.
-
-## 12. Open questions
-
-- **Why remove memory accounting and cancellation (§5.2)?** The reason
-  should be stated: what bounds a runaway query or ends one whose client
-  disconnected, and whether a long synchronous `push` on an async thread is
-  acceptable.
-- **How is "less code" measured?** E.g. lines removed against lines copied
-  in, and the size of the DataFusion dependency.
-- **How are semantic differences checked** beyond existing tests, e.g. by
-  running our evaluator and DataFusion's on the same inputs for the
-  expressions in §11 that differ?
-- **Benchmark** before and after, for the secondary goal.
