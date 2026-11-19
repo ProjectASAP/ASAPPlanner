@@ -3,7 +3,10 @@
 //! The planner has no reference answer, so these tests pin its output
 //! instead: each corpus query's selected plan (default search) is compared
 //! with the committed one, and any change fails until the snapshot is
-//! regenerated and the change explained in the PR.
+//! regenerated and the change explained in the PR. A changed plan whose
+//! cost equals the committed plan's (relative difference at most 1e-9)
+//! passes: the selection may return any of several equal-cost plans, and
+//! which one can differ between machines.
 //!
 //! Each `tests/corpus_snapshots/<corpus>/corpus.json` declares the shared
 //! planning inputs and the queries by stable id; `<id>.json` beside it is
@@ -141,6 +144,37 @@ fn plan_snapshot(document: &Value) -> Map<String, Value> {
     snapshot
 }
 
+/// The largest relative difference between two selected plans' costs per
+/// second for which a changed plan still passes. Snapshot floats carry 12
+/// significant digits, and plans this close in cost are equally good:
+/// the selection may return either, depending on the machine.
+const EQUAL_COST_RELATIVE_TOLERANCE: f64 = 1e-9;
+
+/// Whether the snapshot texts `expected` and `actual` select plans of the
+/// same cost ([`same_selected_cost`]).
+fn equal_cost_plan(expected: &str, actual: &str) -> bool {
+    match (
+        serde_json::from_str::<Value>(expected),
+        serde_json::from_str::<Value>(actual),
+    ) {
+        (Ok(expected), Ok(actual)) => same_selected_cost(&expected, &actual),
+        _ => false,
+    }
+}
+
+/// Whether both snapshots select a plan and their costs per second are
+/// equal within [`EQUAL_COST_RELATIVE_TOLERANCE`].
+fn same_selected_cost(expected: &Value, actual: &Value) -> bool {
+    let cost = |snapshot: &Value| snapshot["selected"]["cost"]["cost_per_second"].as_f64();
+    match (cost(expected), cost(actual)) {
+        (Some(expected), Some(actual)) => {
+            (expected - actual).abs()
+                <= EQUAL_COST_RELATIVE_TOLERANCE * expected.abs().max(actual.abs())
+        }
+        _ => false,
+    }
+}
+
 /// The first line where `expected` and `actual` differ, for the failure message.
 fn first_difference(expected: &str, actual: &str) -> String {
     let mut expected_lines = expected.lines();
@@ -253,7 +287,9 @@ fn corpus_plans_match_snapshots() {
                 continue;
             }
             let expected = std::fs::read_to_string(&path).unwrap_or_default();
-            if expected != actual {
+            if expected != actual && equal_cost_plan(&expected, &actual) {
+                eprintln!("{name}/{id}: plan changed at the committed plan's cost; passes");
+            } else if expected != actual {
                 let out = regenerated.join(&name);
                 std::fs::create_dir_all(&out).unwrap();
                 std::fs::write(out.join(format!("{id}.json")), &actual).unwrap();
@@ -355,4 +391,29 @@ fn first_difference_names_the_line() {
         first_difference("a\n", "a\nb\n"),
         "line 2:\n  - <end>\n  + b"
     );
+}
+
+/// A changed plan with the committed plan's cost passes: the planner may
+/// pick any of several equal-cost plans, and which one depends on the
+/// machine. A dearer or cheaper plan, or one that no longer plans, fails.
+#[test]
+fn equal_cost_plans_pass() {
+    let plan = |cost: f64| json!({"selected": {"cost": {"cost_per_second": cost}, "dag": {}}});
+    assert!(same_selected_cost(
+        &plan(7.32192724727e-7),
+        &plan(7.32192724727e-7)
+    ));
+    assert!(same_selected_cost(
+        &plan(1.65072582049e-8),
+        &plan(1.65072581961e-8)
+    ));
+    assert!(!same_selected_cost(&plan(1.0e-6), &plan(1.1e-6)));
+    assert!(!same_selected_cost(
+        &plan(1.0e-6),
+        &json!({"selected": null})
+    ));
+    assert!(!same_selected_cost(
+        &json!({"selected": null}),
+        &json!({"selected": null})
+    ));
 }
