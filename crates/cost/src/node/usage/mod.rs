@@ -719,7 +719,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             input_rows,
             state_bytes,
             update_terms_per_row,
-            assumed_magnitude_range_fact: assumed_magnitude_range_fact(column, input_rows),
+            magnitude_range_fact: assumed_magnitude_range_fact(column, input_rows),
         })
     };
     let unary = |output| UnaryEdgeStatistics {
@@ -1137,7 +1137,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 input_rows,
                 state_bytes,
                 update_terms_per_row: update_terms,
-                assumed_magnitude_range_fact,
+                magnitude_range_fact,
             } = summary_state_build(
                 family,
                 update,
@@ -1145,7 +1145,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
             )?;
             built_state_input_rows = Some(input_rows);
-            assumed_data_facts.extend(assumed_magnitude_range_fact);
+            assumed_data_facts.extend(magnitude_range_fact);
             let update_ops = update_terms.operations();
             let out = EdgeStatistics {
                 rows: group_count,
@@ -1214,7 +1214,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 input_rows,
                 state_bytes,
                 update_terms_per_row: update_terms,
-                assumed_magnitude_range_fact,
+                magnitude_range_fact,
             } = summary_state_build(
                 family,
                 update,
@@ -1222,7 +1222,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
             )?;
             built_state_input_rows = Some(input_rows);
-            assumed_data_facts.extend(assumed_magnitude_range_fact);
+            assumed_data_facts.extend(magnitude_range_fact);
             let update_ops = update_terms.operations();
             // The states it completes in one execution, each allocated
             // when its window opens: at ingestion time one second's share
@@ -1707,17 +1707,17 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     Ok((usage, terms))
 }
 
-/// A formula estimate whose CPU operations are `terms` at the built-in
-/// values, holding `peak_memory_bytes` and scanning `scan_bytes`.
 /// A summary build's per-state results shared by `SummaryAgg` and
 /// `SummaryTumblingWindowChain`.
 struct SummaryStateBuild {
     input_rows: StateInputRows,
     state_bytes: u64,
     update_terms_per_row: NodeCostTerms,
-    assumed_magnitude_range_fact: Option<AssumedDataFact>,
+    magnitude_range_fact: Option<AssumedDataFact>,
 }
 
+/// A formula estimate whose CPU operations are `terms` at the built-in
+/// values, holding `peak_memory_bytes` and scanning `scan_bytes`.
 fn charged(
     terms: NodeCostTerms,
     peak_memory_bytes: u64,
