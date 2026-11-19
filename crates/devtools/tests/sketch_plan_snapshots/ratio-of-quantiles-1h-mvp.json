@@ -32,7 +32,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 8.02474994718e-6,
+      "cost_per_second": 8.02474994706e-6,
       "cpu_core_seconds_per_second": 0.483447166667,
       "per_node": {
         "0": {
@@ -99,19 +99,19 @@
           "timing": "query_time"
         },
         "7": {
-          "cost_per_second": 1.87406134311e-12,
+          "cost_per_second": 1.87400000613e-12,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.66666666667e-7,
-          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 320000 bytes for 0.010 ms",
+          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 0.010 ms",
           "multiplier": 1,
           "operator": "Project",
           "timing": "query_time"
         },
         "8": {
-          "cost_per_second": 1.87406134311e-12,
+          "cost_per_second": 1.87400000613e-12,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.66666666667e-7,
-          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 320000 bytes for 0.010 ms",
+          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 0.010 ms",
           "multiplier": 1,
           "operator": "BinaryOp",
           "timing": "query_time"
@@ -119,11 +119,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 2250832389.85,
+        "average_memory_bytes": 2250832389.74,
         "cpu_ops_per_second": 477047166.667,
         "disk_bytes": 0,
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 2296083752,
+        "peak_memory_bytes": 2295443816,
         "scanned_bytes_per_second": 64000000.0
       }
     },
@@ -980,9 +980,7 @@
         },
         {
           "id": 7,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1050,9 +1048,7 @@
         },
         {
           "id": 8,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
