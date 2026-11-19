@@ -408,7 +408,10 @@ pub(crate) enum SelectionMilpError {
 /// (absolute; HiGHS's default is 1e-7). A second solve uses it when the
 /// selection at the default tolerances misses an accuracy target: a
 /// per-value δ of 1e-6 (δ = 0.01 over 1e4 values) may be passed by up to
-/// 1e-7 at the default, but only by 1e-10 here.
+/// 1e-7 at the default, but only by 1e-10 here. With the objective scaled
+/// to [`LARGEST_SCALED_OBJECTIVE_COEFFICIENT`], a raw-data row's activity
+/// can reach about 1e6, where one rounding step is about 1.2e-10, so this
+/// tolerance is at the limit of double precision on those rows.
 const LEAST_HIGHS_FEASIBILITY_TOLERANCE: f64 = 1e-10;
 
 /// The objective's largest coefficient once scaled, 1e6. HiGHS ends its

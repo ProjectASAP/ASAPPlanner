@@ -9,9 +9,8 @@
 //! costs 0.0078/s and an unused ingestion-time chain 2.55e6/s. Scaled so
 //! the largest coefficient was 1,000 (the scale then), a 0.001/s difference
 //! between two plans became 4e-7, and the solver returned a plan 12.6%
-//! dearer. The
-//! greedy plan bounds the optimum by about 0.0088/s, so the chain is left
-//! out and the largest coefficient left is about 0.006/s.
+//! dearer. The greedy plan bounds the optimum by about 0.0088/s, so the
+//! chain is left out and the largest coefficient left is about 0.006/s.
 
 use std::collections::{BTreeMap, HashMap};
 
