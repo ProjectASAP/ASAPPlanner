@@ -1,0 +1,608 @@
+//! Acceptance and regression tests of cost model 3's `lowest_mean_latency`
+//! (`docs/design_docs/proposals/stage3-lowest-mean-latency.md`, section
+//! 6.1 and 6.3): Stage 3 selects the plan with the smallest
+//! frequency-weighted mean query latency (freshness wait plus query
+//! execution) among the plans within the cluster's limits.
+//!
+//! The workloads read the gauge `m` (1,000 series, one sample per second).
+//! Times come from a measured table ([`max_min_table`]), so the expected
+//! plan does not depend on formula constants: `max_over_time(m[5m])` is
+//! answered either by a query-time scan of 300,000 samples, or by an
+//! ingestion-time chain of 10 s windows whose refresh emits 1,000 states
+//! per window.
+
+use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
+use asap_planner::{CostInputs, DeploymentCapabilities, PlanningModels};
+use asap_types::ir::NonASAPOp;
+use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
+use serde_json::{json, Value};
+
+use crate::lowest_mean_latency_common::{
+    cluster, cost_inputs, data_plane, every, max_min_table, over_m, plan, planned, usage_over_time,
+};
+
+/// `max_over_time(m[5m])` every 10 s.
+fn max_every_10s(max_latency_ms: Option<f64>) -> Value {
+    every("max_over_time(m[5m])", 10_000, max_latency_ms)
+}
+
+/// Cost model 3 with `lowest_mean_latency` and no binding limit.
+fn lowest_mean_latency() -> Value {
+    cluster("lowest_mean_latency", None, None, None)
+}
+
+/// Assert `actual` is within 1% of `expected` (or 1e-9 absolute).
+fn assert_close(name: &str, actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() <= 0.01 * expected.abs().max(1e-7),
+        "{name}: {actual} is not close to {expected}"
+    );
+}
+
+/// A1. A scan of 30 ms per run, or a chain refreshing at 10 ms of CPU and
+/// 30 ms of I/O wait per 10 s window: cost model 1 selects the chain (its
+/// CPU per second is lower), `lowest_mean_latency` the scan (30.3 ms
+/// against about 40 ms, the chain's wait for the newest window counted).
+#[tokio::test]
+async fn a1_lowest_mean_latency_picks_a_lower_latency_plan_than_the_cheapest() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let table = max_min_table(100.0, 10_000.0, 0.0);
+    let io_wait = json!({"refresh_io_wait": {"ns_per_refresh": 30_000_000.0}});
+    let cheapest = plan(
+        &workload,
+        &cost_inputs(usage_over_time(), table.clone(), io_wait.clone(), json!({})),
+        true,
+    )
+    .await;
+    assert!(cheapest.has_ingestion_views(), "cost model 1: the chain");
+    let fastest = plan(
+        &workload,
+        &cost_inputs(lowest_mean_latency(), table, io_wait, json!({})),
+        true,
+    )
+    .await;
+    assert!(
+        !fastest.has_ingestion_views(),
+        "lowest mean latency: the scan"
+    );
+    let mean = fastest.mean_latency_ms();
+    assert!((29.0..32.0).contains(&mean), "mean latency {mean} ms");
+}
+
+/// The A2 and A7 workload: a chain refreshing at 9 s of CPU per 10 s window
+/// (load 0.9 on one precompute thread; latency about 9 s) or a scan of 21 s
+/// per run.
+fn heavy_refresh(precompute_threads: u32) -> Value {
+    cost_inputs(
+        lowest_mean_latency(),
+        max_min_table(70_000.0, 9_000_000.0, 0.0),
+        json!({}),
+        data_plane(json!({"precompute_threads": precompute_threads})),
+    )
+}
+
+/// A2. The lowest-latency plan's precompute load is 0.9 on one thread, over
+/// `max_thread_utilization` 0.7: it is invalid, and the scan is selected.
+#[tokio::test]
+async fn a2_a_plan_over_the_precompute_load_bound_is_rejected() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let selected = plan(&workload, &heavy_refresh(1), true).await;
+    assert!(!selected.has_ingestion_views(), "the chain's load is 0.9");
+    assert!(selected.usage("precompute_load") <= 0.7);
+}
+
+/// A3. The A1 settings select the scan, whose 5 minutes of raw rows held
+/// while it runs are its peak; a memory limit one byte below that peak
+/// selects the chain, whose state is smaller, within the limit.
+#[tokio::test]
+async fn a3_a_tighter_memory_limit_switches_to_a_smaller_state_plan() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let settings = |memory| {
+        cost_inputs(
+            cluster("lowest_mean_latency", memory, None, None),
+            max_min_table(100.0, 10_000.0, 0.0),
+            json!({"refresh_io_wait": {"ns_per_refresh": 30_000_000.0}}),
+            json!({}),
+        )
+    };
+    let unlimited = plan(&workload, &settings(None), true).await;
+    assert!(!unlimited.has_ingestion_views());
+    let peak = unlimited.usage("peak_memory_bytes") as u64;
+    let selected = plan(&workload, &settings(Some(peak - 1)), true).await;
+    assert!(selected.has_ingestion_views(), "the chain");
+    assert!(selected.usage("peak_memory_bytes") <= (peak - 1) as f64);
+}
+
+/// The A4 and A5 table: each chain refreshes at 2 s per window; each scan
+/// takes 3 s, a `min` 1 s more (`min_ns_per_row`).
+fn conflicting(min_ns_per_row: f64) -> Value {
+    cost_inputs(
+        lowest_mean_latency(),
+        max_min_table(10_000.0, 2_000.0 * 1_000.0, min_ns_per_row),
+        json!({}),
+        json!({}),
+    )
+}
+
+/// A4. `max` (q1) and `min` (q2) every 10 s. Chains of one refresh group
+/// wait for each other (4 s each when both are selected). The mean is
+/// smallest with q1 scanned (3 s) and q2 on its chain (2 s); q1's bound of
+/// 2.5 s forces q1 onto its chain and q2 onto the scan, though the mean
+/// rises.
+#[tokio::test]
+async fn a4_max_latency_ms_is_enforced() {
+    let min_every_10s = |bound| every("min_over_time(m[5m])", 10_000, bound);
+    let unbounded = plan(
+        &over_m(vec![max_every_10s(None), min_every_10s(None)], 1000),
+        &conflicting(3_333.0),
+        true,
+    )
+    .await;
+    assert!(!unbounded.query_reads_a_view(0) && unbounded.query_reads_a_view(1));
+    let bounded = plan(
+        &over_m(
+            vec![max_every_10s(Some(2_500.0)), min_every_10s(None)],
+            1000,
+        ),
+        &conflicting(3_333.0),
+        true,
+    )
+    .await;
+    assert!(bounded.query_reads_a_view(0) && !bounded.query_reads_a_view(1));
+    assert!(bounded.query_ms(0, "latency_ms") <= 2_500.0);
+    assert!(bounded.mean_latency_ms() > unbounded.mean_latency_ms());
+}
+
+/// A5. `max` every 10 s and `min` every 20 s, each faster on its chain
+/// alone (2 s) than scanned (3 s), slower when both chains wait for each
+/// other: the chain goes to the more frequent query, and reversing the
+/// intervals reverses the choice.
+#[tokio::test]
+async fn a5_the_more_frequent_query_gets_the_lower_latency() {
+    for (max_interval, min_interval) in [(10_000, 20_000), (20_000, 10_000)] {
+        let workload = over_m(
+            vec![
+                every("max_over_time(m[5m])", max_interval, None),
+                every("min_over_time(m[5m])", min_interval, None),
+            ],
+            1000,
+        );
+        let selected = plan(&workload, &conflicting(0.0), true).await;
+        let max_is_more_frequent = max_interval < min_interval;
+        assert_eq!(
+            (
+                selected.query_reads_a_view(0),
+                selected.query_reads_a_view(1)
+            ),
+            (max_is_more_frequent, !max_is_more_frequent),
+            "max every {max_interval} ms, min every {min_interval} ms"
+        );
+    }
+}
+
+/// A6. The chain's refresh (10 ms) is in the query's latency, which is
+/// below the scan's 30 ms; at 40 ms of refresh the scan is selected.
+#[tokio::test]
+async fn a6_the_freshness_wait_counts() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let with_refresh = |state_ns| {
+        cost_inputs(
+            lowest_mean_latency(),
+            max_min_table(100.0, state_ns, 0.0),
+            json!({}),
+            json!({}),
+        )
+    };
+    let light = plan(&workload, &with_refresh(10_000.0), true).await;
+    assert!(light.query_reads_a_view(0));
+    assert!(light.query_ms(0, "precompute_execution_ms") >= 10.0);
+    assert!(light.query_ms(0, "latency_ms") >= 10.0);
+    let heavy = plan(&workload, &with_refresh(40_000.0), true).await;
+    assert!(!heavy.query_reads_a_view(0), "40 ms of refresh: the scan");
+}
+
+/// A7. The A2 workload with two precompute threads: the chain's load is
+/// 0.45, within the bound, and its lower latency wins.
+#[tokio::test]
+async fn a7_the_precompute_thread_count_changes_the_choice() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let one = plan(&workload, &heavy_refresh(1), true).await;
+    assert!(!one.has_ingestion_views());
+    let two = plan(&workload, &heavy_refresh(2), true).await;
+    assert!(two.has_ingestion_views());
+    assert_close("precompute load", two.usage("precompute_load"), 0.45);
+}
+
+/// A8. With every time 0, every plan's mean latency ties at 0: the plan
+/// selected has the least peak memory (no plan fits one byte less), then
+/// the least disk among those (no plan fits one byte less of disk at that
+/// memory).
+#[tokio::test]
+async fn a8_ties_go_to_the_least_memory_then_the_least_disk() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let at = |memory, disk| {
+        cost_inputs(
+            cluster("lowest_mean_latency", memory, disk, None),
+            max_min_table(0.0, 0.0, 0.0),
+            json!({}),
+            json!({}),
+        )
+    };
+    let selected = plan(&workload, &at(None, None), true).await;
+    assert_eq!(selected.mean_latency_ms(), 0.0);
+    let peak = selected.usage("peak_memory_bytes") as u64;
+    let disk = selected.usage("disk_bytes") as u64;
+    let less_memory = planned(&workload, &at(Some(peak - 1), None), true).await;
+    assert!(
+        less_memory.is_err(),
+        "a plan with less peak memory exists, so the tie went the wrong way"
+    );
+    if disk > 0 {
+        let less_disk = planned(&workload, &at(Some(peak), Some(disk - 1)), true).await;
+        assert!(
+            less_disk.is_err(),
+            "a plan with less disk at that memory exists"
+        );
+    }
+}
+
+/// A9. Each query's latency is its four parts' sum, its weight its
+/// evaluations per second (0.1 every 10 s), and the selection MILP's mean
+/// latency is the mean `plan_cost` reports for the selected plan.
+#[tokio::test]
+async fn a9_the_report_breaks_latency_down() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let settings = cost_inputs(
+        lowest_mean_latency(),
+        max_min_table(100.0, 10_000.0, 0.0),
+        json!({}),
+        json!({}),
+    );
+    let selected = plan(&workload, &settings, true).await;
+    let parts: f64 = [
+        "allowed_lateness_ms",
+        "precompute_queueing_ms",
+        "precompute_execution_ms",
+        "query_execution_ms",
+    ]
+    .iter()
+    .map(|part| selected.query_ms(0, part))
+    .sum();
+    assert_close("latency", selected.query_ms(0, "latency_ms"), parts);
+    assert_close(
+        "weight",
+        selected.query_ms(0, "evaluations_per_second"),
+        0.1,
+    );
+    // The MILP's mean latency, from the stages run directly.
+    let settings: CostInputs = serde_json::from_value(settings).unwrap();
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: true,
+        ..Default::default()
+    };
+    let models = PlanningModels::builtin()
+        .with_cost_inputs(&settings)
+        .with_deployment_capabilities(&capabilities);
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let run = run_planning_stages_over(
+        lower_promql_roots(&workload).unwrap(),
+        &entries,
+        &data,
+        models,
+    )
+    .unwrap();
+    let (_, selection) = run.run.selection.as_ref().expect("a plan is selected");
+    let milp_mean = selection
+        .selected_plan_mean_latency_ms
+        .expect("lowest_mean_latency reports the selected plan's mean latency");
+    assert_close("MILP mean", milp_mean, selected.mean_latency_ms());
+}
+
+/// A10. A memory limit below every plan's peak, and a latency bound no plan
+/// meets: the error names the limit, with the least any plan needs.
+#[tokio::test]
+async fn a10_no_plan_within_the_limits_is_an_error_naming_the_limit() {
+    let table = max_min_table(100.0, 10_000.0, 0.0);
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let tiny_memory = cost_inputs(
+        cluster("lowest_mean_latency", Some(1), None, None),
+        table.clone(),
+        json!({}),
+        json!({}),
+    );
+    let error = planned(&workload, &tiny_memory, true)
+        .await
+        .err()
+        .expect("no plan fits 1 byte");
+    assert!(
+        error.contains("no plan fits the cluster's limits") && error.contains("Memory"),
+        "{error}"
+    );
+    let bounded = over_m(vec![max_every_10s(Some(0.001))], 1000);
+    let error = planned(
+        &bounded,
+        &cost_inputs(lowest_mean_latency(), table, json!({}), json!({})),
+        true,
+    )
+    .await
+    .err()
+    .expect("no plan answers within 0.001 ms");
+    assert!(
+        error.contains("no plan fits the cluster's limits") && error.contains("QueryLatency"),
+        "{error}"
+    );
+}
+
+/// A11. A scan of 16 s per 10 s run (1.6 cores) or a chain of 8 s of CPU
+/// (0.8 cores) and 10 s of I/O wait per window (latency 18 s): with
+/// `cpu_cores` 2 the faster scan; with 1, the chain, the only plan within
+/// it on average.
+#[tokio::test]
+async fn a11_the_cpu_limit_is_average_cores() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let with_cores = |cores| {
+        cost_inputs(
+            cluster("lowest_mean_latency", None, None, Some(cores)),
+            max_min_table(53_333.0, 8_000_000.0, 0.0),
+            json!({"refresh_io_wait": {"ns_per_refresh": 10_000_000_000.0}}),
+            data_plane(json!({"precompute_threads": 3})),
+        )
+    };
+    let two = plan(&workload, &with_cores(2), true).await;
+    assert!(!two.has_ingestion_views(), "two cores: the faster scan");
+    let one = plan(&workload, &with_cores(1), true).await;
+    assert!(one.has_ingestion_views(), "one core: the chain");
+    assert!(one.usage("cpu_core_seconds_per_second") <= 1.0);
+}
+
+/// A12. A range request of 61 steps every 5 min weighs 61/300 per second;
+/// an instant query every minute 1/60.
+#[tokio::test]
+async fn a12_a_range_requests_weight_counts_its_steps() {
+    let mut range = every("max_over_time(m[5m])", 300_000, None);
+    range["range_evaluation"] = json!({"step_ms": 60_000, "span_ms": 3_600_000});
+    let workload = over_m(
+        vec![range, every("min_over_time(m[5m])", 60_000, None)],
+        1000,
+    );
+    let settings = cost_inputs(
+        lowest_mean_latency(),
+        max_min_table(100.0, 10_000.0, 0.0),
+        json!({}),
+        json!({}),
+    );
+    let selected = plan(&workload, &settings, true).await;
+    assert_close(
+        "range weight",
+        selected.query_ms(0, "evaluations_per_second"),
+        61.0 / 300.0,
+    );
+    assert_close(
+        "instant weight",
+        selected.query_ms(1, "evaluations_per_second"),
+        1.0 / 60.0,
+    );
+}
+
+/// A13. A one-off query of 10 invocations weighs 10 over the default
+/// horizon of 3,600 s.
+#[tokio::test]
+async fn a13_a_non_repeating_querys_weight_is_spread_over_the_horizon() {
+    let workload: asap_planner::PlanningWorkload = serde_json::from_value(json!({
+        "query_workload": {"language": "promql", "query_batch": [{
+            "query": "max_over_time(m[5m])",
+            "requirements": {"max_latency_ms": null},
+            "predictability": "ad_hoc", "invocations": 10, "execute_at": 1767225600000_u64,
+        }]},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 1000.0}},
+            "sources": {"m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000}},
+        },
+    }))
+    .unwrap();
+    let settings = cost_inputs(
+        lowest_mean_latency(),
+        max_min_table(100.0, 10_000.0, 0.0),
+        json!({}),
+        json!({}),
+    );
+    let selected = plan(&workload, &settings, true).await;
+    assert_close(
+        "weight",
+        selected.query_ms(0, "evaluations_per_second"),
+        10.0 / 3_600.0,
+    );
+}
+
+/// A14. An allowed lateness of 5 s adds 5 s to every plan's latency: the
+/// A1 choice (the scan) stands, at about 5,030 ms.
+#[tokio::test]
+async fn a14_the_allowed_lateness_is_in_every_querys_latency() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let selected = plan(
+        &workload,
+        &cost_inputs(
+            lowest_mean_latency(),
+            max_min_table(100.0, 10_000.0, 0.0),
+            json!({"refresh_io_wait": {"ns_per_refresh": 30_000_000.0}}),
+            data_plane(json!({"allowed_lateness_ms": 5_000})),
+        ),
+        true,
+    )
+    .await;
+    assert!(!selected.has_ingestion_views());
+    assert_eq!(selected.query_ms(0, "allowed_lateness_ms"), 5_000.0);
+    let latency = selected.query_ms(0, "latency_ms");
+    assert!(
+        (5_029.0..5_032.0).contains(&latency),
+        "latency {latency} ms"
+    );
+}
+
+/// A15. `max` and `min` over the same 5 minutes read one shared query-time
+/// scan (30 ms): its time is on both queries' paths.
+#[tokio::test]
+async fn a15_a_shared_node_counts_on_every_readers_path() {
+    let workload = over_m(
+        vec![
+            max_every_10s(None),
+            every("min_over_time(m[5m])", 10_000, None),
+        ],
+        1000,
+    );
+    // Chains refreshing at 1 s per window lose to the scans.
+    let selected = plan(
+        &workload,
+        &cost_inputs(
+            lowest_mean_latency(),
+            max_min_table(100.0, 1_000_000.0, 0.0),
+            json!({}),
+            json!({}),
+        ),
+        true,
+    )
+    .await;
+    assert!(!selected.has_ingestion_views());
+    let scans = selected
+        .plan
+        .dag
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. })))
+        .count();
+    assert_eq!(scans, 1, "one scan shared by both queries");
+    for q in 0..2 {
+        assert!(selected.query_ms(q, "query_execution_ms") >= 30.0, "q{q}");
+    }
+}
+
+/// A16. The A7 plan's refresh work is 0.9 core-seconds per second: at the
+/// target utilisation 0.7 it needs 2 precompute threads; ingest and query
+/// need 1 each. Planning again with 2 precompute threads recommends 2.
+#[tokio::test]
+async fn a16_the_report_recommends_thread_counts() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let selected = plan(&workload, &heavy_refresh(2), true).await;
+    let recommended = &selected.report["predicted_usage"]["recommended_configuration"];
+    let threads = |role: &str| recommended[role]["recommended_threads"].as_u64();
+    assert_eq!(threads("precompute"), Some(2), "{recommended}");
+    assert_eq!(threads("ingest"), Some(1), "{recommended}");
+    assert_eq!(threads("query"), Some(1), "{recommended}");
+    let refresh_cores = recommended["precompute"]["predicted_cpu_core_seconds_per_second"]
+        .as_f64()
+        .unwrap();
+    assert_close("refresh cores", refresh_cores, 0.9);
+    let again = plan(&workload, &heavy_refresh(2), true).await;
+    assert_eq!(
+        again.report["predicted_usage"]["recommended_configuration"]["precompute"]
+            ["recommended_threads"]
+            .as_u64(),
+        Some(2)
+    );
+}
+
+/// A17. The A2 scan uses 2.1 query cores on one query thread: it is still
+/// selected, and the report recommends 3 query threads.
+#[tokio::test]
+async fn a17_query_cpu_is_not_limited_by_the_thread_count() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let selected = plan(&workload, &heavy_refresh(1), true).await;
+    assert!(!selected.has_ingestion_views());
+    let query = &selected.report["predicted_usage"]["recommended_configuration"]["query"];
+    assert_eq!(query["recommended_threads"].as_u64(), Some(3), "{query}");
+}
+
+/// The A1 table without the field this work adds (`ns_per_state_emitted`).
+fn old_table() -> Vec<Value> {
+    max_min_table(100.0, 0.0, 0.0)
+        .into_iter()
+        .map(|mut entry| {
+            entry
+                .as_object_mut()
+                .unwrap()
+                .remove("ns_per_state_emitted");
+            entry
+        })
+        .collect()
+}
+
+/// R1. Under cost model 1 a latency bound changes nothing: the plan with
+/// a bound tighter than any plan's latency is the plan without one.
+#[tokio::test]
+async fn r1_cost_model_1_enforces_no_latency_bound() {
+    // Cost inputs as written before this work: no new field.
+    let settings = cost_inputs(usage_over_time(), old_table(), json!({}), json!({}));
+    let without = plan(&over_m(vec![max_every_10s(None)], 1000), &settings, true).await;
+    let with = plan(
+        &over_m(vec![max_every_10s(Some(0.001))], 1000),
+        &settings,
+        true,
+    )
+    .await;
+    assert_eq!(without.plan.dag, with.plan.dag);
+    assert_eq!(
+        without.report["cost_per_second"],
+        with.report["cost_per_second"]
+    );
+}
+
+/// R2. Cost model 2, and cost model 3's other objectives, are still not
+/// supported by the selection MILP.
+#[tokio::test]
+async fn r2_other_objectives_are_unsupported_as_before() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let provisioned = json!({"provisioned_capacity": {
+        "cost_per_cpu_op": 0.0, "cost_per_scanned_byte": 0.0,
+        "cost_per_memory_byte_second": 0.0,
+        "cost_per_provisioned_memory_byte_second": 1e-9,
+        "cost_per_provisioned_cpu_core_second": 1.0,
+        "cost_per_disk_byte_second": 0.0}});
+    for cost_model in [
+        provisioned,
+        cluster("lowest_latency", None, None, None),
+        cluster("least_memory", None, None, None),
+    ] {
+        let error = planned(&workload, &json!({"cost_model": cost_model}), true)
+            .await
+            .err()
+            .expect("unsupported");
+        assert!(error.contains("does not support"), "{error}");
+    }
+}
+
+/// R3. Cost inputs written before this work (no `data_plane_execution`, no
+/// new calibration field) load with the defaults; zero threads and a
+/// utilisation outside (0, 1] are refused.
+#[tokio::test]
+async fn r3_old_cost_inputs_load_and_new_ones_are_validated() {
+    let old: CostInputs = serde_json::from_value(json!({
+        "cost_model": usage_over_time(),
+        "measured_operation_costs": {"operators": old_table()},
+    }))
+    .unwrap();
+    assert_eq!(old.validate(), Ok(()));
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    for (field, value) in [
+        ("precompute_threads", json!(0)),
+        ("query_threads", json!(0)),
+        ("ingest_threads", json!(0)),
+        ("max_thread_utilization", json!(0.0)),
+        ("max_thread_utilization", json!(1.5)),
+    ] {
+        let settings = cost_inputs(
+            lowest_mean_latency(),
+            vec![],
+            json!({}),
+            data_plane(json!({ field: value })),
+        );
+        let error = planned(&workload, &settings, true)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{field} {value} is refused"));
+        assert!(
+            error.contains(field) && !error.contains("unknown field"),
+            "{field} {value}: {error}"
+        );
+    }
+}

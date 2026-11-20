@@ -168,6 +168,7 @@ pub fn select_plan(
         milp_construction_ms: solved.construction_ms,
         milp_solve_ms: solved.solve_ms,
         milp_solve_count: solved.solve_count,
+        selected_plan_mean_latency_ms: None,
     };
     Ok((plan, selection))
 }
