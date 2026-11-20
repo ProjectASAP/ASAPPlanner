@@ -14,7 +14,7 @@ use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_state_bytes, state_bytes_per_row, StateInputRows};
 use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
-use crate::{lookup, StateFamily};
+use crate::{lookup_at_scale, StateFamily};
 use crate::{node_resource_usage_and_cost, NodeResourceUsageAndCost, ProducerOutput};
 use crate::{
     CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind, ResourceUsage,
@@ -118,18 +118,19 @@ impl QueryLatency {
 #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoleThreads {
-    /// Core-seconds per second the role is predicted to use (a refresh's
-    /// I/O wait included for the precompute role: a waiting thread is
-    /// busy).
-    pub predicted_cpu_core_seconds_per_second: f64,
-    /// ceil(predicted cores / max_thread_utilization), at least 1.
+    /// Thread-seconds per second the role keeps its threads busy: its CPU
+    /// core-seconds, and for the precompute role a refresh's I/O wait too
+    /// (a waiting thread is busy).
+    pub predicted_busy_thread_seconds_per_second: f64,
+    /// ceil(busy thread-seconds per second / max_thread_utilization), at
+    /// least 1.
     pub recommended_threads: u32,
 }
 
 impl RoleThreads {
     fn of(cores: f64, utilization: f64) -> Self {
         Self {
-            predicted_cpu_core_seconds_per_second: cores,
+            predicted_busy_thread_seconds_per_second: cores,
             recommended_threads: ((cores / utilization).ceil() as u32).max(1),
         }
     }
@@ -167,11 +168,9 @@ pub fn plan_cost(
     settings: &CostInputs,
 ) -> Result<(PlanCost, CalibrationFit), (PhysicalASAPNodeId, AnalyticalCostError)> {
     let nodes = &node_map(dag);
-    let formula_scale = settings.frozen_calibration_factor.unwrap_or(1.0);
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
     let table = &settings.measured_operation_costs;
     let mut fit = CalibrationFit::default();
-    let speed = settings.resource_speed;
     // Cost model 1 costs each node as it is measured.
     let unit_costs = settings.cost_model.per_node_unit_costs();
     // Each node's `(multiplier, per_second)` ([`computations`]), then its
@@ -260,13 +259,6 @@ pub fn plan_cost(
     // Each in-memory ingestion-time state's bytes per window (what it keeps
     // for one window, its output or an exact aggregate's values).
     let mut maintained: Vec<(PhysicalASAPNodeId, u64)> = Vec::new();
-    // Each summary node's state family, to look up in the measured table:
-    // a build's own (one sketch instance per group; a shared Hydra
-    // structure is not that sketch), inherited by the merges, estimates and
-    // finalizations over it.
-    let mut family_of: HashMap<PhysicalASAPNodeId, StateFamily<'_>> = HashMap::new();
-    let sketch_size =
-        |params: &SketchParams| sketch_state_bytes(params, StateInputRows::UNKNOWN) as f64;
     for node in &dag.nodes {
         let node_costed = &costed[&node.id];
         usage.cpu_ops_per_second += node_costed.cpu_ops_per_second;
@@ -279,9 +271,6 @@ pub fn plan_cost(
         fit.add(node_costed.fit);
         work_ms.insert(node.id, node_costed.work_ms_per_execution);
         output.insert(node.id, node_costed.output);
-        if node_costed.family != StateFamily::None {
-            family_of.insert(node.id, node_costed.family);
-        }
         if let Some(window) = node_costed.maintained {
             maintained.push((node.id, window));
         }
@@ -372,39 +361,8 @@ pub fn plan_cost(
         measured.detail +=
             &format!("; {copies} partial copies of its newest window, {bytes} bytes");
     }
-    // Milliseconds of one merge of a node's state when the newest window's
-    // partial copies are compacted: its measured query-time merge entry
-    // (ns · 10⁻⁶) when the table has one, else the merge formula of its
-    // family and bytes per state, as a `SummaryMerge` over it is costed (a
-    // DDSketch state: 2,500 operations). 0 for a node holding no states,
-    // such as the raw rows a `Filter` or `TimeRange` keeps or an exact
-    // `Aggregate`'s values: the executor merges ingest shards only of
-    // summary state columns, and partial copies of rows are concatenated.
-    // No per-group term (`merge_output_terms`, 19,000 per KLL group):
-    // the executor merges a shard's states into the existing states in
-    // place, group by group, and creates no group's state or output row.
-    let merge_ms = |id: PhysicalASAPNodeId| {
-        let Some(&family) = family_of.get(&id) else {
-            return 0.0;
-        };
-        lookup(
-            table,
-            OperatorKind::SummaryMerge,
-            ExecutionTiming::QueryTime,
-            family,
-            sketch_size,
-        )
-        .map_or_else(
-            || {
-                // A partial copy merges into a state of the same window.
-                let state_bytes = state_bytes_per_row(output[&id], &nodes[&id].output_schema);
-                merge_terms_per_state(family, state_bytes, state_bytes, None, 1).operations()
-                    * speed.ms_per_cpu_op
-                    * formula_scale
-            },
-            |unit| (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6,
-        )
-    };
+    let merge_ms =
+        |id: PhysicalASAPNodeId| partial_copy_merge_ms(nodes[&id], &costed[&id], settings);
     let groups = refresh_groups(
         dag,
         nodes,
@@ -597,6 +555,60 @@ fn peak_cpu_cores(
     cores(ingestion_ms_per_second) + evaluating.max(cores(query_ms_per_second))
 }
 
+/// Milliseconds of one merge of `node`'s state (with its `usage`) when the
+/// newest window's partial copies are compacted: its measured query-time
+/// merge entry (ns · 10⁻⁶, at its series count) when the table has one,
+/// else the merge formula of its family and bytes per state, as a
+/// `SummaryMerge` over it is costed (a DDSketch state: 2,500 operations).
+/// 0 for a node holding no states, such as the raw rows a `Filter` or
+/// `TimeRange` keeps or an exact `Aggregate`'s values: the executor merges
+/// ingest shards only of summary state columns, and partial copies of rows
+/// are concatenated. No per-group term (`merge_output_terms`, 19,000 per
+/// KLL group): the executor merges a shard's states into the existing
+/// states in place, group by group, and creates no group's state or output
+/// row.
+pub fn partial_copy_merge_ms(
+    node: &PhysicalASAPDAGNode,
+    usage: &NodeResourceUsageAndCost<'_>,
+    settings: &CostInputs,
+) -> f64 {
+    let family = usage.family;
+    if family == StateFamily::None {
+        return 0.0;
+    }
+    let sketch_size =
+        |params: &SketchParams| sketch_state_bytes(params, StateInputRows::UNKNOWN) as f64;
+    lookup_at_scale(
+        &settings.measured_operation_costs,
+        OperatorKind::SummaryMerge,
+        ExecutionTiming::QueryTime,
+        family,
+        sketch_size,
+        usage.series,
+    )
+    .map_or_else(
+        || {
+            // A partial copy merges into a state of the same window.
+            let state_bytes = state_bytes_per_row(usage.output, &node.output_schema);
+            merge_terms_per_state(family, state_bytes, state_bytes, None, 1).operations()
+                * settings.resource_speed.ms_per_cpu_op
+                * settings.frozen_calibration_factor.unwrap_or(1.0)
+        },
+        |unit| (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6,
+    )
+}
+
+/// The ingest threads that each build a partial copy of an in-memory
+/// ingestion-time state's newest window, for a state whose ingestion work
+/// takes `ingest_cores`: the deployment's `ingest_threads` when set, else
+/// one per core that work takes, at least one.
+pub fn ingest_threads_building_copies(settings: &CostInputs, ingest_cores: f64) -> u64 {
+    match settings.data_plane_execution.ingest_threads {
+        Some(threads) => u64::from(threads),
+        None => ingest_cores.ceil().max(1.0) as u64,
+    }
+}
+
 /// Steps one request of `entry` evaluates: its range evaluation's, 1
 /// without one (or without an entry).
 fn steps_per_request(entry: Option<&QueryWorkloadEntry>) -> u64 {
@@ -633,7 +645,7 @@ pub(crate) struct RefreshGroup {
 
 /// Whether windows `a` and `b` can close at one instant: their phases agree
 /// modulo the gcd of their widths.
-pub(crate) fn close_together(a: RefreshWindow, b: RefreshWindow) -> bool {
+pub fn close_together(a: RefreshWindow, b: RefreshWindow) -> bool {
     let gcd = greatest_common_divisor(a.width_ms, b.width_ms).max(1);
     a.phase_ms % gcd == b.phase_ms % gcd
 }
@@ -734,7 +746,8 @@ pub(crate) fn group_waits(groups: &[RefreshGroup], precompute_threads: u32) -> V
 
 /// Each query's latency per request ([`QueryLatency`]), without its fixed
 /// cost per request and step (added by [`plan_cost`]): the query-time work
-/// it reaches, each node once, after the allowed lateness and the longest
+/// it reaches, each node once per step of the request (once per request
+/// for a node kept across evaluations), after the allowed lateness and the longest
 /// freshness wait among the refresh groups of the ingestion-time nodes it
 /// reads.
 fn query_latencies(
@@ -790,7 +803,15 @@ fn query_latencies(
                     }
                     continue;
                 }
-                latency.query_execution_ms += work_ms[&id];
+                // Computed once per step of the request, once per request
+                // when kept across evaluations (as `computations` counts it).
+                let per_request = match nodes[&id].lifetime {
+                    Lifetime::AcrossEvaluations(_) => 1,
+                    Lifetime::None | Lifetime::OneEvaluation(_) => {
+                        steps_per_request(entries.get(query))
+                    }
+                };
+                latency.query_execution_ms += work_ms[&id] * per_request as f64;
                 stack.extend(inputs(id));
             }
             Ok(latency)
@@ -807,9 +828,6 @@ fn ingest_workers(
     state: PhysicalASAPNodeId,
     settings: &CostInputs,
 ) -> u64 {
-    if let Some(threads) = settings.data_plane_execution.ingest_threads {
-        return u64::from(threads);
-    }
     let mut ingest_ms_per_s = 0.0;
     let mut seen = HashSet::new();
     let mut stack = vec![state];
@@ -824,7 +842,7 @@ fn ingest_workers(
             );
         }
     }
-    (ingest_ms_per_s / 1_000.0).ceil().max(1.0) as u64
+    ingest_threads_building_copies(settings, ingest_ms_per_s / 1_000.0)
 }
 
 /// The nodes of `dag` by id.

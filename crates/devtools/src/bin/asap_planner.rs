@@ -1053,6 +1053,7 @@ fn selection_json(
         "milp_constraints": selection.milp_constraint_count,
         "milp_objective_cost_per_second": selection.selected_plan_cost_per_second,
         "milp_objective_mean_latency_ms": selection.selected_plan_mean_latency_ms,
+        "milp_latency_ms_per_query": selection.selected_plan_latency_ms_per_query,
         "executions_pruned_by_latency_bound": selection.executions_pruned_by_latency_bound,
     })
 }

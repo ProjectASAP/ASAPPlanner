@@ -103,11 +103,15 @@ pub struct PredictedUsage {
     pub per_node: Vec<PredictedNodeUsage>,
     /// One per workload query, in workload order.
     pub per_query: Vec<PredictedQueryUsage>,
-    /// The fraction of the precompute threads' time spent refreshing (ρ).
+    /// The fraction of the precompute threads' time spent refreshing (ρ);
+    /// 0 in a report written without it.
+    #[serde(default)]
     pub precompute_load: f64,
     /// Per thread role (ingest, precompute, query), the CPU the plan is
     /// predicted to use and the threads that serve it at the target
-    /// utilisation: what a data plane configures its threads from.
+    /// utilisation: what a data plane configures its threads from; zeros
+    /// in a report written without it.
+    #[serde(default)]
     pub recommended_configuration: RecommendedThreads,
 }
 
@@ -129,16 +133,21 @@ pub struct PredictedNodeUsage {
     /// Whether its CPU came from the measured cost table or the formulas.
     pub cost_source: NodeCostSource,
     /// At ingestion time: its ingest work, core-seconds per second.
+    #[serde(default)]
     pub ingest_cpu_core_seconds_per_second: f64,
     /// At ingestion time: its refresh work's CPU ms per window close.
+    #[serde(default)]
     pub refresh_cpu_ms_per_window: f64,
     /// At ingestion time: its refresh work's wall ms per window close (CPU
     /// plus I/O wait).
+    #[serde(default)]
     pub refresh_wall_ms_per_window: f64,
     /// At query time: ms of one computation (one step).
+    #[serde(default)]
     pub query_ms_per_step: f64,
     /// Whether its measured price came from the nearest measured series
     /// count, its own being outside them.
+    #[serde(default)]
     pub priced_outside_measured_scale: bool,
 }
 
@@ -148,16 +157,26 @@ pub struct PredictedNodeUsage {
 #[serde(deny_unknown_fields)]
 pub struct PredictedQueryUsage {
     /// The data plane's allowed lateness.
+    #[serde(default)]
     pub allowed_lateness_ms: f64,
     /// Queueing behind the other refreshes of its newest window's instant.
+    #[serde(default)]
     pub precompute_queueing_ms: f64,
-    /// The refresh of the newest window of the views it reads.
+    /// The refresh of the newest window of the views it reads, the merging
+    /// of the ingest threads' partial copies included (a report written
+    /// before the breakdown names it `compaction_ms`).
+    #[serde(default, alias = "compaction_ms")]
     pub precompute_execution_ms: f64,
-    /// Its query-time work, its fixed cost per request and step included.
+    /// Its query-time work, its fixed cost per request and step included
+    /// (`query_ms` in a report written before the breakdown).
+    #[serde(alias = "query_ms")]
     pub query_execution_ms: f64,
-    /// The four parts' sum.
+    /// The four parts' sum; 0 in a report written before the breakdown.
+    #[serde(default)]
     pub latency_ms: f64,
-    /// Its evaluations per second, its weight in the mean latency.
+    /// Its evaluations per second, its weight in the mean latency; 0 in a
+    /// report written before the breakdown.
+    #[serde(default)]
     pub evaluations_per_second: f64,
 }
 

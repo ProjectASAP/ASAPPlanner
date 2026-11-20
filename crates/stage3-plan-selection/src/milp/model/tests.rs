@@ -201,6 +201,11 @@ fn selection_inputs(
             .iter()
             .map(|execution| Ok(w[execution.candidate.0]))
             .collect(),
+        per_execution_at_largest_retention: selectable
+            .executions()
+            .iter()
+            .map(|execution| Ok(w[execution.candidate.0]))
+            .collect(),
         per_edge: selectable
             .edges()
             .iter()

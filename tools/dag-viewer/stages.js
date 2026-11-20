@@ -761,7 +761,7 @@ function threadsText(usage) {
   const n = (x) => (typeof x === 'number' ? Number(x.toPrecision(3)).toLocaleString('en-US') : '—');
   const roles = ['ingest', 'precompute', 'query'].map((role) => {
     const r = usage.recommended_configuration[role] || {};
-    return `${role} ${n(r.recommended_threads)} (${n(r.predicted_cpu_core_seconds_per_second)} cores)`;
+    return `${role} ${n(r.recommended_threads)} (${n(r.predicted_busy_thread_seconds_per_second)} busy)`;
   });
   return `recommended threads: ${roles.join(', ')} · precompute load ${n(usage.precompute_load)}`;
 }
@@ -786,7 +786,7 @@ function clusterLimitRows(doc) {
     row('memory', usage.peak_memory_bytes, cluster.memory_bytes, ' B peak'),
     row('disk', usage.disk_bytes, cluster.disk_bytes, ' B')];
   if (typeof cluster.cpu_cores === 'number') {
-    const ingest = ((usage.recommended_configuration || {}).ingest || {}).predicted_cpu_core_seconds_per_second || 0;
+    const ingest = ((usage.recommended_configuration || {}).ingest || {}).predicted_busy_thread_seconds_per_second || 0;
     const nodes = (cost.cpu_core_seconds_per_second || 0);
     const decode = Math.max(0, ingest - Object.values(cost.per_node || {})
       .reduce((sum, node) => sum + (node.ingest_cpu_core_seconds_per_second || 0), 0));

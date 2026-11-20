@@ -340,6 +340,36 @@ pub struct CostInputs {
     /// [`DataPlaneExecution::default`].
     #[serde(skip_serializing_if = "DataPlaneExecution::is_default")]
     pub data_plane_execution: DataPlaneExecution,
+    /// Whether the times these inputs predict passed the deployment's
+    /// calibration gate; cost model 3's `lowest_mean_latency` selects by
+    /// latency only when they did, or when the deployment opts in to
+    /// uncalibrated times for testing. Default not checked.
+    #[serde(skip_serializing_if = "LatencyCalibration::is_not_checked")]
+    pub latency_calibration: LatencyCalibration,
+}
+
+/// Whether a deployment's predicted times passed its calibration gate
+/// (`docs/design_docs/proposals/stage3-lowest-mean-latency.md`, section
+/// 2.4): every node's time per phase within 1.5× of measured at every
+/// series scale it runs. JSON: `"not_checked"`, `"passed_gate"` or
+/// `"uncalibrated_for_testing"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LatencyCalibration {
+    /// Not checked against measurements: `lowest_mean_latency` refuses it.
+    #[default]
+    NotChecked,
+    /// The calibration gate passed for these inputs.
+    PassedGate,
+    /// Uncalibrated, for testing: `lowest_mean_latency` selects with the
+    /// times as predicted, which may rank plans by prediction errors.
+    UncalibratedForTesting,
+}
+
+impl LatencyCalibration {
+    fn is_not_checked(&self) -> bool {
+        *self == Self::NotChecked
+    }
 }
 
 impl Default for CostInputs {
@@ -351,6 +381,7 @@ impl Default for CostInputs {
             measured_operation_costs: MeasuredOperationCosts::default(),
             frozen_calibration_factor: None,
             data_plane_execution: DataPlaneExecution::default(),
+            latency_calibration: LatencyCalibration::NotChecked,
         }
     }
 }
