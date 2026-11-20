@@ -59,8 +59,9 @@ pub use installable::{
 // What a deployment runtime needs to build a `UserInput` and read an
 // `InstallablePlan`, so it depends on this crate and `asap-executor` alone.
 pub use asap_cost::{
-    ClusterLimits, ClusterObjective, CostInputs, CostModel, MeasuredOperationCosts, NodeCostSource,
-    OperatorCost, OperatorKind, ResourceSpeed, ResourceUnitCost,
+    ClusterLimits, ClusterObjective, CostInputs, CostModel, DataPlaneExecution,
+    MeasuredOperationCosts, NodeCostSource, OperatorCost, OperatorKind, RecommendedThreads,
+    RefreshIoWait, ResourceSpeed, ResourceUnitCost, RoleThreads,
 };
 pub use asap_frontend_sql::SqlCatalog;
 pub use asap_stage3_plan_selection::{

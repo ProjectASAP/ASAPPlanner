@@ -9,7 +9,7 @@ mod physical;
 pub(crate) use cpu::ModeledCpu;
 pub(crate) use physical::PhysicalResources;
 
-use crate::QueryLatency;
+use crate::{QueryLatency, RecommendedThreads};
 
 /// What one candidate uses, per second of wall time unless the name says
 /// otherwise, without prices: its nodes' CPU, scans, retained memory and disk
@@ -36,8 +36,14 @@ pub struct ResourceUsage {
     /// CPU cores to provision for the peak: the ingestion work's cores plus
     /// one per query evaluating at once.
     pub peak_cpu_cores: u32,
-    /// One per query, in workload order: its latency per evaluation.
+    /// One per query, in workload order: its latency per request.
     pub latency_per_query: Vec<QueryLatency>,
+    /// The fraction of the precompute threads' time spent refreshing (ρ):
+    /// each refresh group's wall time per window over its window width,
+    /// summed, over `precompute_threads`.
+    pub precompute_load: f64,
+    /// Per thread role, the predicted CPU and the threads that serve it.
+    pub recommended_configuration: RecommendedThreads,
 }
 #[cfg(test)]
 mod tests {

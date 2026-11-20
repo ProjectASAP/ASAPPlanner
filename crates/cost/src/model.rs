@@ -219,6 +219,87 @@ pub enum ClusterObjective {
     LowestLatency,
     /// The smallest peak memory; ties by disk, then worst-query latency.
     LeastMemory,
+    /// The smallest frequency-weighted mean query latency (each query
+    /// weighted by its evaluations per second; latency = freshness wait +
+    /// query execution); ties by peak memory, then disk. Each query's
+    /// `max_latency_ms` and the precompute load bound
+    /// ([`DataPlaneExecution::max_thread_utilization`]) are hard limits.
+    LowestMeanLatency,
+}
+
+/// How the deployment's data plane runs work: its threads, the lateness it
+/// allows before closing a window, and the utilisation its threads may
+/// run at. Latency, the precompute load and the recommended thread counts
+/// read it, under every cost model; only cost model 3's
+/// `lowest_mean_latency` selects with it. In JSON an object with these
+/// fields; an omitted field takes its default.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DataPlaneExecution {
+    /// Threads inserting arriving rows, each building a partial copy of an
+    /// in-memory state's newest window; `None` (default): one per core the
+    /// ingestion work needs.
+    pub ingest_threads: Option<u32>,
+    /// Threads running window-close refreshes of ingestion-time views;
+    /// default 1.
+    pub precompute_threads: u32,
+    /// Threads running query requests, one request per thread; default 1.
+    /// Not a limit: the report recommends how many a plan needs.
+    pub query_threads: u32,
+    /// Milliseconds the data plane waits after a window's end before
+    /// closing it; every query waits for it. Default 0.
+    pub allowed_lateness_ms: u64,
+    /// The largest precompute load (the fraction of the precompute threads'
+    /// time spent refreshing) a plan may have under `lowest_mean_latency`,
+    /// and the utilisation the recommended thread counts are sized for;
+    /// default 0.7.
+    pub max_thread_utilization: f64,
+}
+
+impl Default for DataPlaneExecution {
+    fn default() -> Self {
+        Self {
+            ingest_threads: None,
+            precompute_threads: 1,
+            query_threads: 1,
+            allowed_lateness_ms: 0,
+            max_thread_utilization: 0.7,
+        }
+    }
+}
+
+impl DataPlaneExecution {
+    /// Whether every field has its default, so JSON leaves it out.
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Bad input: a thread count of 0, or a utilisation outside (0, 1].
+    fn validate(&self) -> Result<(), AnalyticalCostError> {
+        for (name, threads) in [
+            (
+                "data_plane_execution.ingest_threads",
+                self.ingest_threads.unwrap_or(1),
+            ),
+            (
+                "data_plane_execution.precompute_threads",
+                self.precompute_threads,
+            ),
+            ("data_plane_execution.query_threads", self.query_threads),
+        ] {
+            if threads == 0 {
+                return Err(AnalyticalCostError::InvalidCalibration(name, 0.0));
+            }
+        }
+        let utilization = self.max_thread_utilization;
+        if !(utilization > 0.0 && utilization <= 1.0) {
+            return Err(AnalyticalCostError::InvalidCalibration(
+                "data_plane_execution.max_thread_utilization",
+                utilization,
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The deployment's choices for plan selection (Stage 3): the cost model,
@@ -248,6 +329,10 @@ pub struct CostInputs {
     /// candidate catalog before pricing, preserving the default calibration policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_calibration_factor: Option<f64>,
+    /// How the deployment's data plane runs work; default
+    /// [`DataPlaneExecution::default`].
+    #[serde(skip_serializing_if = "DataPlaneExecution::is_default")]
+    pub data_plane_execution: DataPlaneExecution,
 }
 
 impl Default for CostInputs {
@@ -258,6 +343,7 @@ impl Default for CostInputs {
             non_repeating_query_horizon_seconds: DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
             measured_operation_costs: MeasuredOperationCosts::default(),
             frozen_calibration_factor: None,
+            data_plane_execution: DataPlaneExecution::default(),
         }
     }
 }
@@ -272,6 +358,7 @@ impl CostInputs {
         if let Some(factor) = self.frozen_calibration_factor {
             CalibrationFit::from_factor(factor)?;
         }
+        self.data_plane_execution.validate()?;
         for (name, value) in [
             ("ms_per_cpu_op", self.resource_speed.ms_per_cpu_op),
             (

@@ -34,6 +34,9 @@ fn kll_entry(
         ns_per_unit,
         ns_per_invocation,
         memory_bytes_per_state,
+        ns_per_state_emitted: 0.0,
+        measured_series_count: None,
+        measures: Vec::new(),
     }
 }
 
@@ -181,6 +184,9 @@ fn full_table() -> MeasuredOperationCosts {
                 ns_per_unit: 3.75,
                 ns_per_invocation: 0.0,
                 memory_bytes_per_state: None,
+                ns_per_state_emitted: 0.0,
+                measured_series_count: None,
+                measures: Vec::new(),
             },
             OperatorCost {
                 operator: OperatorKind::Aggregate,
@@ -191,6 +197,9 @@ fn full_table() -> MeasuredOperationCosts {
                 ns_per_unit: 12.0,
                 ns_per_invocation: 250.0,
                 memory_bytes_per_state: None,
+                ns_per_state_emitted: 0.0,
+                measured_series_count: None,
+                measures: Vec::new(),
             },
             OperatorCost {
                 operator: OperatorKind::Scan,
@@ -201,9 +210,15 @@ fn full_table() -> MeasuredOperationCosts {
                 ns_per_unit: 20.0,
                 ns_per_invocation: 5_000.0,
                 memory_bytes_per_state: None,
+                ns_per_state_emitted: 0.0,
+                measured_series_count: None,
+                measures: Vec::new(),
             },
         ],
         ns_per_evaluation: 50_000.0,
+        ns_per_evaluation_step: 0.0,
+        ns_per_ingested_sample: 0.0,
+        refresh_io_wait: Default::default(),
     }
 }
 
