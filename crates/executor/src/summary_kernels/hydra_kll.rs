@@ -1,5 +1,5 @@
 use crate::summary_kernels::traits::{aggregate_core_object_methods, downcast_peer};
-use crate::AggregateCore;
+use crate::{AggregateCore, KernelError};
 use asap_sketchlib::input::{HydraCounter, HydraQuery};
 use asap_sketchlib::{DataInput, Hydra, Kll};
 
@@ -10,7 +10,7 @@ const KEY: &str = "key";
 /// HydraKLL (shared-grouping quantiles): `asap_sketchlib::Hydra` over KLL cells.
 #[derive(Debug, Clone)]
 pub struct HydraKllSketchAccumulator {
-    pub inner: Hydra,
+    pub(crate) inner: Hydra,
 }
 
 impl HydraKllSketchAccumulator {
@@ -19,6 +19,34 @@ impl HydraKllSketchAccumulator {
         Self {
             inner: Hydra::with_schema(rows, cols, [KEY], cell).expect("a one-column schema"),
         }
+    }
+
+    /// The `asap_sketchlib` sketch, so a deployment can persist it with the
+    /// library's codec.
+    pub fn sketch(&self) -> &Hydra {
+        &self.inner
+    }
+
+    /// The accumulator restored from a sketch that was read from an
+    /// accumulator with [`Self::sketch`] and persisted (for example a
+    /// materialized view written to disk).
+    /// Fails for a grid [`Self::new`] does not build: a zero dimension, a
+    /// cell other than KLL, or key columns other than the one key column.
+    pub fn restore_from_disk(sketch: Hydra) -> Result<Self, KernelError> {
+        let kll = |cell: &HydraCounter| matches!(cell, HydraCounter::Kll(_));
+        if sketch.rows == 0
+            || sketch.cols == 0
+            || (sketch.cells.rows(), sketch.cells.cols()) != (sketch.rows, sketch.cols)
+        {
+            return Err("HydraKLL dimensions must be positive and match the grid".into());
+        }
+        if !kll(&sketch.prototype) || !sketch.cells.as_slice().iter().all(kll) {
+            return Err("HydraKLL cells must be KLL".into());
+        }
+        if sketch.schema() != [KEY] {
+            return Err(format!("HydraKLL key columns must be [{KEY}]").into());
+        }
+        Ok(Self { inner: sketch })
     }
 
     pub fn update(&mut self, key: &[String], value: f64) {

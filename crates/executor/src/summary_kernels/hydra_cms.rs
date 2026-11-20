@@ -50,12 +50,15 @@ impl HydraCms {
         })
     }
 
-    /// The grid, so a deployment can encode it with `asap_sketchlib`'s codec.
+    /// The `asap_sketchlib` sketch, so a deployment can persist it with the
+    /// library's codec.
     pub fn sketch(&self) -> &Hydra {
         &self.inner
     }
 
-    /// The state that keeps `sketch`. Its cell shape is read from the
+    /// The accumulator restored from a grid that was read from an
+    /// accumulator with [`Self::sketch`] and persisted (for example a
+    /// materialized view written to disk). Its cell shape is read from the
     /// prototype and its total weight from the grid: with the one group key
     /// column an update adds its weight to one cell per grid row, so the
     /// total is grid row 0's cell masses summed. Fails for a grid
@@ -67,7 +70,7 @@ impl HydraCms {
     /// Every group row of a window shares one grid: restore it once and
     /// share the `Arc` across the window's [`HydraCmsGroup`] rows, since
     /// memory accounting deduplicates the grid by pointer.
-    pub fn from_parts(sketch: Hydra) -> Result<Self, KernelError> {
+    pub fn restore_from_disk(sketch: Hydra) -> Result<Self, KernelError> {
         let HydraCounter::CountMinSketch(prototype) = &sketch.prototype else {
             return Err("HydraCms cells must be Count-Min".into());
         };
@@ -80,9 +83,7 @@ impl HydraCms {
         if sketch.schema() != [GROUP] {
             return Err(format!("HydraCms key columns must be [{GROUP}]").into());
         }
-        let same_shape = |cell: &HydraCounter| {
-            matches!(cell, HydraCounter::CountMinSketch(c) if (c.cols(), c.rows()) == (width, depth))
-        };
+        let same_shape = |cell: &HydraCounter| matches!(cell, HydraCounter::CountMinSketch(c) if (c.cols(), c.rows()) == (width, depth));
         if !sketch.cells.as_slice().iter().all(same_shape) {
             return Err("HydraCms cells must all have the prototype's shape".into());
         }

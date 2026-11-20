@@ -151,16 +151,19 @@ impl WeightedFrequency {
         (self.width, self.depth, self.capacity)
     }
 
-    /// The sketch, so a deployment can encode it with `asap_sketchlib`'s codec.
+    /// The `asap_sketchlib` sketch, so a deployment can persist it with the
+    /// library's codec.
     pub fn sketch(&self) -> &FrequencySketch {
         &self.sketch
     }
 
-    /// The state that keeps `sketch`, its shape read from the sketch. Fails
-    /// for a shape [`check_shape`] refuses, a heap of capacity 0, a
-    /// non-finite counter and a heap key that is not tuple-key bytes, none of
-    /// which a state is built or updated into.
-    pub fn from_sketch(sketch: FrequencySketch) -> Result<Self, Error> {
+    /// The accumulator restored from a sketch that was read from an
+    /// accumulator with [`Self::sketch`] and persisted (for example a
+    /// materialized view written to disk). Its shape is read from the
+    /// sketch. Fails for a shape [`check_shape`] refuses, a heap of capacity
+    /// 0, a non-finite counter and a heap key that is not tuple-key bytes,
+    /// none of which a state is built or updated into.
+    pub fn restore_from_disk(sketch: FrequencySketch) -> Result<Self, Error> {
         let (algorithm, depth, width, capacity) = match &sketch {
             FrequencySketch::Cms(s) => (FrequencyAlgorithm::Cms, s.rows(), s.cols(), 0),
             FrequencySketch::CountSketch(s) => {
@@ -201,8 +204,7 @@ impl WeightedFrequency {
             ));
         }
         // `rows` reads every heap key back as a tuple key.
-        let tuple_key =
-            |key: &OwnedDataInput| matches!(key, OwnedDataInput::Bytes(b) if TupleKey::from_bytes(b).is_ok());
+        let tuple_key = |key: &OwnedDataInput| matches!(key, OwnedDataInput::Bytes(b) if TupleKey::from_bytes(b).is_ok());
         if !state.heap_keys().into_iter().all(tuple_key) {
             return Err(Error::Invalid(
                 "weighted frequency heap key is not a tuple key".into(),

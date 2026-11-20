@@ -6,7 +6,7 @@ use planner_types::summary_type::SketchStatistic;
 
 #[derive(Debug, Clone)]
 pub struct CountMinSketchAccumulator {
-    pub inner: CountMinF64,
+    pub(crate) inner: CountMinF64,
 }
 
 impl CountMinSketchAccumulator {
@@ -19,6 +19,21 @@ impl CountMinSketchAccumulator {
     }
 
     /// Adds `weight` to `item`, whatever its sign.
+    /// The `asap_sketchlib` sketch, so a deployment can persist it with the
+    /// library's codec.
+    pub fn sketch(&self) -> &CountMinF64 {
+        &self.inner
+    }
+
+    /// The accumulator restored from a sketch that was read from an
+    /// accumulator with [`Self::sketch`] and persisted (for example a
+    /// materialized view written to disk).
+    /// Fails for a shape [`Self::new`] refuses.
+    pub fn restore_from_disk(sketch: CountMinF64) -> Result<Self, KernelError> {
+        CountMinSketch::check_shape(sketch.rows(), sketch.cols())?;
+        Ok(Self { inner: sketch })
+    }
+
     pub fn update(&mut self, item: &str, weight: f64) {
         self.inner.update_weighted(&DataInput::Str(item), weight);
     }

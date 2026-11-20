@@ -53,7 +53,8 @@ impl UnivMonAccumulator {
         })
     }
 
-    /// The underlying sketch, so a deployment can encode it with sketchlib's codec.
+    /// The `asap_sketchlib` sketch, so a deployment can persist it with the
+    /// library's codec.
     pub fn sketch(&self) -> &UnivMon {
         &self.inner
     }
@@ -68,15 +69,17 @@ impl UnivMonAccumulator {
         self.inserted_key_bytes
     }
 
-    /// The state that keeps `sketch` and the memory bookkeeping read from
-    /// [`Self::max_key_bytes`] and [`Self::inserted_key_bytes`]. Fails for a
+    /// The accumulator restored from a sketch and bookkeeping that were read
+    /// from an accumulator with [`Self::sketch`], [`Self::max_key_bytes`] and
+    /// [`Self::inserted_key_bytes`] and persisted (for example a materialized
+    /// view written to disk). Fails for a
     /// shape [`check_shape`] refuses, a sketch updated in sketchlib's
     /// terminal mode (the kernel's next insert or merge would panic), a heap
     /// key the kernel never inserts (not a sample's `u64` or key bytes), and
     /// bookkeeping the retained keys contradict: a key longer than
     /// `max_key_bytes`, one layer's keys longer than `inserted_key_bytes`
     /// together, or `max_key_bytes` greater than `inserted_key_bytes`.
-    pub fn from_parts(
+    pub fn restore_from_disk(
         sketch: UnivMon,
         max_key_bytes: usize,
         inserted_key_bytes: usize,
@@ -85,8 +88,7 @@ impl UnivMonAccumulator {
         if !sketch.accepts_standard_updates() {
             return Err("UnivMon sketch was updated in terminal mode".into());
         }
-        if max_key_bytes > inserted_key_bytes || (max_key_bytes == 0) != (inserted_key_bytes == 0)
-        {
+        if max_key_bytes > inserted_key_bytes || (max_key_bytes == 0) != (inserted_key_bytes == 0) {
             return Err(format!(
                 "inconsistent UnivMon key bytes: longest {max_key_bytes}, inserted {inserted_key_bytes}"
             )
@@ -102,9 +104,9 @@ impl UnivMonAccumulator {
                     }
                     OwnedDataInput::Bytes(key) => {
                         return Err(format!(
-                            "UnivMon retains a {}-byte key, longer than max_key_bytes {max_key_bytes}",
-                            key.len()
-                        )
+                        "UnivMon retains a {}-byte key, longer than max_key_bytes {max_key_bytes}",
+                        key.len()
+                    )
                         .into())
                     }
                     _ => return Err("UnivMon heap key is not a sample or key bytes".into()),

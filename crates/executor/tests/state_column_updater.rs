@@ -174,9 +174,9 @@ fn fingerprint(state: &dyn AggregateCore) -> String {
         // its count and quantiles are deterministic.
         return format!(
             "KLL k={} n={} q={:?}",
-            s.inner.k(),
-            s.inner.count(),
-            [0.1, 0.5, 0.9, 1.0].map(|q| s.inner.quantile(q).to_bits())
+            s.sketch().k(),
+            s.sketch().count(),
+            [0.1, 0.5, 0.9, 1.0].map(|q| s.sketch().quantile(q).to_bits())
         );
     }
     if let Some(s) = any.downcast_ref::<DDSketchAccumulator>() {
