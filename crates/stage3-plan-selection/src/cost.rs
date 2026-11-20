@@ -161,6 +161,49 @@ pub(crate) fn execution_costs(
     data: &DataWorkload,
     cost_inputs: &CostInputs,
 ) -> ExecutionCosts {
+    execution_quantities(
+        physical,
+        selectable,
+        entries,
+        data,
+        cost_inputs,
+        Quantity::CostPerSecond,
+    )
+}
+
+/// What [`execution_quantities`] attributes to executions, edges and
+/// retention, by the rules cost model 1's cost follows: a candidate's
+/// `quantity` over its baseline inputs on its execution, the difference
+/// a producer makes on the edge, and its retention's share per retained
+/// second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Quantity {
+    /// Cost model 1's cost per second.
+    CostPerSecond,
+    /// Query-time work of one run, in ms (0 at ingestion time).
+    QueryMsPerRun,
+    /// Refresh wall time per window close, in ms (0 at query time).
+    RefreshWallMsPerWindow,
+    /// CPU core-seconds per second.
+    CpuCoreSecondsPerSecond,
+    /// Peak memory, in bytes.
+    PeakMemoryBytes,
+    /// Disk, in bytes, a query-time scan's raw data apart (per source).
+    DiskBytes,
+}
+
+/// [`execution_costs`] of `quantity` instead of cost model 1's cost
+/// ([`Quantity`]). `cost_inputs` must be cost model 1's, which every
+/// quantity is costed under (only [`Quantity::CostPerSecond`] reads its
+/// prices).
+pub(crate) fn execution_quantities(
+    physical: &PhysicalASAPMemoCandidates,
+    selectable: &SelectableExecutions,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    cost_inputs: &CostInputs,
+    quantity: Quantity,
+) -> ExecutionCosts {
     let memo = &physical.logical_candidates.memo;
     let count = physical.physical_candidates.len();
     let executions = selectable.executions();
@@ -313,7 +356,7 @@ pub(crate) fn execution_costs(
             data,
             cost_inputs,
         )
-        .and_then(|usage| cost_per_second(&usage, cost_inputs))
+        .and_then(|usage| quantity_of(quantity, &usage, cost_inputs))
     };
     let cost = |v: PhysicalCandidateId,
                 node: &PhysicalASAPDAGNode,
@@ -707,6 +750,36 @@ fn ingestion_window_ms(
     v: PhysicalCandidateId,
 ) -> Option<u64> {
     RefreshWindow::computed_from(physical, v).map(|window| window.width_ms)
+}
+
+/// A candidate's `quantity` from its usage: its own, and a query-time
+/// scan's raw data on disk apart ([`cost_per_second`]).
+fn quantity_of(
+    quantity: Quantity,
+    usage: &NodeResourceUsageAndCost<'_>,
+    cost_inputs: &CostInputs,
+) -> Result<(f64, f64), String> {
+    let query_time = usage.cost.timing == ExecutionTiming::QueryTime;
+    Ok(match quantity {
+        Quantity::CostPerSecond => return cost_per_second(usage, cost_inputs),
+        Quantity::QueryMsPerRun => (
+            if query_time {
+                usage.work_ms_per_execution
+            } else {
+                0.0
+            },
+            0.0,
+        ),
+        Quantity::RefreshWallMsPerWindow => {
+            (usage.cost.phase_times.refresh_wall_ms_per_window, 0.0)
+        }
+        Quantity::CpuCoreSecondsPerSecond => (usage.cost.cpu_core_seconds_per_second, 0.0),
+        Quantity::PeakMemoryBytes => (usage.peak_memory_bytes as f64, 0.0),
+        Quantity::DiskBytes => (
+            usage.disk_bytes as f64,
+            usage.raw_scan.map_or(0.0, |(_, bytes)| bytes as f64),
+        ),
+    })
 }
 
 /// A candidate's cost per second from its usage under cost model 1: its

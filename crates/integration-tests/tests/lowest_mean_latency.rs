@@ -91,9 +91,10 @@ async fn a2_a_plan_over_the_precompute_load_bound_is_rejected() {
     assert!(selected.usage("precompute_load") <= 0.7);
 }
 
-/// A3. The A1 settings select the scan, whose 5 minutes of raw rows held
-/// while it runs are its peak; a memory limit one byte below that peak
-/// selects the chain, whose state is smaller, within the limit.
+/// A3. The A6 settings select the chain (13 ms against the raw read's
+/// 30 ms), whose windows of states are its peak memory; a memory limit one
+/// byte below that peak selects the raw read, whose state is smaller,
+/// within the limit.
 #[tokio::test]
 async fn a3_a_tighter_memory_limit_switches_to_a_smaller_state_plan() {
     let workload = over_m(vec![max_every_10s(None)], 1000);
@@ -101,15 +102,15 @@ async fn a3_a_tighter_memory_limit_switches_to_a_smaller_state_plan() {
         cost_inputs(
             cluster("lowest_mean_latency", memory, None, None),
             max_min_table(100.0, 10_000.0, 0.0),
-            json!({"refresh_io_wait": {"ns_per_refresh": 30_000_000.0}}),
+            json!({}),
             json!({}),
         )
     };
     let unlimited = plan(&workload, &settings(None), true).await;
-    assert!(!unlimited.has_ingestion_views());
+    assert!(unlimited.has_ingestion_views());
     let peak = unlimited.usage("peak_memory_bytes") as u64;
     let selected = plan(&workload, &settings(Some(peak - 1)), true).await;
-    assert!(selected.has_ingestion_views(), "the chain");
+    assert!(!selected.has_ingestion_views(), "the raw read");
     assert!(selected.usage("peak_memory_bytes") <= (peak - 1) as f64);
 }
 
@@ -221,15 +222,25 @@ async fn a7_the_precompute_thread_count_changes_the_choice() {
 async fn a8_ties_go_to_the_least_memory_then_the_least_disk() {
     let workload = over_m(vec![max_every_10s(None)], 1000);
     let at = |memory, disk| {
-        cost_inputs(
+        let free: Vec<Value> = max_min_table(0.0, 0.0, 0.0)
+            .into_iter()
+            .map(|mut entry| {
+                entry["ns_per_unit"] = json!(0.0);
+                entry
+            })
+            .collect();
+        let mut settings = cost_inputs(
             cluster("lowest_mean_latency", memory, disk, None),
-            max_min_table(0.0, 0.0, 0.0),
+            free,
             json!({}),
             json!({}),
-        )
+        );
+        // The nodes without an entry are free too.
+        settings["frozen_calibration_factor"] = json!(1e-12);
+        settings
     };
     let selected = plan(&workload, &at(None, None), true).await;
-    assert_eq!(selected.mean_latency_ms(), 0.0);
+    assert!(selected.mean_latency_ms() < 1e-6);
     let peak = selected.usage("peak_memory_bytes") as u64;
     let disk = selected.usage("disk_bytes") as u64;
     let less_memory = planned(&workload, &at(Some(peak - 1), None), true).await;
@@ -334,8 +345,9 @@ async fn a10_no_plan_within_the_limits_is_an_error_naming_the_limit() {
     );
 }
 
-/// A11. A scan of 16 s per 10 s run (1.6 cores) or a chain of 8 s of CPU
-/// (0.8 cores) and 10 s of I/O wait per window (latency 18 s): with
+/// A11. A scan of 16 s per 10 s run (1.6 cores) or a chain of 7 s of CPU
+/// per window and 1.6 s per run (0.86 cores) and 10 s of I/O wait per
+/// window (latency 18.6 s): with
 /// `cpu_cores` 2 the faster scan; with 1, the chain, the only plan within
 /// it on average.
 #[tokio::test]
@@ -344,7 +356,7 @@ async fn a11_the_cpu_limit_is_average_cores() {
     let with_cores = |cores| {
         cost_inputs(
             cluster("lowest_mean_latency", None, None, Some(cores)),
-            max_min_table(53_333.0, 8_000_000.0, 0.0),
+            max_min_table(53_333.0, 7_000_000.0, 0.0),
             json!({"refresh_io_wait": {"ns_per_refresh": 10_000_000_000.0}}),
             data_plane(json!({"precompute_threads": 3})),
         )
@@ -502,15 +514,24 @@ async fn a16_the_report_recommends_thread_counts() {
     );
 }
 
-/// A17. The A2 scan uses 2.1 query cores on one query thread: it is still
-/// selected, and the report recommends 3 query threads.
+/// A17. The A2 scan uses about 2.1 query cores on one query thread: it is
+/// still selected, and the report recommends ceil(cores / 0.7) query
+/// threads.
 #[tokio::test]
 async fn a17_query_cpu_is_not_limited_by_the_thread_count() {
     let workload = over_m(vec![max_every_10s(None)], 1000);
     let selected = plan(&workload, &heavy_refresh(1), true).await;
     assert!(!selected.has_ingestion_views());
     let query = &selected.report["predicted_usage"]["recommended_configuration"]["query"];
-    assert_eq!(query["recommended_threads"].as_u64(), Some(3), "{query}");
+    let cores = query["predicted_cpu_core_seconds_per_second"]
+        .as_f64()
+        .unwrap();
+    assert!(cores > 2.0, "{query}");
+    assert_eq!(
+        query["recommended_threads"].as_u64(),
+        Some((cores / 0.7).ceil() as u64),
+        "{query}"
+    );
 }
 
 /// The A1 table without the field this work adds (`ns_per_state_emitted`).
@@ -605,4 +626,44 @@ async fn r3_old_cost_inputs_load_and_new_ones_are_validated() {
             "{field} {value}: {error}"
         );
     }
+}
+
+/// A18. Latency bounds as exclusions: with a 40 ms refresh the chain's
+/// least latency (over 40 ms) is over the query's 35 ms bound, so its
+/// executions are left out before the MILP, and the raw read (30.3 ms) is
+/// selected.
+#[tokio::test]
+async fn a18_a_candidate_over_every_readers_bound_is_pruned_before_the_milp() {
+    let workload = over_m(vec![max_every_10s(Some(35.0))], 1000);
+    let settings: CostInputs = serde_json::from_value(cost_inputs(
+        lowest_mean_latency(),
+        max_min_table(100.0, 40_000.0, 0.0),
+        json!({}),
+        json!({}),
+    ))
+    .unwrap();
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: true,
+        ..Default::default()
+    };
+    let models = PlanningModels::builtin()
+        .with_cost_inputs(&settings)
+        .with_deployment_capabilities(&capabilities);
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let run = run_planning_stages_over(
+        lower_promql_roots(&workload).unwrap(),
+        &entries,
+        &data,
+        models,
+    )
+    .unwrap();
+    let (plan, selection) = run.run.selection.as_ref().expect("a plan is selected");
+    assert!(
+        selection.executions_pruned_by_latency_bound > 0,
+        "the chain's executions are left out"
+    );
+    assert!(plan.nodes.iter().all(|node| node.output_state.timing
+        == asap_planner::ExecutionTiming::QueryTime
+        || !node.is_view()));
 }

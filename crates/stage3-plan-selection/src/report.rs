@@ -194,8 +194,11 @@ pub struct Selection {
     pub milp_solve_count: usize,
     /// Under cost model 3's `lowest_mean_latency`, the selected plan's
     /// frequency-weighted mean query latency in ms; `None` otherwise.
-    /// Stub: always `None` until the latency objective is implemented.
     pub selected_plan_mean_latency_ms: Option<f64>,
+    /// Under cost model 3's `lowest_mean_latency`, the executions left out
+    /// before the MILP because their least possible latency is over the
+    /// `max_latency_ms` of every query that may read them; 0 otherwise.
+    pub executions_pruned_by_latency_bound: usize,
 }
 
 /// Why Stage 3 selected no plan.
@@ -237,9 +240,15 @@ pub enum ErrorSelectingPlan {
         query: usize,
         failure_probability_bound: Option<FailureProbabilityBound>,
     },
-    /// The selection MILP implements cost model 1 only (#1095 §3).
+    /// The selection MILP implements cost model 1 and cost model 3's
+    /// `lowest_mean_latency` only.
     #[error("the selection MILP does not support {0}")]
     UnsupportedCostModel(String),
+    /// Under cost model 3, no plan fits the cluster's limits: each listed
+    /// limit alone blocks every plan meeting the others, with the least any
+    /// such plan needs.
+    #[error("no plan fits the cluster's limits: {0:?}")]
+    OverClusterLimits(Vec<crate::ClusterLimitShortfall>),
 }
 
 /// `bound` in words for [`ErrorSelectingPlan::AccuracyTargetBelowSolverPrecision`]:
