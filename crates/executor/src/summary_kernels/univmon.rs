@@ -2,7 +2,7 @@
 
 use crate::summary_kernels::traits::{aggregate_core_object_methods, downcast_peer};
 use crate::AggregateCore;
-use asap_sketchlib::{DataInput, UnivMon};
+use asap_sketchlib::{DataInput, OwnedDataInput, UnivMon};
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::summary_type::SketchStatistic;
 
@@ -53,9 +53,78 @@ impl UnivMonAccumulator {
         })
     }
 
-    /// The underlying sketch, so a deployment can encode it with sketchlib's codec.
+    /// The `asap_sketchlib` sketch, so a deployment can persist it with the
+    /// library's codec.
     pub fn sketch(&self) -> &UnivMon {
         &self.inner
+    }
+
+    /// The longest variable-length key inserted, in bytes (memory bookkeeping).
+    pub fn max_key_bytes(&self) -> usize {
+        self.max_key_bytes
+    }
+
+    /// The bytes of every variable-length key inserted (memory bookkeeping).
+    pub fn inserted_key_bytes(&self) -> usize {
+        self.inserted_key_bytes
+    }
+
+    /// The accumulator restored from a sketch and bookkeeping that were read
+    /// from an accumulator with [`Self::sketch`], [`Self::max_key_bytes`] and
+    /// [`Self::inserted_key_bytes`] and persisted (for example a materialized
+    /// view written to disk). Fails for a
+    /// shape [`check_shape`] refuses, a sketch updated in sketchlib's
+    /// terminal mode (the kernel's next insert or merge would panic), a heap
+    /// key the kernel never inserts (not a sample's `u64` or key bytes), and
+    /// bookkeeping the retained keys contradict: a key longer than
+    /// `max_key_bytes`, one layer's keys longer than `inserted_key_bytes`
+    /// together, `max_key_bytes` greater than `inserted_key_bytes`, or
+    /// exactly one of `max_key_bytes` and `inserted_key_bytes` 0.
+    pub fn restore_from_disk(
+        sketch: UnivMon,
+        max_key_bytes: usize,
+        inserted_key_bytes: usize,
+    ) -> Result<Self, Error> {
+        check_shape(sketch.heap_size, sketch.rows, sketch.cols, sketch.layers)?;
+        if !sketch.accepts_standard_updates() {
+            return Err("UnivMon sketch was updated in terminal mode".into());
+        }
+        if max_key_bytes > inserted_key_bytes || (max_key_bytes == 0) != (inserted_key_bytes == 0) {
+            return Err(format!(
+                "inconsistent UnivMon key bytes: longest {max_key_bytes}, inserted {inserted_key_bytes}"
+            )
+            .into());
+        }
+        for heap in sketch.layer_heaps.as_slice() {
+            let mut layer_key_bytes = 0usize;
+            for item in heap.heap() {
+                match &item.key {
+                    OwnedDataInput::U64(_) => {}
+                    OwnedDataInput::Bytes(key) if key.len() <= max_key_bytes => {
+                        layer_key_bytes = layer_key_bytes.saturating_add(key.len());
+                    }
+                    OwnedDataInput::Bytes(key) => {
+                        return Err(format!(
+                        "UnivMon retains a {}-byte key, longer than max_key_bytes {max_key_bytes}",
+                        key.len()
+                    )
+                        .into())
+                    }
+                    _ => return Err("UnivMon heap key is not a sample or key bytes".into()),
+                }
+            }
+            if layer_key_bytes > inserted_key_bytes {
+                return Err(format!(
+                    "UnivMon layer retains {layer_key_bytes} key bytes, more than inserted_key_bytes {inserted_key_bytes}"
+                )
+                .into());
+            }
+        }
+        Ok(Self {
+            inner: sketch,
+            max_key_bytes,
+            inserted_key_bytes,
+        })
     }
 
     /// Each non-NaN sample is one occurrence. Signed zero has one identity.

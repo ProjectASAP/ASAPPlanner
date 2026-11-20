@@ -6,7 +6,7 @@ use planner_types::summary_type::SketchStatistic;
 
 #[derive(Debug, Clone)]
 pub struct DDSketchAccumulator {
-    pub inner: DdSketch,
+    pub(crate) inner: DdSketch,
 }
 
 impl DDSketchAccumulator {
@@ -14,6 +14,19 @@ impl DDSketchAccumulator {
         Self {
             inner: DdSketch::new(alpha),
         }
+    }
+
+    /// The `asap_sketchlib` sketch, so a deployment can persist it with the
+    /// library's codec.
+    pub fn sketch(&self) -> &DdSketch {
+        &self.inner
+    }
+
+    /// The accumulator restored from a sketch that was read from an
+    /// accumulator with [`Self::sketch`] and persisted (for example a
+    /// materialized view written to disk).
+    pub fn restore_from_disk(sketch: DdSketch) -> Result<Self, KernelError> {
+        Ok(Self { inner: sketch })
     }
 }
 

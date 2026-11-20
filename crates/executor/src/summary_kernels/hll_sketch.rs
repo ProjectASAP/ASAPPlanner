@@ -3,15 +3,17 @@
 use crate::summary_kernels::traits::{aggregate_core_object_methods, downcast_peer};
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::DataInput;
+pub use hll_registers::HllRegisters;
 use planner_types::summary_type::SketchStatistic;
-use registers::Registers;
 
 /// The precisions a state can be built at.
 pub const HLL_PRECISIONS: std::ops::RangeInclusive<u8> = 4..=18;
 
 /// `asap_sketchlib` fixes an HLL's precision in its register type: one type
-/// per precision in [`HLL_PRECISIONS`], and [`Registers`] holds any of them.
-mod registers {
+/// per precision in [`HLL_PRECISIONS`], and [`HllRegisters`] holds any of them.
+/// Public so a deployment can name each precision's sketch type, for
+/// example to decode one with `asap_sketchlib`'s codec.
+pub mod hll_registers {
     use asap_sketchlib::sketches::hll::HyperLogLogImpl;
     use asap_sketchlib::{Classic, DataInput};
 
@@ -20,11 +22,11 @@ mod registers {
             $(asap_sketchlib::impl_hll_registers!($storage, $precision, 1_usize << $precision);)*
 
             #[derive(Debug, Clone)]
-            pub enum Registers {
+            pub enum HllRegisters {
                 $($variant(HyperLogLogImpl<Classic, $storage>),)*
             }
 
-            impl Registers {
+            impl HllRegisters {
                 pub fn new(precision: u8) -> Option<Self> {
                     match precision {
                         $($precision => Some(Self::$variant(HyperLogLogImpl::<Classic, $storage>::new())),)*
@@ -91,15 +93,28 @@ mod registers {
 
 #[derive(Debug, Clone)]
 pub struct HllSketchAccumulator {
-    inner: Registers,
+    inner: HllRegisters,
 }
 
 impl HllSketchAccumulator {
     /// Fails for a precision outside [`HLL_PRECISIONS`].
     pub fn new(precision: u8) -> Result<Self, KernelError> {
-        Registers::new(precision)
+        HllRegisters::new(precision)
             .map(|inner| Self { inner })
             .ok_or_else(|| format!("HLL precision {precision} is outside 4..=18").into())
+    }
+
+    /// The registers at their precision, each variant an `asap_sketchlib`
+    /// sketch, so a deployment can persist it with the library's codec.
+    pub fn sketch(&self) -> &HllRegisters {
+        &self.inner
+    }
+
+    /// The accumulator restored from registers that were read from an
+    /// accumulator with [`Self::sketch`] and persisted (for example a
+    /// materialized view written to disk).
+    pub fn restore_from_disk(sketch: HllRegisters) -> Result<Self, KernelError> {
+        Ok(Self { inner: sketch })
     }
 
     pub fn precision(&self) -> u8 {
@@ -123,7 +138,7 @@ impl HllSketchAccumulator {
 
     /// Empty the state in place, keeping its precision.
     pub fn clear(&mut self) {
-        self.inner = Registers::new(self.precision()).expect("a built precision");
+        self.inner = HllRegisters::new(self.precision()).expect("a built precision");
     }
 }
 

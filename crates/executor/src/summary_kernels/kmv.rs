@@ -14,7 +14,7 @@ pub const KMV_MIN_K: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct KmvAccumulator {
-    pub inner: Kmv,
+    pub(crate) inner: Kmv,
 }
 
 impl KmvAccumulator {
@@ -22,6 +22,23 @@ impl KmvAccumulator {
         Self {
             inner: Kmv::new(k as usize),
         }
+    }
+
+    /// The `asap_sketchlib` sketch, so a deployment can persist it with the
+    /// library's codec.
+    pub fn sketch(&self) -> &Kmv {
+        &self.inner
+    }
+
+    /// The accumulator restored from a sketch that was read from an
+    /// accumulator with [`Self::sketch`] and persisted (for example a
+    /// materialized view written to disk).
+    /// Fails for `k` below [`KMV_MIN_K`].
+    pub fn restore_from_disk(sketch: Kmv) -> Result<Self, KernelError> {
+        if sketch.k < KMV_MIN_K as usize {
+            return Err(format!("KMV k {} is below {KMV_MIN_K}", sketch.k).into());
+        }
+        Ok(Self { inner: sketch })
     }
 
     /// Observe one sample value. Like HLL, a value is hashed by its bits

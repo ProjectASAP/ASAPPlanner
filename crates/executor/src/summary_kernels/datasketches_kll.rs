@@ -6,7 +6,7 @@ use planner_types::summary_type::SketchStatistic;
 
 #[derive(Clone)]
 pub struct DatasketchesKLLAccumulator {
-    pub inner: Kll,
+    pub(crate) inner: Kll,
 }
 
 impl DatasketchesKLLAccumulator {
@@ -14,6 +14,19 @@ impl DatasketchesKLLAccumulator {
         Self {
             inner: Kll::with_k(i32::from(k)),
         }
+    }
+
+    /// The `asap_sketchlib` sketch, so a deployment can persist it with the
+    /// library's codec.
+    pub fn sketch(&self) -> &Kll {
+        &self.inner
+    }
+
+    /// The accumulator restored from a sketch that was read from an
+    /// accumulator with [`Self::sketch`] and persisted (for example a
+    /// materialized view written to disk).
+    pub fn restore_from_disk(sketch: Kll) -> Result<Self, KernelError> {
+        Ok(Self { inner: sketch })
     }
 
     pub fn update(&mut self, value: f64) {

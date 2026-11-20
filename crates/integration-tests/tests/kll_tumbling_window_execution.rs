@@ -329,7 +329,7 @@ fn five_tumbling_windows_roundtrip_and_shared_merge_runs_once() {
             .as_any()
             .downcast_ref::<DatasketchesKLLAccumulator>()
             .unwrap();
-        assert_eq!(kll.inner.count(), 100);
+        assert_eq!(kll.sketch().count(), 100);
         let value = |index: usize| {
             result[index][0].to_rows()[0]
                 .iter()

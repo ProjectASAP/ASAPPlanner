@@ -50,6 +50,72 @@ impl HydraCms {
         })
     }
 
+    /// The `asap_sketchlib` sketch, so a deployment can persist it with the
+    /// library's codec.
+    pub fn sketch(&self) -> &Hydra {
+        &self.inner
+    }
+
+    /// The accumulator restored from a grid that was read from an
+    /// accumulator with [`Self::sketch`] and persisted (for example a
+    /// materialized view written to disk). Its cell shape is read from the
+    /// prototype and its total weight from the grid: with the one group key
+    /// column an update adds its weight to one cell per grid row, so every
+    /// grid row's cell masses sum to the total. Fails for a grid
+    /// [`Self::new`] does not build (a zero dimension, a cell other than
+    /// Count-Min, a cell of another shape than the prototype, or key columns
+    /// other than the one group column), for grid rows whose totals differ,
+    /// and for a total outside `0..=i32::MAX`.
+    ///
+    /// Every group row of a window shares one grid: restore it once and
+    /// share the `Arc` across the window's [`HydraCmsGroup`] rows, since
+    /// memory accounting deduplicates the grid by pointer.
+    pub fn restore_from_disk(sketch: Hydra) -> Result<Self, KernelError> {
+        let HydraCounter::CountMinSketch(prototype) = &sketch.prototype else {
+            return Err("HydraCms cells must be Count-Min".into());
+        };
+        let (width, depth) = (prototype.cols(), prototype.rows());
+        if [sketch.rows, sketch.cols, width, depth].contains(&0)
+            || (sketch.cells.rows(), sketch.cells.cols()) != (sketch.rows, sketch.cols)
+        {
+            return Err("HydraCms dimensions must be positive and match the grid".into());
+        }
+        if sketch.schema() != [GROUP] {
+            return Err(format!("HydraCms key columns must be [{GROUP}]").into());
+        }
+        let same_shape = |cell: &HydraCounter| matches!(cell, HydraCounter::CountMinSketch(c) if (c.cols(), c.rows()) == (width, depth));
+        if !sketch.cells.as_slice().iter().all(same_shape) {
+            return Err("HydraCms cells must all have the prototype's shape".into());
+        }
+        // Every update adds its weight to one cell per grid row, so every
+        // grid row sums to the total.
+        let mut row_totals = (0..sketch.rows).map(|row| {
+            (0..sketch.cols).try_fold(0i64, |total, column| {
+                let cell = sketch.cells.get(row, column).expect("within the grid");
+                let mass = cell.total_mass()? as i64;
+                if mass < 0 {
+                    return Err("HydraCms cell holds a negative weight".to_string());
+                }
+                Ok(total + mass)
+            })
+        });
+        let total = row_totals.next().expect("a positive row count")?;
+        for row_total in row_totals {
+            if row_total? != total {
+                return Err("HydraCms grid rows hold different totals".into());
+            }
+        }
+        if !(0..=i64::from(i32::MAX)).contains(&total) {
+            return Err(format!("HydraCms total {total} is outside its i32 counters").into());
+        }
+        Ok(Self {
+            inner: sketch,
+            width,
+            depth,
+            total,
+        })
+    }
+
     /// `(shared_rows, shared_columns, width, depth)`.
     pub fn shape(&self) -> (usize, usize, usize, usize) {
         (self.inner.rows, self.inner.cols, self.width, self.depth)
