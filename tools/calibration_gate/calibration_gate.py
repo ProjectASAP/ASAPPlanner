@@ -3,35 +3,41 @@
 docs/design_docs/proposals/stage3-lowest-mean-latency.md, section 2.4):
 check a deployment's calibration file against its own measurements.
 
-For each calibration workload, the planner plans it with the calibration
-file and writes its report (`asap_planner --report-file`); the deployment
-measured the same plan running. The gate passes when every refresh group's
-CPU and wall time per window, and every query's time per request, is within
-the acceptance ratio (default 1.5x) of the measured value.
+For each calibration case (a workload, the plan that ran for it, and what
+the deployment measured running it), the planner prices that plan with the
+calibration file (`asap_planner --price-plan PLAN --report-file`). The gate
+passes when every refresh group's CPU per window close and every query's
+time per request is within the acceptance ratio (default 1.5x) of the
+measured value.
 
-Measured file (one per workload), JSON:
+A refresh group's prediction is the ingestion-time work of its views and
+the ingestion-time nodes they read, per window close: each node's ingest
+CPU over the window plus its refresh CPU (and wall: its refresh wall time).
+A query's prediction is its query execution per request.
+
+Measured file (one per case), JSON:
 
     {
       "refresh_groups": [
-        {"views": [3, 4], "cpu_ms_per_window": 12.5, "wall_ms_per_window": 20.1}
+        {"views": [3, 4], "window_ms": 10000,
+         "cpu_ms_per_window": 12.5, "wall_ms_per_window": 20.1}
       ],
       "queries": [
         {"query": 0, "cpu_ms_per_request": 31.0}
       ]
     }
 
-`views` are the plan's node ids of the group's views (the installed plan's
-`ingestion_refresh_groups`); `query` is the query's position in the
-workload. A missing `wall_ms_per_window` is not checked.
+`views` are node ids of the plan's views in the group; `query` is the
+query's position in the workload. A missing `wall_ms_per_window` is not
+checked.
 
 Usage:
 
     calibration_gate.py --planner target/debug/asap_planner \\
-        --cost-inputs calibration.json [--deployment-capabilities caps.json] \\
-        [--ratio 1.5] --case WORKLOAD.json MEASURED.json [--case ...]
+        --cost-inputs calibration.json [--ratio 1.5] \\
+        --case WORKLOAD.json PLAN.json MEASURED.json [--case ...]
 
-Exit status 0 when every case passes, 1 otherwise; one line per checked
-row.
+Exit status 0 when every case passes, 1 otherwise; one line per row.
 """
 
 import argparse
@@ -42,22 +48,31 @@ import tempfile
 from pathlib import Path
 
 
-def predicted(planner, workload, cost_inputs, capabilities):
-    """The planner's report for `workload` as JSON."""
+def priced(planner, workload, plan, cost_inputs):
+    """The planner's report of `plan` for `workload` as JSON."""
     with tempfile.TemporaryDirectory() as tmp:
         report = Path(tmp) / "report.json"
-        command = [
-            planner,
-            "--workload", workload,
-            "--run-until", "stage3",
-            "--cost-inputs", cost_inputs,
-            "--out", str(Path(tmp) / "stages.txt"),
-            "--report-file", str(report),
-        ]
-        if capabilities:
-            command += ["--deployment-capabilities", capabilities]
-        subprocess.run(command, check=True)
+        subprocess.run([planner, "--workload", workload, "--run-until", "stage3",
+                        "--cost-inputs", cost_inputs, "--price-plan", plan,
+                        "--report-file", str(report)], check=True)
         return json.loads(report.read_text())
+
+
+def ingestion_nodes_read(plan, views):
+    """`views` and the ingestion-time nodes they read, transitively."""
+    dag = plan["dag"]
+    timing = {node["id"]: node["output_state"]["timing"] for node in dag["nodes"]}
+    producers = {}
+    for edge in dag["edges"]:
+        producers.setdefault(edge["consumer"], []).append(edge["producer"])
+    seen, stack = set(), list(views)
+    while stack:
+        node = stack.pop()
+        if node in seen or timing.get(node) != "ingestion_time":
+            continue
+        seen.add(node)
+        stack.extend(producers.get(node, []))
+    return seen
 
 
 def within(measured, predicted_value, ratio):
@@ -66,30 +81,32 @@ def within(measured, predicted_value, ratio):
     return 1 / ratio <= measured / predicted_value <= ratio
 
 
-def check(report, measured, ratio, label):
+def check(report, plan, measured, ratio, label):
     """One line per row; True when every row is within `ratio`."""
     per_node = {node["node_id"]: node for node in report["predicted_usage"]["per_node"]}
     per_query = report["predicted_usage"]["per_query"]
     ok = True
-    for group in measured.get("refresh_groups", []):
-        nodes = [per_node[view] for view in group["views"]]
-        for field, key in [("refresh_cpu_ms_per_window", "cpu_ms_per_window"),
-                           ("refresh_wall_ms_per_window", "wall_ms_per_window")]:
-            if key not in group:
-                continue
-            value = sum(node[field] for node in nodes)
-            passed = within(group[key], value, ratio)
-            ok &= passed
-            print(f"{label} group {group['views']} {key}: measured {group[key]:.3f} "
-                  f"predicted {value:.3f} ratio {group[key] / value if value else float('nan'):.2f} "
-                  f"{'ok' if passed else 'FAIL'}")
-    for query in measured.get("queries", []):
-        value = per_query[query["query"]]["query_execution_ms"]
-        passed = within(query["cpu_ms_per_request"], value, ratio)
+
+    def row(name, measured_value, predicted_value):
+        nonlocal ok
+        passed = within(measured_value, predicted_value, ratio)
         ok &= passed
-        print(f"{label} query {query['query']} ms per request: measured "
-              f"{query['cpu_ms_per_request']:.3f} predicted {value:.3f} "
-              f"{'ok' if passed else 'FAIL'}")
+        ratio_text = f"{measured_value / predicted_value:.2f}" if predicted_value else "nan"
+        print(f"{label} {name}: measured {measured_value:.3f} predicted {predicted_value:.3f} "
+              f"ratio {ratio_text} {'ok' if passed else 'FAIL'}")
+
+    for group in measured.get("refresh_groups", []):
+        nodes = [per_node[n] for n in ingestion_nodes_read(plan, group["views"]) if n in per_node]
+        window_s = group["window_ms"] / 1000.0
+        ingest = sum(n["ingest_cpu_core_seconds_per_second"] for n in nodes) * window_s * 1000
+        cpu = ingest + sum(n["refresh_cpu_ms_per_window"] for n in nodes)
+        wall = ingest + sum(n["refresh_wall_ms_per_window"] for n in nodes)
+        row(f"group {group['views']} cpu ms/window", group["cpu_ms_per_window"], cpu)
+        if "wall_ms_per_window" in group:
+            row(f"group {group['views']} wall ms/window", group["wall_ms_per_window"], wall)
+    for query in measured.get("queries", []):
+        row(f"query {query['query']} ms/request", query["cpu_ms_per_request"],
+            per_query[query["query"]]["query_execution_ms"])
     return ok
 
 
@@ -97,17 +114,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--planner", required=True)
     parser.add_argument("--cost-inputs", required=True)
-    parser.add_argument("--deployment-capabilities")
     parser.add_argument("--ratio", type=float, default=1.5)
-    parser.add_argument("--case", nargs=2, action="append", required=True,
-                        metavar=("WORKLOAD", "MEASURED"))
+    parser.add_argument("--case", nargs=3, action="append", required=True,
+                        metavar=("WORKLOAD", "PLAN", "MEASURED"))
     args = parser.parse_args()
     ok = True
-    for workload, measured in args.case:
-        report = predicted(args.planner, workload, args.cost_inputs,
-                           args.deployment_capabilities)
-        ok &= check(report, json.loads(Path(measured).read_text()), args.ratio,
-                    Path(workload).stem)
+    for workload, plan, measured in args.case:
+        report = priced(args.planner, workload, plan, args.cost_inputs)
+        ok &= check(report, json.loads(Path(plan).read_text()),
+                    json.loads(Path(measured).read_text()), args.ratio, Path(measured).stem)
     print("PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)
 

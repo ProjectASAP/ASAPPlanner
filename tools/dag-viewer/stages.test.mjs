@@ -217,3 +217,46 @@ test('the deployment settings name each capability left out and the caller exclu
   const defaults = call('capabilityLimitsText', { raw_data_retained: true, query_time_results_retained: false });
   assert.equal(defaults, '');
 });
+
+test('under cost model 3 the settings list each cluster limit, what the plan uses and which binds', () => {
+  const doc = {
+    cost_inputs: {
+      cost_model: { cluster_capacity: { memory_bytes: 1000, disk_bytes: 10, cpu_cores: 2, objective: 'lowest_mean_latency' } },
+      data_plane_execution: { precompute_threads: 2, query_threads: 4, allowed_lateness_ms: 5, max_thread_utilization: 0.7 },
+    },
+    workload: { queries: [{ requirements: { max_latency_ms: 40 } }, { requirements: {} }] },
+    stage3_plan_selection: {
+      cost: {
+        cpu_core_seconds_per_second: 0.5,
+        per_node: { 0: { ingest_cpu_core_seconds_per_second: 0.1 } },
+        usage: {
+          peak_memory_bytes: 1000, disk_bytes: 2, precompute_load: 0.35,
+          recommended_configuration: {
+            ingest: { predicted_cpu_core_seconds_per_second: 0.1, recommended_threads: 1 },
+            precompute: { predicted_cpu_core_seconds_per_second: 0.7, recommended_threads: 1 },
+            query: { predicted_cpu_core_seconds_per_second: 1.5, recommended_threads: 3 },
+          },
+          latency_per_query: [
+            { allowed_lateness_ms: 5, precompute_queueing_ms: 1, precompute_execution_ms: 30, query_execution_ms: 4, latency_ms: 40, evaluations_per_second: 0.1 },
+            { allowed_lateness_ms: 5, precompute_queueing_ms: 0, precompute_execution_ms: 0, query_execution_ms: 2, latency_ms: 7, evaluations_per_second: 1 },
+          ],
+        },
+      },
+    },
+  };
+  const rows = Object.fromEntries(call('clusterLimitRows', doc));
+  assert.equal(rows.objective, 'lowest mean latency');
+  assert.match(rows.memory, /1,000 of 1,000 B peak \(binds\)/);
+  assert.doesNotMatch(rows.disk, /binds/);
+  assert.match(rows['CPU cores (average)'], /0\.5 of 2/);
+  assert.match(rows['precompute load'], /0\.35 of 0\.7/);
+  assert.match(rows['q1 latency'], /40 of 40 ms \(binds\)/);
+  assert.equal(rows['q2 latency'], undefined);
+  assert.match(rows['data plane'], /precompute 2, query 4 · allowed lateness 5 ms/);
+  // Cost model 1 has no cluster rows.
+  assert.deepEqual(call('clusterLimitRows', { cost_inputs: { cost_model: { usage_over_time: {} } } }), []);
+  const breakdown = call('latencyBreakdownText', doc.stage3_plan_selection.cost.usage);
+  assert.match(breakdown, /q1 40 ms = lateness 5 \+ queueing 1 \+ precompute 30 \+ execution 4 ms, 0\.1\/s/);
+  assert.match(call('threadsText', doc.stage3_plan_selection.cost.usage), /query 3 \(1\.5 cores\)/);
+  assert.match(call('usageText', doc.stage3_plan_selection.cost.usage), /latency q1 40 ms, q2 7 ms/);
+});

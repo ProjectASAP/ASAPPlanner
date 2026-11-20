@@ -694,8 +694,11 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
 
 /// The `--cost-inputs` cost model decides how Example 4's candidates are
 /// compared: cost model 1 (the default) selects a plan with a cost per
-/// second, and Stage 3's selection MILP refuses cost models 2 and 3 with
-/// an error saying it implements cost model 1 only (#888).
+/// second; cost model 3's `lowest_mean_latency` enforces the queries'
+/// 200 ms latency bound, which no plan meets (the least is 7 s), and names
+/// it; and Stage 3's selection MILP refuses cost model 2
+/// and cost model 3's other objectives with an error naming what it
+/// implements.
 #[test]
 fn the_cost_model_chooses_how_candidates_are_compared() {
     use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel, ResourceUnitCost};
@@ -710,6 +713,18 @@ fn the_cost_model_chooses_how_candidates_are_compared() {
     let usage = selected(CostModel::UsageOverTime(ResourceUnitCost::illustrative()));
     assert!(selects_a_plan(&usage), "{usage}");
     assert!(usage["cost"]["cost_per_second"].is_number());
+    let fastest = selected(CostModel::ClusterCapacity(ClusterLimits {
+        memory_bytes: 256_000_000_000,
+        disk_bytes: 1_000_000_000_000,
+        cpu_cores: None,
+        objective: ClusterObjective::LowestMeanLatency,
+    }));
+    assert!(!selects_a_plan(&fastest), "{fastest}");
+    let error = fastest["error"].as_str().unwrap();
+    assert!(
+        error.contains("no plan fits the cluster's limits") && error.contains("QueryLatencyMs"),
+        "{error}"
+    );
     for cost_model in [
         CostModel::ProvisionedCapacity(ResourceUnitCost::illustrative()),
         CostModel::ClusterCapacity(ClusterLimits {
@@ -725,7 +740,7 @@ fn the_cost_model_chooses_how_candidates_are_compared() {
             refused["error"]
                 .as_str()
                 .unwrap()
-                .contains("implements cost model 1 only"),
+                .contains("implements cost model 1 and cost model 3's lowest_mean_latency"),
             "{refused}"
         );
     }

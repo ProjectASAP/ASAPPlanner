@@ -254,6 +254,12 @@ pub struct DataPlaneExecution {
     /// and the utilisation the recommended thread counts are sized for;
     /// default 0.7.
     pub max_thread_utilization: f64,
+    /// Whether the data plane buffers a window's arriving rows and inserts
+    /// them when the window closes, in the refresh: its ingest work is
+    /// then refresh work (on the precompute threads, in the freshness wait
+    /// and the precompute load). Default false: rows are inserted as they
+    /// arrive, on the ingest threads.
+    pub ingest_work_at_refresh: bool,
 }
 
 impl Default for DataPlaneExecution {
@@ -264,6 +270,7 @@ impl Default for DataPlaneExecution {
             query_threads: 1,
             allowed_lateness_ms: 0,
             max_thread_utilization: 0.7,
+            ingest_work_at_refresh: false,
         }
     }
 }

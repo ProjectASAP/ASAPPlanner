@@ -1620,7 +1620,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         producer.family != StateFamily::None || producer.chain_tumbling_window_width_ms.is_some()
     });
     let phase_times = phase_times(
-        reads_closed_windows,
+        reads_closed_windows || settings.data_plane_execution.ingest_work_at_refresh,
         ingestion,
         window_ms,
         node_ms,
