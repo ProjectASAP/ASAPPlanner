@@ -1,6 +1,6 @@
 # Planner bench (SQL)
 
-1570 jobs; outcomes: {'ok': 1524, 'killed_timeout': 45, 'killed_memory': 1}
+1558 jobs; outcomes: {'ok': 1512, 'killed_timeout': 45, 'killed_memory': 1}
 
 ## Scaling: growth exponent (log-log slope vs queries)
 
@@ -278,8 +278,8 @@ cfg_capabilities  queries  s02_ms   s3_ms  rss02_mib  rss3_mib  logical  milp_va
 
 ## log-log regression (all ok jobs)
 
-- **stage0_2_ms** correlation of logs: logical_candidates 0.94, memo_groups 0.70, queries 0.68, milp_variables 0.64, physical_candidates 0.63, distinct_group_bys 0.36, filtered_queries 0.28, distinct_windows 0.08, distinct_schedules 0.08
-- **stage3_ms** correlation of logs: milp_variables 0.94, physical_candidates 0.93, memo_groups 0.82, queries 0.75, logical_candidates 0.72, filtered_queries 0.45, distinct_group_bys 0.41, distinct_windows 0.16, distinct_schedules 0.15
+- **stage0_2_ms** correlation of logs: logical_candidates 0.94, memo_groups 0.69, queries 0.67, milp_variables 0.63, physical_candidates 0.62, distinct_group_bys 0.36, filtered_queries 0.28, distinct_windows 0.08, distinct_schedules 0.08
+- **stage3_ms** correlation of logs: milp_variables 0.94, physical_candidates 0.93, memo_groups 0.81, queries 0.75, logical_candidates 0.72, filtered_queries 0.45, distinct_group_bys 0.41, distinct_windows 0.16, distinct_schedules 0.15
 - **peak_rss_stage0_2_bytes** correlation of logs: logical_candidates 0.74, memo_groups 0.72, queries 0.68, physical_candidates 0.60, milp_variables 0.60, filtered_queries 0.53, distinct_group_bys 0.33, distinct_schedules 0.07, distinct_windows 0.07
 - **peak_rss_stage3_bytes** correlation of logs: milp_variables 0.87, physical_candidates 0.87, memo_groups 0.76, logical_candidates 0.73, queries 0.72, filtered_queries 0.48, distinct_group_bys 0.35, distinct_schedules 0.14, distinct_windows 0.08
 

@@ -46,7 +46,7 @@ def query_features(bench_dir, job_id):
 
 def load(bench_dir):
     rows = []
-    for f in sorted(glob.glob(f"{bench_dir}/results/node*_results.jsonl")):
+    for f in sorted(glob.glob(f"{bench_dir}/results/node[0-9]_results.jsonl")):
         latest = {}
         for line in open(f):
             r = json.loads(line)
