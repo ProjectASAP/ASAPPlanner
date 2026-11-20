@@ -235,8 +235,8 @@ spill files. So every operator of ours is built in one of three ways:
 
 Two questions about an operator matter for its implementation:
 
-- **Memory:** how does its state grow with its input? Answered by its
-  state's *shape* and *law*.
+- **Memory:** how does its state grow with its input? Answered by what it
+  keeps state *per*, and what that state *grows with*.
 - **Parallelism:** can its input be split across threads? Answered by
   whether partial results merge, which the *class* of its functions decides.
 
@@ -269,31 +269,32 @@ This is why ASAP uses sketches: a holistic function's answer comes from a
 distributive, fixed-size build, which can be updated per mini-batch at
 ingestion time and merged across windows at query time.
 
-#### Memory: shape × law
+#### Memory: state per, and what it grows with
 
-An operator's state is *instances × size of one instance*.
+An operator's memory is *number of states × size of one state*.
 
-- **Shape** is how many instances there are:
-  - *PerGroup:* each group has its own state, independent of the others.
-    A global (ungrouped) operator has one group.
-  - *Shared:* one state whose contents mix all groups. In a Hydra sketch,
-    every group hashes into the same cells.
-  - *None:* the operator keeps nothing.
+- **State per** says how many states there are:
+  - *group:* each group has its own state, independent of the others. A
+    global (ungrouped) operator has one group.
+  - *all groups:* one state whose contents mix all groups. In a Hydra
+    sketch, every group hashes into the same cells.
+  - *none:* the operator keeps nothing.
 
-  What decides shape is whether groups mix, not how many objects hold the
-  state. An exact `sum by (job)` over 3 jobs is 3 numbers: whether that is
-  one state holding 3 numbers or 3 states holding one, the jobs never mix,
-  so it is PerGroup.[^cost-model]
-- **Law** is how one instance grows:
-  - *Fixed:* set by configuration, not by the data, e.g. a KLL sketch's `k`.
-  - *PerKey:* one entry per distinct key, e.g. exact distinct count keeps
-    every distinct value it has seen.
-  - *PerRow:* keeps the rows, e.g. sort.
+  What matters is whether groups mix, not how many objects hold the state.
+  An exact `sum by (job)` over 3 jobs is 3 numbers: one state holding 3
+  numbers or 3 states holding one, the jobs never mix, so it is state per
+  group.
+- **Grows with** says how one state's size grows:
+  - *nothing (fixed size):* set by configuration, not by the data, e.g. a
+    KLL sketch's `k`.
+  - *distinct values:* one entry per distinct value inside the group, e.g.
+    `count_distinct(user) by (job)` keeps every distinct `user` of each
+    `job`.
+  - *rows:* keeps the rows, e.g. sort.
 
-[^cost-model]: The RQE cost model (`ASAPQuery/rqe-optimizer/docs/rqe_optimizer_cost_model.md`,
-"Instance shape and size law") uses the same two properties, but labels an
-exact sum Shared + PerKey: sketch-bench measures one instance holding every
-group and divides by the group count. The memory is the same.
+The RQE cost model (`ASAPQuery/rqe-optimizer/docs/rqe_optimizer_cost_model.md`,
+"Instance shape and size law") uses the same two properties, under the
+names shape and law.
 
 #### Parallelism: how the input can be split
 
@@ -306,11 +307,12 @@ Say 10 threads each receive a tenth of the input.
   thread's rows, then adds the 10 partial sums per job; KLL builds 10
   sketches and merges them. This needs distributive or algebraic functions,
   whose partials are small.
-- **Split by key.** All rows of a key go to the same thread. Example: an
+- **Partitioned.** Rows are routed by a column, so all rows with the same
+  value go to the same thread. Example: an
   exact p99 by `job`: 10 partial p99s cannot be combined, so every
   `job="api"` row goes to one thread, which computes api's p99 alone. A
   holistic function's partial result is all its values, so merging partials
-  would send all the data to one thread anyway. A single hot key (one huge
+  would send all the data to one thread anyway. A single hot value (one huge
   series) cannot be spread over threads.
 
 `GroupsAccumulator::state` and `merge_batch` (§6.5) already provide the
@@ -318,16 +320,16 @@ merge that "any split + merge" needs.
 
 #### Operators
 
-| Shape + law | Memory | Split | Operators |
+| State | Memory | Split | Operators |
 | --- | --- | --- | --- |
-| None | none | any | `filter`, `project`, `time_range`, `evaluate_at` (time shift), `union`, `series_labels`, `series_relabel`, `window_end_timestamp`, `evaluation`, scalar expressions |
-| PerGroup + Fixed | groups × fixed size | any + merge | `aggregate` with distributive or algebraic functions, sketch builds, `summary_merge`, `current_series` (merge keeps the latest sample), `limit` (merge keeps the first n) |
-| PerGroup + PerKey | grows with distinct keys | by key | `aggregate` with exact distinct count |
-| PerGroup + PerRow | grows with rows | by key | `aggregate` with exact quantile (by group), joins (by join key), `set_operation`, `sql_window` (by partition key), `range_window` / `series_window` (by series); `sort` is the exception: any split, then a k-way merge of the sorted runs |
-| Shared + Fixed | fixed | any + merge | `all_groups_summary_build` (Hydra sketches) |
+| none | none | any | `filter`, `project`, `time_range`, `evaluate_at` (time shift), `union`, `series_labels`, `series_relabel`, `window_end_timestamp`, `evaluation`, scalar expressions |
+| per group, fixed size | groups × fixed size | any + merge | `aggregate` with distributive or algebraic functions, sketch builds, `summary_merge`, `current_series` (merge keeps the latest sample), `limit` (merge keeps the first n) |
+| per group, grows with distinct values | groups × distinct values | partitioned by group | `aggregate` with exact distinct count |
+| per group, grows with rows | rows | partitioned | `aggregate` with exact quantile (by group), joins (by join key), `set_operation`, `sql_window` (by partition key), `range_window` / `series_window` (by series); `sort` is the exception: any split, then a k-way merge of the sorted runs |
+| for all groups, fixed size | fixed | any + merge | `all_groups_summary_build` (Hydra sketches) |
 
 An aggregate operator takes the worst row of its functions: one exact
-quantile makes the whole operator PerGroup + PerRow.
+quantile makes the whole operator "per group, grows with rows".
 
 ### 6.5 Grouped state through `GroupsAccumulator`
 
@@ -406,18 +408,18 @@ The names below are the `Operator` constructors; their code is in
 `union`, `scalar` and `absent` are in `source.rs`, `window` in
 `aggregate/`, `evaluate_at` in `time_range.rs`).
 
-| Operator | Shape + law (§6.4) | How | Detail |
+| Operator | State (§6.4) | How | Detail |
 | --- | --- | --- | --- |
-| `project`, `filter`, scalar `Expression` | None | Wrap + implement | Expressions are lowered to DataFusion `PhysicalExpr`s; `filter` then applies Arrow's `filter` kernel. About half of our expression forms map directly, a third need care when lowering, and the rest are ours (§12). |
-| `aggregate` | PerGroup, law from its functions | Wrap + implement | Grouping uses `GroupValues`, and SQL aggregates use DataFusion's accumulators. PromQL `avg`, `quantile`, compensated `sum` and the NaN rules of `min`/`max` differ from DataFusion's, so they are our own `GroupsAccumulator`s. |
-| `sql_window` | PerGroup + PerRow | Wrap | SQL window functions use DataFusion's built-in implementations (`PartitionEvaluator`), whose semantics `sql_window` already follows. |
-| `sort` (grouped, optional top-k) | PerGroup + PerRow | Copy | Sorting uses Arrow's `lexsort_to_indices` and `take`. Top-k is copied from DataFusion's `TopK`, which is private. |
-| `relational_join`, `semi_join` | PerGroup + PerRow | Wrap + copy | The build side uses DataFusion's public `JoinHashMap`. The probe and the output of each join kind (inner, outer, semi, anti, non-equality predicates) are copied from `HashJoinExec`. |
-| `certified_semi_join`, `set_operation` | PerGroup + PerRow | Implement | Both are built on the copied join: the first adds a check that the right side is complete, the second adds a distinct, as DataFusion plans INTERSECT and EXCEPT. |
-| `union`, `limit`, `scalar`, `source`, `absent`, `vector_to_scalar`, `bind_scalar_ref` | None (`limit`: PerGroup + Fixed) | Implement | These are a few lines each on Arrow's `concat` and `slice`, so reuse saves nothing. |
-| `per_group_summary_build`, `per_group_keyed_summary_build`, `summary_merge` | PerGroup + Fixed | Wrap + implement | Grouping uses `GroupValues`; each sketch family is our own `GroupsAccumulator` (§6.5). |
-| `all_groups_summary_build` | Shared + Fixed | Implement | HydraCms keeps one state shared by all groups, which `GroupsAccumulator` cannot express. |
-| `evaluation`, `keyed_evaluation` | None | Implement | They read a value (a quantile, a count) from a summary state, which is sketch-specific. |
+| `project`, `filter`, scalar `Expression` | none | Wrap + implement | Expressions are lowered to DataFusion `PhysicalExpr`s; `filter` then applies Arrow's `filter` kernel. About half of our expression forms map directly, a third need care when lowering, and the rest are ours (§12). |
+| `aggregate` | per group; growth from its functions | Wrap + implement | Grouping uses `GroupValues`, and SQL aggregates use DataFusion's accumulators. PromQL `avg`, `quantile`, compensated `sum` and the NaN rules of `min`/`max` differ from DataFusion's, so they are our own `GroupsAccumulator`s. |
+| `sql_window` | per group, grows with rows | Wrap | SQL window functions use DataFusion's built-in implementations (`PartitionEvaluator`), whose semantics `sql_window` already follows. |
+| `sort` (grouped, optional top-k) | per group, grows with rows | Copy | Sorting uses Arrow's `lexsort_to_indices` and `take`. Top-k is copied from DataFusion's `TopK`, which is private. |
+| `relational_join`, `semi_join` | per group, grows with rows | Wrap + copy | The build side uses DataFusion's public `JoinHashMap`. The probe and the output of each join kind (inner, outer, semi, anti, non-equality predicates) are copied from `HashJoinExec`. |
+| `certified_semi_join`, `set_operation` | per group, grows with rows | Implement | Both are built on the copied join: the first adds a check that the right side is complete, the second adds a distinct, as DataFusion plans INTERSECT and EXCEPT. |
+| `union`, `limit`, `scalar`, `source`, `absent`, `vector_to_scalar`, `bind_scalar_ref` | none (`limit`: per group, fixed size) | Implement | These are a few lines each on Arrow's `concat` and `slice`, so reuse saves nothing. |
+| `per_group_summary_build`, `per_group_keyed_summary_build`, `summary_merge` | per group, fixed size | Wrap + implement | Grouping uses `GroupValues`; each sketch family is our own `GroupsAccumulator` (§6.5). |
+| `all_groups_summary_build` | for all groups, fixed size | Implement | HydraCms keeps one state shared by all groups, which `GroupsAccumulator` cannot express. |
+| `evaluation`, `keyed_evaluation` | none | Implement | They read a value (a quantile, a count) from a summary state, which is sketch-specific. |
 | PromQL and time: `time_range`, `evaluate_at`, `scope_timestamp`, `current_series`, `series_window`, `range_window`, `window`, `*_binary`, `series_labels`, `series_relabel`, `series_sample`, `*histogram_quantile` | Varies (§6.4) | Implement | DataFusion has no PromQL or time-series operators. Their grouping and label matching can use `GroupValues` and Arrow's `RowConverter`. |
 
 ## 9. Risks
