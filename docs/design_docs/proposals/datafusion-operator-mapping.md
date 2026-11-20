@@ -80,9 +80,10 @@ What the executor's runtime must do, whichever operator code it runs:
   item keys *within* a group, e.g. a Count-Min sketch of the most frequent
   `path`s per `job`. This doc says "grouped" for per-group state and keeps
   "keyed" for this meaning.
-- **DataFusion component:** a public DataFusion building block that works
-  on its own, given a `RecordBatch` or arrays, e.g. `PhysicalExpr`
-  (evaluates an expression) or `GroupsAccumulator` (§8.3).
+- **Standalone DataFusion code:** public DataFusion functions and types
+  that any code can call on a `RecordBatch` or arrays, without the
+  execution layer, e.g. `sort_batch`, `PhysicalExpr` (evaluates an
+  expression) or `GroupsAccumulator` (§8.3).
 - **DataFusion execution layer:** what DataFusion's own operators run on:
   the `ExecutionPlan` trait, `TaskContext` and `RuntimeEnv` (memory pool,
   spill files), async streams and tokio. Each DataFusion operator, named
@@ -125,14 +126,14 @@ Two consequences:
 DataFusion
   execution layer   *Exec operators on ExecutionPlan, TaskContext, RuntimeEnv, tokio
                     (SortExec, HashJoinExec, AggregateExec, ...)
-  components        PhysicalExpr, GroupValues, GroupsAccumulator,
+  standalone code   PhysicalExpr, GroupValues, GroupsAccumulator,
                     PartitionEvaluator, JoinHashMap, built-in functions and aggregates
   Arrow kernels     filter, take, sort, concat, RowConverter
 ```
 
 DataFusion's operators (`*Exec`) are tied to its execution layer, just as
-ours are tied to our runtime. Its components are not: they can be called
-from any code.
+ours are tied to our runtime. Its standalone code is not: any code can
+call it.
 
 ## 5. End state
 
@@ -142,7 +143,7 @@ runtime (ours): runs the plan, connects operators, reads storage
   └─ driver (ours): open → push … push → finish
        │
        └─ operator: only the computation
-            ├─ wrap:      calls DataFusion components (expressions, grouping, SQL aggregates)
+            ├─ wrap:      our operator calls DataFusion functions (expressions, grouping, SQL aggregates, sort)
             ├─ copy:      DataFusion code ported into our crate (top-k, hash-join probe)
             └─ implement: our own code (PromQL, sketches, trivial operators)
 ```
@@ -188,7 +189,7 @@ reviewed together. §14 lists the PRs.
   yielding and cancellation, then move every operator to `OperatorLogic`
   with its current code, then delete the old path. Existing tests pass
   unchanged.
-- **Phase B: DataFusion internals.** Replace one component per PR:
+- **Phase B: DataFusion internals.** Replace one part per PR:
   grouping, accumulators, sort, joins, expressions. Expressions go last
   because they change query results (§7.9).
 
@@ -222,7 +223,7 @@ async only because storage reads are async; operator calls are synchronous.
 Operators run one at a time; parallel execution is out of scope for the
 first version.
 
-### 7.3 Use DataFusion's components, never its execution layer
+### 7.3 Call DataFusion's standalone code, never its execution layer
 
 Running a DataFusion `*Exec` from our runtime would mean building a small
 DataFusion plan around our data:
@@ -234,8 +235,11 @@ our batches ──▶ StreamLeaf (an ExecutionPlan we write) ──▶ SortExec 
 That brings back the execution layer: async pulling, tokio, a memory pool,
 spill files. So every operator of ours is built in one of three ways:
 
-- **Wrap:** call DataFusion components. No measurable overhead: it is a
-  direct call on the `RecordBatch` our `Batch` already holds.
+- **Wrap:** our operator's `push` and `finish` call DataFusion functions,
+  e.g. `sort_batch` or `GroupValues::intern`, on the `RecordBatch` our
+  `Batch` already holds, and add only what DataFusion lacks, such as
+  keeping rows between calls. These are direct calls, with no measurable
+  overhead.
 - **Copy:** port DataFusion code into our crate, when the logic exists only
   inside a `*Exec` (the hash-join probe) or is private (`TopK`). We keep
   DataFusion's tested algorithm without its execution layer, and maintain
@@ -264,8 +268,8 @@ DataFusion's `state` encodes states as bytes. Passing sketches between our
 operators that way would encode and decode them at every step. Instead,
 `push` takes our `Batch`, whose summary columns index into its in-memory
 sketch list (§3), and our accumulators hand sketches to the next operator
-in memory. Encoding happens only when a state is stored. Wrapped DataFusion
-components receive the `Batch`'s `RecordBatch`.
+in memory. Encoding happens only when a state is stored. DataFusion functions
+receive the `Batch`'s `RecordBatch`.
 
 ### 7.7 Evaluation time enters at `open`
 
@@ -410,7 +414,7 @@ quantile makes the whole operator "per group, grows with rows".
 ### 8.3 Grouped state through `GroupsAccumulator`
 
 Aggregates, summary builds and summary merges all keep one state per
-group. DataFusion splits this into two components:
+group. DataFusion splits this into two types:
 
 - **`GroupValues`:** maps each row's key columns to a group id, a batch at
   a time: `[api, db, api]` → `[0, 1, 0]`.
