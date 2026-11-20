@@ -544,3 +544,16 @@ fn hydra_grids_refuse_declared_rows_other_than_their_cells() {
     assert!(HydraKllSketchAccumulator::restore_from_disk(zero_cols).is_err());
     assert!(HydraKllSketchAccumulator::restore_from_disk(kll_grid()).is_ok());
 }
+
+// Every update adds its weight to one cell per grid row, so all grid rows sum
+// to the same total; a grid whose row 1 holds more than row 0 is refused,
+// since the total read from row 0 would let its counters overflow.
+#[test]
+fn hydra_cms_refuses_grid_rows_with_different_totals() {
+    let mut grid = HydraCms::new(2, 8, 16, 3).unwrap().sketch().clone();
+    let HydraCounter::CountMinSketch(cell) = grid.cells.get_mut(1, 0).unwrap() else {
+        unreachable!("a Count-Min grid")
+    };
+    cell.as_storage_mut().as_mut_slice()[0] = i32::MAX;
+    assert!(HydraCms::restore_from_disk(grid).is_err());
+}

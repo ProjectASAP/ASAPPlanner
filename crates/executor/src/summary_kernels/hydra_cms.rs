@@ -60,12 +60,12 @@ impl HydraCms {
     /// accumulator with [`Self::sketch`] and persisted (for example a
     /// materialized view written to disk). Its cell shape is read from the
     /// prototype and its total weight from the grid: with the one group key
-    /// column an update adds its weight to one cell per grid row, so the
-    /// total is grid row 0's cell masses summed. Fails for a grid
+    /// column an update adds its weight to one cell per grid row, so every
+    /// grid row's cell masses sum to the total. Fails for a grid
     /// [`Self::new`] does not build (a zero dimension, a cell other than
     /// Count-Min, a cell of another shape than the prototype, or key columns
-    /// other than the one group column) and for a total outside
-    /// `0..=i32::MAX`.
+    /// other than the one group column), for grid rows whose totals differ,
+    /// and for a total outside `0..=i32::MAX`.
     ///
     /// Every group row of a window shares one grid: restore it once and
     /// share the `Arc` across the window's [`HydraCmsGroup`] rows, since
@@ -87,14 +87,23 @@ impl HydraCms {
         if !sketch.cells.as_slice().iter().all(same_shape) {
             return Err("HydraCms cells must all have the prototype's shape".into());
         }
-        let mut total = 0i64;
-        for column in 0..sketch.cols {
-            let cell = sketch.cells.get(0, column).expect("within the grid");
-            let mass = cell.total_mass()? as i64;
-            if mass < 0 {
-                return Err("HydraCms cell holds a negative weight".into());
+        // Every update adds its weight to one cell per grid row, so every
+        // grid row sums to the total.
+        let mut row_totals = (0..sketch.rows).map(|row| {
+            (0..sketch.cols).try_fold(0i64, |total, column| {
+                let cell = sketch.cells.get(row, column).expect("within the grid");
+                let mass = cell.total_mass()? as i64;
+                if mass < 0 {
+                    return Err("HydraCms cell holds a negative weight".to_string());
+                }
+                Ok(total + mass)
+            })
+        });
+        let total = row_totals.next().expect("a positive row count")?;
+        for row_total in row_totals {
+            if row_total? != total {
+                return Err("HydraCms grid rows hold different totals".into());
             }
-            total += mass;
         }
         if !(0..=i64::from(i32::MAX)).contains(&total) {
             return Err(format!("HydraCms total {total} is outside its i32 counters").into());
