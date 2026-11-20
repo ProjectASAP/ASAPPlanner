@@ -157,8 +157,9 @@ impl WeightedFrequency {
     }
 
     /// The state that keeps `sketch`, its shape read from the sketch. Fails
-    /// for a shape [`check_shape`] refuses, a heap of capacity 0 and a
-    /// non-finite counter, none of which a state is built or updated into.
+    /// for a shape [`check_shape`] refuses, a heap of capacity 0, a
+    /// non-finite counter and a heap key that is not tuple-key bytes, none of
+    /// which a state is built or updated into.
     pub fn from_sketch(sketch: FrequencySketch) -> Result<Self, Error> {
         let (algorithm, depth, width, capacity) = match &sketch {
             FrequencySketch::Cms(s) => (FrequencyAlgorithm::Cms, s.rows(), s.cols(), 0),
@@ -197,6 +198,14 @@ impl WeightedFrequency {
         if state.counters().iter().any(|c| !c.is_finite()) {
             return Err(Error::Invalid(
                 "weighted frequency counter is not finite".into(),
+            ));
+        }
+        // `rows` reads every heap key back as a tuple key.
+        let tuple_key =
+            |key: &OwnedDataInput| matches!(key, OwnedDataInput::Bytes(b) if TupleKey::from_bytes(b).is_ok());
+        if !state.heap_keys().into_iter().all(tuple_key) {
+            return Err(Error::Invalid(
+                "weighted frequency heap key is not a tuple key".into(),
             ));
         }
         Ok(state)
@@ -326,14 +335,19 @@ impl WeightedFrequency {
         Ok(self.estimate_key(&identity_key(values)?))
     }
 
-    /// The keys the heap retains; none at capacity 0.
-    fn retained_keys(&self) -> Vec<&[u8]> {
-        let keys: Vec<&OwnedDataInput> = match &self.sketch {
-            FrequencySketch::Cms(_) | FrequencySketch::CountSketch(_) => return Vec::new(),
+    /// The heap's keys as sketchlib holds them; none at capacity 0.
+    fn heap_keys(&self) -> Vec<&OwnedDataInput> {
+        match &self.sketch {
+            FrequencySketch::Cms(_) | FrequencySketch::CountSketch(_) => Vec::new(),
             FrequencySketch::CmsHeap(s) => s.heap().heap().iter().map(|e| &e.key).collect(),
             FrequencySketch::CountSketchHeap(s) => s.heap().heap().iter().map(|e| &e.key).collect(),
-        };
-        keys.into_iter()
+        }
+    }
+
+    /// The keys the heap retains; none at capacity 0.
+    fn retained_keys(&self) -> Vec<&[u8]> {
+        self.heap_keys()
+            .into_iter()
             .map(|key| match key {
                 OwnedDataInput::Bytes(bytes) => bytes.as_slice(),
                 _ => unreachable!("the state retains tuple-key bytes"),

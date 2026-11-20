@@ -225,3 +225,15 @@ fn hydra_cms_refuses_a_total_outside_i32() {
     assert!(HydraCms::from_parts(sketch(), i64::from(i32::MAX) + 1).is_err());
     assert!(HydraCms::from_parts(sketch(), 0).is_ok());
 }
+
+// Heap keys the kernel never retains (a `u64` key, bytes that are no tuple
+// key) are refused, rather than panicking when the rows are read.
+#[test]
+fn weighted_frequency_refuses_foreign_heap_keys() {
+    use asap_sketchlib::DataInput;
+    for key in [DataInput::U64(5), DataInput::Bytes(&[0xff, 0x00, 0x07])] {
+        let mut sketch = CountMinSketchWithHeap::<Vector2D<f64>, RegularPath>::new(3, 64, 4);
+        sketch.heap_mut().update(&key, 1.0);
+        assert!(WeightedFrequency::from_sketch(FrequencySketch::CmsHeap(sketch)).is_err());
+    }
+}
