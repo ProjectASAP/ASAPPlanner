@@ -192,6 +192,10 @@ pub struct Selection {
     /// HiGHS's default feasibility tolerances (1e-7) missed an accuracy
     /// target when checked exactly and was solved again at 1e-10.
     pub milp_solve_count: usize,
+    /// Under cost model 3's `lowest_mean_latency`, the selected plan's
+    /// frequency-weighted mean query latency in ms; `None` otherwise.
+    /// Stub: always `None` until the latency objective is implemented.
+    pub selected_plan_mean_latency_ms: Option<f64>,
 }
 
 /// Why Stage 3 selected no plan.
