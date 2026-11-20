@@ -19,8 +19,10 @@ pub enum FrequencyAlgorithm {
 
 type Matrix = Vector2D<f64>;
 
+/// The `asap_sketchlib` sketch a state keeps: a matrix alone at capacity 0,
+/// a matrix with a top-k heap otherwise.
 #[derive(Clone)]
-enum Sketch {
+pub enum FrequencySketch {
     Cms(CountMinSketch<Matrix, RegularPath>),
     CountSketch(CountSketch<Matrix, RegularPath>),
     CmsHeap(CountMinSketchWithHeap<Matrix, RegularPath>),
@@ -80,7 +82,7 @@ fn identity_values(key: &[u8]) -> Vec<Value> {
 
 #[derive(Clone)]
 pub struct WeightedFrequency {
-    sketch: Sketch,
+    sketch: FrequencySketch,
     width: usize,
     depth: usize,
     capacity: usize,
@@ -139,12 +141,65 @@ impl WeightedFrequency {
     /// a decoded state against its declared family.
     pub fn algorithm(&self) -> FrequencyAlgorithm {
         match self.sketch {
-            Sketch::Cms(_) | Sketch::CmsHeap(_) => FrequencyAlgorithm::Cms,
-            Sketch::CountSketch(_) | Sketch::CountSketchHeap(_) => FrequencyAlgorithm::CountSketch,
+            FrequencySketch::Cms(_) | FrequencySketch::CmsHeap(_) => FrequencyAlgorithm::Cms,
+            FrequencySketch::CountSketch(_) | FrequencySketch::CountSketchHeap(_) => {
+                FrequencyAlgorithm::CountSketch
+            }
         }
     }
     pub fn shape(&self) -> (usize, usize, usize) {
         (self.width, self.depth, self.capacity)
+    }
+
+    /// The sketch, so a deployment can encode it with `asap_sketchlib`'s codec.
+    pub fn sketch(&self) -> &FrequencySketch {
+        &self.sketch
+    }
+
+    /// The state that keeps `sketch`, its shape read from the sketch. Fails
+    /// for a shape [`check_shape`] refuses, a heap of capacity 0 and a
+    /// non-finite counter, none of which a state is built or updated into.
+    pub fn from_sketch(sketch: FrequencySketch) -> Result<Self, Error> {
+        let (algorithm, depth, width, capacity) = match &sketch {
+            FrequencySketch::Cms(s) => (FrequencyAlgorithm::Cms, s.rows(), s.cols(), 0),
+            FrequencySketch::CountSketch(s) => {
+                (FrequencyAlgorithm::CountSketch, s.rows(), s.cols(), 0)
+            }
+            FrequencySketch::CmsHeap(s) => (
+                FrequencyAlgorithm::Cms,
+                s.rows(),
+                s.cols(),
+                s.heap().capacity(),
+            ),
+            FrequencySketch::CountSketchHeap(s) => (
+                FrequencyAlgorithm::CountSketch,
+                s.rows(),
+                s.cols(),
+                s.heap().capacity(),
+            ),
+        };
+        check_shape(algorithm, width, depth)?;
+        let has_heap = matches!(
+            sketch,
+            FrequencySketch::CmsHeap(_) | FrequencySketch::CountSketchHeap(_)
+        );
+        if has_heap && capacity == 0 {
+            return Err(Error::Invalid(
+                "weighted frequency heap capacity is 0".into(),
+            ));
+        }
+        let state = Self {
+            sketch,
+            width,
+            depth,
+            capacity,
+        };
+        if state.counters().iter().any(|c| !c.is_finite()) {
+            return Err(Error::Invalid(
+                "weighted frequency counter is not finite".into(),
+            ));
+        }
+        Ok(state)
     }
 
     /// Fails for a shape [`check_shape`] refuses.
@@ -157,16 +212,16 @@ impl WeightedFrequency {
         check_shape(algorithm, width, depth)?;
         let sketch = match (algorithm, capacity) {
             (FrequencyAlgorithm::Cms, 0) => {
-                Sketch::Cms(CountMinSketch::with_dimensions(depth, width))
+                FrequencySketch::Cms(CountMinSketch::with_dimensions(depth, width))
             }
             (FrequencyAlgorithm::CountSketch, 0) => {
-                Sketch::CountSketch(CountSketch::with_dimensions(depth, width))
+                FrequencySketch::CountSketch(CountSketch::with_dimensions(depth, width))
             }
             (FrequencyAlgorithm::Cms, _) => {
-                Sketch::CmsHeap(CountMinSketchWithHeap::new(depth, width, capacity))
+                FrequencySketch::CmsHeap(CountMinSketchWithHeap::new(depth, width, capacity))
             }
             (FrequencyAlgorithm::CountSketch, _) => {
-                Sketch::CountSketchHeap(CountSketchWithHeap::new(depth, width, capacity))
+                FrequencySketch::CountSketchHeap(CountSketchWithHeap::new(depth, width, capacity))
             }
         };
         Ok(Self {
@@ -201,10 +256,10 @@ impl WeightedFrequency {
     /// Empties the state in place, keeping its algorithm and shape.
     pub(crate) fn clear(&mut self) {
         match &mut self.sketch {
-            Sketch::Cms(s) => s.clear(),
-            Sketch::CountSketch(s) => s.clear(),
-            Sketch::CmsHeap(s) => s.clear(),
-            Sketch::CountSketchHeap(s) => s.clear(),
+            FrequencySketch::Cms(s) => s.clear(),
+            FrequencySketch::CountSketch(s) => s.clear(),
+            FrequencySketch::CmsHeap(s) => s.clear(),
+            FrequencySketch::CountSketchHeap(s) => s.clear(),
         }
     }
 
@@ -229,9 +284,11 @@ impl WeightedFrequency {
         // counter carried past `f64::MAX`, leaving the sketch unchanged.
         let overflow = |e: String| Error::Operator(format!("weighted frequency sum overflow: {e}"));
         match &mut self.sketch {
-            Sketch::Cms(s) => s.try_update_weighted(&key, weight).map_err(overflow)?,
-            Sketch::CountSketch(s) => s.try_update_weighted(&key, weight).map_err(overflow)?,
-            Sketch::CmsHeap(s) => {
+            FrequencySketch::Cms(s) => s.try_update_weighted(&key, weight).map_err(overflow)?,
+            FrequencySketch::CountSketch(s) => {
+                s.try_update_weighted(&key, weight).map_err(overflow)?
+            }
+            FrequencySketch::CmsHeap(s) => {
                 s.count_min_sketch_mut()
                     .try_update_weighted(&key, weight)
                     .map_err(overflow)?;
@@ -239,7 +296,7 @@ impl WeightedFrequency {
                 let estimate = s.estimate(&key);
                 s.heap_mut().update(&key, estimate);
             }
-            Sketch::CountSketchHeap(s) => {
+            FrequencySketch::CountSketchHeap(s) => {
                 s.count_sketch_mut()
                     .try_update_weighted(&key, weight)
                     .map_err(overflow)?;
@@ -254,10 +311,10 @@ impl WeightedFrequency {
     fn estimate_key(&self, key: &[u8]) -> f64 {
         let key = DataInput::Bytes(key);
         match &self.sketch {
-            Sketch::Cms(s) => s.estimate(&key),
-            Sketch::CountSketch(s) => s.estimate(&key),
-            Sketch::CmsHeap(s) => s.estimate(&key),
-            Sketch::CountSketchHeap(s) => s.estimate(&key),
+            FrequencySketch::Cms(s) => s.estimate(&key),
+            FrequencySketch::CountSketch(s) => s.estimate(&key),
+            FrequencySketch::CmsHeap(s) => s.estimate(&key),
+            FrequencySketch::CountSketchHeap(s) => s.estimate(&key),
         }
     }
 
@@ -272,9 +329,9 @@ impl WeightedFrequency {
     /// The keys the heap retains; none at capacity 0.
     fn retained_keys(&self) -> Vec<&[u8]> {
         let keys: Vec<&OwnedDataInput> = match &self.sketch {
-            Sketch::Cms(_) | Sketch::CountSketch(_) => return Vec::new(),
-            Sketch::CmsHeap(s) => s.heap().heap().iter().map(|e| &e.key).collect(),
-            Sketch::CountSketchHeap(s) => s.heap().heap().iter().map(|e| &e.key).collect(),
+            FrequencySketch::Cms(_) | FrequencySketch::CountSketch(_) => return Vec::new(),
+            FrequencySketch::CmsHeap(s) => s.heap().heap().iter().map(|e| &e.key).collect(),
+            FrequencySketch::CountSketchHeap(s) => s.heap().heap().iter().map(|e| &e.key).collect(),
         };
         keys.into_iter()
             .map(|key| match key {
@@ -308,10 +365,10 @@ impl WeightedFrequency {
     /// The `depth x width` counters, row by row.
     pub fn counters(&self) -> &[f64] {
         match &self.sketch {
-            Sketch::Cms(s) => s.as_storage().as_slice(),
-            Sketch::CountSketch(s) => s.as_storage().as_slice(),
-            Sketch::CmsHeap(s) => s.count_min_sketch().as_storage().as_slice(),
-            Sketch::CountSketchHeap(s) => s.count_sketch().as_storage().as_slice(),
+            FrequencySketch::Cms(s) => s.as_storage().as_slice(),
+            FrequencySketch::CountSketch(s) => s.as_storage().as_slice(),
+            FrequencySketch::CmsHeap(s) => s.count_min_sketch().as_storage().as_slice(),
+            FrequencySketch::CountSketchHeap(s) => s.count_sketch().as_storage().as_slice(),
         }
     }
 
@@ -323,10 +380,12 @@ impl WeightedFrequency {
         }
         let mut merged = self.clone();
         match (&mut merged.sketch, &other.sketch) {
-            (Sketch::Cms(s), Sketch::Cms(o)) => s.merge(o),
-            (Sketch::CountSketch(s), Sketch::CountSketch(o)) => s.merge(o),
-            (Sketch::CmsHeap(s), Sketch::CmsHeap(o)) => s.merge(o),
-            (Sketch::CountSketchHeap(s), Sketch::CountSketchHeap(o)) => s.merge(o),
+            (FrequencySketch::Cms(s), FrequencySketch::Cms(o)) => s.merge(o),
+            (FrequencySketch::CountSketch(s), FrequencySketch::CountSketch(o)) => s.merge(o),
+            (FrequencySketch::CmsHeap(s), FrequencySketch::CmsHeap(o)) => s.merge(o),
+            (FrequencySketch::CountSketchHeap(s), FrequencySketch::CountSketchHeap(o)) => {
+                s.merge(o)
+            }
             _ => unreachable!("one algorithm and capacity is one kind of sketch"),
         }
         // Both inputs are left unchanged, so a merge past `f64::MAX` is
@@ -350,12 +409,12 @@ impl AggregateCore for WeightedFrequency {
     /// This adapter's fields plus sketchlib's count of the sketch, which
     /// includes the sketch's own struct.
     fn approx_memory_bytes(&self) -> usize {
-        std::mem::size_of::<Self>() - std::mem::size_of::<Sketch>()
+        std::mem::size_of::<Self>() - std::mem::size_of::<FrequencySketch>()
             + match &self.sketch {
-                Sketch::Cms(s) => s.memory_bytes(),
-                Sketch::CountSketch(s) => s.memory_bytes(),
-                Sketch::CmsHeap(s) => s.memory_bytes(),
-                Sketch::CountSketchHeap(s) => s.memory_bytes(),
+                FrequencySketch::Cms(s) => s.memory_bytes(),
+                FrequencySketch::CountSketch(s) => s.memory_bytes(),
+                FrequencySketch::CmsHeap(s) => s.memory_bytes(),
+                FrequencySketch::CountSketchHeap(s) => s.memory_bytes(),
             }
     }
 }
@@ -426,12 +485,12 @@ mod tests {
     #[test]
     fn memory_charge_counts_the_sketch_once() {
         let state = WeightedFrequency::new(FrequencyAlgorithm::Cms, 64, 3, 4).unwrap();
-        let Sketch::CmsHeap(sketch) = &state.sketch else {
+        let FrequencySketch::CmsHeap(sketch) = &state.sketch else {
             unreachable!()
         };
         assert_eq!(
             state.approx_memory_bytes(),
-            std::mem::size_of::<WeightedFrequency>() - std::mem::size_of::<Sketch>()
+            std::mem::size_of::<WeightedFrequency>() - std::mem::size_of::<FrequencySketch>()
                 + sketch.memory_bytes()
         );
     }

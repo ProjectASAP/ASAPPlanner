@@ -50,6 +50,43 @@ impl HydraCms {
         })
     }
 
+    /// The grid, so a deployment can encode it with `asap_sketchlib`'s codec.
+    pub fn sketch(&self) -> &Hydra {
+        &self.inner
+    }
+
+    /// Total weight added.
+    pub fn total(&self) -> i64 {
+        self.total
+    }
+
+    /// The state that keeps `sketch`, its cell shape read from the
+    /// prototype, with [`Self::total`] `total`. Fails for a grid [`Self::new`]
+    /// does not build (a zero dimension, a cell other than Count-Min, or key
+    /// columns other than the one group column) and for a total outside
+    /// `0..=i32::MAX`.
+    pub fn from_parts(sketch: Hydra, total: i64) -> Result<Self, KernelError> {
+        let HydraCounter::CountMinSketch(cell) = &sketch.prototype else {
+            return Err("HydraCms cells must be Count-Min".into());
+        };
+        let (width, depth) = (cell.cols(), cell.rows());
+        if [sketch.rows, sketch.cols, width, depth].contains(&0) {
+            return Err("HydraCms dimensions must be positive".into());
+        }
+        if sketch.schema() != [GROUP] {
+            return Err(format!("HydraCms key columns must be [{GROUP}]").into());
+        }
+        if !(0..=i64::from(i32::MAX)).contains(&total) {
+            return Err(format!("HydraCms total {total} is outside its i32 counters").into());
+        }
+        Ok(Self {
+            inner: sketch,
+            width,
+            depth,
+            total,
+        })
+    }
+
     /// `(shared_rows, shared_columns, width, depth)`.
     pub fn shape(&self) -> (usize, usize, usize, usize) {
         (self.inner.rows, self.inner.cols, self.width, self.depth)

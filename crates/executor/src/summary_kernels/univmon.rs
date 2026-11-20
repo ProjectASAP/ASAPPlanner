@@ -58,6 +58,40 @@ impl UnivMonAccumulator {
         &self.inner
     }
 
+    /// The longest variable-length key inserted, in bytes (memory bookkeeping).
+    pub fn max_key_bytes(&self) -> usize {
+        self.max_key_bytes
+    }
+
+    /// The bytes of every variable-length key inserted (memory bookkeeping).
+    pub fn inserted_key_bytes(&self) -> usize {
+        self.inserted_key_bytes
+    }
+
+    /// The state that keeps `sketch` and the memory bookkeeping read from
+    /// [`Self::max_key_bytes`] and [`Self::inserted_key_bytes`]. Fails for a
+    /// shape [`check_shape`] refuses, and for bookkeeping no insertions give:
+    /// the longest key longer than all inserted keys together, or keys
+    /// inserted with none of positive length.
+    pub fn from_parts(
+        sketch: UnivMon,
+        max_key_bytes: usize,
+        inserted_key_bytes: usize,
+    ) -> Result<Self, Error> {
+        check_shape(sketch.heap_size, sketch.rows, sketch.cols, sketch.layers)?;
+        if max_key_bytes > inserted_key_bytes || (max_key_bytes == 0) != (inserted_key_bytes == 0) {
+            return Err(format!(
+                "inconsistent UnivMon key bytes: longest {max_key_bytes}, inserted {inserted_key_bytes}"
+            )
+            .into());
+        }
+        Ok(Self {
+            inner: sketch,
+            max_key_bytes,
+            inserted_key_bytes,
+        })
+    }
+
     /// Each non-NaN sample is one occurrence. Signed zero has one identity.
     pub fn insert_sample(&mut self, value: f64) -> Result<(), Error> {
         if value.is_nan() {

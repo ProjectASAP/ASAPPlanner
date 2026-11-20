@@ -4,14 +4,16 @@ use crate::summary_kernels::traits::{aggregate_core_object_methods, downcast_pee
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::DataInput;
 use planner_types::summary_type::SketchStatistic;
-use registers::Registers;
+pub use registers::Registers;
 
 /// The precisions a state can be built at.
 pub const HLL_PRECISIONS: std::ops::RangeInclusive<u8> = 4..=18;
 
 /// `asap_sketchlib` fixes an HLL's precision in its register type: one type
 /// per precision in [`HLL_PRECISIONS`], and [`Registers`] holds any of them.
-mod registers {
+/// Public so a deployment can name each precision's sketch type, for
+/// example to decode one with `asap_sketchlib`'s codec.
+pub mod registers {
     use asap_sketchlib::sketches::hll::HyperLogLogImpl;
     use asap_sketchlib::{Classic, DataInput};
 
@@ -91,7 +93,8 @@ mod registers {
 
 #[derive(Debug, Clone)]
 pub struct HllSketchAccumulator {
-    inner: Registers,
+    /// The registers at their precision; any variant is a valid state.
+    pub inner: Registers,
 }
 
 impl HllSketchAccumulator {
