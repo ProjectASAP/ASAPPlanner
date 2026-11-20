@@ -25,7 +25,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use asap_cost::{NodeCostSource, OperatorKind, PlanCost};
+use asap_cost::{NodeCostSource, OperatorKind, PlanCost, RecommendedThreads};
 use asap_executor::physical_planner::CompiledPhysicalDAG;
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::plan::materialized_view::{
@@ -103,6 +103,12 @@ pub struct PredictedUsage {
     pub per_node: Vec<PredictedNodeUsage>,
     /// One per workload query, in workload order.
     pub per_query: Vec<PredictedQueryUsage>,
+    /// The fraction of the precompute threads' time spent refreshing (ρ).
+    pub precompute_load: f64,
+    /// Per thread role (ingest, precompute, query), the CPU the plan is
+    /// predicted to use and the threads that serve it at the target
+    /// utilisation: what a data plane configures its threads from.
+    pub recommended_configuration: RecommendedThreads,
 }
 
 /// One operator node's predicted usage.
@@ -122,17 +128,37 @@ pub struct PredictedNodeUsage {
     pub cost_per_second: Option<f64>,
     /// Whether its CPU came from the measured cost table or the formulas.
     pub cost_source: NodeCostSource,
+    /// At ingestion time: its ingest work, core-seconds per second.
+    pub ingest_cpu_core_seconds_per_second: f64,
+    /// At ingestion time: its refresh work's CPU ms per window close.
+    pub refresh_cpu_ms_per_window: f64,
+    /// At ingestion time: its refresh work's wall ms per window close (CPU
+    /// plus I/O wait).
+    pub refresh_wall_ms_per_window: f64,
+    /// At query time: ms of one computation (one step).
+    pub query_ms_per_step: f64,
+    /// Whether its measured price came from the nearest measured series
+    /// count, its own being outside them.
+    pub priced_outside_measured_scale: bool,
 }
 
-/// One query's predicted latency per evaluation.
+/// One query's predicted latency per request: the freshness wait, then the
+/// request's execution (`asap_cost::QueryLatency`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PredictedQueryUsage {
-    /// Milliseconds compacting the newest window of the ingestion-time
-    /// state it reads.
-    pub compaction_ms: f64,
-    /// Milliseconds of its query-time work, its per-request cost included.
-    pub query_ms: f64,
+    /// The data plane's allowed lateness.
+    pub allowed_lateness_ms: f64,
+    /// Queueing behind the other refreshes of its newest window's instant.
+    pub precompute_queueing_ms: f64,
+    /// The refresh of the newest window of the views it reads.
+    pub precompute_execution_ms: f64,
+    /// Its query-time work, its fixed cost per request and step included.
+    pub query_execution_ms: f64,
+    /// The four parts' sum.
+    pub latency_ms: f64,
+    /// Its evaluations per second, its weight in the mean latency.
+    pub evaluations_per_second: f64,
 }
 
 /// Why an installable plan could not be built or is not consistent.
@@ -629,6 +655,13 @@ fn report_of(cost: &PlanCost, assumed_data_facts: Vec<AssumedDataFact>) -> Selec
                     cpu_core_seconds_per_second: node.cpu_core_seconds_per_second,
                     cost_per_second: node.cost_per_second,
                     cost_source: node.cost_source,
+                    ingest_cpu_core_seconds_per_second: node
+                        .phase_times
+                        .ingest_cpu_core_seconds_per_second,
+                    refresh_cpu_ms_per_window: node.phase_times.refresh_cpu_ms_per_window,
+                    refresh_wall_ms_per_window: node.phase_times.refresh_wall_ms_per_window,
+                    query_ms_per_step: node.phase_times.query_ms_per_step,
+                    priced_outside_measured_scale: node.priced_outside_measured_scale,
                 })
                 .collect(),
             per_query: cost
@@ -636,10 +669,16 @@ fn report_of(cost: &PlanCost, assumed_data_facts: Vec<AssumedDataFact>) -> Selec
                 .latency_per_query
                 .iter()
                 .map(|latency| PredictedQueryUsage {
-                    compaction_ms: latency.compaction_ms,
-                    query_ms: latency.query_ms,
+                    allowed_lateness_ms: latency.allowed_lateness_ms,
+                    precompute_queueing_ms: latency.precompute_queueing_ms,
+                    precompute_execution_ms: latency.precompute_execution_ms,
+                    query_execution_ms: latency.query_execution_ms,
+                    latency_ms: latency.latency_ms(),
+                    evaluations_per_second: latency.evaluations_per_second,
                 })
                 .collect(),
+            precompute_load: cost.usage.precompute_load,
+            recommended_configuration: cost.usage.recommended_configuration,
         },
         assumed_data_facts,
     }

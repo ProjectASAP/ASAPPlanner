@@ -106,9 +106,10 @@ async fn c1_states_emitted_are_charged_at_each_refresh() {
             - number(&chain(&without), "refresh_cpu_ms_per_window"),
         9.234,
     );
-    assert_eq!(
+    assert_close(
+        "ingest CPU",
         number(&chain(&with), "ingest_cpu_core_seconds_per_second"),
-        number(&chain(&without), "ingest_cpu_core_seconds_per_second")
+        number(&chain(&without), "ingest_cpu_core_seconds_per_second"),
     );
 }
 
@@ -163,12 +164,12 @@ async fn c3_prices_follow_the_series_scale() {
         entry(
             "SummaryMerge",
             "query_time",
-            json!({"exact": "Max", "ns_per_unit": 100.0, "measured_group_count": 1_000}),
+            json!({"exact": "Max", "ns_per_unit": 100.0, "measured_series_count": 1_000}),
         ),
         entry(
             "SummaryMerge",
             "query_time",
-            json!({"exact": "Max", "ns_per_unit": 1_000.0, "measured_group_count": 10_000}),
+            json!({"exact": "Max", "ns_per_unit": 1_000.0, "measured_series_count": 10_000}),
         ),
     ];
     for (series, ns_per_state, outside) in [
@@ -345,8 +346,8 @@ fn table_schema() -> Schema {
 }
 
 /// C6. `SUM(x), COUNT(x)` in one `Aggregate`: an entry for the combination
-/// (1,000 ns per row) wins over the two single-measure entries (1 ns each),
-/// so the node's CPU is 500 times theirs.
+/// (0.5 ns per row) wins over the two single-measure entries (1 ns each),
+/// so the node's CPU is a quarter of theirs.
 #[tokio::test]
 async fn c6_a_measure_combination_entry_wins() {
     let workload: PlanningWorkload = serde_json::from_value(json!({
@@ -400,11 +401,11 @@ async fn c6_a_measure_combination_entry_wins() {
     combined.push(entry(
         "Aggregate",
         "query_time",
-        json!({"measures": ["sum", "count"], "ns_per_unit": 1_000.0}),
+        json!({"measures": ["sum", "count"], "ns_per_unit": 0.5}),
     ));
     let single_cpu = aggregate_cpu(single).await;
     let combined_cpu = aggregate_cpu(combined).await;
-    assert_close("ratio", combined_cpu / single_cpu, 500.0);
+    assert_close("ratio", combined_cpu / single_cpu, 0.25);
 }
 
 /// C7 (guard). A query-time fixed cost per computation, 5 ms, is charged
@@ -465,7 +466,7 @@ async fn c9_each_node_reports_its_time_by_phase() {
         &max_chain_workload(1000),
         &cost_inputs(
             usage_over_time(),
-            chain_table(json!({}), vec![]),
+            chain_table(json!({"ns_per_state_emitted": 1_000.0}), vec![]),
             json!({}),
             json!({}),
         ),

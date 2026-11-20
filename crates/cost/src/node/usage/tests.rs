@@ -3533,6 +3533,9 @@ fn terms_ignore_the_measured_table_and_the_calibration_factor() {
                 ns_per_unit: 10.0,
                 ns_per_invocation: 0.0,
                 memory_bytes_per_state: None,
+                ns_per_state_emitted: 0.0,
+                measured_series_count: None,
+                measures: Vec::new(),
             }],
             ..MeasuredOperationCosts::default()
         },
@@ -3656,6 +3659,9 @@ fn node_priced_by_hand() {
             ns_per_unit: 10.0,
             ns_per_invocation: 500.0,
             memory_bytes_per_state: None,
+            ns_per_state_emitted: 0.0,
+            measured_series_count: None,
+            measures: Vec::new(),
         });
     let data = DataWorkload::default();
     let range = one_minute_range();
@@ -3708,6 +3714,9 @@ fn aggregate_needs_every_measure() {
             ns_per_unit: 10.0,
             ns_per_invocation: 0.0,
             memory_bytes_per_state: None,
+            ns_per_state_emitted: 0.0,
+            measured_series_count: None,
+            measures: Vec::new(),
         });
     let data = DataWorkload::default();
     let range = one_minute_range();
