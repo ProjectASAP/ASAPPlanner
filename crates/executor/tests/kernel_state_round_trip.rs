@@ -191,9 +191,8 @@ fn filled_hydra(offset: i32) -> HydraCms {
 fn hydra_cms_parts_round_trip() {
     let (grid, other) = (filled_hydra(0), filled_hydra(4));
     let decoded = Hydra::from_asapv1(&grid.sketch().to_asapv1().unwrap()).unwrap();
-    let rebuilt = HydraCms::from_parts(decoded, grid.total()).unwrap();
+    let rebuilt = HydraCms::from_parts(decoded).unwrap();
     assert_eq!(rebuilt.shape(), grid.shape());
-    assert_eq!(rebuilt.total(), grid.total());
     let group = |grid: HydraCms| HydraCmsGroup {
         grid: Arc::new(grid),
         group: "g3".into(),
@@ -217,14 +216,6 @@ fn hydra_cms_parts_round_trip() {
     );
 }
 
-// A total outside the i32 guard is refused.
-#[test]
-fn hydra_cms_refuses_a_total_outside_i32() {
-    let sketch = || HydraCms::new(2, 8, 16, 3).unwrap().sketch().clone();
-    assert!(HydraCms::from_parts(sketch(), -1).is_err());
-    assert!(HydraCms::from_parts(sketch(), i64::from(i32::MAX) + 1).is_err());
-    assert!(HydraCms::from_parts(sketch(), 0).is_ok());
-}
 
 // Heap keys the kernel never retains (a `u64` key, bytes that are no tuple
 // key) are refused, rather than panicking when the rows are read.
@@ -264,4 +255,25 @@ fn univmon_refuses_key_bytes_below_the_retained_keys() {
         state.inserted_key_bytes()
     )
     .is_ok());
+}
+
+// The i32 guard counts the restored grid's weight: a grid holding 600 is not
+// allowed another i32::MAX - 500.
+#[test]
+fn hydra_cms_restored_total_is_the_grids() {
+    let mut grid = HydraCms::new(2, 8, 16, 3).unwrap();
+    grid.count("g", "i", 600).unwrap();
+    let mut restored = HydraCms::from_parts(grid.sketch().clone()).unwrap();
+    assert!(restored.count("g", "i", i32::MAX - 500).is_err());
+}
+
+// A cell whose shape differs from the prototype's is refused.
+#[test]
+fn hydra_cms_refuses_a_cell_of_another_shape() {
+    use asap_sketchlib::{input::HydraCounter, CountMinSketch, FastPath};
+    let mut sketch = HydraCms::new(2, 8, 16, 3).unwrap().sketch().clone();
+    *sketch.cells.get_mut(1, 1).unwrap() = HydraCounter::CountMinSketch(
+        CountMinSketch::<Vector2D<i32>, FastPath>::with_dimensions(3, 32),
+    );
+    assert!(HydraCms::from_parts(sketch).is_err());
 }
