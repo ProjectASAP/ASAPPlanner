@@ -143,7 +143,7 @@ runtime (ours): runs the plan, connects operators, reads storage
        │
        └─ operator: only the computation
             ├─ wrap:      calls DataFusion components (expressions, grouping, SQL aggregates)
-            ├─ copy:      DataFusion code ported into our crate (sort, hash-join probe)
+            ├─ copy:      DataFusion code ported into our crate (top-k, hash-join probe)
             └─ implement: our own code (PromQL, sketches, trivial operators)
 ```
 
@@ -443,7 +443,7 @@ The names below are the `Operator` constructors; their code is in
 | `project`, `filter`, scalar `Expression` | none | Wrap + implement | Expressions are lowered to DataFusion `PhysicalExpr`s; `filter` then applies Arrow's `filter` kernel. About half of our expression forms map directly, a third need care when lowering, and the rest are ours (§13). |
 | `aggregate` | per group; growth from its functions | Wrap + implement | Grouping uses `GroupValues`, and SQL aggregates use DataFusion's accumulators. PromQL `avg`, `quantile`, compensated `sum` and the NaN rules of `min`/`max` differ from DataFusion's, so they are our own `GroupsAccumulator`s. |
 | `sql_window` | per group, grows with rows | Wrap | SQL window functions use DataFusion's built-in implementations (`PartitionEvaluator`), whose semantics `sql_window` already follows. |
-| `sort` (grouped, optional top-k) | per group, grows with rows | Copy | Sorting uses Arrow's `lexsort_to_indices` and `take`. Top-k is copied from DataFusion's `TopK`, which is private. |
+| `sort` (grouped, optional top-k) | per group, grows with rows | Wrap + copy | At `finish`, the buffered rows are concatenated and sorted by DataFusion's public `sort_batch`. Top-k is copied from DataFusion's `TopK`, which is private, so it keeps only k rows per group instead of every row. |
 | `relational_join`, `semi_join` | per group, grows with rows | Wrap + copy | The build side uses DataFusion's public `JoinHashMap`. The probe and the output of each join kind (inner, outer, semi, anti, non-equality predicates) are copied from `HashJoinExec`. |
 | `certified_semi_join`, `set_operation` | per group, grows with rows | Implement | Both are built on the copied join: the first adds a check that the right side is complete, the second adds a distinct, as DataFusion plans INTERSECT and EXCEPT. |
 | `union`, `limit`, `scalar`, `source`, `absent`, `vector_to_scalar`, `bind_scalar_ref` | none (`limit`: per group, fixed size) | Implement | These are a few lines each on Arrow's `concat` and `slice`, so reuse saves nothing. |
@@ -467,6 +467,15 @@ The names below are the `Operator` constructors; their code is in
   readers. Streams do not matter, since we use no `*Exec`. Our runtime gives
   each reader a cheap clone of each batch: the Arrow arrays and the sketch
   list are shared, not copied, and no reader modifies them.
+- **Unstable DataFusion interfaces.** `GroupValues` and `JoinHashMap` are
+  public but not a stable API, and can change between major versions. We
+  pin DataFusion (§11) and adapt our code on each upgrade.
+- **Buffering between operators.** The driver feeds a two-input operator
+  all of input 0 before input 1 (§7.1). If both inputs come from the same
+  upstream operator, e.g. one scan feeding both sides of a join, that
+  operator's output for input 1 is held until input 0 ends: up to a whole
+  side of the join. This is a property of the plan's shape, handled by the
+  runtime, not by the operators.
 
 ## 11. Implementation details
 
@@ -545,7 +554,7 @@ executor tests and corpus snapshots pass without edits.
 | --- | --- | --- |
 | B1 | Add DataFusion 54.2.0 (§11); `GroupValues` replaces `group_table`. The PR states the added clean-build time and crates, and one before/after timing of a grouped aggregate. | Tests unchanged. |
 | B2 | Built-in SQL aggregates use DataFusion's `GroupsAccumulator`s; our sketches implement the same trait (§8.3). | Tests unchanged. |
-| B3 | Sort on `lexsort_to_indices` and `take`; top-k copied from DataFusion's `TopK`. | Tests unchanged. |
+| B3 | Sort on DataFusion's `sort_batch`; top-k copied from DataFusion's `TopK`. | Tests unchanged. |
 | B4 | Joins on `JoinHashMap`, probe copied from `HashJoinExec`. The build side moves to input 0, which ends the semi-join's buffering. | Tests unchanged. |
 | B5 | Expressions lowered to `PhysicalExpr` with DataFusion's semantics (§7.9); PromQL functions on built-ins or our UDFs. | Tests updated only for the result changes listed under the PR's **Verification**, each traced to a §13 difference. |
 | B6 | Re-measure per-operator unit costs on the new executor and update `operations_per_unit` in `asap-cost`. | Before/after timings reported; any planner snapshot changes listed with why. |
