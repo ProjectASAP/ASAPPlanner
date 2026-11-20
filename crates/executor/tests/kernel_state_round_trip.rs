@@ -512,3 +512,35 @@ fn hydra_kll_refuses_grids_it_never_builds() {
 fn kmv_refuses_a_k_below_its_minimum() {
     assert!(KmvAccumulator::restore_from_disk(Kmv::new(1)).is_err());
 }
+
+// Two different 15-byte keys retained in one layer add up to 30 bytes, more
+// than an `inserted_key_bytes` of 15 records, so the bookkeeping is refused.
+#[test]
+fn univmon_refuses_a_layer_holding_more_key_bytes_than_inserted() {
+    let mut state = UnivMonAccumulator::new(16, 3, 256, 4).unwrap();
+    for key in ["identity-one-aa", "identity-two-bb"] {
+        state.insert_value(&Value::Utf8(key.into())).unwrap();
+    }
+    let longest = state.max_key_bytes();
+    assert_eq!(state.inserted_key_bytes(), 2 * longest);
+    let sketch = state.sketch().clone();
+    assert!(UnivMonAccumulator::restore_from_disk(sketch.clone(), longest, longest).is_err());
+    assert!(UnivMonAccumulator::restore_from_disk(sketch, longest, 2 * longest).is_ok());
+}
+
+// A grid whose declared rows disagree with its cells (both non-zero) is
+// refused by Hydra-CMS and HydraKLL, and HydraKLL refuses a zero dimension.
+#[test]
+fn hydra_grids_refuse_declared_rows_other_than_their_cells() {
+    let mut cms_grid = HydraCms::new(2, 8, 16, 3).unwrap().sketch().clone();
+    cms_grid.rows = 3;
+    assert!(HydraCms::restore_from_disk(cms_grid).is_err());
+    let kll_grid = || HydraKllSketchAccumulator::new(2, 8, 200).sketch().clone();
+    let mut more_rows = kll_grid();
+    more_rows.rows = 3;
+    assert!(HydraKllSketchAccumulator::restore_from_disk(more_rows).is_err());
+    let mut zero_cols = kll_grid();
+    zero_cols.cols = 0;
+    assert!(HydraKllSketchAccumulator::restore_from_disk(zero_cols).is_err());
+    assert!(HydraKllSketchAccumulator::restore_from_disk(kll_grid()).is_ok());
+}

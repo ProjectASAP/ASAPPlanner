@@ -78,7 +78,8 @@ impl UnivMonAccumulator {
     /// key the kernel never inserts (not a sample's `u64` or key bytes), and
     /// bookkeeping the retained keys contradict: a key longer than
     /// `max_key_bytes`, one layer's keys longer than `inserted_key_bytes`
-    /// together, or `max_key_bytes` greater than `inserted_key_bytes`.
+    /// together, `max_key_bytes` greater than `inserted_key_bytes`, or
+    /// exactly one of `max_key_bytes` and `inserted_key_bytes` 0.
     pub fn restore_from_disk(
         sketch: UnivMon,
         max_key_bytes: usize,

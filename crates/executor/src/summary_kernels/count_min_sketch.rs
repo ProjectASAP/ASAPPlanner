@@ -18,7 +18,6 @@ impl CountMinSketchAccumulator {
         })
     }
 
-    /// Adds `weight` to `item`, whatever its sign.
     /// The `asap_sketchlib` sketch, so a deployment can persist it with the
     /// library's codec.
     pub fn sketch(&self) -> &CountMinF64 {
@@ -34,6 +33,7 @@ impl CountMinSketchAccumulator {
         Ok(Self { inner: sketch })
     }
 
+    /// Adds `weight` to `item`, whatever its sign.
     pub fn update(&mut self, item: &str, weight: f64) {
         self.inner.update_weighted(&DataInput::Str(item), weight);
     }

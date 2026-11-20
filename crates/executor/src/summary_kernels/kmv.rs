@@ -24,8 +24,6 @@ impl KmvAccumulator {
         }
     }
 
-    /// Observe one sample value. Like HLL, a value is hashed by its bits
-    /// with `-0.0` folded into `0.0`; NaN is not an item.
     /// The `asap_sketchlib` sketch, so a deployment can persist it with the
     /// library's codec.
     pub fn sketch(&self) -> &Kmv {
@@ -43,6 +41,8 @@ impl KmvAccumulator {
         Ok(Self { inner: sketch })
     }
 
+    /// Observe one sample value. Like HLL, a value is hashed by its bits
+    /// with `-0.0` folded into `0.0`; NaN is not an item.
     pub fn insert_sample(&mut self, value: f64) {
         if !value.is_nan() {
             let bits = if value == 0.0 { 0 } else { value.to_bits() };
