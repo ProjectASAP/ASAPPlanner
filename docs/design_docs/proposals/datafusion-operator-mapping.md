@@ -15,12 +15,33 @@ Goal: **write and maintain less operator code** by reusing
 [DataFusion](https://github.com/apache/datafusion)'s implementations where
 they exist. Efficiency is a secondary goal.
 
-How to read this doc: §2 defines terms. §3 shows the code today, §4 the end
-state, and §5 the decisions that take us from one to the other. §6 is the
-path, and §12 its PRs. §7–§11 are detail to read once the overview is
-clear.
+How to read this doc: §2 lists what the runtime must do, and §3 defines
+terms. §4 shows the code today, §5 the end state, and §6 the decisions that
+take us from one to the other. §7 is the path, and §13 its PRs. §8–§12 are
+detail to read once the overview is clear.
 
-## 2. Glossary
+## 2. Requirements
+
+What the executor's runtime must do, whichever operator code it runs:
+
+- **Batch and streaming.** A query's input exists already; an ingestion
+  window's input arrives over time. Either way, an operator updates its
+  state with each mini-batch as it arrives, and keeps no rows it does not
+  need: a 10-minute KLL sketch is never built from 10 minutes of buffered
+  rows (§6.1).
+- **Two-input operators.** The runtime decides the order in which an
+  operator's inputs arrive, e.g. a join's build side first (§6.1).
+- **Several readers.** One operator's output can feed several operators
+  (§9).
+- **Single-threaded first.** Version 1 runs one operator at a time; §6.4
+  classifies which operators could later be split across threads.
+- **No memory accounting, yielding or cancellation** (§6.2).
+- **Sketches stay in memory** between operators and are encoded only when
+  stored (§6.6).
+- **Evaluation time** (a query's time, or an ingestion window) is given to
+  an operator when it starts (§6.7).
+
+## 3. Glossary
 
 - **Batch:** a set of rows in columnar form. DataFusion uses Arrow's
   `RecordBatch`. Our `Batch` is a `RecordBatch` plus a list of in-memory
@@ -32,7 +53,7 @@ clear.
   runs when, connects each operator's output to the operators that read it,
   and reads data from storage.
 - **Driver:** the part of the runtime that feeds one operator its input and
-  collects its output, by calling the operator's methods (§4).
+  collects its output, by calling the operator's methods (§5).
 - **Query time / ingestion time:** a node runs either when a query is
   evaluated, or as data arrives, ahead of queries.
 - **Window:** a fixed time interval, e.g. each 10-minute interval aligned to
@@ -42,7 +63,7 @@ clear.
   already exists (e.g. read from storage for a query). In streaming mode it
   arrives over time as mini-batches (e.g. a window's data during
   ingestion). Either way the operator should process each mini-batch as it
-  comes, without first collecting all of them (§5.1).
+  comes, without first collecting all of them (§6.1).
 - **Aggregate:** an operator that outputs one final value per group, e.g.
   `sum by (job)`.
 - **Summary:** a per-group state output as a column, to be merged or read
@@ -60,13 +81,13 @@ clear.
   "keyed" for this meaning.
 - **DataFusion component:** a public DataFusion building block that works
   on its own, given a `RecordBatch` or arrays, e.g. `PhysicalExpr`
-  (evaluates an expression) or `GroupsAccumulator` (§5.5).
+  (evaluates an expression) or `GroupsAccumulator` (§6.5).
 - **DataFusion execution layer:** what DataFusion's own operators run on:
   the `ExecutionPlan` trait, `TaskContext` and `RuntimeEnv` (memory pool,
   spill files), async streams and tokio. Each DataFusion operator, named
   `*Exec` (`SortExec`, `HashJoinExec`, `AggregateExec`), is built on it.
 
-## 3. Today
+## 4. Today
 
 ### Our executor
 
@@ -112,7 +133,7 @@ DataFusion's operators (`*Exec`) are tied to its execution layer, just as
 ours are tied to our runtime. Its components are not: they can be called
 from any code.
 
-## 4. End state
+## 5. End state
 
 ```text
 runtime (ours): runs the plan, connects operators, reads storage
@@ -157,11 +178,11 @@ End state: open(ctx)        new GroupValues + KLL GroupsAccumulator
 The same operator runs in batch and streaming mode; only when the driver's
 `push` calls happen differs.
 
-## 5. Decisions
+## 6. Decisions
 
-### 5.1 Separate computation from running
+### 6.1 Separate computation from running
 
-Operators become plain computation (`OperatorLogic`, §4). The runtime and
+Operators become plain computation (`OperatorLogic`, §5). The runtime and
 its drivers own everything else. This is what makes the rest possible:
 once an operator is only computation, its computation can come from
 DataFusion.
@@ -172,22 +193,22 @@ has ended: at the end of a query's input, or at the end of an ingestion
 window. An operator that can update its state per mini-batch must do so,
 and not keep the rows: a 10-minute KLL sketch is updated with each
 mini-batch, never built from 10 minutes of buffered rows. Some operators
-cannot avoid keeping rows until `finish` (§5.4). (`compute(batch)` and `init / update / finalize`, an earlier
+cannot avoid keeping rows until `finish` (§6.4). (`compute(batch)` and `init / update / finalize`, an earlier
 two-interface idea, are a `push` returning one batch and an accumulator,
-§5.5.)
+§6.5.)
 
 The driver orders the inputs of a two-input operator: a join receives every
 build-side batch and `finish` for that input before its first probe-side
 batch.
 
-### 5.2 Remove memory accounting, yielding and cancellation
+### 6.2 Remove memory accounting, yielding and cancellation
 
 From operators and from the runtime, to keep both simple. The runtime stays
 async only because storage reads are async; operator calls are synchronous.
 Operators run one at a time; parallel execution is out of scope for the
 first version.
 
-### 5.3 Use DataFusion's components, never its execution layer
+### 6.3 Use DataFusion's components, never its execution layer
 
 Running a DataFusion `*Exec` from our runtime would mean building a small
 DataFusion plan around our data:
@@ -204,13 +225,13 @@ spill files. So every operator of ours is built in one of three ways:
 - **Copy:** port DataFusion code into our crate, when the logic exists only
   inside a `*Exec` (the hash-join probe) or is private (`TopK`). We keep
   DataFusion's tested algorithm without its execution layer, and maintain
-  the copy (§9).
+  the copy (§10).
 - **Implement:** write our own, when DataFusion has nothing equivalent
   (PromQL, sketches) or the operator is a few lines.
 
-§7 lists which operator is which.
+§8 lists which operator is which.
 
-### 5.4 Classifying functions and operators
+### 6.4 Classifying functions and operators
 
 Two questions about an operator matter for its implementation:
 
@@ -219,7 +240,7 @@ Two questions about an operator matter for its implementation:
 - **Parallelism:** can its input be split across threads? Answered by
   whether partial results merge, which the *class* of its functions decides.
 
-Version 1 runs single-threaded (§5.2); the parallelism column below is for
+Version 1 runs single-threaded (§6.2); the parallelism column below is for
 analysis and later work.
 
 #### Aggregate functions
@@ -292,7 +313,7 @@ Say 10 threads each receive a tenth of the input.
   would send all the data to one thread anyway. A single hot key (one huge
   series) cannot be spread over threads.
 
-`GroupsAccumulator::state` and `merge_batch` (§5.5) already provide the
+`GroupsAccumulator::state` and `merge_batch` (§6.5) already provide the
 merge that "any split + merge" needs.
 
 #### Operators
@@ -308,7 +329,7 @@ merge that "any split + merge" needs.
 An aggregate operator takes the worst row of its functions: one exact
 quantile makes the whole operator PerGroup + PerRow.
 
-### 5.5 Grouped state through `GroupsAccumulator`
+### 6.5 Grouped state through `GroupsAccumulator`
 
 Aggregates, summary builds and summary merges all keep one state per
 group. DataFusion splits this into two components:
@@ -332,23 +353,23 @@ is then `GroupValues` + accumulators, with no grouping code of ours.
 not needed: most sketches cannot remove values, so sliding windows merge
 window states instead.
 
-### 5.6 Sketches stay in memory between operators
+### 6.6 Sketches stay in memory between operators
 
 DataFusion's `state` encodes states as bytes. Passing sketches between our
 operators that way would encode and decode them at every step. Instead,
 `push` takes our `Batch`, whose summary columns index into its in-memory
-sketch list (§2), and our accumulators hand sketches to the next operator
+sketch list (§3), and our accumulators hand sketches to the next operator
 in memory. Encoding happens only when a state is stored. Wrapped DataFusion
 components receive the `Batch`'s `RecordBatch`.
 
-### 5.7 Evaluation time enters at `open`
+### 6.7 Evaluation time enters at `open`
 
-`Operator::open(ctx)` (§4) creates each run's state, and `ctx`
+`Operator::open(ctx)` (§5) creates each run's state, and `ctx`
 holds the evaluation time; operators receive no other run context. PromQL's
 `@` (evaluate at another time) stays a runtime action: the runtime opens the
 operator's inputs with a shifted `ctx`.
 
-### 5.8 Later: results per window within one run
+### 6.8 Later: results per window within one run
 
 Not in the first version. Each ingestion run covers one window, and
 `finish` emits its result. An `advance(t)` method, emitting the windows that
@@ -357,18 +378,18 @@ instance span many windows. If added: `t` is a window end the runtime
 already knows, late data is dropped, and operator state is not
 checkpointed.
 
-### 5.9 DataFusion's expression semantics win
+### 6.9 DataFusion's expression semantics win
 
-Where our expression semantics differ from DataFusion's (§11), we adopt
+Where our expression semantics differ from DataFusion's (§12), we adopt
 DataFusion's and accept the changed query results. This includes PromQL
 functions: they map onto the nearest DataFusion built-in, and become our own
 UDF only when no built-in is close enough. The checks that fail a query
 (`FiniteFloat64`, checked division, exact Int64→Float64) are dropped.
 
-## 6. Path
+## 7. Path
 
 Two phases, so that the interface change and the DataFusion change are never
-reviewed together. §12 lists the PRs.
+reviewed together. §13 lists the PRs.
 
 - **Phase A: new interface, same internals.** Remove memory accounting,
   yielding and cancellation, then move every operator to `OperatorLogic`
@@ -376,32 +397,32 @@ reviewed together. §12 lists the PRs.
   unchanged.
 - **Phase B: DataFusion internals.** Replace one component per PR:
   grouping, accumulators, sort, joins, expressions. Expressions go last
-  because they change query results (§5.9).
+  because they change query results (§6.9).
 
-## 7. Per-operator mapping
+## 8. Per-operator mapping
 
 The names below are the `Operator` constructors; their code is in
 `crates/executor/src/operators/`, mostly in a file of the same name (e.g.
 `union`, `scalar` and `absent` are in `source.rs`, `window` in
 `aggregate/`, `evaluate_at` in `time_range.rs`).
 
-| Operator | Shape + law (§5.4) | How | Detail |
+| Operator | Shape + law (§6.4) | How | Detail |
 | --- | --- | --- | --- |
-| `project`, `filter`, scalar `Expression` | None | Wrap + implement | Expressions are lowered to DataFusion `PhysicalExpr`s; `filter` then applies Arrow's `filter` kernel. About half of our expression forms map directly, a third need care when lowering, and the rest are ours (§11). |
+| `project`, `filter`, scalar `Expression` | None | Wrap + implement | Expressions are lowered to DataFusion `PhysicalExpr`s; `filter` then applies Arrow's `filter` kernel. About half of our expression forms map directly, a third need care when lowering, and the rest are ours (§12). |
 | `aggregate` | PerGroup, law from its functions | Wrap + implement | Grouping uses `GroupValues`, and SQL aggregates use DataFusion's accumulators. PromQL `avg`, `quantile`, compensated `sum` and the NaN rules of `min`/`max` differ from DataFusion's, so they are our own `GroupsAccumulator`s. |
 | `sql_window` | PerGroup + PerRow | Wrap | SQL window functions use DataFusion's built-in implementations (`PartitionEvaluator`), whose semantics `sql_window` already follows. |
 | `sort` (grouped, optional top-k) | PerGroup + PerRow | Copy | Sorting uses Arrow's `lexsort_to_indices` and `take`. Top-k is copied from DataFusion's `TopK`, which is private. |
 | `relational_join`, `semi_join` | PerGroup + PerRow | Wrap + copy | The build side uses DataFusion's public `JoinHashMap`. The probe and the output of each join kind (inner, outer, semi, anti, non-equality predicates) are copied from `HashJoinExec`. |
 | `certified_semi_join`, `set_operation` | PerGroup + PerRow | Implement | Both are built on the copied join: the first adds a check that the right side is complete, the second adds a distinct, as DataFusion plans INTERSECT and EXCEPT. |
 | `union`, `limit`, `scalar`, `source`, `absent`, `vector_to_scalar`, `bind_scalar_ref` | None (`limit`: PerGroup + Fixed) | Implement | These are a few lines each on Arrow's `concat` and `slice`, so reuse saves nothing. |
-| `per_group_summary_build`, `per_group_keyed_summary_build`, `summary_merge` | PerGroup + Fixed | Wrap + implement | Grouping uses `GroupValues`; each sketch family is our own `GroupsAccumulator` (§5.5). |
+| `per_group_summary_build`, `per_group_keyed_summary_build`, `summary_merge` | PerGroup + Fixed | Wrap + implement | Grouping uses `GroupValues`; each sketch family is our own `GroupsAccumulator` (§6.5). |
 | `all_groups_summary_build` | Shared + Fixed | Implement | HydraCms keeps one state shared by all groups, which `GroupsAccumulator` cannot express. |
 | `evaluation`, `keyed_evaluation` | None | Implement | They read a value (a quantile, a count) from a summary state, which is sketch-specific. |
-| PromQL and time: `time_range`, `evaluate_at`, `scope_timestamp`, `current_series`, `series_window`, `range_window`, `window`, `*_binary`, `series_labels`, `series_relabel`, `series_sample`, `*histogram_quantile` | Varies (§5.4) | Implement | DataFusion has no PromQL or time-series operators. Their grouping and label matching can use `GroupValues` and Arrow's `RowConverter`. |
+| PromQL and time: `time_range`, `evaluate_at`, `scope_timestamp`, `current_series`, `series_window`, `range_window`, `window`, `*_binary`, `series_labels`, `series_relabel`, `series_sample`, `*histogram_quantile` | Varies (§6.4) | Implement | DataFusion has no PromQL or time-series operators. Their grouping and label matching can use `GroupValues` and Arrow's `RowConverter`. |
 
-## 8. Risks
+## 9. Risks
 
-- **Semantics.** Adopting DataFusion's expression semantics (§5.9) changes
+- **Semantics.** Adopting DataFusion's expression semantics (§6.9) changes
   query results, including PromQL edge cases (NaN, rounding, overflow) where
   we will then differ from Prometheus. Grouping, accumulators, sort and
   joins must not change results.
@@ -415,7 +436,7 @@ The names below are the `Operator` constructors; their code is in
   each reader a cheap clone of each batch: the Arrow arrays and the sketch
   list are shared, not copied, and no reader modifies them.
 
-## 9. Implementation details
+## 10. Implementation details
 
 - **DataFusion 54.2.0.** It is the newest release on our Arrow version (58),
   so no Arrow upgrade is needed. Releases and their Arrow versions: 54.x →
@@ -429,7 +450,7 @@ The names below are the `Operator` constructors; their code is in
 - **Copied files** keep DataFusion's Apache-2.0 header, are listed in
   `THIRD_PARTY.md`, and record the DataFusion commit they came from.
 
-## 10. Finding: operators in ingestion-time plans
+## 11. Finding: operators in ingestion-time plans
 
 Every ingestion-time plan in the corpus snapshots is a scan followed by a
 summary chain: `filter` / `project`, then `time_range` (one window's rows),
@@ -437,9 +458,9 @@ summary chain: `filter` / `project`, then `time_range` (one window's rows),
 (stamps each result with its window end). The planner does not restrict
 which operators may run at ingestion time, so others can appear later.
 
-## 11. Finding: expressions on DataFusion `PhysicalExpr`
+## 12. Finding: expressions on DataFusion `PhysicalExpr`
 
-We adopt DataFusion's semantics for every difference below (§5.9).
+We adopt DataFusion's semantics for every difference below (§6.9).
 
 Each expression form of our `Expression` enum and the Planner scalar IR was
 classified against DataFusion.
@@ -470,7 +491,7 @@ classified against DataFusion.
   the checks that fail a query (`FiniteFloat64`, checked division, exact
   Int64→Float64), `mapconcat` and `days_in_month`.
 
-## 12. Implementation plan
+## 13. Implementation plan
 
 Every PR keeps the executor working. "Tests unchanged" means the existing
 executor tests and corpus snapshots pass without edits.
@@ -490,11 +511,11 @@ executor tests and corpus snapshots pass without edits.
 
 | # | PR | Done when |
 | --- | --- | --- |
-| B1 | Add DataFusion 54.2.0 (§9); `GroupValues` replaces `group_table`. The PR states the added clean-build time and crates, and one before/after timing of a grouped aggregate. | Tests unchanged. |
-| B2 | Built-in SQL aggregates use DataFusion's `GroupsAccumulator`s; our sketches implement the same trait (§5.5). | Tests unchanged. |
+| B1 | Add DataFusion 54.2.0 (§10); `GroupValues` replaces `group_table`. The PR states the added clean-build time and crates, and one before/after timing of a grouped aggregate. | Tests unchanged. |
+| B2 | Built-in SQL aggregates use DataFusion's `GroupsAccumulator`s; our sketches implement the same trait (§6.5). | Tests unchanged. |
 | B3 | Sort on `lexsort_to_indices` and `take`; top-k copied from DataFusion's `TopK`. | Tests unchanged. |
 | B4 | Joins on `JoinHashMap`, probe copied from `HashJoinExec`. The build side moves to input 0, which ends the semi-join's buffering. | Tests unchanged. |
-| B5 | Expressions lowered to `PhysicalExpr` with DataFusion's semantics (§5.9); PromQL functions on built-ins or our UDFs. | Tests updated only for the result changes listed under the PR's **Verification**, each traced to a §11 difference. |
+| B5 | Expressions lowered to `PhysicalExpr` with DataFusion's semantics (§6.9); PromQL functions on built-ins or our UDFs. | Tests updated only for the result changes listed under the PR's **Verification**, each traced to a §12 difference. |
 | B6 | Re-measure per-operator unit costs on the new executor and update `operations_per_unit` in `asap-cost`. | Before/after timings reported; any planner snapshot changes listed with why. |
 
 Efficiency gates no PR before B6: the main goal is less code to maintain.
