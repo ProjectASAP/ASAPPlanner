@@ -520,14 +520,14 @@ executor tests and corpus snapshots pass without edits.
 | A2 | Add `OperatorLogic`, `Operator::open` and `drive`; port `filter`. `drive` feeds inputs in index order: every batch of input 0, `finish(0)`, then input 1. Sources (`Scan`, `UnboundInput`) stay async streams. | Tests unchanged. |
 | A3 | Port the stateless operators (projection, `time_range`, `scope_timestamp`, `bind_scalar_ref`, `unchecked`, `limit`, `series_labels`, `series_sample`). | Tests unchanged. |
 | A4 | Port the grouping operators (aggregate, summary builds and merge, `range_function`, `series_window`, `vector_window`, `current_series`). | Tests unchanged, plus a new test: a KLL sketch built from many mini-batches equals one built from a single batch. |
-| A5 | Port sort, joins and the other two-input operators (sort, joins, `aligned_binary`, `vector_binary`, `set_operation`, `sql_window`). The semi-join builds on input 1, so it buffers input 0 until Phase B. | Tests unchanged. |
+| A5 | Port sort, joins and the other two-input operators (sort, joins, `aligned_binary`, `vector_binary`, `set_operation`, `sql_window`). The semi-join builds on input 1, so it buffers input 0 until Phase B. | Tests unchanged, plus a new test: a join whose two inputs read the same upstream operator completes, with input 1's batches waiting in the runtime's per-reader queue (§10). |
 | A6 | Delete the old path: `PhysicalOperator::start` for operators and the per-operator `execute` functions. Test operators implement `OperatorLogic`. | Tests unchanged. |
 
 ### Phase B: DataFusion internals
 
 | # | PR | Done when |
 | --- | --- | --- |
-| B1 | Add DataFusion 54.2.0 (§11); `GroupValues` replaces `group_table`. The PR states the added clean-build time and crates, and one before/after timing of a grouped aggregate. | Tests unchanged. |
+| B1 | Add DataFusion pinned to exactly `=54.2.0` (§11), since `GroupValues` is not a stable API (§10); `GroupValues` replaces `group_table`. The PR states the added clean-build time and crates, and one before/after timing of a grouped aggregate. | Tests unchanged. |
 | B2 | Built-in SQL aggregates use DataFusion's `GroupsAccumulator`s; our sketches implement the same trait (§8.3). | Tests unchanged. |
 | B3 | Sort on DataFusion's `sort_batch`; top-k copied from DataFusion's `TopK`. | Tests unchanged. |
 | B4 | Joins on `JoinHashMap`, probe copied from `HashJoinExec`. The build side moves to input 0, which ends the semi-join's buffering. | Tests unchanged. |
