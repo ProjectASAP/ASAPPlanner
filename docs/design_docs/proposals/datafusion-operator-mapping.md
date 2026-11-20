@@ -325,91 +325,62 @@ ingestion time and merged across windows at query time.
 
 ### 8.2 Classifying operators
 
-Two questions about an operator matter for its implementation:
+We analyse two properties of an operator in a query:
 
-- **Memory:** how does its state grow with its input? Answered by what it
-  keeps state *per*, and what that state *grows with*.
-- **Parallelism:** can its input be split across threads? Answered by
-  whether partial results merge (§8.1), and by whether there is a column to
-  route rows by.
+- **Memory:** how much state it keeps.
+- **Split:** whether its work can be spread across threads. Version 1 runs
+  single-threaded (§7.2), so this is analysis for later.
 
-Some of these are properties of a function alone, and some of a function
-in a particular query:
+Three factors determine them:
 
-- **Of the function:** its class (§8.1) and what one state grows with. An
-  exact quantile is holistic and keeps its rows in every query.
-- **Of the function in a query:** how many states there are, and how the
-  input can be split. `quantile(0.99, latency) by (job)` keeps one state per
-  job and is partitioned by `job`; without `by` it keeps one state and runs
-  on a single thread.
+1. **What one state grows with.** Set by the function or operator.
+   - *Nothing (fixed size):* sum, avg, a KLL sketch.
+   - *Distinct values:* exact distinct count.
+   - *Rows:* exact quantile, sort, join.
+2. **Whether groups share a state.** Set by the function.
+   - *Per group:* each group has its own state (`sum by (job)`).
+   - *Shared:* one state mixes all groups (Hydra).
+   - *None:* the operator keeps nothing (`filter`).
+3. **The query's groups.** Set by the query.
+   - *How many groups* there are.
+   - *Whether a column exists to route rows by:* a `by`, a join key, or a
+     `PARTITION BY`.
 
-Version 1 runs single-threaded (§7.2); the split is for analysis and later
-work.
+The function classes of §8.1 explain factor 1: distributive and algebraic
+functions, including sketch builds, have fixed-size state; holistic
+functions have growing state.
 
-#### Memory: state per, and what it grows with
+The logic:
 
-An operator's memory is *number of states × size of one state*.
+- **Memory** = number of states × size of one state. The number of states
+  is the number of groups, 1 if shared, or 0 with no state. One state's
+  size is fixed, or its group's distinct values or rows.
+- **Split:**
+  1. No state: **any split**.
+  2. Fixed-size state: **any split + merge**. Each thread builds a small
+     partial state, and the partials merge.
+  3. Growing state, with a column to route by: **partitioned** by it.
+  4. Growing state, no such column: **single thread**.
 
-- **State per** says how many states there are:
-  - *group:* each group has its own state, independent of the others. A
-    global (ungrouped) operator has one group.
-  - *all groups:* one state whose contents mix all groups. In a Hydra
-    sketch, every group hashes into the same cells.
-  - *none:* the operator keeps nothing.
+  Sort is the exception: its state grows with rows, but sorted runs from
+  any split can be k-way merged.
 
-  What matters is whether groups mix, not how many objects hold the state.
-  An exact `sum by (job)` over 3 jobs is 3 numbers: one state holding 3
-  numbers or 3 states holding one, the jobs never mix, so it is state per
-  group.
-- **Grows with** says how one state's size grows:
-  - *nothing (fixed size):* set by configuration, not by the data, e.g. a
-    KLL sketch's `k`.
-  - *distinct values:* one entry per distinct value inside the group, e.g.
-    `count_distinct(user) by (job)` keeps every distinct `user` of each
-    `job`.
-  - *rows:* keeps the rows, e.g. sort.
+  `GroupsAccumulator::state` and `merge_batch` (§8.3) already provide the
+  merge that "any split + merge" needs.
 
-The RQE cost model (`ASAPQuery/rqe-optimizer/docs/rqe_optimizer_cost_model.md`,
-"Instance shape and size law") uses the same two properties, under the
-names shape and law.
+Every operator, by factor and outcome:
 
-#### Parallelism: how the input can be split
+| Operators | State grows with | State per | Memory | Split |
+| --- | --- | --- | --- | --- |
+| `filter`, `project`, `time_range`, `evaluate_at`, `union`, `series_labels`, `series_relabel`, `window_end_timestamp`, `evaluation`, scalar expressions | — | none | none | any |
+| `aggregate` with distributive or algebraic functions, sketch builds, `summary_merge`, `current_series`, `limit` | nothing | group | groups × fixed size | any + merge |
+| `all_groups_summary_build` (Hydra) | nothing | shared | fixed size | any + merge |
+| `aggregate` with exact distinct count | distinct values | group | groups × distinct values | partitioned by group, else single thread |
+| `aggregate` with exact quantile, joins, `set_operation`, `sql_window`, `range_window` / `series_window` | rows | group | rows | partitioned by group, join key, partition key or series, else single thread |
+| `sort` | rows | group | rows | any, then k-way merge |
 
-Say 10 threads each receive a tenth of the input.
-
-- **Any split.** Each thread processes its own rows; the outputs are
-  concatenated. Example: `filter`.
-- **Any split + merge.** Each thread builds a partial state from its own
-  rows; a final step merges the partials. Example: `sum by (job)` sums each
-  thread's rows, then adds the 10 partial sums per job; KLL builds 10
-  sketches and merges them. This needs distributive or algebraic functions,
-  whose partials are small.
-- **Partitioned.** Rows are routed by a column, so all rows with the same
-  value go to the same thread. Example: an
-  exact p99 by `job`: 10 partial p99s cannot be combined, so every
-  `job="api"` row goes to one thread, which computes api's p99 alone. A
-  holistic function's partial result is all its values, so merging partials
-  would send all the data to one thread anyway. A single hot value (one huge
-  series) cannot be spread over threads.
-- **Single thread.** Neither of the above: partials do not merge, and there
-  is no column to route by. Example: an exact p99 with no `by`
-  (`quantile(0.99, latency)`), or a `sql_window` without `PARTITION BY`.
-
-`GroupsAccumulator::state` and `merge_batch` (§8.3) already provide the
-merge that "any split + merge" needs.
-
-#### Operators
-
-| State | Memory | Split | Operators |
-| --- | --- | --- | --- |
-| none | none | any | `filter`, `project`, `time_range`, `evaluate_at` (time shift), `union`, `series_labels`, `series_relabel`, `window_end_timestamp`, `evaluation`, scalar expressions |
-| per group, fixed size | groups × fixed size | any + merge | `aggregate` with distributive or algebraic functions, sketch builds, `summary_merge`, `current_series` (merge keeps the latest sample), `limit` (merge keeps the first n) |
-| per group, grows with distinct values | groups × distinct values | partitioned by group | `aggregate` with exact distinct count |
-| per group, grows with rows | rows | partitioned, or single thread without a group, join key or partition key | `aggregate` with exact quantile (by group), joins (by join key), `set_operation`, `sql_window` (by partition key), `range_window` / `series_window` (by series); `sort` is the exception: any split, then a k-way merge of the sorted runs |
-| for all groups, fixed size | fixed | any + merge | `all_groups_summary_build` (Hydra sketches) |
-
-An aggregate operator takes the worst row of its functions: one exact
-quantile makes the whole operator "per group, grows with rows".
+An aggregate takes the worst of its functions: one exact quantile puts the
+whole operator in the "rows" row.
 
 ### 8.3 Grouped state through `GroupsAccumulator`
 
