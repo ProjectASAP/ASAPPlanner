@@ -237,3 +237,31 @@ fn weighted_frequency_refuses_foreign_heap_keys() {
         assert!(WeightedFrequency::from_sketch(FrequencySketch::CmsHeap(sketch)).is_err());
     }
 }
+
+// A terminal-mode UnivMon (updated with `update_weighted_terminal`) is refused:
+// the kernel's next insert or merge would panic on it.
+#[test]
+fn univmon_refuses_a_terminal_mode_sketch() {
+    let mut sketch = UnivMon::new(16, 3, 256, 4);
+    sketch.update_weighted_terminal(&asap_sketchlib::DataInput::U64(1), 1);
+    assert!(UnivMonAccumulator::from_parts(sketch, 0, 0).is_err());
+}
+
+// A retained key longer than the recorded longest key, or byte keys with
+// zero recorded bytes, are refused.
+#[test]
+fn univmon_refuses_key_bytes_below_the_retained_keys() {
+    let mut state = UnivMonAccumulator::new(16, 3, 256, 4).unwrap();
+    state
+        .insert_value(&Value::Utf8("a-long-identity".into()))
+        .unwrap();
+    let sketch = state.sketch().clone();
+    assert!(UnivMonAccumulator::from_parts(sketch.clone(), 1, 100).is_err());
+    assert!(UnivMonAccumulator::from_parts(sketch.clone(), 0, 0).is_err());
+    assert!(UnivMonAccumulator::from_parts(
+        sketch,
+        state.max_key_bytes(),
+        state.inserted_key_bytes()
+    )
+    .is_ok());
+}

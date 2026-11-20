@@ -2,7 +2,7 @@
 
 use crate::summary_kernels::traits::{aggregate_core_object_methods, downcast_peer};
 use crate::AggregateCore;
-use asap_sketchlib::{DataInput, UnivMon};
+use asap_sketchlib::{DataInput, OwnedDataInput, UnivMon};
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::summary_type::SketchStatistic;
 
@@ -70,20 +70,52 @@ impl UnivMonAccumulator {
 
     /// The state that keeps `sketch` and the memory bookkeeping read from
     /// [`Self::max_key_bytes`] and [`Self::inserted_key_bytes`]. Fails for a
-    /// shape [`check_shape`] refuses, and for bookkeeping no insertions give:
-    /// the longest key longer than all inserted keys together, or keys
-    /// inserted with none of positive length.
+    /// shape [`check_shape`] refuses, a sketch updated in sketchlib's
+    /// terminal mode (the kernel's next insert or merge would panic), a heap
+    /// key the kernel never inserts (not a sample's `u64` or key bytes), and
+    /// bookkeeping the retained keys contradict: a key longer than
+    /// `max_key_bytes`, one layer's keys longer than `inserted_key_bytes`
+    /// together, or `max_key_bytes` greater than `inserted_key_bytes`.
     pub fn from_parts(
         sketch: UnivMon,
         max_key_bytes: usize,
         inserted_key_bytes: usize,
     ) -> Result<Self, Error> {
         check_shape(sketch.heap_size, sketch.rows, sketch.cols, sketch.layers)?;
-        if max_key_bytes > inserted_key_bytes || (max_key_bytes == 0) != (inserted_key_bytes == 0) {
+        if !sketch.accepts_standard_updates() {
+            return Err("UnivMon sketch was updated in terminal mode".into());
+        }
+        if max_key_bytes > inserted_key_bytes || (max_key_bytes == 0) != (inserted_key_bytes == 0)
+        {
             return Err(format!(
                 "inconsistent UnivMon key bytes: longest {max_key_bytes}, inserted {inserted_key_bytes}"
             )
             .into());
+        }
+        for heap in sketch.layer_heaps.as_slice() {
+            let mut layer_key_bytes = 0usize;
+            for item in heap.heap() {
+                match &item.key {
+                    OwnedDataInput::U64(_) => {}
+                    OwnedDataInput::Bytes(key) if key.len() <= max_key_bytes => {
+                        layer_key_bytes = layer_key_bytes.saturating_add(key.len());
+                    }
+                    OwnedDataInput::Bytes(key) => {
+                        return Err(format!(
+                            "UnivMon retains a {}-byte key, longer than max_key_bytes {max_key_bytes}",
+                            key.len()
+                        )
+                        .into())
+                    }
+                    _ => return Err("UnivMon heap key is not a sample or key bytes".into()),
+                }
+            }
+            if layer_key_bytes > inserted_key_bytes {
+                return Err(format!(
+                    "UnivMon layer retains {layer_key_bytes} key bytes, more than inserted_key_bytes {inserted_key_bytes}"
+                )
+                .into());
+            }
         }
         Ok(Self {
             inner: sketch,
