@@ -158,6 +158,36 @@ Calibration uses the existing inputs plus one new field:
 - `CostInputs::frozen_calibration_factor`: the scale for the formula-priced
   nodes the table does not cover.
 
+What the current format can and cannot express:
+
+| Measured term | Format today | Change |
+| --- | --- | --- |
+| time per unit of an operator, per phase and family | `ns_per_unit` | none |
+| fixed time per query run of an operator | `ns_per_invocation` with `phase: query_time` | none |
+| fixed time per request | `ns_per_evaluation` | none |
+| fixed time per precompute refresh (window close) | none: `ns_per_invocation` at ingestion time is per second of arriving rows | new `ns_per_refresh` |
+| scale for uncovered nodes | `frozen_calibration_factor` | none |
+
+A calibration file is a `CostInputs` JSON (`asap_planner --cost-inputs`)
+carrying the measured table and the factor, e.g.:
+
+```json
+{
+  "measured_operation_costs": {
+    "ns_per_evaluation": 1500000,
+    "operators": [
+      {"operator": "SummaryTumblingWindowChain", "phase": "ingestion_time",
+       "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 310, "ns_per_refresh": 44000000},
+      {"operator": "Aggregate", "phase": "query_time", "measure": "max",
+       "ns_per_unit": 9, "ns_per_invocation": 5000000}
+    ]
+  },
+  "frozen_calibration_factor": 1.8
+}
+```
+
+A file without `ns_per_refresh` loads as before (default 0).
+
 ## 2. Algorithm
 
 ### 2.1 Query latency
