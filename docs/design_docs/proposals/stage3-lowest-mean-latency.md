@@ -98,7 +98,7 @@ work. They are deployment parameters, passed in, never inferred:
 | `precompute_threads` | threads | 1 | threads running window-close refreshes of ingestion-time views |
 | `query_threads` | threads | 1 | threads running query requests; one request runs on one thread |
 | `allowed_lateness_ms` | ms | 0 | how long the data plane waits after a window's end before closing it |
-| `max_precompute_load` ($\rho_{\max}$) | fraction | 0.7 | the largest precompute load a valid plan may have |
+| `max_thread_utilization` ($\rho_{\max}$) | fraction | 0.7 | the largest precompute load a valid plan may have (hard); also the target utilisation of the recommended thread counts (section 2.6) |
 
 **Where they live: `CostInputs::data_plane_execution`**, a new struct beside
 `resource_speed`. Reasons:
@@ -116,7 +116,13 @@ work. They are deployment parameters, passed in, never inferred:
   cost model. `ClusterLimits` keeps only the cluster's resource limits and
   objective.
 - $\rho_{\max}$ sits with the thread counts because $\rho$ is defined over
-  `precompute_threads`.
+  `precompute_threads` and the recommended thread counts are sized by it.
+
+Of the thread counts, only `precompute_threads` enters selection (through
+$\rho$ and $Q_G$); `ingest_threads` sets the partial copies; `query_threads`
+is not a constraint. Ingest and query CPU are not limited against their
+thread counts: the data plane configures its threads from the planner's
+recommended configuration instead (section 2.6).
 
 `ingest_threads: None` keeps today's rule (one partial copy per core the
 ingestion work needs), so cost model 1 plans and costs do not change.
@@ -244,7 +250,7 @@ $\rho \le \rho_{\max}$ (default 0.7) keeps the refresh backlog from growing.
 $\rho$ is linear in the selection: $P_G$ is a sum over selected nodes.
 
 Within $\rho \le \rho_{\max}$, the queueing time $Q_G$ is the conservative
-linear bound of section 2.1 (proposed for v1, see open question 1): it ignores
+linear bound of section 2.1 (decided for v1): it ignores
 work left over from earlier closes, which $\rho \le \rho_{\max}$ keeps small,
 and assumes every coinciding group is ahead of $G$.
 
@@ -273,7 +279,9 @@ deployment that reports per-phase times can run it.
      range): declare the fact in the data workload;
    - nodes the table does not cover: `frozen_calibration_factor`.
 5. **Repeat** until every node's predicted time per phase is within the
-   acceptance ratio of the measured one (proposed 1.5×, open question 2).
+   acceptance ratio of the measured one: 1.5× (decided), per node and per
+   phase, on the calibration workloads. The objective is implemented only
+   after the calibration passes.
 
 The deployment supplies the measured costs as a `MeasuredOperationCosts`
 table; the planner reads only that table.
@@ -367,6 +375,27 @@ gains the precompute load $\rho$. Under cost model 3,
 objective today, the MILP's mean latency equals the mean latency `plan_cost`
 computes for the selected plan.
 
+**Recommended configuration.** The report also states, per thread role,
+the CPU the selected plan is predicted to use and the threads a deployment
+needs to serve it at the target utilisation $\rho_{\max}$:
+
+| Role | Predicted CPU core-seconds per second | Recommended threads |
+| --- | --- | --- |
+| ingest | ingest work of the ingestion-time nodes | $\lceil \text{cores} / \rho_{\max} \rceil$, at least 1 |
+| precompute | $\sum_G P_G / W_G$ (refresh work) | $\lceil \text{cores} / \rho_{\max} \rceil$, at least 1 |
+| query | query-time work plus request overhead | $\lceil \text{cores} / \rho_{\max} \rceil$, at least 1 |
+
+Example: refresh work of 0.9 core-seconds per second at $\rho_{\max} = 0.7$
+recommends 2 precompute threads (0.9 / 0.7 = 1.29, rounded up).
+
+`precompute_threads` stays an input: $\rho$ and $Q_G$ are computed with it.
+For a valid plan the recommendation is at most the input (since
+$\rho \le \rho_{\max}$). A deployment may set `precompute_threads` from the
+recommendation and replan: fewer threads raise $Q_G$ and may change the
+selection, more threads admit plans with heavier refresh work. The
+recommendation is stable when replanning with it as the input returns it
+again. The recommendation is reported under every cost model.
+
 ### 2.7 Errors and the other objectives
 
 **No plan fits.** When the MILP is infeasible under cost model 3, Stage 3
@@ -427,13 +456,14 @@ model 2 keeps returning `UnsupportedCostModel`.
 +    /// closing it; default 0.
 +    pub allowed_lateness_ms: u64,
 +    /// The largest precompute load (fraction of the precompute threads'
-+    /// time spent refreshing) a valid plan may have; default 0.7.
-+    pub max_precompute_load: f64,
++    /// time spent refreshing) a valid plan may have, and the target
++    /// utilisation of the recommended thread counts; default 0.7.
++    pub max_thread_utilization: f64,
 +}
 ```
 
 `CostInputs::validate` refuses thread counts of 0 and a
-`max_precompute_load` outside (0, 1].
+`max_thread_utilization` outside (0, 1].
 
 ### 3.2 Measured costs (`asap-cost`, `measured.rs`)
 
@@ -481,13 +511,29 @@ model 2 keeps returning `UnsupportedCostModel`.
      ...
 +    /// Fraction of the precompute threads' time spent refreshing (ρ).
 +    pub precompute_load: f64,
++    /// Per thread role, the predicted CPU and recommended thread count.
++    pub recommended_configuration: RecommendedThreads,
  }
+
++/// The threads a deployment needs to serve the plan (section 2.6).
++pub struct RecommendedThreads {
++    pub ingest: RoleThreads,
++    pub precompute: RoleThreads,
++    pub query: RoleThreads,
++}
++pub struct RoleThreads {
++    /// CPU core-seconds per second the role is predicted to use.
++    pub predicted_cpu_core_seconds_per_second: f64,
++    /// ceil(predicted cores / max_thread_utilization), at least 1.
++    pub recommended_threads: u32,
++}
 ```
 
 `PredictedQueryUsage` (the plan report) takes the same five fields plus
 `latency_ms`; `PredictedNodeUsage` gains `ingest_cpu_core_seconds_per_second`,
 `refresh_ms_per_window` and `query_ms_per_run` for the calibration
-comparison; `PredictedUsage` gains `precompute_load`. The report's JSON
+comparison; `PredictedUsage` gains `precompute_load` and
+`recommended_configuration`. The report's JSON
 changes, so `INSTALLABLE_PLAN_WIRE_VERSION` goes from 15 to 16.
 
 ### 3.4 Stage 3 (`stage3-plan-selection`)
@@ -551,40 +597,30 @@ tie-break solves from `CostModel`.
 | 4 | CPU limit = average cores used; memory peak $\le$ `memory_bytes`; disk $\le$ `disk_bytes`. | Decided |
 | 5 | Calibrate before implementing the objective; feed results through the measured table, data facts and `frozen_calibration_factor`; generic procedure. | Decided |
 | 6a | Precompute load $\rho = \sum_G (P_G/W_G) / \text{precompute\_threads}$; hard constraint $\rho \le \rho_{\max}$, default 0.7; plans above it are invalid. | Decided |
-| 6b | Queueing time within $\rho \le \rho_{\max}$: the linear upper bound (coinciding groups' refresh times ÷ precompute threads). | Proposed (open question 1) |
+| 6b | Queueing time within $\rho \le \rho_{\max}$: the linear upper bound (coinciding groups' refresh times ÷ precompute threads). | Decided |
 | 7 | MILP: per-query latency variables, max over freshness sources by big-M with computed bounds, objective $\sum w_q L_q$, resource rows; lexicographic second solves for ties; scaling as today; sharing through $a_{q,e}$. | Decided (formulation); tie-break choice by this document |
-| 8 | On one thread the critical path is the sum of the sub-DAG's node times (each once), so query execution is a sum over $a_{q,e}$; the max is needed only over the freshness sources. | By this document (open question 3) |
+| 8 | On one thread the critical path is the sum of the sub-DAG's node times (each once), so query execution is a sum over $a_{q,e}$; the max is needed only over the freshness sources. | Proposed for v1 (open question 1) |
 | 9 | Refresh group = ingestion-time nodes of one `RefreshWindow`, refreshed as one task on one precompute thread; compaction of partial copies moves from query latency into refresh time. | By this document |
 | 10 | New `OperatorCost::ns_per_refresh` for the fixed cost per refresh. | By this document |
-| 11 | Latency bounds and $\rho \le \rho_{\max}$ are enforced under cost model 3 only in this work; cost model 1 plans do not change. | By this document (open question 4) |
+| 11 | Cost model 1 does not enforce latency bounds or $\rho \le \rho_{\max}$; cost model 1 plans do not change. | Decided |
 | 12 | This work implements `LowestMeanLatency` only; `LowestLatency`, `LeastMemory` and cost model 2 keep `UnsupportedCostModel`. | By this document |
 | 13 | Infeasible under cost model 3: per-limit relaxed solves on the error path, `OverClusterLimits` with least needed and available. | By this document |
 | 14 | Under cost model 3 the greedy cost upper bound is not applied; the `OneEvaluation` twin dominance is restated over time, memory, disk and CPU. | By this document |
+| 15 | Calibration passes when every node's predicted time per phase is within 1.5× of measured. | Decided |
+| 16 | Ingest and query CPU are not hard constraints against thread counts; the report gives per role (ingest, precompute, query) the predicted CPU core-seconds per second and the recommended threads, $\lceil$cores$/\rho_{\max}\rceil$; `precompute_threads` stays an input for $\rho$, and a deployment may set it from the recommendation and replan. | Decided |
+| 17 | One utilisation parameter, `max_thread_utilization`, is both $\rho_{\max}$ and the recommendation target. | By this document |
 
 ## 5. Open questions
 
-1. **Queueing bound (6b).** Confirm the v1 linear upper bound for $Q_G$
-   (every coinciding group ahead, divided by `precompute_threads`; no
-   carry-over from earlier closes). The alternative is a queueing formula
-   in $\rho$ (e.g. M/D/c), which is not linear in the selection.
-2. **Calibration acceptance.** Is "every node's predicted time per phase
-   within 1.5× of measured on the calibration workloads" the gate before
-   the objective lands?
-3. **Critical path on one thread.** Section 2.1 reads "one run per query on
-   one thread" as: every node of the sub-DAG is on the critical path, so
-   execution is the sum. If the data plane runs independent branches of one
-   request concurrently, replace the sum with per-node finish times
+1. **Critical path on one thread (decision 8, proposed for v1).** Section
+   2.1 reads "one run per query on one thread" as: every node of the
+   sub-DAG is on the critical path, so execution is the sum. If the data
+   plane later runs independent branches of one request concurrently,
+   replace the sum with per-node finish times
    $f_{q,e} \ge f_{q,u} + d_e - M(1 - y_{u \to e})$.
-4. **Cost model 1.** Today no cost model enforces `max_latency_ms`. Should
-   cost model 1 enforce it (and $\rho_{\max}$) too? That changes the plans of
-   workloads that declare bounds, so it would be its own change.
-5. **Ingest and query load.** Should ingest CPU per second $\le$
-   `ingest_threads` and query CPU per second $\le$ `query_threads` (both
-   × $\rho_{\max}$) be hard constraints as well? This document uses the
-   thread counts only for the partial copies and the precompute load.
-6. **Query queueing.** Queries waiting for a free query thread are not
-   modelled; with `query_threads` below the concurrent requests, latency is
-   under-predicted.
+2. **Query queueing.** Requests waiting for a free query thread are not
+   modelled; a deployment running fewer query threads than recommended
+   sees latency above the prediction.
 
 ## 6. Test plan (for approval)
 
@@ -613,6 +649,8 @@ on formula constants.
 | A13 | Non-repeating weight | a one-off query with 10 invocations, horizon 3,600 s | weight 10/3,600 per second | yes |
 | A14 | Allowed lateness | the A1 workload with `allowed_lateness_ms` 5,000 | both plans' latency rises by 5,000 ms; the choice is unchanged | yes |
 | A15 | Sharing counts on every reader | two queries reading one shared `OneEvaluation` node | its time is in both queries' `query_execution_ms`, its memory once | yes |
+| A16 | Recommended configuration | a plan with 0.9 refresh, 0.3 ingest and 1.5 query CPU core-seconds per second, $\rho_{\max} = 0.7$ | recommended threads: precompute 2, ingest 1, query 3; each role's predicted cores reported; replanning with `precompute_threads` = 2 returns 2 again | yes |
+| A17 | Ingest and query CPU are not limited by thread counts | a plan whose query CPU exceeds `query_threads` | still selected (no rejection); recommended query threads above `query_threads` | yes |
 
 ### 6.2 Calibration
 
@@ -627,7 +665,7 @@ on formula constants.
 
 | # | Behaviour | Inputs | Expected | Fails today |
 | --- | --- | --- | --- | --- |
-| R1 | Cost model 1 plans unchanged | the sketch plan snapshots and the Stage 3 objective tests | identical plans and costs | no (guard) |
+| R1 | Cost model 1 plans unchanged | the sketch plan snapshots and the Stage 3 objective tests, also workloads with `max_latency_ms` | identical plans and costs; no latency bound or $\rho_{\max}$ enforced | no (guard) |
 | R2 | Other objectives unchanged | cost model 2; cost model 3 with `LowestLatency` and `LeastMemory` | `UnsupportedCostModel` as today | no (guard) |
 | R3 | Old cost-inputs JSON loads | a `CostInputs` file without `data_plane_execution` or `ns_per_refresh` | defaults of section 1.3; validation refuses 0 threads and a load bound outside (0, 1] | no for loading (guard), yes for the new validation |
 
