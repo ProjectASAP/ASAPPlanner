@@ -165,9 +165,9 @@ and cannot express, from the fit of section 2.4:
 | fixed CPU per computation of an operator | `OperatorCost::ns_per_invocation` (per evaluation at query time, per second of rows at ingestion time) | none |
 | scale for nodes without an entry | `frozen_calibration_factor` | none |
 | DDSketch value range | `column_magnitudes` in the data workload (default 1..1e9 otherwise) | none |
-| (1) CPU per window state emitted at a refresh (~9.2 µs) | none: a chain entry's `ns_per_unit` replaces the formula's own states-emitted term, and `ns_per_invocation` at ingestion time is per second of rows | new `OperatorCost::ns_per_state_emitted`, **added to** the formula's states-emitted term |
+| (1) CPU per window state emitted at a refresh (~9.2 µs) | none: a chain entry's `ns_per_unit` replaces the formula's own states-emitted term, and `ns_per_invocation` at ingestion time is per second of rows | new `OperatorCost::ns_per_state_emitted`, charged **beside** the entry's `ns_per_unit` (which then prices only the per-row work) |
 | (2) fixed CPU per engine query run, one run per step of a range request (~3.4 ms) | `ns_per_evaluation` is charged once per request | new `MeasuredOperationCosts::ns_per_evaluation_step`, charged per step; `ns_per_evaluation` stays per request |
-| (3) per-unit cost growing with the series count (1.5–1.8× per unit from 1k to 10k series) | entries key on operator, phase and family only | new `OperatorCost::measured_group_count`: entries of one class at several scales, interpolated by the node's group count |
+| (3) per-unit cost growing with the series count (1.5–1.8× per unit from 1k to 10k series) | entries key on operator, phase and family only | new `OperatorCost::measured_series_count`: entries of one class at several scales, interpolated by the series count of the node's sources |
 | (4) refresh wall time above its CPU (1.1–3×: view writes, syncs) | CPU only | new `MeasuredOperationCosts::refresh_io_wait` (`ns_per_refresh`, `ns_per_state_emitted`), wall time, not CPU |
 | (5) ingest decode and append outside every plan node (~1 core-second per second at 10k series) | not representable | new `MeasuredOperationCosts::ns_per_ingested_sample` |
 | (6) an `Aggregate` with several measures | priced only from single-measure entries | new `OperatorCost::measures`: an entry for the measure combination, which wins over the per-measure entries |
@@ -178,15 +178,15 @@ How each new term enters the model:
    added to its refresh CPU (and so to $P_G$, $\rho$, CPU and cost model 1's
    cost).
 2. A request of $s$ steps runs $s$ engine runs: its query execution is
-   `ns_per_evaluation` + $s$ × (`ns_per_evaluation_step` + the node work of
-   one step). A range request's latency is its steps × the per-step time.
-3. For a node of a class with entries at several `measured_group_count`s,
+   `ns_per_evaluation` + $s$ × `ns_per_evaluation_step` + the node work of
+   the request (as `plan_cost` counts each node's computations). The fixed
+   cost per step is charged per step, in latency and in CPU.
+3. For a node of a class with entries at several `measured_series_count`s,
    `ns_per_unit` and `ns_per_invocation` are interpolated linearly in
-   log(price) over log(group count) between the two nearest scales, and the
-   nearest scale's price is used outside the measured range (the report
-   names the node as priced outside its measured scale). The group count is
-   the number of groups (states held) the node works over, from the data
-   workload's series counts.
+   log(price) over log(series count) between the two nearest scales, and
+   the nearest scale's price is used outside the measured range (the report
+   names the node as priced outside its measured scale). The series count
+   is what the node's sources declare in the data workload.
 4. `refresh_io_wait` adds wall time per refresh and per state emitted to
    $P_G$ only: latency, $Q_G$ and $\rho$ include it; CPU and cost do not.
 5. `ns_per_ingested_sample` × the samples arriving per second is the same
@@ -209,13 +209,13 @@ before. Example:
     "operators": [
       {"operator": "SummaryTumblingWindowChain", "phase": "ingestion_time",
        "sketch": {"DDSketch": {"alpha": 0.05}}, "ns_per_unit": 337,
-       "ns_per_state_emitted": 9234, "measured_group_count": 1000},
+       "ns_per_state_emitted": 9234, "measured_series_count": 1000},
       {"operator": "SummaryMerge", "phase": "query_time",
        "sketch": {"DDSketch": {"alpha": 0.05}}, "ns_per_unit": 1701,
-       "measured_group_count": 1000},
+       "measured_series_count": 1000},
       {"operator": "SummaryMerge", "phase": "query_time",
        "sketch": {"DDSketch": {"alpha": 0.05}}, "ns_per_unit": 2900,
-       "measured_group_count": 10000}
+       "measured_series_count": 10000}
     ]
   },
   "frozen_calibration_factor": 0.78
@@ -303,7 +303,7 @@ deployment that reports per-phase times can run it.
    family.
 4. **Feed back**, by cause:
    - a per-unit error: `ns_per_unit` of that operator and family, at the
-     scale measured (`measured_group_count`);
+     scale measured (`measured_series_count`);
    - a fixed cost per computation: `ns_per_invocation`; per query step:
      `ns_per_evaluation_step`; per request: `ns_per_evaluation`;
    - a refresh cost per state emitted: `ns_per_state_emitted`;
@@ -328,7 +328,7 @@ workloads; 66 valid rows of per-refresh-group and per-query CPU) gives:
 | --- | --- | --- |
 | (1) ~9.2 µs CPU per window state emitted at a refresh; a fixed cost per refresh run ≈ 0 | precompute under-predicted 1.1–12× (worst for 5 s and 15 s windows of small views) | every validated refresh group within 0.74–1.24× |
 | (2) ~3.4 ms CPU per engine run, one per step | range requests short by (steps − 1) × 3.4 ms | fitted from instant runs only; range runs to be re-measured |
-| (3) per-unit cost 1.5–1.8× higher at 10k than 1k series (a 1 h DDSketch quantile: 649 ms → 10.2 s per request for 10× series) | one price cannot fit both scales | needs `measured_group_count` |
+| (3) per-unit cost 1.5–1.8× higher at 10k than 1k series (a 1 h DDSketch quantile: 649 ms → 10.2 s per request for 10× series) | one price cannot fit both scales | needs `measured_series_count` |
 | (4) refresh wall time 1.1–3× its CPU; query wall = CPU | refresh latency under-predicted | needs `refresh_io_wait` |
 | (5) ingest decode ~1 core-second per second at 10k series, outside every node | ingest CPU and threads under-predicted | needs `ns_per_ingested_sample` |
 | (6) multi-measure `Aggregate` has no entry | priced from the formulas × factor | needs `measures` |
@@ -420,8 +420,23 @@ rows stay in ms and bytes, unscaled.
 - `dominated_by_one_evaluation_twin` is applied with its condition restated
   over the cluster quantities: the twin is no slower ($d$, $p$), uses no
   more peak memory, disk and CPU, and answers the same outputs.
-- An execution whose own $d_e$ (or freshness lower bound $a + p_e$) is above
-  the `max_latency_ms` of every query that may read it is left out.
+- **Latency bounds as exclusions (decided).** Before the MILP, each
+  execution's least possible latency is computed in f64: its least work
+  (its own $d_e$ plus, per input, the fastest choice beneath it, edge
+  share included) plus its least freshness (the allowed lateness and, at
+  ingestion time, $a + p_e$ plus the wait per refresh run, with only that
+  execution in its group; the largest of its inputs' least). Iterated from
+  0 until stable, so it stays a lower bound on cycles of selectable edges.
+  An execution whose least latency, with a query's fixed cost per request,
+  is over the `max_latency_ms` of every query that may read it is left out
+  (compared with a relative margin of 1e-9, away from the solver's
+  tolerances). The remaining bounds stay as MILP rows. The number left out
+  is reported (`Selection::executions_pruned_by_latency_bound`).
+  Considered and deferred: per-execution bottom-up latency and freshness
+  variables $\ell_e$, $\varphi_e$ in place of the per-query reads
+  $a_{q,e}$. They need far fewer variables, but are conservative where two
+  paths of one query meet below it (a diamond counts the shared node on
+  both paths).
 
 ### 2.6 Report
 
@@ -537,7 +552,7 @@ model 2 keeps returning `UnsupportedCostModel`.
 +    /// of one class at several counts are interpolated (section 1.5).
 +    /// `None`: one price at every scale.
 +    #[serde(default)]
-+    pub measured_group_count: Option<u64>,
++    pub measured_series_count: Option<u64>,
 +    /// For an `Aggregate`: the exact measure combination this entry was
 +    /// measured on, e.g. `["sum", "count"]`; wins over per-measure entries.
 +    #[serde(default)]
@@ -621,7 +636,8 @@ model 2 keeps returning `UnsupportedCostModel`.
 `query_ms_per_step` for the calibration
 comparison; `PredictedUsage` gains `precompute_load` and
 `recommended_configuration`. The report's JSON
-changes, so `INSTALLABLE_PLAN_WIRE_VERSION` goes from 15 to 16.
+changes; the plan file does not carry the report, so
+`INSTALLABLE_PLAN_WIRE_VERSION` stays 15.
 
 ### 3.4 Stage 3 (`stage3-plan-selection`)
 
@@ -631,6 +647,9 @@ changes, so `INSTALLABLE_PLAN_WIRE_VERSION` goes from 15 to 16.
 +    /// Under cost model 3's `LowestMeanLatency`, the selected plan's
 +    /// frequency-weighted mean latency in ms; `None` otherwise.
 +    pub selected_plan_mean_latency_ms: Option<f64>,
++    /// Under `lowest_mean_latency`, the executions left out before the
++    /// MILP for a latency bound (section 2.5); 0 otherwise.
++    pub executions_pruned_by_latency_bound: usize,
  }
 
  pub enum ErrorSelectingPlan {
@@ -671,7 +690,7 @@ tie-break solves from `CostModel`.
    2.4 re-run until the gate passes at 1k and 10k series (prerequisites
    there).
 3. Latency model in `plan_cost`: `DataPlaneExecution`, the new
-   `QueryLatency`, $\rho$; report fields and wire version.
+   `QueryLatency`, $\rho$; report fields.
 4. Stage 3: cost model 3 with `LowestMeanLatency`, the limit rows,
    tie-break solves, `OverClusterLimits`.
 
@@ -689,10 +708,11 @@ tie-break solves from `CostModel`.
 | 7 | MILP: per-query latency variables, max over freshness sources by big-M with computed bounds, objective $\sum w_q L_q$, resource rows; lexicographic second solves for ties; scaling as today; sharing through $a_{q,e}$. | Decided (formulation); tie-break choice by this document |
 | 8 | On one thread the critical path is the sum of the sub-DAG's node times (each once), so query execution is a sum over $a_{q,e}$; the max is needed only over the freshness sources. | Proposed for v1 (open question 1) |
 | 9 | Refresh group = ingestion-time nodes of one `RefreshWindow`, refreshed as one task on one precompute thread; compaction of partial copies moves from query latency into refresh time. | By this document |
-| 10 | Calibration terms the format lacks (section 1.5): `ns_per_state_emitted` (added to the formula term), `ns_per_evaluation_step` (range latency = steps × per-step), `measured_group_count` (scale), `refresh_io_wait` (wall, not CPU), `ns_per_ingested_sample` (ingest role and CPU limit, not cost model 1), `measures` (multi-measure entries). | Required by the calibration; field names and the scale rule by this document (open question 3) |
+| 10 | Calibration terms the format lacks (section 1.5): `ns_per_state_emitted` (added to the formula term), `ns_per_evaluation_step` (range latency = steps × per-step), `measured_series_count` (scale), `refresh_io_wait` (wall, not CPU), `ns_per_ingested_sample` (ingest role and CPU limit, not cost model 1), `measures` (multi-measure entries). | Required by the calibration; field names and the scale rule by this document (open question 3) |
 | 11 | Cost model 1 does not enforce latency bounds or $\rho \le \rho_{\max}$; cost model 1 plans do not change. | Decided |
 | 12 | This work implements `LowestMeanLatency` only; `LowestLatency`, `LeastMemory` and cost model 2 keep `UnsupportedCostModel`. | By this document |
 | 13 | Infeasible under cost model 3: per-limit relaxed solves on the error path, `OverClusterLimits` with least needed and available. | By this document |
+| 18 | Latency bounds become exclusions before the MILP (least possible latency per execution, in f64); the remaining bounds are rows; per-execution bottom-up latency variables considered and deferred. | Decided |
 | 14 | Under cost model 3 the greedy cost upper bound is not applied; the `OneEvaluation` twin dominance is restated over time, memory, disk and CPU. | By this document |
 | 15 | Calibration passes when every node's predicted time per phase is within 1.5× of measured, at every series scale run (1k passes; 10k after term (3)). | Decided |
 | 16 | Ingest and query CPU are not hard constraints against thread counts; the report gives per role (ingest, precompute, query) the predicted CPU core-seconds per second and the recommended threads, $\lceil$cores$/\rho_{\max}\rceil$; `precompute_threads` stays an input for $\rho$, and a deployment may set it from the recommendation and replan. | Decided |
@@ -710,7 +730,7 @@ tie-break solves from `CostModel`.
    modelled; a deployment running fewer query threads than recommended
    sees latency above the prediction.
 3. **Scale rule.** Interpolating per-unit prices in log-log between measured
-   group counts (nearest price outside the range) is this document's
+   series counts (nearest price outside the range) is this document's
    choice. The alternative is a working-set term (bytes held ÷ cache size)
    in the formulas, which needs no per-scale measurement but a cache
    model.

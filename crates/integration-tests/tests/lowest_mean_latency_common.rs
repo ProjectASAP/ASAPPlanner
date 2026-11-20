@@ -73,9 +73,12 @@ pub(crate) fn entry(operator: &str, phase: &str, fields: Value) -> Value {
 }
 
 /// The measured table pricing both plans of `max_over_time(m[5m])` (and
-/// `min_over_time`): a query-time raw scan at `scan_ns_per_sample` per
-/// sample, and an ingestion-time chain of exact accumulators whose refresh
-/// costs `state_ns` per window state emitted. Every other class is priced
+/// `min_over_time`): reading 5 minutes of raw rows (a query-time
+/// `TimeRange` over the raw rows, kept at ingestion or scanned at query
+/// time) at `scan_ns_per_sample` per row, and an ingestion-time chain of
+/// exact accumulators whose refresh costs `state_ns` per window state
+/// emitted (one built at query time reads the raw rows at the raw price),
+/// its windows' states read by a `TimeRange` at the same price per row. Every other class is priced
 /// at 1 ns per unit, so the plans differ only by these, except that each
 /// query-time row a `min` folds (an `Aggregate` or a `SummaryAgg`) costs
 /// `min_ns_per_row` more.
@@ -86,12 +89,12 @@ pub(crate) fn max_min_table(
 ) -> Vec<Value> {
     let mut entries = vec![
         entry("Scan", "ingestion_time", json!({"ns_per_unit": 1.0})),
+        entry("Scan", "query_time", json!({"ns_per_unit": 0.0})),
         entry(
-            "Scan",
+            "TimeRange",
             "query_time",
             json!({"ns_per_unit": scan_ns_per_sample}),
         ),
-        entry("TimeRange", "query_time", json!({"ns_per_unit": 0.0})),
         entry("BinaryOp", "query_time", json!({"ns_per_unit": 0.0})),
     ];
     for (measure, exact, row_ns) in [("max", "Max", 1.0), ("min", "Min", 1.0 + min_ns_per_row)] {
@@ -109,6 +112,12 @@ pub(crate) fn max_min_table(
             "SummaryAgg",
             "query_time",
             json!({"exact": exact, "ns_per_unit": row_ns}),
+        ));
+        // A chain built at query time reads the raw rows too.
+        entries.push(entry(
+            "SummaryTumblingWindowChain",
+            "query_time",
+            json!({"exact": exact, "ns_per_unit": scan_ns_per_sample + row_ns}),
         ));
         for operator in ["SummaryMerge", "FinalizeExactAccumulator"] {
             entries.push(entry(

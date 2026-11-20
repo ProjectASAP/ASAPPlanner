@@ -31,21 +31,46 @@ mod report;
 mod retention;
 mod selectable;
 
-use asap_cost::{request_overhead_cost_per_second, CostInputs, CostModel};
+use asap_cost::{
+    request_overhead_cost_per_second, ClusterLimits, ClusterObjective, CostInputs, CostModel,
+    ResourceUnitCost,
+};
 use asap_types::deployment_capabilities::FinalResultsCache;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::{MemoGroupId, PhysicalASAPMemoCandidates, PruneReason, PrunedCandidate};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-use crate::cost::execution_costs;
+use crate::cost::{execution_costs, execution_quantities, Quantity};
+use crate::milp::model::cluster::{solve_cluster_selection, ClusterInputs, ClusterSelectionError};
 use crate::milp::model::{solve_selection, SelectionInputs, SelectionMilpError};
 use crate::plan::plan_of;
 use crate::report::{accepted_accuracy, excluded_by_deployment, infeasible};
 use crate::selectable::{QueryId, SelectableExecutions};
 
+pub use milp::model::cluster::{ClusterLimit, ClusterLimitShortfall};
 pub use report::{
     large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, Selection,
 };
+
+/// What the cluster offers of `limit`: its memory, disk or cores, the
+/// precompute load bound, or the query's `max_latency_ms`.
+fn available(
+    limits: &ClusterLimits,
+    cost_inputs: &CostInputs,
+    entries: &[QueryWorkloadEntry],
+    limit: ClusterLimit,
+) -> f64 {
+    match limit {
+        ClusterLimit::MemoryBytes => limits.memory_bytes as f64,
+        ClusterLimit::DiskBytes => limits.disk_bytes as f64,
+        ClusterLimit::CpuCores => limits.cpu_cores.map_or(f64::INFINITY, f64::from),
+        ClusterLimit::PrecomputeLoad => cost_inputs.data_plane_execution.max_thread_utilization,
+        ClusterLimit::QueryLatencyMs { query } => entries
+            .get(query)
+            .and_then(|entry| entry.requirements.max_latency_ms)
+            .unwrap_or(f64::INFINITY),
+    }
+}
 
 /// Stage 3, plan selection: select one plan among `physical`'s candidates
 /// (module documentation) under `cost_inputs`, and build it: one
@@ -73,11 +98,36 @@ pub fn select_plan(
     cost_inputs
         .validate()
         .map_err(ErrorSelectingPlan::InvalidSettings)?;
-    if !matches!(cost_inputs.cost_model, CostModel::UsageOverTime(_)) {
-        return Err(ErrorSelectingPlan::UnsupportedCostModel(
-            "cost models 2 and 3 (the selection MILP implements cost model 1 only)".into(),
-        ));
-    }
+    // Cost model 3's `lowest_mean_latency` selects over cost model 1's
+    // structure (which executions can be costed, retention), costed at the
+    // illustrative prices, with its own rows and objective.
+    let cluster_limits = match &cost_inputs.cost_model {
+        CostModel::UsageOverTime(_) => None,
+        CostModel::ClusterCapacity(limits)
+            if limits.objective == ClusterObjective::LowestMeanLatency =>
+        {
+            Some(limits)
+        }
+        _ => {
+            return Err(ErrorSelectingPlan::UnsupportedCostModel(
+                "cost model 2 and cost model 3's lowest_latency and least_memory (the \
+                 selection MILP implements cost model 1 and cost model 3's \
+                 lowest_mean_latency)"
+                    .into(),
+            ))
+        }
+    };
+    let structure_inputs;
+    let cost_inputs_for_structure = match cluster_limits {
+        Some(_) => {
+            structure_inputs = CostInputs {
+                cost_model: CostModel::UsageOverTime(ResourceUnitCost::illustrative()),
+                ..cost_inputs.clone()
+            };
+            &structure_inputs
+        }
+        None => cost_inputs,
+    };
     let queries = physical.logical_candidates.memo.queries();
     if entries.len() != queries.len() {
         return Err(ErrorSelectingPlan::EntryCount {
@@ -101,7 +151,13 @@ pub fn select_plan(
         node: 0,
         error,
     })?;
-    let costs = execution_costs(physical, &selectable, entries, data, cost_inputs);
+    let costs = execution_costs(
+        physical,
+        &selectable,
+        entries,
+        data,
+        cost_inputs_for_structure,
+    );
     // A query output is answered by an execution that could be costed and
     // that its query may read (X).
     selectable.retain_answering(|query, index, execution| {
@@ -121,13 +177,13 @@ pub fn select_plan(
                 .unwrap_or_else(|| infeasible(&costs)),
         );
     }
-    let solved = solve_selection(&SelectionInputs {
+    let selection_inputs = SelectionInputs {
         physical,
         entries,
         selectable: &selectable,
         costs: &costs,
-    })
-    .map_err(|error| match error {
+    };
+    let milp_error = |error| match error {
         SelectionMilpError::Infeasible => {
             excluded_by_deployment(&physical.pruned_candidates, None, &costs)
                 .unwrap_or_else(|| infeasible(&costs))
@@ -140,7 +196,63 @@ pub fn select_plan(
             query: query.0,
             failure_probability_bound,
         },
-    })?;
+    };
+    let (solved, mean_latency_ms, pruned_by_latency_bound) = match cluster_limits {
+        None => (
+            solve_selection(&selection_inputs).map_err(milp_error)?,
+            None,
+            0,
+        ),
+        Some(limits) => {
+            let quantity = |quantity| {
+                execution_quantities(
+                    physical,
+                    &selectable,
+                    entries,
+                    data,
+                    cost_inputs_for_structure,
+                    quantity,
+                )
+            };
+            let (query_ms, refresh_ms, cpu, memory, disk) = (
+                quantity(Quantity::QueryMsPerRun),
+                quantity(Quantity::RefreshWallMsPerWindow),
+                quantity(Quantity::CpuCoreSecondsPerSecond),
+                quantity(Quantity::PeakMemoryBytes),
+                quantity(Quantity::DiskBytes),
+            );
+            let solved = solve_cluster_selection(&ClusterInputs {
+                selection: selection_inputs,
+                query_ms: &query_ms,
+                refresh_ms: &refresh_ms,
+                cpu: &cpu,
+                memory: &memory,
+                disk: &disk,
+                limits,
+                cost_inputs,
+                data,
+            })
+            .map_err(|error| match error {
+                ClusterSelectionError::Milp(error) => milp_error(error),
+                ClusterSelectionError::OverLimits(shortfalls) => {
+                    ErrorSelectingPlan::OverClusterLimits(
+                        shortfalls
+                            .into_iter()
+                            .map(|shortfall| ClusterLimitShortfall {
+                                available: available(limits, cost_inputs, entries, shortfall.limit),
+                                ..shortfall
+                            })
+                            .collect(),
+                    )
+                }
+            })?;
+            (
+                solved.solved,
+                Some(solved.mean_latency_ms),
+                solved.pruned_by_latency_bound,
+            )
+        }
+    };
     let plan = plan_of(physical, &solved, &outputs).map_err(|error| {
         ErrorSelectingPlan::Solver(format!("the selected plan is invalid: {error}"))
     })?;
@@ -168,7 +280,8 @@ pub fn select_plan(
         milp_construction_ms: solved.construction_ms,
         milp_solve_ms: solved.solve_ms,
         milp_solve_count: solved.solve_count,
-        selected_plan_mean_latency_ms: None,
+        selected_plan_mean_latency_ms: mean_latency_ms,
+        executions_pruned_by_latency_bound: pruned_by_latency_bound,
     };
     Ok((plan, selection))
 }
