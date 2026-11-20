@@ -378,6 +378,9 @@ pub struct NodeResourceUsageAndCost<'a> {
     pub raw_scan: Option<(&'a Source, u64)>,
     /// Its calibration fit.
     pub fit: CalibrationFit,
+    /// The series its sources declare, when they all do: the scale its
+    /// measured prices are taken at.
+    pub series: Option<u64>,
     /// Its cost.
     pub cost: NodeCost,
 }
@@ -593,7 +596,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let operator = OperatorKind::of(&node.payload);
     let measured_unit_cost = match &node.payload {
         Payload::NonASAP(NonASAPOp::Aggregate { measures, .. }) => {
-            aggregate_lookup(table, node.output_state.timing, measures)
+            aggregate_lookup(table, node.output_state.timing, measures, series)
         }
         Payload::NonASAP(
             NonASAPOp::Scan { .. }
@@ -1508,6 +1511,12 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     };
     let (estimate, terms) = estimate?;
     let (multiplier, per_second) = rate;
+    // The formula's ms of emitting states at window closes, per execution,
+    // scaled by the calibration: charged whether the node is priced from
+    // the formulas or from a measured entry (whose `ns_per_state_emitted`
+    // adds to it).
+    let formula_emit_ms_per_execution =
+        formula_emit_ops_per_second * speed.ms_per_cpu_op * formula_scale;
     let formula_ms = estimate.cpu_ops() * speed.ms_per_cpu_op
         + estimate.scan_bytes() as f64 * speed.ms_per_scanned_byte;
     // What one computation processes, the unit its entry is costed per
@@ -1558,11 +1567,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let estimate = match measured_unit_cost {
         Some(unit) => {
             cost_source = NodeCostSource::Measured;
-            // At ingestion time, the states emitted at window closes too.
+            // At ingestion time, the states emitted at window closes too:
+            // the formula's emit term, plus the measured cost per state.
             let measured_ms = (units as f64 * unit.ns_per_unit
                 + unit.ns_per_invocation
                 + states_emitted_per_second * unit.ns_per_state_emitted)
-                * 1e-6;
+                * 1e-6
+                + formula_emit_ms_per_execution;
             fit.record(measured_ms * per_second, formula_ms * per_second);
             detail += &format!(
                 "; measured {units} x {:.3} ns + {:.3} ns",
@@ -1597,10 +1608,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         window_ms,
         node_ms,
         node_ms * per_second,
-        match measured_unit_cost {
-            Some(unit) => states_emitted_per_second * unit.ns_per_state_emitted * 1e-6,
-            None => formula_emit_ops_per_second * speed.ms_per_cpu_op * formula_scale,
-        } * per_second,
+        (formula_emit_ms_per_execution
+            + measured_unit_cost.map_or(0.0, |unit| {
+                states_emitted_per_second * unit.ns_per_state_emitted * 1e-6
+            }))
+            * per_second,
         states_emitted_per_second * per_second * table.refresh_io_wait.ns_per_state_emitted * 1e-6,
     );
 
@@ -1794,6 +1806,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         maintained,
         raw_scan,
         fit,
+        series,
         cost: NodeCost {
             operator,
             timing: node.output_state.timing,

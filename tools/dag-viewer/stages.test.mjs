@@ -232,9 +232,9 @@ test('under cost model 3 the settings list each cluster limit, what the plan use
         usage: {
           peak_memory_bytes: 1000, disk_bytes: 2, precompute_load: 0.35,
           recommended_configuration: {
-            ingest: { predicted_cpu_core_seconds_per_second: 0.1, recommended_threads: 1 },
-            precompute: { predicted_cpu_core_seconds_per_second: 0.7, recommended_threads: 1 },
-            query: { predicted_cpu_core_seconds_per_second: 1.5, recommended_threads: 3 },
+            ingest: { predicted_busy_thread_seconds_per_second: 0.1, recommended_threads: 1 },
+            precompute: { predicted_busy_thread_seconds_per_second: 0.7, recommended_threads: 1 },
+            query: { predicted_busy_thread_seconds_per_second: 1.5, recommended_threads: 3 },
           },
           latency_per_query: [
             { allowed_lateness_ms: 5, precompute_queueing_ms: 1, precompute_execution_ms: 30, query_execution_ms: 4, latency_ms: 40, evaluations_per_second: 0.1 },
@@ -257,6 +257,6 @@ test('under cost model 3 the settings list each cluster limit, what the plan use
   assert.deepEqual(call('clusterLimitRows', { cost_inputs: { cost_model: { usage_over_time: {} } } }), []);
   const breakdown = call('latencyBreakdownText', doc.stage3_plan_selection.cost.usage);
   assert.match(breakdown, /q1 40 ms = lateness 5 \+ queueing 1 \+ precompute 30 \+ execution 4 ms, 0\.1\/s/);
-  assert.match(call('threadsText', doc.stage3_plan_selection.cost.usage), /query 3 \(1\.5 cores\)/);
+  assert.match(call('threadsText', doc.stage3_plan_selection.cost.usage), /query 3 \(1\.5 busy\)/);
   assert.match(call('usageText', doc.stage3_plan_selection.cost.usage), /latency q1 40 ms, q2 7 ms/);
 });

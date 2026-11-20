@@ -287,8 +287,11 @@ async fn c5_ingest_decode_counts_in_the_ingest_role() {
     };
     assert_close(
         "ingest cores",
-        number(&ingest(&with), "predicted_cpu_core_seconds_per_second")
-            - number(&ingest(&without), "predicted_cpu_core_seconds_per_second"),
+        number(&ingest(&with), "predicted_busy_thread_seconds_per_second")
+            - number(
+                &ingest(&without),
+                "predicted_busy_thread_seconds_per_second",
+            ),
         1.0,
     );
     assert!(

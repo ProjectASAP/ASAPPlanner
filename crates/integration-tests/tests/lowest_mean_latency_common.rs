@@ -150,6 +150,11 @@ pub(crate) fn cost_inputs(
     if data_plane_execution != json!({}) {
         settings["data_plane_execution"] = data_plane_execution;
     }
+    // Cost model 3's latency objective needs times that passed the
+    // calibration gate: these are made up, so the tests opt in.
+    if settings["cost_model"].get("cluster_capacity").is_some() {
+        settings["latency_calibration"] = json!("uncalibrated_for_testing");
+    }
     settings
 }
 

@@ -37,7 +37,8 @@ pub use measured::{
 };
 pub use model::{
     CalibrationFit, ClusterLimits, ClusterObjective, CostInputs, CostModel, DataPlaneExecution,
-    ResourceSpeed, ResourceUnitCost, COST_SOURCE, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
+    LatencyCalibration, ResourceSpeed, ResourceUnitCost, COST_SOURCE, MEASURED_COST_SOURCE,
+    MIXED_COST_SOURCE,
 };
 pub use node::cost_terms::{node_cost_terms, CostConstant, NodeCostTerms};
 pub use node::operator_statistics::EdgeStatistics;
@@ -46,7 +47,8 @@ pub use node::usage::{
     NodeCost, NodeResourceUsageAndCost, PhaseTimes, ProducerOutput,
 };
 pub use plan::cost::{
-    ingest_decode_cpu_core_seconds_per_second, plan_cost, raw_data_disk_cost_per_second,
+    close_together, ingest_decode_cpu_core_seconds_per_second, ingest_threads_building_copies,
+    partial_copy_merge_ms, plan_cost, raw_data_disk_cost_per_second,
     request_overhead_cost_per_second, PlanCost, QueryLatency, RecommendedThreads, RoleThreads,
 };
 pub use resources::ResourceUsage;

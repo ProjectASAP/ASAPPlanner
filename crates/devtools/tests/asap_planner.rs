@@ -701,10 +701,15 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
 /// implements.
 #[test]
 fn the_cost_model_chooses_how_candidates_are_compared() {
-    use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel, ResourceUnitCost};
+    use asap_cost::{
+        ClusterLimits, ClusterObjective, CostInputs, CostModel, LatencyCalibration,
+        ResourceUnitCost,
+    };
     let selected = |cost_model: CostModel| {
         let file = cost_inputs(&CostInputs {
             cost_model,
+            // Example 3b's times are not calibrated.
+            latency_calibration: LatencyCalibration::UncalibratedForTesting,
             ..Default::default()
         });
         let args = ["--run-until", "stage3", "--cost-inputs", file.path()];

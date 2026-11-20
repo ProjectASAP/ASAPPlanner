@@ -1,8 +1,10 @@
 # Stage 3: Lowest Mean Latency Under Cluster Limits
 
-**Status:** Design proposal. Design only: no code or tests yet. The test plan
-(section 6) is approved before tests are written; the implementation follows
-the tests.
+**Status:** Implemented behind the calibration gate: cost model 3's
+`lowest_mean_latency` selects only with cost inputs marked as passing the
+gate (`latency_calibration: passed_gate`) or opted in for testing
+(`uncalibrated_for_testing`). The test plan (section 6) was approved before
+the tests were written.
 
 **Audience:** Planner designers and implementers of plan selection (Stage 3)
 and the cost model (`asap-cost`).
@@ -166,7 +168,7 @@ and cannot express, from the fit of section 2.4:
 | fixed CPU per computation of an operator | `OperatorCost::ns_per_invocation` (per evaluation at query time, per second of rows at ingestion time) | none |
 | scale for nodes without an entry | `frozen_calibration_factor` | none |
 | DDSketch value range | `column_magnitudes` in the data workload (default 1..1e9 otherwise) | none |
-| (1) CPU per window state emitted at a refresh (~9.2 µs) | none: a chain entry's `ns_per_unit` replaces the formula's own states-emitted term, and `ns_per_invocation` at ingestion time is per second of rows | new `OperatorCost::ns_per_state_emitted`, charged **beside** the entry's `ns_per_unit` (which then prices only the per-row work) |
+| (1) CPU per window state emitted at a refresh (~9.2 µs) | none: a chain entry's `ns_per_unit` replaces the formula's own states-emitted term, and `ns_per_invocation` at ingestion time is per second of rows | new `OperatorCost::ns_per_state_emitted`, **added to** the formula's states-emitted term, which a measured entry no longer replaces |
 | (2) fixed CPU per engine query run, one run per step of a range request (~3.4 ms) | `ns_per_evaluation` is charged once per request | new `MeasuredOperationCosts::ns_per_evaluation_step`, charged per step; `ns_per_evaluation` stays per request |
 | (3) per-unit cost growing with the series count (1.5–1.8× per unit from 1k to 10k series) | entries key on operator, phase and family only | new `OperatorCost::measured_series_count`: entries of one class at several scales, interpolated by the series count of the node's sources |
 | (4) refresh wall time above its CPU (1.1–3×: view writes, syncs) | CPU only | new `MeasuredOperationCosts::refresh_io_wait` (`ns_per_refresh`, `ns_per_state_emitted`), wall time, not CPU |
@@ -175,13 +177,17 @@ and cannot express, from the fit of section 2.4:
 
 How each new term enters the model:
 
-1. `ns_per_state_emitted` × the states a node emits per window close is
-   added to its refresh CPU (and so to $P_G$, $\rho$, CPU and cost model 1's
-   cost).
+1. A node's refresh CPU for the states it emits is the formula's
+   states-emitted term (scaled by the calibration factor), whether the node
+   is priced from the formulas or from a measured entry, plus
+   `ns_per_state_emitted` × the states it emits per window close. It
+   counts in $P_G$, $\rho$, CPU and cost model 1's cost.
 2. A request of $s$ steps runs $s$ engine runs: its query execution is
    `ns_per_evaluation` + $s$ × `ns_per_evaluation_step` + the node work of
-   the request (as `plan_cost` counts each node's computations). The fixed
-   cost per step is charged per step, in latency and in CPU.
+   the request: each query-time node's work per step times the $s$ steps
+   (once per request for a node kept across evaluations), as `plan_cost`
+   counts each node's computations. The fixed cost per step is charged per
+   step, in latency and in CPU.
 3. For a node of a class with entries at several `measured_series_count`s,
    `ns_per_unit` and `ns_per_invocation` are interpolated linearly in
    log(price) over log(series count) between the two nearest scales, and
@@ -412,7 +418,10 @@ reader's $L_q$ through its own $a_{q,e}$, and its CPU, memory and disk once
 $\sum w_q L_q$, giving $L^*$. Solve 2 adds
 $\sum w_q L_q \le L^* (1 + \epsilon)$ and minimizes peak memory, giving
 $M^*$. Solve 3 adds peak memory $\le M^*(1+\epsilon)$ and minimizes disk.
-$\epsilon$ is the existing relative cost tolerance (`COST_RELATIVE_TOLERANCE`).
+$\epsilon$ is $10^{-9}$ relative plus $10^{-9}$ ms absolute (latency) and
+1 byte (memory): not cost model 1's `COST_RELATIVE_TOLERANCE` (1e-12),
+which is below HiGHS's absolute feasibility tolerance on these rows and
+would make the fixed optimum infeasible to re-attain.
 Each later solve starts from the previous solution. Weighted tie terms
 (latency + λ·memory + μ·disk in one objective) are rejected: latency in ms,
 memory and disk in bytes differ by up to 12 orders of magnitude, and with
@@ -422,10 +431,26 @@ difference falls under the tolerance, so ties would be broken by HiGHS's
 search path, the instability the 1e6 scaling was introduced to remove.
 `Selection::milp_solve_count` counts the extra solves.
 
-**Scaling.** The objective is scaled as today: the largest objective
-coefficient becomes 1e6. With continuous $L_q$, the scale is taken over the
-largest per-execution contribution $w_q d_e$ and $w_q M_G$; the constraint
-rows stay in ms and bytes, unscaled.
+**Scaling.** The objective is scaled as today: its largest coefficient
+becomes 1e6. The objective's variables are the continuous $L_q$, so its
+coefficients are the weights $w_q$ and the scale is over the largest
+$w_q$ (not over $w_q d_e$ or $w_q M_G$, which are row coefficients); the
+constraint rows stay in ms and bytes, unscaled. Scaling over 1 or 1,000
+instead was measured and does not change the solve time.
+
+**Latency rows and retention.** A latency row reads each execution's time
+at the largest retention its readers may need (`per_execution` before
+$\pi_v h_v$ is taken off), so the row's coefficient does not depend on
+$h_v$: an upper bound whatever $h_v$ the plan selects, exact when
+retention does not change the time (as for every operator today, whose
+retention changes memory, not work per run).
+
+**Partial copies.** An ingestion-time execution's refresh time includes
+merging the ingest threads' partial copies of its newest window, and its
+peak memory the copies, as `plan_cost` counts them. With `ingest_threads`
+set both use it; without it, `plan_cost` derives the threads from the
+ingestion work of the node and its producers, the MILP from the node's
+own (a candidate does not know its producers).
 
 **Pruning before the MILP.**
 - `dearer_than_a_feasible_plan` (the greedy cost upper bound) is cost model
@@ -444,7 +469,14 @@ rows stay in ms and bytes, unscaled.
   is over the `max_latency_ms` of every query that may read it is left out
   (compared with a relative margin of 1e-9, away from the solver's
   tolerances). The remaining bounds stay as MILP rows. The number left out
-  is reported (`Selection::executions_pruned_by_latency_bound`).
+  is reported (`Selection::executions_pruned_by_latency_bound`). A
+  producer's negative edge share counts at its value (a consumer is costed
+  over its dearest producer, and the share takes that back), and each share
+  at its least retention, so the bound stays at or below every plan's
+  latency: a plan exactly at its bound is kept. It is computed once per
+  selection; only the diagnosis of an infeasible selection recomputes it
+  without the bound it relaxes. The MILP has no read variables for the
+  executions left out.
   Considered and deferred: per-execution bottom-up latency and freshness
   variables $\ell_e$, $\varphi_e$ in place of the per-query reads
   $a_{q,e}$. They need far fewer variables, but are conservative where two
@@ -637,7 +669,7 @@ model 2 keeps returning `UnsupportedCostModel`.
 +}
 +pub struct RoleThreads {
 +    /// CPU core-seconds per second the role is predicted to use.
-+    pub predicted_cpu_core_seconds_per_second: f64,
++    pub predicted_busy_thread_seconds_per_second: f64,
 +    /// ceil(predicted cores / max_thread_utilization), at least 1.
 +    pub recommended_threads: u32,
 +}
@@ -660,6 +692,8 @@ changes; the plan file does not carry the report, so
 +    /// Under cost model 3's `LowestMeanLatency`, the selected plan's
 +    /// frequency-weighted mean latency in ms; `None` otherwise.
 +    pub selected_plan_mean_latency_ms: Option<f64>,
++    /// Under `lowest_mean_latency`, each query's latency in the optimum.
++    pub selected_plan_latency_ms_per_query: Option<Vec<f64>>,
 +    /// Under `lowest_mean_latency`, the executions left out before the
 +    /// MILP for a latency bound (section 2.5); 0 otherwise.
 +    pub executions_pruned_by_latency_bound: usize,
@@ -725,6 +759,10 @@ tie-break solves from `CostModel`.
 | 11 | Cost model 1 does not enforce latency bounds or $\rho \le \rho_{\max}$; cost model 1 plans do not change. | Decided |
 | 12 | This work implements `LowestMeanLatency` only; `LowestLatency`, `LeastMemory` and cost model 2 keep `UnsupportedCostModel`. | By this document |
 | 13 | Infeasible under cost model 3: per-limit relaxed solves on the error path, `OverClusterLimits` with least needed and available. | By this document |
+| 20 | `measured_series_count` keys measured prices by the series count the node's sources declare, not by the node's groups: the calibration runs vary the series count, every source declares it, and a node's groups after `by` differ per query, so one measured entry could not be reused across nodes. | By this document |
+| 21 | The plan report stays readable from older JSON: every new field defaults, and `compaction_ms` / `query_ms` load as `precompute_execution_ms` / `query_execution_ms`. | By this document |
+| 22 | `CostInputs::latency_calibration` (`not_checked`, `passed_gate`, `uncalibrated_for_testing`); `lowest_mean_latency` refuses `not_checked`. | Decided (review) |
+| 23 | Latency rows use times at the largest retention; partial copies in the MILP's refresh time and memory; per-step work × steps. | By this document |
 | 19 | `DataPlaneExecution::ingest_work_at_refresh` for a data plane that inserts a window's rows at its close (the measured one does). | By this document |
 | 18 | Latency bounds become exclusions before the MILP (least possible latency per execution, in f64); the remaining bounds are rows; per-execution bottom-up latency variables considered and deferred. | Decided |
 | 14 | Under cost model 3 the greedy cost upper bound is not applied; the `OneEvaluation` twin dominance is restated over time, memory, disk and CPU. | By this document |

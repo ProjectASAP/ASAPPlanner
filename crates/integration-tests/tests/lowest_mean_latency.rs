@@ -70,12 +70,12 @@ async fn a1_lowest_mean_latency_picks_a_lower_latency_plan_than_the_cheapest() {
 }
 
 /// The A2 and A7 workload: a chain refreshing at 9 s of CPU per 10 s window
-/// (load 0.9 on one precompute thread; latency about 9 s) or a scan of 21 s
-/// per run.
+/// (load 0.9 on one precompute thread; latency about 9 s) or a raw read of
+/// 20 s per run (2 query cores).
 fn heavy_refresh(precompute_threads: u32) -> Value {
     cost_inputs(
         lowest_mean_latency(),
-        max_min_table(70_000.0, 9_000_000.0, 0.0),
+        max_min_table(66_666.0, 9_000_000.0, 0.0),
         json!({}),
         data_plane(json!({"precompute_threads": precompute_threads})),
     )
@@ -240,7 +240,7 @@ async fn a8_ties_go_to_the_least_memory_then_the_least_disk() {
         settings
     };
     let selected = plan(&workload, &at(None, None), true).await;
-    assert!(selected.mean_latency_ms() < 1e-6);
+    assert_eq!(selected.mean_latency_ms(), 0.0);
     let peak = selected.usage("peak_memory_bytes") as u64;
     let disk = selected.usage("disk_bytes") as u64;
     let less_memory = planned(&workload, &at(Some(peak - 1), None), true).await;
@@ -501,7 +501,7 @@ async fn a16_the_report_recommends_thread_counts() {
     assert_eq!(threads("precompute"), Some(2), "{recommended}");
     assert_eq!(threads("ingest"), Some(1), "{recommended}");
     assert_eq!(threads("query"), Some(1), "{recommended}");
-    let refresh_cores = recommended["precompute"]["predicted_cpu_core_seconds_per_second"]
+    let refresh_cores = recommended["precompute"]["predicted_busy_thread_seconds_per_second"]
         .as_f64()
         .unwrap();
     assert_close("refresh cores", refresh_cores, 0.9);
@@ -514,24 +514,16 @@ async fn a16_the_report_recommends_thread_counts() {
     );
 }
 
-/// A17. The A2 scan uses about 2.1 query cores on one query thread: it is
-/// still selected, and the report recommends ceil(cores / 0.7) query
-/// threads.
+/// A17. The A2 raw read uses about 2.0 query cores on one query thread: it
+/// is still selected, and the report recommends 3 query threads
+/// (2.0 / 0.7 = 2.86).
 #[tokio::test]
 async fn a17_query_cpu_is_not_limited_by_the_thread_count() {
     let workload = over_m(vec![max_every_10s(None)], 1000);
     let selected = plan(&workload, &heavy_refresh(1), true).await;
     assert!(!selected.has_ingestion_views());
     let query = &selected.report["predicted_usage"]["recommended_configuration"]["query"];
-    let cores = query["predicted_cpu_core_seconds_per_second"]
-        .as_f64()
-        .unwrap();
-    assert!(cores > 2.0, "{query}");
-    assert_eq!(
-        query["recommended_threads"].as_u64(),
-        Some((cores / 0.7).ceil() as u64),
-        "{query}"
-    );
+    assert_eq!(query["recommended_threads"].as_u64(), Some(3), "{query}");
 }
 
 /// The A1 table without the field this work adds (`ns_per_state_emitted`).
@@ -666,4 +658,181 @@ async fn a18_a_candidate_over_every_readers_bound_is_pruned_before_the_milp() {
     assert!(plan.nodes.iter().all(|node| node.output_state.timing
         == asap_planner::ExecutionTiming::QueryTime
         || !node.is_view()));
+}
+
+/// The MILP's latency per query and mean for `settings` on `workload`, from
+/// the stages run directly (`Selection`).
+fn milp_latencies(workload: &asap_planner::PlanningWorkload, settings: &Value) -> (Vec<f64>, f64) {
+    let settings: CostInputs = serde_json::from_value(settings.clone()).unwrap();
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: true,
+        ..Default::default()
+    };
+    let models = PlanningModels::builtin()
+        .with_cost_inputs(&settings)
+        .with_deployment_capabilities(&capabilities);
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let run = run_planning_stages_over(
+        lower_promql_roots(workload).unwrap(),
+        &entries,
+        &data,
+        models,
+    )
+    .unwrap();
+    let (_, selection) = run.run.selection.as_ref().expect("a plan is selected");
+    (
+        selection
+            .selected_plan_latency_ms_per_query
+            .clone()
+            .unwrap(),
+        selection.selected_plan_mean_latency_ms.unwrap(),
+    )
+}
+
+/// Each query's latency in the MILP equals the report's (`plan_cost`'s):
+/// the MILP reads, per query, the sub-DAG it reaches in the plan.
+fn assert_milp_latencies_are_the_reports(
+    workload: &asap_planner::PlanningWorkload,
+    settings: &Value,
+    planned: &crate::lowest_mean_latency_common::Planned,
+) {
+    let (per_query, mean) = milp_latencies(workload, settings);
+    for (q, milp) in per_query.iter().enumerate() {
+        assert_close(
+            &format!("q{q} latency"),
+            *milp,
+            planned.query_ms(q, "latency_ms"),
+        );
+    }
+    assert_close("mean latency", mean, planned.mean_latency_ms());
+}
+
+/// A9 with the ingest threads' partial copies: two ingest threads each
+/// build a copy of the chain's newest window, merged at its refresh. The
+/// merge is in the query's precompute execution and the copy in the peak
+/// memory, in the MILP and in `plan_cost` alike.
+#[tokio::test]
+async fn a9_partial_copies_are_counted_in_the_milp_as_in_the_report() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let with_threads = |ingest_threads: u32| {
+        cost_inputs(
+            lowest_mean_latency(),
+            max_min_table(100.0, 10_000.0, 0.0),
+            json!({}),
+            data_plane(json!({ "ingest_threads": ingest_threads })),
+        )
+    };
+    let one = plan(&workload, &with_threads(1), true).await;
+    let two = plan(&workload, &with_threads(2), true).await;
+    assert!(one.has_ingestion_views() && two.has_ingestion_views());
+    assert!(
+        two.query_ms(0, "precompute_execution_ms") > one.query_ms(0, "precompute_execution_ms"),
+        "the merge of the copies is counted"
+    );
+    assert!(two.usage("peak_memory_bytes") > one.usage("peak_memory_bytes"));
+    assert_milp_latencies_are_the_reports(&workload, &with_threads(2), &two);
+}
+
+/// A range request evaluates each step: its query-time work is one step's
+/// (the 30.3 ms raw read) times its 61 steps, in the report and the MILP.
+#[tokio::test]
+async fn a9_a_range_requests_work_counts_each_step() {
+    let mut range = every("max_over_time(m[5m])", 300_000, None);
+    range["range_evaluation"] = json!({"step_ms": 60_000, "span_ms": 3_600_000});
+    let workload = over_m(vec![range], 1000);
+    // Chains refreshing at 10 s per window lose to the raw read.
+    let settings = cost_inputs(
+        lowest_mean_latency(),
+        max_min_table(100.0, 10_000_000.0, 0.0),
+        json!({}),
+        json!({}),
+    );
+    let selected = plan(&workload, &settings, true).await;
+    assert!(!selected.has_ingestion_views());
+    assert_close(
+        "query execution",
+        selected.query_ms(0, "query_execution_ms"),
+        61.0 * 30.3,
+    );
+    assert_milp_latencies_are_the_reports(&workload, &settings, &selected);
+}
+
+/// §6.4: the MILP's reads of each query are the sub-DAG it reaches in the
+/// plan, so each query's latency is the report's: two queries sharing a
+/// raw read (A15), and two conflicting queries (A4).
+#[tokio::test]
+async fn milp_reads_are_the_reachable_sub_dag() {
+    let max_and_min = || {
+        over_m(
+            vec![
+                max_every_10s(None),
+                every("min_over_time(m[5m])", 10_000, None),
+            ],
+            1000,
+        )
+    };
+    for settings in [
+        cost_inputs(
+            lowest_mean_latency(),
+            max_min_table(100.0, 1_000_000.0, 0.0),
+            json!({}),
+            json!({}),
+        ),
+        conflicting(3_333.0),
+    ] {
+        let workload = max_and_min();
+        let selected = plan(&workload, &settings, true).await;
+        assert_milp_latencies_are_the_reports(&workload, &settings, &selected);
+    }
+}
+
+/// Latency-bound exclusions are sound: with the bound exactly the selected
+/// plan's latency (the raw read; then, with a heavier refresh, the chain
+/// over its raw rows), that plan is still selected.
+#[tokio::test]
+async fn a18_a_plan_exactly_at_its_bound_is_kept() {
+    for state_ns in [10_000.0, 40_000.0] {
+        let settings = cost_inputs(
+            lowest_mean_latency(),
+            max_min_table(100.0, state_ns, 0.0),
+            json!({}),
+            json!({}),
+        );
+        let unbounded = plan(&over_m(vec![max_every_10s(None)], 1000), &settings, true).await;
+        let latency = unbounded.query_ms(0, "latency_ms");
+        let bounded = plan(
+            &over_m(vec![max_every_10s(Some(latency))], 1000),
+            &settings,
+            true,
+        )
+        .await;
+        assert_eq!(bounded.plan.dag, unbounded.plan.dag, "state {state_ns} ns");
+    }
+}
+
+/// R4. `lowest_mean_latency` refuses cost inputs whose times did not pass
+/// the calibration gate, unless they opt in for testing.
+#[tokio::test]
+async fn r4_lowest_mean_latency_needs_a_passed_calibration_or_the_opt_in() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let mut settings = cost_inputs(
+        lowest_mean_latency(),
+        max_min_table(100.0, 10_000.0, 0.0),
+        json!({}),
+        json!({}),
+    );
+    settings
+        .as_object_mut()
+        .unwrap()
+        .remove("latency_calibration");
+    let error = planned(&workload, &settings, true)
+        .await
+        .err()
+        .expect("refused");
+    assert!(error.contains("calibration gate"), "{error}");
+    settings["latency_calibration"] = json!("passed_gate");
+    planned(&workload, &settings, true)
+        .await
+        .expect("a passed gate is accepted");
 }

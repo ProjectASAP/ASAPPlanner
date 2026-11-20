@@ -86,6 +86,10 @@ pub(crate) struct ExecutionCosts {
     /// `SelectableExecutions::executions`; or why `asap-cost` could not
     /// cost it (the MILP leaves it out).
     pub(crate) per_execution: Vec<Result<f64, String>>,
+    /// Each execution's share at the largest retention its readers may
+    /// need (`per_execution` before $\pi_v h_v$ is taken off): what the
+    /// latency rows read, whose coefficients cannot depend on $h_v$.
+    pub(crate) per_execution_at_largest_retention: Vec<Result<f64, String>>,
     /// $\rho_\kappa c_{\kappa,u,c,i}$ of each edge, by position in
     /// `SelectableExecutions::edges`; `None` when it could not be costed
     /// (the MILP leaves it out).
@@ -356,7 +360,7 @@ pub(crate) fn execution_quantities(
             data,
             cost_inputs,
         )
-        .and_then(|usage| quantity_of(quantity, &usage, cost_inputs))
+        .and_then(|usage| quantity_of(quantity, &usage, node, cost_inputs))
     };
     let cost = |v: PhysicalCandidateId,
                 node: &PhysicalASAPDAGNode,
@@ -485,6 +489,20 @@ pub(crate) fn execution_quantities(
             }
         }
     }
+    // Each execution's own share at its largest retention (no $\pi_v h_v$
+    // taken off): a time row's coefficient, an upper bound whatever $h_v$
+    // the plan selects, exact when retention does not change the time.
+    let per_execution_at_largest_retention: Vec<Result<f64, String>> = executions
+        .iter()
+        .zip(&at_rate)
+        .map(|(execution, at_rate)| {
+            let &(own, raw_data, _) = at_rate.as_ref().map_err(Clone::clone)?;
+            Ok(match query_time_scan[execution.candidate.0] {
+                true => own,
+                false => own + raw_data,
+            })
+        })
+        .collect();
     let per_execution: Vec<Result<f64, String>> = executions
         .iter()
         .zip(&at_rate)
@@ -548,6 +566,7 @@ pub(crate) fn execution_quantities(
         .collect();
     let mut costs = ExecutionCosts {
         per_execution,
+        per_execution_at_largest_retention,
         per_edge,
         retention_cost_per_retained_second,
         retention_need_ms_per_edge,
@@ -757,9 +776,21 @@ fn ingestion_window_ms(
 fn quantity_of(
     quantity: Quantity,
     usage: &NodeResourceUsageAndCost<'_>,
+    node: &PhysicalASAPDAGNode,
     cost_inputs: &CostInputs,
 ) -> Result<(f64, f64), String> {
     let query_time = usage.cost.timing == ExecutionTiming::QueryTime;
+    // The ingest threads building partial copies of its newest window, as
+    // `plan_cost` counts them: the deployment's `ingest_threads`, else one
+    // per core of its own ingestion work (`plan_cost` also counts its
+    // producers' work there, which the candidate alone does not know).
+    let copies = || -> f64 {
+        let own_cores = match query_time {
+            true => 0.0,
+            false => usage.work_ms_per_execution / 1_000.0,
+        };
+        (asap_cost::ingest_threads_building_copies(cost_inputs, own_cores) - 1) as f64
+    };
     Ok(match quantity {
         Quantity::CostPerSecond => return cost_per_second(usage, cost_inputs),
         Quantity::QueryMsPerRun => (
@@ -770,11 +801,25 @@ fn quantity_of(
             },
             0.0,
         ),
+        // With the merging of the partial copies of its newest window.
         Quantity::RefreshWallMsPerWindow => {
-            (usage.cost.phase_times.refresh_wall_ms_per_window, 0.0)
+            let refresh = &usage.cost.phase_times;
+            let compaction = match refresh.refresh_window_width_ms {
+                Some(_) => {
+                    copies()
+                        * usage.output.rows as f64
+                        * asap_cost::partial_copy_merge_ms(node, usage, cost_inputs)
+                }
+                None => 0.0,
+            };
+            (refresh.refresh_wall_ms_per_window + compaction, 0.0)
         }
         Quantity::CpuCoreSecondsPerSecond => (usage.cost.cpu_core_seconds_per_second, 0.0),
-        Quantity::PeakMemoryBytes => (usage.peak_memory_bytes as f64, 0.0),
+        // With the partial copies of an in-memory state's newest window.
+        Quantity::PeakMemoryBytes => (
+            usage.peak_memory_bytes as f64 + copies() * usage.maintained.unwrap_or(0) as f64,
+            0.0,
+        ),
         Quantity::DiskBytes => (
             usage.disk_bytes as f64,
             usage.raw_scan.map_or(0.0, |(_, bytes)| bytes as f64),

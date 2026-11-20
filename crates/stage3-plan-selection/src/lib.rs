@@ -33,7 +33,7 @@ mod selectable;
 
 use asap_cost::{
     request_overhead_cost_per_second, ClusterLimits, ClusterObjective, CostInputs, CostModel,
-    ResourceUnitCost,
+    LatencyCalibration, ResourceUnitCost,
 };
 use asap_types::deployment_capabilities::FinalResultsCache;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
@@ -106,6 +106,9 @@ pub fn select_plan(
         CostModel::ClusterCapacity(limits)
             if limits.objective == ClusterObjective::LowestMeanLatency =>
         {
+            if cost_inputs.latency_calibration == LatencyCalibration::NotChecked {
+                return Err(ErrorSelectingPlan::LatencyNotCalibrated);
+            }
             Some(limits)
         }
         _ => {
@@ -197,62 +200,76 @@ pub fn select_plan(
             failure_probability_bound,
         },
     };
-    let (solved, mean_latency_ms, pruned_by_latency_bound) = match cluster_limits {
-        None => (
-            solve_selection(&selection_inputs).map_err(milp_error)?,
-            None,
-            0,
-        ),
-        Some(limits) => {
-            let quantity = |quantity| {
-                execution_quantities(
-                    physical,
-                    &selectable,
-                    entries,
-                    data,
-                    cost_inputs_for_structure,
-                    quantity,
-                )
-            };
-            let (query_ms, refresh_ms, cpu, memory, disk) = (
-                quantity(Quantity::QueryMsPerRun),
-                quantity(Quantity::RefreshWallMsPerWindow),
-                quantity(Quantity::CpuCoreSecondsPerSecond),
-                quantity(Quantity::PeakMemoryBytes),
-                quantity(Quantity::DiskBytes),
-            );
-            let solved = solve_cluster_selection(&ClusterInputs {
-                selection: selection_inputs,
-                query_ms: &query_ms,
-                refresh_ms: &refresh_ms,
-                cpu: &cpu,
-                memory: &memory,
-                disk: &disk,
-                limits,
-                cost_inputs,
-                data,
-            })
-            .map_err(|error| match error {
-                ClusterSelectionError::Milp(error) => milp_error(error),
-                ClusterSelectionError::OverLimits(shortfalls) => {
-                    ErrorSelectingPlan::OverClusterLimits(
-                        shortfalls
-                            .into_iter()
-                            .map(|shortfall| ClusterLimitShortfall {
-                                available: available(limits, cost_inputs, entries, shortfall.limit),
-                                ..shortfall
-                            })
-                            .collect(),
+    let (solved, mean_latency_ms, latency_ms_per_query, pruned_by_latency_bound) =
+        match cluster_limits {
+            None => (
+                solve_selection(&selection_inputs).map_err(milp_error)?,
+                None,
+                None,
+                0,
+            ),
+            Some(limits) => {
+                let quantity = |quantity| {
+                    execution_quantities(
+                        physical,
+                        &selectable,
+                        entries,
+                        data,
+                        cost_inputs_for_structure,
+                        quantity,
                     )
+                };
+                let (query_ms, refresh_ms, cpu, memory, disk) = (
+                    quantity(Quantity::QueryMsPerRun),
+                    quantity(Quantity::RefreshWallMsPerWindow),
+                    quantity(Quantity::CpuCoreSecondsPerSecond),
+                    quantity(Quantity::PeakMemoryBytes),
+                    quantity(Quantity::DiskBytes),
+                );
+                let solved = solve_cluster_selection(&ClusterInputs {
+                    selection: selection_inputs,
+                    query_ms: &query_ms,
+                    refresh_ms: &refresh_ms,
+                    cpu: &cpu,
+                    memory: &memory,
+                    disk: &disk,
+                    limits,
+                    cost_inputs,
+                    data,
+                })
+                .map_err(|error| match error {
+                    ClusterSelectionError::Milp(error) => milp_error(error),
+                    ClusterSelectionError::OverLimits(shortfalls) => {
+                        ErrorSelectingPlan::OverClusterLimits(
+                            shortfalls
+                                .into_iter()
+                                .map(|shortfall| ClusterLimitShortfall {
+                                    available: available(
+                                        limits,
+                                        cost_inputs,
+                                        entries,
+                                        shortfall.limit,
+                                    ),
+                                    ..shortfall
+                                })
+                                .collect(),
+                        )
+                    }
+                })?;
+                let mut per_query = vec![0.0; entries.len()];
+                for &(query, latency) in &solved.latency_ms_per_query {
+                    if let Some(slot) = per_query.get_mut(query) {
+                        *slot = latency;
+                    }
                 }
-            })?;
-            (
-                solved.solved,
-                Some(solved.mean_latency_ms),
-                solved.pruned_by_latency_bound,
-            )
-        }
-    };
+                (
+                    solved.solved,
+                    Some(solved.mean_latency_ms),
+                    Some(per_query),
+                    solved.pruned_by_latency_bound,
+                )
+            }
+        };
     let plan = plan_of(physical, &solved, &outputs).map_err(|error| {
         ErrorSelectingPlan::Solver(format!("the selected plan is invalid: {error}"))
     })?;
@@ -273,14 +290,16 @@ pub fn select_plan(
                 reason: PruneReason::UsageNotCostable,
             })
             .collect(),
-        selected_plan_cost_per_second: solved.cost_per_second_without_request_overhead
-            + request_overhead_cost_per_second,
+        selected_plan_cost_per_second: cluster_limits.is_none().then_some(
+            solved.cost_per_second_without_request_overhead + request_overhead_cost_per_second,
+        ),
         milp_variable_count: solved.variable_count,
         milp_constraint_count: solved.constraint_count,
         milp_construction_ms: solved.construction_ms,
         milp_solve_ms: solved.solve_ms,
         milp_solve_count: solved.solve_count,
         selected_plan_mean_latency_ms: mean_latency_ms,
+        selected_plan_latency_ms_per_query: latency_ms_per_query,
         executions_pruned_by_latency_bound: pruned_by_latency_bound,
     };
     Ok((plan, selection))

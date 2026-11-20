@@ -335,6 +335,9 @@ pub fn lookup_at_scale(
 /// else the nearest count's, marked outside the measured scale. A zero
 /// price interpolates linearly.
 fn at_series_count(entries: &[&OperatorCost], series: Option<u64>) -> Option<UnitPrice> {
+    if entries.is_empty() {
+        return None;
+    }
     let count = |entry: &&&OperatorCost| entry.measured_series_count.expect("a scaled entry");
     let nearest_outside = |entry: &OperatorCost| {
         let mut price = price_of(entry);
@@ -388,23 +391,47 @@ pub(crate) fn aggregate_lookup(
     table: &MeasuredOperationCosts,
     phase: ExecutionTiming,
     measures: &[AggIntent],
+    series: Option<u64>,
 ) -> Option<UnitPrice> {
     let mut names: Vec<String> = measures.iter().map(AggIntent::kind_name).collect();
     names.sort();
-    let combination = |for_phase: Option<ExecutionTiming>| {
-        table.operators.iter().find(|entry| {
-            entry.operator == OperatorKind::Aggregate
-                && entry.phase == for_phase
-                && !entry.measures.is_empty()
-                && {
-                    let mut measured = entry.measures.clone();
-                    measured.sort();
-                    measured == names
-                }
-        })
+    // The entries of one class at `series`: interpolated by series count
+    // when they name one ([`at_series_count`]), else the first.
+    let priced = |entries: Vec<&OperatorCost>| -> Option<UnitPrice> {
+        if entries
+            .iter()
+            .any(|entry| entry.measured_series_count.is_some())
+        {
+            let scaled: Vec<&OperatorCost> = entries
+                .into_iter()
+                .filter(|entry| entry.measured_series_count.is_some())
+                .collect();
+            return at_series_count(&scaled, series);
+        }
+        entries.first().map(|entry| price_of(entry))
     };
-    if let Some(entry) = combination(Some(phase)).or_else(|| combination(None)) {
-        return Some(price_of(entry));
+    let combination = |for_phase: Option<ExecutionTiming>| -> Vec<&OperatorCost> {
+        table
+            .operators
+            .iter()
+            .filter(|entry| {
+                entry.operator == OperatorKind::Aggregate
+                    && entry.phase == for_phase
+                    && !entry.measures.is_empty()
+                    && {
+                        let mut measured = entry.measures.clone();
+                        measured.sort();
+                        measured == names
+                    }
+            })
+            .collect()
+    };
+    let mut entries = combination(Some(phase));
+    if entries.is_empty() {
+        entries = combination(None);
+    }
+    if !entries.is_empty() {
+        return priced(entries);
     }
     let mut total = UnitPrice {
         ns_per_unit: 0.0,
@@ -415,17 +442,26 @@ pub(crate) fn aggregate_lookup(
     };
     for measure in measures {
         let name = measure.kind_name();
-        let find = |for_phase: Option<ExecutionTiming>| {
-            table.operators.iter().find(|e| {
-                e.operator == OperatorKind::Aggregate
-                    && e.phase == for_phase
-                    && e.measure.as_deref() == Some(name.as_str())
-            })
+        let find = |for_phase: Option<ExecutionTiming>| -> Vec<&OperatorCost> {
+            table
+                .operators
+                .iter()
+                .filter(|e| {
+                    e.operator == OperatorKind::Aggregate
+                        && e.phase == for_phase
+                        && e.measure.as_deref() == Some(name.as_str())
+                })
+                .collect()
         };
-        let entry = find(Some(phase)).or_else(|| find(None))?;
+        let mut entries = find(Some(phase));
+        if entries.is_empty() {
+            entries = find(None);
+        }
+        let entry = priced(entries)?;
         total.ns_per_unit += entry.ns_per_unit;
         total.ns_per_invocation += entry.ns_per_invocation;
         total.ns_per_state_emitted += entry.ns_per_state_emitted;
+        total.outside_measured_scale |= entry.outside_measured_scale;
     }
     (!measures.is_empty()).then_some(total)
 }

@@ -12,5 +12,6 @@
     "query_threads": 4,
     "allowed_lateness_ms": 0,
     "max_thread_utilization": 0.7
-  }
+  },
+  "latency_calibration": "uncalibrated_for_testing"
 }
