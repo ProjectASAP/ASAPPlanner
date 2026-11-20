@@ -32,12 +32,12 @@ so its latency is 46 ms, not 2 ms. Today Stage 3 cannot express either point:
 3. A query's `max_latency_ms` is checked by no cost model:
    `RejectionCause::LatencyBoundExceeded` exists, but no MILP row enforces it.
 4. The per-node times the cost model predicts are not yet checked against a
-   running data plane. A comparison of predicted against measured per-phase
-   times found precompute under-predicted about 2× (a fixed cost of about
-   44 ms per refresh is not modelled), `max_over_time` query runs
-   under-predicted 2.6× (a fixed 3–7 ms per run), and DDSketch merges
-   over-predicted (the value range defaults to 1..1e9). An objective built
-   on uncalibrated times would rank plans by errors.
+   running data plane. A fit on measured data-plane runs (section 2.4)
+   found terms the cost model and the measured table cannot express: a
+   cost per window state emitted at each refresh, a fixed cost per query
+   step, a per-unit cost that grows with the series count, refresh wall
+   time above its CPU, and ingest decode outside every plan node. An
+   objective built on uncalibrated times would rank plans by errors.
 
 This document adds `ClusterObjective::LowestMeanLatency`, the latency
 model it needs, the calibration that comes first, and the MILP rows that
@@ -140,59 +140,89 @@ An ingestion-time node's work splits by when it runs:
   `QueryLatency::compaction_ms`), and every ingestion-time node that reads a
   closed window (a `SummaryMerge`, `SummaryEstimate`,
   `FinalizeExactAccumulator` over it, or a chain over a smaller window's
-  output), plus each node's fixed per-refresh cost (section 2.4).
+  output), plus each node's cost per window state it emits (section 1.5).
+  A refresh also waits on I/O (writing the view, syncs): its **refresh wall
+  time** is its CPU plus that wait.
 
 A **refresh group** is the set of selected ingestion-time nodes with one
 `RefreshWindow` (`width_ms`, `phase_ms`): their windows close at the same
 instants and one task refreshes them, on one precompute thread. Its
 **refresh time** $P_G$ in ms per window is the sum of its nodes' refresh
-work per window.
+wall time per window (CPU plus I/O wait). $P_G$ is what latency, queueing
+and $\rho$ use (a thread waiting on I/O is busy); the CPU limit and cost
+model 1 use the CPU part only.
 
 ### 1.5 Calibration inputs
 
-Calibration uses the existing inputs plus one new field:
-
-- `MeasuredOperationCosts::operators[i].ns_per_invocation`: per evaluation
-  at query time (the fixed 3–7 ms per run), as today.
-- `MeasuredOperationCosts::ns_per_evaluation`: per request, as today.
-- New `OperatorCost::ns_per_refresh` (default 0): CPU ns per window close of
-  an ingestion-time node, the fixed cost per refresh (the ~44 ms). Today's
-  `ns_per_invocation` at ingestion time is per second of arriving rows and
-  cannot express it.
-- `DataWorkload` `column_magnitudes`: a declared value range replaces the
-  DDSketch default 1..1e9 (reported today as an `AssumedDataFact`).
-- `CostInputs::frozen_calibration_factor`: the scale for the formula-priced
-  nodes the table does not cover.
-
-What the current format can and cannot express:
+A calibration is a `CostInputs` JSON file (`asap_planner --cost-inputs`)
+carrying `measured_operation_costs` and `frozen_calibration_factor`, the
+inputs that exist today, plus the terms below. What the current format can
+and cannot express, from the fit of section 2.4:
 
 | Measured term | Format today | Change |
 | --- | --- | --- |
-| time per unit of an operator, per phase and family | `ns_per_unit` | none |
-| fixed time per query run of an operator | `ns_per_invocation` with `phase: query_time` | none |
-| fixed time per request | `ns_per_evaluation` | none |
-| fixed time per precompute refresh (window close) | none: `ns_per_invocation` at ingestion time is per second of arriving rows | new `ns_per_refresh` |
-| scale for uncovered nodes | `frozen_calibration_factor` | none |
+| CPU per unit of an operator, per phase and family | `OperatorCost::ns_per_unit` | none |
+| fixed CPU per computation of an operator | `OperatorCost::ns_per_invocation` (per evaluation at query time, per second of rows at ingestion time) | none |
+| scale for nodes without an entry | `frozen_calibration_factor` | none |
+| DDSketch value range | `column_magnitudes` in the data workload (default 1..1e9 otherwise) | none |
+| (1) CPU per window state emitted at a refresh (~9.2 µs) | none: a chain entry's `ns_per_unit` replaces the formula's own states-emitted term, and `ns_per_invocation` at ingestion time is per second of rows | new `OperatorCost::ns_per_state_emitted`, **added to** the formula's states-emitted term |
+| (2) fixed CPU per engine query run, one run per step of a range request (~3.4 ms) | `ns_per_evaluation` is charged once per request | new `MeasuredOperationCosts::ns_per_evaluation_step`, charged per step; `ns_per_evaluation` stays per request |
+| (3) per-unit cost growing with the series count (1.5–1.8× per unit from 1k to 10k series) | entries key on operator, phase and family only | new `OperatorCost::measured_group_count`: entries of one class at several scales, interpolated by the node's group count |
+| (4) refresh wall time above its CPU (1.1–3×: view writes, syncs) | CPU only | new `MeasuredOperationCosts::refresh_io_wait` (`ns_per_refresh`, `ns_per_state_emitted`), wall time, not CPU |
+| (5) ingest decode and append outside every plan node (~1 core-second per second at 10k series) | not representable | new `MeasuredOperationCosts::ns_per_ingested_sample` |
+| (6) an `Aggregate` with several measures | priced only from single-measure entries | new `OperatorCost::measures`: an entry for the measure combination, which wins over the per-measure entries |
 
-A calibration file is a `CostInputs` JSON (`asap_planner --cost-inputs`)
-carrying the measured table and the factor, e.g.:
+How each new term enters the model:
+
+1. `ns_per_state_emitted` × the states a node emits per window close is
+   added to its refresh CPU (and so to $P_G$, $\rho$, CPU and cost model 1's
+   cost).
+2. A request of $s$ steps runs $s$ engine runs: its query execution is
+   `ns_per_evaluation` + $s$ × (`ns_per_evaluation_step` + the node work of
+   one step). A range request's latency is its steps × the per-step time.
+3. For a node of a class with entries at several `measured_group_count`s,
+   `ns_per_unit` and `ns_per_invocation` are interpolated linearly in
+   log(price) over log(group count) between the two nearest scales, and the
+   nearest scale's price is used outside the measured range (the report
+   names the node as priced outside its measured scale). The group count is
+   the number of groups (states held) the node works over, from the data
+   workload's series counts.
+4. `refresh_io_wait` adds wall time per refresh and per state emitted to
+   $P_G$ only: latency, $Q_G$ and $\rho$ include it; CPU and cost do not.
+5. `ns_per_ingested_sample` × the samples arriving per second is the same
+   for every plan: it is added to the ingest role's predicted CPU and
+   recommended threads (section 2.6) and to cost model 3's CPU limit, and
+   reported apart; it is not added to cost model 1's cost, so cost model 1
+   plans and costs do not change.
+6. A `measures` entry prices the `Aggregate` with exactly those measures.
+
+Every new field defaults to 0 or empty; a file without them loads as
+before. Example:
 
 ```json
 {
   "measured_operation_costs": {
-    "ns_per_evaluation": 1500000,
+    "ns_per_evaluation": 0,
+    "ns_per_evaluation_step": 3400000,
+    "ns_per_ingested_sample": 100000,
+    "refresh_io_wait": {"ns_per_refresh": 2000000, "ns_per_state_emitted": 5000},
     "operators": [
       {"operator": "SummaryTumblingWindowChain", "phase": "ingestion_time",
-       "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 310, "ns_per_refresh": 44000000},
-      {"operator": "Aggregate", "phase": "query_time", "measure": "max",
-       "ns_per_unit": 9, "ns_per_invocation": 5000000}
+       "sketch": {"DDSketch": {"alpha": 0.05}}, "ns_per_unit": 337,
+       "ns_per_state_emitted": 9234, "measured_group_count": 1000},
+      {"operator": "SummaryMerge", "phase": "query_time",
+       "sketch": {"DDSketch": {"alpha": 0.05}}, "ns_per_unit": 1701,
+       "measured_group_count": 1000},
+      {"operator": "SummaryMerge", "phase": "query_time",
+       "sketch": {"DDSketch": {"alpha": 0.05}}, "ns_per_unit": 2900,
+       "measured_group_count": 10000}
     ]
   },
-  "frozen_calibration_factor": 1.8
+  "frozen_calibration_factor": 0.78
 }
 ```
 
-A file without `ns_per_refresh` loads as before (default 0).
+(The values are illustrative, in the range the fit found.)
 
 ## 2. Algorithm
 
@@ -220,7 +250,8 @@ $$F_q = \max\Big(a,\ \max_{G \text{ read by } q} \big(a + Q_G + P_G\big)\Big)$$
 $$Q_G = \frac{1}{\text{precompute\_threads}} \sum_{H \ne G,\ H \text{ coincides with } G,\ G \text{ does not read } H} P_H \;+\; \sum_{H \text{ read by } G} P_H$$
 
 **Query execution** $E_q$: the critical path of $q$'s query-time sub-DAG for
-one request, plus the request's fixed overhead (`ns_per_evaluation`). One
+one request, plus the request's fixed costs (`ns_per_evaluation` once,
+`ns_per_evaluation_step` per step, section 1.5). One
 request runs on one query thread (the executor's run is single-threaded), so
 every node of the sub-DAG is on the critical path: $E_q$ is the sum of the
 per-run times $d_e$ of the query-time nodes $q$ reads, each node once.
@@ -271,20 +302,47 @@ deployment that reports per-phase times can run it.
    and phase and reports the ratio per node, operator kind and summary
    family.
 4. **Feed back**, by cause:
-   - a fixed cost per run or per refresh: `ns_per_invocation` (query time)
-     or `ns_per_refresh` (ingestion time) of that operator;
-   - a per-unit error: `ns_per_unit` of that operator and family;
-   - a fixed cost per request: `ns_per_evaluation`;
+   - a per-unit error: `ns_per_unit` of that operator and family, at the
+     scale measured (`measured_group_count`);
+   - a fixed cost per computation: `ns_per_invocation`; per query step:
+     `ns_per_evaluation_step`; per request: `ns_per_evaluation`;
+   - a refresh cost per state emitted: `ns_per_state_emitted`;
+   - refresh wall time above CPU: `refresh_io_wait`;
+   - ingest work outside plan nodes: `ns_per_ingested_sample`;
    - a wrong data assumption (an `AssumedDataFact`, e.g. the DDSketch value
      range): declare the fact in the data workload;
    - nodes the table does not cover: `frozen_calibration_factor`.
-5. **Repeat** until every node's predicted time per phase is within the
-   acceptance ratio of the measured one: 1.5× (decided), per node and per
-   phase, on the calibration workloads. The objective is implemented only
-   after the calibration passes.
+5. **Gate.** Every node's predicted time per phase (and each refresh
+   group's and each query's) is within 1.5× of the measured one, on the
+   calibration workloads at every series scale the deployment runs. The
+   objective is implemented only after the gate passes.
 
-The deployment supplies the measured costs as a `MeasuredOperationCosts`
-table; the planner reads only that table.
+The deployment supplies the measured costs as this file; the planner reads
+only the file.
+
+**Results so far.** A fit on measured data-plane runs on one machine type
+(eight runs: 1k and 10k series, instant and range requests, three
+workloads; 66 valid rows of per-refresh-group and per-query CPU) gives:
+
+| Finding | Effect without the term | With the term |
+| --- | --- | --- |
+| (1) ~9.2 µs CPU per window state emitted at a refresh; a fixed cost per refresh run ≈ 0 | precompute under-predicted 1.1–12× (worst for 5 s and 15 s windows of small views) | every validated refresh group within 0.74–1.24× |
+| (2) ~3.4 ms CPU per engine run, one per step | range requests short by (steps − 1) × 3.4 ms | fitted from instant runs only; range runs to be re-measured |
+| (3) per-unit cost 1.5–1.8× higher at 10k than 1k series (a 1 h DDSketch quantile: 649 ms → 10.2 s per request for 10× series) | one price cannot fit both scales | needs `measured_group_count` |
+| (4) refresh wall time 1.1–3× its CPU; query wall = CPU | refresh latency under-predicted | needs `refresh_io_wait` |
+| (5) ingest decode ~1 core-second per second at 10k series, outside every node | ingest CPU and threads under-predicted | needs `ns_per_ingested_sample` |
+| (6) multi-measure `Aggregate` has no entry | priced from the formulas × factor | needs `measures` |
+
+Formula-to-fit ratios per class are mostly 0.7–1.5; `frozen_calibration_factor`
+is 0.78. A hold-out fit (three runs left out) predicts them at an rms
+log-ratio of 0.36.
+
+**Gate status.** At 1k series the gate passes at 1.5× with terms (1) and
+(2). At 10k series it does not until (3) is modelled. **Prerequisites
+before the objective:** terms (1), (2), (3) implemented and the gate passing
+at 1k and 10k series; (4) before the latency rows (refresh wall time);
+(5) before the ingest recommendation and the CPU limit count ingest
+decode. (6) is not a prerequisite.
 
 ### 2.5 Selection MILP
 
@@ -381,8 +439,8 @@ needs to serve it at the target utilisation $\rho_{\max}$:
 
 | Role | Predicted CPU core-seconds per second | Recommended threads |
 | --- | --- | --- |
-| ingest | ingest work of the ingestion-time nodes | $\lceil \text{cores} / \rho_{\max} \rceil$, at least 1 |
-| precompute | $\sum_G P_G / W_G$ (refresh work) | $\lceil \text{cores} / \rho_{\max} \rceil$, at least 1 |
+| ingest | ingest work of the ingestion-time nodes plus decode and append outside the plan (`ns_per_ingested_sample`) | $\lceil \text{cores} / \rho_{\max} \rceil$, at least 1 |
+| precompute | $\sum_G P_G / W_G$ (refresh wall time: a thread waiting on I/O is busy) | $\lceil \text{cores} / \rho_{\max} \rceil$, at least 1 |
 | query | query-time work plus request overhead | $\lceil \text{cores} / \rho_{\max} \rceil$, at least 1 |
 
 Example: refresh work of 0.9 core-seconds per second at $\rho_{\max} = 0.7$
@@ -471,12 +529,40 @@ model 2 keeps returning `UnsupportedCostModel`.
  pub struct OperatorCost {
      ...
      pub ns_per_invocation: f64,
-+    /// CPU nanoseconds per window close of an ingestion-time node, whatever
-+    /// its units: the fixed cost of one refresh. Default 0.
++    /// Ingestion time: CPU nanoseconds per window state the node emits at
++    /// a refresh, added to the formula's states-emitted term. Default 0.
 +    #[serde(default)]
-+    pub ns_per_refresh: f64,
++    pub ns_per_state_emitted: f64,
++    /// The groups (states held) the node worked over when measured; entries
++    /// of one class at several counts are interpolated (section 1.5).
++    /// `None`: one price at every scale.
++    #[serde(default)]
++    pub measured_group_count: Option<u64>,
++    /// For an `Aggregate`: the exact measure combination this entry was
++    /// measured on, e.g. `["sum", "count"]`; wins over per-measure entries.
++    #[serde(default)]
++    pub measures: Vec<String>,
      ...
  }
+
+ pub struct MeasuredOperationCosts {
+     pub operators: Vec<OperatorCost>,
+     pub ns_per_evaluation: f64,
++    /// CPU nanoseconds per engine query run: one per step of a request.
++    pub ns_per_evaluation_step: f64,
++    /// CPU nanoseconds per arriving sample outside every plan node
++    /// (decode, append).
++    pub ns_per_ingested_sample: f64,
++    /// Wall time a refresh waits on I/O, not CPU.
++    pub refresh_io_wait: RefreshIoWait,
+ }
+
++pub struct RefreshIoWait {
++    /// Wall nanoseconds per refresh-group run.
++    pub ns_per_refresh: f64,
++    /// Wall nanoseconds per window state emitted.
++    pub ns_per_state_emitted: f64,
++}
 ```
 
 ### 3.3 Latency and report (`asap-cost` `plan/cost.rs`, planner `installable`)
@@ -531,7 +617,8 @@ model 2 keeps returning `UnsupportedCostModel`.
 
 `PredictedQueryUsage` (the plan report) takes the same five fields plus
 `latency_ms`; `PredictedNodeUsage` gains `ingest_cpu_core_seconds_per_second`,
-`refresh_ms_per_window` and `query_ms_per_run` for the calibration
+`refresh_cpu_ms_per_window`, `refresh_wall_ms_per_window` and
+`query_ms_per_step` for the calibration
 comparison; `PredictedUsage` gains `precompute_load` and
 `recommended_configuration`. The report's JSON
 changes, so `INSTALLABLE_PLAN_WIRE_VERSION` goes from 15 to 16.
@@ -579,9 +666,10 @@ tie-break solves from `CostModel`.
 ### 3.5 Order of work
 
 1. Tests of section 6, failing.
-2. Calibration: `ns_per_refresh`, the ingest/refresh split per node, the
-   per-node phase times in the report; the comparison procedure of section
-   2.4 run against a deployment, with the measured table fed back.
+2. Calibration: the new terms of section 1.5, the ingest/refresh split per
+   node, the per-node phase times in the report; the procedure of section
+   2.4 re-run until the gate passes at 1k and 10k series (prerequisites
+   there).
 3. Latency model in `plan_cost`: `DataPlaneExecution`, the new
    `QueryLatency`, $\rho$; report fields and wire version.
 4. Stage 3: cost model 3 with `LowestMeanLatency`, the limit rows,
@@ -601,12 +689,12 @@ tie-break solves from `CostModel`.
 | 7 | MILP: per-query latency variables, max over freshness sources by big-M with computed bounds, objective $\sum w_q L_q$, resource rows; lexicographic second solves for ties; scaling as today; sharing through $a_{q,e}$. | Decided (formulation); tie-break choice by this document |
 | 8 | On one thread the critical path is the sum of the sub-DAG's node times (each once), so query execution is a sum over $a_{q,e}$; the max is needed only over the freshness sources. | Proposed for v1 (open question 1) |
 | 9 | Refresh group = ingestion-time nodes of one `RefreshWindow`, refreshed as one task on one precompute thread; compaction of partial copies moves from query latency into refresh time. | By this document |
-| 10 | New `OperatorCost::ns_per_refresh` for the fixed cost per refresh. | By this document |
+| 10 | Calibration terms the format lacks (section 1.5): `ns_per_state_emitted` (added to the formula term), `ns_per_evaluation_step` (range latency = steps × per-step), `measured_group_count` (scale), `refresh_io_wait` (wall, not CPU), `ns_per_ingested_sample` (ingest role and CPU limit, not cost model 1), `measures` (multi-measure entries). | Required by the calibration; field names and the scale rule by this document (open question 3) |
 | 11 | Cost model 1 does not enforce latency bounds or $\rho \le \rho_{\max}$; cost model 1 plans do not change. | Decided |
 | 12 | This work implements `LowestMeanLatency` only; `LowestLatency`, `LeastMemory` and cost model 2 keep `UnsupportedCostModel`. | By this document |
 | 13 | Infeasible under cost model 3: per-limit relaxed solves on the error path, `OverClusterLimits` with least needed and available. | By this document |
 | 14 | Under cost model 3 the greedy cost upper bound is not applied; the `OneEvaluation` twin dominance is restated over time, memory, disk and CPU. | By this document |
-| 15 | Calibration passes when every node's predicted time per phase is within 1.5× of measured. | Decided |
+| 15 | Calibration passes when every node's predicted time per phase is within 1.5× of measured, at every series scale run (1k passes; 10k after term (3)). | Decided |
 | 16 | Ingest and query CPU are not hard constraints against thread counts; the report gives per role (ingest, precompute, query) the predicted CPU core-seconds per second and the recommended threads, $\lceil$cores$/\rho_{\max}\rceil$; `precompute_threads` stays an input for $\rho$, and a deployment may set it from the recommendation and replan. | Decided |
 | 17 | One utilisation parameter, `max_thread_utilization`, is both $\rho_{\max}$ and the recommendation target. | By this document |
 
@@ -621,6 +709,11 @@ tie-break solves from `CostModel`.
 2. **Query queueing.** Requests waiting for a free query thread are not
    modelled; a deployment running fewer query threads than recommended
    sees latency above the prediction.
+3. **Scale rule.** Interpolating per-unit prices in log-log between measured
+   group counts (nearest price outside the range) is this document's
+   choice. The alternative is a working-set term (bytes held ÷ cache size)
+   in the formulas, which needs no per-scale measurement but a cache
+   model.
 
 ## 6. Test plan (for approval)
 
@@ -639,7 +732,7 @@ on formula constants.
 | A3 | A tighter memory limit switches to a smaller-state plan | a quantile query whose lowest-latency plan keeps a large ingestion-time sketch; `memory_bytes` set first above, then below its peak | above: that plan; below: a plan with smaller peak memory, within the limit | yes |
 | A4 | `max_latency_ms` is enforced | the A1 workload with a second query that reads a heavy refresh group; its bound set below that plan's latency | that query is answered by a plan within its bound, even though the mean rises | yes |
 | A5 | Frequency weighting | two queries, one every 10 s, one every 5 min, where one plan favours each | the plan favouring the 10 s query; reversing the intervals reverses the choice | yes |
-| A6 | Freshness counts | a query reading an ingestion-time view in a group with a heavy refresh (ns_per_refresh large) | its predicted latency includes that refresh; raising the refresh time switches it to a query-time plan | yes |
+| A6 | Freshness counts | a query reading an ingestion-time view in a group with a heavy refresh (many states emitted) | its predicted latency includes that refresh; raising the refresh time switches it to a query-time plan | yes |
 | A7 | Thread count changes the choice | the A2 workload with `precompute_threads` 1, then 2 | 1: the plan with $\rho \le 0.7$; 2: the lowest-latency plan ($\rho = 0.45$), queueing halved | yes |
 | A8 | Ties by memory, then disk | two plans with equal mean latency and different peak memory; then equal latency and memory, different disk | the smaller peak memory; then the smaller disk; `milp_solve_count` 3 | yes |
 | A9 | Report breakdown | the A1 and A6 workloads | per query, lateness + queueing + precompute execution + query execution = `latency_ms`; weights as section 1.1; the MILP's mean equals `plan_cost`'s mean of the selected plan | yes |
@@ -656,10 +749,16 @@ on formula constants.
 
 | # | Behaviour | Inputs | Expected | Fails today |
 | --- | --- | --- | --- | --- |
-| C1 | `ns_per_refresh` is charged once per window close | an ingestion-time chain of 1 min windows with `ns_per_refresh` 44e6 | its refresh time per window rises by 44 ms, its CPU by 44 ms ÷ 60 s, $\rho$ accordingly | yes (no field) |
-| C2 | A query-time fixed cost per run is charged per run | `max_over_time` with `ns_per_invocation` 5e6 at query time | its `query_ms_per_run` rises by 5 ms | no (guard) |
-| C3 | A declared value range replaces the DDSketch default | a DDSketch merge with `column_magnitudes` [1, 1e3] | smaller merge time than with the default; no `AssumedDataFact` | no (guard) |
-| C4 | Per-node phase times are reported | any plan with ingestion-time and query-time nodes | each node's `ingest_cpu_core_seconds_per_second`, `refresh_ms_per_window`, `query_ms_per_run` | yes |
+| C1 | (1) states emitted are charged at each refresh, added to the formula term | a 1 min chain emitting 1,000 states per window, `ns_per_state_emitted` 9,234 | refresh CPU per window rises by 9.2 ms over the same entry without it; the formula's own states-emitted term is still charged | yes (no field) |
+| C2 | (2) the per-step fixed cost is charged per step | `ns_per_evaluation_step` 3.4e6; an instant request, and a range request of 61 steps | instant: +3.4 ms latency; range: +61 × 3.4 ms latency and CPU per request; `ns_per_evaluation` still once per request | yes |
+| C3 | (3) prices follow the series scale | `SummaryMerge` DDSketch entries at 1,000 and 10,000 groups; nodes over 1,000, 3,162 and 10,000 groups, and over 20,000 | the 1k price, the log-log midpoint, the 10k price; the 10k price at 20k and the node named as outside its measured scale | yes |
+| C4 | (4) refresh I/O wait is wall time, not CPU | `refresh_io_wait` 2 ms per refresh | $P_G$, latency and $\rho$ rise by 2 ms per window; CPU, the CPU limit and cost model 1's cost do not | yes |
+| C5 | (5) ingest decode counts in the ingest role | `ns_per_ingested_sample` 1e5 at 10,000 samples per second | ingest role +1 core-second per second, recommended ingest threads up accordingly; a cost model 3 `cpu_cores` limit counts it; cost model 1's cost and plan unchanged | yes |
+| C6 | (6) a measure-combination entry wins | an `Aggregate` with `sum` and `count`, entries for each and one for `["sum","count"]` | priced from the combination entry | yes |
+| C7 | A query-time fixed cost per computation is charged per run | `max_over_time` with `ns_per_invocation` 5e6 at query time | its per-step time rises by 5 ms | no (guard) |
+| C8 | A declared value range replaces the DDSketch default | a DDSketch merge with `column_magnitudes` [1, 1e3] | smaller merge time than with the default; no `AssumedDataFact` | no (guard) |
+| C9 | Per-node phase times are reported | any plan with ingestion-time and query-time nodes | each node's `ingest_cpu_core_seconds_per_second`, `refresh_cpu_ms_per_window`, `refresh_wall_ms_per_window`, `query_ms_per_step` | yes |
+| C10 | The gate | the calibration file applied to the calibration workloads' plans at 1k and 10k series | every refresh group and query within 1.5× of measured (a check run against the deployment's measurements, not a unit test) | yes at 10k until (3) |
 
 ### 6.3 Regression
 
@@ -667,7 +766,7 @@ on formula constants.
 | --- | --- | --- | --- | --- |
 | R1 | Cost model 1 plans unchanged | the sketch plan snapshots and the Stage 3 objective tests, also workloads with `max_latency_ms` | identical plans and costs; no latency bound or $\rho_{\max}$ enforced | no (guard) |
 | R2 | Other objectives unchanged | cost model 2; cost model 3 with `LowestLatency` and `LeastMemory` | `UnsupportedCostModel` as today | no (guard) |
-| R3 | Old cost-inputs JSON loads | a `CostInputs` file without `data_plane_execution` or `ns_per_refresh` | defaults of section 1.3; validation refuses 0 threads and a load bound outside (0, 1] | no for loading (guard), yes for the new validation |
+| R3 | Old cost-inputs JSON loads | a `CostInputs` file without `data_plane_execution` or any new calibration field | defaults of section 1.3; validation refuses 0 threads and a load bound outside (0, 1] | no for loading (guard), yes for the new validation |
 
 ### 6.4 Unit tests of the rows
 
