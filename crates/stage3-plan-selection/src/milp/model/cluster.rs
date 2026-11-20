@@ -749,7 +749,6 @@ fn build_and_solve(
     }
     let threads = f64::from(execution.precompute_threads);
     let lateness = execution.allowed_lateness_ms as f64;
-    let total_bound: f64 = refresh_bound.iter().sum();
     // f_G = lateness + Q_G + P_G.
     let freshness: Vec<Expression> = (0..groups.windows.len())
         .map(|group| {
@@ -769,7 +768,26 @@ fn build_and_solve(
             expression
         })
         .collect();
-    let big_m = lateness + total_bound;
+    // Per group, the most f_G can exceed the allowed lateness (F_q's own
+    // lower bound): its big-M, as tight as the bounds allow.
+    let big_m: Vec<f64> = (0..groups.windows.len())
+        .map(|group| {
+            let mut bound = refresh_bound[group];
+            for (other, (&other_bound, &other_window)) in
+                refresh_bound.iter().zip(&groups.windows).enumerate()
+            {
+                if other == group {
+                    continue;
+                }
+                if groups.reads[group].contains(&other) {
+                    bound += other_bound;
+                } else if close_together(groups.windows[group], other_window) {
+                    bound += other_bound / threads;
+                }
+            }
+            bound
+        })
+        .collect();
     // Per query: reads a, edge reads w, freshness F, latency L.
     let mut latencies: Vec<Variable> = Vec::new();
     for shape in shapes {
@@ -813,7 +831,7 @@ fn build_and_solve(
             match groups.of_execution.get(&index) {
                 Some(&group) if at_ingestion(inputs, index) => {
                     rows.push(constraint!(
-                        fresh >= freshness[group].clone() - big_m * (1 - read)
+                        fresh >= freshness[group].clone() - big_m[group] * (1 - read)
                     ));
                 }
                 _ => execution_ms += of(inputs.query_ms, index) * read,

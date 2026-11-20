@@ -98,6 +98,7 @@ work. They are deployment parameters, passed in, never inferred:
 | `precompute_threads` | threads | 1 | threads running window-close refreshes of ingestion-time views |
 | `query_threads` | threads | 1 | threads running query requests; one request runs on one thread |
 | `allowed_lateness_ms` | ms | 0 | how long the data plane waits after a window's end before closing it |
+| `ingest_work_at_refresh` | bool | false | the data plane buffers a window's rows and inserts them at the window close, so all ingest work is refresh work (the measured data plane does) |
 | `max_thread_utilization` ($\rho_{\max}$) | fraction | 0.7 | the largest precompute load a valid plan may have (hard); also the target utilisation of the recommended thread counts (section 2.6) |
 
 **Where they live: `CostInputs::data_plane_execution`**, a new struct beside
@@ -338,7 +339,19 @@ is 0.78. A hold-out fit (three runs left out) predicts them at an rms
 log-ratio of 0.36.
 
 **Gate status.** At 1k series the gate passes at 1.5× with terms (1) and
-(2). At 10k series it does not until (3) is modelled. **Prerequisites
+(2). At 10k series it does not until (3) is modelled.
+
+C10 run (`tools/calibration_gate`, the fitted file with terms (1) and (2)
+in the new fields, every run's plan priced as it ran, queries with failed
+evaluations left out):
+
+| Series | Refresh-group CPU | Refresh-group wall | Query time per request |
+| --- | --- | --- | --- |
+| 1k | 11 of 11 within 1.5× | 7 of 11 (no `refresh_io_wait` fitted yet) | 25 of 31 (6 over-predicted 1.6–3×, one workload family) |
+| 10k | 20 of 20 | 14 of 20 | 4 of 6 (2 under-predicted 1.5–1.65×: term (3)) |
+
+Both scales fail the gate: the remaining work is fitting `refresh_io_wait`
+and per-scale entries (`measured_series_count`), then running it again. **Prerequisites
 before the objective:** terms (1), (2), (3) implemented and the gate passing
 at 1k and 10k series; (4) before the latency rows (refresh wall time);
 (5) before the ingest recommendation and the CPU limit count ingest
@@ -712,6 +725,7 @@ tie-break solves from `CostModel`.
 | 11 | Cost model 1 does not enforce latency bounds or $\rho \le \rho_{\max}$; cost model 1 plans do not change. | Decided |
 | 12 | This work implements `LowestMeanLatency` only; `LowestLatency`, `LeastMemory` and cost model 2 keep `UnsupportedCostModel`. | By this document |
 | 13 | Infeasible under cost model 3: per-limit relaxed solves on the error path, `OverClusterLimits` with least needed and available. | By this document |
+| 19 | `DataPlaneExecution::ingest_work_at_refresh` for a data plane that inserts a window's rows at its close (the measured one does). | By this document |
 | 18 | Latency bounds become exclusions before the MILP (least possible latency per execution, in f64); the remaining bounds are rows; per-execution bottom-up latency variables considered and deferred. | Decided |
 | 14 | Under cost model 3 the greedy cost upper bound is not applied; the `OneEvaluation` twin dominance is restated over time, memory, disk and CPU. | By this document |
 | 15 | Calibration passes when every node's predicted time per phase is within 1.5× of measured, at every series scale run (1k passes; 10k after term (3)). | Decided |
@@ -734,6 +748,11 @@ tie-break solves from `CostModel`.
    choice. The alternative is a working-set term (bytes held ÷ cache size)
    in the formulas, which needs no per-scale measurement but a cache
    model.
+4. **Solve time.** The first solve (mean latency) of a 9-query workload
+   takes 80–170 s (1,100 variables, 1,500 rows), the tie-break solves under
+   a second; single-query workloads solve in milliseconds. The per-query
+   reads $a_{q,e}$ with big-M freshness rows are the likely cause; the
+   deferred per-execution formulation would shrink the model.
 
 ## 6. Test plan (for approval)
 

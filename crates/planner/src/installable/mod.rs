@@ -255,7 +255,7 @@ pub async fn plan_installable(
     )?;
     let assumed_data_facts = assumed_data_facts(&output.plan, &cost, &data);
     let installable = installable_plan_of(output.plan, &entries).map_err(PlanError::Installable)?;
-    Ok((installable, report_of(&cost, assumed_data_facts)))
+    Ok((installable, selected_plan_report(&cost, assumed_data_facts)))
 }
 
 /// The installable plan of `plan`, the plan Stage 3 built for a workload
@@ -630,8 +630,12 @@ pub fn assumed_data_facts(
     facts
 }
 
-/// The report of the selected plan's `cost` and the data facts it assumed.
-fn report_of(cost: &PlanCost, assumed_data_facts: Vec<AssumedDataFact>) -> SelectedPlanReport {
+/// The report of the selected plan's `cost` and the data facts it assumed,
+/// as [`plan_installable`] returns it beside the plan.
+pub fn selected_plan_report(
+    cost: &PlanCost,
+    assumed_data_facts: Vec<AssumedDataFact>,
+) -> SelectedPlanReport {
     SelectedPlanReport {
         cost_per_second: cost.cost_per_second,
         predicted_usage: PredictedUsage {

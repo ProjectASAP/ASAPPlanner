@@ -51,8 +51,8 @@ pub use run::{
 
 mod installable;
 pub use installable::{
-    assumed_data_facts, installable_plan_of, plan_installable, InstallablePlan,
-    InstallablePlanError, PredictedNodeUsage, PredictedQueryUsage, PredictedUsage,
+    assumed_data_facts, installable_plan_of, plan_installable, selected_plan_report,
+    InstallablePlan, InstallablePlanError, PredictedNodeUsage, PredictedQueryUsage, PredictedUsage,
     SelectedPlanReport, INSTALLABLE_PLAN_WIRE_VERSION,
 };
 
