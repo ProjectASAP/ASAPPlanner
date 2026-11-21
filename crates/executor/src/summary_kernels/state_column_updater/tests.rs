@@ -276,3 +276,47 @@ fn sealed_counter_records_keep_resets() {
     assert!(records.get(1).insufficient_counter_raw_data_samples());
     assert!(matches!(records.get(2), ScalarState::Counter(None)));
 }
+
+/// Sealing shrinks each DDSketch to its occupied buckets (stores grow 128
+/// slots at a time): the same quantiles, less memory.
+#[test]
+fn sealed_ddsketch_windows_answer_alike_and_hold_less() {
+    use planner_types::summary_type::{SketchAlgorithm, SketchStatistic};
+    let ddsketch = FieldDataType::Sketch(SketchAlgorithm::DDSketch);
+    let alpha = SketchParams::DDSketch { alpha: 0.05 };
+    let updater = ten_thousand_series(&ddsketch, Some(&alpha));
+    let open_bytes = updater.memory_bytes();
+    let GroupStates::Sketches(open) = &updater.states else {
+        unreachable!()
+    };
+    let quantiles = [0.0, 0.1, 0.5, 0.9, 0.99, 1.0];
+    let answers = |state: &dyn AggregateCore| {
+        quantiles
+            .iter()
+            .map(|&q| {
+                state
+                    .estimate(&SketchStatistic::Quantile { q })
+                    .unwrap()
+                    .to_bits()
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = open
+        .iter()
+        .map(|state| answers(state.snapshot_accumulator().as_ref()))
+        .collect::<Vec<_>>();
+    let sealed = updater.seal();
+    for (group, expected) in expected.iter().enumerate() {
+        assert_eq!(
+            &answers(sealed.state(group).as_ref()),
+            expected,
+            "group {group}"
+        );
+    }
+    let sealed_bytes = sealed.charged_state_bytes();
+    println!("DDSketch alpha=0.05, 10k series x 15 samples: open {open_bytes} B, sealed {sealed_bytes} B");
+    assert!(
+        sealed_bytes * 2 < open_bytes,
+        "{sealed_bytes} vs {open_bytes}"
+    );
+}
