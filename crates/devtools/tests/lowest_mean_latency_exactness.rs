@@ -162,7 +162,8 @@ fn the_speed_ups_keep_the_optimum() {
     }
 }
 
-/// Every sketch plan snapshot workload (minutes without the speed-ups):
+/// Every PromQL sketch plan snapshot workload (minutes without the
+/// speed-ups), exact and with the default stop rule:
 /// `cargo test -p asap-devtools --test devtools -- --ignored the_speed_ups_keep_every`.
 #[test]
 #[ignore]
@@ -175,7 +176,13 @@ fn the_speed_ups_keep_every_snapshot_workloads_optimum() {
         .unwrap(),
     )
     .unwrap();
-    for entry in manifest["workloads"].as_array().unwrap() {
+    // The PromQL workloads: a SQL one needs its catalog tables.
+    for entry in manifest["workloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry.get("tables").is_none())
+    {
         let deployment = match entry["deployment"].as_str().unwrap() {
             "raw_retained" => "raw-retained",
             other => other,
