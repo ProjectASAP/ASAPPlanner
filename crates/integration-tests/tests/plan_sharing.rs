@@ -62,6 +62,32 @@ fn nested_exact_sum_reuses_newest_tumbling_windows() {
     }
 }
 
+/// `rate(m_counter[1h])` and `increase(m_counter[1h])` read one counter
+/// state: both extrapolate the same sampled increase, `rate` per second of
+/// the range. With no raw data kept, the plan builds one ingestion-time
+/// chain that both roots read.
+#[test]
+fn rate_and_increase_of_one_counter_share_one_chain() {
+    let mut related = fuzz_workload("rate_and_increase_same_counter", false);
+    related.raw_data_retained = false;
+    let plan = selected_plan(&related, &CostInputs::default());
+    let chains: Vec<_> = plan
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.payload,
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+        })
+        .map(|node| node.id)
+        .collect();
+    assert_eq!(chains.len(), 1, "one chain: {plan:#?}");
+    for &root in &plan.roots {
+        assert!(reaches(&plan, root, chains[0]), "root {root}: {plan:#?}");
+    }
+}
+
 /// Whether `from` is `to` or reads it through the plan's edges.
 fn reaches(
     plan: &asap_types::plan::physical_asap_dag::PhysicalASAPDAG,
