@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::edges::CandidateEdge;
 use crate::rules::candidates::{
     add_candidate_if_output_matches, add_candidates_per_input_parameters,
     add_group_computing_itself, distinct_parameters,
@@ -45,6 +46,7 @@ pub(crate) fn add_chain_groups(
     memo: &mut Memo,
     evaluation_period_ms_per_query: &[BTreeMap<usize, Option<u64>>],
     pruned: &BTreeSet<CandidateForMemoGroupId>,
+    edges: &[CandidateEdge],
 ) -> Result<(), Pass2RuleError> {
     // The chainable states with the θ of their surviving builds, the
     // unanchored ones first: an anchored state reads only the chains they
@@ -112,9 +114,7 @@ pub(crate) fn add_chain_groups(
     for (state, path, chain_groups, parameters) in chains_of_states {
         let state_grid_ms =
             state_evaluation_grid_ms(&evaluation_period_ms_per_query[state.0 as usize]);
-        // The smallest θs that met the state's accuracy (listed smallest
-        // first): a larger θ's levels hold larger states at more cost.
-        let level_parameters = &parameters[..parameters.len().min(MOST_LEVEL_PARAMETERS)];
+        let level_parameters = &smallest_parameters_per_reader(memo, state, &parameters, edges);
         add_wider_levels(
             memo,
             state,
@@ -179,11 +179,90 @@ pub(crate) const WIDER_LEVEL_WIDTHS_MS: [u64; 6] =
 /// 1 min, 5 min, 15 min, 1 h and 6 h.
 pub(crate) const MOST_WIDER_LEVELS: usize = 3;
 
-/// The most θs per state whose builds get wider levels: the smallest that
-/// survived (a larger θ's levels and covers cost more in states, merges
-/// and memory for an accuracy the smaller already meets; the second keeps
-/// a choice when readers of the state share it at another target).
-pub(crate) const MOST_LEVEL_PARAMETERS: usize = 1;
+/// The θs of `state`'s surviving builds (`parameters`) that get wider
+/// levels: for each reader of `state` (a candidate an edge from its builds
+/// reaches, `edges` before the chains), the smallest θ by state size
+/// ([`nominal_state_size`]) whose edge meets that reader's accuracy. A
+/// larger θ's levels and covers cost more in states, merges and memory
+/// for an accuracy a smaller one already meets, so no reader needs them.
+/// Example: one state read at relative error 0.05 every 60 s and at 0.005
+/// every 15 s: DDSketch α = 0.05 for the first and the smallest α meeting
+/// 0.005 for the second. Exact states (no θ): `[None]`.
+fn smallest_parameters_per_reader(
+    memo: &Memo,
+    state: MemoGroupId,
+    parameters: &[Option<SketchParams>],
+    edges: &[CandidateEdge],
+) -> Vec<Option<SketchParams>> {
+    let size = |theta: &Option<SketchParams>| nominal_state_size(theta.as_ref());
+    let mut smallest_per_reader: BTreeMap<CandidateForMemoGroupId, Option<SketchParams>> =
+        BTreeMap::new();
+    for edge in edges {
+        if edge.producer.group != state || edge.satisfies.is_err() {
+            continue;
+        }
+        let theta = memo
+            .candidate(edge.producer)
+            .logical_properties
+            .parameters()
+            .cloned();
+        if !parameters.contains(&theta) {
+            continue;
+        }
+        let smallest = smallest_per_reader
+            .entry(edge.consumer)
+            .or_insert(theta.clone());
+        if size(&theta) < size(smallest) {
+            *smallest = theta;
+        }
+    }
+    let mut chosen: Vec<Option<SketchParams>> = Vec::new();
+    for theta in smallest_per_reader.into_values() {
+        if !chosen.contains(&theta) {
+            chosen.push(theta);
+        }
+    }
+    chosen.sort_by(|a, b| size(a).total_cmp(&size(b)));
+    chosen
+}
+
+/// A θ's state size, to order θs of one family smallest first: its counters
+/// or items (a KLL's `k`, a Count-Min's width × depth, an HLL's 2^p
+/// registers, a DDSketch's buckets per unit of log range, `1 / α`). An
+/// exact state (`None`) is 0. Only the order within one family matters.
+fn nominal_state_size(parameters: Option<&SketchParams>) -> f64 {
+    let Some(parameters) = parameters else {
+        return 0.0;
+    };
+    match parameters {
+        SketchParams::Kll { k } | SketchParams::Kmv { k } => f64::from(*k),
+        SketchParams::DDSketch { alpha } => 1.0 / alpha.max(f64::MIN_POSITIVE),
+        SketchParams::Hll { precision } => 2f64.powi(i32::from(*precision)),
+        SketchParams::Cms { width, depth } | SketchParams::CountSketch { width, depth } => {
+            f64::from(*width) * f64::from(*depth)
+        }
+        SketchParams::CmsWithHeap {
+            width,
+            depth,
+            heap_size,
+        }
+        | SketchParams::CountSketchWithHeap {
+            width,
+            depth,
+            heap_size,
+        } => f64::from(*width) * f64::from(*depth) + f64::from(*heap_size),
+        SketchParams::UnivMon {
+            heap_size,
+            sketch_rows,
+            sketch_cols,
+            layers,
+        } => {
+            f64::from(*layers)
+                * (f64::from(*sketch_rows) * f64::from(*sketch_cols) + f64::from(*heap_size))
+        }
+        SketchParams::Hydra(_) => f64::MAX,
+    }
+}
 
 /// A state group's evaluation grid, the gcd of its readers' periods
 /// (`evaluation_period_ms_per_query`); `None` when one reader's is unknown
@@ -202,16 +281,17 @@ fn state_evaluation_grid_ms(periods_ms: &BTreeMap<usize, Option<u64>>) -> Option
 /// (W the state's range), narrowest first. Each is the chain group
 /// `SummaryTumblingWindowChain[C](X)` with one `SummaryMergeWindows[C]`
 /// candidate over the next narrower level per θ (built only from the
-/// narrower level, never from the rows), and each nested prefix of the
-/// levels, $\{C_1, w\}, \{C_2, C_1, w\}, \ldots$, is a `TimeRangeCover(W)`
-/// group over them, widest first, with a `SummaryMerge` over it in the
-/// state group. At most [`MOST_WIDER_LEVELS`] levels;
+/// narrower level, never from the rows), and two `TimeRangeCover(W)`
+/// groups, over the first wider level and over all of them (widest first),
+/// each with a `SummaryMerge` over it in the state group, each for the θs of `level_parameters` (the smallest each
+/// reader accepts). At most [`MOST_WIDER_LEVELS`] levels;
 /// only over a chain $G_w$ whose width divides the state's evaluation grid
 /// `state_grid_ms` (a cover over any other would fail Pass 2's grid check:
 /// its edges are read from $G_w$); only for a range with no `TimeShift`.
 /// Example: `quantile_over_time(0.99, m[1h])` every 15 s: levels 1 min,
-/// 5 min and 15 min over the 15 s chain (not 1 h: 2 h > 1 h), and three
-/// covers; read every 15 s and every 60 s, none over the 60 s chain.
+/// 5 min and 15 min over the 15 s chain (not 1 h: 2 h > 1 h), and covers
+/// over (1 min, 15 s) and over the four; read every 15 s and every 60 s, none over the 60 s
+/// chain.
 fn add_wider_levels(
     memo: &mut Memo,
     state: MemoGroupId,
@@ -253,6 +333,7 @@ fn add_wider_levels(
                 widths[widths.len() - 1],
             ];
         }
+        let widths_count = widths.len();
         // Levels narrowest first; each built from the one before.
         let mut levels = vec![narrowest];
         for width in widths {
@@ -263,10 +344,28 @@ fn add_wider_levels(
                 tumbling_window_width_ms: width,
             });
             levels.push(level);
-            let cover = memo.find_or_add_group(Operator::NonASAP(NonASAPOp::TimeRangeCover {
+            // Covers over the first wider level and over all of them: the
+            // shortest keeps the least memory, the longest the fewest
+            // merges per step; a middle one (with three levels) rarely
+            // wins over both and grows the selection per context and θ.
+            let widest_so_far = levels.len() - 1;
+            if widest_so_far != 1 && widest_so_far != widths_count {
+                for theta in level_parameters {
+                    add_candidate_if_output_matches(
+                        memo,
+                        level,
+                        merge_windows.clone(),
+                        theta.clone(),
+                        OriginOfCandidateForMemoGroup::MultiLevelWindows,
+                    )?;
+                }
+                continue;
+            }
+            let cover_expression = Operator::NonASAP(NonASAPOp::TimeRangeCover {
                 range: std::time::Duration::from_millis(path.window_ms),
                 levels: levels.iter().rev().copied().collect(),
-            }))?;
+            });
+            let cover = memo.find_or_add_group(cover_expression.clone())?;
             let merge = Operator::ASAP(ASAPOp::SummaryMerge {
                 children: vec![cover],
                 group_by: None,
@@ -274,7 +373,7 @@ fn add_wider_levels(
             for theta in level_parameters {
                 for (group, operator) in [
                     (level, merge_windows.clone()),
-                    (cover, memo.groups()[cover.0 as usize].expression.clone()),
+                    (cover, cover_expression.clone()),
                     (state, merge.clone()),
                 ] {
                     add_candidate_if_output_matches(

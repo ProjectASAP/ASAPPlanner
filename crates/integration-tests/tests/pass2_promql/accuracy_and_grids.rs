@@ -114,13 +114,10 @@ fn wider_levels_feed_only_covers(logical: &LogicalASAPMemoCandidates) {
                 if !is_wider_level(&memo.groups()[child.0 as usize]) {
                     continue;
                 }
-                let ok = match &candidate.expression.operator {
-                    Operator::ASAP(ASAPOp::SummaryMergeWindows { .. }) => true,
-                    Operator::NonASAP(asap_types::ir::NonASAPOp::TimeRangeCover {
-                        levels, ..
-                    }) => input + 1 < levels.len(),
-                    _ => false,
-                };
+                let ok = candidate
+                    .expression
+                    .operator
+                    .reads_input_off_the_grid(input);
                 assert!(ok, "G{index} reads wider level G{}: {candidate:?}", child.0);
             }
         }

@@ -51,8 +51,8 @@ fn covers_merged_by(memo: &Memo, state: MemoGroupId) -> BTreeSet<Vec<u64>> {
 /// T3. `quantile_over_time(0.99, m[1h])` every 15 s: chain groups at 15 s,
 /// 1 min, 5 min and 15 min, not 1 h (2 · 1 h > 1 h). Each wider level is
 /// built only from the next narrower one, a `SummaryMergeWindows` per θ,
-/// never from the rows; the state group merges over a cover per nested
-/// prefix of the levels, each holding the 15 s level.
+/// never from the rows; the state group merges over two covers: over the
+/// first wider level and over all of them, widest first.
 #[test]
 fn a_long_range_gets_wider_levels() {
     let mut memo = Memo::new(&DataWorkload::default());
@@ -95,11 +95,7 @@ fn a_long_range_gets_wider_levels() {
     }
     assert_eq!(
         covers_merged_by(memo, state),
-        BTreeSet::from([
-            vec![60_000, 15_000],
-            vec![300_000, 60_000, 15_000],
-            vec![900_000, 300_000, 60_000, 15_000],
-        ])
+        BTreeSet::from([vec![60_000, 15_000], vec![900_000, 300_000, 60_000, 15_000],])
     );
 }
 

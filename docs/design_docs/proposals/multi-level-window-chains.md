@@ -86,8 +86,9 @@ What exists and why it does not help:
    windows that tile `(T − W, T]` exactly: the widest whole windows inside the
    range, then, in each uncovered edge, the next level's whole windows, down to
    the narrowest level. The state group `SummaryAgg(TimeRange(W, X))` gets
-   `SummaryMerge` over the cover as a candidate, one per nested prefix of the
-   levels: {1 min, 15 s}, {5 min, 1 min, 15 s}, {15 min, 5 min, 1 min, 15 s}.
+   `SummaryMerge` over each of two covers as candidates: over the first
+   wider level, {1 min, 15 s}, and over all of them, {15 min, 5 min, 1 min,
+   15 s}.
 4. **Cost.** The cover's selected windows per step are the mean, over the
    evaluation times of the reader it runs for (its context's grid), of the
    cover's window count (closed form below), not rounded; a `SummaryMerge`
@@ -202,8 +203,9 @@ merges the same kind of states, only fewer and wider.
 | KLL | Not bit-identical (compaction depends on merge order), but keeps its rank bound: the bound holds for any merge tree. |
 | Heap top-k, UnivMon entropy | Not offered, as for rollups today (no merged guarantee). |
 
-**Complexity (planner).** For each chain group: at most 3 levels and one
-cover per nested prefix, each for one θ. Planning time over the 56
+**Complexity (planner).** For each chain group: at most 3 levels and two
+covers, each for the smallest θ each reader of the state accepts (one θ when
+the readers share a target). Planning time over the 56
 snapshot workloads is in the PR body (before and after the caps).
 
 ## 4. Code interface
@@ -213,45 +215,82 @@ snapshot workloads is in the PR body (before and after the caps).
  pub enum ASAPOp<C> {
      SummaryTumblingWindowChain { child: C, summary_type: FieldDataType, input: SummaryUpdate,
          reduction: Reduction, filter: Option<Predicate<C>>, tumbling_window_width_ms: u64 },
-+    /// A chain of wider tumbling windows built from a narrower chain `child`:
-+    /// window `(k·w, (k+1)·w]` is the merge of `child`'s windows inside it.
-+    /// `child`'s width divides `tumbling_window_width_ms`. Same output schema
-+    /// as `child`; a candidate of the group `SummaryTumblingWindowChain[w](X)`.
++    /// Wider windows built from a narrower chain `child`: window `(k·w, (k+1)·w]`
++    /// is the merge of `child`'s windows inside it, per key. A candidate of the
++    /// group `SummaryTumblingWindowChain[w](X)`; Stage 2 places it at ingestion time.
 +    SummaryMergeWindows { child: C, tumbling_window_width_ms: u64 },
  }
 
  // crates/types/src/ir/operator/non_asap.rs
  pub enum NonASAPOp<C> {
-     TimeRange { range: Duration, kind: TimeRangeKind, child: C },
-+    /// The windows of `levels` (chains, or `TimeShift`s over chains, widest
-+    /// first, each width dividing the previous) that tile `(T − range, T]`:
-+    /// the widest whole windows inside it, narrower ones at the edges.
+     TimeShift { shift: TimeShift, child: C },
++    /// The windows of `levels` (chains, widest first, each width a multiple of
++    /// the next) that tile `(T − range, T]`: widest whole windows, narrower edges.
 +    TimeRangeCover { range: Duration, levels: Vec<C> },
+ }
+
+ // crates/types/src/ir/operator/node.rs
+ impl<C> Operator<C> {
++    /// Whether it reads input `input` off its own evaluation grid on purpose: a
++    /// `SummaryMergeWindows`'s narrower chain, a cover's wider levels. Pass 2's grid
++    /// check and Stage 3's delivery check exempt exactly these; Stage 3 accepts
++    /// such an input only when stored at ingestion time (epoch-anchored).
++    pub fn reads_input_off_the_grid(&self, input: usize) -> bool;
+ }
+
+ // crates/types/src/ir/operator/kind.rs
+ pub enum OperatorKind {
++    TimeRangeCover,
++    SummaryMergeWindows,
  }
 
  // crates/types/src/stages/logical/candidate/mod.rs
  pub enum OriginOfCandidateForMemoGroup {
      TumblingWindows,
-+    /// A wider chain level and the covers over levels.
++    /// A wider chain level, a cover over levels, or a merge over a cover.
 +    MultiLevelWindows,
  }
 
  // crates/types/src/ir/operator/tumbling_window_chain.rs
-+/// The windows that tile `(start_ms, end_ms]` with `level_widths_ms`
-+/// (widest first): `(level index, window_end_ms)` per window, oldest first.
-+pub fn cover_windows(start_ms: i64, end_ms: i64, level_widths_ms: &[u64]) -> Vec<(usize, i64)>;
-+/// Mean `cover_windows` count over the evaluation times `k · step_ms`.
-+pub fn mean_cover_windows(range_ms: u64, offset_ms: i64, step_ms: u64, level_widths_ms: &[u64]) -> f64;
++/// One level of a cover: the cover's range, its levels' widths and this level's index.
++pub struct CoverLevel { pub range_ms: u64, pub level_widths_ms: Vec<u64>, pub level: usize }
++/// An interval off the narrowest level's grid: no exact cover.
++pub struct CoverOffTheGrid { pub start_ms: i64, pub end_ms: i64, pub narrowest_ms: u64 }
++/// The windows tiling `(start_ms, end_ms]` (widest first): `(level, window_end_ms)`, oldest first.
++pub fn cover_windows(start_ms: i64, end_ms: i64, level_widths_ms: &[u64]) -> Result<Vec<(usize, i64)>, CoverOffTheGrid>;
++/// Mean windows taken per level at the evaluation times of `grid` (closed form).
++pub fn mean_cover_windows_per_level(range_ms: u64, grid: EvaluationGrid, level_widths_ms: &[u64]) -> Vec<f64>;
+
+ // crates/cost/src/node/usage/mod.rs
+-pub fn node_resource_usage_and_cost<'a>(node: &'a PhysicalASAPDAGNode, producers: &[ProducerOutput<'a>], rate: (u64, f64), window_ms: Option<u64>, data: &DataWorkload, settings: &'a CostInputs) -> Result<NodeResourceUsageAndCost<'a>, AnalyticalCostError>;
++/// `evaluation_grid`: the grid the node runs at (its readers'); a cover is charged its mean windows there.
++pub fn node_resource_usage_and_cost<'a>(node: &'a PhysicalASAPDAGNode, producers: &[ProducerOutput<'a>], rate: (u64, f64), window_ms: Option<u64>, evaluation_grid: Option<EvaluationGrid>, data: &DataWorkload, settings: &'a CostInputs) -> Result<NodeResourceUsageAndCost<'a>, AnalyticalCostError>;
+ pub struct ProducerOutput<'a> {
+-    pub tumbling_windows: u64,
++    /// A cover's is its mean windows per evaluation, not a whole number.
++    pub tumbling_windows: f64,
+ }
+
+ // crates/executor/src/operators (time_range.rs)
+ impl Operator {
++    /// Keep only the windows a cover takes from one of its levels.
++    pub fn with_cover_level(self, cover_level: CoverLevel) -> Result<Self, Error>;
++    /// Tumbling-window ends anchored at the epoch, not at the range's end.
++    pub fn with_tumbling_window_ends_from_epoch(self, width_ms: i64) -> Result<Self, Error>;
+ }
 ```
 
-Pass 2: `add_chain_groups` gains a step after the existing one,
-`add_wider_levels`, in `rules/chains.rs`. Cost: `selected_tumbling_windows`
-handles `TimeRangeCover` through `mean_cover_windows`; `SummaryMergeWindows` is
-charged one merge per narrower state plus the emit charge per wider state.
-Stage 2 places `SummaryMergeWindows` like a chain (ingestion time, materialized
-across evaluations). Stage 3: no change. The executor implements both
-operators, and the cover's view request becomes one window range per level and
-edge.
+Pass 2: `add_chain_groups` adds the wider levels and one cover per chain
+(`add_wider_levels`, `rules/chains.rs`), for the θs each reader of the state
+accepts at least size. Cost: a cover is charged its mean windows on its
+readers' grid; `SummaryMergeWindows` one merge per narrower state plus the
+emit charge per wider state, at ingestion time. Stage 2 places
+`SummaryMergeWindows` only at ingestion time. Stage 3 costs a cover and its
+readers at each context's grid and accepts a cover's wider level only when
+stored at ingestion time. The executor runs both operators; a slot read only
+by covers fetches the union of the windows they take from it. Retention: each
+level keeps its readers' whole range back from the newest evaluation (a
+store keeps a contiguous span; the cover's oldest edge is `W` back).
 
 **Deployments without the operators.** A runtime that cannot run them
 lists both in `excluded_candidates`: `[{"operator": "SummaryMergeWindows"},
@@ -282,9 +321,19 @@ not enough: a cover may still read a coarser chain built from the rows
    always read from it, so wider levels may be off the grid (5 min under a
    15 s grid). Pass 2's grid check and Stage 3's delivery check exempt a
    cover's wider levels and a `SummaryMergeWindows`'s input.
-6. **Nested prefixes only.** Pass 2 offers one cover per prefix of the
-   admitted widths (k covers for k widths), not every subset (2^k). On the
-   section 1 workload Stage 3 picks the longest prefix.
+6. **Two covers: the shortest and the longest prefix.** Pass 2 offers a
+   cover over the first wider level (least memory) and one over every
+   admitted level (fewest merges per step), not one per prefix (k) or per
+   subset (2^k): each further cover multiplies the selection's size per
+   context and θ, and the middle prefix of three rarely wins over both.
+   Offering only the longest made one counter workload 3% dearer (its
+   plan read the 1 min level alone).
+6b. **Level θs per reader.** Levels and the cover are built for, per
+   reader of the state, the smallest θ (by state size) whose edge meets
+   that reader's accuracy, read from Pass 2's edges before the chain rule.
+   A larger θ costs more for an accuracy a smaller one meets; taking only
+   the smallest surviving θ instead left a stricter reader without a
+   cover (+53% on one state read at 0.05 and at 0.005).
 7. **A wider level is built only from the next narrower level.** A from-rows
    build adds one row update per level (100,000 per second here) against
    about 870 merges per second; it is not offered.
@@ -309,7 +358,7 @@ Each test is written before the code and fails on main for the reason given.
 | T1 | `cover_windows_tile_the_range` (types) | For levels {5 min, 15 s}, {5 min, 1 min, 15 s} and {15 min, 5 min, 1 min, 15 s}, every `T` on the 15 s grid over one day, `W` ∈ {1 h, 57.5 min, 30 min}: the windows are disjoint, inside `(T − W, T]`, and their union is the range. | `cover_windows` does not exist. |
 | T2 | `cover_counts_match_the_design_table` (types) | `T` = 100 h + 105 s, {5 min, 15 s}: 13 + 11 + 7 = 31 windows; mean windows per 15 s step 30.05, 18.05 and 12.02 for the three level sets at `W` = 1 h. | As T1. |
 | T2b | `closed_form_means_equal_counted_means`, `an_interval_off_the_narrowest_grid_is_refused` (types) | The closed-form means equal counts over every evaluation time, for ranges below and above twice the widest width, several periods and phases; an interval off the narrowest grid is an error. | Added after review. |
-| T3 | `a_long_range_gets_wider_levels` (stage1-pass2) | `quantile_over_time(0.99, data[1h])`, step 15 s: chain groups at 15 s, 1 min, 5 min, 15 min (not 1 h: `2·C ≤ W`); each wider group's only candidates are `SummaryMergeWindows` over the next narrower group; the state group merges over one cover per nested prefix. | Pass 2 adds only the 15 s chain. |
+| T3 | `a_long_range_gets_wider_levels` (stage1-pass2) | `quantile_over_time(0.99, data[1h])`, step 15 s: chain groups at 15 s, 1 min, 5 min, 15 min (not 1 h: `2·C ≤ W`); each wider group's only candidates are `SummaryMergeWindows` over the next narrower group; the state group merges over covers over (1 min, 15 s) and over all four levels. | Pass 2 adds only the 15 s chain. |
 | T4 | `a_short_range_gets_no_wider_level` (stage1-pass2) | `data[1m]` step 15 s: only the 15 s chain. | Passes on main; guards against regressions. |
 | T5 | `wider_levels_need_a_merging_summary` (stage1-pass2) | An `irate` state (no merge) over an hour gets no chain and no level. | Passes on main; guards the capability rule. |
 | T6 | `cover_merge_is_charged_its_mean_windows` (integration-tests) | The section 1 plan's merge is charged 120,000 states into 10,000 per step, × 16.0667/s; each `SummaryMergeWindows` is charged the states it merges per second at ingestion time. | Neither node is costed. |

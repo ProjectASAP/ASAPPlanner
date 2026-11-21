@@ -148,8 +148,8 @@ pub fn mean_cover_windows_per_level(
             let residues = width / g;
             // The residues of T and of T − W modulo `width`.
             let first_t = grid.phase_ms % g;
-            let first_start =
-                (grid.phase_ms + width * (range_ms / width + 1) - range_ms % width) % g;
+            // T − W ≡ φ − W (mod g).
+            let first_start = (first_t + g - range_ms % g) % g;
             let mean_residue = |first: u64| first as f64 + g as f64 * (residues - 1) as f64 / 2.0;
             if range_ms >= 2 * width {
                 // ⌈T − W⌉ − (T − W) = (width − (T − W) mod width) mod width.

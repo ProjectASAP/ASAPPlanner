@@ -55,8 +55,8 @@ use asap_cost::plan::execution_demand::{
     context_executions_per_second, executions_per_second as rate_of_materialized,
 };
 use asap_cost::{
-    node_resource_usage_and_cost_on_grid, output_interval_ms, raw_data_disk_cost_per_second,
-    CostInputs, NodeResourceUsageAndCost, ProducerOutput,
+    node_resource_usage_and_cost, output_interval_ms, raw_data_disk_cost_per_second, CostInputs,
+    NodeResourceUsageAndCost, ProducerOutput,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
@@ -836,7 +836,7 @@ fn cost_node<'a>(
         ExecutionTiming::QueryTime => scan_read_ms,
         ExecutionTiming::IngestionTime => ingestion_window_ms(physical, v),
     };
-    node_resource_usage_and_cost_on_grid(
+    node_resource_usage_and_cost(
         node,
         inputs,
         (1, per_second),

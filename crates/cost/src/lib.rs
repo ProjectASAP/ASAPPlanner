@@ -43,9 +43,8 @@ pub use model::{
 pub use node::cost_terms::{node_cost_terms, CostConstant, NodeCostTerms};
 pub use node::operator_statistics::EdgeStatistics;
 pub use node::usage::{
-    node_resource_usage_and_cost, node_resource_usage_and_cost_on_grid, output_interval_ms,
-    reads_one_batch_of, summary_type_name, NodeCost, NodeResourceUsageAndCost, PhaseTimes,
-    ProducerOutput,
+    node_resource_usage_and_cost, output_interval_ms, reads_one_batch_of, summary_type_name,
+    NodeCost, NodeResourceUsageAndCost, PhaseTimes, ProducerOutput,
 };
 pub use plan::cost::{
     close_together, ingest_decode_cpu_core_seconds_per_second, ingest_threads_building_copies,

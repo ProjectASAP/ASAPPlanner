@@ -224,6 +224,18 @@ async fn a_cover_reads_wider_levels_only_from_ingestion_time() {
     let (plan, _) = plan_installable(UserInput::new(&workload, FrontendInput::Promql, models))
         .await
         .unwrap();
+    // Nothing is stored at ingestion time over data at rest, so no cover
+    // can read a wider level: the plan has none, though a 60 s chain built
+    // at query time and kept across evaluations is offered.
+    assert!(
+        nodes_where(&plan, |operator| matches!(
+            operator,
+            Operator::NonASAP(NonASAPOp::TimeRangeCover { .. })
+        ))
+        .is_empty(),
+        "{:?}",
+        plan.dag.nodes
+    );
     for node in &plan.dag.nodes {
         let Operator::NonASAP(NonASAPOp::TimeRangeCover { levels, .. }) = &node.payload else {
             continue;

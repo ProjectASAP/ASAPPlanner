@@ -15,7 +15,7 @@ use crate::node::state_bytes::{sketch_state_bytes, state_bytes_per_row, StateInp
 use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
 use crate::{lookup_at_scale, StateFamily};
-use crate::{node_resource_usage_and_cost_on_grid, NodeResourceUsageAndCost, ProducerOutput};
+use crate::{node_resource_usage_and_cost, NodeResourceUsageAndCost, ProducerOutput};
 use crate::{
     CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind, ResourceUsage,
     MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
@@ -204,13 +204,15 @@ pub fn plan_cost(
         })
         .collect();
     // Each node's readers' evaluation grid: the gcd of the grids of the
-    // queries whose roots reach it (a cover is charged its windows over it).
+    // queries whose roots reach it, each its evaluation context's grid
+    // (`QueryWorkloadEntry::evaluation_grid`, the grid Stage 3's context
+    // of the query has; a cover is charged its windows over it).
     let mut grid_of: HashMap<PhysicalASAPNodeId, u64> = HashMap::new();
     for (query, &root) in dag.roots.iter().enumerate() {
         let Some(entry) = entries.get(query) else {
             continue;
         };
-        let period_ms = entry.evaluation_grid_ms();
+        let period_ms = entry.evaluation_grid().period_ms;
         let mut seen = std::collections::HashSet::new();
         let mut pending = vec![root];
         while let Some(id) = pending.pop() {
@@ -249,7 +251,7 @@ pub fn plan_cost(
             }
             ExecutionTiming::QueryTime => scan_read_ms(dag, node),
         };
-        let node_costed = node_resource_usage_and_cost_on_grid(
+        let node_costed = node_resource_usage_and_cost(
             node,
             &views,
             multipliers[&node.id],
@@ -260,7 +262,7 @@ pub fn plan_cost(
         )
         .map_err(|error| (node.id, error))?;
         if let Some(unstored) = one_batch_nodes.get(&node.id) {
-            let batch = node_resource_usage_and_cost_on_grid(
+            let batch = node_resource_usage_and_cost(
                 unstored,
                 &views,
                 multipliers[&node.id],

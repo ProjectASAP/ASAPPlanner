@@ -471,24 +471,14 @@ pub fn output_interval_ms<C>(payload: &Operator<C>, window_ms: Option<u64>) -> u
 /// it (one second of rows when it maintains no window). The formulas' CPU is scaled by
 /// `settings.frozen_calibration_factor` (1 when unset).
 ///
+/// `evaluation_grid` is the grid of the evaluation times the node runs at
+/// (its readers'; `None` when not one grid): a `TimeRangeCover` is charged
+/// its mean windows over those times. Example: a cover of 1 h over 5 min
+/// and 15 s windows read every 60 s takes 27.2 windows per evaluation,
+/// every 15 s 30.05.
+///
 /// [`executions_per_second`]: crate::plan::execution_demand::executions_per_second
 pub fn node_resource_usage_and_cost<'a>(
-    node: &'a asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode,
-    producers: &[ProducerOutput<'a>],
-    rate: (u64, f64),
-    window_ms: Option<u64>,
-    data: &DataWorkload,
-    settings: &'a CostInputs,
-) -> Result<NodeResourceUsageAndCost<'a>, AnalyticalCostError> {
-    node_resource_usage_and_cost_on_grid(node, producers, rate, window_ms, None, data, settings)
-}
-
-/// [`node_resource_usage_and_cost`] for a node run at the evaluation times
-/// of `evaluation_grid` (its readers' grid; `None` when not one grid): a
-/// `TimeRangeCover` is charged its mean windows over those times. Example:
-/// a cover of 1 h over 5 min and 15 s windows read every 60 s takes 27.2
-/// windows per evaluation, every 15 s 30.05.
-pub fn node_resource_usage_and_cost_on_grid<'a>(
     node: &'a asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode,
     producers: &[ProducerOutput<'a>],
     rate: (u64, f64),
