@@ -195,6 +195,37 @@ impl StateInputRows {
     };
 }
 
+/// [`sketch_state_bytes`] of a sketch still receiving values (the current
+/// window of a chain, a query-time build before it is sealed, a merge
+/// target): a DDSketch's stores as they grow
+/// ([`ddsketch_open_state_bytes`]); every other family as sealed.
+pub fn open_sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> u64 {
+    match params {
+        SketchParams::DDSketch { alpha } if *alpha > 0.0 && *alpha < 1.0 => {
+            ddsketch_open_state_bytes(*alpha, input_rows)
+        }
+        SketchParams::Hydra(hydra) => {
+            open_sketch_state_bytes(&hydra.per_subpopulation(), input_rows)
+        }
+        _ => sketch_state_bytes(params, input_rows),
+    }
+}
+
+/// [`summary_state_bytes`] of a state still receiving values
+/// ([`open_sketch_state_bytes`]).
+pub fn open_summary_state_bytes(
+    family: &FieldDataType,
+    parameters: Option<&SketchParams>,
+    input_rows: StateInputRows,
+) -> Result<u64, AnalyticalCostError> {
+    match (family, parameters) {
+        (FieldDataType::Sketch(..), Some(parameters)) => {
+            Ok(open_sketch_state_bytes(parameters, input_rows))
+        }
+        _ => summary_state_bytes(family, parameters, input_rows),
+    }
+}
+
 /// [`summary_state_bytes`] of one sketch. With [`StateInputRows::UNKNOWN`], the bytes are also the
 /// size the measured table interpolates between
 /// (`crate::measured`).
@@ -244,15 +275,9 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
         SketchParams::DDSketch { alpha } if !(*alpha > 0.0 && *alpha < 1.0) => {
             std::mem::size_of::<DdSketch>() as u64
         }
-        // Over the declared magnitude range, or the one assumed when none
-        // is declared (`assumed_magnitude_range`).
-        SketchParams::DDSketch { alpha } => ddsketch_state_bytes(
-            *alpha,
-            input_rows,
-            input_rows
-                .value_magnitude_range
-                .or_else(|| assumed_magnitude_range(params, input_rows)),
-        ),
+        // Over the declared magnitude range, or a wide spread within the
+        // one assumed when none is declared (`assumed_magnitude_range`).
+        SketchParams::DDSketch { alpha } => ddsketch_state_bytes(*alpha, input_rows),
         SketchParams::Hll { precision, .. } => {
             HyperLogLog::<Classic>::estimated_memory_bytes(usize::from(*precision)) as u64
         }
@@ -394,53 +419,98 @@ const DDSKETCH_ASSUMED_MAGNITUDE_RANGE: ValueMagnitudeRange = ValueMagnitudeRang
 };
 
 /// The ratio of the largest to the smallest of `rows` values a DDSketch
-/// state is assumed to span when the workload declares nothing about its
-/// values: `rows` samples of an exponential distribution, as latencies
-/// roughly are, whose largest is about `H_n` times their mean and whose
-/// smallest has a log about `ln(mean / n) − γ`, so a ratio of about
-/// `n · H_n · e^γ`. Example: 10 values span a ratio of 52, 3,000 values
-/// one of 4.6e4.
+/// state is charged for when the workload declares nothing about its
+/// values: a wide-spread margin, the expected spread of `rows` draws of a
+/// lognormal of σ = 2.5 (`exp(σ · E[range of n standard normals])`, the
+/// range by Blom's approximation `2 Φ⁻¹((n − 0.375) / (n + 0.25))`),
+/// capped by the assumed nine decades. Example: 10 values span a ratio of
+/// 2.3e3, 100 values one of 2.7e5, 600 one of 4.8e6.
 ///
-/// The default when the data workload declares nothing about the values,
-/// not workload evidence. At α = 0.01, values with a floor (lognormal
-/// latencies, σ = 1) span less and are over-charged 1.1x; a narrow gauge
-/// (100 ± 10), whose states hold one first block of buckets, 2.4x at 10
-/// values per state to 5.6x at 36,000; values with a heavier tail than an
-/// exponential (Pareto) are under-charged.
-fn exponential_values_magnitude_ratio(rows: u64) -> f64 {
-    let n = rows.max(1) as f64;
-    let harmonic = n.ln() + std::f64::consts::EULER_GAMMA + 1.0 / (2.0 * n);
-    n * harmonic * std::f64::consts::EULER_GAMMA.exp()
+/// The default when the data workload declares nothing, not workload
+/// evidence. It is wider than latency-like (exponential) values spread,
+/// which it charges 1.5–2.0x, so that a lognormal of σ = 2 is not
+/// under-charged. It stops there: at σ = 3 a 10 Hz latency quantile's
+/// stored DDSketch windows, measured cheaper than the exact plan
+/// (`default_cost_plan_ranking`), would be priced above it. The widest
+/// spreads (Zipf integers, values log-uniform over seven decades) are
+/// under-charged at a few rows per state (0.6–0.7x at 10) unless their
+/// range is declared, which floors their spread (see
+/// [`ddsketch_state_bytes`]).
+fn wide_spread_values_magnitude_ratio(rows: u64) -> f64 {
+    const SIGMA: f64 = 2.5;
+    if rows <= 1 {
+        return 1.0;
+    }
+    let n = rows as f64;
+    let expected_range = 2.0 * standard_normal_quantile((n - 0.375) / (n + 0.25));
+    (SIGMA * expected_range).exp()
 }
 
-/// The bytes a DDSketch of relative accuracy `alpha` is expected to hold
-/// after folding `input_rows`, as the executor keeps it sealed (it shrinks
-/// every DDSketch when it seals a window, `DdSketch::shrink_to_fit`): its
-/// struct, and per sign it holds (one when its values are proven
-/// non-negative or it folds one row, else two) one 8-byte counter per
-/// bucket its values span.
+/// Φ⁻¹(p), the standard normal quantile, for p in (0, 1) (Acklam's
+/// rational approximation, relative error below 1.2e-9).
+fn standard_normal_quantile(p: f64) -> f64 {
+    const A: [f64; 6] = [
+        -3.969_683_028_665_376e1,
+        2.209_460_984_245_205e2,
+        -2.759_285_104_469_687e2,
+        1.383_577_518_672_69e2,
+        -3.066_479_806_614_716e1,
+        2.506_628_277_459_239,
+    ];
+    const B: [f64; 5] = [
+        -5.447_609_879_822_406e1,
+        1.615_858_368_580_409e2,
+        -1.556_989_798_598_866e2,
+        6.680_131_188_771_972e1,
+        -1.328_068_155_288_572e1,
+    ];
+    const C: [f64; 6] = [
+        -7.784_894_002_430_293e-3,
+        -3.223_964_580_411_365e-1,
+        -2.400_758_277_161_838,
+        -2.549_732_539_343_734,
+        4.374_664_141_464_968,
+        2.938_163_982_698_783,
+    ];
+    const D: [f64; 4] = [
+        7.784_695_709_041_462e-3,
+        3.224_671_290_700_398e-1,
+        2.445_134_137_142_996,
+        3.754_408_661_907_416,
+    ];
+    let p = p.clamp(1e-300, 1.0 - 1e-16);
+    let tail = |q: f64| {
+        (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
+    };
+    if p < 0.024_25 {
+        tail((-2.0 * p.ln()).sqrt())
+    } else if p > 1.0 - 0.024_25 {
+        -tail((-2.0 * (1.0 - p).ln()).sqrt())
+    } else {
+        let q = p - 0.5;
+        let r = q * q;
+        (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
+            / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
+    }
+}
+
+/// The buckets a DDSketch of relative accuracy `alpha` over `input_rows`
+/// is expected to span, per store, and its stores (per sign it holds: one
+/// when its values are proven non-negative or it folds one row, else two).
 ///
-/// The span is that of the values the state folds, not of the column: the
-/// smaller of the magnitude ratio its rows are assumed to span
-/// ([`exponential_values_magnitude_ratio`]) and the ratio of
-/// `column_range`, its column's declared `column_magnitudes`, or the range
-/// [`assumed_magnitude_range`] assumes when none is declared; without known
-/// rows, the ratio of `column_range`. An open sketch (one a query-time
-/// merge folds windows into) holds more, its store grown 128 slots at a
-/// time; this leaves that uncharged, as KLL's pricing leaves its open
-/// buffer.
-///
-/// Example: at α = 0.01, 10 exponential samples span a ratio of 52, 198
-/// buckets: 144 + 8 × 198 = 1,728 bytes; 3,000 samples span 537 buckets,
-/// 4,440 bytes. A gauge declared within [90, 110] spans a ratio of 1.22,
-/// 11 buckets: 232 bytes for any number of rows.
-fn ddsketch_state_bytes(
-    alpha: f64,
-    input_rows: StateInputRows,
-    column_range: Option<ValueMagnitudeRange>,
-) -> u64 {
+/// The span is that of the values one state folds, not of the column: the
+/// wide-spread margin of its rows ([`wide_spread_values_magnitude_ratio`]),
+/// capped by the column's declared range (`column_magnitudes`) or, when
+/// none is declared, by the assumed range ([`assumed_magnitude_range`]);
+/// without known rows, that range. A declared range also floors the span
+/// at the spread of the rows log-uniform over it, `ratio^((n − 1) / (n +
+/// 1))`, so values that fill it (Zipf integers, values over decades) are
+/// not under-charged at a few rows per state; per-series values narrower
+/// than their column (latencies of one service, levels of one series) are
+/// over-charged instead, which a measured table's bytes per state corrects.
+fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
     use asap_sketchlib::DdSketch;
-    let struct_bytes = std::mem::size_of::<DdSketch>() as u64;
     let sketch = DdSketch::new(alpha);
     // Buckets a ratio of `ratio` between the largest and smallest
     // magnitude spans, at least one.
@@ -460,17 +530,87 @@ fn ddsketch_state_bytes(
     let rows_per_store = input_rows
         .rows_per_state
         .map(|rows| rows.div_ceil(stores).max(1));
-    // The most the column's values span: its declared range, else the
-    // assumed one.
-    let column_ratio = column_range.map_or(f64::INFINITY, |range| range.magnitude_ratio());
-    let span = if rows_per_store == Some(1) {
-        1
-    } else {
-        buckets_spanned(rows_per_store.map_or(column_ratio, |rows| {
-            exponential_values_magnitude_ratio(rows).min(column_ratio)
-        }))
-    };
-    struct_bytes + stores * 8 * span
+    if rows_per_store == Some(1) {
+        return (1, stores);
+    }
+    let column_ratio = input_rows
+        .value_magnitude_range
+        .unwrap_or(DDSKETCH_ASSUMED_MAGNITUDE_RANGE)
+        .magnitude_ratio();
+    let ratio = rows_per_store.map_or(column_ratio, |rows| {
+        let capped = wide_spread_values_magnitude_ratio(rows).min(column_ratio);
+        match input_rows.value_magnitude_range {
+            // A declared range also floors the spread at that of `rows`
+            // values log-uniform over it, `ratio^((n − 1) / (n + 1))`, so a
+            // range the values do fill (Zipf integers, values over decades)
+            // is not under-charged at a few rows per state.
+            Some(_) => {
+                let n = rows as f64;
+                capped.max(column_ratio.powf((n - 1.0) / (n + 1.0)))
+            }
+            None => capped,
+        }
+    });
+    (buckets_spanned(ratio), stores)
+}
+
+/// The bytes a DDSketch of relative accuracy `alpha` holds sealed after
+/// folding `input_rows`, as the executor keeps a stored window (it shrinks
+/// every DDSketch when it seals a window, `DdSketch::shrink_to_fit`): its
+/// struct and one 8-byte counter per bucket each store spans
+/// ([`ddsketch_span`]). [`ddsketch_open_state_bytes`] prices one still
+/// receiving values or merges. A measured table's bytes per state
+/// (`memory_bytes_per_state`, fitted from a deployment's sealed states)
+/// replace this estimate.
+///
+/// How it compares with what a sealed `asap_sketchlib` sketch holds, at
+/// α = 0.01, the mean of 20 series of 10 to 36,000 values each (the bands
+/// `state_bytes::tests` pins):
+///
+/// | values | range declared | charged ÷ held |
+/// |---|---|---|
+/// | exponential (latency-like) | no | 1.5–2.0 |
+/// | exponential (latency-like) | the generator's [2.7e-8, 1104] | 1.8–5.1 |
+/// | lognormal σ = 1 | no | 2.3–2.5 |
+/// | lognormal σ = 2 | no | 1.2–1.3 |
+/// | log-uniform over 7 decades | no | 0.59–1.28 |
+/// | log-uniform over 7 decades | [0.001, 1e4] | 0.99–1.0 |
+/// | Zipf(1.1) integers in [1, 1e6] | no | 0.70–1.49 |
+/// | Zipf(1.1) integers in [1, 1e6] | [1, 1e6] | 1.0–1.01 |
+/// | narrow gauge 100 ± 10 | no | 15–35 |
+/// | narrow gauge 100 ± 10 | [90, 110] | 0.97–1.06 |
+/// | counter readings near 1e6 | no | 21–46 |
+/// | per-series levels ± 10%, levels over [1, 1e5] | no | 15–36 |
+/// | per-series levels ± 10%, levels over [1, 1e5] | [1, 1e5] | 18–21 |
+///
+/// A declared range never lets values that fill it be under-charged, and
+/// prices a narrow one (a gauge, a counter's readings) close; a narrow
+/// per-state spread within a wide column range (per-series levels, the
+/// benchmark's Zipf-scaled series) is over-charged. Where this estimate is
+/// far from a deployment's states, its measured table's bytes per state,
+/// fitted from its sealed states per family, replace it.
+///
+/// Example: at α = 0.01, a state of 10 values with no declared range is
+/// charged the spread 2.3e3, 387 buckets: 144 + 8 × 387 = 3,240 bytes. A
+/// gauge declared within
+/// [90, 110] spans a ratio of 1.22, 11 buckets: 232 bytes for any number
+/// of rows.
+fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
+    let (span, stores) = ddsketch_span(alpha, input_rows);
+    std::mem::size_of::<asap_sketchlib::DdSketch>() as u64 + stores * 8 * span
+}
+
+/// The bytes a DDSketch still receiving values holds (the current window
+/// of a chain, a query-time build, a merge target): its stores grow 128
+/// slots at a time, so per store one first block (1 KiB) plus a counter
+/// for each bucket beyond the first ([`ddsketch_span`]).
+fn ddsketch_open_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
+    use asap_sketchlib::DdSketch;
+    let struct_bytes = std::mem::size_of::<DdSketch>() as u64;
+    let block_bytes =
+        DdSketch::estimated_memory_bytes(alpha, 1, 1.0, 1.0, false) as u64 - struct_bytes;
+    let (span, stores) = ddsketch_span(alpha, input_rows);
+    struct_bytes + stores * (block_bytes + 8 * (span - 1))
 }
 
 #[cfg(test)]

@@ -574,10 +574,10 @@ fn the_objective_is_the_plan_cost_on_anchored_and_plain_queries_on_one_grid() {
 /// most one row in a batch narrower than 15 s, so at the 10 s default every
 /// row is a visit, the raw scan costs more than the views and the two
 /// plans are the same. With 30 min batches, a series has 120 rows in a
-/// batch, and reading them was cheaper than the views (4.7e5/s against
-/// 7.1e5/s) while stored DDSketch windows were priced at their open size;
-/// priced sealed (as the executor keeps them), the views are the cheapest
-/// plan, 2.5e5/s, with raw data kept or not.
+/// batch. Stored DDSketch windows priced sealed (as the executor keeps
+/// them), the views are the cheapest plan (4.3e5/s) with raw data kept or
+/// not; with memory priced 100x higher, reading the raw rows is cheaper
+/// and is selected.
 #[test]
 fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     let query = |query: &str| {
@@ -614,8 +614,7 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     // ingestion-time views over the arriving rows can answer them, the
     // kind of plan the objective's scale once led the solver to at 2,000x
     // the cost of the best. With raw data kept the selection can only cost
-    // less or the same; with sealed DDSketch windows the views are the
-    // cheapest either way.
+    // less or the same; here the views are the cheapest either way.
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..Default::default()
@@ -633,6 +632,39 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     assert!(
         plan_cost <= views_only_plan_cost,
         "selected {plan_cost} is above the ingestion-time views plan, {views_only_plan_cost}"
+    );
+    // When memory is priced 100x higher (each byte-second of the views'
+    // years of windows), reading the raw rows at query time beats the
+    // views: the selection costs strictly less than the views-only plan.
+    let mut costly_memory = settings.clone();
+    let CostModel::UsageOverTime(unit_costs) = &mut costly_memory.cost_model else {
+        unreachable!("the default cost model is cost model 1")
+    };
+    unit_costs.cost_per_memory_byte_second *= 100.0;
+    let raw_kept = PlanningModels::builtin()
+        .with_ignore_accuracy_guarantees(true)
+        .with_cost_inputs(&costly_memory);
+    let (raw_kept_plan, (_, raw_kept_plan_cost)) =
+        selected_plan_objective_and_plan_cost_with(&w, raw_kept, &costly_memory);
+    // The selection reads raw rows at query time.
+    assert!(
+        raw_kept_plan.nodes.iter().any(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
+            ) && node.output_state.timing == ExecutionTiming::QueryTime
+        }),
+        "memory at 100x: the selection scans no raw rows at query time"
+    );
+    let views_only = PlanningModels::builtin()
+        .with_ignore_accuracy_guarantees(true)
+        .with_cost_inputs(&costly_memory)
+        .with_deployment_capabilities(&capabilities);
+    let (_, (_, views_only_plan_cost)) =
+        selected_plan_objective_and_plan_cost_with(&ingesting, views_only, &costly_memory);
+    assert!(
+        raw_kept_plan_cost < views_only_plan_cost,
+        "memory at 100x: selected {raw_kept_plan_cost}, views {views_only_plan_cost}"
     );
 }
 

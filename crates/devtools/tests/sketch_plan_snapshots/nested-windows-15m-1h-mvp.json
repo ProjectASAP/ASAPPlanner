@@ -40,7 +40,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 6.35101400889e-6,
+      "cost_per_second": 6.76171244207e-6,
       "cpu_core_seconds_per_second": 0.489907833333,
       "per_node": {
         "0": {
@@ -53,28 +53,28 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 5.8858427139e-6,
+          "cost_per_second": 6.29604411442e-6,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.448586666667,
-          "detail": "build DDSketch in tumbling windows of 60000 ms for 10000 groups: 2000000 rows x 210 ops, 1000 group visits, 166.7 states emitted; x 1.0000/s; keeps 732000000 bytes",
+          "detail": "build DDSketch in tumbling windows of 60000 ms for 10000 groups: 2000000 rows x 210 ops, 1000 group visits, 166.7 states emitted; x 1.0000/s; keeps 1088640000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
         },
         "2": {
-          "cost_per_second": 1.23684015182e-9,
+          "cost_per_second": 1.23684022369e-9,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00011,
-          "detail": "time range 3600s: 60 tumbling windows of states; x 0.0167/s; holds 1200 bytes for 6.600 ms",
+          "detail": "time range 3600s: 60 tumbling windows of states; x 0.0167/s; holds 1768 bytes for 6.600 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "3": {
-          "cost_per_second": 2.83610943806e-7,
+          "cost_per_second": 2.84000239474e-7,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0251833333333,
-          "detail": "merge 600000 states into 10000; x 0.0167/s; holds 15520000 bytes for 1511.000 ms",
+          "detail": "merge 600000 states into 10000; x 0.0167/s; holds 28960000 bytes for 1511.000 ms",
           "multiplier": 1,
           "operator": "SummaryMerge",
           "timing": "query_time"
@@ -98,19 +98,19 @@
           "timing": "query_time"
         },
         "6": {
-          "cost_per_second": 3.09210037956e-10,
+          "cost_per_second": 3.09210055922e-10,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000275,
-          "detail": "time range 900s: 15 tumbling windows of states; x 0.0167/s; holds 1200 bytes for 1.650 ms",
+          "detail": "time range 900s: 15 tumbling windows of states; x 0.0167/s; holds 1768 bytes for 1.650 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "7": {
-          "cost_per_second": 7.24429529883e-8,
+          "cost_per_second": 7.25506898987e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00643333333333,
-          "detail": "merge 150000 states into 10000; x 0.0167/s; holds 14400000 bytes for 386.000 ms",
+          "detail": "merge 150000 states into 10000; x 0.0167/s; holds 28960000 bytes for 386.000 ms",
           "multiplier": 1,
           "operator": "SummaryMerge",
           "timing": "query_time"
@@ -136,11 +136,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 732483485.498,
+        "average_memory_bytes": 1089555618.91,
         "cpu_ops_per_second": 483507833.333,
         "disk_bytes": 0,
         "peak_cpu_cores": 3,
-        "peak_memory_bytes": 761922496,
+        "peak_memory_bytes": 1146563632,
         "scanned_bytes_per_second": 64000000.0
       }
     },
