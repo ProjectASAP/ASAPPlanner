@@ -331,7 +331,7 @@ fn quantile_at_10_hz_with_raw_data_keeps_stored_ddsketch_windows() {
 /// Per-series values of these modes may span much less than the column
 /// does; which plan is cheaper for them is for a measured table's bytes
 /// per state (fitted from the data plane's stored states) to settle. These
-/// pin the selection the floor gives.
+/// pin the selection the floor gives until calibration.
 #[test]
 fn quantile_at_10_hz_under_column_wide_declared_ranges_follows_the_floor() {
     use PlanKind::{ExactScan, StoredStates};
