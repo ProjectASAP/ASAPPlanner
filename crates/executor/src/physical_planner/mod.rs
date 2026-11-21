@@ -219,7 +219,7 @@ fn compile_internal(
                     view: (*view).clone(),
                     schema: output,
                     read_window,
-                    cover_level: cover_level_read(id, &graph),
+                    cover_reads: cover_reads_of(id, &graph),
                 },
             )?;
         } else if let Payload::NonASAP(NonASAPOp::Scan {
@@ -690,6 +690,7 @@ fn compile_internal(
                         vec![*level],
                         Operator::time_range(schema.clone(), time, 0, range_ms, None, None)?
                             .with_cover_level(CoverLevel {
+                                range_ms: range_ms as u64,
                                 level_widths_ms: widths.clone(),
                                 level: index,
                             })?,
@@ -2101,16 +2102,18 @@ mod tests;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
-/// The cover level `id` is read as, when every compiled reader of it is a
-/// `TimeRangeCover` reading it as the same level: its levels' widths and
-/// `id`'s index among them. A query run then reads only the windows the
-/// cover takes from `id` (`Scan::materialized_view`). `None` when another
-/// operator reads it, or covers read it as different levels.
-fn cover_level_read(id: NodeId, graph: &CompileGraph<'_>) -> Option<CoverLevel> {
+/// How the covers reading `id` read it, when every compiled reader of it
+/// is a `TimeRangeCover`: per cover, its range, its levels' widths and
+/// `id`'s index among them (each distinct read once). A query run then
+/// reads only the union of the windows those covers take from `id`
+/// (`Scan::materialized_view`). `None` when another operator reads it.
+/// Example: a 1 h and a 70 min cover over 5 min and 15 s levels: two
+/// reads of the 15 s level, whose edge windows differ.
+fn cover_reads_of(id: NodeId, graph: &CompileGraph<'_>) -> Option<Vec<CoverLevel>> {
     let readers = graph.consumers.get(&id)?;
-    let mut read_as: Option<CoverLevel> = None;
+    let mut reads: Vec<CoverLevel> = Vec::new();
     for reader in readers {
-        let Payload::NonASAP(NonASAPOp::TimeRangeCover { levels, .. }) =
+        let Payload::NonASAP(NonASAPOp::TimeRangeCover { range, levels }) =
             &graph.nodes.get(reader)?.payload
         else {
             return None;
@@ -2124,15 +2127,14 @@ fn cover_level_read(id: NodeId, graph: &CompileGraph<'_>) -> Option<CoverLevel> 
                     .and_then(|node| node.payload.chain_tumbling_window_width_ms())
             })
             .collect::<Option<Vec<u64>>>()?;
-        let level = levels.iter().position(|&level| level as NodeId == id)?;
-        let this = CoverLevel {
+        let read = CoverLevel {
+            range_ms: u64::try_from(range.as_millis()).ok()?,
             level_widths_ms,
-            level,
+            level: levels.iter().position(|&level| level as NodeId == id)?,
         };
-        match &read_as {
-            Some(known) if *known != this => return None,
-            _ => read_as = Some(this),
+        if !reads.contains(&read) {
+            reads.push(read);
         }
     }
-    read_as
+    (!reads.is_empty()).then_some(reads)
 }

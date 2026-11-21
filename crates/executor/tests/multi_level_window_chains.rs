@@ -697,3 +697,107 @@ fn a_cover_off_its_grid_is_refused() {
         .unwrap_or_default();
     assert!(error.contains("not on the grid"), "{error:?}");
 }
+
+/// Covers of `ranges_ms` over one 5 min level and one 15 s chain (exact
+/// sums), and nothing else reading the levels; each step's sums per cover
+/// and the sums computed directly over the raw samples, every 15 s over
+/// the last 5 minutes of 3 h.
+/// One cover's answer at one step: `(T, range in ms, answered, expected)`.
+type CoverAnswer = (i64, i64, BTreeMap<String, f64>, BTreeMap<String, f64>);
+
+fn covers_only(ranges_ms: &[i64]) -> Vec<CoverAnswer> {
+    let narrow = chain(NARROW_MS, Built::Sum);
+    let wide = node(Operator::ASAP(ASAPOp::SummaryMergeWindows {
+        child: narrow.clone(),
+        tumbling_window_width_ms: WIDE_MS as u64,
+    }));
+    let covers: Vec<Rc<OperatorNode>> = ranges_ms
+        .iter()
+        .map(|&range_ms| {
+            finalized_merge(
+                node(Operator::NonASAP(NonASAPOp::TimeRangeCover {
+                    range: Duration::from_millis(range_ms as u64),
+                    levels: vec![wide.clone(), narrow.clone()],
+                })),
+                Built::Sum,
+            )
+        })
+        .collect();
+    let roots: Vec<QueryRoot> = covers.iter().cloned().map(QueryRoot::Operator).collect();
+    let (mut dag, nodes) =
+        planner_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(
+            &roots,
+        )
+        .unwrap();
+    let levels = vec![
+        (id_of(&nodes, &narrow), NARROW_MS),
+        (id_of(&nodes, &wide), WIDE_MS),
+    ];
+    for node in dag
+        .nodes
+        .iter_mut()
+        .filter(|node| levels.iter().any(|(id, _)| *id == node.id))
+    {
+        node.retention_ms = Some(3 * HOUR_MS as u64);
+    }
+    let ids: Vec<u64> = levels.iter().map(|(id, _)| *id as u64).collect();
+    let views = views_at(&mut dag, &ids).unwrap();
+    let cover_ids: Vec<u64> = covers
+        .iter()
+        .map(|cover| id_of(&nodes, cover) as u64)
+        .collect();
+    let plan = Levels {
+        dag,
+        levels,
+        cover: cover_ids[0] as usize,
+        flat: cover_ids[0] as usize,
+        views,
+    };
+    let mut store = Arc::new(store_with_samples());
+    refresh_levels(&plan, &mut store, 3 * HOUR_MS);
+    let query = compile(&plan.dag, &plan.views, &cover_ids).unwrap();
+    let mut answers = Vec::new();
+    let mut t = 3 * HOUR_MS - WIDE_MS;
+    while t <= 3 * HOUR_MS {
+        let context = RunContext::new(
+            Scope::Query {
+                evaluation_time_ms: t,
+            },
+            Limits::default(),
+        )
+        .unwrap();
+        let rows = {
+            let query = query.instantiate(store.clone()).unwrap();
+            run(&query, &cover_ids, context)
+        };
+        for (cover, &range_ms) in ranges_ms.iter().enumerate() {
+            answers.push((
+                t,
+                range_ms,
+                sums_of(rows[cover].clone()),
+                direct_sums(t - range_ms, t),
+            ));
+        }
+        t += NARROW_MS;
+    }
+    answers
+}
+
+/// A cover that is the only reader of its levels reads only its own
+/// windows from the store and answers the sums over the raw samples.
+#[test]
+fn a_cover_as_its_levels_only_reader_answers_exactly() {
+    for (t, range_ms, answered, expected) in covers_only(&[HOUR_MS]) {
+        assert_eq!(answered, expected, "{range_ms} ms at {t}");
+    }
+}
+
+/// Two covers of different ranges (1 h and 70 min) over the same levels,
+/// the levels' only readers: each level is read for the union of the
+/// windows both take, so each answers its own range's sums, at every step.
+#[test]
+fn covers_of_different_ranges_over_shared_levels_answer_exactly() {
+    for (t, range_ms, answered, expected) in covers_only(&[HOUR_MS, 70 * 60 * SECOND_MS]) {
+        assert_eq!(answered, expected, "{range_ms} ms at {t}");
+    }
+}

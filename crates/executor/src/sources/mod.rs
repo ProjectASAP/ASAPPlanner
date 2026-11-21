@@ -56,9 +56,9 @@ enum ScanInput {
         view: MaterializedView,
         /// The rows a read selects, back from the evaluation time.
         read_window: TimeWindow,
-        /// A chain read only as one level of a `TimeRangeCover`: a query
-        /// run reads only the windows the cover takes from it.
-        cover_level: Option<CoverLevel>,
+        /// A chain read only as a level of `TimeRangeCover`s: a query run
+        /// reads only the union of the windows they take from it.
+        cover_reads: Option<Vec<CoverLevel>>,
     },
 }
 
@@ -94,14 +94,14 @@ impl Scan {
         }
     }
     /// A materialized view slot reading the rows of `view` that
-    /// `read_window` selects; read as a `TimeRangeCover`'s level
-    /// (`cover_level`), only the windows the cover takes from it.
+    /// `read_window` selects; read only as `TimeRangeCover` levels
+    /// (`cover_reads`), only the union of the windows they take from it.
     pub(crate) fn materialized_view(
         store: Arc<dyn DataStore>,
         view: MaterializedView,
         output: SchemaRef,
         read_window: TimeWindow,
-        cover_level: Option<CoverLevel>,
+        cover_reads: Option<Vec<CoverLevel>>,
     ) -> Self {
         Self {
             store,
@@ -109,7 +109,7 @@ impl Scan {
             input: ScanInput::MaterializedView {
                 view,
                 read_window,
-                cover_level,
+                cover_reads,
             },
         }
     }
@@ -177,8 +177,8 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
             ScanInput::MaterializedView {
                 view,
                 read_window,
-                cover_level,
-            } => self.start_materialized_view(view, *read_window, cover_level.as_ref(), context),
+                cover_reads,
+            } => self.start_materialized_view(view, *read_window, cover_reads.as_deref(), context),
         }
     }
 }
@@ -187,7 +187,7 @@ impl Scan {
         &'a self,
         view: &'a MaterializedView,
         read_window: TimeWindow,
-        cover_level: Option<&CoverLevel>,
+        cover_reads: Option<&[CoverLevel]>,
         context: RunContext,
     ) -> Result<OutputStream<'a, Batch>, Error> {
         // A query run reads the window back from its evaluation time; an
@@ -200,27 +200,38 @@ impl Scan {
             ),
         };
         let time_range_ms = read_window.bounds_ms(at_ms);
-        // A cover level reads, at query time, only the windows the cover
-        // takes from it: one read per run of consecutive windows (a wider
-        // level's middle, the narrowest level's two edges). Example: the
-        // 15 s level of a 1 h cover over 5 min windows reads two ranges of
-        // at most 5 min, not the hour.
-        let ranges_ms: Vec<(i64, i64)> = match (&context.scope, cover_level) {
-            (Scope::Query { .. }, Some(cover_level)) => {
-                let width = i64::try_from(cover_level.level_widths_ms[cover_level.level])
-                    .map_err(|_| Error::Invalid("a cover level's width exceeds Int64".into()))?;
-                let (start, end) = time_range_ms;
-                let windows = planner_types::ir::operator::tumbling_window_chain::cover_windows(
-                    start,
-                    end,
-                    &cover_level.level_widths_ms,
-                )
-                .map_err(|error| Error::Invalid(error.to_string()))?;
+        // Read only as cover levels: at query time only the union of the
+        // windows those covers take from it, one read per run of
+        // consecutive windows (a wider level's middle, the narrowest
+        // level's two edges). Example: the 15 s level of a 1 h cover over
+        // 5 min windows reads two ranges of at most 5 min, not the hour;
+        // with a 70 min cover too, also that cover's edges.
+        let ranges_ms: Vec<(i64, i64)> = match (&context.scope, cover_reads) {
+            (Scope::Query { evaluation_time_ms }, Some(cover_reads)) => {
+                let mut window_ends: std::collections::BTreeSet<i64> = Default::default();
+                let mut width = 0_i64;
+                for read in cover_reads {
+                    width = i64::try_from(read.level_widths_ms[read.level]).map_err(|_| {
+                        Error::Invalid("a cover level's width exceeds Int64".into())
+                    })?;
+                    let range = i64::try_from(read.range_ms)
+                        .map_err(|_| Error::Invalid("a cover's range exceeds Int64".into()))?;
+                    let windows =
+                        planner_types::ir::operator::tumbling_window_chain::cover_windows(
+                            evaluation_time_ms - range,
+                            *evaluation_time_ms,
+                            &read.level_widths_ms,
+                        )
+                        .map_err(|error| Error::Invalid(error.to_string()))?;
+                    window_ends.extend(
+                        windows
+                            .into_iter()
+                            .filter(|(level, _)| *level == read.level)
+                            .map(|(_, window_end)| window_end),
+                    );
+                }
                 let mut ranges: Vec<(i64, i64)> = Vec::new();
-                for (level, window_end) in windows {
-                    if level != cover_level.level {
-                        continue;
-                    }
+                for window_end in window_ends {
                     match ranges.last_mut() {
                         Some((_, last_end)) if *last_end == window_end - width => {
                             *last_end = window_end
