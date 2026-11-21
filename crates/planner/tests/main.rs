@@ -5,6 +5,7 @@
 mod time_series;
 
 mod columnar_batches;
+mod compressed_samples_install;
 mod deployment_exclusions;
 mod e2e_plan;
 mod exact_only_reads;

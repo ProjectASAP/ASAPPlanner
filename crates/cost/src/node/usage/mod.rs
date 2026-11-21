@@ -2048,4 +2048,6 @@ fn split(input: EdgeStatistics, partitions: u64) -> PartitionStatistics {
 }
 
 #[cfg(test)]
+mod compressed_samples_tests;
+#[cfg(test)]
 mod tests;
