@@ -456,15 +456,16 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
             "{n} samples"
         );
     }
-    // Past `k`, half the rows or the levels' capacities: within 1.5 times
-    // what the sketch retains.
+    // Past `k`, the open sketch's grown buffer: at least what the sealed
+    // sketch retains.
     for n in [k + 1, 1_000, 5_000, 100_000] {
-        let ratio = model_bytes(Some(u64::from(n))) as f64 / library_bytes(n) as f64;
         assert!(
-            (1.0 / 1.5..=1.5).contains(&ratio),
-            "{n} samples: {ratio:.2}"
+            library_bytes(n) <= model_bytes(Some(u64::from(n))),
+            "{n} samples"
         );
     }
+    // 5,000 rows fill 6 levels: 7 boundaries.
+    assert_eq!(model_bytes(Some(5_000)), 248 + 8 * 7 + 8 * 1_206);
     // A state assumed to see no sample holds at least one; unknown
     // samples fill every level to its capacity.
     assert_eq!(model_bytes(Some(0)), 272);
@@ -487,8 +488,8 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
 /// the price bounds it, by at most [`BYTES_AGREEMENT_FACTOR`] times once
 /// the state is full;
 /// UnivMon's price also bounds the bytes its sketch holds.
-/// KLL past `k` rows is priced at the expected fill of its levels, within
-/// 1.5 times either way of the sealed (shrunk) sketch.
+/// KLL past `k` rows is priced at an open sketch's grown buffer, at least
+/// what the sealed (shrunk) sketch holds.
 ///
 /// HydraCms is left out: plan selection prices an independent Count-Min
 /// per group, the executor one shared grid, so the two agree only at
@@ -505,8 +506,8 @@ fn state_bytes_bound_the_executors_charge() {
     /// How the priced bytes relate to the sketch's.
     enum Priced {
         Exact,
-        /// Exact up to `k` rows; past them within 1.5 times either way
-        /// (priced at the expected fill of its levels).
+        /// Exact up to `k` rows (sealed); past them at most the price
+        /// (an open sketch's grown buffer).
         Kll {
             k: u32,
         },
@@ -680,11 +681,8 @@ fn state_bytes_bound_the_executors_charge() {
             match priced_as {
                 Priced::Exact => assert_eq!(charged, priced, "{context}"),
                 Priced::Kll { k } if n <= *k => assert_eq!(charged, priced, "{context}"),
-                // Past `k` rows, the expected fill of its levels.
-                Priced::Kll { .. } => assert!(
-                    (1.0 / 1.5..=1.5).contains(&(priced as f64 / charged as f64)),
-                    "{context}, {charged} charged"
-                ),
+                // Past `k` rows, the open buffer: at least the sealed sketch.
+                Priced::Kll { .. } => assert!(charged <= priced, "{context}, {charged} charged"),
                 // One value can be a zero, which no store holds.
                 Priced::Expected if n == 1 => assert!(charged <= priced, "{context}"),
                 Priced::Expected => assert!(
@@ -754,7 +752,8 @@ fn next_uniform(state: &mut u64) -> f64 {
 /// 10,000 latencies log-uniform over 1 ms to 1 s (declared
 /// non-negative), or 1,000 rows of 1,000 distinct label values or label
 /// sets. Its charge as the executor seals it (a sketch shrunk, its
-/// `approx_memory_bytes`; an exact family's sealed column of 1,024 groups,
+/// `approx_memory_bytes`, but KLL, whose 10,000 rows are past `k` and
+/// priced open; an exact family's sealed column of 1,024 groups,
 /// per group; for HydraCms its shared grid over its 10 groups) is compared
 /// with `summary_state_bytes` for the same rows. Priced ÷
 /// charged lies within [`BYTES_AGREEMENT_FACTOR`], or the family's row
@@ -934,8 +933,12 @@ fn priced_bytes_agree_with_the_executor() {
                 Rows::Keyed => updater.update_keyed(&labels(key), 1.0, 0).unwrap(),
             }
         }
-        // As the executor seals a window.
-        updater.shrink_to_fit();
+        // As the executor seals a window, except a KLL past `k` rows,
+        // which is priced as the open sketch a query-time merge holds
+        // (`kll_sealed_bytes`).
+        if !matches!(family, FieldDataType::Sketch(A::Kll)) {
+            updater.shrink_to_fit();
+        }
         let charged = updater.into_accumulator().approx_memory_bytes() as u64;
         let priced = summary_state_bytes(&family, params.as_ref(), input_rows(rows_fed)).unwrap();
         measured.push((family, priced, charged, known_gap));

@@ -25,18 +25,26 @@ fn kll_workload() -> PlanningWorkload {
     .unwrap()
 }
 
-/// The θ of each `SummaryAgg` of `dag`.
-fn summary_agg_parameters(dag: &PhysicalASAPDAG) -> Vec<Option<SketchParams>> {
+/// The θ of each build (`SummaryAgg` or tumbling-window chain) of `dag`.
+fn build_parameters(dag: &PhysicalASAPDAG) -> Vec<Option<SketchParams>> {
     dag.nodes
         .iter()
-        .filter(|node| matches!(node.payload, Operator::ASAP(ASAPOp::SummaryAgg { .. })))
+        .filter(|node| {
+            matches!(
+                node.payload,
+                Operator::ASAP(
+                    ASAPOp::SummaryAgg { .. } | ASAPOp::SummaryTumblingWindowChain { .. }
+                )
+            )
+        })
         .map(|node| node.parameters.clone())
         .collect()
 }
 
-/// Excluding KLL at k ≤ 1,403 moves the installable plan's KLL from
-/// k = 547 to k = 1,404, and `e2e_plan` with the same models selects the
-/// same; without the exclusion it stays at k = 547.
+/// Excluding KLL at k ≤ 2,862 moves the installable plan's KLL from
+/// stored windows at k = 1,404 to a query-time build at k = 2,863, and
+/// `e2e_plan` with the same models selects the same; without the exclusion
+/// it stays at k = 1,404.
 #[tokio::test]
 async fn exclusions_reach_stage2_through_plan_installable() {
     let workload = kll_workload();
@@ -44,7 +52,7 @@ async fn exclusions_reach_stage2_through_plan_installable() {
         excluded_candidates: vec![CandidateExclusion {
             sketch_parameter_range: Some(SketchParameterRange::KllK {
                 at_least: None,
-                at_most: Some(1403),
+                at_most: Some(2862),
             }),
             ..Default::default()
         }],
@@ -56,15 +64,15 @@ async fn exclusions_reach_stage2_through_plan_installable() {
             .await
             .expect("plans");
     assert_eq!(
-        summary_agg_parameters(&installable.dag),
-        vec![Some(SketchParams::Kll { k: 1404 })]
+        build_parameters(&installable.dag),
+        vec![Some(SketchParams::Kll { k: 2863 })]
     );
     let output = e2e_plan(UserInput::new(&workload, FrontendInput::Promql, restricted))
         .await
         .expect("plans");
     assert_eq!(
-        summary_agg_parameters(&output.plan),
-        vec![Some(SketchParams::Kll { k: 1404 })]
+        build_parameters(&output.plan),
+        vec![Some(SketchParams::Kll { k: 2863 })]
     );
 
     let (unrestricted, _) = plan_installable(UserInput::new(
@@ -75,7 +83,7 @@ async fn exclusions_reach_stage2_through_plan_installable() {
     .await
     .expect("plans");
     assert_eq!(
-        summary_agg_parameters(&unrestricted.dag),
-        vec![Some(SketchParams::Kll { k: 547 })]
+        build_parameters(&unrestricted.dag),
+        vec![Some(SketchParams::Kll { k: 1404 })]
     );
 }

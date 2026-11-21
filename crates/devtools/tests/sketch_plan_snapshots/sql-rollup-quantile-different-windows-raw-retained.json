@@ -39,8 +39,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 2.66626771562e-8,
-      "cpu_core_seconds_per_second": 0.00226611296667,
+      "cost_per_second": 2.66283115923e-8,
+      "cpu_core_seconds_per_second": 0.00226585536667,
       "per_node": {
         "0": {
           "cost_per_second": 4.34768002135e-10,
@@ -97,36 +97,36 @@
           "timing": "ingestion_time"
         },
         "5": {
-          "cost_per_second": 1.91531091927e-9,
+          "cost_per_second": 1.883841902e-9,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000659526666667,
-          "detail": "build Kll in tumbling windows of 60000 ms for 10 groups: 667 rows x 84 ops, 1 group visits, 0.2 states emitted; x 1.0000/s; keeps 1020480 bytes",
+          "detail": "build Kll in tumbling windows of 60000 ms for 10 groups: 667 rows x 84 ops, 1 group visits, 0.2 states emitted; x 1.0000/s; keeps 993120 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
         },
         "6": {
-          "cost_per_second": 1.03070179321e-13,
+          "cost_per_second": 1.03070174513e-13,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 9.16666666667e-9,
-          "detail": "time range 300s: 5 tumbling windows of states; x 0.0167/s; holds 17008 bytes for 0.001 ms",
+          "detail": "time range 300s: 5 tumbling windows of states; x 0.0167/s; holds 16552 bytes for 0.001 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "7": {
-          "cost_per_second": 1.2538702282e-10,
+          "cost_per_second": 1.23219087472e-10,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.0000111512666667,
-          "detail": "merge 50 states into 10; x 0.0167/s; holds 170000 bytes for 0.669 ms",
+          "cpu_core_seconds_per_second": 0.0000109584666667,
+          "detail": "merge 50 states into 10; x 0.0167/s; holds 165680 bytes for 0.658 ms",
           "multiplier": 1,
           "operator": "SummaryMerge",
           "timing": "query_time"
         },
         "8": {
-          "cost_per_second": 3.33302144e-11,
+          "cost_per_second": 3.26016032e-11,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 2.96426666667e-6,
+          "cpu_core_seconds_per_second": 2.89946666667e-6,
           "detail": "estimate 10 groups x 1; x 0.0167/s",
           "multiplier": 1,
           "operator": "SummaryEstimate",
@@ -144,11 +144,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 1028099.50125,
-        "cpu_ops_per_second": 2230911.36667,
+        "average_memory_bytes": 1000739.42113,
+        "cpu_ops_per_second": 2230653.76667,
         "disk_bytes": 19200000,
         "peak_cpu_cores": 3,
-        "peak_memory_bytes": 4887720,
+        "peak_memory_bytes": 4855584,
         "scanned_bytes_per_second": 352016.0
       }
     },

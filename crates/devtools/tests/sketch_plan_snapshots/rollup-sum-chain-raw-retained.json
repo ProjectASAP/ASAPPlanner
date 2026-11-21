@@ -25,7 +25,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 5.13562430321e-9,
+      "cost_per_second": 5.13561209593e-9,
       "cpu_core_seconds_per_second": 0.0004567235,
       "per_node": {
         "0": {
@@ -47,10 +47,10 @@
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 3.72959570019e-10,
+          "cost_per_second": 3.72947362739e-10,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000331666666667,
-          "detail": "build exact Sum accumulator into 10000 states: 10000 rows x 29 ops, 10000 group visits; x 0.0167/s; holds 880000 bytes for 1.990 ms",
+          "detail": "build exact Sum accumulator into 10000 states: 10000 rows x 29 ops, 10000 group visits; x 0.0167/s; holds 560000 bytes for 1.990 ms",
           "multiplier": 1,
           "operator": "SummaryAgg",
           "timing": "query_time"
@@ -85,11 +85,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 195.855042017,
+        "average_memory_bytes": 185.241708684,
         "cpu_ops_per_second": 455656.833333,
         "disk_bytes": 640000,
         "peak_cpu_cores": 3,
-        "peak_memory_bytes": 1280552,
+        "peak_memory_bytes": 960552,
         "scanned_bytes_per_second": 10666.6666667
       }
     },
