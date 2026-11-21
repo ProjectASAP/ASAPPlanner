@@ -23,6 +23,7 @@ mod lowest_mean_latency;
 mod lowest_mean_latency_common;
 mod materialized_views;
 mod memo_value_bounds;
+mod multi_level_windows;
 mod nested;
 mod operator_design_examples;
 mod operator_sharing;
