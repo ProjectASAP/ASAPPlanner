@@ -116,6 +116,9 @@ pub(crate) enum ClusterSelectionError {
 pub(crate) struct ClusterSolved {
     pub(crate) solved: SolvedSelection,
     pub(crate) mean_latency_ms: f64,
+    /// The solver's lower bound on any plan's mean latency (equal to
+    /// `mean_latency_ms` at a proved optimum).
+    pub(crate) mean_latency_lower_bound_ms: f64,
     /// The LP relaxation's mean latency, when asked for.
     pub(crate) root_lp_mean_latency_ms: Option<f64>,
     /// Each query's latency in the MILP's optimum: (query, ms).
@@ -158,7 +161,30 @@ struct Solve<'s> {
     /// selection variable to 0; HiGHS completes the continuous ones. The
     /// pinned solve's columns are the next solve's MIP start.
     pinned: Option<&'s FeasiblePlan>,
+    stop: Stop,
 }
+
+/// When a solve stops.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Stop {
+    /// At a proved optimum.
+    Exact,
+    /// At a relative gap of [`STOP_RELATIVE_GAP`] or after
+    /// [`STOP_SECONDS`], whichever comes first.
+    GapOrTime,
+    /// At a relative gap of [`STOP_RELATIVE_GAP`]: when no plan was found
+    /// in [`STOP_SECONDS`].
+    Gap,
+}
+
+/// The default stop rule of the mean latency solve: a relative gap of 1 %
+/// or 30 s, whichever comes first (`LatencySelectionChecks::exact_solve`
+/// turns it off).
+const STOP_RELATIVE_GAP: f64 = 0.01;
+const STOP_SECONDS: f64 = 30.0;
+
+/// What a solve that ran out of time without a plan returns.
+const NO_PLAN_IN_TIME: &str = "no plan within the time limit";
 
 /// The longest a tie-break solve looks for a smaller plan: as long as the
 /// first solve took, between `SHORTEST_TIE_BREAK_SECONDS` and this.
@@ -170,10 +196,14 @@ const SHORTEST_TIE_BREAK_SECONDS: f64 = 0.05;
 struct QueryShape {
     query: QueryId,
     weight: f64,
+    /// The request's fixed latency, ms: its per-step part once per round.
     request_ms: f64,
-    /// Steps per request: a query-time execution not kept across
-    /// evaluations runs once per step.
-    steps: u64,
+    /// Rounds of steps per request, the steps split over the query
+    /// threads (`asap_cost::step_rounds`): a query-time execution not kept
+    /// across evaluations adds its work once per round to the latency.
+    step_rounds: u64,
+    /// The request's fixed CPU, ms: every step's, wherever it runs.
+    request_cpu_ms: f64,
     max_latency_ms: Option<f64>,
     answering: Vec<usize>,
     /// Executions it may read (stopping at ingestion time), ascending.
@@ -200,6 +230,8 @@ struct Solution {
     answering: Vec<(QueryId, usize)>,
     latency_ms: Vec<f64>,
     objective: f64,
+    /// The solver's lower bound on the objective, unscaled.
+    lower_bound: f64,
     /// Every column's value, the next solve's start.
     columns: Vec<f64>,
     /// The plan's peak memory and disk, in bytes.
@@ -309,6 +341,7 @@ pub(crate) fn solve_cluster_selection(
                 improve_below: None,
                 tie_break_seconds: 0.0,
                 pinned: None,
+                stop: Stop::Exact,
             },
         );
         if let Ok(bound) = bound {
@@ -339,6 +372,7 @@ pub(crate) fn solve_cluster_selection(
                     improve_below: None,
                     tie_break_seconds: 0.0,
                     pinned: Some(plan),
+                    stop: Stop::Exact,
                 },
             )
             .ok()
@@ -347,7 +381,8 @@ pub(crate) fn solve_cluster_selection(
     let solve = |objective: Objective,
                  fixed: Fixed,
                  start: Option<&[f64]>,
-                 tie_break: Option<(f64, f64)>| {
+                 tie_break: Option<(f64, f64)>,
+                 stop: Stop| {
         build_and_solve(
             inputs,
             &shapes,
@@ -361,6 +396,7 @@ pub(crate) fn solve_cluster_selection(
                 improve_below: tie_break.map(|(below, _)| below),
                 tie_break_seconds: tie_break.map_or(0.0, |(_, seconds)| seconds),
                 pinned: None,
+                stop,
             },
         )
     };
@@ -369,16 +405,47 @@ pub(crate) fn solve_cluster_selection(
     let weights: f64 = shapes.iter().map(|shape| shape.weight).sum();
     let root_lp_mean_latency_ms = checks
         .report_root_lp_bound
-        .then(|| solve(Objective::Relaxation, Fixed::default(), None, None).ok())
+        .then(|| {
+            solve(
+                Objective::Relaxation,
+                Fixed::default(),
+                None,
+                None,
+                Stop::Exact,
+            )
+            .ok()
+        })
         .flatten()
         .map(|relaxed| relaxed.objective / weights.max(f64::MIN_POSITIVE));
     let mut solve_count = 1;
-    let first = match solve(
-        Objective::MeanLatency,
-        Fixed::default(),
-        pinned_start.as_ref().map(|(columns, _)| columns.as_slice()),
-        None,
-    ) {
+    let start = pinned_start.as_ref().map(|(columns, _)| columns.as_slice());
+    let first = match checks.exact_solve {
+        true => solve(
+            Objective::MeanLatency,
+            Fixed::default(),
+            start,
+            None,
+            Stop::Exact,
+        ),
+        // No plan in the time limit: on to the gap alone.
+        false => match solve(
+            Objective::MeanLatency,
+            Fixed::default(),
+            start,
+            None,
+            Stop::GapOrTime,
+        ) {
+            Err(SelectionMilpError::Solver(reason)) if reason == NO_PLAN_IN_TIME => solve(
+                Objective::MeanLatency,
+                Fixed::default(),
+                start,
+                None,
+                Stop::Gap,
+            ),
+            solved => solved,
+        },
+    };
+    let first = match first {
         Ok(first) => first,
         Err(SelectionMilpError::Infeasible) => {
             return Err(diagnose(&limits, |objective, active| {
@@ -396,6 +463,7 @@ pub(crate) fn solve_cluster_selection(
                         improve_below: None,
                         tie_break_seconds: 0.0,
                         pinned: None,
+                        stop: Stop::Exact,
                     },
                 )
                 .ok()
@@ -407,6 +475,7 @@ pub(crate) fn solve_cluster_selection(
     let tie_break_seconds =
         (first.solve_ms as f64 / 1_000.0).clamp(SHORTEST_TIE_BREAK_SECONDS, TIE_BREAK_SECONDS);
     let weighted = first.objective;
+    let weighted_lower_bound = first.lower_bound;
     // Tie-breaks only when an alternative optimum may exist: each starts
     // from the plan so far and only looks for one at least a byte smaller
     // within `TIE_BREAK_SECONDS`; finding none (or none in time) keeps the
@@ -427,6 +496,7 @@ pub(crate) fn solve_cluster_selection(
             fixed,
             Some(&last.columns),
             (!full_tie_breaks).then_some((current - 0.5, tie_break_seconds)),
+            Stop::Exact,
         );
         solve_count += 1;
         if let Ok(better) = tried {
@@ -494,9 +564,12 @@ pub(crate) fn solve_cluster_selection(
         solve_ms,
         solve_count,
     };
+    let mean_latency_lower_bound_ms =
+        (weighted_lower_bound / weights.max(f64::MIN_POSITIVE)).min(mean_latency_ms);
     Ok(ClusterSolved {
         solved,
         mean_latency_ms,
+        mean_latency_lower_bound_ms,
         root_lp_mean_latency_ms,
         latency_ms_per_query: shapes
             .iter()
@@ -609,7 +682,14 @@ fn query_shapes(inputs: &ClusterInputs<'_>) -> Result<Vec<QueryShape>, Selection
             let steps = entry
                 .and_then(|entry| entry.range_evaluation)
                 .map_or(1, |range| range.evaluations_per_request());
-            let request_ms =
+            let step_rounds = asap_cost::step_rounds(
+                steps,
+                inputs.cost_inputs.data_plane_execution.query_threads,
+            );
+            let request_ms = (table.ns_per_evaluation
+                + table.ns_per_evaluation_step * step_rounds as f64)
+                * 1e-6;
+            let request_cpu_ms =
                 (table.ns_per_evaluation + table.ns_per_evaluation_step * steps as f64) * 1e-6;
             let mut reach = BTreeSet::new();
             let mut edges = Vec::new();
@@ -631,7 +711,8 @@ fn query_shapes(inputs: &ClusterInputs<'_>) -> Result<Vec<QueryShape>, Selection
                 query,
                 weight,
                 request_ms,
-                steps,
+                step_rounds,
+                request_cpu_ms,
                 max_latency_ms: entry.and_then(|entry| entry.requirements.max_latency_ms),
                 answering,
                 reach,
@@ -1137,6 +1218,7 @@ fn build_and_solve(
         improve_below,
         tie_break_seconds,
         pinned,
+        stop,
     } = solve;
     let selection = &inputs.selection;
     let selectable = selection.selectable;
@@ -1270,11 +1352,11 @@ fn build_and_solve(
                 rows.push(constraint!(read >= z));
             }
         }
-        // A query-time execution not kept across evaluations runs once per
-        // step of the request.
+        // A query-time execution not kept across evaluations adds its work
+        // once per round of the request's steps over the query threads.
         let runs = |index: usize| match once_per_request(inputs, index) {
             true => 1.0,
-            false => shape.steps as f64,
+            false => shape.step_rounds as f64,
         };
         let fresh = problem.add(variable().min(lateness));
         let latency = problem.add(variable().min(0));
@@ -1387,7 +1469,7 @@ fn build_and_solve(
                     .ok()
                 })
                 .unwrap_or(0.0);
-            shape.request_ms * requests_per_second / 1_000.0
+            shape.request_cpu_ms * requests_per_second / 1_000.0
         })
         .sum::<f64>()
         + asap_cost::ingest_decode_cpu_core_seconds_per_second(inputs.data, inputs.cost_inputs);
@@ -1491,8 +1573,17 @@ fn build_and_solve(
     let mut model = builder
         .try_into_inner()
         .map_err(|error| SelectionMilpError::Solver(error.to_string()))?;
-    model.set_option("mip_rel_gap", 0.0);
+    model.set_option(
+        "mip_rel_gap",
+        match stop {
+            Stop::Exact => 0.0,
+            Stop::GapOrTime | Stop::Gap => STOP_RELATIVE_GAP,
+        },
+    );
     model.set_option("mip_abs_gap", 0.0);
+    if stop == Stop::GapOrTime {
+        model.set_option("time_limit", STOP_SECONDS);
+    }
     let log = inputs.cost_inputs.latency_selection_checks.log_solver;
     model.set_option("output_flag", log);
     model.set_option("log_to_console", log);
@@ -1546,8 +1637,22 @@ fn build_and_solve(
         HighsModelStatus::Infeasible | HighsModelStatus::UnboundedOrInfeasible => {
             return Err(SelectionMilpError::Infeasible)
         }
+        HighsModelStatus::ReachedTimeLimit if improve_below.is_none() => {
+            return Err(SelectionMilpError::Solver(NO_PLAN_IN_TIME.to_string()))
+        }
         other => return Err(SelectionMilpError::Solver(format!("{other:?}"))),
     };
+    // The lower bound HiGHS proved, unscaled; at a proved optimum (or an
+    // empty model, or the LP relaxation) the objective itself.
+    let proved_optimal = stop == Stop::Exact
+        || objective == Objective::Relaxation
+        || solved.status() == HighsModelStatus::ModelEmpty;
+    let dual_bound = (!proved_optimal)
+        .then(|| solved.double_info_value(c"mip_dual_bound").ok())
+        .flatten()
+        .filter(|bound| bound.is_finite())
+        // HiGHS's objective has no constant term.
+        .map(|bound| bound / scale + goal.constant());
     let value = |variable: Variable| columns.get(column_of[&variable]).copied().unwrap_or(0.0);
     let chosen = |variable: Variable| value(variable) > 0.5;
     let selected: Vec<usize> = (0..variables.x.len())
@@ -1594,6 +1699,7 @@ fn build_and_solve(
         answering,
         latency_ms: latencies.iter().map(|&latency| value(latency)).collect(),
         objective: objective_value,
+        lower_bound: dual_bound.map_or(objective_value, |bound| bound.min(objective_value)),
         memory_bytes,
         disk_bytes,
         columns,

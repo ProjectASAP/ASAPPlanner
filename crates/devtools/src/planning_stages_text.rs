@@ -1447,7 +1447,15 @@ fn write_selection(
             selection.selected_plan_mean_latency_ms
         ) {
             (Some(cost), _) => format!("{cost:.6e}/s"),
-            (None, Some(latency)) => format!("mean latency {latency:.6} ms"),
+            (None, Some(latency)) => match selection.optimality_gap {
+                // Below 1e-6, the solver's rounding: optimal.
+                Some(gap) if gap.relative_gap > 1e-6 => format!(
+                    "mean latency {latency:.6} ms (gap {:.3} %, no plan below {:.6} ms)",
+                    gap.relative_gap * 100.0,
+                    gap.mean_latency_lower_bound_ms
+                ),
+                _ => format!("mean latency {latency:.6} ms (optimal)"),
+            },
             (None, None) => "none".to_string(),
         }
     );

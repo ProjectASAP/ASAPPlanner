@@ -187,7 +187,12 @@ How each new term enters the model:
    the request: each query-time node's work per step times the $s$ steps
    (once per request for a node kept across evaluations), as `plan_cost`
    counts each node's computations. The fixed cost per step is charged per
-   step, in latency and in CPU.
+   step in CPU. In latency, the steps split over the `query_threads`
+   query threads: per-step work (the fixed cost per step and each
+   query-time node's work per step) counts $\lceil s / T_{query} \rceil$
+   times (`step_rounds`), so a 240-step range request on 4 query threads
+   waits for 60 rounds, not 240; with one query thread (the default) it is
+   $s$ as before.
 3. For a node of a class with entries at several `measured_series_count`s,
    `ns_per_unit` and `ns_per_invocation` are interpolated linearly in
    log(price) over log(series count) between the two nearest scales, and
@@ -831,6 +836,8 @@ tie-break solves from `CostModel`.
 | 24 | S1 (per-execution latency and freshness variables $\ell_e$, $\varphi_e$ with big-M rows, replacing the per-query reads): considered and rejected. Its LP bound stays at 0 like the McCormick reads, and it measured slower (two workloads: 4.4 s and 5.1 s against 1.2 s). | Decided (rejected) |
 | 25 | Speed-ups, each exact: reads only of kept executions; the latency-bound exclusions once per selection; θ dominance in every quantity; a feasible plan's bound (T8); reads as a flow (T9) with the valid freshness rows; lazy tie-break solves warm-started from the plan so far (2 s each). | Decided |
 | 26 | Checking knobs in `CostInputs::latency_selection_checks` (`theta_dominance`, `feasible_plan_bound`, `lazy_tie_breaks`, `flow_reads`, all on by default; `report_root_lp_bound`, off): turning a speed-up off must not change the optimum, which the exactness tests check. The planning crates read no environment; the `asap_planner` tool maps `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_LATENCY_READS=mccormick` and `ASAP_STAGE3_ROOT_LP=1` onto them; `feasible_plan_start` (off; `ASAP_STAGE3_FEASIBLE_PLAN_START=on`) and `log_solver` (off; `ASAP_STAGE3_SOLVER_LOG=1`, the solver's log and the model's size by family) are measurements. | By this document |
+| 27 | The mean latency solve stops at a relative MIP gap of 1 % or after 30 s, whichever comes first, and returns its plan with the gap and the solver's lower bound (`Selection::optimality_gap`, the plan report's `optimality_gap`, the text output's mean latency line). `LatencySelectionChecks::exact_solve` (`ASAP_STAGE3_EXACT=1`) solves to optimality; the exactness tests compare in exact mode, and in the default mode check that the gap is at most 1 % (unless stopped on time) and that the plan is within its gap of the exact optimum. With no plan in 30 s, the solve continues to the 1 % gap. | Decided |
+| 28 | A range request's steps split over the query threads in latency: per-step work counts $\lceil s / T_{query} \rceil$ times; CPU still counts every step. | Decided |
 | 14 | Under cost model 3 the greedy cost upper bound is not applied; the `OneEvaluation` twin dominance is restated over time, memory, disk and CPU. | By this document |
 | 15 | Calibration passes when every node's predicted time per phase is within 1.5× of measured, at every series scale run (1k passes; 10k after term (3)). | Decided |
 | 16 | Ingest and query CPU are not hard constraints against thread counts; the report gives per role (ingest, precompute, query) the predicted CPU core-seconds per second and the recommended threads, $\lceil$cores$/\rho_{\max}\rceil$; `precompute_threads` stays an input for $\rho$, and a deployment may set it from the recommendation and replan. | Decided |

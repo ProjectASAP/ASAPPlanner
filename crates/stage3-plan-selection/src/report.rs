@@ -201,10 +201,29 @@ pub struct Selection {
     /// Under `lowest_mean_latency` with `report_root_lp_bound`, the LP
     /// relaxation's mean latency in ms: the formulation's bound.
     pub milp_root_lp_mean_latency_ms: Option<f64>,
+    /// Under `lowest_mean_latency`, how far the selected plan may be from
+    /// the optimum: the solve stops at a relative gap of 1 % or after 30 s
+    /// unless `LatencySelectionChecks::exact_solve`; `None` otherwise.
+    pub optimality_gap: Option<OptimalityGap>,
     /// Under cost model 3's `lowest_mean_latency`, the executions left out
     /// before the MILP because their least possible latency is over the
     /// `max_latency_ms` of every query that may read them; 0 otherwise.
     pub executions_pruned_by_latency_bound: usize,
+}
+
+/// How far a selected plan's mean latency may be from the optimum: no
+/// plan has a mean latency below `mean_latency_lower_bound_ms`, and
+/// `relative_gap` = (`mean_latency_ms` − bound) / `mean_latency_ms` (0 when
+/// the solve proved the plan optimal).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptimalityGap {
+    /// The selected plan's frequency-weighted mean query latency, ms.
+    pub mean_latency_ms: f64,
+    /// The solver's lower bound on any plan's mean latency, ms.
+    pub mean_latency_lower_bound_ms: f64,
+    /// The relative gap between the two.
+    pub relative_gap: f64,
 }
 
 /// Why Stage 3 selected no plan.

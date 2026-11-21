@@ -79,6 +79,12 @@ pub struct SelectedPlanReport {
     /// empty in a report written without it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assumed_data_facts: Vec<AssumedDataFact>,
+    /// Under cost model 3's `lowest_mean_latency`, the mean latency the
+    /// selection reached, the lower bound no plan beats and the relative
+    /// gap between them (the solve stops at 1 % or 30 s unless asked to be
+    /// exact); omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimality_gap: Option<asap_stage3_plan_selection::OptimalityGap>,
 }
 
 /// What Stage 3 predicts the selected plan uses, per second of wall time
@@ -274,7 +280,9 @@ pub async fn plan_installable(
     )?;
     let assumed_data_facts = assumed_data_facts(&output.plan, &cost, &data);
     let installable = installable_plan_of(output.plan, &entries).map_err(PlanError::Installable)?;
-    Ok((installable, selected_plan_report(&cost, assumed_data_facts)))
+    let mut report = selected_plan_report(&cost, assumed_data_facts);
+    report.optimality_gap = output.optimality_gap;
+    Ok((installable, report))
 }
 
 /// The installable plan of `plan`, the plan Stage 3 built for a workload
@@ -704,6 +712,7 @@ pub fn selected_plan_report(
             recommended_configuration: cost.usage.recommended_configuration,
         },
         assumed_data_facts,
+        optimality_gap: None,
     }
 }
 
