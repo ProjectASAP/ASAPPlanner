@@ -274,6 +274,17 @@ const KLL_PLAN: [(OperatorKind, ExecutionTiming); 5] = [
     (OperatorKind::Project, QueryTime),
 ];
 
+/// The KLL quantile over stored windows: a chain built at ingestion, its
+/// windows merged at query time.
+const STORED_KLL_PLAN: [(OperatorKind, ExecutionTiming); 6] = [
+    (OperatorKind::Scan, IngestionTime),
+    (OperatorKind::SummaryTumblingWindowChain, IngestionTime),
+    (OperatorKind::TimeRange, QueryTime),
+    (OperatorKind::SummaryMerge, QueryTime),
+    (OperatorKind::SummaryEstimate, QueryTime),
+    (OperatorKind::Project, QueryTime),
+];
+
 fn kll(k: u32) -> (FieldDataType, Option<SketchParams>) {
     (
         FieldDataType::Sketch(SketchAlgorithm::Kll),
@@ -312,21 +323,31 @@ fn an_exclusion_matching_nothing_changes_nothing() {
     }
 }
 
-/// The answer-10 example: a KLL `k` range moves the quantile's state from
-/// k = 547 to k = 1,404, and to 2,863 when 1,404 is excluded too; the
-/// plan's shape stays and its cost never falls as more is excluded.
+/// The answer-10 example: a KLL `k` range moves the quantile's state to a
+/// larger `k`, and its cost never falls as more is excluded. Unrestricted,
+/// the quantile reads stored windows of KLL at k = 1,404 (sealed
+/// sketches, priced at what they retain, cost less to keep than a
+/// query-time k = 547 build costs to run); excluding k up to 1,403 changes
+/// nothing;
+/// excluding k up to 2,862 rules every stored size out, and the quantile is
+/// built at query time at k = 2,863.
 #[test]
-fn a_kll_k_range_moves_the_quantile_from_k_547_to_k_1404() {
+fn a_kll_k_range_moves_the_quantile_to_a_larger_k() {
     let workload = kll_workload();
     let cases = [
-        (None, 547, 0.060946),
-        (Some(kll_at_most(1403)), 1404, 0.061518),
-        (Some(kll_at_most(2862)), 2863, 0.062491),
+        (None, STORED_KLL_PLAN.as_slice(), 1404, 0.057933),
+        (
+            Some(kll_at_most(1403)),
+            STORED_KLL_PLAN.as_slice(),
+            1404,
+            0.057933,
+        ),
+        (Some(kll_at_most(2862)), KLL_PLAN.as_slice(), 2863, 0.062491),
     ];
-    for (exclusion, k, cost) in cases {
+    for (exclusion, plan_operators, k, cost) in cases {
         let run = planned(&workload, &excluding(exclusion.iter().cloned().collect()));
         let (plan, selection) = selected(&run);
-        assert_eq!(operators(plan), KLL_PLAN, "k = {k}");
+        assert_eq!(operators(plan), plan_operators, "k = {k}");
         assert_eq!(builds(plan), vec![kll(k)]);
         assert_cost(selection, cost);
         if let Some(exclusion) = &exclusion {
@@ -400,7 +421,7 @@ fn the_stored_arm_exclusions_select_an_ingestion_time_chain() {
         builds(plan),
         vec![(FieldDataType::exact(ExactKind::Sum), None)]
     );
-    assert_cost(selection, 0.113237);
+    assert_cost(selection, 0.105237);
     let excluded: usize = (0..4)
         .map(|index| pruned_by(&stored, ExclusionSource::ExcludedCandidate { index }))
         .sum();
@@ -527,8 +548,8 @@ fn a_target_without_mergeable_rate_state_builds_rate_within_one_evaluation() {
         ]
     };
     let cases = [
-        ("rate", "5m", ExactKind::Counter, 0.279284, 0.367671),
-        ("increase", "1h", ExactKind::Counter, 1.490206, 3.953715),
+        ("rate", "5m", ExactKind::Counter, 0.274034, 0.367670),
+        ("increase", "1h", ExactKind::Counter, 1.436831, 3.953712),
     ];
     for (function, range, kind, unrestricted_cost, restricted_cost) in cases {
         let workload = counter_workload(function, range);
@@ -652,7 +673,7 @@ fn counter_semantics_a_target_lacks_rule_out_the_functions_that_need_them() {
         builds(plan),
         vec![(FieldDataType::exact(ExactKind::IRate), None)]
     );
-    assert_cost(selection, 0.367671);
+    assert_cost(selection, 0.367670);
     assert_eq!(
         pruned_by(
             &irate_without_extrapolation,

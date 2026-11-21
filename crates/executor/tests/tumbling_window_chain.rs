@@ -224,6 +224,7 @@ fn a_chain_built_at_ingestion_answers_queries_through_its_time_ranges() {
     let query = compile(&dag, &views, &[now as u64, shifted as u64]).unwrap();
     let mut store = Arc::new(store_with_samples());
     let mut window_end = WIDTH_MS;
+    let mut window_bytes = 0;
     while window_end <= 4 * HOUR_MS {
         let context = RunContext::new(
             Scope::Ingestion {
@@ -251,18 +252,24 @@ fn a_chain_built_at_ingestion_answers_queries_through_its_time_ranges() {
                 .clone(),
         );
         let batch = Batch::try_new(schema, rows).unwrap();
+        // Its columns and states, before the store marks them as its own.
+        window_bytes = batch.memory_bytes();
         Arc::get_mut(&mut store)
             .unwrap()
             .append_materialized_view(&views[0], (window_end - WIDTH_MS, window_end), vec![batch])
             .unwrap();
         window_end += WIDTH_MS;
     }
+    // The store reports its 12 windows (2 h of 10-minute windows) with
+    // their states, right after appending and after a query read them.
+    assert_eq!(store.materialized_view_bytes(), 12 * window_bytes);
     let evaluation_time_ms = 4 * HOUR_MS;
     let context = RunContext::new(Scope::Query { evaluation_time_ms }, Limits::default()).unwrap();
     let answers = {
         let query = query.instantiate(store.clone()).unwrap();
         run(&query, &[now as u64, shifted as u64], context)
     };
+    assert_eq!(store.materialized_view_bytes(), 12 * window_bytes);
     assert_eq!(
         sums_of(answers[0].clone()),
         direct_sums(evaluation_time_ms - HOUR_MS, evaluation_time_ms)

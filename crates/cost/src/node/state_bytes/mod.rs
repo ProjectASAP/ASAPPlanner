@@ -5,8 +5,8 @@ use crate::node::analytical::AnalyticalCostError;
 use crate::node::operator_statistics::EdgeStatistics;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema, PROMQL_SERIES_IDENTITY};
+use asap_types::summary_type::SketchParams;
 use asap_types::summary_type::KLL_MAX_K;
-use asap_types::summary_type::{SketchParams, EXACT_ACCUMULATOR_STATE_BYTES};
 use asap_types::workload::ValueMagnitudeRange;
 
 /// Bytes of one output row: each column at [`column_bytes`].
@@ -30,8 +30,7 @@ fn column_bytes(field: &Field) -> u64 {
 /// identity, which a state's row holds its own copy of, at
 /// `SERIES_IDENTITY_BYTES`. Example: a stored per-series Sum carrying
 /// `job` holds its window time, `job` and the series identity: 8 + 16 + 64
-/// = 88 bytes beside its 56-byte state, 144 in all, where the executor
-/// holds 151 per state.
+/// = 88 bytes beside its 24-byte sealed state, 112 in all.
 pub(crate) fn state_row_bytes_beside_state(schema: &Schema) -> u64 {
     schema
         .fields
@@ -49,7 +48,7 @@ pub(crate) fn state_row_bytes_beside_state(schema: &Schema) -> u64 {
 /// Bytes of the state one row of `edge` holds: its bytes per row without
 /// what the row holds beside its state ([`state_row_bytes_beside_state`] of
 /// the producer's `schema`). Example: 1,000 rows of stored per-series Sums
-/// carrying `job`, 144,000 bytes, hold 144 − 88 = 56 bytes of state each.
+/// carrying `job`, 112,000 bytes, hold 112 − 88 = 24 bytes of state each.
 pub(crate) fn state_bytes_per_row(edge: EdgeStatistics, schema: &Schema) -> u64 {
     edge.bytes_per_row()
         .saturating_sub(state_row_bytes_beside_state(schema))
@@ -87,13 +86,13 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
 /// - DDSketch: what it is expected to hold, not the most it can
 ///   ([`ddsketch_state_bytes`]).
 ///
-/// KLL is priced without the library's estimate: its fixed bytes
-/// (`kll_fixed_bytes`: the struct and its level array) plus the 8-byte
-/// item array as `asap_sketchlib` grows it for the rows the state folds, at
-/// most its full capacity (`kll_buffer_items`).
+/// KLL is priced as the executor keeps a sealed state (it shrinks every
+/// KLL when it seals a window, `Kll::shrink_to_fit`): the struct, the
+/// 8-byte boundaries of the levels the rows fill, and the 8-byte items they
+/// leave retained ([`kll_sealed_bytes`]).
 ///
-/// An exact accumulator's state is the executor's per-group state,
-/// [`EXACT_ACCUMULATOR_STATE_BYTES`] for every kind.
+/// An exact accumulator's state is the executor's sealed record of its
+/// kind, [`ExactKind::sealed_state_bytes`].
 ///
 /// `parameters` is the build's θ (`PhysicalASAPDAGNode::parameters`). Err
 /// [`AnalyticalCostError::UnsupportedCandidate`] for a sketch without θ: a
@@ -106,7 +105,7 @@ pub fn summary_state_bytes(
     Ok(match (family, parameters) {
         (FieldDataType::Sketch(..), Some(parameters)) => sketch_state_bytes(parameters, input_rows),
         (FieldDataType::Sketch(..), None) => return Err(AnalyticalCostError::UnsupportedCandidate),
-        (FieldDataType::ExactAggregate(..), _) => EXACT_ACCUMULATOR_STATE_BYTES,
+        (FieldDataType::ExactAggregate(kind, _), _) => kind.sealed_state_bytes(),
         _ => 8,
     })
 }
@@ -239,7 +238,7 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
             *heap_size as usize,
             &heap_key,
         ) as u64,
-        SketchParams::Kll { k, .. } => kll_fixed_bytes() + 8 * kll_buffer_items(*k, input_rows),
+        SketchParams::Kll { k, .. } => kll_sealed_bytes(*k, input_rows),
         // The executor builds no DDSketch outside α in (0, 1), where
         // sketchlib's estimate panics: priced as an empty one.
         SketchParams::DDSketch { alpha } if !(*alpha > 0.0 && *alpha < 1.0) => {
@@ -274,57 +273,80 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
     }
 }
 
+/// Bytes a KLL state of `k` holds after folding `input_rows`: the struct,
+/// `levels + 1` 8-byte level boundaries for the `L(n)` levels `n` rows fill
+/// (`kll_levels_after`), and its 8-byte items. Up to `k` rows nothing
+/// compacts, and the state is priced as the executor keeps it sealed
+/// (`Kll::shrink_to_fit`): exactly the `n` items. Past `k`, the items are
+/// the buffer an open sketch grows to (16 items doubled up to the
+/// capacity of all its levels, `kll_buffer_items`), what a query-time merge
+/// holds while it folds windows; a sealed state past `k` holds about half
+/// of that, which this leaves uncharged. A state is assumed to fold at
+/// least one row, as a DDSketch's is; unknown rows fill every level.
+///
+/// Example: `k` = 132 over a 15 s window of one sample a second (15 rows):
+/// 248 + 8 · 2 + 8 · 15 = 384 bytes.
+fn kll_sealed_bytes(k: u32, input_rows: StateInputRows) -> u64 {
+    let k = u64::from(k.clamp(8, KLL_MAX_K));
+    let (levels, items) = match input_rows.rows_per_state {
+        None => (KLL_MAX_LEVELS as u64, kll_capacity_items(k, KLL_MAX_LEVELS)),
+        Some(rows) => {
+            let rows = rows.max(1);
+            let items = match rows <= k {
+                true => rows,
+                false => kll_buffer_items(k, rows),
+            };
+            (kll_levels_after(k, rows), items)
+        }
+    };
+    std::mem::size_of::<asap_sketchlib::Kll<f64>>() as u64 + 8 * (levels + 1) + 8 * items
+}
+
+/// Items an open `asap_sketchlib` KLL of `k` allocates for `rows`: its
+/// item array starts empty and grows when full, to at least twice its
+/// length and at least 16 items, at most the capacity of all its levels
+/// ([`kll_capacity_items`]): the smallest `16 · 2^j` ≥ `rows`, capped.
+fn kll_buffer_items(k: u64, rows: u64) -> u64 {
+    const INITIAL_BUFFER_ITEMS: u64 = 16;
+    rows.div_ceil(INITIAL_BUFFER_ITEMS)
+        .next_power_of_two()
+        .saturating_mul(INITIAL_BUFFER_ITEMS)
+        .min(kll_capacity_items(k, KLL_MAX_LEVELS))
+}
+
 /// Levels `asap_sketchlib`'s KLL has room for (`MAX_LEVELS`).
 const KLL_MAX_LEVELS: usize = 61;
 
-/// Bytes every `asap_sketchlib` KLL state holds whatever its samples: the
-/// struct and the 8-byte level-boundary array of `KLL_MAX_LEVELS + 1` entries it
-/// allocates on creation (`Kll::init_internal`). 744 bytes, an empty
-/// sketch's `memory_bytes()`.
-fn kll_fixed_bytes() -> u64 {
-    (std::mem::size_of::<asap_sketchlib::Kll<f64>>() + 8 * (KLL_MAX_LEVELS + 1)) as u64
+/// `L(n)`: the levels a KLL of `k` holds after `n` rows, a level added once
+/// the top holds `k + 1` items of weight 2^top (`asap_sketchlib`'s
+/// `levels_after`). 1 up to `k` rows; 2 from `k + 1`.
+fn kll_levels_after(k: u64, rows: u64) -> u64 {
+    let mut levels = 1;
+    while levels < KLL_MAX_LEVELS as u64
+        && 1u64
+            .checked_shl(levels as u32 - 1)
+            .and_then(|weight| weight.checked_mul(k + 1))
+            .is_some_and(|items| items <= rows)
+    {
+        levels += 1;
+    }
+    levels
 }
 
-/// The most items `asap_sketchlib`'s KLL holds for `k`, the capacity its item
-/// array grows to (`Kll::init_internal` → `compute_max_capacity(k, 8)`): over its
-/// [`KLL_MAX_LEVELS`] levels,
-/// `max(ceil(k · (2/3)^i), 8)` each, with `k` capped at [`KLL_MAX_K`] as the
-/// library caps it. 1,206 items at `k` = 269.
-fn kll_capacity_items(k: u32) -> u64 {
+/// The items the top `levels` levels of a KLL of `k` hold at capacity:
+/// `max(ceil(k · (2/3)^i), 8)` for heights `i` from the top. Over all
+/// [`KLL_MAX_LEVELS`] levels, the most items the library holds: 1,206 at
+/// `k` = 269.
+fn kll_capacity_items(k: u64, levels: usize) -> u64 {
     const MIN_LEVEL_CAPACITY: f64 = 8.0;
-    let k = f64::from(k.min(KLL_MAX_K));
+    let k = k as f64;
     let mut scale = 1.0_f64;
     let mut total = 0;
-    for _ in 0..KLL_MAX_LEVELS {
+    for _ in 0..levels {
         total += (k * scale).ceil().max(MIN_LEVEL_CAPACITY) as u64;
         scale *= 2.0 / 3.0;
     }
     total
-}
-
-/// Items `asap_sketchlib`'s KLL for `k` allocates over `input_rows`: its
-/// item array starts empty and grows when full, to at least twice its
-/// length and at least 16 items (`INITIAL_BUFFER_ITEMS`), at most its full
-/// capacity ([`kll_capacity_items`]). So `n` rows take the smallest
-/// `16 · 2^j` ≥ `n`, capped at the capacity: exactly what the library holds
-/// up to `max(k, 8)` rows, before anything compacts; 16 items for one row,
-/// the capacity when the rows are unknown. Past that, compaction keeps the
-/// array within this size, but the library also holds merge scratch space,
-/// not modelled here, that adds up to about a fifth. A state is assumed to
-/// fold at least one row, as a DDSketch's is.
-fn kll_buffer_items(k: u32, input_rows: StateInputRows) -> u64 {
-    const INITIAL_BUFFER_ITEMS: u64 = 16;
-    let capacity = kll_capacity_items(k);
-    match input_rows.rows_per_state {
-        None => capacity,
-        Some(rows_per_state) => {
-            let grown = rows_per_state
-                .max(1)
-                .div_ceil(INITIAL_BUFFER_ITEMS)
-                .next_power_of_two();
-            grown.saturating_mul(INITIAL_BUFFER_ITEMS).min(capacity)
-        }
-    }
 }
 
 /// Bytes of the key one Count-Min / Count Sketch top-k heap slot holds: an

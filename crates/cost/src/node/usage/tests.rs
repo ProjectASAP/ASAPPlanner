@@ -255,7 +255,7 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
         output_schema: &windows.output_schema,
         output: EdgeStatistics {
             rows: 5_000,
-            bytes: 5_000 * asap_types::summary_type::EXACT_ACCUMULATOR_STATE_BYTES,
+            bytes: 5_000 * asap_types::summary_type::ExactKind::Counter.sealed_state_bytes(),
         },
         sources: BTreeSet::new(),
         family: StateFamily::None,
