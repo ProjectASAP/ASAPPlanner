@@ -40,4 +40,5 @@ mod sql_frequency;
 mod sql_relational_execution;
 mod sql_to_post_asap;
 mod stage3_objective;
+mod stored_view_bytes;
 mod time_range;
