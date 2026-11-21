@@ -253,19 +253,15 @@ fn run_data_plane(plan: &InstallablePlan) -> Vec<Vec<Vec<Value>>> {
     // one per tumbling window its retention keeps, newest last.
     let mut built: BTreeMap<u64, Vec<WindowState>> = BTreeMap::new();
     for view in &views {
-        let width_ms = match &dag
+        // A chain, or a wider level merged from a narrower one.
+        let width_ms = dag
             .nodes
             .iter()
             .find(|n| n.id == view.node_id)
             .unwrap()
             .payload
-        {
-            PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }) => Some(*tumbling_window_width_ms as i64),
-            _ => None,
-        };
+            .chain_tumbling_window_width_ms()
+            .map(|width_ms| width_ms as i64);
         let spans: Vec<(i64, i64)> = match width_ms {
             Some(width_ms) => {
                 let windows = (view.retention_ms() as i64 / width_ms).max(1);

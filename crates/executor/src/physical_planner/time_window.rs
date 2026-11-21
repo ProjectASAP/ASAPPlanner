@@ -321,6 +321,13 @@ pub(super) fn counter_window(
         if !visited.insert(ancestor) {
             continue;
         }
+        // A cover reads its range from levels of one chain, without
+        // shifts below it.
+        if let Payload::NonASAP(NonASAPOp::TimeRangeCover { range, .. }) = &nodes[&ancestor].payload
+        {
+            windows.insert((0, millis(range.as_millis())?));
+            continue;
+        }
         if let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) = &nodes[&ancestor].payload {
             let mut offset = 0i64;
             let mut below = dependencies.get(&ancestor).and_then(|d| d.first()).copied();

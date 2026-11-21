@@ -30,7 +30,10 @@ fn cover_windows_tile_the_range() {
                 windows.sort();
                 let mut covered_to = t - range_ms;
                 for (start, end) in &windows {
-                    assert_eq!(*start, covered_to, "{levels:?} {range_ms} at {t}: {windows:?}");
+                    assert_eq!(
+                        *start, covered_to,
+                        "{levels:?} {range_ms} at {t}: {windows:?}"
+                    );
                     covered_to = *end;
                 }
                 assert_eq!(covered_to, t, "{levels:?} {range_ms} at {t}");

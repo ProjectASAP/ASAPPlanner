@@ -180,12 +180,9 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 view,
                 read_window,
                 tumbling_window_width_ms,
-            } => self.start_materialized_view(
-                view,
-                *read_window,
-                *tumbling_window_width_ms,
-                context,
-            ),
+            } => {
+                self.start_materialized_view(view, *read_window, *tumbling_window_width_ms, context)
+            }
         }
     }
 }
@@ -214,7 +211,11 @@ impl Scan {
                 let width = i64::try_from(width_ms).unwrap_or(i64::MAX);
                 let (start, end) = time_range_ms;
                 let start = start.div_euclid(width) * width
-                    + if start.rem_euclid(width) == 0 { 0 } else { width };
+                    + if start.rem_euclid(width) == 0 {
+                        0
+                    } else {
+                        width
+                    };
                 let end = end.div_euclid(width) * width;
                 (start.min(end), end)
             }

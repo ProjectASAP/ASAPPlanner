@@ -188,9 +188,9 @@ pub(super) fn aggregate_coverage<'m>(
         }
         // The narrower chain's states merged into wider windows: the same
         // build, its time unconstrained.
-        Operator::ASAP(ASAPOp::SummaryMergeWindows { child, .. }) => {
-            stored_coverage(child).cloned().ok_or(CoverageError::NoCoverage)
-        }
+        Operator::ASAP(ASAPOp::SummaryMergeWindows { child, .. }) => stored_coverage(child)
+            .cloned()
+            .ok_or(CoverageError::NoCoverage),
         Operator::NonASAP(_) => match selected_build(operator)? {
             Some(build) => of_summary_agg(&build),
             None => Err(CoverageError::NoCoverage),

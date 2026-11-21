@@ -40,11 +40,11 @@ use crate::{
     CalibrationFit, CostInputs, NodeCostSource, OperatorKind, COST_SOURCE, MEASURED_COST_SOURCE,
     MIXED_COST_SOURCE,
 };
+use asap_types::ir::operator::tumbling_window_chain::mean_cover_windows_per_level;
 use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::resolve_column_ref;
 use asap_types::ir::schema::{ColumnId, FieldDataType, Schema};
-use asap_types::ir::operator::tumbling_window_chain::mean_cover_windows_per_level;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
@@ -494,12 +494,12 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // a chain (through the operators that keep each row's window, which
     // pass them on: `Operator::keeps_input_window`), 1 otherwise.
     // A cover's mean windows per level ([`cover_windows_per_level`]).
-    let cover_windows = match &node.payload {
-        Payload::NonASAP(NonASAPOp::TimeRangeCover { range, .. }) => {
+    let cover_windows =
+        if let Payload::NonASAP(NonASAPOp::TimeRangeCover { range, .. }) = &node.payload {
             Some(cover_windows_per_level(range, producers))
-        }
-        _ => None,
-    };
+        } else {
+            None
+        };
     let tumbling_windows = match &node.payload {
         Payload::NonASAP(NonASAPOp::TimeRange { range, .. })
             if chain_tumbling_window_width_ms(producers).is_some() =>
@@ -1398,7 +1398,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             // inside it, per group: at ingestion time one second's share,
             // `group_count · 1000 / narrower width` merges and
             // `group_count · 1000 / width` states emitted per second.
-            let narrower = producers.first().ok_or(AnalyticalCostError::UnsupportedCandidate)?;
+            let narrower = producers
+                .first()
+                .ok_or(AnalyticalCostError::UnsupportedCandidate)?;
             let narrower_width_ms = narrower
                 .chain_tumbling_window_width_ms
                 .ok_or(AnalyticalCostError::UnsupportedCandidate)?
@@ -1943,7 +1945,10 @@ fn chain_tumbling_window_width_ms(producers: &[ProducerOutput<'_>]) -> Option<u6
 /// evaluation times on the narrowest level's grid
 /// ([`mean_cover_windows_per_level`]). Example: 1 h over 5 min and 15 s:
 /// `[11.05, 19.0]`.
-fn cover_windows_per_level(range: &std::time::Duration, producers: &[ProducerOutput<'_>]) -> Vec<f64> {
+fn cover_windows_per_level(
+    range: &std::time::Duration,
+    producers: &[ProducerOutput<'_>],
+) -> Vec<f64> {
     let widths: Vec<u64> = producers
         .iter()
         .map(|producer| producer.chain_tumbling_window_width_ms.unwrap_or(1).max(1))

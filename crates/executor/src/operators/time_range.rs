@@ -299,7 +299,10 @@ pub(super) fn execute<'a>(
                         let t = times.value(row);
                         start < t
                             && t <= end
-                            && cover_ends.as_ref().as_ref().is_none_or(|ends| ends.contains(&t))
+                            && cover_ends
+                                .as_ref()
+                                .as_ref()
+                                .is_none_or(|ends| ends.contains(&t))
                     };
                     let stale = values.is_some_and(|values| {
                         values.is_valid(row) && is_stale_marker(values.value(row))

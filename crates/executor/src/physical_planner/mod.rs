@@ -628,9 +628,15 @@ fn compile_internal(
                         )
                     }
                 };
-                let window =
-                    Operator::time_range(input.clone(), time, end_offset_ms, length_ms, None, None)?
-                        .with_tumbling_window_ends_from_epoch(width_ms)?;
+                let window = Operator::time_range(
+                    input.clone(),
+                    time,
+                    end_offset_ms,
+                    length_ms,
+                    None,
+                    None,
+                )?
+                .with_tumbling_window_ends_from_epoch(width_ms)?;
                 let windowed = window.schema();
                 let state = summary_column(&windowed)?;
                 // The keys, then the wider window's end.
