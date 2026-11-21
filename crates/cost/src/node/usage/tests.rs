@@ -261,6 +261,74 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
     );
 }
 
+/// A `Project` or `Filter` over KLL states passes them on unchanged, so
+/// its states keep the KLL family, and an estimate reading them is costed
+/// as a KLL quantile, as over the build itself, not as a plain row.
+#[test]
+fn a_project_or_filter_over_states_passes_their_family_on() {
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let kll = SketchParams::Kll { k: 547 };
+    let states = node(Payload::ASAP(ASAPOp::SummaryAgg {
+        child: 0,
+        summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+        input: SummaryUpdate::column(ColumnRef::SampleValue),
+        reduction: Reduction::PerEntity,
+        filter: None,
+    }));
+    let states_output = ProducerOutput {
+        payload: &states.payload,
+        output_schema: &states.output_schema,
+        output: EdgeStatistics {
+            rows: 1_000,
+            bytes: 1_000 * 4_844,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::Sketch(&kll),
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 1,
+        chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
+        state_input_rows: None,
+    };
+    for passing in [
+        Payload::NonASAP(NonASAPOp::Project {
+            cols: Vec::new(),
+            child: 0,
+        }),
+        Payload::NonASAP(NonASAPOp::Filter {
+            pred: asap_types::ir::scalar::Predicate(asap_types::ir::ScalarExpr::Literal(
+                asap_types::ir::scalar::ScalarValue::Boolean(true),
+            )),
+            child: 0,
+        }),
+    ] {
+        let mut passing = node(passing);
+        passing.output_schema = Schema {
+            fields: vec![Field {
+                name: "state".into(),
+                dtype: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+                nullable: false,
+            }],
+            ..Schema::default()
+        };
+        let usage = node_resource_usage_and_cost(
+            &passing,
+            &[states_output.clone()],
+            (1, 1.0),
+            None,
+            &data,
+            &settings,
+        )
+        .unwrap();
+        assert!(
+            matches!(usage.family, StateFamily::Sketch(SketchParams::Kll { .. })),
+            "{}",
+            passing.payload.kind_name()
+        );
+    }
+}
+
 /// A merge over a time range of a counter chain's windows reads counter
 /// accumulator states, though the time range has no family and the merge
 /// no θ: its output's state column names the family, so each of the 5,000
