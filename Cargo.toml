@@ -32,10 +32,11 @@ ahash = { version = "0.8", default-features = false, features = ["std", "runtime
 # medians), #248 (`DdSketch::quantile_interpolated`), #249 (`memory_bytes` and
 # `estimated_memory_bytes`; KMV without `experimental`), #251 (the public
 # capability table) and #254 (Planner names in that table), plus
-# `Kll::shrink_to_fit` from #267 (branch `planner-pin/kll-shrink-to-fit`:
-# 21b6357 and that one commit, since main has renamed the capability
-# vocabulary since). Moves to a release once #267 is in one.
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "cbce5dca82c3bbc4a19341cfb3db9460b6cbee29" }
+# `Kll::shrink_to_fit` from #267 and `DdSketch::shrink_to_fit` from #270
+# (branch `planner-pin/dd-kll-shrink-to-fit`: 21b6357, #267's commit, and
+# #270's change and tests, since main has renamed the capability
+# vocabulary since). Moves to a release once #267 and #270 are in one.
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "befcef8c8f68ce54d3a91d6617a62896f70efeee" }
 
 [profile.dev]
 # Backtraces and profilers keep file:line; full variable info is opt-in via
