@@ -634,19 +634,27 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
 }
 
 /// `sum_over_time(m[5m] @ end())` and `sum_over_time(m[5m])`, both instant
-/// every 60 s: an instant query's `@ end()` is its evaluation time, so the
-/// anchored input runs in the evaluation context and shares `m[5m]` with
-/// the plain query, in the MILP and in `plan_cost` alike. The two cost less
-/// than planned alone, which is what any plan that does not share `m[5m]`
-/// (such as one in a request context of its own) costs.
+/// every 60 s over `m` at rest (no ingestion-time chain, which the plain
+/// query would otherwise read: a stored 60 s Sum chain costs less than its
+/// share of the scan): an instant query's `@ end()` is its evaluation time,
+/// so the anchored input runs in the evaluation context and shares `m[5m]`
+/// with the plain query, in the MILP and in `plan_cost` alike. The two cost
+/// less than planned alone, which is what any plan that does not share
+/// `m[5m]` (such as one in a request context of its own) costs.
 #[test]
 fn an_instant_at_end_input_shares_the_evaluation_context() {
     let queries = [
         requested("sum_over_time(m[5m] @ end())", 60_000, None),
         requested("sum_over_time(m[5m])", 60_000, None),
     ];
+    let over_m_at_rest = |entries: Vec<serde_json::Value>| {
+        let mut workload = over_m(entries);
+        workload.data_workload.as_mut().unwrap().arrival =
+            asap_types::workload::DataArrival::AtRest;
+        workload
+    };
     let (plan, (objective, plan_cost)) = selected_plan_objective_and_plan_cost_with(
-        &over_m(queries.to_vec()),
+        &over_m_at_rest(queries.to_vec()),
         PlanningModels::builtin(),
         &CostInputs::default(),
     );
@@ -657,7 +665,7 @@ fn an_instant_at_end_input_shares_the_evaluation_context() {
     assert_one_scan_read_by_every_query(&plan, 2);
     let alone: f64 = costs_of_queries_planned_alone(
         &queries,
-        |queries| over_m(queries.to_vec()),
+        |queries| over_m_at_rest(queries.to_vec()),
         PlanningModels::builtin,
     )
     .iter()

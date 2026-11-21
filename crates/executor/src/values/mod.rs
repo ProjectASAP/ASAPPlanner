@@ -8,6 +8,7 @@ use std::{cmp::Ordering, sync::Arc};
 pub(crate) mod arrow_columns;
 mod batch;
 mod state_column;
+pub(crate) mod text_interner;
 pub use batch::{Batch, BatchColumn};
 pub use state_column::StateColumn;
 pub(crate) use state_column::StateStorage;

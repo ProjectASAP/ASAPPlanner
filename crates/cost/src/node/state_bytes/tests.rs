@@ -996,10 +996,12 @@ fn priced_bytes_agree_with_the_executor() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A summary state's row holds its labels, its window's time and its
-/// series identity beside the state; the state's own bytes, which a merge
-/// is costed by, leave them out. A stored per-series Sum carrying `job`:
-/// 144 bytes per row, 56 of them its state.
+/// A summary state's row holds its state's index, a key per text column
+/// (`job` and the series identity), its window's time and the batch's
+/// row slot beside the state, and the batch holds the texts once; the
+/// state's own bytes, which a merge is costed by, leave them out. 1,000
+/// per-series Counts carrying `job`: 116,000 bytes, 80,000 of them texts,
+/// 28 per row beside each 8-byte record.
 #[test]
 fn state_bytes_per_row_leave_out_what_the_row_holds_beside_its_state() {
     use asap_types::ir::schema::{Field, PROMQL_SERIES_IDENTITY};
@@ -1008,7 +1010,7 @@ fn state_bytes_per_row_leave_out_what_the_row_holds_beside_its_state() {
         Field::new("ts", FieldDataType::Plain(DataType::Int64), false),
         Field::new(
             "state",
-            FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
             false,
         ),
         Field::new("job", FieldDataType::Plain(DataType::Utf8), false),
@@ -1018,10 +1020,50 @@ fn state_bytes_per_row_leave_out_what_the_row_holds_beside_its_state() {
             false,
         ),
     ]);
-    assert_eq!(state_row_bytes_beside_state(&schema), 88);
+    assert_eq!(state_row_bytes_beside_state(&schema), 28);
+    assert_eq!(text_dictionary_bytes(&schema, 1_000), 80_000);
+    assert_eq!(state_rows_bytes(&schema, 1_000, 8), Some(116_000));
     let edge = EdgeStatistics {
         rows: 1_000,
-        bytes: 144_000,
+        bytes: 116_000,
     };
-    assert_eq!(state_bytes_per_row(edge, &schema), 56);
+    assert_eq!(state_bytes_per_row(edge, &schema), 8);
+}
+
+/// A stored view holds a key per text and each text column's texts once:
+/// a plain view of 1,000 rows by `job` prices 16,000 bytes of `job` per
+/// output on its edge and 4,000 of keys stored, and the view 16,000 bytes
+/// of texts and 36,000 of their positions once; a view of 1,000
+/// per-series states prices their 64,000 bytes of identities once per
+/// output and once per view stored, with their positions.
+#[test]
+fn a_stored_view_holds_a_key_per_text_and_its_texts_once() {
+    use asap_types::ir::schema::{Field, PROMQL_SERIES_IDENTITY};
+    use asap_types::summary_type::{ExactKind, ExactParams};
+    let plain = Schema::new(vec![
+        Field::new("job", FieldDataType::Plain(DataType::Utf8), false),
+        Field::new("value", FieldDataType::Plain(DataType::Float64), false),
+    ]);
+    let texts = stored_view_texts(&plain, 1_000);
+    assert_eq!(
+        (texts.in_output, texts.keys_per_output, texts.shared_once),
+        (16_000, 4_000, 52_000)
+    );
+    let states = Schema::new(vec![
+        Field::new(
+            "state",
+            FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
+            false,
+        ),
+        Field::new(
+            PROMQL_SERIES_IDENTITY,
+            FieldDataType::Plain(DataType::Utf8),
+            false,
+        ),
+    ]);
+    let texts = stored_view_texts(&states, 1_000);
+    assert_eq!(
+        (texts.in_output, texts.keys_per_output, texts.shared_once),
+        (64_000, 0, 100_000)
+    );
 }

@@ -181,19 +181,11 @@ pub(crate) fn encode(
             }
         ),
         DataType::Utf8 if depth == ColumnDepth::BatchColumn => {
-            let mut codes: HashMap<&str, u32> = HashMap::new();
-            let mut dictionary: Vec<&str> = Vec::new();
+            let mut texts = super::text_interner::TextInterner::default();
             let keys: UInt32Array = values
                 .iter()
                 .map(|value| match value {
-                    Value::Utf8(text) => {
-                        let next = dictionary.len() as u32;
-                        let code = *codes.entry(text.as_ref()).or_insert_with(|| {
-                            dictionary.push(text.as_ref());
-                            next
-                        });
-                        Ok(Some(code))
-                    }
+                    Value::Utf8(text) => Ok(Some(texts.intern(text))),
                     Value::Null => Ok(None),
                     _ => Err(mismatch()),
                 })
@@ -201,7 +193,7 @@ pub(crate) fn encode(
             Arc::new(
                 DictionaryArray::<UInt32Type>::try_new(
                     keys,
-                    Arc::new(StringArray::from(dictionary)),
+                    Arc::new(texts.frozen_values().clone()),
                 )
                 .map_err(arrow_error)?,
             )

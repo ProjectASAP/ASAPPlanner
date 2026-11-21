@@ -4,6 +4,7 @@
 //! (and `TimeShift`) above the chain select; a chain built at query time
 //! builds those windows in the query run. And a `TimeShift` with an `@`
 //! anchor evaluates its input at the anchor's time.
+use asap_executor::arrow::array::Array;
 use asap_executor::physical_planner::{compile, test_support::views_at};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::InMemoryDataStore;
@@ -225,6 +226,7 @@ fn a_chain_built_at_ingestion_answers_queries_through_its_time_ranges() {
     let mut store = Arc::new(store_with_samples());
     let mut window_end = WIDTH_MS;
     let mut window_bytes = 0;
+    let mut appended_rows = std::collections::VecDeque::new();
     while window_end <= 4 * HOUR_MS {
         let context = RunContext::new(
             Scope::Ingestion {
@@ -251,25 +253,88 @@ fn a_chain_built_at_ingestion_answers_queries_through_its_time_ranges() {
                 .output_schema
                 .clone(),
         );
+        appended_rows.push_back(rows.clone());
+        if appended_rows.len() > 12 {
+            appended_rows.pop_front();
+        }
         let batch = Batch::try_new(schema, rows).unwrap();
-        // Its columns and states, before the store marks them as its own.
-        window_bytes = batch.memory_bytes();
+        // Its columns and states, before the store marks them as its own,
+        // without the texts of its `job` column (column 1), which the
+        // store holds once for the view, but with the empty values its
+        // stored keys point at.
+        let texts = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<asap_executor::arrow::array::DictionaryArray<
+                asap_executor::arrow::datatypes::UInt32Type,
+            >>()
+            .unwrap()
+            .values()
+            .get_array_memory_size();
+        let no_texts = asap_executor::arrow::array::StringArray::from(Vec::<&str>::new())
+            .get_array_memory_size();
+        window_bytes = batch.memory_bytes() - texts + no_texts;
         Arc::get_mut(&mut store)
             .unwrap()
             .append_materialized_view(&views[0], (window_end - WIDTH_MS, window_end), vec![batch])
             .unwrap();
         window_end += WIDTH_MS;
     }
-    // The store reports its 12 windows (2 h of 10-minute windows) with
-    // their states, right after appending and after a query read them.
-    assert_eq!(store.materialized_view_bytes(), 12 * window_bytes);
+    // The store holds its 12 windows (2 h of 10-minute windows) with
+    // their states, and their `job` texts once for the view, right after
+    // appending and after a query read them. Each window reads back as
+    // appended.
+    let view_bytes = store.materialized_view_bytes();
+    assert_eq!(
+        view_bytes,
+        12 * window_bytes + store.materialized_view_shared_text_bytes()
+    );
+    let schema = Arc::new(
+        dag.nodes
+            .iter()
+            .find(|node| node.id == chain)
+            .unwrap()
+            .output_schema
+            .clone(),
+    );
+    for (i, rows) in appended_rows.iter().enumerate() {
+        let end = 4 * HOUR_MS - (11 - i as i64) * WIDTH_MS;
+        let request = asap_executor::sources::MaterializedViewRequest {
+            time_range_ms: (end - WIDTH_MS, end),
+            schema: &schema,
+        };
+        let context = RunContext::new(
+            Scope::Query {
+                evaluation_time_ms: end,
+            },
+            Limits::default(),
+        )
+        .unwrap();
+        let read: Vec<Vec<Value>> = block_on(async {
+            use asap_executor::sources::DataStore;
+            store
+                .read_materialized_view(&views[0], &request, context)
+                .unwrap()
+                .map(|batch| batch.unwrap().to_rows())
+                .collect::<Vec<_>>()
+                .await
+        })
+        .into_iter()
+        .flatten()
+        .collect();
+        assert_eq!(
+            format!("{read:?}"),
+            format!("{rows:?}"),
+            "window ending {end}"
+        );
+    }
     let evaluation_time_ms = 4 * HOUR_MS;
     let context = RunContext::new(Scope::Query { evaluation_time_ms }, Limits::default()).unwrap();
     let answers = {
         let query = query.instantiate(store.clone()).unwrap();
         run(&query, &[now as u64, shifted as u64], context)
     };
-    assert_eq!(store.materialized_view_bytes(), 12 * window_bytes);
+    assert_eq!(store.materialized_view_bytes(), view_bytes);
     assert_eq!(
         sums_of(answers[0].clone()),
         direct_sums(evaluation_time_ms - HOUR_MS, evaluation_time_ms)

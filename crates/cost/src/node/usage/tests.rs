@@ -1927,7 +1927,11 @@ fn ddsketch_build_cost(
     let usage =
         node_resource_usage_and_cost(&build, &[producer_output], (1, 1.0), None, data, &settings)
             .unwrap();
-    (usage.output.bytes, usage.cost)
+    // The state's bytes, without the row's own beside it.
+    (
+        crate::node::state_bytes::state_bytes_per_row(usage.output, &build.output_schema),
+        usage.cost,
+    )
 }
 
 /// The bytes `sketch_state_bytes` gives a DDSketch state at α = 0.01 over 600

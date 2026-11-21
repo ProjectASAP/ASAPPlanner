@@ -32,7 +32,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 1.82328574786e-6,
+      "cost_per_second": 1.80733520719e-6,
       "cpu_core_seconds_per_second": 0.105421,
       "per_node": {
         "0": {
@@ -45,28 +45,28 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 9.17984496282e-7,
+          "cost_per_second": 9.02019950972e-7,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.02507,
-          "detail": "build DDSketch in tumbling windows of 10000 ms for 10000 groups: 100000 rows x 210 ops, 1000 group visits, 1000.0 states emitted; x 1.0000/s; keeps 553040000 bytes",
+          "detail": "build DDSketch in tumbling windows of 10000 ms for 10000 groups: 100000 rows x 210 ops, 1000 group visits, 1000.0 states emitted; x 1.0000/s; keeps 539160000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
         },
         "2": {
-          "cost_per_second": 3.71052067714e-9,
+          "cost_per_second": 3.71052068321e-9,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00033,
-          "detail": "time range 300s: 30 tumbling windows of states; x 0.1000/s; holds 1784 bytes for 3.300 ms",
+          "detail": "time range 300s: 30 tumbling windows of states; x 0.1000/s; holds 1800 bytes for 3.300 ms",
           "multiplier": 1,
           "operator": "TimeRange",
           "timing": "query_time"
         },
         "3": {
-          "cost_per_second": 8.57503006901e-7,
+          "cost_per_second": 8.57517011534e-7,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0761,
-          "detail": "merge 300000 states into 10000; x 0.1000/s; holds 20960000 bytes for 761.000 ms",
+          "detail": "merge 300000 states into 10000; x 0.1000/s; holds 21120000 bytes for 761.000 ms",
           "multiplier": 1,
           "operator": "SummaryMerge",
           "timing": "query_time"
@@ -92,11 +92,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 554635056.589,
+        "average_memory_bytes": 540767232.594,
         "cpu_ops_per_second": 105101000.0,
         "disk_bytes": 0,
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 574001848,
+        "peak_memory_bytes": 560281864,
         "scanned_bytes_per_second": 3200000.0
       }
     },

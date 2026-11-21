@@ -25,40 +25,141 @@ fn column_bytes(field: &Field) -> u64 {
     }
 }
 
-/// Bytes a summary state's output row holds beside its state: its labels
-/// and its window's time, each at [`column_bytes`] except the series
-/// identity, which a state's row holds its own copy of, at
-/// `SERIES_IDENTITY_BYTES`. Example: a stored per-series Sum carrying
-/// `job` holds its window time, `job` and the series identity: 8 + 16 + 64
-/// = 88 bytes beside its 24-byte sealed state, 112 in all.
+/// Bytes a row of summary states holds beside its state, as the executor
+/// holds a batch of them: its state's 4-byte index into the batch's state
+/// column, a 4-byte dictionary key per text column (a label or the series
+/// identity, whose texts are held once per batch or, stored, once per
+/// view: [`text_dictionary_bytes`]), each other column at 8 (its window's
+/// time) and the batch's 8-byte slot per row. Example: a stored per-series
+/// Count carrying `job`, at its window's time: 4 + 4 + 4 + 8 + 8 = 28 bytes
+/// beside its 8-byte record.
 pub(crate) fn state_row_bytes_beside_state(schema: &Schema) -> u64 {
+    ROW_SLOT_BYTES
+        + schema
+            .fields
+            .iter()
+            .map(|field| match &field.dtype {
+                FieldDataType::Sketch(..) | FieldDataType::ExactAggregate(..) => STATE_INDEX_BYTES,
+                FieldDataType::Plain(DataType::Utf8) => TEXT_KEY_BYTES,
+                _ => column_bytes(field),
+            })
+            .sum::<u64>()
+}
+
+/// Bytes of the texts of `rows` rows of summary states with `schema`, held
+/// once per batch, or once per view when stored (the executor's store
+/// shares each text column's values across a view's windows): per text
+/// column, a text per row, the series identity at `SERIES_IDENTITY_BYTES`
+/// and a label at 16. An upper bound for a label, whose rows repeat few
+/// values. Example: 10,000 per-series states hold 640,000 bytes of series
+/// identities.
+pub(crate) fn text_dictionary_bytes(schema: &Schema, rows: u64) -> u64 {
     schema
         .fields
         .iter()
         .map(|field| match &field.dtype {
-            FieldDataType::Sketch(..) | FieldDataType::ExactAggregate(..) => 0,
             FieldDataType::Plain(DataType::Utf8) if field.name == PROMQL_SERIES_IDENTITY => {
                 SERIES_IDENTITY_BYTES
             }
-            _ => column_bytes(field),
+            FieldDataType::Plain(DataType::Utf8) => column_bytes(field),
+            _ => 0,
         })
-        .sum()
+        .sum::<u64>()
+        .saturating_mul(rows)
 }
 
-/// Bytes of the state one row of `edge` holds: its bytes per row without
-/// what the row holds beside its state ([`state_row_bytes_beside_state`] of
-/// the producer's `schema`). Example: 1,000 rows of stored per-series Sums
-/// carrying `job`, 112,000 bytes, hold 112 − 88 = 24 bytes of state each.
+/// What a stored view's output holds of its texts, priced on its edge
+/// and stored: the store keeps a key per text and holds each text column's
+/// values once per view ([`stored_view_texts`]).
+pub(crate) struct StoredViewTexts {
+    /// Bytes the output, as priced on its edge, spends on texts: a batch's
+    /// texts once for summary states ([`text_dictionary_bytes`]), a text
+    /// per row of each text column for plain rows ([`row_bytes`]).
+    pub(crate) in_output: u64,
+    /// Bytes the stored output spends on keys instead: none more for
+    /// summary states (their row already prices a key), a 4-byte key per
+    /// row of each text column for plain rows.
+    pub(crate) keys_per_output: u64,
+    /// The texts the view holds once: [`text_dictionary_bytes`] of one
+    /// output, and the store's table of each text's position.
+    pub(crate) shared_once: u64,
+}
+
+/// [`StoredViewTexts`] of a view whose outputs have `schema` and `rows`
+/// rows. Example: a plain view of 1,000 rows by `job` prices 16,000 bytes
+/// of `job` on its edge; stored, each output holds 4,000 bytes of keys and
+/// the view 16,000 + 36,000 bytes of texts and positions once.
+pub(crate) fn stored_view_texts(schema: &Schema, rows: u64) -> StoredViewTexts {
+    let text_columns = schema
+        .fields
+        .iter()
+        .filter(|field| field.dtype == FieldDataType::Plain(DataType::Utf8))
+        .count() as u64;
+    let summary_states = schema.fields.iter().any(|field| !field.is_plain());
+    let dictionary = text_dictionary_bytes(schema, rows);
+    StoredViewTexts {
+        in_output: match summary_states {
+            true => dictionary,
+            false => rows.saturating_mul(text_columns * TEXT_ROW_BYTES),
+        },
+        keys_per_output: match summary_states {
+            true => 0,
+            false => rows.saturating_mul(text_columns * TEXT_KEY_BYTES),
+        },
+        shared_once: dictionary
+            .saturating_add(rows.saturating_mul(text_columns * TEXT_POSITION_TABLE_BYTES)),
+    }
+}
+
+/// A text column's bytes per row of plain rows ([`column_bytes`]).
+const TEXT_ROW_BYTES: u64 = 16;
+
+/// The store's table entry per shared text: its position by hash, the
+/// next with the same hash, at a hash table's spare capacity. Measured at
+/// 29 to 42 bytes per text over 1,000 to 30,000 texts.
+const TEXT_POSITION_TABLE_BYTES: u64 = 36;
+
+/// Bytes of `rows` rows of summary states with `schema`, each state of
+/// `state_bytes`: each row's [`state_row_bytes_beside_state`] and state,
+/// and the batch's texts once ([`text_dictionary_bytes`]). `None` on
+/// overflow.
+pub(crate) fn state_rows_bytes(schema: &Schema, rows: u64, state_bytes: u64) -> Option<u64> {
+    rows.checked_mul(state_bytes.checked_add(state_row_bytes_beside_state(schema))?)?
+        .checked_add(text_dictionary_bytes(schema, rows))
+}
+
+/// Bytes of the state one row of `edge` holds: its bytes without the
+/// batch's texts ([`text_dictionary_bytes`]), per row, without what the
+/// row holds beside its state ([`state_row_bytes_beside_state`] of the
+/// producer's `schema`). Example: 1,000 rows of per-series Counts carrying
+/// `job`, 116,000 bytes, of which 80,000 are texts, hold 36 − 28 = 8 bytes
+/// of state each.
 pub(crate) fn state_bytes_per_row(edge: EdgeStatistics, schema: &Schema) -> u64 {
-    edge.bytes_per_row()
+    let without_texts = EdgeStatistics {
+        rows: edge.rows,
+        bytes: edge
+            .bytes
+            .saturating_sub(text_dictionary_bytes(schema, edge.rows)),
+    };
+    without_texts
+        .bytes_per_row()
         .saturating_sub(state_row_bytes_beside_state(schema))
 }
 
-/// Bytes of one series identity in a state's row: its serialized label
-/// set, e.g. `{"instance":"host-17:9100","job":"api","region":"r1"}`
-/// (about 55 bytes), and the column's 4-byte offset, rounded up. An
-/// assumption: the data workload declares no label lengths.
+/// Bytes of one series identity's text: its serialized label set, e.g.
+/// `{"instance":"host-17:9100","job":"api","region":"r1"}` (about 55
+/// bytes), and its 4-byte offset, rounded up. An assumption: the data
+/// workload declares no label lengths.
 const SERIES_IDENTITY_BYTES: u64 = 64;
+
+/// The executor's slot per batch row (`ROW_SLOT_BYTES` in its batches).
+const ROW_SLOT_BYTES: u64 = 8;
+
+/// A state's index into its batch's state column (a `UInt32`).
+const STATE_INDEX_BYTES: u64 = 4;
+
+/// A text column's dictionary key per row (a `UInt32`).
+const TEXT_KEY_BYTES: u64 = 4;
 
 /// Exact state that keeps every value or item of its group, so grows with
 /// the data; other exact accumulators are fixed-size.
