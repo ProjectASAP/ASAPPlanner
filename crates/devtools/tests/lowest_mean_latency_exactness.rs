@@ -4,7 +4,10 @@
 //! bound), the flow-formulated reads and the lazy tie-break solves, the
 //! selected plan's mean latency is the one the full MILP finds without
 //! them, on sketch plan snapshot workloads and on a query that reads one
-//! state twice (an in-query diamond: a ratio of two quantiles).
+//! state twice (an in-query diamond: a ratio of two quantiles). These
+//! comparisons solve exactly (`ASAP_STAGE3_EXACT=1`); the default stop
+//! rule (a relative gap of 1 % or 30 s) is checked against the exact
+//! optimum.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -20,14 +23,25 @@ fn root() -> PathBuf {
 /// its size.
 struct Selected {
     mean_latency_ms: f64,
+    /// The solver's lower bound on any plan's mean latency, ms.
+    lower_bound_ms: f64,
+    /// The reported relative gap.
+    relative_gap: f64,
     variables: u64,
     rows: u64,
 }
 
 /// The selection for `workload` on `deployment` (a sketch plan snapshot
 /// deployment), cost model 3 with the viewer's cluster inputs, with the
-/// speed-ups or without (`full`).
-fn selected(workload: &str, deployment: &str, ignore_accuracy: bool, full: bool) -> Selected {
+/// speed-ups or without (`full`), solved exactly or with the default stop
+/// rule.
+fn selected_with(
+    workload: &str,
+    deployment: &str,
+    ignore_accuracy: bool,
+    full: bool,
+    exact: bool,
+) -> Selected {
     let root = root();
     let mut command = Command::new(env!("CARGO_BIN_EXE_asap_planner"));
     command
@@ -45,6 +59,9 @@ fn selected(workload: &str, deployment: &str, ignore_accuracy: bool, full: bool)
     if ignore_accuracy {
         command.arg("--ignore-accuracy-guarantees");
     }
+    if exact {
+        command.env("ASAP_STAGE3_EXACT", "1");
+    }
     if full {
         command
             .env("ASAP_STAGE3_THETA_DOMINANCE", "off")
@@ -60,9 +77,59 @@ fn selected(workload: &str, deployment: &str, ignore_accuracy: bool, full: bool)
         mean_latency_ms: stage3["milp_objective_mean_latency_ms"]
             .as_f64()
             .unwrap_or_else(|| panic!("{workload}: no plan: {}", stage3["error"])),
+        lower_bound_ms: stage3["milp_optimality_gap"]["mean_latency_lower_bound_ms"]
+            .as_f64()
+            .unwrap(),
+        relative_gap: stage3["milp_optimality_gap"]["relative_gap"]
+            .as_f64()
+            .unwrap(),
         variables: stage3["milp_variables"].as_u64().unwrap(),
         rows: stage3["milp_constraints"].as_u64().unwrap(),
     }
+}
+
+/// The exact selection, with the speed-ups or without (`full`).
+fn selected(workload: &str, deployment: &str, ignore_accuracy: bool, full: bool) -> Selected {
+    selected_with(workload, deployment, ignore_accuracy, full, true)
+}
+
+/// The default stop rule's plan is within its reported gap of the exact
+/// optimum `optimum_ms`: its lower bound is at most the optimum, and its
+/// mean latency at most the optimum plus the gap; the gap is at most 1 %
+/// unless the solve stopped on time (`may_stop_on_time`).
+fn assert_within_gap(
+    workload: &str,
+    deployment: &str,
+    ignore_accuracy: bool,
+    optimum_ms: f64,
+    may_stop_on_time: bool,
+) {
+    let stopped = selected_with(workload, deployment, ignore_accuracy, false, false);
+    let tolerance = 1e-6 * optimum_ms.max(1.0);
+    assert!(
+        may_stop_on_time || stopped.relative_gap <= 0.01 + 1e-9,
+        "{workload}: gap {} over 1 %",
+        stopped.relative_gap
+    );
+    assert!(
+        stopped.lower_bound_ms <= optimum_ms + tolerance,
+        "{workload}: bound {} ms over the optimum {optimum_ms} ms",
+        stopped.lower_bound_ms
+    );
+    assert!(
+        stopped.mean_latency_ms - optimum_ms
+            <= stopped.relative_gap * stopped.mean_latency_ms + tolerance,
+        "{workload}: {} ms, optimum {optimum_ms} ms, gap {}",
+        stopped.mean_latency_ms,
+        stopped.relative_gap
+    );
+    assert!(
+        (stopped.relative_gap
+            - (stopped.mean_latency_ms - stopped.lower_bound_ms) / stopped.mean_latency_ms)
+            .abs()
+            <= 1e-9,
+        "{workload}: the reported gap is not (plan - bound) / plan"
+    );
 }
 
 /// Assert the mean latency is the full MILP's, to the solver's precision.
@@ -114,7 +181,10 @@ fn the_speed_ups_keep_every_snapshot_workloads_optimum() {
             other => other,
         };
         let ignore = entry["accuracy_guarantees"] == "ignored";
-        assert_same_optimum(entry["workload"].as_str().unwrap(), deployment, ignore);
+        let workload = entry["workload"].as_str().unwrap();
+        assert_same_optimum(workload, deployment, ignore);
+        let optimum = selected(workload, deployment, ignore, false).mean_latency_ms;
+        assert_within_gap(workload, deployment, ignore, optimum, false);
     }
 }
 
@@ -171,6 +241,16 @@ fn the_measured_workloads_keep_their_optimum_in_a_bounded_model() {
             selected.variables,
             selected.rows
         );
+        // seed-862 proves its optimum in about 60 s: the default rule stops
+        // it at 30 s, above 1 %.
+        let may_stop_on_time = workload.contains("seed-862");
+        assert_within_gap(
+            &workload,
+            deployment,
+            ignore_accuracy,
+            mean_latency_ms,
+            may_stop_on_time,
+        );
     }
 }
 
@@ -187,6 +267,7 @@ fn dominated_theta_families_are_left_out() {
             .current_dir(root())
             .env("ASAP_STAGE3_FEASIBLE_PLAN_BOUND", "off")
             .env("ASAP_STAGE3_THETA_DOMINANCE", theta_dominance)
+            .env("ASAP_STAGE3_EXACT", "1")
             .args(["--workload", workload, "--run-until", "stage3"])
             .args([
                 "--deployment-capabilities",

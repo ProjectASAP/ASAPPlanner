@@ -303,7 +303,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     // `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_LATENCY_READS=mccormick`
     // turn one off; `ASAP_STAGE3_ROOT_LP=1` reports the LP bound;
     // `ASAP_STAGE3_FEASIBLE_PLAN_START=on` starts from cost model 1's plan;
-    // `ASAP_STAGE3_SOLVER_LOG=1` prints the solver's log.
+    // `ASAP_STAGE3_SOLVER_LOG=1` prints the solver's log;
+    // `ASAP_STAGE3_EXACT=1` solves the mean latency to optimality.
     let knob = |name: &str| std::env::var(name).ok();
     let checks = &mut cost_inputs.latency_selection_checks;
     if knob("ASAP_STAGE3_THETA_DOMINANCE").as_deref() == Some("off") {
@@ -326,6 +327,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     if knob("ASAP_STAGE3_SOLVER_LOG").is_some() {
         checks.log_solver = true;
+    }
+    if knob("ASAP_STAGE3_EXACT").is_some() {
+        checks.exact_solve = true;
     }
     // Price a given plan instead of planning: its report only.
     if let Some(path) = price_plan {
@@ -363,9 +367,11 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         .ok()
         .and_then(|run| run.run.selection.as_ref().ok())
         .zip(plan_cost.as_ref())
-        .map(|((plan, _), cost)| {
+        .map(|((plan, selection), cost)| {
             let facts = asap_planner::assumed_data_facts(plan, cost, &data);
-            asap_planner::selected_plan_report(cost, facts)
+            let mut report = asap_planner::selected_plan_report(cost, facts);
+            report.optimality_gap = selection.optimality_gap;
+            report
         });
     // The selected plan as a runtime installs it, validated.
     let installable = result
@@ -1085,6 +1091,7 @@ fn selection_json(
         "milp_objective_mean_latency_ms": selection.selected_plan_mean_latency_ms,
         "milp_latency_ms_per_query": selection.selected_plan_latency_ms_per_query,
         "milp_root_lp_mean_latency_ms": selection.milp_root_lp_mean_latency_ms,
+        "milp_optimality_gap": selection.optimality_gap,
         "executions_pruned_by_latency_bound": selection.executions_pruned_by_latency_bound,
     })
 }

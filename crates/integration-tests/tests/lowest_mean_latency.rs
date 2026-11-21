@@ -758,6 +758,38 @@ async fn a9_a_range_requests_work_counts_each_step() {
     assert_milp_latencies_are_the_reports(&workload, &settings, &selected);
 }
 
+/// A range request's steps split over the query threads: on 4 threads its
+/// 61 steps take 16 rounds, so its query-time work is 16 × 30.3 ms in the
+/// report and the MILP, and its CPU is the one-thread plan's.
+#[tokio::test]
+async fn a9b_a_range_requests_steps_split_over_the_query_threads() {
+    let mut range = every("max_over_time(m[5m])", 300_000, None);
+    range["range_evaluation"] = json!({"step_ms": 60_000, "span_ms": 3_600_000});
+    let workload = over_m(vec![range], 1000);
+    let settings = |threads: u32| {
+        cost_inputs(
+            lowest_mean_latency(),
+            max_min_table(100.0, 10_000_000.0, 0.0),
+            json!({}),
+            data_plane(json!({ "query_threads": threads })),
+        )
+    };
+    let one = plan(&workload, &settings(1), true).await;
+    let four = plan(&workload, &settings(4), true).await;
+    assert!(!four.has_ingestion_views());
+    assert_close(
+        "query execution",
+        four.query_ms(0, "query_execution_ms"),
+        16.0 * 30.3,
+    );
+    assert_close(
+        "CPU",
+        four.usage("cpu_core_seconds_per_second"),
+        one.usage("cpu_core_seconds_per_second"),
+    );
+    assert_milp_latencies_are_the_reports(&workload, &settings(4), &four);
+}
+
 /// §6.4: the MILP's reads of each query are the sub-DAG it reaches in the
 /// plan, so each query's latency is the report's: two queries sharing a
 /// raw read (A15), and two conflicting queries (A4).

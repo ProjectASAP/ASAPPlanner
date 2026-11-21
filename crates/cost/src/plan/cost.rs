@@ -305,8 +305,12 @@ pub fn plan_cost(
         if !usage.cpu_ops_per_second.is_finite() || !request_ms_per_second.is_finite() {
             return Err((diagnostic_node, AnalyticalCostError::Overflow));
         }
-        evaluation_ms_per_query[query] =
-            evaluation_ms + step_ms * steps_per_request(entries.get(query)) as f64;
+        evaluation_ms_per_query[query] = evaluation_ms
+            + step_ms
+                * step_rounds(
+                    steps_per_request(entries.get(query)),
+                    settings.data_plane_execution.query_threads,
+                ) as f64;
         let Some(&first_read) = start.first() else {
             has_unattached_request_overhead = true;
             if let Some(unit_cost) = unit_costs {
@@ -611,6 +615,13 @@ pub fn ingest_threads_building_copies(settings: &CostInputs, ingest_cores: f64) 
 
 /// Steps one request of `entry` evaluates: its range evaluation's, 1
 /// without one (or without an entry).
+/// The rounds a request's `steps` take when they split over
+/// `query_threads` query threads: ⌈steps ÷ threads⌉, the latency's
+/// multiplier of per-step work (its CPU stays `steps` times).
+pub fn step_rounds(steps: u64, query_threads: u32) -> u64 {
+    steps.div_ceil(u64::from(query_threads.max(1)))
+}
+
 fn steps_per_request(entry: Option<&QueryWorkloadEntry>) -> u64 {
     entry
         .and_then(|entry| entry.range_evaluation)
@@ -807,9 +818,10 @@ fn query_latencies(
                 // when kept across evaluations (as `computations` counts it).
                 let per_request = match nodes[&id].lifetime {
                     Lifetime::AcrossEvaluations(_) => 1,
-                    Lifetime::None | Lifetime::OneEvaluation(_) => {
-                        steps_per_request(entries.get(query))
-                    }
+                    Lifetime::None | Lifetime::OneEvaluation(_) => step_rounds(
+                        steps_per_request(entries.get(query)),
+                        settings.data_plane_execution.query_threads,
+                    ),
                 };
                 latency.query_execution_ms += work_ms[&id] * per_request as f64;
                 stack.extend(inputs(id));

@@ -51,7 +51,8 @@ use crate::selectable::{Execution, QueryId, SelectableExecutions};
 
 pub use milp::model::cluster::{ClusterLimit, ClusterLimitShortfall};
 pub use report::{
-    large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, RejectionCause, Selection,
+    large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, OptimalityGap, RejectionCause,
+    Selection,
 };
 
 /// What the cluster offers of `limit`: its memory, disk or cores, the
@@ -202,110 +203,119 @@ pub fn select_plan(
             failure_probability_bound,
         },
     };
-    let (solved, mean_latency_ms, latency_ms_per_query, pruned_by_latency_bound, root_lp) =
-        match cluster_limits {
-            None => (
-                solve_selection(&selection_inputs).map_err(milp_error)?,
-                None,
-                None,
-                0,
-                None,
-            ),
-            Some(limits) => {
-                let quantity = |quantity| {
-                    execution_quantities(
-                        physical,
-                        &selectable,
-                        entries,
-                        data,
-                        cost_inputs_for_structure,
-                        quantity,
-                    )
-                };
-                let (query_ms, refresh_ms, cpu, memory, disk) = (
-                    quantity(Quantity::QueryMsPerRun),
-                    quantity(Quantity::RefreshWallMsPerWindow),
-                    quantity(Quantity::CpuCoreSecondsPerSecond),
-                    quantity(Quantity::PeakMemoryBytes),
-                    quantity(Quantity::DiskBytes),
-                );
-                // A feasible plan's executions for T8: cost model 1's
-                // optimum (when it is solved), by position.
-                let feasible_plan = solve_selection(&selection_inputs).ok().map(|solved| {
-                    let executions = selectable.executions();
-                    let position =
-                        |execution: &Execution| executions.iter().position(|e| e == execution);
-                    FeasiblePlan {
-                        executions: solved.executions.iter().filter_map(position).collect(),
-                        edges: selectable
-                            .edges()
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, edge)| {
-                                solved.edges.iter().any(|selected| {
-                                    selected.edge == edge.edge
-                                        && selected.consumer == executions[edge.consumer]
-                                        && selected.producer == executions[edge.producer]
-                                })
-                            })
-                            .map(|(position, _)| position)
-                            .collect(),
-                        answering: selectable
-                            .answering()
-                            .iter()
-                            .zip(&solved.outputs)
-                            .filter_map(|((query, _), output)| {
-                                position(output).map(|index| (*query, index))
-                            })
-                            .collect(),
-                    }
-                });
-                let solved = solve_cluster_selection(&ClusterInputs {
-                    selection: selection_inputs,
-                    query_ms: &query_ms,
-                    refresh_ms: &refresh_ms,
-                    cpu: &cpu,
-                    memory: &memory,
-                    disk: &disk,
-                    limits,
-                    cost_inputs,
+    let (
+        solved,
+        mean_latency_ms,
+        latency_ms_per_query,
+        pruned_by_latency_bound,
+        root_lp,
+        optimality_gap,
+    ) = match cluster_limits {
+        None => (
+            solve_selection(&selection_inputs).map_err(milp_error)?,
+            None,
+            None,
+            0,
+            None,
+            None,
+        ),
+        Some(limits) => {
+            let quantity = |quantity| {
+                execution_quantities(
+                    physical,
+                    &selectable,
+                    entries,
                     data,
-                    feasible_plan,
-                })
-                .map_err(|error| match error {
-                    ClusterSelectionError::Milp(error) => milp_error(error),
-                    ClusterSelectionError::OverLimits(shortfalls) => {
-                        ErrorSelectingPlan::OverClusterLimits(
-                            shortfalls
-                                .into_iter()
-                                .map(|shortfall| ClusterLimitShortfall {
-                                    available: available(
-                                        limits,
-                                        cost_inputs,
-                                        entries,
-                                        shortfall.limit,
-                                    ),
-                                    ..shortfall
-                                })
-                                .collect(),
-                        )
-                    }
-                })?;
-                let mut per_query = vec![0.0; entries.len()];
-                for &(query, latency) in &solved.latency_ms_per_query {
-                    if let Some(slot) = per_query.get_mut(query) {
-                        *slot = latency;
-                    }
-                }
-                (
-                    solved.solved,
-                    Some(solved.mean_latency_ms),
-                    Some(per_query),
-                    solved.pruned_by_latency_bound,
-                    solved.root_lp_mean_latency_ms,
+                    cost_inputs_for_structure,
+                    quantity,
                 )
+            };
+            let (query_ms, refresh_ms, cpu, memory, disk) = (
+                quantity(Quantity::QueryMsPerRun),
+                quantity(Quantity::RefreshWallMsPerWindow),
+                quantity(Quantity::CpuCoreSecondsPerSecond),
+                quantity(Quantity::PeakMemoryBytes),
+                quantity(Quantity::DiskBytes),
+            );
+            // A feasible plan's executions for T8: cost model 1's
+            // optimum (when it is solved), by position.
+            let feasible_plan = solve_selection(&selection_inputs).ok().map(|solved| {
+                let executions = selectable.executions();
+                let position =
+                    |execution: &Execution| executions.iter().position(|e| e == execution);
+                FeasiblePlan {
+                    executions: solved.executions.iter().filter_map(position).collect(),
+                    edges: selectable
+                        .edges()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, edge)| {
+                            solved.edges.iter().any(|selected| {
+                                selected.edge == edge.edge
+                                    && selected.consumer == executions[edge.consumer]
+                                    && selected.producer == executions[edge.producer]
+                            })
+                        })
+                        .map(|(position, _)| position)
+                        .collect(),
+                    answering: selectable
+                        .answering()
+                        .iter()
+                        .zip(&solved.outputs)
+                        .filter_map(|((query, _), output)| {
+                            position(output).map(|index| (*query, index))
+                        })
+                        .collect(),
+                }
+            });
+            let solved = solve_cluster_selection(&ClusterInputs {
+                selection: selection_inputs,
+                query_ms: &query_ms,
+                refresh_ms: &refresh_ms,
+                cpu: &cpu,
+                memory: &memory,
+                disk: &disk,
+                limits,
+                cost_inputs,
+                data,
+                feasible_plan,
+            })
+            .map_err(|error| match error {
+                ClusterSelectionError::Milp(error) => milp_error(error),
+                ClusterSelectionError::OverLimits(shortfalls) => {
+                    ErrorSelectingPlan::OverClusterLimits(
+                        shortfalls
+                            .into_iter()
+                            .map(|shortfall| ClusterLimitShortfall {
+                                available: available(limits, cost_inputs, entries, shortfall.limit),
+                                ..shortfall
+                            })
+                            .collect(),
+                    )
+                }
+            })?;
+            let mut per_query = vec![0.0; entries.len()];
+            for &(query, latency) in &solved.latency_ms_per_query {
+                if let Some(slot) = per_query.get_mut(query) {
+                    *slot = latency;
+                }
             }
-        };
+            (
+                solved.solved,
+                Some(solved.mean_latency_ms),
+                Some(per_query),
+                solved.pruned_by_latency_bound,
+                solved.root_lp_mean_latency_ms,
+                Some(OptimalityGap {
+                    mean_latency_ms: solved.mean_latency_ms,
+                    mean_latency_lower_bound_ms: solved.mean_latency_lower_bound_ms,
+                    relative_gap: ((solved.mean_latency_ms - solved.mean_latency_lower_bound_ms)
+                        / solved.mean_latency_ms.max(f64::MIN_POSITIVE))
+                    .max(0.0),
+                }),
+            )
+        }
+    };
     let plan = plan_of(physical, &solved, &outputs).map_err(|error| {
         ErrorSelectingPlan::Solver(format!("the selected plan is invalid: {error}"))
     })?;
@@ -337,6 +347,7 @@ pub fn select_plan(
         selected_plan_mean_latency_ms: mean_latency_ms,
         selected_plan_latency_ms_per_query: latency_ms_per_query,
         milp_root_lp_mean_latency_ms: root_lp,
+        optimality_gap,
         executions_pruned_by_latency_bound: pruned_by_latency_bound,
     };
     Ok((plan, selection))

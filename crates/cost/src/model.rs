@@ -243,8 +243,10 @@ pub struct DataPlaneExecution {
     /// Threads running window-close refreshes of ingestion-time views;
     /// default 1.
     pub precompute_threads: u32,
-    /// Threads running query requests, one request per thread; default 1.
-    /// Not a limit: the report recommends how many a plan needs.
+    /// Threads running query requests; default 1. A range request's steps
+    /// split over them (`step_rounds`): its per-step work takes
+    /// ⌈steps ÷ threads⌉ rounds of latency, its CPU is unchanged. Not a
+    /// limit: the report recommends how many a plan needs.
     pub query_threads: u32,
     /// Milliseconds the data plane waits after a window's end before
     /// closing it; every query waits for it. Default 0.
@@ -381,6 +383,10 @@ pub struct LatencySelectionChecks {
     /// Print the solver's log and the model's size by family on standard
     /// error (a measurement); default false.
     pub log_solver: bool,
+    /// Solve the mean latency to optimality; default false: stop at a
+    /// relative gap of 1 % or after 30 s, whichever comes first, and
+    /// report the gap and the lower bound beside the plan.
+    pub exact_solve: bool,
 }
 
 impl Default for LatencySelectionChecks {
@@ -393,6 +399,7 @@ impl Default for LatencySelectionChecks {
             report_root_lp_bound: false,
             log_solver: false,
             feasible_plan_start: false,
+            exact_solve: false,
         }
     }
 }
