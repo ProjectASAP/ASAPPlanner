@@ -4,6 +4,7 @@
 //! (and `TimeShift`) above the chain select; a chain built at query time
 //! builds those windows in the query run. And a `TimeShift` with an `@`
 //! anchor evaluates its input at the anchor's time.
+use asap_executor::arrow::array::Array;
 use asap_executor::physical_planner::{compile, test_support::views_at};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::InMemoryDataStore;
@@ -257,8 +258,22 @@ fn a_chain_built_at_ingestion_answers_queries_through_its_time_ranges() {
             appended_rows.pop_front();
         }
         let batch = Batch::try_new(schema, rows).unwrap();
-        // Its columns and states, before the store marks them as its own.
-        window_bytes = batch.memory_bytes();
+        // Its columns and states, before the store marks them as its own,
+        // without the texts of its `job` column (column 1), which the
+        // store holds once for the view, but with the empty values its
+        // stored keys point at.
+        let texts = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<asap_executor::arrow::array::DictionaryArray<
+                asap_executor::arrow::datatypes::UInt32Type,
+            >>()
+            .unwrap()
+            .values()
+            .get_array_memory_size();
+        let no_texts = asap_executor::arrow::array::StringArray::from(Vec::<&str>::new())
+            .get_array_memory_size();
+        window_bytes = batch.memory_bytes() - texts + no_texts;
         Arc::get_mut(&mut store)
             .unwrap()
             .append_materialized_view(&views[0], (window_end - WIDTH_MS, window_end), vec![batch])
@@ -266,11 +281,14 @@ fn a_chain_built_at_ingestion_answers_queries_through_its_time_ranges() {
         window_end += WIDTH_MS;
     }
     // The store holds its 12 windows (2 h of 10-minute windows) with
-    // their states, and their `job` texts once for the view: less than 12
-    // windows each with its own texts, right after appending and after a
-    // query read them. Each window reads back as appended.
+    // their states, and their `job` texts once for the view, right after
+    // appending and after a query read them. Each window reads back as
+    // appended.
     let view_bytes = store.materialized_view_bytes();
-    assert!(view_bytes < 12 * window_bytes, "{view_bytes}");
+    assert_eq!(
+        view_bytes,
+        12 * window_bytes + store.materialized_view_shared_text_bytes()
+    );
     let schema = Arc::new(
         dag.nodes
             .iter()

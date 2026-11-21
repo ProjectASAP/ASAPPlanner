@@ -68,6 +68,57 @@ pub(crate) fn text_dictionary_bytes(schema: &Schema, rows: u64) -> u64 {
         .saturating_mul(rows)
 }
 
+/// What a stored view's output holds of its texts, priced on its edge
+/// and stored: the store keeps a key per text and holds each text column's
+/// values once per view ([`stored_view_texts`]).
+pub(crate) struct StoredViewTexts {
+    /// Bytes the output, as priced on its edge, spends on texts: a batch's
+    /// texts once for summary states ([`text_dictionary_bytes`]), a text
+    /// per row of each text column for plain rows ([`row_bytes`]).
+    pub(crate) in_output: u64,
+    /// Bytes the stored output spends on keys instead: none more for
+    /// summary states (their row already prices a key), a 4-byte key per
+    /// row of each text column for plain rows.
+    pub(crate) keys_per_output: u64,
+    /// The texts the view holds once: [`text_dictionary_bytes`] of one
+    /// output, and the store's table of each text's position.
+    pub(crate) shared_once: u64,
+}
+
+/// [`StoredViewTexts`] of a view whose outputs have `schema` and `rows`
+/// rows. Example: a plain view of 1,000 rows by `job` prices 16,000 bytes
+/// of `job` on its edge; stored, each output holds 4,000 bytes of keys and
+/// the view 16,000 + 36,000 bytes of texts and positions once.
+pub(crate) fn stored_view_texts(schema: &Schema, rows: u64) -> StoredViewTexts {
+    let text_columns = schema
+        .fields
+        .iter()
+        .filter(|field| field.dtype == FieldDataType::Plain(DataType::Utf8))
+        .count() as u64;
+    let summary_states = schema.fields.iter().any(|field| !field.is_plain());
+    let dictionary = text_dictionary_bytes(schema, rows);
+    StoredViewTexts {
+        in_output: match summary_states {
+            true => dictionary,
+            false => rows.saturating_mul(text_columns * TEXT_ROW_BYTES),
+        },
+        keys_per_output: match summary_states {
+            true => 0,
+            false => rows.saturating_mul(text_columns * TEXT_KEY_BYTES),
+        },
+        shared_once: dictionary
+            .saturating_add(rows.saturating_mul(text_columns * TEXT_POSITION_TABLE_BYTES)),
+    }
+}
+
+/// A text column's bytes per row of plain rows ([`column_bytes`]).
+const TEXT_ROW_BYTES: u64 = 16;
+
+/// The store's table entry per shared text: its position by hash, the
+/// next with the same hash, at a hash table's spare capacity. Measured at
+/// 29 to 42 bytes per text over 1,000 to 30,000 texts.
+const TEXT_POSITION_TABLE_BYTES: u64 = 36;
+
 /// Bytes of `rows` rows of summary states with `schema`, each state of
 /// `state_bytes`: each row's [`state_row_bytes_beside_state`] and state,
 /// and the batch's texts once ([`text_dictionary_bytes`]). `None` on

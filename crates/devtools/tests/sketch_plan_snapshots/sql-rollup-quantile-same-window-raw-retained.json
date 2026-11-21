@@ -39,7 +39,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 1.64730766637e-8,
+      "cost_per_second": 1.64734907297e-8,
       "cpu_core_seconds_per_second": 0.0013631887,
       "per_node": {
         "0": {
@@ -97,10 +97,10 @@
           "timing": "ingestion_time"
         },
         "5": {
-          "cost_per_second": 1.88402593134e-9,
+          "cost_per_second": 1.88443999736e-9,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000659526666667,
-          "detail": "build Kll in tumbling windows of 60000 ms for 10 groups: 667 rows x 84 ops, 1 group visits, 0.2 states emitted; x 1.0000/s; keeps 993280 bytes",
+          "detail": "build Kll in tumbling windows of 60000 ms for 10 groups: 667 rows x 84 ops, 1 group visits, 0.2 states emitted; x 1.0000/s; keeps 993640 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
@@ -144,11 +144,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 995826.353532,
+        "average_memory_bytes": 996186.353532,
         "cpu_ops_per_second": 1343987.1,
         "disk_bytes": 9600000,
         "peak_cpu_cores": 3,
-        "peak_memory_bytes": 3255920,
+        "peak_memory_bytes": 3256280,
         "scanned_bytes_per_second": 192016.0
       }
     },

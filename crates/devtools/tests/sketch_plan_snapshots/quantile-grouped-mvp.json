@@ -32,7 +32,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 1.8821983413e-6,
+      "cost_per_second": 1.88302647333e-6,
       "cpu_core_seconds_per_second": 0.111971,
       "per_node": {
         "0": {
@@ -45,10 +45,10 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 9.44818941687e-7,
+          "cost_per_second": 9.4564707372e-7,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.02877,
-          "detail": "build DDSketch in tumbling windows of 10000 ms for 10000 groups: 100000 rows x 247 ops, 1000 group visits, 1000.0 states emitted; x 1.0000/s; keeps 540200000 bytes",
+          "detail": "build DDSketch in tumbling windows of 10000 ms for 10000 groups: 100000 rows x 247 ops, 1000 group visits, 1000.0 states emitted; x 1.0000/s; keeps 540920000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
@@ -101,11 +101,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 541823528.601,
+        "average_memory_bytes": 542543528.601,
         "cpu_ops_per_second": 111491000.0,
         "disk_bytes": 0,
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 561921916,
+        "peak_memory_bytes": 562641916,
         "scanned_bytes_per_second": 4800000.0
       }
     },

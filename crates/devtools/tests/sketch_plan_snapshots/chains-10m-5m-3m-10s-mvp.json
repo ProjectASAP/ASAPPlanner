@@ -64,7 +64,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 5.00200951295e-7,
+      "cost_per_second": 5.01029083328e-7,
       "cpu_core_seconds_per_second": 0.0371869067333,
       "per_node": {
         "0": {
@@ -77,19 +77,19 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 1.94175584606e-8,
+          "cost_per_second": 1.98316244773e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000262089333333,
-          "detail": "build Kll in tumbling windows of 300000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 33.3 states emitted; x 1.0000/s; keeps 14320000 bytes",
+          "detail": "build Kll in tumbling windows of 300000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 33.3 states emitted; x 1.0000/s; keeps 14680000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
         },
         "10": {
-          "cost_per_second": 9.55423630985e-8,
+          "cost_per_second": 9.59564291152e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.002678756,
-          "detail": "build Kll in tumbling windows of 10000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 1000.0 states emitted; x 1.0000/s; keeps 56880000 bytes",
+          "detail": "build Kll in tumbling windows of 10000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 1000.0 states emitted; x 1.0000/s; keeps 57240000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
@@ -205,11 +205,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 71355032.1082,
+        "average_memory_bytes": 72075032.1082,
         "cpu_ops_per_second": 37184772.3333,
         "disk_bytes": 0,
         "peak_cpu_cores": 4,
-        "peak_memory_bytes": 88241528,
+        "peak_memory_bytes": 88961528,
         "scanned_bytes_per_second": 21344.0
       }
     },

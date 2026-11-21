@@ -1,6 +1,7 @@
 use super::*;
-use crate::values::arrow_columns::text_dictionary_array;
-use arrow::array::{Array, ArrayRef, DictionaryArray, StringArray, StringBuilder, UInt32Array};
+use crate::values::arrow_columns::{dense_dictionary, text_dictionary_array};
+use crate::values::text_interner::TextInterner;
+use arrow::array::{Array, ArrayRef, DictionaryArray, StringArray, UInt32Array};
 use arrow::datatypes::UInt32Type;
 use planner_types::plan::physical_asap_dag::PhysicalASAPNodeId;
 use std::collections::BTreeMap;
@@ -32,30 +33,58 @@ pub struct InMemoryDataStore {
 }
 
 /// A view's appended rows, oldest first, with the texts of its text
-/// columns held once for the whole view: each text column of every
-/// appended batch is a dictionary over that column's one shared values
-/// array, so a series identity is stored once per view, not once per
-/// window. The shared values keep every text appended, also after the
-/// rows reading it are dropped.
+/// columns held once for the whole view: each stored batch keeps only its
+/// text columns' keys, into the view's [`TextInterner`] for that column,
+/// and a read pairs them with its values ([`StoredView::readable`]). So a
+/// series identity is stored once per view, not once per window.
 #[derive(Default)]
 struct StoredView {
+    /// The appended rows. A stored batch's text column is its keys over an
+    /// empty values array: never read as it is, only through
+    /// [`StoredView::readable`].
     rows: Vec<AppendedRows>,
-    /// Per text column (by index), its shared values.
-    texts: BTreeMap<usize, SharedTexts>,
+    /// Per text column (by index), its texts.
+    shared_texts_by_column: BTreeMap<usize, TextInterner>,
 }
 
-/// One text column's values, shared by every stored batch of a view, and
-/// each text's key in them.
-struct SharedTexts {
-    values: ArrayRef,
-    keys: ahash::AHashMap<String, u32>,
+/// The values a stored batch's text column holds: none (see
+/// [`StoredView::rows`]).
+fn no_texts() -> ArrayRef {
+    Arc::new(StringArray::from(Vec::<&str>::new()))
 }
 
 impl StoredView {
-    /// `batches` with each text column re-keyed into the view's shared
-    /// values (extended with their new texts); when the shared values grew,
-    /// the stored batches are pointed at the new values too (their keys
-    /// stay valid: the old values are a prefix).
+    /// Append `batches` covering `time_range_ms` (`(start, end]`), then
+    /// drop the rows ending `retention_ms` or more before `end` and compact
+    /// the shared texts. Bad input when the range is empty or starts before
+    /// the end of the rows appended last.
+    fn append(
+        &mut self,
+        time_range_ms: (i64, i64),
+        batches: Vec<Batch>,
+        retention_ms: u64,
+    ) -> Result<(), Error> {
+        let (start, end) = time_range_ms;
+        if start >= end
+            || self
+                .rows
+                .last()
+                .is_some_and(|((_, last_end), _)| start < *last_end)
+        {
+            return Err(Error::Invalid(format!(
+                "appended rows ({start}, {end}] are empty or not after the stored ones"
+            )));
+        }
+        let batches = self.share_texts(batches)?;
+        held_by_store(&batches);
+        self.rows.push((time_range_ms, batches));
+        drop_rows_ending_before(&mut self.rows, end, retention_ms);
+        self.compact_texts()
+    }
+
+    /// `batches` with each text column's keys re-keyed into the view's
+    /// shared texts, which gain the texts the keys use that they lack.
+    /// Only the dictionary entries a batch's keys use are looked up.
     fn share_texts(&mut self, batches: Vec<Batch>) -> Result<Vec<Batch>, Error> {
         let Some(schema) = batches.first().map(|batch| batch.schema().clone()) else {
             return Ok(batches);
@@ -68,13 +97,8 @@ impl StoredView {
             {
                 continue;
             }
-            let shared = self.texts.entry(column).or_insert_with(|| SharedTexts {
-                values: Arc::new(StringArray::from(Vec::<&str>::new())),
-                keys: ahash::AHashMap::new(),
-            });
-            let mut added: Vec<String> = Vec::new();
-            let mut rekeyed = Vec::with_capacity(batches.len());
-            for batch in &batches {
+            let texts = self.shared_texts_by_column.entry(column).or_default();
+            for batch in &mut batches {
                 let dictionary =
                     text_dictionary_array(batch.column(column)).expect("checked above");
                 let values = dictionary
@@ -82,84 +106,140 @@ impl StoredView {
                     .as_any()
                     .downcast_ref::<StringArray>()
                     .ok_or_else(|| Error::Invalid("text dictionary values are not Utf8".into()))?;
-                let shared_key_of_value: Vec<u32> = values
-                    .iter()
-                    .map(|text| {
-                        let text = text.unwrap_or_default();
-                        if let Some(&key) = shared.keys.get(text) {
-                            return key;
+                let rows = dictionary.len();
+                // One lookup per dictionary entry the keys use: a slot per
+                // entry, or a map when the dictionary is much larger than
+                // the batch (a slice of a large batch).
+                let dense = dense_dictionary(values.len(), rows);
+                let mut slot_of_entry: Vec<Option<u32>> = match dense {
+                    true => vec![None; values.len()],
+                    false => Vec::new(),
+                };
+                let mut map_of_entry: ahash::AHashMap<u32, u32> = ahash::AHashMap::new();
+                let mut shared_key = |entry: u32| {
+                    let cached = match dense {
+                        true => slot_of_entry[entry as usize],
+                        false => map_of_entry.get(&entry).copied(),
+                    };
+                    cached.unwrap_or_else(|| {
+                        let key = texts.intern(values.value(entry as usize));
+                        match dense {
+                            true => slot_of_entry[entry as usize] = Some(key),
+                            false => {
+                                map_of_entry.insert(entry, key);
+                            }
                         }
-                        let key = shared.keys.len() as u32;
-                        shared.keys.insert(text.to_string(), key);
-                        added.push(text.to_string());
                         key
                     })
-                    .collect();
+                };
                 let keys: UInt32Array = dictionary
                     .keys()
                     .iter()
-                    .map(|key| key.map(|key| shared_key_of_value[key as usize]))
+                    .map(|key| key.map(&mut shared_key))
                     .collect();
-                rekeyed.push(keys);
+                *batch = batch.with_plain_column(column, keys_only(keys))?;
             }
-            if !added.is_empty() {
-                let old = shared
-                    .values
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("shared texts are Utf8");
-                // Built at its exact size: the values are kept for the view's life.
-                let texts = old.len() + added.len();
-                let text_bytes =
-                    old.value_data().len() + added.iter().map(String::len).sum::<usize>();
-                let mut builder = StringBuilder::with_capacity(texts, text_bytes);
-                for text in old.iter().map(|text| text.unwrap_or_default()) {
-                    builder.append_value(text);
-                }
-                for text in &added {
-                    builder.append_value(text);
-                }
-                shared.values = Arc::new(builder.finish());
-                for (_, stored) in &mut self.rows {
-                    for batch in stored.iter_mut() {
-                        let keys = text_dictionary_array(batch.column(column))
-                            .expect("stored text columns are dictionaries")
-                            .keys()
-                            .clone();
-                        *batch =
-                            batch.with_plain_column(column, dictionary(keys, &shared.values))?;
-                    }
-                }
-            }
-            for (batch, keys) in batches.iter_mut().zip(rekeyed) {
-                *batch = batch.with_plain_column(column, dictionary(keys, &shared.values))?;
-            }
+            texts.frozen_values();
         }
         Ok(batches)
     }
 
+    /// `batch`, a stored batch, with its text columns' keys over the view's
+    /// shared texts: a batch a run can read.
+    fn readable(&self, batch: &Batch) -> Result<Batch, Error> {
+        let mut batch = batch.clone();
+        for (&column, texts) in &self.shared_texts_by_column {
+            let keys = text_dictionary_array(batch.column(column))
+                .expect("stored text columns are keys over no texts")
+                .keys()
+                .clone();
+            let values: ArrayRef =
+                Arc::new(texts.values().expect("frozen after each append").clone());
+            // SAFETY: every stored key is a position in the shared texts,
+            // which only grow until compacted, and compaction re-keys
+            // every stored batch.
+            let dictionary = unsafe { DictionaryArray::<UInt32Type>::new_unchecked(keys, values) };
+            batch = batch.with_plain_column(column, Arc::new(dictionary))?;
+        }
+        Ok(batch)
+    }
+
+    /// Drops the shared texts no stored row uses once they are more than
+    /// half of the texts (and over 64): each text column's texts are
+    /// rebuilt from the stored rows' keys, in key order, and the stored
+    /// batches re-keyed. Series that come and go then hold at most twice
+    /// the texts the view's rows use, and a read keeps the dictionary
+    /// within `dense_dictionary`'s bound.
+    fn compact_texts(&mut self) -> Result<(), Error> {
+        for (&column, texts) in self.shared_texts_by_column.iter_mut() {
+            let mut used = vec![false; texts.len()];
+            let mut used_count = 0usize;
+            for (_, batches) in &self.rows {
+                for batch in batches {
+                    let keys = text_dictionary_array(batch.column(column))
+                        .expect("stored text columns are keys over no texts")
+                        .keys();
+                    for key in keys.iter().flatten() {
+                        if !std::mem::replace(&mut used[key as usize], true) {
+                            used_count += 1;
+                        }
+                    }
+                }
+            }
+            if texts.len() <= 2 * used_count + 64 {
+                continue;
+            }
+            let mut compacted = TextInterner::default();
+            let new_key: Vec<u32> = (0..texts.len() as u32)
+                .map(|key| match used[key as usize] {
+                    true => compacted.intern(texts.text(key)),
+                    false => u32::MAX,
+                })
+                .collect();
+            compacted.frozen_values();
+            for (_, batches) in &mut self.rows {
+                for batch in batches.iter_mut() {
+                    let keys: UInt32Array = text_dictionary_array(batch.column(column))
+                        .expect("stored text columns are keys over no texts")
+                        .keys()
+                        .iter()
+                        .map(|key| key.map(|key| new_key[key as usize]))
+                        .collect();
+                    *batch = batch.with_plain_column(column, keys_only(keys))?;
+                }
+            }
+            *texts = compacted;
+        }
+        Ok(())
+    }
+
     /// Bytes of the stored rows: each batch's [`Batch::stored_bytes`]
-    /// without its text columns' shared values, which count once.
+    /// (its text columns' keys), and each text column's shared texts once.
     fn bytes(&self) -> usize {
-        let shared_per_batch: usize = self
-            .texts
+        let rows: usize = self
+            .rows
+            .iter()
+            .flat_map(|(_, batches)| batches)
+            .map(Batch::stored_bytes)
+            .sum();
+        rows + self.shared_text_bytes()
+    }
+
+    /// Bytes of the shared texts, each text column's once, with their
+    /// table of positions.
+    fn shared_text_bytes(&self) -> usize {
+        self.shared_texts_by_column
             .values()
-            .map(|texts| texts.values.get_array_memory_size())
-            .sum();
-        let batches = self.rows.iter().flat_map(|(_, batches)| batches);
-        let rows: usize = batches
-            .map(|batch| batch.stored_bytes() - shared_per_batch)
-            .sum();
-        rows + shared_per_batch
+            .map(TextInterner::memory_bytes)
+            .sum()
     }
 }
 
-/// A text column of `keys` into the shared `values`; the keys index
-/// `values`, so the dictionary is built without checking them again.
-fn dictionary(keys: UInt32Array, values: &ArrayRef) -> ArrayRef {
-    // SAFETY: every key was taken from the shared key map, whose keys are
-    // positions in `values`.
-    Arc::new(unsafe { DictionaryArray::<UInt32Type>::new_unchecked(keys, values.clone()) })
+/// A stored text column: `keys` over no texts (see [`StoredView::rows`]).
+fn keys_only(keys: UInt32Array) -> ArrayRef {
+    // SAFETY: never read as it is: a read pairs the keys with the view's
+    // shared texts first (`StoredView::readable`).
+    Arc::new(unsafe { DictionaryArray::<UInt32Type>::new_unchecked(keys, no_texts()) })
 }
 
 /// Rows appended for a view or a raw table bound for appending: the
@@ -329,24 +409,26 @@ impl InMemoryDataStore {
         time_range_ms: (i64, i64),
         batches: Vec<Batch>,
     ) -> Result<(), Error> {
-        let (start, end) = time_range_ms;
-        let stored = self.materialized_views.entry(view.node_id).or_default();
-        if start >= end
-            || stored
-                .rows
-                .last()
-                .is_some_and(|((_, last_end), _)| start < *last_end)
-        {
-            return Err(Error::Invalid(format!(
-                "materialized view {}: appended rows ({start}, {end}] are empty or not after the stored ones",
-                view.node_id
-            )));
-        }
-        let batches = stored.share_texts(batches)?;
-        held_by_store(&batches);
-        stored.rows.push((time_range_ms, batches));
-        drop_rows_ending_before(&mut stored.rows, end, view.retention_ms());
-        Ok(())
+        self.materialized_views
+            .entry(view.node_id)
+            .or_default()
+            .append(time_range_ms, batches, view.retention_ms())
+            .map_err(|error| match error {
+                Error::Invalid(reason) => {
+                    Error::Invalid(format!("materialized view {}: {reason}", view.node_id))
+                }
+                error => error,
+            })
+    }
+
+    /// Bytes of the texts the materialized views share across their stored
+    /// rows: part of [`Self::materialized_view_bytes`], held once per view
+    /// and text column.
+    pub fn materialized_view_shared_text_bytes(&self) -> usize {
+        self.materialized_views
+            .values()
+            .map(StoredView::shared_text_bytes)
+            .sum()
     }
 }
 
@@ -431,11 +513,11 @@ impl DataStore for InMemoryDataStore {
                 view.node_id
             ))
         };
-        let rows = &self
+        let stored = self
             .materialized_views
             .get(&view.node_id)
-            .ok_or_else(missing)?
-            .rows;
+            .ok_or_else(missing)?;
+        let rows = &stored.rows;
         let selected: Vec<&AppendedRows> = rows
             .iter()
             .filter(|((row_start, row_end), _)| *row_start >= start && *row_end <= end)
@@ -454,7 +536,7 @@ impl DataStore for InMemoryDataStore {
         Ok(stream_batches(
             selected
                 .into_iter()
-                .flat_map(|(_, batches)| batches.iter().cloned().map(Ok)),
+                .flat_map(|(_, batches)| batches.iter().map(|batch| stored.readable(batch))),
             context,
         ))
     }
@@ -483,3 +565,6 @@ fn projection(schema: &SchemaRef, output: &SchemaRef) -> Result<Vec<usize>, Erro
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests;

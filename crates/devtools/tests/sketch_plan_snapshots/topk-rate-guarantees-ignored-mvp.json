@@ -30,7 +30,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 3.41421933295e-7,
+      "cost_per_second": 3.42250065329e-7,
       "cpu_core_seconds_per_second": 0.027839267,
       "per_node": {
         "0": {
@@ -43,10 +43,10 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 1.41602103976e-7,
+          "cost_per_second": 1.42430236009e-7,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.01007,
-          "detail": "build exact Counter accumulator in tumbling windows of 10000 ms for 10000 groups: 100000 rows x 70 ops, 1000 group visits, 1000.0 states emitted; x 1.0000/s; keeps 24670000 bytes",
+          "detail": "build exact Counter accumulator in tumbling windows of 10000 ms for 10000 groups: 100000 rows x 70 ops, 1000 group visits, 1000.0 states emitted; x 1.0000/s; keeps 25390000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
@@ -99,11 +99,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 24689293.5943,
+        "average_memory_bytes": 25409293.5943,
         "cpu_ops_per_second": 27359267.0,
         "disk_bytes": 0,
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 26720221,
+        "peak_memory_bytes": 27440221,
         "scanned_bytes_per_second": 4800000.0
       }
     },
