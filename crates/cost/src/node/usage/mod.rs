@@ -628,7 +628,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 Payload::NonASAP(NonASAPOp::Filter { .. } | NonASAPOp::Project { .. }) => {
                     StateFamily::None
                 }
-                _ => family,
+                Payload::NonASAP(_) | Payload::ASAP(_) => family,
             },
             sketch_size,
         ),
@@ -1770,14 +1770,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         .any(|field| !field.is_plain());
     let states_last_merged = match &node.payload {
         Payload::ASAP(ASAPOp::SummaryMerge { .. }) => true,
-        Payload::NonASAP(NonASAPOp::Filter { .. } | NonASAPOp::Project { .. })
-            if outputs_states =>
-        {
-            producers
-                .first()
-                .is_some_and(|producer| producer.states_last_merged)
+        Payload::NonASAP(NonASAPOp::Filter { .. } | NonASAPOp::Project { .. }) => {
+            outputs_states
+                && producers
+                    .first()
+                    .is_some_and(|producer| producer.states_last_merged)
         }
-        _ => false,
+        Payload::NonASAP(_) | Payload::ASAP(_) => false,
     };
     let usage = NodeResourceUsageAndCost {
         output: out,
