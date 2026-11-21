@@ -28,6 +28,7 @@ pub enum OperatorKind {
     SQLWindowFunc,
     TimeRange,
     TimeShift,
+    TimeRangeCover,
     PromqlVectorFromScalar,
     PromqlRelabel,
     PromqlInfoEnrich,
@@ -42,6 +43,7 @@ pub enum OperatorKind {
     // Formerly named `PaneChain`; old JSON still loads.
     #[serde(alias = "PaneChain")]
     SummaryTumblingWindowChain,
+    SummaryMergeWindows,
     SummarySubtract,
     SummaryDelete,
     SummaryJoin,
@@ -68,6 +70,7 @@ impl OperatorKind {
                 NonASAPOp::SQLWindowFunc { .. } => Self::SQLWindowFunc,
                 NonASAPOp::TimeRange { .. } => Self::TimeRange,
                 NonASAPOp::TimeShift { .. } => Self::TimeShift,
+                NonASAPOp::TimeRangeCover { .. } => Self::TimeRangeCover,
                 NonASAPOp::PromqlVectorFromScalar(_) => Self::PromqlVectorFromScalar,
                 NonASAPOp::PromqlRelabel { .. } => Self::PromqlRelabel,
                 NonASAPOp::PromqlInfoEnrich { .. } => Self::PromqlInfoEnrich,
@@ -82,6 +85,7 @@ impl OperatorKind {
                 ASAPOp::EvaluatePopulation { .. } => Self::EvaluatePopulation,
                 ASAPOp::SummaryMerge { .. } => Self::SummaryMerge,
                 ASAPOp::SummaryTumblingWindowChain { .. } => Self::SummaryTumblingWindowChain,
+                ASAPOp::SummaryMergeWindows { .. } => Self::SummaryMergeWindows,
                 ASAPOp::SummarySubtract { .. } => Self::SummarySubtract,
                 ASAPOp::SummaryDelete { .. } => Self::SummaryDelete,
                 ASAPOp::SummaryJoin { .. } => Self::SummaryJoin,
