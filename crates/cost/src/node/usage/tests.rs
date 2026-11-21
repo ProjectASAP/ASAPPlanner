@@ -4252,7 +4252,7 @@ fn a_ddsketch_build_holds_open_states_and_keeps_sealed_ones() {
         sources: BTreeSet::from(["a"]),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::from(["ts", "value"]),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         state_input_rows: None,
         raw_rows_span_ms: None,
@@ -4284,6 +4284,7 @@ fn a_ddsketch_build_holds_open_states_and_keeps_sealed_ones() {
         &build,
         &[producer_output(600)],
         (1, 1.0),
+        None,
         None,
         &data,
         &settings,
@@ -4322,7 +4323,7 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
         sources: BTreeSet::from(["a"]),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::from(["ts", "value"]),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         state_input_rows: None,
         raw_rows_span_ms: None,
@@ -4343,6 +4344,7 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
         &build,
         std::slice::from_ref(&producer_output),
         (1, 1.0),
+        None,
         None,
         &data,
         &analytical,
@@ -4368,9 +4370,16 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
         },
         ..CostInputs::default()
     };
-    let usage =
-        node_resource_usage_and_cost(&build, &[producer_output], (1, 1.0), None, &data, &measured)
-            .unwrap();
+    let usage = node_resource_usage_and_cost(
+        &build,
+        &[producer_output],
+        (1, 1.0),
+        None,
+        None,
+        &data,
+        &measured,
+    )
+    .unwrap();
     assert_ne!(estimated.output.bytes, 900, "{}", estimated.cost.detail);
     assert_eq!(usage.output.bytes, 900, "{}", usage.cost.detail);
     assert_eq!(usage.peak_memory_bytes, 900, "{}", usage.cost.detail);

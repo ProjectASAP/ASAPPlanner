@@ -125,8 +125,8 @@ async fn stage3_picks_levels_for_a_long_range() {
 }
 
 /// T8. Each level is a view kept for its readers' longest read: the 15 s
-/// chain still 2 h (1 h range + 1 h span), as on main, and each wider
-/// level its own retention.
+/// chain still 2 h (1 h range + 1 h span) and as many bytes as in the
+/// single-chain plan, and each wider level its own retention.
 #[tokio::test]
 async fn levels_cost_memory() {
     let plan = planned().await;
@@ -142,9 +142,43 @@ async fn levels_cost_memory() {
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
         )
     })[0];
-    assert!(cost.per_node[&narrowest]
-        .detail
-        .contains("keeps 8773440000 bytes"));
+    // The 15 s chain keeps what the single-chain plan's does: the levels
+    // add their own windows, not the chain's.
+    let kept = |detail: &str| {
+        detail
+            .split("keeps ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .map(str::to_owned)
+    };
+    let single = {
+        let workload = workload();
+        let capabilities = asap_planner::DeploymentCapabilities {
+            excluded_candidates: serde_json::from_str(
+                r#"[{"operator": "SummaryMergeWindows"}, {"operator": "TimeRangeCover"}]"#,
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+        let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
+        plan_installable(UserInput::new(&workload, FrontendInput::Promql, models))
+            .await
+            .unwrap()
+            .0
+    };
+    let single_cost = cost_of(&single);
+    let single_chain = nodes_where(&single, |operator| {
+        matches!(
+            operator,
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+        )
+    })[0];
+    let with_levels = kept(&cost.per_node[&narrowest].detail);
+    assert!(with_levels.is_some());
+    assert_eq!(
+        with_levels,
+        kept(&single_cost.per_node[&single_chain].detail)
+    );
 }
 
 /// T11. The plan file with both new operators reads back as written, and
