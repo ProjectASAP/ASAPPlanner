@@ -339,6 +339,11 @@ impl Batch {
             if 2 * indices.len() >= state_column.len() {
                 continue;
             }
+            // Mapped states cost the run nothing: indices into them are
+            // kept as they are.
+            if matches!(state_column.storage(), super::StateStorage::Mapped(_)) {
+                continue;
+            }
             let mut moved = ahash::AHashMap::<u32, u32>::new();
             let mut used = Vec::new();
             let remapped = indices
@@ -361,6 +366,7 @@ impl Batch {
                     used.iter().map(|&index| records.get(index)).collect(),
                 ),
                 // Shared by pointer: stored sketches are not charged again.
+                super::StateStorage::Mapped(_) => unreachable!("mapped columns are kept"),
                 super::StateStorage::Objects(_) => StateColumn::from_objects_of(
                     family,
                     used.iter()
@@ -503,7 +509,7 @@ impl Batch {
                                 state_column.state(index as usize),
                                 state_column.state_held_outside_run(index as usize),
                             )),
-                            super::StateStorage::Exact(_) => {
+                            super::StateStorage::Exact(_) | super::StateStorage::Mapped(_) => {
                                 objects.push((state_column.state(index as usize), false))
                             }
                         }

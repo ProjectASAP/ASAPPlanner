@@ -36,7 +36,7 @@ ahash = { version = "0.8", default-features = false, features = ["std", "runtime
 # (branch `planner-pin/dd-kll-shrink-to-fit`: 21b6357, #267's commit, and
 # #270's change and tests, since main has renamed the capability
 # vocabulary since). Moves to a release once #267 and #270 are in one.
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "befcef8c8f68ce54d3a91d6617a62896f70efeee" }
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "1cdc3c7726ee172e1e168a44a4f1073915dbdc77" }
 
 [profile.dev]
 # Backtraces and profilers keep file:line; full variable info is opt-in via
