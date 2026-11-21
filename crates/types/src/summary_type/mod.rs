@@ -23,7 +23,7 @@ pub use parameter_lists::parameter_list;
 pub use parameters::{
     CounterReadout, ExactKind, ExactParams, HydraParams, SamplingKind, SamplingParams,
     SketchParameterRange, SketchParams, StatModelKind, StatModelParams, WaveletKind, WaveletParams,
-    EXACT_ACCUMULATOR_STATE_BYTES, KLL_MAX_K,
+    KLL_MAX_K,
 };
 pub use statistic::SketchStatistic;
 pub use update::{EntityIdentity, SummaryInputExpr, SummaryUpdate};

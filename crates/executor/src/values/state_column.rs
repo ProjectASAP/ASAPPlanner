@@ -4,6 +4,7 @@ use crate::summary_kernels::increase::IncreaseAccumulator;
 use crate::AggregateCore;
 use arrow::buffer::BooleanBuffer;
 use planner_types::ir::schema::FieldDataType;
+use planner_types::summary_type::ExactKind;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -99,15 +100,14 @@ impl ExactRecords {
     /// `states`, all records of the exact `family`, in their family's
     /// layout.
     fn of(family: &FieldDataType, states: Vec<ScalarState>) -> Self {
-        let kind = states
-            .first()
-            .cloned()
-            .or_else(|| ScalarState::empty(family).ok());
+        let FieldDataType::ExactAggregate(kind, _) = family else {
+            unreachable!("exact records are of an exact family")
+        };
         fn wrong<T>() -> T {
             unreachable!("one exact family has one kind of record")
         }
         match kind {
-            Some(ScalarState::Sum { .. }) | None => Self::Sum(
+            ExactKind::Sum => Self::Sum(
                 states
                     .into_iter()
                     .map(|state| match state {
@@ -120,7 +120,7 @@ impl ExactRecords {
                     })
                     .collect(),
             ),
-            Some(ScalarState::Count(_)) => Self::Count(
+            ExactKind::Count => Self::Count(
                 states
                     .into_iter()
                     .map(|state| match state {
@@ -129,28 +129,28 @@ impl ExactRecords {
                     })
                     .collect(),
             ),
-            Some(ScalarState::Min(_)) => Self::Min(Optional::of(
+            ExactKind::Min => Self::Min(Optional::of(
                 states.into_iter().map(|state| match state {
                     ScalarState::Min(value) => value,
                     _ => wrong(),
                 }),
                 0.0,
             )),
-            Some(ScalarState::Max(_)) => Self::Max(Optional::of(
+            ExactKind::Max => Self::Max(Optional::of(
                 states.into_iter().map(|state| match state {
                     ScalarState::Max(value) => value,
                     _ => wrong(),
                 }),
                 0.0,
             )),
-            Some(ScalarState::Counter(_)) => Self::Counter(Optional::of(
+            ExactKind::Counter => Self::Counter(Optional::of(
                 states.into_iter().map(|state| match state {
                     ScalarState::Counter(counter) => counter,
                     _ => wrong(),
                 }),
                 IncreaseAccumulator::new(0.0, 0, 0.0, 0),
             )),
-            Some(ScalarState::LastTwoSamples(_)) => Self::LastTwoSamples(
+            ExactKind::IRate => Self::LastTwoSamples(
                 states
                     .into_iter()
                     .map(|state| match state {
@@ -336,7 +336,7 @@ impl StateColumn {
     }
 
     /// Memory the states hold, whoever holds them.
-    pub(crate) fn state_memory_bytes(&self) -> usize {
+    pub fn state_memory_bytes(&self) -> usize {
         self.state_memory_bytes
     }
 }

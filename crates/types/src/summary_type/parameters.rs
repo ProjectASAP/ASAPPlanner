@@ -4,13 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Bytes the executor holds per group for an exact accumulator of any
-/// [`ExactKind`]: one element of its column of fixed-size states (the
-/// executor's `ScalarState`, whose largest variant, a counter's, is 48
-/// bytes). Plan selection prices exact state with it; an executor test
-/// asserts it equals that state's size.
-pub const EXACT_ACCUMULATOR_STATE_BYTES: u64 = 56;
-
 /// An exact, mergeable accumulator family — zero approximation error. The
 /// partial state built for one of these *is* the answer; no
 /// `SummaryEstimate` evaluation is needed to get a value out of it.
@@ -31,6 +24,26 @@ pub enum ExactKind {
     Counter,
     /// Instant-rate accumulator retaining the final two timestamped samples.
     IRate,
+}
+
+impl ExactKind {
+    /// Bytes the executor keeps per group for a sealed state of this kind:
+    /// its record in the column of the kind's records, whole bytes (a
+    /// validity bit counted as one byte). Plan selection prices exact state
+    /// with it; an executor test asserts each kind's sealed column holds it
+    /// per group. Sum: the compensated sum and whether it saw a sample (24);
+    /// count (8); min and max: the value and a validity bit (9); a counter:
+    /// its two samples, increase and sample count, and a validity bit (49);
+    /// irate: the last two samples (48).
+    pub fn sealed_state_bytes(self) -> u64 {
+        match self {
+            ExactKind::Sum => 24,
+            ExactKind::Count => 8,
+            ExactKind::Min | ExactKind::Max => 9,
+            ExactKind::Counter => 49,
+            ExactKind::IRate => 48,
+        }
+    }
 }
 
 /// What a finalize reads from a [`ExactKind::Counter`] state: PromQL

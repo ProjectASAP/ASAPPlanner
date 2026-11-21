@@ -224,7 +224,7 @@ fn drop_rows_ending_before(rows: &mut Vec<AppendedRows>, end: i64, retention_ms:
 }
 
 fn batches_bytes(batches: &[Batch]) -> usize {
-    batches.iter().map(Batch::memory_bytes).sum()
+    batches.iter().map(Batch::stored_bytes).sum()
 }
 
 fn held_by_store(batches: &[Batch]) {

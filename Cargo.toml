@@ -31,8 +31,10 @@ ahash = { version = "0.8", default-features = false, features = ["std", "runtime
 # rescoring), #246 (KLL lazy-buffer follow-ups), #247 (Count Sketch stack
 # medians), #248 (`DdSketch::quantile_interpolated`), #249 (`memory_bytes` and
 # `estimated_memory_bytes`; KMV without `experimental`), #251 (the public
-# capability table) and #254 (Planner names in that table). Moves to 0.4.1
-# once that is released.
+# capability table) and #254 (Planner names in that table), plus
+# `Kll::shrink_to_fit` from #267 (branch `planner-pin/kll-shrink-to-fit`:
+# 21b6357 and that one commit, since main has renamed the capability
+# vocabulary since). Moves to a release once #267 is in one.
 asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "a404f031f3c47f14667220d3d0628053f9638e52" }
 
 [profile.dev]

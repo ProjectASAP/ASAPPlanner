@@ -1,15 +1,17 @@
 use super::*;
 use asap_types::summary_type::SketchAlgorithm;
 
-/// An exact accumulator's state is priced at the executor's per-group
-/// state, 56 bytes for every kind (a counter's state alone is 48), so a
-/// tumbling-window chain of exact sums keeps 56 bytes per tumbling window and group.
+/// An exact accumulator's state is priced at the executor's sealed
+/// record of its kind: a sum 24 bytes, a counter 49 (its 48 and a
+/// validity bit), so a tumbling-window chain of exact sums keeps
+/// 24 bytes per tumbling window and group.
 #[test]
-fn exact_state_is_priced_at_the_executors_state_size() {
+fn exact_state_is_priced_at_the_executors_sealed_record() {
     use asap_types::summary_type::{ExactKind, ExactParams};
-    for (kind, params) in [
-        (ExactKind::Sum, ExactParams::Sum),
-        (ExactKind::Counter, ExactParams::Counter),
+    for (kind, params, bytes) in [
+        (ExactKind::Sum, ExactParams::Sum, 24),
+        (ExactKind::Max, ExactParams::Max, 9),
+        (ExactKind::Counter, ExactParams::Counter, 49),
     ] {
         assert_eq!(
             summary_state_bytes(
@@ -17,10 +19,9 @@ fn exact_state_is_priced_at_the_executors_state_size() {
                 None,
                 StateInputRows::UNKNOWN
             ),
-            Ok(56)
+            Ok(bytes)
         );
     }
-    assert_eq!(asap_types::summary_type::EXACT_ACCUMULATOR_STATE_BYTES, 56);
 }
 
 /// Merging states keeps the larger column's distinct values, since they
@@ -416,21 +417,22 @@ fn ddsketch_state_bytes_under_charge_log_uniform_values_over_a_declared_range() 
     }
 }
 
-/// A KLL state is charged what `asap_sketchlib` allocates for the
-/// samples it sees, not its full capacity: its fixed struct and level
-/// array, plus the item array the library starts empty and doubles from
-/// 16 items as samples arrive, up to `compute_max_capacity(k, 8)`. E.g.
-/// a 10 s tumbling window of a series sampled every 15 s sees one sample: 744 + 128
-/// = 872 bytes, where the full capacity at `k` = 269 is 1,206 items.
+/// A KLL state is charged what a sealed `asap_sketchlib` sketch holds for
+/// the samples it saw (the executor shrinks each sketch when it seals a
+/// window): the struct, the boundaries of the levels in use and the
+/// retained items. E.g. a 10 s tumbling window of a series sampled every
+/// 15 s sees one sample: 248 + 16 + 8 = 272 bytes, where an open sketch
+/// holds 872.
 #[test]
 fn kll_state_bytes_grow_with_the_samples_it_sees() {
     let k = 269;
-    // The library's bytes after `n` samples.
+    // The library's bytes after `n` samples, shrunk as sealed.
     let library_bytes = |n: u32| {
         let mut sketch = asap_sketchlib::Kll::<f64>::with_k(k as i32);
         for i in 0..n {
             sketch.update(&f64::from(i));
         }
+        sketch.shrink_to_fit();
         sketch.memory_bytes() as u64
     };
     let model_bytes = |rows_per_state| {
@@ -444,12 +446,9 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
             },
         )
     };
-    // An empty sketch holds its fixed bytes; one sample adds 16 items.
-    assert_eq!(library_bytes(0), kll_fixed_bytes());
-    assert_eq!(library_bytes(0), 744);
-    assert_eq!(library_bytes(1), 872);
-    // Up to `k` samples nothing compacts, so the library holds exactly
-    // the fixed bytes and the grown array (and no merge scratch space).
+    assert_eq!(library_bytes(1), 272);
+    // Up to `k` samples nothing compacts, so the sealed sketch holds
+    // exactly the struct, two level boundaries and the samples.
     for n in [1, 4, 16, 17, 100, k] {
         assert_eq!(
             model_bytes(Some(u64::from(n))),
@@ -457,13 +456,19 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
             "{n} samples"
         );
     }
-    // Many samples are charged the full capacity, the most the array
-    // grows to.
-    assert_eq!(model_bytes(Some(5_000)), 744 + 8 * 1_206);
-    // A state assumed to see no sample holds at least one, as a
-    // DDSketch's does; unknown samples fill the full capacity.
-    assert_eq!(model_bytes(Some(0)), 872);
-    assert_eq!(model_bytes(None), 744 + 8 * 1_206);
+    // Past `k`, half the rows or the levels' capacities: within 1.5 times
+    // what the sketch retains.
+    for n in [k + 1, 1_000, 5_000, 100_000] {
+        let ratio = model_bytes(Some(u64::from(n))) as f64 / library_bytes(n) as f64;
+        assert!(
+            (1.0 / 1.5..=1.5).contains(&ratio),
+            "{n} samples: {ratio:.2}"
+        );
+    }
+    // A state assumed to see no sample holds at least one; unknown
+    // samples fill every level to its capacity.
+    assert_eq!(model_bytes(Some(0)), 272);
+    assert_eq!(model_bytes(None), 248 + 8 * 62 + 8 * 1_206);
 }
 
 /// Plan selection prices each state the executor builds per group at
@@ -482,9 +487,8 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
 /// the price bounds it, by at most [`BYTES_AGREEMENT_FACTOR`] times once
 /// the state is full;
 /// UnivMon's price also bounds the bytes its sketch holds.
-/// KLL past `k` rows is checked only loosely: the planner's formula
-/// leaves out the compaction scratch space, a known gap until a
-/// sketchlib estimate without the CDF cache can price KLL.
+/// KLL past `k` rows is priced at the expected fill of its levels, within
+/// 1.5 times either way of the sealed (shrunk) sketch.
 ///
 /// HydraCms is left out: plan selection prices an independent Count-Min
 /// per group, the executor one shared grid, so the two agree only at
@@ -501,8 +505,8 @@ fn state_bytes_bound_the_executors_charge() {
     /// How the priced bytes relate to the sketch's.
     enum Priced {
         Exact,
-        /// Exact up to `k` rows; past them at most the formula's
-        /// missing compaction scratch space over it.
+        /// Exact up to `k` rows; past them within 1.5 times either way
+        /// (priced at the expected fill of its levels).
         Kll {
             k: u32,
         },
@@ -658,6 +662,8 @@ fn state_bytes_bound_the_executors_charge() {
                     Rows::Keyed => updater.update_keyed(&labels(i), 1.0, 0).unwrap(),
                 }
             }
+            // As the executor seals a window.
+            updater.shrink_to_fit();
             let state = updater.into_accumulator();
             let charged = state.approx_memory_bytes();
             let priced = fields
@@ -674,10 +680,9 @@ fn state_bytes_bound_the_executors_charge() {
             match priced_as {
                 Priced::Exact => assert_eq!(charged, priced, "{context}"),
                 Priced::Kll { k } if n <= *k => assert_eq!(charged, priced, "{context}"),
-                // sketchlib bounds KLL's compaction scratch space at
-                // 2 (k - 1) items.
-                Priced::Kll { k } => assert!(
-                    charged <= priced + 8 * 2 * (*k as usize - 1),
+                // Past `k` rows, the expected fill of its levels.
+                Priced::Kll { .. } => assert!(
+                    (1.0 / 1.5..=1.5).contains(&(priced as f64 / charged as f64)),
                     "{context}, {charged} charged"
                 ),
                 // One value can be a zero, which no store holds.
@@ -748,9 +753,10 @@ fn next_uniform(state: &mut u64) -> f64 {
 /// built through the executor and fed seeded rows ([`Rows::fed`]):
 /// 10,000 latencies log-uniform over 1 ms to 1 s (declared
 /// non-negative), or 1,000 rows of 1,000 distinct label values or label
-/// sets. Its charge
-/// (`approx_memory_bytes`; for HydraCms its shared grid over its 10
-/// groups) is compared with `summary_state_bytes` for the same rows. Priced ÷
+/// sets. Its charge as the executor seals it (a sketch shrunk, its
+/// `approx_memory_bytes`; an exact family's sealed column of 1,024 groups,
+/// per group; for HydraCms its shared grid over its 10 groups) is compared
+/// with `summary_state_bytes` for the same rows. Priced ÷
 /// charged lies within [`BYTES_AGREEMENT_FACTOR`], or the family's row
 /// carries its [`KnownBytesGap`].
 ///
@@ -777,14 +783,14 @@ fn priced_bytes_agree_with_the_executor() {
         })
     };
     let sketch = FieldDataType::Sketch;
-    // Priced as one 56-byte record of the executor's exact state column;
-    // the accumulator object built here charges its whole 136-byte struct.
+    // Priced as one record of the executor's sealed exact state column,
+    // and charged as that column's bytes per group.
     let exact = |kind, params| {
         (
             FieldDataType::ExactAggregate(kind, params),
             None,
             Rows::Values,
-            gap(1333, 0.412),
+            None,
         )
     };
     // (family, its parameters, the rows it is fed, its known gap).
@@ -888,6 +894,23 @@ fn priced_bytes_agree_with_the_executor() {
     let mut measured = Vec::new();
     for (family, params, rows, known_gap) in families {
         let rows_fed = rows.fed();
+        if let FieldDataType::ExactAggregate(..) = family {
+            // A sealed column of 1,024 groups, the rows spread over them.
+            const GROUPS: u32 = 1_024;
+            let mut updater = asap_executor::StateColumnUpdater::new(&family, None).unwrap();
+            updater.ensure_groups(GROUPS as usize).unwrap();
+            let mut seed = 0x5EED_u64;
+            for i in 0..rows_fed {
+                let latency_ms = 1_000f64.powf(next_uniform(&mut seed));
+                updater
+                    .update(i % GROUPS, latency_ms, i64::from(i) * 1_000)
+                    .unwrap();
+            }
+            let charged = (updater.seal().state_memory_bytes() / GROUPS as usize) as u64;
+            let priced = summary_state_bytes(&family, None, input_rows(rows_fed / GROUPS)).unwrap();
+            measured.push((family, priced, charged, known_gap));
+            continue;
+        }
         let mut updater =
             create_planner_accumulator(&family, params.as_ref(), &rows.update()).unwrap();
         let mut seed = 0x5EED_u64;
@@ -911,6 +934,8 @@ fn priced_bytes_agree_with_the_executor() {
                 Rows::Keyed => updater.update_keyed(&labels(key), 1.0, 0).unwrap(),
             }
         }
+        // As the executor seals a window.
+        updater.shrink_to_fit();
         let charged = updater.into_accumulator().approx_memory_bytes() as u64;
         let priced = summary_state_bytes(&family, params.as_ref(), input_rows(rows_fed)).unwrap();
         measured.push((family, priced, charged, known_gap));
