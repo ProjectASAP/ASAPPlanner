@@ -11,6 +11,7 @@ use crate::{
     Error,
 };
 use planner_types::ir::operator::asap::evaluated_rows_kind;
+use planner_types::ir::operator::tumbling_window_chain::CoverLevel;
 use planner_types::ir::operator::{AggIntent, GroupKeys, Reduction as PlannerReduction};
 use planner_types::ir::scalar::{ColumnRef, CompareOpKind};
 use planner_types::ir::schema::{DataType, FieldDataType};
@@ -218,7 +219,7 @@ fn compile_internal(
                     view: (*view).clone(),
                     schema: output,
                     read_window,
-                    tumbling_window_width_ms: node.payload.chain_tumbling_window_width_ms(),
+                    cover_level: cover_level_read(id, &graph),
                 },
             )?;
         } else if let Payload::NonASAP(NonASAPOp::Scan {
@@ -688,7 +689,10 @@ fn compile_internal(
                         helper,
                         vec![*level],
                         Operator::time_range(schema.clone(), time, 0, range_ms, None, None)?
-                            .with_cover_level(widths.clone(), index)?,
+                            .with_cover_level(CoverLevel {
+                                level_widths_ms: widths.clone(),
+                                level: index,
+                            })?,
                     )?;
                     selected.push(helper);
                 }
@@ -2096,3 +2100,39 @@ mod tests;
 /// Helpers for the Planner's own tests (`test-support`).
 #[cfg(feature = "test-support")]
 pub mod test_support;
+
+/// The cover level `id` is read as, when every compiled reader of it is a
+/// `TimeRangeCover` reading it as the same level: its levels' widths and
+/// `id`'s index among them. A query run then reads only the windows the
+/// cover takes from `id` (`Scan::materialized_view`). `None` when another
+/// operator reads it, or covers read it as different levels.
+fn cover_level_read(id: NodeId, graph: &CompileGraph<'_>) -> Option<CoverLevel> {
+    let readers = graph.consumers.get(&id)?;
+    let mut read_as: Option<CoverLevel> = None;
+    for reader in readers {
+        let Payload::NonASAP(NonASAPOp::TimeRangeCover { levels, .. }) =
+            &graph.nodes.get(reader)?.payload
+        else {
+            return None;
+        };
+        let level_widths_ms = levels
+            .iter()
+            .map(|&level| {
+                graph
+                    .nodes
+                    .get(&(level as NodeId))
+                    .and_then(|node| node.payload.chain_tumbling_window_width_ms())
+            })
+            .collect::<Option<Vec<u64>>>()?;
+        let level = levels.iter().position(|&level| level as NodeId == id)?;
+        let this = CoverLevel {
+            level_widths_ms,
+            level,
+        };
+        match &read_as {
+            Some(known) if *known != this => return None,
+            _ => read_as = Some(this),
+        }
+    }
+    read_as
+}

@@ -35,7 +35,6 @@ use asap_types::deployment_capabilities::FinalResultsCache;
 
 use asap_types::ir::operator::AtModifier;
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::plan::materialized_view::RefreshWindow;
 use asap_types::stages::{
     anchor_is_evaluation_time, producer_satisfies_physical_requirements, queries_of_context,
@@ -202,20 +201,12 @@ impl SelectableExecutions {
         while let Some(consumer) = pending.pop() {
             let c = consumer.candidate;
             let context = selectable.input_context(physical, entries, consumer);
-            // A cover reads its wider levels' stored windows whatever its
-            // grid: it takes only whole windows from them, and its edges
-            // from the narrowest level, which is on the grid.
-            let wider_levels = match physical.operator(c) {
-                Operator::NonASAP(NonASAPOp::TimeRangeCover { levels, .. }) => {
-                    levels.len().saturating_sub(1)
-                }
-                _ => 0,
-            };
             for input in 0..physical.input_count(c) {
                 for &edge in physical.admissible_edges_into(c, input) {
                     let u = physical.edge(edge).producer_candidate_id;
+                    let off_the_grid = physical.operator(c).reads_input_off_the_grid(input);
                     if let Some(producer) =
-                        selectable.execution_reading(physical, context, u, input < wider_levels)
+                        selectable.execution_reading(physical, context, u, off_the_grid)
                     {
                         edges.insert((consumer, edge, producer));
                         if reached.insert(producer) {
@@ -277,9 +268,9 @@ impl SelectableExecutions {
     }
 
     /// The execution of producer `u` a consumer whose inputs run in
-    /// `context` reads, when `u` delivers on it (a wider level of a
-    /// `TimeRangeCover`, `wider_level_of_cover`, delivers whenever it is
-    /// stored across evaluations): its own for an
+    /// `context` reads, when `u` delivers on it (an input read off the grid
+    /// on purpose, `read_off_the_grid`, only when stored at ingestion
+    /// time): its own for an
     /// `AcrossEvaluations` producer, the one ingestion context
     /// `ExecutionContext::EVERY_ARRIVING_ROW` for another ingestion-time producer, otherwise
     /// its run in `context`.
@@ -288,12 +279,21 @@ impl SelectableExecutions {
         physical: &PhysicalASAPMemoCandidates,
         context: ExecutionContextId,
         u: PhysicalCandidateId,
-        wider_level_of_cover: bool,
+        read_off_the_grid: bool,
     ) -> Option<Execution> {
         let producer = &physical.physical_candidates[u.0];
-        let stored_windows =
-            wider_level_of_cover && producer.physical_properties.is_across_evaluations();
-        if !stored_windows && !physical.delivers_on(u, &self.contexts[context.0]) {
+        // Read off the grid on purpose (`Operator::reads_input_off_the_grid`):
+        // only windows stored at ingestion time, anchored at the epoch; a
+        // chain built at query time ends its windows at the evaluation
+        // time, not on the epoch grid.
+        if read_off_the_grid {
+            let epoch_anchored = producer.physical_properties.timing()
+                == ExecutionTiming::IngestionTime
+                && producer.physical_properties.is_across_evaluations();
+            if !epoch_anchored {
+                return None;
+            }
+        } else if !physical.delivers_on(u, &self.contexts[context.0]) {
             return None;
         }
         let properties = producer.physical_properties;

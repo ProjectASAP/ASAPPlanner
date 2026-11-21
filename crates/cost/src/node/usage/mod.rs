@@ -2147,8 +2147,10 @@ fn cover_windows_per_level(
     let narrowest = widths.last().copied().unwrap_or(1);
     mean_cover_windows_per_level(
         u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
-        0,
-        narrowest,
+        asap_types::stages::EvaluationGrid {
+            period_ms: narrowest,
+            phase_ms: 0,
+        },
         &widths,
     )
 }

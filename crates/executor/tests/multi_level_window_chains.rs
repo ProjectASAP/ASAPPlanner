@@ -129,7 +129,9 @@ fn id_of(nodes: &[Rc<OperatorNode>], operator: &Rc<OperatorNode>) -> PhysicalASA
 #[derive(Clone, Copy)]
 enum Built {
     Sum,
+    Max,
     DDSketchP99,
+    KllP99,
 }
 
 fn chain(width_ms: i64, built: Built) -> Rc<OperatorNode> {
@@ -141,7 +143,9 @@ fn chain(width_ms: i64, built: Built) -> Rc<OperatorNode> {
         })),
         summary_type: match built {
             Built::Sum => FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            Built::Max => FieldDataType::ExactAggregate(ExactKind::Max, ExactParams::Max),
             Built::DDSketchP99 => FieldDataType::Sketch(SketchAlgorithm::DDSketch),
+            Built::KllP99 => FieldDataType::Sketch(SketchAlgorithm::Kll),
         },
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::by(vec![0]),
@@ -157,15 +161,24 @@ fn finalized_merge(windows: Rc<OperatorNode>, built: Built) -> Rc<OperatorNode> 
         group_by: None,
     }));
     node(Operator::ASAP(match built {
-        Built::Sum => ASAPOp::FinalizeExactAccumulator {
+        Built::Sum | Built::Max => ASAPOp::FinalizeExactAccumulator {
             counter_readout: None,
             child: merged,
         },
-        Built::DDSketchP99 => ASAPOp::SummaryEstimate {
+        Built::DDSketchP99 | Built::KllP99 => ASAPOp::SummaryEstimate {
             summary_input: merged,
             query: SketchStatistic::Quantile { q: 0.99 },
         },
     }))
+}
+
+/// The θ of `built`'s sketches; `None` for exact states.
+fn sketch_parameters(built: Built) -> Option<SketchParams> {
+    match built {
+        Built::Sum | Built::Max => None,
+        Built::DDSketchP99 => Some(SketchParams::DDSketch { alpha: 0.01 }),
+        Built::KllP99 => Some(SketchParams::Kll { k: 200 }),
+    }
 }
 
 /// The plan: a 15 s chain of exact sums per job, a 5 min level merged from
@@ -233,9 +246,7 @@ fn plan(built: Built) -> Plan {
     }
     // The sketches' θ, on every build and merge of windows.
     for node in dag.nodes.iter_mut().filter(|node| ids.contains(&node.id)) {
-        if let Built::DDSketchP99 = built {
-            node.parameters = Some(SketchParams::DDSketch { alpha: 0.01 });
-        }
+        node.parameters = sketch_parameters(built);
     }
     let views = views_at(&mut dag, &ids.map(|id| id as u64)).unwrap();
     Plan {
@@ -447,4 +458,242 @@ fn cover_quantiles_equal_flat_quantiles() {
         assert_eq!(cover, flat, "at {t}");
         t += NARROW_MS;
     }
+}
+
+/// A chain of `level_widths_ms[last]` over the rows and a level of each
+/// wider width (widest first) merged from the next narrower one, all kept
+/// 2 h; `cover` reads `(T - 1h, T]` over every level, `flat` over the
+/// narrowest chain alone.
+struct Levels {
+    dag: PhysicalASAPDAG,
+    /// Narrowest first, with its width.
+    levels: Vec<(PhysicalASAPNodeId, i64)>,
+    cover: PhysicalASAPNodeId,
+    flat: PhysicalASAPNodeId,
+    views: Vec<MaterializedView>,
+}
+
+fn levels_plan(built: Built, level_widths_ms: &[i64]) -> Levels {
+    let finalized_merge = |windows| finalized_merge(windows, built);
+    let mut widths = level_widths_ms.to_vec();
+    widths.reverse();
+    let mut nodes_narrowest_first = vec![chain(widths[0], built)];
+    for &width in &widths[1..] {
+        let narrower = nodes_narrowest_first.last().unwrap().clone();
+        nodes_narrowest_first.push(node(Operator::ASAP(ASAPOp::SummaryMergeWindows {
+            child: narrower,
+            tumbling_window_width_ms: width as u64,
+        })));
+    }
+    let cover = finalized_merge(node(Operator::NonASAP(NonASAPOp::TimeRangeCover {
+        range: Duration::from_millis(HOUR_MS as u64),
+        levels: nodes_narrowest_first.iter().rev().cloned().collect(),
+    })));
+    let flat = finalized_merge(node(Operator::NonASAP(NonASAPOp::TimeRange {
+        range: Duration::from_millis(HOUR_MS as u64),
+        kind: TimeRangeKind::Range,
+        child: nodes_narrowest_first[0].clone(),
+    })));
+    let (mut dag, nodes) =
+        planner_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&[
+            QueryRoot::Operator(cover.clone()),
+            QueryRoot::Operator(flat.clone()),
+        ])
+        .unwrap();
+    let levels: Vec<(PhysicalASAPNodeId, i64)> = nodes_narrowest_first
+        .iter()
+        .zip(&widths)
+        .map(|(level, &width)| (id_of(&nodes, level), width))
+        .collect();
+    for node in dag
+        .nodes
+        .iter_mut()
+        .filter(|node| levels.iter().any(|(id, _)| *id == node.id))
+    {
+        node.retention_ms = Some(2 * HOUR_MS as u64);
+        node.parameters = sketch_parameters(built);
+    }
+    let ids: Vec<u64> = levels.iter().map(|(id, _)| *id as u64).collect();
+    let views = views_at(&mut dag, &ids).unwrap();
+    Levels {
+        cover: id_of(&nodes, &cover),
+        flat: id_of(&nodes, &flat),
+        dag,
+        levels,
+        views,
+    }
+}
+
+/// Refreshes every level in time order up to `until`, as a runtime does:
+/// at each window end, the narrowest chain from the rows, then each wider
+/// level from the next narrower one's stored windows.
+fn refresh_levels(plan: &Levels, store: &mut Arc<InMemoryDataStore>, until: i64) {
+    let view = |node| {
+        plan.views
+            .iter()
+            .find(|view| view.node_id == node)
+            .unwrap()
+            .clone()
+    };
+    let compiled: Vec<_> = plan
+        .levels
+        .iter()
+        .enumerate()
+        .map(|(index, &(id, width))| {
+            let bound: Vec<_> = match index {
+                0 => vec![],
+                _ => vec![view(plan.levels[index - 1].0)],
+            };
+            (id, width, compile(&plan.dag, &bound, &[id as u64]).unwrap())
+        })
+        .collect();
+    let narrowest = plan.levels[0].1;
+    let mut end = narrowest;
+    while end <= until {
+        for (id, width, refresh) in &compiled {
+            if end % width != 0 {
+                continue;
+            }
+            let context = RunContext::new(
+                Scope::Ingestion {
+                    window_start_ms: end - width,
+                    window_end_ms: end,
+                },
+                Limits::default(),
+            )
+            .unwrap();
+            let rows = {
+                let dag = refresh.instantiate(store.clone()).unwrap();
+                run(&dag, &[*id as u64], context).remove(0)
+            };
+            let schema = Arc::new(
+                plan.dag
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == *id)
+                    .unwrap()
+                    .output_schema
+                    .clone(),
+            );
+            let batch = Batch::try_new(schema, rows).unwrap();
+            Arc::get_mut(store)
+                .unwrap()
+                .append_materialized_view(&view(*id), (end - width, end), vec![batch])
+                .unwrap();
+        }
+        end += narrowest;
+    }
+}
+
+/// Each step's answers of `cover` and `flat`, every 15 s over the last
+/// 5 minutes of 3 h, after refreshing the levels.
+fn answers_by_step(plan: &Levels) -> Vec<(i64, [BTreeMap<String, f64>; 2])> {
+    let mut store = Arc::new(store_with_samples());
+    refresh_levels(plan, &mut store, 3 * HOUR_MS);
+    let query = compile(
+        &plan.dag,
+        &plan.views,
+        &[plan.cover as u64, plan.flat as u64],
+    )
+    .unwrap();
+    let mut answers = Vec::new();
+    let mut t = 3 * HOUR_MS - WIDE_MS;
+    while t <= 3 * HOUR_MS {
+        let context = RunContext::new(
+            Scope::Query {
+                evaluation_time_ms: t,
+            },
+            Limits::default(),
+        )
+        .unwrap();
+        let rows = {
+            let query = query.instantiate(store.clone()).unwrap();
+            run(&query, &[plan.cover as u64, plan.flat as u64], context)
+        };
+        answers.push((t, [sums_of(rows[0].clone()), sums_of(rows[1].clone())]));
+        t += NARROW_MS;
+    }
+    answers
+}
+
+/// T10, `max_over_time`. The cover's max per job equals the max computed
+/// directly over the raw samples at every step.
+#[test]
+fn cover_maxima_equal_direct_maxima() {
+    let plan = levels_plan(Built::Max, &[WIDE_MS, NARROW_MS]);
+    for (t, [cover, flat]) in answers_by_step(&plan) {
+        let mut expected: BTreeMap<String, f64> = BTreeMap::new();
+        for (job, sample_t, value) in samples() {
+            if t - HOUR_MS < sample_t && sample_t <= t {
+                let max = expected.entry(job.to_string()).or_insert(f64::MIN);
+                *max = max.max(value);
+            }
+        }
+        assert_eq!(cover, expected, "cover at {t}");
+        assert_eq!(flat, expected, "flat at {t}");
+    }
+}
+
+/// T10, KLL. A KLL merged through the cover is not bit-identical to the
+/// single chain's (compaction depends on merge order), but its p99 keeps
+/// the rank bound: within 2% of the samples of each job's hour from the
+/// true p99's rank, at every step.
+#[test]
+fn cover_kll_quantiles_keep_their_rank_bound() {
+    let plan = levels_plan(Built::KllP99, &[WIDE_MS, NARROW_MS]);
+    for (t, [cover, flat]) in answers_by_step(&plan) {
+        for job in ["a", "b"] {
+            let mut values: Vec<f64> = samples()
+                .into_iter()
+                .filter(|(j, sample_t, _)| *j == job && t - HOUR_MS < *sample_t && *sample_t <= t)
+                .map(|(_, _, value)| value)
+                .collect();
+            values.sort_by(f64::total_cmp);
+            let rank = |estimate: f64| {
+                values.iter().filter(|&&value| value <= estimate).count() as f64
+                    / values.len() as f64
+            };
+            for (name, answer) in [("cover", &cover), ("flat", &flat)] {
+                let error = (rank(answer[job]) - 0.99).abs();
+                assert!(error <= 0.02, "{name} {job} at {t}: rank error {error}");
+            }
+        }
+    }
+}
+
+/// Nested levels collapse exactly: over DDSketch states, a cover over 5 min,
+/// 1 min and 15 s levels (each built from the next narrower) reads the
+/// same p99 as the 15 s chain, bit for bit, at every step.
+#[test]
+fn nested_ddsketch_levels_collapse_exactly() {
+    let plan = levels_plan(Built::DDSketchP99, &[WIDE_MS, 60 * SECOND_MS, NARROW_MS]);
+    for (t, [cover, flat]) in answers_by_step(&plan) {
+        assert_eq!(cover.len(), 2, "at {t}");
+        assert_eq!(cover, flat, "at {t}");
+    }
+}
+
+/// A query run off the narrowest level's grid is refused, not answered
+/// from part of the range: at T = 3 h − 7 s the 15 s level's windows
+/// cannot tile `(T − 1h, T]`.
+#[test]
+fn a_cover_off_its_grid_is_refused() {
+    let plan = levels_plan(Built::Sum, &[WIDE_MS, NARROW_MS]);
+    let mut store = Arc::new(store_with_samples());
+    refresh_levels(&plan, &mut store, 3 * HOUR_MS);
+    let query = compile(&plan.dag, &plan.views, &[plan.cover as u64]).unwrap();
+    let context = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: 3 * HOUR_MS - 7 * SECOND_MS,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let query = query.instantiate(store).unwrap();
+    let result = crate::common::run_roots(&query, &[plan.cover as u64], context);
+    let error = result
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+    assert!(error.contains("not on the grid"), "{error:?}");
 }

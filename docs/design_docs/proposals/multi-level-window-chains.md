@@ -73,7 +73,11 @@ What exists and why it does not help:
    one candidate per θ: a new operator `SummaryMergeWindows[C]` over the next
    narrower level: when a window of width `C` ends, it merges the `C/c`
    narrower windows it contains (one merge per narrower state, no row work).
-   It is placed only at ingestion time, materialized across evaluations.
+   Stage 2 places it only at ingestion time, materialized across
+   evaluations. A cover reads a wider level only when it is stored at
+   ingestion time, so its windows are on the epoch grid; that rules out a
+   from-rows chain of the same width built at query time (whose windows end
+   at the evaluation time).
 3. **Cover.** A new node `TimeRangeCover(W)` over the levels (each under the
    same `TimeShift`s), widest first, selects at each evaluation time `T` the
    windows that tile `(T − W, T]` exactly: the widest whole windows inside the
@@ -240,6 +244,12 @@ across evaluations). Stage 3: no change. The executor implements both
 operators, and the cover's view request becomes one window range per level and
 edge.
 
+**Deployments without the operators.** A runtime that cannot run them
+lists both in `excluded_candidates`: `[{"operator": "SummaryMergeWindows"},
+{"operator": "TimeRangeCover"}]`. Excluding `SummaryMergeWindows` alone is
+not enough: a cover may still read a coarser chain built from the rows
+(for a reader on a coarser grid).
+
 ## 5. Decisions
 
 1. **Wider levels are extra chain groups, not a new kind of chain.** The memo
@@ -288,16 +298,19 @@ Each test is written before the code and fails on main for the reason given.
 | # | Test (crate) | Checks | Fails on main because |
 | --- | --- | --- | --- |
 | T1 | `cover_windows_tile_the_range` (types) | For levels {5 min, 15 s}, {5 min, 1 min, 15 s} and {15 min, 5 min, 1 min, 15 s}, every `T` on the 15 s grid over one day, `W` ∈ {1 h, 57.5 min, 30 min}: the windows are disjoint, inside `(T − W, T]`, and their union is the range. | `cover_windows` does not exist. |
-| T2 | `cover_counts_match_the_design_table` (types) | `T` = 100 h + 105 s, {5 min, 15 s}: 11 + 13 + 7 = 31 windows; `mean_cover_windows` = 30.1, 18.1, 12.0 for the three level sets at `W` = 1 h. | As T1. |
-| T3 | `a_long_range_gets_wider_levels` (stage1-pass2) | `quantile_over_time(0.99, data[1h])`, step 15 s: chain groups at 15 s, 1 min, 5 min, 15 min (not 1 h: `2·C ≤ W`); each wider group has a `SummaryMergeWindows` candidate over the next narrower group and a from-rows build; the state group has `SummaryMerge` over `TimeRangeCover` candidates, one per level subset containing 15 s. | Pass 2 adds only the 15 s chain. |
-| T4 | `a_short_range_gets_no_wider_level` (stage1-pass2) | `data[1m]` step 15 s: only the 15 s chain; memo unchanged from main. | Passes on main; guards against regressions. |
-| T5 | `wider_levels_need_a_merging_summary` (stage1-pass2) | `topk` heap and UnivMon entropy states get no wider level. | Passes on main; guards the capability rule. |
-| T6 | `cover_merge_is_charged_its_mean_windows` (cost) | The `SummaryMerge` over a {5 min, 15 s} cover for 10,000 series is charged 30.1 × 10,000 states per step, × 16.0667/s; `SummaryMergeWindows[5 min]` over 1 min is charged 5 merges per emitted state. | Neither node is costed. |
-| T7 | `stage3_picks_levels_for_a_long_range` (integration-tests) | The section 1 workload: Stage 3 selects a plan with at least one wider level, built from the narrower level; its `cost_per_second` is below main's 9.896383e4; its merge node is charged at most 31 windows per step. | Pass 2 offers no levels. |
-| T8 | `levels_cost_memory` (integration-tests) | Each level's retention is its readers' longest; the 15 s chain's retention is unchanged (7,200,000 ms); the plan's kept bytes rise by each level's states. | As T7. |
-| T9 | `merge_windows_equals_direct_build` (executor) | `SummaryMergeWindows[5 min]` over a 15 s DDSketch chain: each 5 min state equals the from-rows 5 min build bit for bit; same for exact sum and max. | Operator not in the executor. |
-| T10 | `cover_answers_equal_flat_answers`, `cover_quantiles_equal_flat_quantiles` (executor) | Range query `quantile_over_time(0.99, data[1h])` and `max_over_time(data[30m])`, step 15 s, small data: the cover plan's answers equal the 15 s plan's exactly for DDSketch and max; KLL within its rank bound. Steps include `T` on and off the 5 min grid. | As T9. |
-| T11 | `installable_plan_round_trips_levels` (planner) | An `InstallablePlan` with both new operators round-trips JSON and `check_compiles` on the Planner's executor. | Operators do not exist. |
+| T2 | `cover_counts_match_the_design_table` (types) | `T` = 100 h + 105 s, {5 min, 15 s}: 13 + 11 + 7 = 31 windows; mean windows per 15 s step 30.05, 18.05 and 12.02 for the three level sets at `W` = 1 h. | As T1. |
+| T2b | `closed_form_means_equal_counted_means`, `an_interval_off_the_narrowest_grid_is_refused` (types) | The closed-form means equal counts over every evaluation time, for ranges below and above twice the widest width, several periods and phases; an interval off the narrowest grid is an error. | Added after review. |
+| T3 | `a_long_range_gets_wider_levels` (stage1-pass2) | `quantile_over_time(0.99, data[1h])`, step 15 s: chain groups at 15 s, 1 min, 5 min, 15 min (not 1 h: `2·C ≤ W`); each wider group's only candidates are `SummaryMergeWindows` over the next narrower group; the state group merges over one cover per nested prefix. | Pass 2 adds only the 15 s chain. |
+| T4 | `a_short_range_gets_no_wider_level` (stage1-pass2) | `data[1m]` step 15 s: only the 15 s chain. | Passes on main; guards against regressions. |
+| T5 | `wider_levels_need_a_merging_summary` (stage1-pass2) | An `irate` state (no merge) over an hour gets no chain and no level. | Passes on main; guards the capability rule. |
+| T6 | `cover_merge_is_charged_its_mean_windows` (integration-tests) | The section 1 plan's merge is charged 120,000 states into 10,000 per step, × 16.0667/s; each `SummaryMergeWindows` is charged the states it merges per second at ingestion time. | Neither node is costed. |
+| T7 | `stage3_picks_levels_for_a_long_range` (integration-tests) | The section 1 workload: Stage 3 selects wider levels and a cover; cost below main's 9.896383e4; at most 31 windows per series per step. | Pass 2 offers no levels. |
+| T8 | `levels_cost_memory` (integration-tests) | Every level and the 15 s chain keep 7,200,000 ms; the 15 s chain keeps 8,773,440,000 bytes, as on main. | As T7. |
+| T9 | `merge_windows_equals_direct_build` (executor) | Each 5 min window `SummaryMergeWindows` merges from 15 s windows holds what the 5 min chain built from the rows holds (exact sums per job, stamped with the window's end). | Operator not in the executor. |
+| T10 | `cover_answers_equal_flat_answers`, `cover_maxima_equal_direct_maxima`, `cover_quantiles_equal_flat_quantiles`, `cover_kll_quantiles_keep_their_rank_bound`, `nested_ddsketch_levels_collapse_exactly` (executor) | `(T − 1h, T]` every 15 s over 5 minutes, on and off the 5 min grid: sums and maxima equal those computed over the raw samples; DDSketch p99 through two and through three levels equals the 15 s chain's bit for bit; KLL p99 within 2% rank of the true p99. | As T9. |
+| T10b | `a_cover_off_its_grid_is_refused` (executor) | A query run at T off the 15 s grid is refused, not answered from part of the range. | Added after review. |
+| T11 | `installable_plan_round_trips_levels` (integration-tests) | The plan file with both operators writes back the same text and compiles on the Planner's executor. | Operators do not exist. |
+| T11b | `excluding_both_operators_plans_single_chains`, `a_cover_reads_wider_levels_only_from_ingestion_time` (integration-tests) | A deployment excluding both operators gets no level and no cover; a cover's wider levels are stored at ingestion time (never a chain built at query time). | Added after review. |
 | T12 | Plan snapshots (devtools) | Corpus and sketch plan snapshots: only plans with a range read `W ≥ 2 min` change; each changed plan is listed in the PR with old → new cost. | Expected diff, reviewed, not a failing test. |
 
 T10 runs exact sums (against sums computed directly over the raw samples)

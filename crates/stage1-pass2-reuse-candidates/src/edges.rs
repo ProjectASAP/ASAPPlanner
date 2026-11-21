@@ -5,7 +5,6 @@
 use std::collections::BTreeMap;
 
 use asap_accuracy::{AccuracyEvidence, ErrorMetricsOfMemo};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::stages::{
     CandidateForMemoGroupId, EvaluationGrid, Memo, MemoGroupId, RootPruneReason,
 };
@@ -53,17 +52,12 @@ pub(crate) fn candidate_edges(
                 .into_iter()
                 .enumerate()
             {
-                // A wider level is read off the grid on purpose: its
-                // windows are merged into a wider level, or a cover takes
-                // its whole windows and reads the edges from its narrowest
-                // level, which must be on the grid.
-                let read_off_the_grid = match &candidate.expression.operator {
-                    Operator::ASAP(ASAPOp::SummaryMergeWindows { .. }) => true,
-                    Operator::NonASAP(NonASAPOp::TimeRangeCover { levels, .. }) => {
-                        input + 1 < levels.len()
-                    }
-                    _ => false,
-                };
+                // A wider level read on purpose off the grid
+                // (`Operator::reads_input_off_the_grid`).
+                let read_off_the_grid = candidate
+                    .expression
+                    .operator
+                    .reads_input_off_the_grid(input);
                 let chain_off_the_grid = chain_off_the_evaluation_grid(
                     memo,
                     evaluation_grid_of_group,

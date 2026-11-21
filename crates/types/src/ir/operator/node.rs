@@ -74,6 +74,23 @@ impl<C> Operator<C> {
         }
     }
 
+    /// Whether it reads its input `input` off its own evaluation grid on
+    /// purpose: a `SummaryMergeWindows`'s narrower chain (merged into wider
+    /// windows), or a `TimeRangeCover`'s wider levels (it takes only their
+    /// whole windows inside its range; its narrowest level, last, is on its
+    /// grid). Such a read is exact only when that input's windows are
+    /// anchored at the epoch: stored at ingestion time, which Stage 3
+    /// requires. Pass 2's grid check and Stage 3's delivery check both
+    /// exempt exactly these reads. Example: a cover over 5 min and 15 s
+    /// levels read every 15 s reads input 0 off the grid, not input 1.
+    pub fn reads_input_off_the_grid(&self, input: usize) -> bool {
+        match self {
+            Operator::ASAP(ASAPOp::SummaryMergeWindows { .. }) => input == 0,
+            Operator::NonASAP(NonASAPOp::TimeRangeCover { levels, .. }) => input + 1 < levels.len(),
+            Operator::NonASAP(_) | Operator::ASAP(_) => false,
+        }
+    }
+
     /// Its tumbling-window width when it is a `SummaryTumblingWindowChain`,
     /// in ms; `None` for every other operator. E.g. a chain of 1-minute
     /// windows: `Some(60_000)`; `TimeRange(5m)`: `None`.

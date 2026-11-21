@@ -86,8 +86,7 @@ impl Operator {
     /// [`cover_windows`]: planner_types::ir::operator::tumbling_window_chain::cover_windows
     pub fn with_cover_level(
         mut self,
-        level_widths_ms: Vec<u64>,
-        level: usize,
+        cover_level: planner_types::ir::operator::tumbling_window_chain::CoverLevel,
     ) -> Result<Self, Error> {
         let Kind::TimeRange {
             latest_per_series: None,
@@ -98,12 +97,14 @@ impl Operator {
         else {
             return Err(invalid("a cover level is a range window over a chain"));
         };
-        if level >= level_widths_ms.len() || level_widths_ms.contains(&0) {
+        if cover_level.level >= cover_level.level_widths_ms.len()
+            || cover_level.level_widths_ms.contains(&0)
+        {
             return Err(invalid(
                 "a cover level reads one of its positive-width levels",
             ));
         }
-        *slot = Some((level_widths_ms, level));
+        *slot = Some(cover_level);
         Ok(self)
     }
 
@@ -272,14 +273,28 @@ pub(super) fn execute<'a>(
         .ok_or_else(|| invalid("time range input missing"))?;
     let (start, end) = window(end_offset_ms, width_ms, &context)?;
     // A cover level's windows: the ends it takes in this run.
-    let cover_ends: std::sync::Arc<Option<std::collections::BTreeSet<i64>>> =
-        std::sync::Arc::new(cover_level.as_ref().map(|(widths, level)| {
-            planner_types::ir::operator::tumbling_window_chain::cover_windows(start, end, widths)
-                .into_iter()
-                .filter(|(of_level, _)| of_level == level)
-                .map(|(_, window_end)| window_end)
-                .collect()
-        }));
+    // Off the narrowest level's grid no set of whole windows is the range:
+    // refused, not answered from part of it.
+    let cover_ends: std::sync::Arc<Option<std::collections::BTreeSet<i64>>> = std::sync::Arc::new(
+        cover_level
+            .as_ref()
+            .map(|cover_level| {
+                planner_types::ir::operator::tumbling_window_chain::cover_windows(
+                    start,
+                    end,
+                    &cover_level.level_widths_ms,
+                )
+                .map(|windows| {
+                    windows
+                        .into_iter()
+                        .filter(|(of_level, _)| *of_level == cover_level.level)
+                        .map(|(_, window_end)| window_end)
+                        .collect()
+                })
+            })
+            .transpose()
+            .map_err(|error| Error::Invalid(error.to_string()))?,
+    );
     // Whether each row is in the window and, for a range window, not a
     // stale marker.
     let kept =

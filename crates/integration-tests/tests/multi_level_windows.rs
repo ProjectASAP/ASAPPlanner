@@ -160,3 +160,81 @@ async fn installable_plan_round_trips_levels() {
     assert!(text.contains("SummaryMergeWindows") && text.contains("TimeRangeCover"));
     read.check_compiles().unwrap();
 }
+
+/// A deployment that runs neither operator excludes both; its plans then
+/// read no wider level and no cover, even where a coarser chain built from
+/// the rows exists. `quantile_over_time(0.99, data[1h])` every 15 s and
+/// every 60 s has a 60 s chain from the rows besides the 15 s one.
+#[tokio::test]
+async fn excluding_both_operators_plans_single_chains() {
+    let mut workload = workload();
+    let queries = workload.query_workload.repeating_queries.as_mut().unwrap();
+    let mut every_60_s = queries[0].clone();
+    every_60_s.demand = serde_json::from_str(
+        r#"{"fixed_interval_at": {"evaluation_phase": 0, "interval": 60000}}"#,
+    )
+    .unwrap();
+    queries.push(every_60_s);
+    let capabilities = asap_planner::DeploymentCapabilities {
+        excluded_candidates: serde_json::from_str(
+            r#"[{"operator": "SummaryMergeWindows"}, {"operator": "TimeRangeCover"}]"#,
+        )
+        .unwrap(),
+        ..Default::default()
+    };
+    let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
+    let (plan, _) = plan_installable(UserInput::new(&workload, FrontendInput::Promql, models))
+        .await
+        .unwrap();
+    assert!(
+        nodes_where(&plan, |operator| matches!(
+            operator,
+            Operator::ASAP(ASAPOp::SummaryMergeWindows { .. })
+                | Operator::NonASAP(NonASAPOp::TimeRangeCover { .. })
+        ))
+        .is_empty(),
+        "{:?}",
+        plan.dag.nodes
+    );
+}
+
+/// A cover reads its wider levels only as windows stored at ingestion time,
+/// anchored at the epoch: a chain built at query time (kept across
+/// evaluations where the deployment keeps query-time results) ends its
+/// windows at the evaluation time instead. Over data at rest, read every
+/// 15 s and every 60 s (a 60 s chain exists), no cover reads a query-time
+/// wider level.
+#[tokio::test]
+async fn a_cover_reads_wider_levels_only_from_ingestion_time() {
+    let mut workload = workload();
+    workload.data_workload.as_mut().unwrap().arrival =
+        serde_json::from_str(r#""at_rest""#).unwrap();
+    let queries = workload.query_workload.repeating_queries.as_mut().unwrap();
+    let mut every_60_s = queries[0].clone();
+    every_60_s.demand = serde_json::from_str(
+        r#"{"fixed_interval_at": {"evaluation_phase": 0, "interval": 60000}}"#,
+    )
+    .unwrap();
+    queries.push(every_60_s);
+    let capabilities = asap_planner::DeploymentCapabilities {
+        query_time_results_retained: true,
+        ..Default::default()
+    };
+    let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
+    let (plan, _) = plan_installable(UserInput::new(&workload, FrontendInput::Promql, models))
+        .await
+        .unwrap();
+    for node in &plan.dag.nodes {
+        let Operator::NonASAP(NonASAPOp::TimeRangeCover { levels, .. }) = &node.payload else {
+            continue;
+        };
+        for wider in &levels[..levels.len() - 1] {
+            let level = plan.dag.nodes.iter().find(|n| n.id == *wider).unwrap();
+            assert_eq!(
+                level.output_state.timing,
+                asap_planner::ExecutionTiming::IngestionTime,
+                "{level:?}"
+            );
+        }
+    }
+}

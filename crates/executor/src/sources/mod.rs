@@ -11,6 +11,7 @@ use crate::{
     Error,
 };
 use futures::{stream, StreamExt};
+use planner_types::ir::operator::tumbling_window_chain::CoverLevel;
 use planner_types::ir::operator::Source;
 use planner_types::ir::schema::DataType;
 use planner_types::ir::ScalarExpr;
@@ -55,9 +56,9 @@ enum ScanInput {
         view: MaterializedView,
         /// The rows a read selects, back from the evaluation time.
         read_window: TimeWindow,
-        /// A chain's tumbling-window width: a query run reads its whole
-        /// windows inside `read_window`.
-        tumbling_window_width_ms: Option<u64>,
+        /// A chain read only as one level of a `TimeRangeCover`: a query
+        /// run reads only the windows the cover takes from it.
+        cover_level: Option<CoverLevel>,
     },
 }
 
@@ -93,17 +94,14 @@ impl Scan {
         }
     }
     /// A materialized view slot reading the rows of `view` that
-    /// `read_window` selects: for a chain of `tumbling_window_width_ms`, in
-    /// a query run, its whole windows inside it (a wider level of a
-    /// `TimeRangeCover` is read off its grid). Example: windows of 5 min
-    /// read for `(T - 1h, T]` at `T` = 100 h + 105 s: `(99 h + 300 s, 100
-    /// h]`.
+    /// `read_window` selects; read as a `TimeRangeCover`'s level
+    /// (`cover_level`), only the windows the cover takes from it.
     pub(crate) fn materialized_view(
         store: Arc<dyn DataStore>,
         view: MaterializedView,
         output: SchemaRef,
         read_window: TimeWindow,
-        tumbling_window_width_ms: Option<u64>,
+        cover_level: Option<CoverLevel>,
     ) -> Self {
         Self {
             store,
@@ -111,7 +109,7 @@ impl Scan {
             input: ScanInput::MaterializedView {
                 view,
                 read_window,
-                tumbling_window_width_ms,
+                cover_level,
             },
         }
     }
@@ -179,10 +177,8 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
             ScanInput::MaterializedView {
                 view,
                 read_window,
-                tumbling_window_width_ms,
-            } => {
-                self.start_materialized_view(view, *read_window, *tumbling_window_width_ms, context)
-            }
+                cover_level,
+            } => self.start_materialized_view(view, *read_window, cover_level.as_ref(), context),
         }
     }
 }
@@ -191,7 +187,7 @@ impl Scan {
         &'a self,
         view: &'a MaterializedView,
         read_window: TimeWindow,
-        tumbling_window_width_ms: Option<u64>,
+        cover_level: Option<&CoverLevel>,
         context: RunContext,
     ) -> Result<OutputStream<'a, Batch>, Error> {
         // A query run reads the window back from its evaluation time; an
@@ -204,33 +200,51 @@ impl Scan {
             ),
         };
         let time_range_ms = read_window.bounds_ms(at_ms);
-        // A chain's whole windows inside the window: the same window when
-        // the evaluation time is on the chain's grid.
-        let time_range_ms = match (&context.scope, tumbling_window_width_ms) {
-            (Scope::Query { .. }, Some(width_ms)) if width_ms > 0 => {
-                let width = i64::try_from(width_ms).unwrap_or(i64::MAX);
+        // A cover level reads, at query time, only the windows the cover
+        // takes from it: one read per run of consecutive windows (a wider
+        // level's middle, the narrowest level's two edges). Example: the
+        // 15 s level of a 1 h cover over 5 min windows reads two ranges of
+        // at most 5 min, not the hour.
+        let ranges_ms: Vec<(i64, i64)> = match (&context.scope, cover_level) {
+            (Scope::Query { .. }, Some(cover_level)) => {
+                let width = i64::try_from(cover_level.level_widths_ms[cover_level.level])
+                    .map_err(|_| Error::Invalid("a cover level's width exceeds Int64".into()))?;
                 let (start, end) = time_range_ms;
-                let start = start.div_euclid(width) * width
-                    + if start.rem_euclid(width) == 0 {
-                        0
-                    } else {
-                        width
-                    };
-                let end = end.div_euclid(width) * width;
-                (start.min(end), end)
+                let windows = planner_types::ir::operator::tumbling_window_chain::cover_windows(
+                    start,
+                    end,
+                    &cover_level.level_widths_ms,
+                )
+                .map_err(|error| Error::Invalid(error.to_string()))?;
+                let mut ranges: Vec<(i64, i64)> = Vec::new();
+                for (level, window_end) in windows {
+                    if level != cover_level.level {
+                        continue;
+                    }
+                    match ranges.last_mut() {
+                        Some((_, last_end)) if *last_end == window_end - width => {
+                            *last_end = window_end
+                        }
+                        _ => ranges.push((window_end - width, window_end)),
+                    }
+                }
+                ranges
             }
-            _ => time_range_ms,
+            _ => vec![time_range_ms],
         };
         let opening = context.clone();
-        let stream = stream::once(async move {
-            if opening.is_cancelled() {
-                return Err(Error::Cancelled);
+        let stream = stream::iter(ranges_ms).then(move |time_range_ms| {
+            let opening = opening.clone();
+            async move {
+                if opening.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                let request = MaterializedViewRequest {
+                    time_range_ms,
+                    schema: &self.output,
+                };
+                self.store.read_materialized_view(view, &request, opening)
             }
-            let request = MaterializedViewRequest {
-                time_range_ms,
-                schema: &self.output,
-            };
-            self.store.read_materialized_view(view, &request, opening)
         });
         use futures::TryStreamExt;
         Ok(stream

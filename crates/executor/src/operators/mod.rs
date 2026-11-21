@@ -160,7 +160,7 @@ enum Kind {
         /// `TimeRangeCover` over chains of these widths (widest first) takes
         /// from level `.1`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cover_level: Option<(Vec<u64>, usize)>,
+        cover_level: Option<planner_types::ir::operator::tumbling_window_chain::CoverLevel>,
         /// Set by [`Operator::with_tumbling_window_ends_from_epoch`]: the
         /// tumbling windows are anchored at the epoch, not at the range's
         /// end.
