@@ -38,7 +38,7 @@ use dead_candidates::eliminate_dead_candidates;
 use edges::candidate_edges;
 use evaluation_grids::{evaluation_grids, evaluation_period_ms_per_query};
 use readout_requirements::set_readout_requirements;
-use rules::{chains, rollup, topk};
+use rules::{chains, rollup, topk, widened_scans};
 
 /// Why Pass 2 failed on a memo: a rule built an expression the node rules
 /// reject (a bug in the rule), or the memo's reads form a cycle.
@@ -57,7 +57,7 @@ pub enum Pass2RuleError {
 }
 
 /// Stage 1, Pass 2 (concepts doc, section 3, "Stage 1, Pass 2"), in order:
-/// 1. rollup from the finest common group;
+/// 1. widened scans, then rollup from the finest common group;
 /// 2. top-k reuse;
 /// 3. reach, caps and readout requirements;
 /// 4. dead-candidate elimination over the logical edges;
@@ -81,6 +81,7 @@ pub fn generate_logical_asap_memo_candidates(
     evidence: &dyn AccuracyEvidence,
 ) -> Result<LogicalASAPMemoCandidates, Pass2RuleError> {
     let mut memo = pass1;
+    widened_scans::add_widened_scan_candidates(&mut memo)?;
     rollup::add_rollup_candidates(&mut memo)?;
     topk::add_topk_candidates(&mut memo)?;
     let topological_order = |memo: &Memo| {

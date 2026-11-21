@@ -6,3 +6,4 @@ pub(crate) mod candidates;
 pub(crate) mod chains;
 pub(crate) mod rollup;
 pub(crate) mod topk;
+pub(crate) mod widened_scans;
