@@ -25,7 +25,9 @@ impl DatasketchesKLLAccumulator {
     /// The accumulator restored from a sketch that was read from an
     /// accumulator with [`Self::sketch`] and persisted (for example a
     /// materialized view written to disk).
-    pub fn restore_from_disk(sketch: Kll) -> Result<Self, KernelError> {
+    pub fn restore_from_disk(mut sketch: Kll) -> Result<Self, KernelError> {
+        // A stored sketch takes no more samples: keep just what it answers from.
+        sketch.shrink_to_fit();
         Ok(Self { inner: sketch })
     }
 

@@ -1,6 +1,8 @@
 //! The summary states of one batch column.
 use crate::summary_kernels::exact::{ExactAccumulator, ScalarState};
+use crate::summary_kernels::increase::IncreaseAccumulator;
 use crate::AggregateCore;
+use arrow::buffer::BooleanBuffer;
 use planner_types::ir::schema::FieldDataType;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -35,7 +37,171 @@ pub(crate) enum StateStorage {
     /// One fixed-size numeric record per state, for an exact accumulator
     /// (sum, count, min, max, rate, increase) of one population: one
     /// contiguous buffer, no allocation per state.
-    Exact(Vec<ScalarState>),
+    Exact(ExactRecords),
+}
+
+/// The exact records of one column, each stored in the size its family
+/// needs (a MAX in 8 bytes and a validity bit, not in the 56 bytes of the
+/// largest [`ScalarState`]), in buffers of exactly the column's length.
+/// [`Self::get`] gives record `index` back as a [`ScalarState`].
+pub(crate) enum ExactRecords {
+    /// SUM: the compensated sum and whether any sample was added.
+    Sum(Box<[(f64, f64, bool)]>),
+    /// COUNT.
+    Count(Box<[u64]>),
+    /// MIN; absent while empty.
+    Min(Optional<f64>),
+    /// MAX; absent while empty.
+    Max(Optional<f64>),
+    /// Rate and increase; absent while empty.
+    Counter(Optional<IncreaseAccumulator>),
+    /// irate: the last two samples.
+    LastTwoSamples(Box<[LastTwoSamples]>),
+}
+
+/// An irate record: the last two samples, `(time, value)`, the newer second.
+type LastTwoSamples = [Option<(i64, f64)>; 2];
+
+/// Values that may be absent: the values, a filler where one is absent,
+/// and one validity bit each.
+pub(crate) struct Optional<T> {
+    values: Box<[T]>,
+    present: BooleanBuffer,
+}
+
+impl<T: Clone> Optional<T> {
+    fn of(values: impl Iterator<Item = Option<T>>, filler: T) -> Self {
+        let mut present = Vec::new();
+        let values = values
+            .map(|value| {
+                present.push(value.is_some());
+                value.unwrap_or_else(|| filler.clone())
+            })
+            .collect();
+        Self {
+            values,
+            present: BooleanBuffer::from(present),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<T> {
+        self.present
+            .value(index)
+            .then(|| self.values[index].clone())
+    }
+
+    fn memory_bytes(&self) -> usize {
+        std::mem::size_of_val(&*self.values) + self.present.inner().capacity()
+    }
+}
+
+impl ExactRecords {
+    /// `states`, all records of the exact `family`, in their family's
+    /// layout.
+    fn of(family: &FieldDataType, states: Vec<ScalarState>) -> Self {
+        let kind = states
+            .first()
+            .cloned()
+            .or_else(|| ScalarState::empty(family).ok());
+        fn wrong<T>() -> T {
+            unreachable!("one exact family has one kind of record")
+        }
+        match kind {
+            Some(ScalarState::Sum { .. }) | None => Self::Sum(
+                states
+                    .into_iter()
+                    .map(|state| match state {
+                        ScalarState::Sum {
+                            sum,
+                            compensation,
+                            seen,
+                        } => (sum, compensation, seen),
+                        _ => wrong(),
+                    })
+                    .collect(),
+            ),
+            Some(ScalarState::Count(_)) => Self::Count(
+                states
+                    .into_iter()
+                    .map(|state| match state {
+                        ScalarState::Count(count) => count,
+                        _ => wrong(),
+                    })
+                    .collect(),
+            ),
+            Some(ScalarState::Min(_)) => Self::Min(Optional::of(
+                states.into_iter().map(|state| match state {
+                    ScalarState::Min(value) => value,
+                    _ => wrong(),
+                }),
+                0.0,
+            )),
+            Some(ScalarState::Max(_)) => Self::Max(Optional::of(
+                states.into_iter().map(|state| match state {
+                    ScalarState::Max(value) => value,
+                    _ => wrong(),
+                }),
+                0.0,
+            )),
+            Some(ScalarState::Counter(_)) => Self::Counter(Optional::of(
+                states.into_iter().map(|state| match state {
+                    ScalarState::Counter(counter) => counter,
+                    _ => wrong(),
+                }),
+                IncreaseAccumulator::new(0.0, 0, 0.0, 0),
+            )),
+            Some(ScalarState::LastTwoSamples(_)) => Self::LastTwoSamples(
+                states
+                    .into_iter()
+                    .map(|state| match state {
+                        ScalarState::LastTwoSamples(samples) => samples,
+                        _ => wrong(),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Record `index`.
+    pub(crate) fn get(&self, index: usize) -> ScalarState {
+        match self {
+            Self::Sum(records) => {
+                let (sum, compensation, seen) = records[index];
+                ScalarState::Sum {
+                    sum,
+                    compensation,
+                    seen,
+                }
+            }
+            Self::Count(records) => ScalarState::Count(records[index]),
+            Self::Min(records) => ScalarState::Min(records.get(index)),
+            Self::Max(records) => ScalarState::Max(records.get(index)),
+            Self::Counter(records) => ScalarState::Counter(records.get(index)),
+            Self::LastTwoSamples(records) => ScalarState::LastTwoSamples(records[index]),
+        }
+    }
+
+    /// The number of records.
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Sum(records) => records.len(),
+            Self::Count(records) => records.len(),
+            Self::Min(records) | Self::Max(records) => records.values.len(),
+            Self::Counter(records) => records.values.len(),
+            Self::LastTwoSamples(records) => records.len(),
+        }
+    }
+
+    /// The bytes the records hold.
+    fn memory_bytes(&self) -> usize {
+        match self {
+            Self::Sum(records) => std::mem::size_of_val(&**records),
+            Self::Count(records) => std::mem::size_of_val(&**records),
+            Self::Min(records) | Self::Max(records) => records.memory_bytes(),
+            Self::Counter(records) => records.memory_bytes(),
+            Self::LastTwoSamples(records) => std::mem::size_of_val(&**records),
+        }
+    }
 }
 
 impl StateColumn {
@@ -89,10 +255,11 @@ impl StateColumn {
 
     /// The column of exact records `states`, all of the exact `family`.
     pub(crate) fn from_exact(family: FieldDataType, states: Vec<ScalarState>) -> Self {
-        let state_memory_bytes = states.capacity() * std::mem::size_of::<ScalarState>();
+        let records = ExactRecords::of(&family, states);
+        let state_memory_bytes = records.memory_bytes();
         Self {
             family,
-            storage: StateStorage::Exact(states),
+            storage: StateStorage::Exact(records),
             state_memory_bytes,
             held_outside_run: AtomicBool::new(false),
             objects_held_outside_run: None,
@@ -129,7 +296,7 @@ impl StateColumn {
             StateStorage::Objects(states) => states[index].clone(),
             StateStorage::Exact(states) => Arc::new(ExactAccumulator::from_scalar(
                 self.family.clone(),
-                states[index].clone(),
+                states.get(index),
             )),
         }
     }
@@ -158,13 +325,19 @@ impl StateColumn {
     }
 
     /// Memory a run that holds this column is charged for its states: none
-    /// when something outside the run holds them, else the memory they hold.
+    /// when something outside the run holds them, else
+    /// [`Self::state_memory_bytes`].
     pub(crate) fn charged_state_bytes(&self) -> usize {
         if self.is_held_outside_run() {
             0
         } else {
             self.state_memory_bytes
         }
+    }
+
+    /// Memory the states hold, whoever holds them.
+    pub(crate) fn state_memory_bytes(&self) -> usize {
+        self.state_memory_bytes
     }
 }
 

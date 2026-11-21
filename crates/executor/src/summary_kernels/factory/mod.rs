@@ -202,6 +202,10 @@ pub trait AccumulatorUpdater: Send {
 
     /// Estimated memory usage in bytes.
     fn memory_usage_bytes(&self) -> usize;
+
+    /// Free what the state holds only for later updates, once no more come
+    /// (its window is sealed). Answers, merges and encodings are unchanged.
+    fn shrink_to_fit(&mut self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +253,10 @@ impl AccumulatorUpdater for KllAccumulatorUpdater {
 
     fn memory_usage_bytes(&self) -> usize {
         self.acc.approx_memory_bytes()
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.acc.inner.shrink_to_fit();
     }
 }
 

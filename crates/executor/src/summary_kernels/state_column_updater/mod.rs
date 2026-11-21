@@ -518,7 +518,11 @@ impl StateColumnUpdater {
                 self.family,
                 states
                     .into_iter()
-                    .map(|state| Arc::from(state.into_accumulator()))
+                    .map(|mut state| {
+                        // No sample follows: drop what only updates need.
+                        state.shrink_to_fit();
+                        Arc::from(state.into_accumulator())
+                    })
                     .collect(),
             ),
             GroupStates::Keyed { states, .. } => StateColumn::from_objects(
