@@ -33,7 +33,7 @@ ahash = { version = "0.8", default-features = false, features = ["std", "runtime
 # `estimated_memory_bytes`; KMV without `experimental`), #251 (the public
 # capability table) and #254 (Planner names in that table). Moves to 0.4.1
 # once that is released.
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "a404f031f3c47f14667220d3d0628053f9638e52" }
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "cbce5dca82c3bbc4a19341cfb3db9460b6cbee29" }
 
 [profile.dev]
 # Backtraces and profilers keep file:line; full variable info is opt-in via

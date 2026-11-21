@@ -1,6 +1,6 @@
 use super::reorder_buffer::HELD_SAMPLE_BYTES;
 use super::*;
-use planner_types::summary_type::{ExactKind, ExactParams};
+use planner_types::summary_type::{CounterReadout, ExactKind, ExactParams};
 
 // An exact updater charges the buffer it holds (its capacity); its sealed
 // column charges the records at their family's size, without the slack.
@@ -108,10 +108,7 @@ fn ten_thousand_series(
             seed ^= seed << 17;
             let sample = (seed % 100_000) as f64 / 7.0;
             counter += sample;
-            let value = if matches!(
-                family,
-                FieldDataType::ExactAggregate(ExactKind::Rate | ExactKind::Increase, _)
-            ) {
+            let value = if matches!(family, FieldDataType::ExactAggregate(ExactKind::Counter, _)) {
                 counter
             } else {
                 sample
@@ -170,8 +167,7 @@ fn sealed_ten_thousand_series_answer_alike_and_hold_less() {
 
     for (kind, parameters, record_bytes) in [
         (ExactKind::Max, ExactParams::Max, 8),
-        (ExactKind::Rate, ExactParams::Rate, 48),
-        (ExactKind::Increase, ExactParams::Increase, 48),
+        (ExactKind::Counter, ExactParams::Counter, 48),
     ] {
         let family = FieldDataType::ExactAggregate(kind, parameters);
         let updater = ten_thousand_series(&family, None);
@@ -181,7 +177,15 @@ fn sealed_ten_thousand_series_answer_alike_and_hold_less() {
         };
         let read = |state: &ScalarState| {
             (
-                format!("{:?}", state.evaluation(kind, Some((0, 15_000))).unwrap()),
+                format!(
+                    "{:?}",
+                    state
+                        .evaluation(
+                            (kind == ExactKind::Counter).then_some(CounterReadout::Increase),
+                            Some((0, 15_000))
+                        )
+                        .unwrap()
+                ),
                 state.insufficient_counter_raw_data_samples(),
                 format!("{state:?}"),
             )
