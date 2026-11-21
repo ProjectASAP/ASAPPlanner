@@ -1,22 +1,21 @@
 # Planner bench (SQL)
 
-1558 jobs; outcomes: {'ok': 1512, 'killed_timeout': 45, 'killed_memory': 1}
+1563 jobs; outcomes: {'ok': 1518, 'killed_timeout': 42, 'skipped_after_smaller_failed': 3}
 
 ## Scaling: growth exponent (log-log slope vs queries)
 
 | series | max N ok | S0–2 ms | S3 ms | peak RSS S0–2 | peak RSS S3 | logical cands | MILP vars |
 |---|---|---|---|---|---|---|---|
-| scale_baseline | 1024 | 1.46 | 1.68 | 0.26 | 0.43 | 1.35 | 1.18 |
+| scale_baseline | 1024 | 1.44 | 1.69 | 0.30 | 0.48 | 1.34 | 1.17 |
 | scale_high_sharing | 1024 | 1.43 | 1.66 | 0.28 | 0.46 | 1.25 | 1.13 |
-| scale_low_sharing | 512 | 1.31 | 1.59 | 0.22 | 0.42 | 1.21 | 1.21 |
+| scale_low_sharing | 1024 | 1.29 | 1.65 | 0.27 | 0.48 | 1.20 | 1.21 |
 | scale_only_count_distinct | 1024 | 1.22 | 1.21 | 0.33 | 0.35 | 1.18 | 0.96 |
-| scale_only_quantile | 256 | 1.12 | 1.72 | 0.13 | 0.49 | 1.08 | 1.08 |
+| scale_only_quantile | 512 | 1.11 | 1.66 | 0.17 | 0.53 | 1.07 | 1.07 |
 | scale_only_sum | 1024 | 1.05 | 1.44 | 0.16 | 0.41 | 1.05 | 1.06 |
 | scale_only_topk | 1024 | 1.25 | 1.31 | 0.50 | 0.51 | 1.24 | 1.04 |
 
 First non-ok rank per scaling series:
 
-- scale_baseline: N=1024 → killed_timeout
 - scale_high_sharing: N=1024 → killed_timeout
 - scale_low_sharing: N=1024 → killed_timeout
 - scale_only_count_distinct: N=1024 → killed_timeout
@@ -278,9 +277,9 @@ cfg_capabilities  queries  s02_ms   s3_ms  rss02_mib  rss3_mib  logical  milp_va
 
 ## log-log regression (all ok jobs)
 
-- **stage0_2_ms** correlation of logs: logical_candidates 0.94, memo_groups 0.69, queries 0.67, milp_variables 0.63, physical_candidates 0.62, distinct_group_bys 0.36, filtered_queries 0.28, distinct_windows 0.08, distinct_schedules 0.08
-- **stage3_ms** correlation of logs: milp_variables 0.94, physical_candidates 0.93, memo_groups 0.81, queries 0.75, logical_candidates 0.72, filtered_queries 0.45, distinct_group_bys 0.41, distinct_windows 0.16, distinct_schedules 0.15
-- **peak_rss_stage0_2_bytes** correlation of logs: logical_candidates 0.74, memo_groups 0.72, queries 0.68, physical_candidates 0.60, milp_variables 0.60, filtered_queries 0.53, distinct_group_bys 0.33, distinct_schedules 0.07, distinct_windows 0.07
-- **peak_rss_stage3_bytes** correlation of logs: milp_variables 0.87, physical_candidates 0.87, memo_groups 0.76, logical_candidates 0.73, queries 0.72, filtered_queries 0.48, distinct_group_bys 0.35, distinct_schedules 0.14, distinct_windows 0.08
+- **stage0_2_ms** correlation of logs: logical_candidates 0.94, memo_groups 0.70, queries 0.68, milp_variables 0.64, physical_candidates 0.63, distinct_group_bys 0.36, filtered_queries 0.29, distinct_windows 0.09, distinct_schedules 0.08
+- **stage3_ms** correlation of logs: milp_variables 0.94, physical_candidates 0.93, memo_groups 0.82, queries 0.75, logical_candidates 0.72, filtered_queries 0.46, distinct_group_bys 0.42, distinct_windows 0.16, distinct_schedules 0.15
+- **peak_rss_stage0_2_bytes** correlation of logs: logical_candidates 0.74, memo_groups 0.73, queries 0.69, physical_candidates 0.61, milp_variables 0.61, filtered_queries 0.55, distinct_group_bys 0.34, distinct_windows 0.07, distinct_schedules 0.07
+- **peak_rss_stage3_bytes** correlation of logs: milp_variables 0.87, physical_candidates 0.87, memo_groups 0.77, logical_candidates 0.74, queries 0.73, filtered_queries 0.50, distinct_group_bys 0.36, distinct_schedules 0.14, distinct_windows 0.08
 
 Stage 3 share of planning time: median 95%, p90 100%
