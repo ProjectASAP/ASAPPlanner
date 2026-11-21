@@ -64,7 +64,6 @@ fn selected_with(
             .env("ASAP_STAGE3_THETA_DOMINANCE", "off")
             .env("ASAP_STAGE3_FEASIBLE_PLAN_BOUND", "off")
             .env("ASAP_STAGE3_TIE_BREAKS", "full")
-            .env("ASAP_STAGE3_LATENCY_READS", "mccormick")
             .env("ASAP_STAGE3_PATH_READS", "off");
     }
     let output = command.output().unwrap();

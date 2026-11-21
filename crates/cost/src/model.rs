@@ -348,51 +348,59 @@ pub struct CostInputs {
     /// uncalibrated times for testing. Default not checked.
     #[serde(skip_serializing_if = "LatencyCalibration::is_not_checked")]
     pub latency_calibration: LatencyCalibration,
-    /// Which of `lowest_mean_latency`'s exact speed-ups run, and whether it
-    /// reports its LP bound: every speed-up by default. Turning one off
-    /// checks it (the optimum must not change).
-    #[serde(skip_serializing_if = "LatencySelectionChecks::is_default")]
+    /// How cost model 3's `lowest_mean_latency` solves: to a 1 % gap or
+    /// 10,000 nodes by default, or exactly.
+    #[serde(skip_serializing_if = "LatencySelection::is_default")]
+    pub latency_selection: LatencySelection,
+    /// The checking and measurement switches of `lowest_mean_latency`'s
+    /// selection: not part of a cost inputs file (never serialized); the
+    /// `asap_planner` tool and tests set them.
+    #[serde(skip)]
     pub latency_selection_checks: LatencySelectionChecks,
 }
 
-/// The speed-ups of cost model 3's `lowest_mean_latency` (each exact) and
-/// its LP-bound report (`docs/design_docs/proposals/stage3-lowest-mean-latency.md`,
-/// section 2.5). In JSON an object with these fields; an omitted field
-/// takes its default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// How cost model 3's `lowest_mean_latency` solves
+/// (`docs/design_docs/proposals/stage3-lowest-mean-latency.md`, decision
+/// 27). In JSON an object with these fields; an omitted field takes its
+/// default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
+pub struct LatencySelection {
+    /// Solve the mean latency to optimality; default false: stop at a
+    /// relative gap of 1 % or after 10,000 branch-and-bound nodes,
+    /// whichever comes first, and report the gap and the lower bound
+    /// beside the plan.
+    pub exact_solve: bool,
+}
+
+impl LatencySelection {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Switches that check `lowest_mean_latency`'s exact speed-ups (turning
+/// one off must not change the optimum) and measure its solve (section
+/// 2.5). Not serialized: tools and tests set them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LatencySelectionChecks {
     /// Leave out θ-families another family does as well as; default true.
     pub theta_dominance: bool,
     /// Leave out executions no plan with them beats a feasible plan with
     /// (cost model 1's); default true.
     pub feasible_plan_bound: bool,
-    /// Run the tie-break solves only to find a smaller plan within a short
-    /// time; default true (false: to optimality).
+    /// Run the tie-break solves only to find a smaller plan within 500
+    /// nodes; default true (false: to optimality).
     pub lazy_tie_breaks: bool,
-    /// Formulate each query's reads as a flow; default true (false: the
-    /// earlier rows, whose LP bound vanishes).
-    pub flow_reads: bool,
+    /// Bound each query's reads from below along each path of its plan;
+    /// default true (false: only the per-edge and per-execution rows).
+    pub path_reads: bool,
     /// Solve the LP relaxation too and report its mean latency
     /// (`Selection::milp_root_lp_mean_latency_ms`); default false.
     pub report_root_lp_bound: bool,
-    /// Start the first solve from cost model 1's plan (a MIP start);
-    /// default false: measured, it did not speed up any workload and
-    /// slowed the slowest one 3.5 times.
-    pub feasible_plan_start: bool,
     /// Print the solver's log and the model's size by family on standard
-    /// error (a measurement); default false.
+    /// error; default false.
     pub log_solver: bool,
-    /// Solve the mean latency to optimality; default false: stop at a
-    /// relative gap of 1 % or after 10,000 branch-and-bound nodes,
-    /// whichever comes first, and
-    /// report the gap and the lower bound beside the plan.
-    pub exact_solve: bool,
-    /// Bound each query's reads from below along each path of its plan
-    /// (the sub-DAG unfolded into occurrences, each a flow of at most 1),
-    /// with the freshness rows on those sums; default true (false: only the
-    /// per-edge and per-execution rows, to compare).
-    pub path_reads: bool,
 }
 
 impl Default for LatencySelectionChecks {
@@ -401,19 +409,10 @@ impl Default for LatencySelectionChecks {
             theta_dominance: true,
             feasible_plan_bound: true,
             lazy_tie_breaks: true,
-            flow_reads: true,
+            path_reads: true,
             report_root_lp_bound: false,
             log_solver: false,
-            feasible_plan_start: false,
-            exact_solve: false,
-            path_reads: true,
         }
-    }
-}
-
-impl LatencySelectionChecks {
-    fn is_default(&self) -> bool {
-        *self == Self::default()
     }
 }
 
@@ -451,6 +450,7 @@ impl Default for CostInputs {
             frozen_calibration_factor: None,
             data_plane_execution: DataPlaneExecution::default(),
             latency_calibration: LatencyCalibration::NotChecked,
+            latency_selection: LatencySelection::default(),
             latency_selection_checks: LatencySelectionChecks::default(),
         }
     }

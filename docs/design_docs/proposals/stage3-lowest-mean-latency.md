@@ -828,11 +828,12 @@ changes; the plan file does not carry the report, so
 +}
 ```
 
-The MILP rows live in a new `milp/latency.rs` (variables $F_q$, $L_q$, the
-reads $a_{q,e}$ beyond (X), refresh-group expressions, latency rows) and
-`milp/cluster_limits.rs` (memory, disk, CPU, precompute-load rows), next to
-the existing families; `solve_selection` picks the objective and the
-tie-break solves from `CostModel`.
+The MILP lives in `milp/model/cluster/`, by scope: `mod.rs` (the inputs,
+the query shapes and refresh groups, and the sequence of solves:
+exclusions, the first solve, tie-breaks, the report), `exclusions.rs`
+(executions left out before the MILP: latency bounds, the feasible plan's
+bound, over a limit alone), `path_reads.rs` (the path-read rows) and
+`solve.rs` (one solve: its rows and objective, and the stop rule).
 
 ### 3.5 Order of work
 
@@ -873,8 +874,8 @@ tie-break solves from `CostModel`.
 | 24 | S1 (per-execution latency and freshness variables $\ell_e$, $\varphi_e$ with big-M rows, replacing the per-query reads): considered and rejected. Its LP bound stays at 0 like the McCormick reads, and it measured slower (two workloads: 4.4 s and 5.1 s against 1.2 s). | Decided (rejected) |
 | 25 | Speed-ups, each exact: reads only of kept executions; the latency-bound exclusions once per selection; θ dominance in every quantity; a feasible plan's bound (T8); reads as a flow (T9) with the valid freshness rows; lazy tie-break solves warm-started from the plan so far (500 nodes each). | Decided |
 | 29 | Reads along each path of the query's plan (an occurrence tree, where every memo group is read at most once per occurrence, the guard by construction), with the freshness big-M rows on each occurrence's sums per refresh group (section 2.5), knob `path_reads`; exact, checked on the 40 PromQL snapshot workloads. | Decided |
-| 26 | Checking knobs in `CostInputs::latency_selection_checks` (`theta_dominance`, `feasible_plan_bound`, `lazy_tie_breaks`, `flow_reads`, all on by default; `report_root_lp_bound`, off): turning a speed-up off must not change the optimum, which the exactness tests check. The planning crates read no environment; the `asap_planner` tool maps `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_LATENCY_READS=mccormick` and `ASAP_STAGE3_ROOT_LP=1` onto them; `feasible_plan_start` (off; `ASAP_STAGE3_FEASIBLE_PLAN_START=on`) and `log_solver` (off; `ASAP_STAGE3_SOLVER_LOG=1`, the solver's log and the model's size by family) are measurements. | By this document |
-| 27 | The mean latency solve stops at a relative MIP gap of 1 % or after 10,000 branch-and-bound nodes, whichever comes first (nodes, not seconds, so the result does not depend on the host; 10,000 nodes took about 30 s on the slowest workload before the path reads), and returns its plan with the gap and the solver's lower bound (`Selection::optimality_gap`, the plan report's `optimality_gap`, the text output's mean latency line). `LatencySelectionChecks::exact_solve` (`ASAP_STAGE3_EXACT=1`) solves to optimality; the exactness tests compare in exact mode, and in the default mode check that the gap is at most 1 % and that the plan is within its gap of the exact optimum. With no plan within the nodes, the solve runs once more from cost model 1's plan (pinned and completed by HiGHS) under the same limit; with none still, the selection fails. | Decided |
+| 26 | Checking and measurement switches in `CostInputs::latency_selection_checks` (`theta_dominance`, `feasible_plan_bound`, `lazy_tie_breaks`, `path_reads`, on by default; `report_root_lp_bound`, `log_solver`, off), never serialized: tools and tests set them. Turning a speed-up off must not change the optimum, which the exactness tests check. The planning crates read no environment; the `asap_planner` tool maps `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_PATH_READS=off`, `ASAP_STAGE3_ROOT_LP=1` and `ASAP_STAGE3_SOLVER_LOG=1` onto them. The one serialized setting is `CostInputs::latency_selection.exact_solve` (`ASAP_STAGE3_EXACT=1`). The earlier McCormick read rows and the MIP start from cost model 1's plan were measured, not kept (the start remains only for a solve that finds no plan within its node limit). | By this document |
+| 27 | The mean latency solve stops at a relative MIP gap of 1 % or after 10,000 branch-and-bound nodes, whichever comes first (nodes, not seconds, so the result does not depend on the host; 10,000 nodes took about 30 s on the slowest workload before the path reads), and returns its plan with the gap and the solver's lower bound (`Selection::optimality_gap`, the plan report's `optimality_gap`, the text output's mean latency line). `LatencySelection::exact_solve` (`ASAP_STAGE3_EXACT=1`) solves to optimality; the exactness tests compare in exact mode, and in the default mode check that the gap is at most 1 % and that the plan is within its gap of the exact optimum. With no plan within the nodes, the solve runs once more from cost model 1's plan (pinned and completed by HiGHS) under the same limit; with none still, the selection fails. | Decided |
 | 28 | A range request's steps split over the query threads in latency: per-step work counts $\lceil s / T_{query} \rceil$ times; CPU still counts every step. | Decided |
 | 14 | Under cost model 3 the greedy cost upper bound is not applied; the `OneEvaluation` twin dominance is restated over time, memory, disk and CPU. | By this document |
 | 15 | Calibration passes when every node's predicted time per phase is within 1.5× of measured, at every series scale run (1k passes; 10k after term (3)). | Decided |
@@ -927,7 +928,7 @@ tie-break solves from `CostModel`.
    | Change | Result |
    | --- | --- |
    | Union bound for shared sub-DAGs (above) | sound on the ratio of quantiles and `avg`; seed-862 unchanged (it leaves out the same executions) |
-   | Cost model 1's plan as a MIP start (`feasible_plan_start`, completed by HiGHS with the plan's selection pinned) | accepted by HiGHS; no workload faster, seed-862 3.5× slower (212 s, 71,305 nodes); off by default |
+   | Cost model 1's plan as a MIP start (completed by HiGHS with the plan's selection pinned) | accepted by HiGHS; no workload faster, seed-862 3.5× slower (212 s, 71,305 nodes); removed; used only to retry a solve that finds no plan within its node limit |
    | Independent query groups (no shared memo group, edge, or reading or coinciding refresh group) | 4 of 40 workloads split, each solved under 0.5 s; seed-862 is one group (its refresh groups coincide; without them still 6 of 9 queries share memo groups); not built |
    | Merging equivalent executions | 0 duplicates (same context, memo group, operator, θ, physical properties and producers) on every workload: the twin, θ-family and equivalent-context steps already remove them; not built |
 

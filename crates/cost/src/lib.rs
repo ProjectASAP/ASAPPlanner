@@ -37,8 +37,8 @@ pub use measured::{
 };
 pub use model::{
     CalibrationFit, ClusterLimits, ClusterObjective, CostInputs, CostModel, DataPlaneExecution,
-    LatencyCalibration, LatencySelectionChecks, ResourceSpeed, ResourceUnitCost, COST_SOURCE,
-    MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
+    LatencyCalibration, LatencySelection, LatencySelectionChecks, ResourceSpeed, ResourceUnitCost,
+    COST_SOURCE, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 pub use node::cost_terms::{node_cost_terms, CostConstant, NodeCostTerms};
 pub use node::operator_statistics::EdgeStatistics;

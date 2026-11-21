@@ -297,15 +297,14 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         deployment_capabilities.supported_summaries =
             Some(asap_executor::supported_summary_families());
     }
-    // The checking knobs of `lowest_mean_latency`'s speed-ups, from the
-    // environment (the planning crates read none):
-    // `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`,
-    // `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_LATENCY_READS=mccormick`
-    // turn one off; `ASAP_STAGE3_ROOT_LP=1` reports the LP bound;
-    // `ASAP_STAGE3_FEASIBLE_PLAN_START=on` starts from cost model 1's plan;
-    // `ASAP_STAGE3_SOLVER_LOG=1` prints the solver's log;
-    // `ASAP_STAGE3_EXACT=1` solves the mean latency to optimality;
-    // `ASAP_STAGE3_PATH_READS=off` drops the path read rows.
+    // The checking and measurement switches of `lowest_mean_latency`
+    // (never in a cost inputs file), from the environment (the planning
+    // crates read none): `ASAP_STAGE3_THETA_DOMINANCE=off`,
+    // `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`
+    // and `ASAP_STAGE3_PATH_READS=off` turn a speed-up off;
+    // `ASAP_STAGE3_ROOT_LP=1` reports the LP bound;
+    // `ASAP_STAGE3_SOLVER_LOG=1` prints the solver's log.
+    // `ASAP_STAGE3_EXACT=1` sets the cost inputs' `latency_selection.exact_solve`.
     let knob = |name: &str| std::env::var(name).ok();
     let checks = &mut cost_inputs.latency_selection_checks;
     if knob("ASAP_STAGE3_THETA_DOMINANCE").as_deref() == Some("off") {
@@ -317,23 +316,17 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     if knob("ASAP_STAGE3_TIE_BREAKS").as_deref() == Some("full") {
         checks.lazy_tie_breaks = false;
     }
-    if knob("ASAP_STAGE3_LATENCY_READS").as_deref() == Some("mccormick") {
-        checks.flow_reads = false;
+    if knob("ASAP_STAGE3_PATH_READS").as_deref() == Some("off") {
+        checks.path_reads = false;
     }
     if knob("ASAP_STAGE3_ROOT_LP").is_some() {
         checks.report_root_lp_bound = true;
     }
-    if knob("ASAP_STAGE3_FEASIBLE_PLAN_START").as_deref() == Some("on") {
-        checks.feasible_plan_start = true;
-    }
     if knob("ASAP_STAGE3_SOLVER_LOG").is_some() {
         checks.log_solver = true;
     }
-    if knob("ASAP_STAGE3_PATH_READS").as_deref() == Some("off") {
-        checks.path_reads = false;
-    }
     if knob("ASAP_STAGE3_EXACT").is_some() {
-        checks.exact_solve = true;
+        cost_inputs.latency_selection.exact_solve = true;
     }
     // Price a given plan instead of planning: its report only.
     if let Some(path) = price_plan {

@@ -204,7 +204,7 @@ pub struct Selection {
     /// Under `lowest_mean_latency`, how far the selected plan may be from
     /// the optimum: the solve stops at a relative gap of 1 % or after 10,000
     /// branch-and-bound nodes
-    /// unless `LatencySelectionChecks::exact_solve`; `None` otherwise.
+    /// unless `LatencySelection::exact_solve`; `None` otherwise.
     pub optimality_gap: Option<OptimalityGap>,
     /// Under cost model 3's `lowest_mean_latency`, the executions left out
     /// before the MILP because their least possible latency is over the
