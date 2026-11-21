@@ -921,8 +921,9 @@ fn counter_near_a_million(series: u64, n: u32) -> Vec<f64> {
 /// lognormal of σ = 2 1.2–1.3x and latency-like values at most 2.2x, and
 /// under-charges the widest spreads only at few rows per state (Zipf
 /// integers 0.7x, seven decades log-uniform 0.6x at 10 rows); a declared
-/// range is charged in full, within 1.3x of what the values hold; narrow
-/// values with no declared range are over-charged most.
+/// range caps that spread (a narrow gauge's within 1.1x, a wide one leaves
+/// it); narrow per-state values are over-charged most when only a wider
+/// column range, or none, bounds them.
 #[test]
 fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
     let alpha = 0.01;
@@ -933,8 +934,14 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
         Shape,
         Option<ValueMagnitudeRange>,
         std::ops::RangeInclusive<f64>,
-    ); 10] = [
+    ); 13] = [
         ("exponential", latency_like, None, 1.4..=2.2),
+        (
+            "exponential, the generator's range declared",
+            latency_like,
+            range(2.687e-8, 1_104.2),
+            1.4..=2.2,
+        ),
         ("lognormal sigma 1", lognormal, None, 2.1..=2.7),
         ("lognormal sigma 2", lognormal_sigma_2, None, 1.1..=1.4),
         (
@@ -947,14 +954,14 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
             "log-uniform 7 decades, declared",
             log_uniform_over_seven_decades,
             range(0.001, 1e4),
-            0.95..=1.3,
+            0.55..=1.1,
         ),
         ("Zipf(1.1) integers", zipf_integers, None, 0.65..=1.6),
         (
             "Zipf(1.1) integers, declared",
             zipf_integers,
             range(1.0, 1e6),
-            0.95..=1.3,
+            0.65..=1.1,
         ),
         ("narrow gauge", narrow_gauge, None, 12.0..=40.0),
         (
@@ -968,6 +975,13 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
             counter_near_a_million,
             None,
             18.0..=50.0,
+        ),
+        ("per-series levels", per_series_levels, None, 12.0..=40.0),
+        (
+            "per-series levels, column range declared",
+            per_series_levels,
+            range(1.0, 1e5),
+            12.0..=25.0,
         ),
     ];
     for (name, values, value_magnitude_range, band) in shapes {
@@ -1057,4 +1071,13 @@ fn open_ddsketch_states_hold_their_first_blocks() {
         open_sketch_state_bytes(&kll, rows(true)),
         sketch_state_bytes(&kll, rows(true))
     );
+}
+
+/// `n` values of series `series` around its own level, the levels of the
+/// series spread log-uniformly over [1, 1e5]: each value its level ± 10%.
+fn per_series_levels(series: u64, n: u32) -> Vec<f64> {
+    let level = 10f64.powf(5.0 * uniform(series.wrapping_mul(0x9e37_79b9)));
+    (0..u64::from(n))
+        .map(|i| level * (0.9 + 0.2 * uniform((series << 32) ^ i)))
+        .collect()
 }

@@ -433,9 +433,10 @@ const DDSKETCH_ASSUMED_MAGNITUDE_RANGE: ValueMagnitudeRange = ValueMagnitudeRang
 /// stored DDSketch windows, measured cheaper than the exact plan
 /// (`default_cost_plan_ranking`), would be priced above it. The widest
 /// spreads (Zipf integers, values log-uniform over seven decades) are
-/// under-charged at a few rows per state (0.6–0.7x at 10): declare their
-/// `column_magnitudes`, which are charged in full, or give a measured
-/// table's bytes per state (see [`ddsketch_state_bytes`]).
+/// under-charged at a few rows per state (0.6–0.7x at 10); a declared
+/// range only caps the spread, so for them a measured table's bytes per
+/// state (fitted from the deployment's sealed states) is the remedy (see
+/// [`ddsketch_state_bytes`]).
 fn wide_spread_values_magnitude_ratio(rows: u64) -> f64 {
     const SIGMA: f64 = 2.5;
     if rows <= 1 {
@@ -499,12 +500,13 @@ fn standard_normal_quantile(p: f64) -> f64 {
 /// is expected to span, per store, and its stores (per sign it holds: one
 /// when its values are proven non-negative or it folds one row, else two).
 ///
-/// The span is the ratio of the column's declared range (`column_magnitudes`)
-/// when declared, in full: the values' own spread within it is unknown, and
-/// a heavy tail (Zipf integers) spans the range within a few rows. When
-/// none is declared, the wide-spread margin of its rows
-/// ([`wide_spread_values_magnitude_ratio`]), capped by the assumed range
-/// ([`assumed_magnitude_range`]); without known rows, that range.
+/// The span is that of the values one state folds, not of the column: the
+/// wide-spread margin of its rows ([`wide_spread_values_magnitude_ratio`]),
+/// capped by the column's declared range (`column_magnitudes`) or, when
+/// none is declared, by the assumed range ([`assumed_magnitude_range`]);
+/// without known rows, that range. A column-wide range bounds a state's
+/// values but is not their spread: per-series values (latencies of one
+/// service, levels of one series) span much less than the column does.
 fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
     use asap_sketchlib::DdSketch;
     let sketch = DdSketch::new(alpha);
@@ -529,15 +531,13 @@ fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
     if rows_per_store == Some(1) {
         return (1, stores);
     }
-    let ratio = match input_rows.value_magnitude_range {
-        Some(declared) => declared.magnitude_ratio(),
-        None => {
-            let assumed = DDSKETCH_ASSUMED_MAGNITUDE_RANGE.magnitude_ratio();
-            rows_per_store.map_or(assumed, |rows| {
-                wide_spread_values_magnitude_ratio(rows).min(assumed)
-            })
-        }
-    };
+    let column_ratio = input_rows
+        .value_magnitude_range
+        .unwrap_or(DDSKETCH_ASSUMED_MAGNITUDE_RANGE)
+        .magnitude_ratio();
+    let ratio = rows_per_store.map_or(column_ratio, |rows| {
+        wide_spread_values_magnitude_ratio(rows).min(column_ratio)
+    });
     (buckets_spanned(ratio), stores)
 }
 
@@ -557,18 +557,24 @@ fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
 /// | values | range declared | charged ÷ held |
 /// |---|---|---|
 /// | exponential (latency-like) | no | 1.5–2.0 |
+/// | exponential (latency-like) | the generator's [2.7e-8, 1104] | 1.5–2.0 |
 /// | lognormal σ = 1 | no | 2.3–2.5 |
 /// | lognormal σ = 2 | no | 1.22–1.28 |
 /// | log-uniform over 7 decades | no | 0.59–1.28 |
-/// | log-uniform over 7 decades | [0.001, 1e4] | 1.0–1.2 |
+/// | log-uniform over 7 decades | [0.001, 1e4] | 0.59–1.0 |
 /// | Zipf(1.1) integers in [1, 1e6] | no | 0.70–1.49 |
-/// | Zipf(1.1) integers in [1, 1e6] | [1, 1e6] | 1.0–1.22 |
+/// | Zipf(1.1) integers in [1, 1e6] | [1, 1e6] | 0.70–1.0 |
 /// | narrow gauge 100 ± 10 | no | 15–35 |
 /// | narrow gauge 100 ± 10 | [90, 110] | 0.97–1.06 |
 /// | counter readings near 1e6 | no | 21–46 |
+/// | per-series levels ± 10%, levels over [1, 1e5] | no | 15–36 |
+/// | per-series levels ± 10%, levels over [1, 1e5] | [1, 1e5] | 15–21 |
 ///
-/// Declare `column_magnitudes` for the widest spreads (under-charged at
-/// a few rows per state) and for gauges and counters (over-charged).
+/// A declared range caps the spread; it helps when it is narrow (a gauge,
+/// a counter's readings), not when a narrow per-state spread sits in a
+/// wide column range (per-series levels). Where this estimate is far from
+/// a deployment's states, its measured table's bytes per state, fitted
+/// from its sealed states per family, replace it.
 ///
 /// Example: at α = 0.01, a state of 10 values with no declared range is
 /// charged the spread 2.3e3, 387 buckets: 144 + 8 × 387 = 3,240 bytes. A

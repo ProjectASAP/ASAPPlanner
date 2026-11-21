@@ -576,8 +576,8 @@ fn the_objective_is_the_plan_cost_on_anchored_and_plain_queries_on_one_grid() {
 /// plans are the same. With 30 min batches, a series has 120 rows in a
 /// batch. Stored DDSketch windows priced sealed (as the executor keeps
 /// them), the views are the cheapest plan (4.3e5/s) with raw data kept or
-/// not; with the values declared over 18 decades, each window charged that
-/// span, reading the raw rows is cheaper and is selected.
+/// not; with memory priced 100x higher, reading the raw rows is cheaper
+/// and is selected.
 #[test]
 fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     let query = |query: &str| {
@@ -633,33 +633,28 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
         plan_cost <= views_only_plan_cost,
         "selected {plan_cost} is above the ingestion-time views plan, {views_only_plan_cost}"
     );
-    // When the values declare a wide range (`column_magnitudes` over 18
-    // decades, each DDSketch window charged the full span), reading the
-    // raw rows at query time beats the views: the selection costs strictly
-    // less than the views-only plan.
-    let declare_wide = |workload: &PlanningWorkload| -> PlanningWorkload {
-        let mut workload = serde_json::to_value(workload).unwrap();
-        workload["data_workload"]["sources"]["latency_ms"]["column_magnitudes"] =
-            serde_json::json!({"value": {"min_abs": 1e-9, "max_abs": 1e9}});
-        serde_json::from_value(workload).unwrap()
+    // When memory is priced 100x higher (each byte-second of the views'
+    // years of windows), reading the raw rows at query time beats the
+    // views: the selection costs strictly less than the views-only plan.
+    let mut costly_memory = settings.clone();
+    let CostModel::UsageOverTime(unit_costs) = &mut costly_memory.cost_model else {
+        unreachable!("the default cost model is cost model 1")
     };
+    unit_costs.cost_per_memory_byte_second *= 100.0;
     let raw_kept = PlanningModels::builtin()
         .with_ignore_accuracy_guarantees(true)
-        .with_cost_inputs(&settings);
+        .with_cost_inputs(&costly_memory);
     let (_, (_, raw_kept_plan_cost)) =
-        selected_plan_objective_and_plan_cost_with(&declare_wide(&w), raw_kept, &settings);
+        selected_plan_objective_and_plan_cost_with(&w, raw_kept, &costly_memory);
     let views_only = PlanningModels::builtin()
         .with_ignore_accuracy_guarantees(true)
-        .with_cost_inputs(&settings)
+        .with_cost_inputs(&costly_memory)
         .with_deployment_capabilities(&capabilities);
-    let (_, (_, views_only_plan_cost)) = selected_plan_objective_and_plan_cost_with(
-        &declare_wide(&ingesting),
-        views_only,
-        &settings,
-    );
+    let (_, (_, views_only_plan_cost)) =
+        selected_plan_objective_and_plan_cost_with(&ingesting, views_only, &costly_memory);
     assert!(
         raw_kept_plan_cost < views_only_plan_cost,
-        "values over 18 decades: selected {raw_kept_plan_cost}, views {views_only_plan_cost}"
+        "memory at 100x: selected {raw_kept_plan_cost}, views {views_only_plan_cost}"
     );
 }
 

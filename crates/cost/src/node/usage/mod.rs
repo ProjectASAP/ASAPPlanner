@@ -1615,8 +1615,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             match medium {
                 StorageMedium::Memory => {
                     average_memory_bytes = between as f64;
-                    peak_memory_bytes = state
-                        .checked_mul(retained_output_count)
+                    // The newest window is built open while one runs.
+                    peak_memory_bytes = between
+                        .checked_add(open_state)
                         .ok_or(AnalyticalCostError::Overflow)?;
                 }
                 StorageMedium::Disk => disk_bytes = between,
@@ -1650,9 +1651,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             medium,
         ),
         // A whole state materialized across evaluations at query time: it
-        // and the one being built.
+        // (sealed) and the one being built (open).
         (false, Lifetime::AcrossEvaluations(medium), _) => (
-            state.checked_mul(2).ok_or(AnalyticalCostError::Overflow)?,
+            state
+                .checked_add(open_state)
+                .ok_or(AnalyticalCostError::Overflow)?,
             medium,
         ),
     };

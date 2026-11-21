@@ -302,13 +302,44 @@ const TEN_HZ_EVERY_300_S: Setting = Setting {
 /// stored state holds 4.3–5.4 KB (`DdSketch::memory_bytes`); charged the
 /// 18.8 KB bound for values over nine decades, the stored plan was
 /// predicted 2x more expensive than exact and never selected.
+///
+/// The same with the ranges the benchmark workloads declare for their
+/// gauges' values (`column_magnitudes`): Zipf integers in [1, 1.51e9], a
+/// realistic latency in [0.12, 1.83e6]. A declared range only caps the
+/// spread a state is charged, so the ranking is the measured one.
 #[test]
 fn quantile_at_10_hz_with_raw_data_keeps_stored_ddsketch_windows() {
-    for setting in [TEN_HZ_EVERY_10_S, TEN_HZ_EVERY_60_S, TEN_HZ_EVERY_300_S] {
-        let (plan, _) = selected(&workload(QUANTILE, setting), true);
-        assert_eq!(plan_kind(&plan), PlanKind::StoredStates, "{setting:?}");
-        assert!(has_sketch(&plan), "{setting:?}");
+    for declared in [None, Some((1.0, 1.51e9)), Some((0.12, 1.83e6))] {
+        for setting in [TEN_HZ_EVERY_10_S, TEN_HZ_EVERY_60_S, TEN_HZ_EVERY_300_S] {
+            let workload = declaring_latency_range(workload(QUANTILE, setting), declared);
+            let (plan, _) = selected(&workload, true);
+            assert_eq!(
+                plan_kind(&plan),
+                PlanKind::StoredStates,
+                "{setting:?}, declared {declared:?}"
+            );
+            assert!(has_sketch(&plan), "{setting:?}, declared {declared:?}");
+        }
     }
+}
+
+/// `workload` with `latency`'s `value` declared within `range` (min, max of
+/// its magnitudes), and `requests_total`'s within [1, 5.6e9], the range the
+/// benchmark declares for its counter; unchanged for `None`.
+fn declaring_latency_range(
+    workload: PlanningWorkload,
+    range: Option<(f64, f64)>,
+) -> PlanningWorkload {
+    let Some((min_abs, max_abs)) = range else {
+        return workload;
+    };
+    let mut workload = serde_json::to_value(workload).unwrap();
+    let sources = &mut workload["data_workload"]["sources"];
+    sources["latency"]["column_magnitudes"] =
+        serde_json::json!({"value": {"min_abs": min_abs, "max_abs": max_abs}});
+    sources["requests_total"]["column_magnitudes"] =
+        serde_json::json!({"value": {"min_abs": 1.0, "max_abs": 5.6e9}});
+    serde_json::from_value(workload).unwrap()
 }
 
 /// `plan` with every KLL it keeps or builds at `k`.
