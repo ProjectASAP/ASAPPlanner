@@ -52,7 +52,7 @@ fn ranked_source<I: OperatorInput>(child: &I) -> RankedSource {
             }
             Operator::NonASAP(NonASAPOp::Filter { child, .. })
             | Operator::ASAP(
-                ASAPOp::FinalizeExactAccumulator { child }
+                ASAPOp::FinalizeExactAccumulator { child, .. }
                 | ASAPOp::SummaryEstimate {
                     summary_input: child,
                     ..

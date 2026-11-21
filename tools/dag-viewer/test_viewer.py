@@ -347,6 +347,10 @@ class LaneTests(unittest.TestCase):
         exact = {"ASAP": {"SummaryAgg": {"child": 0, "summary_type": {"ExactAggregate": ["Sum", "Sum"]}, "reduction": "PerEntity"}}}
         self.assertEqual(self.js.call("stageNodeLines", exact, None)[1:], ["summary: exact Sum", "per series"])
         self.assertEqual(self.js.call("stageNodeLines", {"ASAP": {"FinalizeExactAccumulator": {"child": 0}}}, None), ["FinalizeExactAccumulator"])
+        self.assertEqual(
+            self.js.call("stageNodeLines", {"ASAP": {"FinalizeExactAccumulator": {"child": 0, "counter_readout": "Rate"}}}, None),
+            ["FinalizeExactAccumulator", "read: rate"],
+        )
 
     def test_node_groups(self):
         """Node kinds map to their colour groups."""

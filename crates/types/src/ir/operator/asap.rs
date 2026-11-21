@@ -16,7 +16,7 @@ use crate::ir::schema::aggregate_schema::{aggregate_output, OutputColumnSource};
 use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 use crate::ir::SchemaDerivationError;
 use crate::summary_type::SummaryTypeCapability;
-use crate::summary_type::{SketchStatistic, SummaryUpdate};
+use crate::summary_type::{CounterReadout, SketchStatistic, SummaryUpdate};
 
 /// Why an ASAP operator cannot be used yet.
 pub const UNIMPLEMENTED_ASAP_OP: &str =
@@ -48,6 +48,11 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
     /// maintenance-to-read boundary before query-time operators.
     FinalizeExactAccumulator {
         child: C,
+        /// For a [`Counter`](crate::summary_type::ExactKind::Counter)
+        /// state, which value it reads (`rate` or `increase`), so one
+        /// counter state answers both; `None` for every other state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counter_readout: Option<CounterReadout>,
     },
     /// Maintain the full declared population, including membership changes.
     MaintainPopulation {
@@ -128,7 +133,7 @@ impl<C> ASAPOp<C> {
                 }
                 inputs
             }
-            FinalizeExactAccumulator { child }
+            FinalizeExactAccumulator { child, .. }
             | MaintainPopulation { child, .. }
             | EvaluatePopulation { child, .. }
             | Extension { child, .. } => vec![child],
@@ -185,7 +190,13 @@ impl<C> ASAPOp<C> {
                 summary_input: f(summary_input),
                 query: query.clone(),
             },
-            FinalizeExactAccumulator { child } => FinalizeExactAccumulator { child: f(child) },
+            FinalizeExactAccumulator {
+                child,
+                counter_readout,
+            } => FinalizeExactAccumulator {
+                child: f(child),
+                counter_readout: *counter_readout,
+            },
             MaintainPopulation { child, population } => MaintainPopulation {
                 child: f(child),
                 population: population.clone(),
@@ -331,14 +342,21 @@ impl<I: OperatorInput> ASAPOp<I> {
                 }
                 schema
             }
-            FinalizeExactAccumulator { child } => {
+            FinalizeExactAccumulator {
+                child,
+                counter_readout,
+            } => {
                 // A rollup finalizes as the coarse build it stands for.
                 if let Some((build, schema)) = rolled_up_build(child) {
-                    return finalized_schema(Some(&build), &schema);
+                    return finalized_schema(Some(&build), &schema, *counter_readout);
                 }
                 // The windows a `TimeRange` over a chain selects, merged,
                 // finalize as the chain's build over that range.
-                finalized_schema(summary_build(child).as_ref(), child.schema())?
+                finalized_schema(
+                    summary_build(child).as_ref(),
+                    child.schema(),
+                    *counter_readout,
+                )?
             }
             MaintainPopulation { child, .. } => child.schema().clone(),
             EvaluatePopulation { child, evaluation } => {
@@ -446,7 +464,7 @@ impl<I: OperatorInput> ASAPOp<I> {
             | SummaryJoin { .. }
             | Extension { .. } => OperatorResultKind::State,
             SummaryEstimate { summary_input, .. } => source_kind(summary_input),
-            FinalizeExactAccumulator { child } | EvaluatePopulation { child, .. } => {
+            FinalizeExactAccumulator { child, .. } | EvaluatePopulation { child, .. } => {
                 source_kind(child)
             }
         }
@@ -543,7 +561,10 @@ impl<I: OperatorInput> ASAPOp<I> {
                 }
                 Ok(())
             }
-            FinalizeExactAccumulator { child } => {
+            FinalizeExactAccumulator {
+                child,
+                counter_readout,
+            } => {
                 needs_state(child, "FinalizeExactAccumulator")?;
                 if child
                     .schema()
@@ -553,6 +574,17 @@ impl<I: OperatorInput> ASAPOp<I> {
                 {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
                         "FinalizeExactAccumulator requires exact accumulator state".into(),
+                    ));
+                }
+                // A counter state is read as `rate` or `increase`; no other
+                // exact state takes a counter readout.
+                if child.schema().fields.iter().any(|f| {
+                    matches!(&f.dtype, FieldDataType::ExactAggregate(kind, _)
+                        if kind.measure(None, *counter_readout).is_none())
+                }) {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
+                        "a counter state's finalize needs a counter readout, and only it takes one"
+                            .into(),
                     ));
                 }
                 Ok(())
@@ -794,10 +826,12 @@ fn chain_schema(
 
 /// The schema `FinalizeExactAccumulator` derives over state of
 /// `state_schema` that `build` (the state's `SummaryAgg`, if any) builds:
-/// each exact aggregate replaced by the value it finalizes to.
+/// each exact aggregate replaced by the value it finalizes to, a counter
+/// state read as `counter_readout`.
 fn finalized_schema<J: OperatorInput>(
     build: Option<&ASAPOp<J>>,
     state_schema: &Schema,
+    counter_readout: Option<CounterReadout>,
 ) -> Result<Schema, SchemaDerivationError> {
     let value_result = if let Some(
         ASAPOp::SummaryAgg {
@@ -829,7 +863,11 @@ fn finalized_schema<J: OperatorInput>(
         let aggregate_schema = crate::ir::NonASAPOp::Aggregate {
             child: source.clone(),
             reduction: reduction.clone(),
-            measures: vec![kind.measure(column)],
+            measures: vec![kind.measure(column, counter_readout).ok_or_else(|| {
+                SchemaDerivationError::InvalidScalarSignature(
+                    "an exact state's finalize reads a counter readout only from a counter".into(),
+                )
+            })?],
             output_names: vec![String::new()],
             // A filtered SUM/MIN/MAX is NULL for a
             // group without a matching row.

@@ -299,8 +299,7 @@ impl Operator {
             self.kind,
             Kind::Evaluation {
                 query: SummaryEvaluation::Exact(crate::summary_kernels::exact::ExactEvaluation {
-                    statistic: planner_types::summary_type::ExactKind::Rate
-                        | planner_types::summary_type::ExactKind::Increase,
+                    statistic: planner_types::summary_type::ExactKind::Counter,
                     ..
                 }),
                 ..

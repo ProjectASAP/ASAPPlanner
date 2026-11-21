@@ -44,7 +44,7 @@
           "cost_per_second": 7.60943621216e-9,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000676666666667,
-          "detail": "build exact Rate accumulator into 10000 states: 200000 rows x 33 ops, 200000 group visits; x 0.0167/s; holds 1280000 bytes for 40.600 ms",
+          "detail": "build exact Counter accumulator into 10000 states: 200000 rows x 33 ops, 200000 group visits; x 0.0167/s; holds 1280000 bytes for 40.600 ms",
           "multiplier": 1,
           "operator": "SummaryAgg",
           "timing": "query_time"
@@ -197,8 +197,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Rate",
-                    "Rate"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -464,8 +464,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Rate",
-                    "Rate"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -505,8 +505,8 @@
                 "reduction": "PerEntity",
                 "summary_type": {
                   "ExactAggregate": [
-                    "Rate",
-                    "Rate"
+                    "Counter",
+                    "Counter"
                   ]
                 }
               }
@@ -556,7 +556,8 @@
           "payload": {
             "ASAP": {
               "FinalizeExactAccumulator": {
-                "child": 2
+                "child": 2,
+                "counter_readout": "Rate"
               }
             }
           }

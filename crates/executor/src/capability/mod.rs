@@ -358,18 +358,22 @@ pub fn validate_exact_evaluation(
     validate_native_family(family)?;
     use planner_types::summary_type::ExactKind as E;
     // `validate_native_family` admits only exact families with a kernel.
+    // A counter state is read as `rate` or `increase`; no other exact
+    // state takes a counter readout.
     let supported = matches!(
         family,
         SummaryFamilyType::ExactAggregate(kind, _) if *kind == evaluation.statistic
-    );
+    ) && (evaluation.statistic == E::Counter)
+        == evaluation.counter_readout.is_some();
     if !supported {
         return Err(Error::Invalid(
             "evaluation is not implemented for this summary family".into(),
         ));
     }
-    if evaluation.lookback_ms.is_some_and(|lookback| {
-        lookback <= 0 || !matches!(evaluation.statistic, E::Rate | E::Increase)
-    }) {
+    if evaluation
+        .lookback_ms
+        .is_some_and(|lookback| lookback <= 0 || evaluation.statistic != E::Counter)
+    {
         return Err(Error::Invalid("invalid exact counter lookback".into()));
     }
     Ok(())

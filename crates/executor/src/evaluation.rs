@@ -1,7 +1,7 @@
 //! Evaluations over merged exact summary states.
 use crate::summary_kernels::exact::ExactAccumulator;
 use crate::AggregateCore;
-use planner_types::summary_type::ExactKind;
+use planner_types::summary_type::{CounterReadout, ExactKind};
 use std::sync::Arc;
 
 fn merge_exact_states(
@@ -37,12 +37,13 @@ pub fn insufficient_counter_raw_data_samples(
             .is_some_and(|state| state.insufficient_counter_raw_data_samples(statistic, None))
 }
 
-/// Merge already selected exact tumbling windows and read one population. `None` means
-/// the population is absent from the result: a counter with too few samples,
-/// or an empty MIN/MAX.
+/// Merge already selected exact tumbling windows and read one population, a
+/// counter as `counter_readout`. `None` means the population is absent from
+/// the result: a counter with too few samples, or an empty MIN/MAX.
 pub fn exact_evaluation(
     states: impl IntoIterator<Item = Arc<dyn AggregateCore>>,
     statistic: ExactKind,
+    counter_readout: Option<CounterReadout>,
     range_ms: Option<(i64, i64)>,
     key: Option<&[String]>,
 ) -> Result<Option<f64>, String> {
@@ -51,7 +52,7 @@ pub fn exact_evaluation(
         return Ok(None);
     }
     merged
-        .evaluation(statistic, range_ms, key)
+        .evaluation(statistic, counter_readout, range_ms, key)
         .map_err(|error| error.to_string())
 }
 
@@ -69,8 +70,7 @@ mod counter_tests {
     #[test]
     fn planner_counter_population_omits_insufficient_samples() {
         for (kind, params) in [
-            (ExactKind::Rate, ExactParams::Rate),
-            (ExactKind::Increase, ExactParams::Increase),
+            (ExactKind::Counter, ExactParams::Counter),
             (ExactKind::IRate, ExactParams::IRate),
         ] {
             for keyed in [false, true] {
@@ -81,6 +81,7 @@ mod counter_tests {
                     exact_evaluation(
                         [Arc::new(state) as Arc<dyn AggregateCore>],
                         kind,
+                        (kind == ExactKind::Counter).then_some(CounterReadout::Rate),
                         None,
                         key.as_deref()
                     )
@@ -94,21 +95,22 @@ mod counter_tests {
     // Two ordered samples read a rate; an inverted range and empty input fail.
     #[test]
     fn sparse_counter_is_absent_but_invalid_ranges_still_fail() {
-        let mut state = counter(ExactKind::Rate, ExactParams::Rate, false);
+        let mut state = counter(ExactKind::Counter, ExactParams::Counter, false);
         state.update(None, 10., 10_000);
-        let rate = ExactKind::Rate;
+        let rate = ExactKind::Counter;
+        let read = Some(CounterReadout::Rate);
         let one = [Arc::new(state.clone()) as Arc<dyn AggregateCore>];
         assert_eq!(
-            exact_evaluation(one, rate, Some((0, 60_000)), None).unwrap(),
+            exact_evaluation(one, rate, read, Some((0, 60_000)), None).unwrap(),
             None
         );
         state.update(None, 20., 20_000);
         let two = || [Arc::new(state.clone()) as Arc<dyn AggregateCore>];
-        assert!(exact_evaluation(two(), rate, Some((0, 60_000)), None)
+        assert!(exact_evaluation(two(), rate, read, Some((0, 60_000)), None)
             .unwrap()
             .is_some());
-        assert!(exact_evaluation(two(), rate, Some((60_000, 0)), None).is_err());
-        assert!(exact_evaluation([], rate, Some((0, 60_000)), None).is_err());
+        assert!(exact_evaluation(two(), rate, read, Some((60_000, 0)), None).is_err());
+        assert!(exact_evaluation([], rate, read, Some((0, 60_000)), None).is_err());
     }
 
     // An irate state reads PromQL `irate` from its last two samples: a
@@ -126,6 +128,7 @@ mod counter_tests {
                 ExactKind::IRate,
                 None,
                 None,
+                None,
             )
         };
         // (8 - 5) over the last 10 s.
@@ -140,6 +143,6 @@ mod counter_tests {
             state.update(None, 1., 0);
             Arc::new(state) as Arc<dyn AggregateCore>
         };
-        assert!(exact_evaluation([state(), state()], ExactKind::IRate, None, None).is_err());
+        assert!(exact_evaluation([state(), state()], ExactKind::IRate, None, None, None).is_err());
     }
 }

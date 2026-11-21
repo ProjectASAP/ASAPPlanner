@@ -74,8 +74,7 @@ impl SketchStatistic {
 pub enum MergeInputRule {
     /// No row in two inputs: the family counts a shared row twice.
     Disjoint,
-    /// The inputs' time windows do not overlap. Counter states (Rate,
-    /// Increase) join consecutive windows in time order, so inputs that are
+    /// The inputs' time windows do not overlap. Counter states join consecutive windows in time order, so inputs that are
     /// disjoint only by a value predicate would interleave in time.
     DisjointInTime,
     /// Inputs may share rows: the merge is idempotent.
@@ -204,7 +203,7 @@ impl SummaryTypeCapability {
                     E::Min | E::Max => (Some(MayOverlap), &[]),
                     // The counter accumulator joins time-ordered windows with
                     // reset handling (`IncreaseAccumulator::merge_pair`).
-                    E::Rate | E::Increase => (Some(DisjointInTime), &[]),
+                    E::Counter => (Some(DisjointInTime), &[]),
                     // IRate reads the last two samples of the window, which a
                     // tumbling window does not keep across its boundary.
                     E::IRate => (None, &[]),
@@ -381,8 +380,7 @@ mod tests {
             &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
         ));
         for (kind, params) in [
-            (ExactKind::Rate, ExactParams::Rate),
-            (ExactKind::Increase, ExactParams::Increase),
+            (ExactKind::Counter, ExactParams::Counter),
             (ExactKind::IRate, ExactParams::IRate),
         ] {
             assert!(!SummaryTypeCapability::merges_groups(

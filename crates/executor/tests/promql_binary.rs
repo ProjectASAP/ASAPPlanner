@@ -362,68 +362,70 @@ fn stored_series_evaluations_support_filters_and_sets() {
         ] {
             // Nodes 0 and 1 are the stored states, per series, of a minute of
             // samples (`Scan` node 5, `TimeRange` node 6).
-            let nodes =
-                (0..7)
-                    .map(|id| PhysicalASAPDAGNode {
-                        id,
-                        payload: match id {
-                            0 | 1 => PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
-                                child: 6,
-                                summary_type: family.clone(),
-                                input: SummaryUpdate::column(ColumnRef::SampleValue),
-                                reduction: Reduction::Reduce(GroupKeys::by(vec![0])),
-                                filter: None,
-                            }),
-                            5 => PhysicalASAPOperatorPayload::NonASAP(
-                                planner_types::ir::NonASAPOp::Scan {
-                                    source: Source::TimeSeries {
-                                        metric: "requests".into(),
-                                    },
-                                    schema: sample_schema(),
-                                    predicates: vec![],
+            let nodes = (0..7)
+                .map(|id| PhysicalASAPDAGNode {
+                    id,
+                    payload: match id {
+                        0 | 1 => PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryAgg {
+                            child: 6,
+                            summary_type: family.clone(),
+                            input: SummaryUpdate::column(ColumnRef::SampleValue),
+                            reduction: Reduction::Reduce(GroupKeys::by(vec![0])),
+                            filter: None,
+                        }),
+                        5 => PhysicalASAPOperatorPayload::NonASAP(
+                            planner_types::ir::NonASAPOp::Scan {
+                                source: Source::TimeSeries {
+                                    metric: "requests".into(),
                                 },
-                            ),
-                            6 => PhysicalASAPOperatorPayload::NonASAP(
-                                planner_types::ir::NonASAPOp::TimeRange {
-                                    range: Duration::from_secs(60),
-                                    kind: planner_types::ir::TimeRangeKind::Range,
-                                    child: 5,
+                                schema: sample_schema(),
+                                predicates: vec![],
+                            },
+                        ),
+                        6 => PhysicalASAPOperatorPayload::NonASAP(
+                            planner_types::ir::NonASAPOp::TimeRange {
+                                range: Duration::from_secs(60),
+                                kind: planner_types::ir::TimeRangeKind::Range,
+                                child: 5,
+                            },
+                        ),
+                        2 | 3 => {
+                            PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator {
+                                child: id - 2,
+                                counter_readout: None,
+                            })
+                        }
+                        _ => PhysicalASAPOperatorPayload::NonASAP(
+                            planner_types::ir::NonASAPOp::BinaryOp {
+                                operator: BinaryOperator {
+                                    kind: kind.clone(),
+                                    vector_match: None,
+                                    checked_relative_division: false,
+                                    checked_finite_division: false,
                                 },
-                            ),
-                            2 | 3 => PhysicalASAPOperatorPayload::ASAP(
-                                ASAPOp::FinalizeExactAccumulator { child: id - 2 },
-                            ),
-                            _ => PhysicalASAPOperatorPayload::NonASAP(
-                                planner_types::ir::NonASAPOp::BinaryOp {
-                                    operator: BinaryOperator {
-                                        kind: kind.clone(),
-                                        vector_match: None,
-                                        checked_relative_division: false,
-                                        checked_finite_division: false,
-                                    },
-                                    return_bool: false,
-                                    lhs: 2,
-                                    rhs: 3,
-                                },
-                            ),
-                        },
-                        output_state: match id {
-                            0 | 1 => ExecutionDataState::INGESTION_SUMMARY,
-                            5 | 6 => ExecutionDataState::QUERY_ROWS,
-                            _ => ExecutionDataState::QUERY_ROWS,
-                        },
-                        lifetime: Default::default(),
-                        parameters: None,
-                        output_schema: match id {
-                            0 | 1 => (*state_schema).clone(),
-                            5 | 6 => sample_schema(),
-                            _ => value_schema.clone(),
-                        },
-                        retention_ms: None,
-                        selected_physical_candidate: None,
-                        view_coverage: None,
-                    })
-                    .collect::<Vec<_>>();
+                                return_bool: false,
+                                lhs: 2,
+                                rhs: 3,
+                            },
+                        ),
+                    },
+                    output_state: match id {
+                        0 | 1 => ExecutionDataState::INGESTION_SUMMARY,
+                        5 | 6 => ExecutionDataState::QUERY_ROWS,
+                        _ => ExecutionDataState::QUERY_ROWS,
+                    },
+                    lifetime: Default::default(),
+                    parameters: None,
+                    output_schema: match id {
+                        0 | 1 => (*state_schema).clone(),
+                        5 | 6 => sample_schema(),
+                        _ => value_schema.clone(),
+                    },
+                    retention_ms: None,
+                    selected_physical_candidate: None,
+                    view_coverage: None,
+                })
+                .collect::<Vec<_>>();
             let edges = [
                 (5, 6, EdgeRole::Input),
                 (6, 0, EdgeRole::Input),

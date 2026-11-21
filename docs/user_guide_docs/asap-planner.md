@@ -92,7 +92,7 @@ do or what the caller rules out:
 ```json
 {
   "counter_semantics": {"reset_handling": true, "extrapolation": false},
-  "state_not_mergeable_across_windows": [{"exact": "Rate"}, {"sketch": "Kll"}],
+  "state_not_mergeable_across_windows": [{"exact": "Counter"}, {"sketch": "Kll"}],
   "excluded_candidates": [
     {"timing": "query_time", "operator": "Scan"},
     {"summary_family": {"sketch": "Kll"}, "sketch_parameter_range": {"kll_k": {"at_most": 1403}}},
@@ -102,9 +102,11 @@ do or what the caller rules out:
 ```
 
 - `counter_semantics` (default: both `true`): without `extrapolation`, no
-  `rate`, `increase` or `delta` and no `Rate` or `Increase` state is
-  planned; without `reset_handling`, no `rate`, `increase`, `irate` or
-  `resets` and no `Rate`, `Increase` or `IRate` state.
+  `rate`, `increase` or `delta` and no `Counter` state is planned;
+  without `reset_handling`, no `rate`, `increase`, `irate` or `resets`
+  and no `Counter` or `IRate` state. One `Counter` state answers both
+  `rate` and `increase`; the names `Rate` and `Increase` from before
+  still read as `Counter`.
 - `state_not_mergeable_across_windows` (default none): for each family
   listed, no tumbling-window chain and no state kept across evaluations;
   its state is built and finalized within one evaluation.
@@ -115,8 +117,8 @@ do or what the caller rules out:
   JSON `kind`, e.g. `"rate"` or `"i_rate"`), `summary_family`,
   `sketch_parameter_range` and `readout` (`{"summary_type": "Kll",
   "statistic": "Quantile"}`). `aggregate_measure` matches the `Aggregate`
-  only: to rule out a `Rate` state as well, add `{"summary_family":
-  {"exact": "Rate"}}`. An entry that sets no field, or whose fields match
+  only: to rule out the counter state as well, add `{"summary_family":
+  {"exact": "Counter"}}`. An entry that sets no field, or whose fields match
   no operator in common, is refused.
 
 Stage 2 prints each candidate a capability rules out as

@@ -4,8 +4,10 @@
 use crate::planning_common::{cost, cost_with, fuzz_workload, selected_plan};
 use asap_cost::CostInputs;
 use asap_devtools::planner_fuzz::{FuzzQuery, FuzzWorkload};
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp};
 use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
+use asap_types::summary_type::{CounterReadout, ExactKind};
 use serde_json::json;
 
 /// Deriving the coarse sum costs only a sum over the 150 fine groups.
@@ -60,6 +62,53 @@ fn nested_exact_sum_reuses_newest_tumbling_windows() {
     for &root in &plan.roots {
         assert!(reaches(&plan, root, chains[0]), "root {root}: {plan:#?}");
     }
+}
+
+/// `rate(m_counter[1h])` and `increase(m_counter[1h])` read one counter
+/// state: both extrapolate the same sampled increase, `rate` per second of
+/// the range. With no raw data kept, the plan builds one ingestion-time
+/// chain of `Counter` states that both roots read, finalized once as
+/// `rate` and once as `increase`, where each function's own chain used to
+/// double the stored state.
+#[test]
+fn rate_and_increase_of_one_counter_share_one_chain() {
+    let mut related = fuzz_workload("rate_and_increase_same_counter", false);
+    related.raw_data_retained = false;
+    let plan = selected_plan(&related, &CostInputs::default());
+    let chains: Vec<_> = plan
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.payload {
+            Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { summary_type, .. }) => {
+                Some((node.id, summary_type.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        chains,
+        vec![(chains[0].0, FieldDataType::exact(ExactKind::Counter))],
+        "one counter chain: {plan:#?}"
+    );
+    for &root in &plan.roots {
+        assert!(reaches(&plan, root, chains[0].0), "root {root}: {plan:#?}");
+    }
+    let mut readouts: Vec<_> = plan
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.payload {
+            Payload::ASAP(ASAPOp::FinalizeExactAccumulator {
+                counter_readout, ..
+            }) => *counter_readout,
+            _ => None,
+        })
+        .collect();
+    readouts.sort();
+    assert_eq!(
+        readouts,
+        [CounterReadout::Rate, CounterReadout::Increase],
+        "{plan:#?}"
+    );
 }
 
 /// Whether `from` is `to` or reads it through the plan's edges.

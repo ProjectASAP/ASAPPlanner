@@ -1216,7 +1216,7 @@ fn counter_tumbling_windows_merge_in_any_order() {
         ("v", DataType::Float64, false),
         ("t", DataType::Timestamp, false),
     ]);
-    let family = FieldDataType::ExactAggregate(ExactKind::Increase, ExactParams::Increase);
+    let family = FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter);
     let build = || {
         Operator::per_group_summary_build(input.clone(), family.clone(), None, 0, Some(1), vec![])
             .unwrap()
@@ -1240,7 +1240,12 @@ fn counter_tumbling_windows_merge_in_any_order() {
             .as_any()
             .downcast_ref::<ExactAccumulator>()
             .unwrap()
-            .evaluation(planner_types::summary_type::ExactKind::Increase, None, None)
+            .evaluation(
+                planner_types::summary_type::ExactKind::Counter,
+                Some(planner_types::summary_type::CounterReadout::Increase),
+                None,
+                None,
+            )
             .unwrap()
             .unwrap()
     };
@@ -1345,6 +1350,7 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
                 asap_executor::operators::SummaryEvaluation::Exact(
                     asap_executor::summary_kernels::exact::ExactEvaluation {
                         statistic: kind,
+                        counter_readout: None,
                         lookback_ms: None,
                         offset_ms: 0,
                     },
@@ -1530,7 +1536,10 @@ fn filtered_summary_build_keeps_empty_groups() {
         ),
         (
             count,
-            ASAPOp::FinalizeExactAccumulator { child: 0 },
+            ASAPOp::FinalizeExactAccumulator {
+                child: 0,
+                counter_readout: None,
+            },
             (DataType::Int64, false),
             ["a 1", "b 0", "c 1"],
         ),

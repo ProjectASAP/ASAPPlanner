@@ -203,6 +203,7 @@ fn summary_construction_merge_and_evaluation_at_both_phases() {
             asap_executor::operators::SummaryEvaluation::Exact(
                 asap_executor::summary_kernels::exact::ExactEvaluation {
                     statistic: ExactKind::Sum,
+                    counter_readout: None,
                     lookback_ms: None,
                     offset_ms: 0,
                 },
@@ -351,7 +352,7 @@ fn binding_rejects_unsupported_operations() {
     let schema = schema(&[("v", DataType::Float64, false)]);
     assert!(Operator::per_group_summary_build(
         schema.clone(),
-        FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+        FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter),
         None,
         0,
         None,
@@ -541,6 +542,7 @@ fn exact_state_and_family_validation() {
             asap_executor::operators::SummaryEvaluation::Exact(
                 asap_executor::summary_kernels::exact::ExactEvaluation {
                     statistic: ExactKind::Sum,
+                    counter_readout: None,
                     lookback_ms: None,
                     offset_ms: 0,
                 },
@@ -671,6 +673,7 @@ fn empty_exact_count_is_an_integer_state_evaluation() {
         asap_executor::operators::SummaryEvaluation::Exact(
             asap_executor::summary_kernels::exact::ExactEvaluation {
                 statistic: ExactKind::Count,
+                counter_readout: None,
                 lookback_ms: None,
                 offset_ms: 0,
             },

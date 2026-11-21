@@ -109,7 +109,7 @@ pub(crate) fn exact_accumulator_input(
         ExactKind::Sum | ExactKind::Count | ExactKind::Min | ExactKind::Max => {
             not_a_stale_marker(value)
         }
-        ExactKind::Increase | ExactKind::Rate | ExactKind::IRate => finite_input(value),
+        ExactKind::Counter | ExactKind::IRate => finite_input(value),
     }
 }
 

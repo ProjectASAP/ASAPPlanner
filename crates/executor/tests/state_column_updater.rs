@@ -116,8 +116,7 @@ fn value_families() -> Vec<Family> {
         exact(ExactKind::Count, ExactParams::Count),
         exact(ExactKind::Min, ExactParams::Min),
         exact(ExactKind::Max, ExactParams::Max),
-        exact(ExactKind::Rate, ExactParams::Rate),
-        exact(ExactKind::Increase, ExactParams::Increase),
+        exact(ExactKind::Counter, ExactParams::Counter),
         // `k` above any group's sample count (at most 600): no compaction,
         // so the random compaction coin never flips.
         sketch(SketchAlgorithm::Kll, SketchParams::Kll { k: 1024 }),
@@ -484,7 +483,7 @@ fn per_sample_updates_build_the_batch_states_for_every_keyed_family() {
 // and a value outside the kernel's domain, leaving the state unchanged.
 #[test]
 fn per_sample_updates_keep_each_kernels_input_contract() {
-    let mut rate = updater(&exact(ExactKind::Rate, ExactParams::Rate));
+    let mut rate = updater(&exact(ExactKind::Counter, ExactParams::Counter));
     let group = rate.add_group().unwrap();
     rate.update(group, 1.0, 100).unwrap();
     assert!(rate.update(group, 2.0, 100).is_err());
@@ -514,10 +513,8 @@ fn per_sample_updates_keep_each_kernels_input_contract() {
 // their merge is refused, not (v30-v10)+(v40-v20).
 #[test]
 fn merging_counter_shards_that_overlap_in_time_is_refused() {
-    for family in [
-        exact(ExactKind::Rate, ExactParams::Rate),
-        exact(ExactKind::Increase, ExactParams::Increase),
-    ] {
+    {
+        let family = exact(ExactKind::Counter, ExactParams::Counter);
         let shard = |samples: &[(i64, f64)]| {
             let mut updater = updater(&family);
             let group = updater.add_group().unwrap();
@@ -562,10 +559,8 @@ fn merging_counter_shards_that_overlap_in_time_is_refused() {
 // 12 s applied, being more than 5 s behind 18 s), 11.5 s is refused.
 #[test]
 fn counter_samples_late_within_the_declared_bound_build_the_in_order_state() {
-    for family in [
-        exact(ExactKind::Rate, ExactParams::Rate),
-        exact(ExactKind::Increase, ExactParams::Increase),
-    ] {
+    {
+        let family = exact(ExactKind::Counter, ExactParams::Counter);
         let build = |samples: &[(i64, f64)], bound: Option<u64>| {
             let mut updater = updater(&family);
             if let Some(bound) = bound {
@@ -629,10 +624,8 @@ fn counter_samples_late_within_the_declared_bound_build_the_in_order_state() {
 // so A's 11 s sample (1 s behind A's newest) is folded in time order.
 #[test]
 fn counter_samples_are_late_relative_to_their_own_series_only() {
-    for family in [
-        exact(ExactKind::Rate, ExactParams::Rate),
-        exact(ExactKind::Increase, ExactParams::Increase),
-    ] {
+    {
+        let family = exact(ExactKind::Counter, ExactParams::Counter);
         let build = |samples: &[(u32, i64, f64)], bound: Option<u64>| {
             let mut updater = updater(&family);
             if let Some(bound) = bound {
@@ -660,7 +653,7 @@ fn counter_samples_are_late_relative_to_their_own_series_only() {
 // sample) and builds the same states from the rest.
 #[test]
 fn a_zero_bound_refuses_what_no_bound_refuses() {
-    let family = exact(ExactKind::Rate, ExactParams::Rate);
+    let family = exact(ExactKind::Counter, ExactParams::Counter);
     let build = |samples: &[(u32, i64, f64)], bound: Option<u64>| {
         let mut updater = updater(&family);
         if let Some(bound) = bound {

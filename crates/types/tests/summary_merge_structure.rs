@@ -136,12 +136,7 @@ fn summary_type_capability_table() {
         ),
         // Counter tumbling-window merge exactly when ordered and disjoint in time.
         (
-            exact(ExactKind::Rate, ExactParams::Rate),
-            Some(DisjointInTime),
-            vec![],
-        ),
-        (
-            exact(ExactKind::Increase, ExactParams::Increase),
+            exact(ExactKind::Counter, ExactParams::Counter),
             Some(DisjointInTime),
             vec![],
         ),

@@ -248,6 +248,7 @@ fn merged_windows_are_the_build_over_the_selected_range() {
             node(if summary_type == sum {
                 Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
                     child: state.clone(),
+                    counter_readout: None,
                 })
             } else {
                 Operator::ASAP(ASAPOp::SummaryEstimate {

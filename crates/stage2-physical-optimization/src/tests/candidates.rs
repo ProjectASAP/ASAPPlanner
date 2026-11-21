@@ -426,7 +426,7 @@ fn a_counter_state_runs_at_ingestion_time_over_ordered_rows() {
             memo,
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 child: scan,
-                summary_type: FieldDataType::exact(ExactKind::Rate),
+                summary_type: FieldDataType::exact(ExactKind::Counter),
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::PerEntity,
                 filter: None,

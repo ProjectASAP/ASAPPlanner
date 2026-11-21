@@ -1,0 +1,76 @@
+{
+  "query_workload": {
+    "language": "promql",
+    "query_batch": null,
+    "repeating_queries": [
+      {
+        "query": "rate(m_counter[1h])",
+        "demand": {
+          "fixed_interval_at": {
+            "interval": 15000,
+            "evaluation_phase": 0
+          }
+        },
+        "requirements": {
+          "accuracy": {
+            "max_error": 0.0,
+            "failure_probability": 0.0,
+            "accuracy_scope": "whole_result"
+          },
+          "max_latency_ms": null
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        }
+      },
+      {
+        "query": "increase(m_counter[1h])",
+        "demand": {
+          "fixed_interval_at": {
+            "interval": 15000,
+            "evaluation_phase": 0
+          }
+        },
+        "requirements": {
+          "accuracy": {
+            "max_error": 0.0,
+            "failure_probability": 0.0,
+            "accuracy_scope": "whole_result"
+          },
+          "max_latency_ms": null
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        }
+      }
+    ]
+  },
+  "data_workload": {
+    "arrival": {
+      "ingesting": {
+        "rows_per_second": 1333.3333333333333
+      }
+    },
+    "sources": {
+      "m_counter": {
+        "series_count": 10000,
+        "metric_type": "counter",
+        "column_signs": {
+          "value": "non_negative"
+        },
+        "sample_interval": 15000,
+        "stream_norms": null,
+        "max_distinct_per_evaluation": null,
+        "distinct_values_per_label": {
+          "instance": 50,
+          "job": 5,
+          "region": 3
+        }
+      }
+    }
+  }
+}

@@ -131,7 +131,7 @@ fn exact_accumulators_take_non_finite_values_as_promql_does() {
             .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
             .expect("an exact state");
         exact
-            .evaluation(kind, None, None)
+            .evaluation(kind, None, None, None)
             .map_err(|error| error.to_string())
     };
     let (inf, nan) = (f64::INFINITY, f64::NAN);
@@ -146,9 +146,7 @@ fn exact_accumulators_take_non_finite_values_as_promql_does() {
     assert_eq!(finalized(ExactKind::Min, &[nan, 2.0, -inf]), Ok(Some(-inf)));
     assert_eq!(finalized(ExactKind::Max, &[2.0, nan]), Ok(Some(2.0)));
     assert!(finalized(ExactKind::Max, &[nan]).unwrap().unwrap().is_nan());
-    for kind in [ExactKind::Rate, ExactKind::Increase] {
-        assert!(finalized(kind, &[1.0, nan]).is_err(), "{kind:?}");
-    }
+    assert!(finalized(ExactKind::Counter, &[1.0, nan]).is_err());
     let stale = f64::from_bits(crate::values::STALE_MARKER);
     for kind in [
         ExactKind::Sum,

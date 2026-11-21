@@ -227,7 +227,10 @@ fn a_compensating_filter_over_a_sql_table_has_sql_semantics() {
     for state in [fine, coarse] {
         let root = group(
             &mut memo,
-            Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: state }),
+            Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+                child: state,
+                counter_readout: None,
+            }),
         );
         query(&mut memo, root, Some(AccuracyTarget::exact()));
     }

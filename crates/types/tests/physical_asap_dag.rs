@@ -33,6 +33,7 @@ fn plan() -> Rc<OperatorNode> {
     .unwrap();
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
         child: Rc::new(state),
+        counter_readout: None,
     }))
     .unwrap()
 }
@@ -44,6 +45,7 @@ fn batch_shares_the_summary_and_keeps_one_root_per_query() {
     let state = first.children()[0].clone();
     let second = OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
         child: state,
+        counter_readout: None,
     }))
     .unwrap();
     let roots: Vec<QueryRoot> = [first, second]

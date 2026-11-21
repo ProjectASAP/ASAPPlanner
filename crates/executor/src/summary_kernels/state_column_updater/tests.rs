@@ -43,15 +43,10 @@ fn an_exact_sum_column_takes_non_finite_values() {
     let GroupStates::Exact { states, .. } = &updater.states else {
         unreachable!()
     };
-    let read = |group: usize| {
-        states[group]
-            .evaluation(ExactKind::Sum, None)
-            .unwrap()
-            .unwrap()
-    };
+    let read = |group: usize| states[group].evaluation(None, None).unwrap().unwrap();
     assert_eq!(read(0), f64::INFINITY);
     assert!(read(1).is_nan());
-    let rate = FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate);
+    let rate = FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter);
     let mut updater = StateColumnUpdater::new(&rate, None).unwrap();
     updater.ensure_groups(1).unwrap();
     assert!(updater.update(0, f64::NAN, 0).is_err());
@@ -70,7 +65,7 @@ fn an_exact_sum_column_takes_non_finite_values() {
 // and is held itself; releasing everything frees the queue.
 #[test]
 fn held_counter_samples_are_charged_until_applied() {
-    let family = FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate);
+    let family = FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter);
     let mut updater = StateColumnUpdater::new(&family, None)
         .unwrap()
         .with_max_out_of_order_ms(1_000);

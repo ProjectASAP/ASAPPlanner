@@ -37,9 +37,13 @@ Implemented:
 - `SummaryEstimate { summary_input, query }`: read the requested statistic
   (`SketchStatistic`) from summary state and return query values in a row-shaped
   schema.
-- `FinalizeExactAccumulator { child }`: read an exact accumulator's state as
-  its finalized value — the maintenance-to-read boundary before query-time
-  operators consume it.
+- `FinalizeExactAccumulator { child, counter_readout }`: read an exact
+  accumulator's state as its finalized value — the maintenance-to-read
+  boundary before query-time operators consume it. A `Counter` state (a
+  counter's first and last samples, sample count and reset-aware increase)
+  is read as `rate` or `increase` (`counter_readout`), so `rate(x[1h])` and
+  `increase(x[1h])` over the same series and range read one state and one
+  tumbling-window chain, as two quantiles read one DDSketch.
 - `MaintainPopulation { child, population }`: maintain the full declared
   population, including membership changes.
 - `EvaluatePopulation { child, evaluation }`: read an aggregate or TopK prefix from a
