@@ -33,7 +33,7 @@ use crate::node::operator_statistics::{
 };
 use crate::node::state_bytes::{
     assumed_magnitude_range, keeps_every_value, row_bytes, sketch_state_bytes, state_bytes_per_row,
-    state_row_bytes_beside_state, summary_state_bytes, StateInputRows,
+    state_rows_bytes, summary_state_bytes, text_dictionary_bytes, StateInputRows,
 };
 use crate::{aggregate_lookup, lookup, StateFamily};
 use crate::{
@@ -1187,8 +1187,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let update_ops = update_terms.operations();
             let out = EdgeStatistics {
                 rows: group_count,
-                bytes: group_count
-                    .checked_mul(state_bytes + state_row_bytes_beside_state(&node.output_schema))
+                bytes: state_rows_bytes(&node.output_schema, group_count, state_bytes)
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             let group_visits = visits(group_count);
@@ -1284,8 +1283,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let group_visits = visits(group_count);
             let out = EdgeStatistics {
                 rows: group_count,
-                bytes: group_count
-                    .checked_mul(state_bytes + state_row_bytes_beside_state(&node.output_schema))
+                bytes: state_rows_bytes(&node.output_schema, group_count, state_bytes)
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             (
@@ -1387,8 +1385,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             };
             let out = EdgeStatistics {
                 rows: group_count,
-                bytes: (merged_state_bytes + state_row_bytes_beside_state(&node.output_schema))
-                    .checked_mul(group_count)
+                bytes: state_rows_bytes(&node.output_schema, group_count, merged_state_bytes)
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             (
@@ -1556,6 +1553,28 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // keeps per group when that is more. A computation that keeps nothing holds its
     // working memory while it runs.
     let state = out.bytes.max(estimate.peak_memory_bytes());
+    // Stored, a view's outputs of summary states share their texts (the
+    // store holds each text column's values once per view): `n` outputs
+    // hold `n` outputs without their texts, and the texts once.
+    let stored_texts = match node
+        .output_schema
+        .fields
+        .iter()
+        .any(|field| !field.is_plain())
+    {
+        true => text_dictionary_bytes(&node.output_schema, out.rows),
+        false => 0,
+    };
+    let stored_outputs_bytes = |outputs: u64| -> Result<u64, AnalyticalCostError> {
+        if outputs == 0 {
+            return Ok(0);
+        }
+        state
+            .saturating_sub(stored_texts)
+            .checked_mul(outputs)
+            .and_then(|bytes| bytes.checked_add(stored_texts))
+            .ok_or(AnalyticalCostError::Overflow)
+    };
     let (materialized_bytes, medium) = match (ingestion, node.lifetime, &node.payload) {
         (_, Lifetime::None, _) => {
             let working_memory_bytes = estimate.peak_memory_bytes();
@@ -1573,15 +1592,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             Lifetime::AcrossEvaluations(medium),
             Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }),
         ) => {
-            let between = state
-                .checked_mul(retained_output_count - 1)
-                .ok_or(AnalyticalCostError::Overflow)?;
+            let between = stored_outputs_bytes(retained_output_count - 1)?;
             match medium {
                 StorageMedium::Memory => {
                     average_memory_bytes = between as f64;
-                    peak_memory_bytes = state
-                        .checked_mul(retained_output_count)
-                        .ok_or(AnalyticalCostError::Overflow)?;
+                    peak_memory_bytes = stored_outputs_bytes(retained_output_count)?;
                 }
                 StorageMedium::Disk => disk_bytes = between,
             }
@@ -1607,21 +1622,16 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         // `TimeShift`'s retention includes its offset: it holds each output
         // that much longer before its readers read it.
         (true, Lifetime::AcrossEvaluations(medium), _) => (
-            state
-                .checked_mul(
-                    retained_output_count
-                        .checked_add(1)
-                        .ok_or(AnalyticalCostError::Overflow)?,
-                )
-                .ok_or(AnalyticalCostError::Overflow)?,
+            stored_outputs_bytes(
+                retained_output_count
+                    .checked_add(1)
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            )?,
             medium,
         ),
         // A whole state materialized across evaluations at query time: it
         // and the one being built.
-        (false, Lifetime::AcrossEvaluations(medium), _) => (
-            state.checked_mul(2).ok_or(AnalyticalCostError::Overflow)?,
-            medium,
-        ),
+        (false, Lifetime::AcrossEvaluations(medium), _) => (stored_outputs_bytes(2)?, medium),
     };
     if ingestion && node.lifetime == Lifetime::AcrossEvaluations(StorageMedium::Memory) {
         maintained = Some(state);

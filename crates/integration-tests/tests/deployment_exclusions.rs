@@ -335,12 +335,12 @@ fn an_exclusion_matching_nothing_changes_nothing() {
 fn a_kll_k_range_moves_the_quantile_to_a_larger_k() {
     let workload = kll_workload();
     let cases = [
-        (None, STORED_KLL_PLAN.as_slice(), 1404, 0.057933),
+        (None, STORED_KLL_PLAN.as_slice(), 1404, 0.057575),
         (
             Some(kll_at_most(1403)),
             STORED_KLL_PLAN.as_slice(),
             1404,
-            0.057933,
+            0.057575,
         ),
         (Some(kll_at_most(2862)), KLL_PLAN.as_slice(), 2863, 0.062491),
     ];
@@ -421,7 +421,7 @@ fn the_stored_arm_exclusions_select_an_ingestion_time_chain() {
         builds(plan),
         vec![(FieldDataType::exact(ExactKind::Sum), None)]
     );
-    assert_cost(selection, 0.105237);
+    assert_cost(selection, 0.101237);
     let excluded: usize = (0..4)
         .map(|index| pruned_by(&stored, ExclusionSource::ExcludedCandidate { index }))
         .sum();
@@ -548,8 +548,8 @@ fn a_target_without_mergeable_rate_state_builds_rate_within_one_evaluation() {
         ]
     };
     let cases = [
-        ("rate", "5m", ExactKind::Counter, 0.274034, 0.367670),
-        ("increase", "1h", ExactKind::Counter, 1.436831, 3.953712),
+        ("rate", "5m", ExactKind::Counter, 0.246034, 0.367671),
+        ("increase", "1h", ExactKind::Counter, 1.078831, 3.953718),
     ];
     for (function, range, kind, unrestricted_cost, restricted_cost) in cases {
         let workload = counter_workload(function, range);
@@ -673,7 +673,7 @@ fn counter_semantics_a_target_lacks_rule_out_the_functions_that_need_them() {
         builds(plan),
         vec![(FieldDataType::exact(ExactKind::IRate), None)]
     );
-    assert_cost(selection, 0.367670);
+    assert_cost(selection, 0.367671);
     assert_eq!(
         pruned_by(
             &irate_without_extrapolation,

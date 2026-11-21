@@ -996,10 +996,12 @@ fn priced_bytes_agree_with_the_executor() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A summary state's row holds its labels, its window's time and its
-/// series identity beside the state; the state's own bytes, which a merge
-/// is costed by, leave them out. A stored per-series Sum carrying `job`:
-/// 144 bytes per row, 56 of them its state.
+/// A summary state's row holds its state's index, a key per text column
+/// (`job` and the series identity), its window's time and the batch's
+/// row slot beside the state, and the batch holds the texts once; the
+/// state's own bytes, which a merge is costed by, leave them out. 1,000
+/// per-series Sums carrying `job`: 116,000 bytes, 80,000 of them texts,
+/// 28 per row beside each 8-byte record.
 #[test]
 fn state_bytes_per_row_leave_out_what_the_row_holds_beside_its_state() {
     use asap_types::ir::schema::{Field, PROMQL_SERIES_IDENTITY};
@@ -1018,10 +1020,12 @@ fn state_bytes_per_row_leave_out_what_the_row_holds_beside_its_state() {
             false,
         ),
     ]);
-    assert_eq!(state_row_bytes_beside_state(&schema), 88);
+    assert_eq!(state_row_bytes_beside_state(&schema), 28);
+    assert_eq!(text_dictionary_bytes(&schema, 1_000), 80_000);
+    assert_eq!(state_rows_bytes(&schema, 1_000, 8), Some(116_000));
     let edge = EdgeStatistics {
         rows: 1_000,
-        bytes: 144_000,
+        bytes: 116_000,
     };
-    assert_eq!(state_bytes_per_row(edge, &schema), 56);
+    assert_eq!(state_bytes_per_row(edge, &schema), 8);
 }
