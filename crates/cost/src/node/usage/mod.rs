@@ -144,11 +144,21 @@ fn state_family<'a>(
         Payload::ASAP(ASAPOp::SummaryEstimate { .. } | ASAPOp::FinalizeExactAccumulator { .. }) => {
             producer_family.unwrap_or(StateFamily::None)
         }
+        // A `Filter` or `Project` outputting states passes them on as they
+        // are: an estimate reading them is costed by their family.
+        Payload::NonASAP(NonASAPOp::Filter { .. } | NonASAPOp::Project { .. })
+            if node
+                .output_schema
+                .fields
+                .iter()
+                .any(|field| !field.is_plain()) =>
+        {
+            producer_family.unwrap_or(StateFamily::None)
+        }
+        Payload::NonASAP(NonASAPOp::Filter { .. } | NonASAPOp::Project { .. }) => StateFamily::None,
         Payload::NonASAP(
             NonASAPOp::Scan { .. }
             | NonASAPOp::Values { .. }
-            | NonASAPOp::Filter { .. }
-            | NonASAPOp::Project { .. }
             | NonASAPOp::Aggregate { .. }
             | NonASAPOp::Join { .. }
             | NonASAPOp::SetOp { .. }
