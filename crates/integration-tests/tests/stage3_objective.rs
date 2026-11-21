@@ -644,8 +644,18 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     let raw_kept = PlanningModels::builtin()
         .with_ignore_accuracy_guarantees(true)
         .with_cost_inputs(&costly_memory);
-    let (_, (_, raw_kept_plan_cost)) =
+    let (raw_kept_plan, (_, raw_kept_plan_cost)) =
         selected_plan_objective_and_plan_cost_with(&w, raw_kept, &costly_memory);
+    // The selection reads raw rows at query time.
+    assert!(
+        raw_kept_plan.nodes.iter().any(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
+            ) && node.output_state.timing == ExecutionTiming::QueryTime
+        }),
+        "memory at 100x: the selection scans no raw rows at query time"
+    );
     let views_only = PlanningModels::builtin()
         .with_ignore_accuracy_guarantees(true)
         .with_cost_inputs(&costly_memory)

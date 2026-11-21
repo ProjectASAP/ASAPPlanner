@@ -769,7 +769,10 @@ fn priced_bytes_agree_with_the_executor() {
     // (`wide_spread_values_magnitude_ratio`): fed latency-like rows (an
     // exponential spread) or the log-uniform three decades of
     // `Rows::Values`, a sealed sketch holds less, within these bands.
-    for (rows, band) in [(Rows::LatencyLike, 1.6..=2.4), (Rows::Values, 2.3..=3.3)] {
+    for (rows, band) in [
+        (Rows::LatencyLike, 1.713..=1.893),
+        (Rows::Values, 2.550..=2.818),
+    ] {
         let family = sketch(A::DDSketch);
         let params = SketchParams::DDSketch { alpha: 0.01 };
         let mut updater =
@@ -921,9 +924,12 @@ fn counter_near_a_million(series: u64, n: u32) -> Vec<f64> {
 /// lognormal of σ = 2 1.2–1.3x and latency-like values at most 2.2x, and
 /// under-charges the widest spreads only at few rows per state (Zipf
 /// integers 0.7x, seven decades log-uniform 0.6x at 10 rows); a declared
-/// range caps that spread (a narrow gauge's within 1.1x, a wide one leaves
-/// it); narrow per-state values are over-charged most when only a wider
-/// column range, or none, bounds them.
+/// range caps that spread (a narrow gauge's within 1.1x) and floors it at
+/// the rows' log-uniform spread over the range, so values that fill a
+/// declared range are charged 0.95–1.1x at any number of rows, at the cost
+/// of over-charging values narrower than their column (latency-like values
+/// in the generator's range up to 5.4x at 10 rows, per-series levels
+/// within a column range 16–22x).
 #[test]
 fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
     let alpha = 0.01;
@@ -940,7 +946,7 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
             "exponential, the generator's range declared",
             latency_like,
             range(2.687e-8, 1_104.2),
-            1.4..=2.2,
+            1.6..=5.4,
         ),
         ("lognormal sigma 1", lognormal, None, 2.1..=2.7),
         ("lognormal sigma 2", lognormal_sigma_2, None, 1.1..=1.4),
@@ -954,14 +960,14 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
             "log-uniform 7 decades, declared",
             log_uniform_over_seven_decades,
             range(0.001, 1e4),
-            0.55..=1.1,
+            0.95..=1.1,
         ),
         ("Zipf(1.1) integers", zipf_integers, None, 0.65..=1.6),
         (
             "Zipf(1.1) integers, declared",
             zipf_integers,
             range(1.0, 1e6),
-            0.65..=1.1,
+            0.95..=1.1,
         ),
         ("narrow gauge", narrow_gauge, None, 12.0..=40.0),
         (
@@ -981,7 +987,7 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
             "per-series levels, column range declared",
             per_series_levels,
             range(1.0, 1e5),
-            12.0..=25.0,
+            16.0..=22.0,
         ),
     ];
     for (name, values, value_magnitude_range, band) in shapes {
@@ -1005,11 +1011,11 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
     }
 }
 
-/// The span a DDSketch is charged: one bucket for one row; a declared
-/// range in full at any number of rows (a gauge within [90, 110]: 11
-/// buckets, 232 bytes); with nothing declared the wide-spread margin,
-/// which grows with the rows up to the assumed nine decades, the span of
-/// unknown rows; two stores for signed values.
+/// The span a DDSketch is charged: one bucket for one row; the wide-spread
+/// margin of its rows, which grows with them, capped by a declared range
+/// (a gauge within [90, 110]: 11 buckets, 232 bytes, at any number of
+/// rows) or by the assumed nine decades, the span of unknown rows; two
+/// stores for signed values.
 #[test]
 fn ddsketch_state_bytes_follow_the_declared_range_or_the_wide_spread_margin() {
     let alpha = 0.01;

@@ -303,42 +303,82 @@ const TEN_HZ_EVERY_300_S: Setting = Setting {
 /// 18.8 KB bound for values over nine decades, the stored plan was
 /// predicted 2x more expensive than exact and never selected.
 ///
-/// The same with the ranges the benchmark workloads declare for their
-/// gauges' values (`column_magnitudes`): Zipf integers in [1, 1.51e9], a
-/// realistic latency in [0.12, 1.83e6]. A declared range only caps the
-/// spread a state is charged, so the ranking is the measured one.
+/// The same with the realistic mode's declared ranges
+/// (`column_magnitudes`: latency [0.12, 1.83e6], counter [1, 3.27e8]).
+/// The ranking rests on the wide-spread margin (σ = 2.5) staying below the
+/// point where it flips (σ = 3, `wide_spread_values_magnitude_ratio`).
 #[test]
 fn quantile_at_10_hz_with_raw_data_keeps_stored_ddsketch_windows() {
-    for declared in [None, Some((1.0, 1.51e9)), Some((0.12, 1.83e6))] {
+    for (gauge, counter) in [BENCHMARK_RANGES[0], BENCHMARK_RANGES[3]] {
         for setting in [TEN_HZ_EVERY_10_S, TEN_HZ_EVERY_60_S, TEN_HZ_EVERY_300_S] {
-            let workload = declaring_latency_range(workload(QUANTILE, setting), declared);
+            let workload = declaring_ranges(workload(QUANTILE, setting), gauge, counter);
             let (plan, _) = selected(&workload, true);
             assert_eq!(
                 plan_kind(&plan),
                 PlanKind::StoredStates,
-                "{setting:?}, declared {declared:?}"
+                "{setting:?}, declared {gauge:?} / {counter:?}"
             );
-            assert!(has_sketch(&plan), "{setting:?}, declared {declared:?}");
+            assert!(has_sketch(&plan), "{setting:?}, declared {gauge:?}");
         }
     }
 }
 
-/// `workload` with `latency`'s `value` declared within `range` (min, max of
-/// its magnitudes), and `requests_total`'s within [1, 5.6e9], the range the
-/// benchmark declares for its counter; unchanged for `None`.
-fn declaring_latency_range(
+/// With the default (Pareto) and Zipf modes' declared ranges, ten and nine
+/// decades across every series' scale, a stored DDSketch state is charged
+/// at least the spread of its rows log-uniform over that range (the
+/// declared range's floor, so values that fill it are not under-charged):
+/// the stored plan is then priced above the exact one at 10 s and 300 s.
+/// Per-series values of these modes may span much less than the column
+/// does; which plan is cheaper for them is for a measured table's bytes
+/// per state (fitted from the data plane's stored states) to settle. These
+/// pin the selection the floor gives.
+#[test]
+fn quantile_at_10_hz_under_column_wide_declared_ranges_follows_the_floor() {
+    use PlanKind::{ExactScan, StoredStates};
+    let expected = [
+        (BENCHMARK_RANGES[1], [ExactScan, ExactScan, ExactScan]),
+        (BENCHMARK_RANGES[2], [ExactScan, StoredStates, ExactScan]),
+    ];
+    for ((gauge, counter), kinds) in expected {
+        let settings = [TEN_HZ_EVERY_10_S, TEN_HZ_EVERY_60_S, TEN_HZ_EVERY_300_S];
+        for (setting, kind) in settings.into_iter().zip(kinds) {
+            let workload = declaring_ranges(workload(QUANTILE, setting), gauge, counter);
+            let (plan, _) = selected(&workload, true);
+            assert_eq!(
+                plan_kind(&plan),
+                kind,
+                "{setting:?}, declared {gauge:?} / {counter:?}"
+            );
+        }
+    }
+}
+
+/// The `column_magnitudes` (min, max of the values' magnitudes) the
+/// benchmark's value modes declare for its gauge and its counter: none; the
+/// default (Pareto gauge) mode; Zipf integers; the realistic mode.
+const BENCHMARK_RANGES: [(Option<(f64, f64)>, Option<(f64, f64)>); 4] = [
+    (None, None),
+    (Some((0.0603, 1.51e9)), Some((0.0603, 1.64e8))),
+    (Some((1.0, 1.51e9)), Some((1.0, 5.6e9))),
+    (Some((0.12, 1.83e6)), Some((1.0, 3.27e8))),
+];
+
+/// `workload` with `latency`'s `value` declared within `gauge` and
+/// `requests_total`'s within `counter` (min, max of their magnitudes);
+/// `None` declares nothing.
+fn declaring_ranges(
     workload: PlanningWorkload,
-    range: Option<(f64, f64)>,
+    gauge: Option<(f64, f64)>,
+    counter: Option<(f64, f64)>,
 ) -> PlanningWorkload {
-    let Some((min_abs, max_abs)) = range else {
-        return workload;
-    };
     let mut workload = serde_json::to_value(workload).unwrap();
     let sources = &mut workload["data_workload"]["sources"];
-    sources["latency"]["column_magnitudes"] =
-        serde_json::json!({"value": {"min_abs": min_abs, "max_abs": max_abs}});
-    sources["requests_total"]["column_magnitudes"] =
-        serde_json::json!({"value": {"min_abs": 1.0, "max_abs": 5.6e9}});
+    for (source, range) in [("latency", gauge), ("requests_total", counter)] {
+        if let Some((min_abs, max_abs)) = range {
+            sources[source]["column_magnitudes"] =
+                serde_json::json!({"value": {"min_abs": min_abs, "max_abs": max_abs}});
+        }
+    }
     serde_json::from_value(workload).unwrap()
 }
 

@@ -1968,9 +1968,9 @@ fn declaring(source: &str, facts: asap_types::workload::SourceFacts) -> DataWork
 }
 
 /// A DDSketch built over a scan's `value` is costed within its source's
-/// declared `column_magnitudes` ([0.001, 10000] here), which cap the
-/// spread its rows are charged; undeclared, or a column its producer does
-/// not pass on unchanged, within the assumed range.
+/// declared `column_magnitudes` ([0.001, 10000] here), which cap and floor
+/// the spread its rows are charged; undeclared, or a column its producer
+/// does not pass on unchanged, within the assumed range.
 #[test]
 fn a_ddsketch_over_a_scan_is_costed_at_its_declared_value_magnitude_range() {
     use asap_types::workload::{SourceFacts, ValueMagnitudeRange};
@@ -2012,13 +2012,10 @@ fn a_ddsketch_over_a_scan_is_costed_at_its_declared_value_magnitude_range() {
         state_bytes(&data(Some(latency)), BTreeSet::from(["ts"])),
         ddsketch_costed_bytes(false, None)
     );
-    // A declared range caps the spread of a state's rows: 600 rows are
-    // charged their wide-spread margin, within the seven decades, so the
-    // declared range neither raises nor lowers their bytes.
-    assert_eq!(
-        ddsketch_costed_bytes(false, Some(latency)),
-        ddsketch_costed_bytes(false, None)
-    );
+    // A declared range floors a state's spread at its rows' log-uniform
+    // spread over it: 600 rows within seven decades are charged nearly all
+    // of them, more than their undeclared wide-spread margin.
+    assert!(ddsketch_costed_bytes(false, Some(latency)) > ddsketch_costed_bytes(false, None));
 }
 
 /// A DDSketch over a scan of `latency` whose `value` declares no
