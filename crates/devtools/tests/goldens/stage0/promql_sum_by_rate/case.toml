@@ -1,0 +1,2 @@
+why = "rate over a range selector, then sum by a label, lowers to a per-series rate aggregate under a sum grouped by job"
+args = ["--run-until", "stage0"]

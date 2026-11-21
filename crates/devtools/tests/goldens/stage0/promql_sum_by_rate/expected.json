@@ -1,0 +1,656 @@
+{
+  "accuracy_guarantees": "enforced",
+  "deployment_capabilities": {
+    "counter_semantics": {
+      "extrapolation": true,
+      "reset_handling": true
+    },
+    "excluded_candidates": [],
+    "query_time_results_retained": false,
+    "raw_data_retained": true,
+    "state_not_mergeable_across_windows": [],
+    "supported_summaries": [
+      {
+        "readouts": [
+          "Total"
+        ],
+        "summary_type": "Cms"
+      },
+      {
+        "readouts": [
+          "TopK"
+        ],
+        "summary_type": "CmsWithHeap"
+      },
+      {
+        "readouts": [
+          "TopK"
+        ],
+        "summary_type": "CountSketchWithHeap"
+      },
+      {
+        "readouts": [
+          "Distinct"
+        ],
+        "summary_type": "Hll"
+      },
+      {
+        "readouts": [
+          "Distinct"
+        ],
+        "summary_type": "Kmv"
+      },
+      {
+        "readouts": [
+          "Quantile"
+        ],
+        "summary_type": "Kll"
+      },
+      {
+        "readouts": [
+          "Quantile"
+        ],
+        "summary_type": "DDSketch"
+      },
+      {
+        "readouts": [
+          "Total",
+          "FrequencyL2",
+          "Distinct",
+          "FrequencyEntropy"
+        ],
+        "summary_type": "UnivMon"
+      }
+    ]
+  },
+  "format": "asap-stage-pipeline/v2",
+  "memo": {
+    "steps": [
+      {
+        "groups": [
+          {
+            "aggregate_coverage": "covers G1 through [Aggregate sum()] selecting [{\"columns\":[]}]",
+            "candidate_count": 0,
+            "candidate_count_by_origin": {},
+            "candidates": [],
+            "children": [
+              1
+            ],
+            "column_lineage": [
+              "http_requests_total.job",
+              "G0.1"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": null,
+            "id": 0,
+            "label": "Aggregate sum()",
+            "operator": {
+              "NonASAP": {
+                "Aggregate": {
+                  "child": 1,
+                  "filters": [],
+                  "having": null,
+                  "measures": [
+                    {
+                      "col": null,
+                      "kind": "sum"
+                    }
+                  ],
+                  "output_names": [
+                    ""
+                  ],
+                  "reduction": {
+                    "Reduce": [
+                      2
+                    ]
+                  }
+                }
+              }
+            },
+            "parents": [],
+            "queries": [
+              0
+            ],
+            "result_kind": "instant_vector",
+            "roots_of": [
+              0
+            ],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "http_requests_total"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": "covers G3 through [Aggregate rate()] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"http_requests_total\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
+            "candidate_count": 0,
+            "candidate_count_by_origin": {},
+            "candidates": [],
+            "children": [
+              2
+            ],
+            "column_lineage": [
+              "http_requests_total.ts",
+              "G1.1",
+              "http_requests_total.job",
+              "http_requests_total.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": null,
+            "id": 1,
+            "label": "Aggregate rate()",
+            "operator": {
+              "NonASAP": {
+                "Aggregate": {
+                  "child": 2,
+                  "filters": [],
+                  "having": null,
+                  "measures": [
+                    {
+                      "kind": "rate"
+                    }
+                  ],
+                  "output_names": [
+                    ""
+                  ],
+                  "reduction": "PerEntity"
+                }
+              }
+            },
+            "parents": [
+              0
+            ],
+            "queries": [
+              0
+            ],
+            "result_kind": "instant_vector",
+            "roots_of": [],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "http_requests_total"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": null,
+            "candidate_count": 0,
+            "candidate_count_by_origin": {},
+            "candidates": [],
+            "children": [
+              3
+            ],
+            "column_lineage": [
+              "http_requests_total.ts",
+              "http_requests_total.value",
+              "http_requests_total.job",
+              "http_requests_total.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": null,
+            "id": 2,
+            "label": "TimeRange 300s",
+            "operator": {
+              "NonASAP": {
+                "TimeRange": {
+                  "child": 3,
+                  "kind": "range",
+                  "range": {
+                    "nanos": 0,
+                    "secs": 300
+                  }
+                }
+              }
+            },
+            "parents": [
+              1
+            ],
+            "queries": [
+              0
+            ],
+            "result_kind": "range_vector",
+            "roots_of": [],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "http_requests_total"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": null,
+            "candidate_count": 0,
+            "candidate_count_by_origin": {},
+            "candidates": [],
+            "children": [],
+            "column_lineage": [
+              "http_requests_total.ts",
+              "http_requests_total.value",
+              "http_requests_total.job",
+              "http_requests_total.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": false,
+            "evaluation_grid": null,
+            "id": 3,
+            "label": "Scan",
+            "operator": {
+              "NonASAP": {
+                "Scan": {
+                  "predicates": [],
+                  "schema": {
+                    "closed": true,
+                    "fields": [
+                      {
+                        "dtype": {
+                          "Plain": "timestamp"
+                        },
+                        "name": "ts",
+                        "nullable": false
+                      },
+                      {
+                        "dtype": {
+                          "Plain": "float64"
+                        },
+                        "name": "value",
+                        "nullable": false
+                      },
+                      {
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "name": "job",
+                        "nullable": true
+                      },
+                      {
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "name": "$promql_series_identity",
+                        "nullable": false
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": [
+                      [
+                        3,
+                        0
+                      ]
+                    ]
+                  },
+                  "source": {
+                    "TimeSeries": {
+                      "metric": "http_requests_total"
+                    }
+                  }
+                }
+              }
+            },
+            "parents": [
+              2
+            ],
+            "queries": [
+              0
+            ],
+            "result_kind": "instant_vector",
+            "roots_of": [],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "http_requests_total"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          }
+        ],
+        "step": "stage0",
+        "title": "Stage 0, the frontends' DAG hash-consed"
+      }
+    ]
+  },
+  "run_until": "stage0",
+  "search": "candidate-connections",
+  "stage0_query_language_frontends": {
+    "dag": {
+      "nodes": [
+        {
+          "operator": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": false
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "job",
+                      "nullable": true
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "$promql_series_identity",
+                      "nullable": false
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": [
+                    [
+                      3,
+                      0
+                    ]
+                  ]
+                },
+                "source": {
+                  "TimeSeries": {
+                    "metric": "http_requests_total"
+                  }
+                }
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          }
+        },
+        {
+          "operator": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 0,
+                "kind": "range",
+                "range": {
+                  "nanos": 0,
+                  "secs": 300
+                }
+              }
+            }
+          },
+          "result_kind": "range_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          }
+        },
+        {
+          "operator": {
+            "NonASAP": {
+              "Aggregate": {
+                "child": 1,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "kind": "rate"
+                  }
+                ],
+                "output_names": [
+                  ""
+                ],
+                "reduction": "PerEntity"
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          }
+        },
+        {
+          "operator": {
+            "NonASAP": {
+              "Aggregate": {
+                "child": 2,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "col": null,
+                    "kind": "sum"
+                  }
+                ],
+                "output_names": [
+                  ""
+                ],
+                "reduction": {
+                  "Reduce": [
+                    2
+                  ]
+                }
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "sum",
+                "nullable": false
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          }
+        }
+      ],
+      "roots": [
+        {
+          "Operator": 3
+        }
+      ]
+    }
+  },
+  "stage1_logical_asap_optimization": null,
+  "stage2_physical_asap_optimization": null,
+  "stage3_plan_selection": null,
+  "workload": {
+    "data_workload": {
+      "arrival": {
+        "ingesting": {
+          "rows_per_second": 1000.0
+        }
+      },
+      "sources": {}
+    },
+    "queries": [
+      {
+        "id": "q1",
+        "language": "promql",
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "recurrence": {
+          "repeated": {
+            "fixed_interval_at": {
+              "evaluation_phase": 0,
+              "interval": 60000
+            }
+          }
+        },
+        "requirements": {
+          "accuracy": {
+            "accuracy_scope": "whole_result",
+            "failure_probability": 0.0,
+            "max_error": 0.0
+          },
+          "repeat_interval_ms": 60000
+        },
+        "text": "sum by (job) (rate(http_requests_total[5m]))"
+      }
+    ]
+  }
+}

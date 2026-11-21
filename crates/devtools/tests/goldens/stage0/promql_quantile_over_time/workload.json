@@ -1,0 +1,29 @@
+{
+  "query_workload": {
+    "language": "promql",
+    "query_batch": null,
+    "repeating_queries": [
+      {
+        "query": "quantile_over_time(0.9, request_latency_seconds[5m])",
+        "demand": {
+          "fixed_interval_at": {
+            "interval": 60000,
+            "evaluation_phase": 0
+          }
+        },
+        "requirements": {
+          "accuracy": {
+            "max_error": 0.0,
+            "failure_probability": 0.0,
+            "accuracy_scope": "whole_result"
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        }
+      }
+    ]
+  }
+}
