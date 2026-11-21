@@ -69,8 +69,10 @@ struct QuerySignature<'a> {
     answering_executions_per_output: Vec<Vec<ExecutionInContext>>,
     /// The groups it may read only exactly.
     exact_only_groups: Option<&'a BTreeSet<MemoGroupId>>,
-    /// Its range-evaluation span (`QueryWorkloadEntry::range_span_ms`).
-    range_span_ms: u64,
+    /// Its retained span (`SelectableExecutions::retained_span_ms_of_query`):
+    /// its range-evaluation span, or its refresh interval when the data
+    /// plane caches final query results.
+    retained_span_ms: u64,
     /// Its accuracy target, by index among the workload's distinct targets
     /// ([`AccuracyTarget`] holds floats: metric, ε, δ and scope all equal).
     accuracy_target_index: usize,
@@ -213,7 +215,7 @@ pub(crate) fn copies_in_equivalent_contexts<'a>(
                 .logical_candidates
                 .exact_only_groups_of_query
                 .get(query.0),
-            range_span_ms: inputs.entries[query.0].range_span_ms(),
+            retained_span_ms: inputs.selectable.retained_span_ms_of_query()[query.0],
             accuracy_target_index: target_of_query[query.0],
         })
     };

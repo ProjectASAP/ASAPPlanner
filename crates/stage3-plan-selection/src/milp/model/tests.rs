@@ -178,7 +178,8 @@ fn selection_inputs(
     edge_costs: &[((usize, usize), f64)],
     retention: &[(usize, f64)],
 ) -> (SelectableExecutions, ExecutionCosts) {
-    let mut selectable = SelectableExecutions::new(physical, entries, &output_groups(physical));
+    let mut selectable =
+        SelectableExecutions::new(physical, entries, &output_groups(physical), false);
     selectable.retain_answering(|query, _, execution| {
         !physical.logical_candidates.query_must_not_read(
             query.0,
@@ -217,7 +218,13 @@ fn selection_inputs(
                 let edge = edge_of(selectable_edge);
                 retention_cost_per_retained_second
                     .contains_key(&edge.producer_candidate_id)
-                    .then(|| edge_retention_need_ms(physical, entries, selectable_edge.edge))
+                    .then(|| {
+                        edge_retention_need_ms(
+                            physical,
+                            selectable.retained_span_ms_of_query(),
+                            selectable_edge.edge,
+                        )
+                    })
                     .flatten()
             })
             .collect(),
@@ -227,8 +234,7 @@ fn selection_inputs(
         raw_data_source: HashMap::new(),
         unbounded_raw_data_on_disk_cost_per_second: HashMap::new(),
     };
-    costs.least_retention_ms_per_execution =
-        least_retention_ms_per_execution(&selectable, &costs, entries);
+    costs.least_retention_ms_per_execution = least_retention_ms_per_execution(&selectable, &costs);
     (selectable, costs)
 }
 
@@ -502,7 +508,7 @@ fn a_stored_result_read_at_its_newest_output_retains_one_output() {
                 .newest_output_retention_ms
                 .insert(PhysicalCandidateId(1), newest_output_ms);
             costs.least_retention_ms_per_execution =
-                least_retention_ms_per_execution(&selectable, &costs, &entries);
+                least_retention_ms_per_execution(&selectable, &costs);
         }
         solve_selection(&SelectionInputs {
             physical: &physical,

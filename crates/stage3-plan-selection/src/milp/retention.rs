@@ -69,7 +69,7 @@ pub(crate) fn retention_constraints(
     let mut constraints = Vec::new();
     for (index, reader, need_ms) in inputs
         .selectable
-        .reads_back(&inputs.costs.retention_need_ms_per_edge, inputs.entries)
+        .reads_back(&inputs.costs.retention_need_ms_per_edge)
     {
         let Some(&h) = h.get(&executions[index].candidate) else {
             continue;
@@ -116,7 +116,7 @@ pub(crate) fn least_retention_ms(
     let mut retention_ms: HashMap<PhysicalCandidateId, u64> = HashMap::new();
     for (index, reader, need_ms) in inputs
         .selectable
-        .reads_back(&inputs.costs.retention_need_ms_per_edge, inputs.entries)
+        .reads_back(&inputs.costs.retention_need_ms_per_edge)
     {
         let selected = match reader {
             Reader::Edge(position) => edges.contains(&position),

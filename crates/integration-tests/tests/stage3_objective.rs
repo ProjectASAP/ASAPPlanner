@@ -777,3 +777,64 @@ fn the_objective_is_the_plan_cost_on_a_scalar_operand() {
     };
     assert_eq!(cost_of(&edges_reversed), cost_of(&plan));
 }
+
+/// A dashboard range panel, `max_over_time(m[1m])` over the last hour at
+/// 15 s steps, refreshed every 15 s. Without a cache of final query
+/// results, every request re-evaluates all 241 steps, so the views it
+/// reads keep the 1 h span beyond their look-back. When the data plane
+/// caches final query results, a request evaluates only the step since
+/// the previous one, so they keep 15 s instead; the plan is cheaper and
+/// the objective is still its `plan_cost`.
+#[test]
+fn cached_final_query_results_retain_a_range_panel_for_its_refresh_interval() {
+    let panel = over_m(vec![requested(
+        "max_over_time(m[1m])",
+        15_000,
+        Some((15_000, 3_600_000)),
+    )]);
+    let settings = CostInputs::default();
+    let plan_with = |final_query_results_cached| {
+        let capabilities = DeploymentCapabilities {
+            raw_data_retained: false,
+            final_query_results_cached,
+            ..Default::default()
+        };
+        let models = PlanningModels::builtin()
+            .with_cost_inputs(&settings)
+            .with_deployment_capabilities(&capabilities);
+        selected_plan_objective_and_plan_cost_with(&panel, models, &settings)
+    };
+    let longest_retention_ms = |plan: &PhysicalASAPDAG| {
+        plan.materialized_views()
+            .unwrap()
+            .iter()
+            .map(|view| view.retention_ms())
+            .max()
+            .expect("the panel reads a view")
+    };
+    let (uncached, uncached_cost) = plan_with(false);
+    let (cached, cached_cost) = plan_with(true);
+    assert_equal("uncached range panel", uncached_cost);
+    assert_equal("cached range panel", cached_cost);
+    let (uncached_ms, cached_ms) = (
+        longest_retention_ms(&uncached),
+        longest_retention_ms(&cached),
+    );
+    println!(
+        "range panel: longest view retention {uncached_ms} ms uncached, {cached_ms} ms cached; \
+         cost {}/s uncached, {}/s cached",
+        uncached_cost.1, cached_cost.1
+    );
+    assert!(
+        uncached_ms >= 3_600_000 + 60_000,
+        "uncached: {uncached_ms} ms"
+    );
+    assert!(
+        cached_ms <= 60_000 + 15_000 + 60_000,
+        "cached: {cached_ms} ms"
+    );
+    assert!(
+        cached_cost.1 < uncached_cost.1,
+        "{cached_cost:?} vs {uncached_cost:?}"
+    );
+}

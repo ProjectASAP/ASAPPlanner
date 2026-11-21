@@ -178,6 +178,7 @@ fn no_execution_reading_a_producer_costs_less_than_nothing() {
         &physical,
         &entries,
         &[(QueryId(0), state), (QueryId(1), newest_day)],
+        false,
     );
     let costs = execution_costs(
         &physical,
@@ -193,7 +194,9 @@ fn no_execution_reading_a_producer_costs_less_than_nothing() {
             .edges()
             .iter()
             .filter(|edge| selectable.executions()[edge.producer].candidate == v)
-            .filter_map(|edge| edge_retention_need_ms(&physical, &entries, edge.edge))
+            .filter_map(|edge| {
+                edge_retention_need_ms(&physical, selectable.retained_span_ms_of_query(), edge.edge)
+            })
             .min()
             .unwrap_or(0);
         costs.retention_cost_per_second(v, least_need_ms)

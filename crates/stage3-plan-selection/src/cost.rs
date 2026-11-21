@@ -195,9 +195,9 @@ pub(crate) fn execution_costs(
             if !retains_rows[u.0] {
                 return None;
             }
-            *need_ms_of_edge
-                .entry(edge)
-                .or_insert_with(|| edge_retention_need_ms(physical, entries, edge))
+            *need_ms_of_edge.entry(edge).or_insert_with(|| {
+                edge_retention_need_ms(physical, selectable.retained_span_ms_of_query(), edge)
+            })
         })
         .collect();
     // Δ of each candidate that retains rows, the newest output a store
@@ -221,7 +221,7 @@ pub(crate) fn execution_costs(
         .iter()
         .map(|(&v, &newest_ms)| (v, Some(newest_ms)))
         .collect();
-    for (index, _, need_ms) in selectable.reads_back(&retention_need_ms_per_edge, entries) {
+    for (index, _, need_ms) in selectable.reads_back(&retention_need_ms_per_edge) {
         if let Some(most) = most_read_ms.get_mut(&executions[index].candidate) {
             *most = most.zip(need_ms).map(|(most, need)| most.max(need));
         }
@@ -513,8 +513,7 @@ pub(crate) fn execution_costs(
         raw_data_source,
         unbounded_raw_data_on_disk_cost_per_second,
     };
-    costs.least_retention_ms_per_execution =
-        least_retention_ms_per_execution(selectable, &costs, entries);
+    costs.least_retention_ms_per_execution = least_retention_ms_per_execution(selectable, &costs);
     costs
 }
 

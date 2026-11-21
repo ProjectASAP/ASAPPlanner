@@ -17,7 +17,8 @@ static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
 /// The facade splits them by stage: Stage 1 reads the supported summaries
 /// of `deployment_capabilities`, Pass 2 the accuracy `evidence`, Stage 2 the
 /// deployment's retention, and Stage 3 (plan selection) compares candidates
-/// under `cost_inputs` ([`CostInputs`]).
+/// under `cost_inputs` ([`CostInputs`]) and reads whether the deployment
+/// caches final query results (`final_query_results_cached`).
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct PlanningModels<'a> {

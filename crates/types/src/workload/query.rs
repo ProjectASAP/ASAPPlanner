@@ -460,6 +460,35 @@ impl QueryWorkloadEntry {
         self.range_evaluation.map_or(0, |range| range.span_ms)
     }
 
+    /// How far back from a request's end the inputs of its evaluations are
+    /// kept beyond their own look-back, in ms: [`Self::range_span_ms`],
+    /// except when the data plane caches final query results
+    /// (`final_query_results_cached`, a deployment capability) and the
+    /// query repeats at a fixed interval that is a whole number of steps.
+    /// Then consecutive requests evaluate at the same step times, every
+    /// step but those newer than the previous request is answered from the
+    /// cache, and the oldest step evaluated is at most one interval back:
+    /// the span is at most that interval.
+    ///
+    /// Example: a range request over the last hour at 15 s steps, every
+    /// 15 s, cached: 15,000 ms (not 3,600,000). Uncached, or every 10 s
+    /// (not a whole number of steps), or a one-off request: 3,600,000 ms.
+    pub fn retained_range_span_ms(&self, final_query_results_cached: bool) -> u64 {
+        let span_ms = self.range_span_ms();
+        match (
+            final_query_results_cached,
+            self.range_evaluation,
+            self.recurrence.fixed_interval_ms(),
+        ) {
+            (true, Some(range), Some(interval_ms))
+                if range.step_ms > 0 && interval_ms % range.step_ms == 0 =>
+            {
+                span_ms.min(interval_ms)
+            }
+            _ => span_ms,
+        }
+    }
+
     /// The grid, in ms, of the times its requests anchor `@ end()` or
     /// `@ start()` (`at`) at: its request end times, shifted back by its
     /// range-evaluation span for `@ start()`; 1 ms when not known.
@@ -949,5 +978,56 @@ mod tests {
             range_evaluation: None,
         }]);
         assert_eq!(workload.validate(), Err(WorkloadError::InvalidRate(-1.0)));
+    }
+
+    /// With final query results cached, a range evaluation repeating at a
+    /// whole number of steps keeps its inputs for its refresh interval
+    /// beyond their look-back, not for its whole span; otherwise, for the
+    /// whole span.
+    #[test]
+    fn cached_final_results_retain_the_refresh_interval_not_the_span() {
+        let hour_at_15s = RangeEvaluation {
+            step_ms: 15_000,
+            span_ms: 3_600_000,
+        };
+        let entry = |recurrence, range_evaluation| QueryWorkloadEntry {
+            query: Query("quantile_over_time(0.9, lat[1m])".into()),
+            requirements: QueryRequirements::default(),
+            predictability: Predictability::Predictable { known_at: None },
+            recurrence,
+            range_evaluation,
+        };
+        let every = |interval_ms| {
+            QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+                interval: RepetitionInterval(interval_ms),
+                evaluation_phase: TimestampMs(0),
+            })
+        };
+        let dashboard = entry(every(15_000), Some(hour_at_15s));
+        assert_eq!(dashboard.retained_range_span_ms(false), 3_600_000);
+        assert_eq!(dashboard.retained_range_span_ms(true), 15_000);
+        // Every minute: four new steps per request.
+        let minutely = entry(every(60_000), Some(hour_at_15s));
+        assert_eq!(minutely.retained_range_span_ms(true), 60_000);
+        // Refreshing less often than the span re-evaluates every step.
+        let daily = entry(every(86_400_000), Some(hour_at_15s));
+        assert_eq!(daily.retained_range_span_ms(true), 3_600_000);
+        // Every 10 s at 15 s steps: requests evaluate at other step times,
+        // so the cache answers none of them.
+        let off_grid = entry(every(10_000), Some(hour_at_15s));
+        assert_eq!(off_grid.retained_range_span_ms(true), 3_600_000);
+        // No known interval: the whole span.
+        let one_off = entry(
+            QueryRecurrence::OneTime {
+                invocations: 1,
+                execute_at: None,
+            },
+            Some(hour_at_15s),
+        );
+        assert_eq!(one_off.retained_range_span_ms(true), 3_600_000);
+        // An instant query has no span either way.
+        let instant = entry(every(15_000), None);
+        assert_eq!(instant.retained_range_span_ms(true), 0);
+        assert_eq!(instant.retained_range_span_ms(false), 0);
     }
 }
