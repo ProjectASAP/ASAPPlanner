@@ -6,8 +6,10 @@
 //! them, on sketch plan snapshot workloads and on a query that reads one
 //! state twice (an in-query diamond: a ratio of two quantiles). These
 //! comparisons solve exactly (`ASAP_STAGE3_EXACT=1`); the default stop
-//! rule (a relative gap of 1 % or 30 s) is checked against the exact
-//! optimum.
+//! rule (a relative gap of 1 % or 10,000 branch-and-bound nodes) is
+//! checked against the exact optimum. The MILP's latencies are the plan's
+//! own: `plan_cost` of the selected plan gives each query the latency the
+//! MILP does.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -315,5 +317,124 @@ const DISTINCT_VARIABLES: u64 = 425;
 const DISTINCT_ROWS: u64 = 747;
 const SEED_VARIABLES: u64 = 1550;
 const SEED_ROWS: u64 = 2763;
+/// Each query's latency in the MILP, and the frequency-weighted mean, are
+/// what `plan_cost` gives the selected plan (`--price-plan`), exactly and
+/// with the default stop rule, on the five measured workloads.
+#[test]
+fn the_milp_latencies_are_the_plan_costs() {
+    let snapshots = "crates/devtools/tests/sketch_plan_snapshots/workloads";
+    let root = root();
+    let scratch = std::env::temp_dir().join(format!("lml_plan_cost_{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    for (name, workload, deployment, ignore_accuracy) in [
+        ("topk", format!("{snapshots}/topk-rate.json"), "mvp", true),
+        (
+            "mixed",
+            format!("{snapshots}/mixed-quantiles.json"),
+            "raw-retained",
+            false,
+        ),
+        (
+            "distinct",
+            format!("{snapshots}/distinct-two-forms.json"),
+            "raw-retained",
+            false,
+        ),
+        (
+            "seed",
+            "tools/dag-viewer/workloads/random-mixed-seed-862/workload-01.json".to_string(),
+            "mvp",
+            false,
+        ),
+        ("typical", TYPICAL_DASHBOARD.to_string(), "mvp", false),
+    ] {
+        for exact in [true, false] {
+            let plan = scratch.join(format!("{name}-{exact}.plan.json"));
+            let report = scratch.join(format!("{name}-{exact}.report.json"));
+            let planner = |extra: &[&str]| {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_asap_planner"));
+                command
+                    .current_dir(&root)
+                    .args(["--workload", &workload, "--run-until", "stage3"])
+                    .args([
+                        "--deployment-capabilities",
+                        &format!("crates/devtools/tests/sketch_plan_snapshots/deployments/{deployment}.capabilities.json"),
+                    ])
+                    .args(["--cost-inputs", cost_inputs_of(&workload)])
+                    .args(extra);
+                if ignore_accuracy {
+                    command.arg("--ignore-accuracy-guarantees");
+                }
+                if exact {
+                    command.env("ASAP_STAGE3_EXACT", "1");
+                }
+                command.output().unwrap()
+            };
+            let selected = planner(&["--format", "json", "--plan-file", plan.to_str().unwrap()]);
+            let document: Value = serde_json::from_slice(&selected.stdout)
+                .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&selected.stderr)));
+            let stage3 = &document["stage3_plan_selection"];
+            let milp_mean_ms = stage3["milp_objective_mean_latency_ms"].as_f64().unwrap();
+            let milp_per_query_ms: Vec<f64> = stage3["milp_latency_ms_per_query"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|ms| ms.as_f64().unwrap())
+                .collect();
+            let priced = planner(&[
+                "--out",
+                "/dev/null",
+                "--price-plan",
+                plan.to_str().unwrap(),
+                "--report-file",
+                report.to_str().unwrap(),
+            ]);
+            assert!(
+                priced.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&priced.stderr)
+            );
+            let report: Value =
+                serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+            let per_query = report["predicted_usage"]["per_query"].as_array().unwrap();
+            let plan_cost_per_query_ms: Vec<f64> = per_query
+                .iter()
+                .map(|query| query["latency_ms"].as_f64().unwrap())
+                .collect();
+            let weights: Vec<f64> = per_query
+                .iter()
+                .map(|query| query["evaluations_per_second"].as_f64().unwrap())
+                .collect();
+            let plan_cost_mean_ms = plan_cost_per_query_ms
+                .iter()
+                .zip(&weights)
+                .map(|(ms, weight)| ms * weight)
+                .sum::<f64>()
+                / weights.iter().sum::<f64>();
+            let close = |a: f64, b: f64| (a - b).abs() <= 1e-6 * b.abs().max(1.0);
+            assert!(
+                close(milp_mean_ms, plan_cost_mean_ms),
+                "{name} (exact {exact}): MILP mean {milp_mean_ms} ms, plan_cost {plan_cost_mean_ms} ms"
+            );
+            assert_eq!(
+                milp_per_query_ms.len(),
+                plan_cost_per_query_ms.len(),
+                "{name}"
+            );
+            for (query, (milp, plan_cost)) in milp_per_query_ms
+                .iter()
+                .zip(&plan_cost_per_query_ms)
+                .enumerate()
+            {
+                assert!(
+                    close(*milp, *plan_cost),
+                    "{name} (exact {exact}): q{query} MILP {milp} ms, plan_cost {plan_cost} ms"
+                );
+            }
+        }
+    }
+    std::fs::remove_dir_all(&scratch).ok();
+}
+
 const TYPICAL_VARIABLES: u64 = 2540;
 const TYPICAL_ROWS: u64 = 4585;

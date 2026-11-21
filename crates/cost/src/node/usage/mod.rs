@@ -1285,19 +1285,31 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             ..
         }) => {
             // One window's states: each input row updates the window its
-            // time falls in. At ingestion time the rows of one window
-            // arrive at the rate of one second's `input.rows`; at query
-            // time one window holds its width's share of the time its
-            // input's raw rows span (without a span, its share of the
+            // time falls in. At ingestion time one window holds the
+            // input's share of one second of its sources' raw rows, over
+            // the window at the exact arrival rate (one second's
+            // `input.rows` is rounded: 666.67 rows a second arrive as 667,
+            // and 60 s of them are 40,000 rows, not 40,020), so a chain
+            // built at ingestion time folds what the same chain built at
+            // query time does; without a rate, `input.rows` a second. At
+            // query time one window holds its width's share of the time
+            // its input's raw rows span (without a span, its share of the
             // retained windows).
             let group_count = groups(reduction)?;
-            let rows_per_tumbling_window = match ingestion {
-                true => u64::try_from(
+            let rows_per_tumbling_window = match (ingestion, rows_per_ms) {
+                (true, Some(rows_per_ms)) => {
+                    let raw_rows_per_second = (rows_per_ms * ONE_SECOND_MS as f64).round().max(1.0);
+                    let share_of_raw_rows = input.rows as f64 / raw_rows_per_second;
+                    ((share_of_raw_rows * rows_per_ms * *tumbling_window_width_ms as f64).round()
+                        as u64)
+                        .max(1)
+                }
+                (true, None) => u64::try_from(
                     (u128::from(input.rows) * u128::from(*tumbling_window_width_ms))
                         .div_ceil(u128::from(ONE_SECOND_MS)),
                 )
                 .map_err(|_| AnalyticalCostError::Overflow)?,
-                false => input_raw_rows_span_ms
+                (false, _) => input_raw_rows_span_ms
                     .filter(|span_ms| *span_ms > 0)
                     .map_or(input.rows.div_ceil(retained_output_count), |span_ms| {
                         ((input.rows as f64 * *tumbling_window_width_ms as f64 / span_ms as f64)
