@@ -61,6 +61,7 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: Some(60_000),
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let windows = node(Payload::NonASAP(NonASAPOp::TimeRange {
@@ -162,6 +163,7 @@ fn an_operator_keeping_its_input_window_over_a_chain_or_its_windows_selects_what
             tumbling_windows: 1,
             chain_tumbling_window_width_ms: Some(60_000),
             raw_rows_span_ms: None,
+            states_last_merged: false,
             state_input_rows: None,
         };
         for &step in path {
@@ -214,6 +216,7 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
         tumbling_windows: 5,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
@@ -236,21 +239,34 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
     );
 }
 
-/// A `Project` or `Filter` over KLL states passes them on unchanged, so
-/// its states keep the KLL family, and an estimate reading them is costed
-/// as a KLL quantile, as over the build itself, not as a plain row.
+/// A `Project` or `Filter` over merged KLL states passes them on
+/// unchanged: its states keep the KLL family and stay merged, so an
+/// estimate reading them is costed as a KLL quantile over sorted levels,
+/// as over the merge itself, and each row holds only the columns it keeps
+/// beside its state (a `Project` dropping `job` drops its 16 bytes).
 #[test]
 fn a_project_or_filter_over_states_passes_their_family_on() {
     let settings = CostInputs::default();
     let data = DataWorkload::default();
     let kll = SketchParams::Kll { k: 547 };
-    let states = node(Payload::ASAP(ASAPOp::SummaryAgg {
-        child: 0,
-        summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
-        input: SummaryUpdate::column(ColumnRef::SampleValue),
-        reduction: Reduction::PerEntity,
-        filter: None,
-    }));
+    let state_field = Field {
+        name: "state".into(),
+        dtype: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+        nullable: false,
+    };
+    let states = PhysicalASAPDAGNode {
+        output_schema: Schema {
+            fields: vec![
+                state_field.clone(),
+                Field::plain("job", asap_types::ir::schema::DataType::Utf8, false),
+            ],
+            ..Schema::default()
+        },
+        ..node(Payload::ASAP(ASAPOp::SummaryMerge {
+            children: vec![0],
+            group_by: None,
+        }))
+    };
     let states_output = ProducerOutput {
         payload: &states.payload,
         output_schema: &states.output_schema,
@@ -264,6 +280,7 @@ fn a_project_or_filter_over_states_passes_their_family_on() {
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: true,
         state_input_rows: None,
     };
     for passing in [
@@ -279,12 +296,9 @@ fn a_project_or_filter_over_states_passes_their_family_on() {
         }),
     ] {
         let mut passing = node(passing);
+        // Without `job`, as a `Project` keeping only the state.
         passing.output_schema = Schema {
-            fields: vec![Field {
-                name: "state".into(),
-                dtype: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
-                nullable: false,
-            }],
+            fields: vec![state_field.clone()],
             ..Schema::default()
         };
         let usage = node_resource_usage_and_cost(
@@ -296,11 +310,16 @@ fn a_project_or_filter_over_states_passes_their_family_on() {
             &settings,
         )
         .unwrap();
+        let name = passing.payload.kind_name();
         assert!(
             matches!(usage.family, StateFamily::Sketch(SketchParams::Kll { .. })),
-            "{}",
-            passing.payload.kind_name()
+            "{name}"
         );
+        // Merged states stay merged: an estimate over them reads sorted
+        // levels.
+        assert!(usage.states_last_merged, "{name}");
+        // The same 4,828-byte states, without `job`'s 16 bytes a row.
+        assert_eq!(usage.output.bytes, 1_000 * (4_844 - 16), "{name}");
     }
 }
 
@@ -331,6 +350,7 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
         tumbling_windows: 5,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
@@ -390,6 +410,7 @@ fn raw_rows<'a>(
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: Some(span_ms),
+        states_last_merged: false,
         state_input_rows: None,
     }
 }
@@ -653,6 +674,7 @@ fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let chain = PhysicalASAPDAGNode {
@@ -890,6 +912,7 @@ fn a_merge_reading_one_state_per_group_passes_it_through() {
             tumbling_windows: 1,
             chain_tumbling_window_width_ms: None,
             raw_rows_span_ms: None,
+            states_last_merged: false,
             state_input_rows: Some(StateInputRows {
                 rows_per_state: Some(100),
                 non_negative: true,
@@ -1521,6 +1544,7 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: Some(rows),
     };
     let rollup = PhysicalASAPDAGNode {
@@ -1592,6 +1616,7 @@ fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: Some(rows),
     };
     let merge_ms = |group_by: Option<Vec<usize>>| {
@@ -1652,6 +1677,7 @@ fn query_time_memory_is_held_only_while_the_node_computes() {
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let merge = PhysicalASAPDAGNode {
@@ -1784,6 +1810,7 @@ fn an_ingestion_time_view_of_raw_rows_keeps_the_rows_its_retention_covers() {
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let row_schema = Schema::new(vec![
@@ -1848,6 +1875,7 @@ fn a_view_without_retention_is_not_costed() {
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let shift = PhysicalASAPDAGNode {
@@ -1922,6 +1950,7 @@ fn a_view_over_an_ingestion_time_chain_keeps_one_output_per_chain_window() {
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: Some(60_000),
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let usage = node_resource_usage_and_cost(
@@ -1989,6 +2018,7 @@ fn ddsketch_build_cost(
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let settings = CostInputs::default();
@@ -2205,6 +2235,7 @@ fn ddsketch_assumed_facts_over_sources(
         unchanged_columns: BTreeSet::from(["ts", "value"]),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
         raw_rows_span_ms: None,
     };
@@ -2390,6 +2421,7 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let mut chain = node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -2508,6 +2540,7 @@ fn a_finalize_charges_each_group_its_measured_time() {
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let finalize = node(Payload::ASAP(ASAPOp::FinalizeExactAccumulator {
@@ -2558,6 +2591,7 @@ fn a_per_series_aggregate_charges_the_labels_it_carries() {
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let ms_per_row = |labels: &[&str]| {
@@ -2674,6 +2708,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         tumbling_windows: 360,
         chain_tumbling_window_width_ms: Some(10_000),
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: Some(rows),
     };
     let wider = ProducerOutput {
@@ -2684,6 +2719,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         tumbling_windows: 60,
         chain_tumbling_window_width_ms: Some(60_000),
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: Some(StateInputRows {
             rows_per_state: Some(100),
             ..rows
@@ -2744,6 +2780,7 @@ fn kll_estimate_us_per_group(producer: Payload, rows_per_state: u64, state_bytes
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: matches!(states.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. })),
         state_input_rows: Some(StateInputRows {
             rows_per_state: Some(rows_per_state),
             non_negative: true,
@@ -3207,6 +3244,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             tumbling_windows: 1,
             chain_tumbling_window_width_ms: Some(60_000),
             raw_rows_span_ms: None,
+            states_last_merged: false,
             state_input_rows: Some(rows_per_state),
         };
         let windows = PhysicalASAPDAGNode {
@@ -3348,6 +3386,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             tumbling_windows: 1,
             chain_tumbling_window_width_ms: None,
             raw_rows_span_ms: None,
+            states_last_merged: false,
             state_input_rows: Some(kmv_rows),
         }],
         None,
@@ -3418,6 +3457,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
                 tumbling_windows: 1,
                 chain_tumbling_window_width_ms: None,
                 raw_rows_span_ms: None,
+                states_last_merged: false,
                 state_input_rows: Some(StateInputRows {
                     rows_per_state: Some(rows_per_state),
                     non_negative: true,
@@ -3451,6 +3491,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             tumbling_windows: 1,
             chain_tumbling_window_width_ms: None,
             raw_rows_span_ms: None,
+            states_last_merged: false,
             state_input_rows: None,
         }],
         None,
@@ -3690,6 +3731,7 @@ fn rows_of<'a>(producer: &'a PhysicalASAPDAGNode, rows: u64) -> ProducerOutput<'
         unchanged_columns: BTreeSet::new(),
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
         raw_rows_span_ms: None,
     }
@@ -3903,6 +3945,7 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
         tumbling_windows: 1,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let family = FieldDataType::Sketch(algorithm);

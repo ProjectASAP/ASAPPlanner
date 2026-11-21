@@ -274,6 +274,11 @@ pub struct ProducerOutput<'a> {
     /// windows of a 1 Hz series passes on 10 rows per state, and a merge
     /// over it outputs states of 3,600 rows.
     pub state_input_rows: Option<StateInputRows>,
+    /// Whether the summary states it outputs were last written by a
+    /// merge (a `SummaryMerge`'s, passed on by a `Filter` or `Project` over
+    /// them), which leaves a KLL's levels sorted; `false` for states built
+    /// by updates and for any other node.
+    pub states_last_merged: bool,
     /// The time, in ms, that the raw rows it outputs span: a scan's
     /// lookback (one second of arriving rows at ingestion time, the
     /// retained rows of raw data materialized at ingestion), narrowed by a
@@ -336,6 +341,9 @@ pub struct NodeResourceUsageAndCost<'a> {
     /// What each summary state it outputs folds
     /// ([`ProducerOutput::state_input_rows`]).
     pub state_input_rows: Option<StateInputRows>,
+    /// Whether its states were last written by a merge
+    /// ([`ProducerOutput::states_last_merged`]).
+    pub states_last_merged: bool,
     /// The time its raw output rows span
     /// ([`ProducerOutput::raw_rows_span_ms`]).
     pub raw_rows_span_ms: Option<u64>,
@@ -380,6 +388,7 @@ impl<'a> NodeResourceUsageAndCost<'a> {
             tumbling_windows: self.tumbling_windows,
             chain_tumbling_window_width_ms: self.chain_tumbling_window_width_ms,
             state_input_rows: self.state_input_rows,
+            states_last_merged: self.states_last_merged,
             raw_rows_span_ms: self.raw_rows_span_ms,
         }
     }
@@ -612,7 +621,15 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             table,
             operator,
             node.output_state.timing,
-            family,
+            // A `Filter` or `Project` passes states on without touching
+            // them: it is measured as one over plain rows, whatever the
+            // family of the states it passes on.
+            match &node.payload {
+                Payload::NonASAP(NonASAPOp::Filter { .. } | NonASAPOp::Project { .. }) => {
+                    StateFamily::None
+                }
+                _ => family,
+            },
             sketch_size,
         ),
     };
@@ -1158,17 +1175,44 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             | NonASAPOp::PromqlInfoEnrich { .. }
             | NonASAPOp::PromqlSeriesSample { .. }
             | NonASAPOp::PromqlSubquery { .. } => {
+                // A `Filter` or `Project` outputting states passes each
+                // state on as it is, its row holding only its own columns
+                // beside it: a `Project` dropping a label drops its bytes.
+                let out = match (operator, producers.first()) {
+                    (NonASAPOp::Filter { .. } | NonASAPOp::Project { .. }, Some(producer))
+                        if node
+                            .output_schema
+                            .fields
+                            .iter()
+                            .any(|field| !field.is_plain()) =>
+                    {
+                        let state_bytes =
+                            state_bytes_per_row(producer.output, producer.output_schema);
+                        EdgeStatistics {
+                            rows: input.rows,
+                            bytes: input
+                                .rows
+                                .checked_mul(
+                                    state_bytes + state_row_bytes_beside_state(&node.output_schema),
+                                )
+                                .ok_or(AnalyticalCostError::Overflow)?,
+                        }
+                    }
+                    _ => input,
+                };
+                // It reads and passes on the same rows, each as it outputs
+                // it.
                 let estimate = estimate_operator_with_terms(
                     PhysicalOperator::PassThrough,
                     OperatorStatistics::PassThrough {
-                        edges: unary(input),
+                        edges: UnaryEdgeStatistics {
+                            input: out,
+                            output: out,
+                            promql: None,
+                        },
                     },
                 );
-                (
-                    input,
-                    estimate,
-                    format!("operator: pass {} rows", input.rows),
-                )
+                (out, estimate, format!("operator: pass {} rows", input.rows))
             }
         },
         Payload::ASAP(ASAPOp::SummaryAgg {
@@ -1411,13 +1455,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             // A merge leaves a KLL's levels sorted; a state built by
             // updates (a `SummaryAgg`, a chain's window) is sorted when read.
             let written_by = match producers.first() {
-                Some(producer)
-                    if matches!(producer.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. })) =>
-                {
-                    StateLastWrittenBy::Merge {
-                        input_rows: producer.state_input_rows,
-                    }
-                }
+                Some(producer) if producer.states_last_merged => StateLastWrittenBy::Merge {
+                    input_rows: producer.state_input_rows,
+                },
                 producer => StateLastWrittenBy::Updates {
                     input_rows: producer.and_then(|producer| producer.state_input_rows),
                 },
@@ -1723,6 +1763,22 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             .then_some(input_raw_rows_span_ms)
             .flatten()
     });
+    let outputs_states = node
+        .output_schema
+        .fields
+        .iter()
+        .any(|field| !field.is_plain());
+    let states_last_merged = match &node.payload {
+        Payload::ASAP(ASAPOp::SummaryMerge { .. }) => true,
+        Payload::NonASAP(NonASAPOp::Filter { .. } | NonASAPOp::Project { .. })
+            if outputs_states =>
+        {
+            producers
+                .first()
+                .is_some_and(|producer| producer.states_last_merged)
+        }
+        _ => false,
+    };
     let usage = NodeResourceUsageAndCost {
         output: out,
         sources,
@@ -1731,6 +1787,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         tumbling_windows,
         chain_tumbling_window_width_ms,
         state_input_rows,
+        states_last_merged,
         raw_rows_span_ms,
         work_ms_per_execution: node_ms,
         cpu_ops_per_second: estimate.cpu_ops() * per_second,
