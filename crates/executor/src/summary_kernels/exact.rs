@@ -3,7 +3,7 @@ use super::increase::IncreaseAccumulator;
 use crate::summary_kernels::traits::{aggregate_core_object_methods, downcast_peer};
 use crate::AggregateCore;
 use planner_types::ir::schema::FieldDataType as SummaryFamilyType;
-use planner_types::summary_type::{ExactKind, ExactParams};
+use planner_types::summary_type::{CounterReadout, ExactKind, ExactParams};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -27,8 +27,10 @@ pub(crate) enum ScalarState {
     LastTwoSamples([Option<(i64, f64)>; 2]),
 }
 
-/// Both the family and population layout survive persistence. Sharing counter
-/// arithmetic never authorizes a Rate state to answer an Increase evaluation.
+/// Both the family and population layout survive persistence. One counter
+/// state answers both a `rate` and an `increase` evaluation (its
+/// [`CounterReadout`]): both extrapolate the same sampled increase to the
+/// evaluation range, as Prometheus' `extrapolatedRate` does.
 ///
 /// Deserialization validates the payload against its declared family, so
 /// deployments can persist this state with any serde format without mirroring
@@ -79,6 +81,10 @@ impl TryFrom<ExactPayload> for ExactAccumulator {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ExactEvaluation {
     pub statistic: ExactKind,
+    /// For a `Counter` state, whether it reads `rate` or `increase`;
+    /// `None` for every other state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counter_readout: Option<CounterReadout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lookback_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -91,10 +97,12 @@ fn is_zero(ms: &i64) -> bool {
 
 impl ExactAccumulator {
     /// Read one population. An empty MIN/MAX population reads as `None`.
-    /// `range_ms` extrapolates a counter Rate/Increase to that evaluation range.
+    /// `range_ms` extrapolates a counter to that evaluation range, read as
+    /// `counter_readout`.
     pub fn evaluation(
         &self,
         statistic: ExactKind,
+        counter_readout: Option<CounterReadout>,
         range_ms: Option<(i64, i64)>,
         key: Option<&[String]>,
     ) -> Result<Option<f64>, Error> {
@@ -106,10 +114,10 @@ impl ExactAccumulator {
             (None, None) => &self.scalar,
             _ => return Err("evaluation population differs from installed layout".into()),
         };
-        state.evaluation(statistic, range_ms)
+        state.evaluation(counter_readout, range_ms)
     }
 
-    /// The earliest sample time of a counter (Rate/Increase) state, over
+    /// The earliest sample time of a counter state, over
     /// all its populations; `None` for an empty or non-counter state.
     /// Counter states merge pairwise in time order, so a merge of tumbling windows
     /// orders them by this first.
@@ -160,10 +168,7 @@ impl ExactAccumulator {
             SummaryFamilyType::ExactAggregate(K::Count, P::Count) => ScalarState::Count(0),
             SummaryFamilyType::ExactAggregate(K::Min, P::Min) => ScalarState::Min(None),
             SummaryFamilyType::ExactAggregate(K::Max, P::Max) => ScalarState::Max(None),
-            SummaryFamilyType::ExactAggregate(K::Rate, P::Rate)
-            | SummaryFamilyType::ExactAggregate(K::Increase, P::Increase) => {
-                ScalarState::Counter(None)
-            }
+            SummaryFamilyType::ExactAggregate(K::Counter, P::Counter) => ScalarState::Counter(None),
             SummaryFamilyType::ExactAggregate(K::IRate, P::IRate) => {
                 ScalarState::LastTwoSamples([None; 2])
             }
@@ -282,11 +287,12 @@ impl ScalarState {
         }
     }
 
-    /// The population's value for `statistic`; `range_ms` extrapolates a
-    /// counter. An empty MIN/MAX reads as `None`.
+    /// The population's value; `range_ms` extrapolates a counter, read as
+    /// `counter_readout` (a counter needs one). An empty MIN/MAX reads as
+    /// `None`.
     pub(crate) fn evaluation(
         &self,
-        statistic: ExactKind,
+        counter_readout: Option<CounterReadout>,
         range_ms: Option<(i64, i64)>,
     ) -> Result<Option<f64>, Error> {
         match self {
@@ -295,9 +301,13 @@ impl ScalarState {
             } => Ok(Some(sum + compensation)),
             ScalarState::Count(count) => Ok(Some(*count as f64)),
             ScalarState::Min(value) | ScalarState::Max(value) => Ok(*value),
-            ScalarState::Counter(Some(counter)) => counter
-                .extrapolated_value(range_ms, statistic == ExactKind::Rate)
-                .map(Some),
+            ScalarState::Counter(Some(counter)) => {
+                let readout =
+                    counter_readout.ok_or("a counter evaluation needs a counter readout")?;
+                counter
+                    .extrapolated_value(range_ms, readout == CounterReadout::Rate)
+                    .map(Some)
+            }
             ScalarState::Counter(None) => Err("empty counter population".into()),
             ScalarState::LastTwoSamples([Some(previous), Some(last)]) => {
                 Ok(super::increase::instant_rate(*previous, *last))
@@ -481,7 +491,9 @@ mod tests {
         negative.update(None, -1e16, 1);
         restored.merge_from(&negative).unwrap();
         assert_eq!(
-            restored.evaluation(ExactKind::Sum, None, None).unwrap(),
+            restored
+                .evaluation(ExactKind::Sum, None, None, None)
+                .unwrap(),
             Some(1.0)
         );
     }
@@ -493,12 +505,12 @@ mod tests {
         state.update(None, f64::INFINITY, 0);
         state.update(None, 1.0, 0);
         assert_eq!(
-            state.evaluation(ExactKind::Sum, None, None).unwrap(),
+            state.evaluation(ExactKind::Sum, None, None, None).unwrap(),
             Some(f64::INFINITY)
         );
         state.update(None, f64::NEG_INFINITY, 0);
         assert!(state
-            .evaluation(ExactKind::Sum, None, None)
+            .evaluation(ExactKind::Sum, None, None, None)
             .unwrap()
             .unwrap()
             .is_nan());
@@ -515,10 +527,49 @@ mod tests {
         assert_eq!(restored.family(), &sum());
         assert_eq!(
             restored
-                .evaluation(ExactKind::Sum, None, Some(&key))
+                .evaluation(ExactKind::Sum, None, None, Some(&key))
                 .unwrap(),
             Some(2.5)
         );
+    }
+
+    // One counter state answers `rate` and `increase`: the increase
+    // extrapolated to the range, and that per second; a counter evaluation
+    // without a readout is an error. A state persisted under the family
+    // names `Rate` or `Increase` (before they shared a state) is refused.
+    #[test]
+    fn one_counter_state_answers_rate_and_increase() {
+        let counter = SummaryFamilyType::exact(ExactKind::Counter);
+        let mut state = ExactAccumulator::new(counter.clone(), false).unwrap();
+        for (time, value) in [(10_000, 5.), (20_000, 8.), (30_000, 2.), (40_000, 6.)] {
+            state.update(None, value, time);
+        }
+        let read = |state: &ExactAccumulator, readout| {
+            state
+                .evaluation(ExactKind::Counter, Some(readout), Some((0, 60_000)), None)
+                .unwrap()
+                .unwrap()
+        };
+        let increase = read(&state, CounterReadout::Increase);
+        let rate = read(&state, CounterReadout::Rate);
+        // 3 + 2 (after the reset) + 4 over 30 s, extrapolated 10 s back to
+        // the range start (within 1.1 sample intervals) and half an
+        // interval (5 s) forward: 9 × 45 / 30 = 13.5, 0.225 per second of
+        // the 60 s range.
+        assert!((increase - 13.5).abs() < 1e-12, "{increase}");
+        assert!((rate - 0.225).abs() < 1e-12, "{rate}");
+        assert!(state
+            .evaluation(ExactKind::Counter, None, Some((0, 60_000)), None)
+            .is_err());
+        let json = serde_json::to_string(&state).unwrap();
+        for old_name in ["Rate", "Increase"] {
+            let old = json.replace(
+                r#"["Counter","Counter"]"#,
+                &format!(r#"["{old_name}","{old_name}"]"#),
+            );
+            assert_ne!(old, json);
+            assert!(serde_json::from_str::<ExactAccumulator>(&old).is_err());
+        }
     }
 
     // Decoding rejects population states that differ from the declared family.

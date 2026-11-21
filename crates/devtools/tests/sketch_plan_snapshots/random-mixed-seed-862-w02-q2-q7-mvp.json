@@ -19,7 +19,7 @@
     },
     {
       "coverage": {
-        "definition_id": "b876d20377d09364dbbaba79f3786982",
+        "definition_id": "87fb3a2af6a1c70dca832c73960f21b2",
         "selection": [
           {
             "columns": []
@@ -160,7 +160,7 @@
           "cost_per_second": 2.31125188068e-7,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.01157,
-          "detail": "build exact Increase accumulator in tumbling windows of 5000 ms for 10000 groups: 100000 rows x 70 ops, 1000 group visits, 2000.0 states emitted; x 1.0000/s; keeps 87840000 bytes",
+          "detail": "build exact Counter accumulator in tumbling windows of 5000 ms for 10000 groups: 100000 rows x 70 ops, 1000 group visits, 2000.0 states emitted; x 1.0000/s; keeps 87840000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
@@ -566,8 +566,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Increase",
-                    "Increase"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -621,8 +621,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Increase",
-                    "Increase"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -676,8 +676,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Increase",
-                    "Increase"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -1394,8 +1394,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Increase",
-                    "Increase"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -1443,8 +1443,8 @@
                 "reduction": "PerEntity",
                 "summary_type": {
                   "ExactAggregate": [
-                    "Increase",
-                    "Increase"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "tumbling_window_width_ms": 5000
@@ -1453,7 +1453,7 @@
           },
           "retention_ms": 300000,
           "view_coverage": {
-            "definition_id": "b876d20377d09364dbbaba79f3786982",
+            "definition_id": "87fb3a2af6a1c70dca832c73960f21b2",
             "selection": [
               {
                 "columns": []
@@ -1477,8 +1477,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Increase",
-                    "Increase"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -1543,8 +1543,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Increase",
-                    "Increase"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -1637,7 +1637,8 @@
           "payload": {
             "ASAP": {
               "FinalizeExactAccumulator": {
-                "child": 10
+                "child": 10,
+                "counter_readout": "Increase"
               }
             }
           }

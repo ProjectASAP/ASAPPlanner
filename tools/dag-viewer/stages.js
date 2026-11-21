@@ -459,6 +459,10 @@ function stageNodeLines(operator, inputSchema) {
       if (grouping) lines.push(grouping);
       break;
     case 'SummaryEstimate': lines.push(`query: ${compactWire(op.query)}`); break;
+    // A counter state is read as `rate` or `increase`.
+    case 'FinalizeExactAccumulator':
+      if (op.counter_readout) lines.push(`read: ${op.counter_readout.toLowerCase()}`);
+      break;
     case 'SummaryTumblingWindowChain':
       lines.push(`summary: ${summaryTypeText(op.summary_type)}`);
       lines.push(`tumbling windows of ${durationText(op.tumbling_window_width_ms)}`);
@@ -750,7 +754,7 @@ function settingsRows(doc) {
 
 // The capabilities a deployment leaves out and the caller's exclusions, as
 // one line, e.g. "counter extrapolation not supported · not mergeable across
-// windows: exact Rate · excluded candidates: 2"; empty for the defaults.
+// windows: exact Counter · excluded candidates: 2"; empty for the defaults.
 function capabilityLimitsText(capabilities) {
   if (!capabilities || typeof capabilities !== 'object') return '';
   const parts = [];

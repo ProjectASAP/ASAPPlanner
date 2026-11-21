@@ -272,6 +272,206 @@ fn the_asap_lane_runs_a_planned_sum_over_time_and_answers_exactly() {
     }
 }
 
+/// Writes the plan file of `queries` (PromQL, each every 10 s at phase 0,
+/// exact) over counter `c`, planned for 1,000 series sampled every second
+/// arriving at 1,000 rows/s with no raw data kept, so every query reads
+/// ingestion-time chains.
+fn write_counter_plan_file(queries: &[&str], plan_file: &Path) {
+    let entries: Vec<_> = queries
+        .iter()
+        .map(|query| {
+            serde_json::json!({
+                "query": query,
+                "demand": {"fixed_interval_at": {"interval": 10000, "evaluation_phase": 0}},
+                "requirements": {"accuracy": {"max_error": 0.0, "failure_probability": 0.0}},
+                "predictability": {"predictable": {"known_at": null}},
+            })
+        })
+        .collect();
+    let planning = serde_json::json!({
+        "query_workload": {"language": "promql", "repeating_queries": entries},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 1000.0}},
+            "sources": {"c": {"series_count": 1000, "metric_type": "counter",
+                "column_signs": {"value": "non_negative"}, "sample_interval": 1000}},
+        },
+    });
+    let workload_file = plan_file.with_extension("planning.json");
+    let capabilities_file = plan_file.with_extension("capabilities.json");
+    std::fs::write(&workload_file, planning.to_string()).unwrap();
+    std::fs::write(&capabilities_file, r#"{"raw_data_retained": false}"#).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_asap_planner"))
+        .args(["--workload", workload_file.to_str().unwrap()])
+        .args([
+            "--deployment-capabilities",
+            capabilities_file.to_str().unwrap(),
+        ])
+        .args(["--run-until", "stage3", "--format", "json"])
+        .args(["--plan-file", plan_file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{stderr}");
+}
+
+/// The summary types of the tumbling-window chains in `plan_file`.
+fn chain_summary_types(plan_file: &Path) -> Vec<serde_json::Value> {
+    let plan: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(plan_file).unwrap()).unwrap();
+    fn walk(value: &serde_json::Value, found: &mut Vec<serde_json::Value>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(chain) = map.get("SummaryTumblingWindowChain") {
+                    found.push(chain["summary_type"].clone());
+                }
+                map.values().for_each(|value| walk(value, found));
+            }
+            serde_json::Value::Array(values) => values.iter().for_each(|value| walk(value, found)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    walk(&plan, &mut found);
+    found
+}
+
+/// Workload `name` of the harness: `queries` (id, PromQL) every 10 s over
+/// 5 minutes, over counter `c` with 2 series (label `s`), one sample per
+/// second from 0 for 360 s, increasing by uniform steps in [0, 10), seed 1.
+fn counter_workload(name: &str, queries: &[(&str, &str)]) -> WorkloadSpec {
+    let mut workload = harness_workload(name, queries[0].1, 300_000);
+    workload.queries = queries
+        .iter()
+        .map(|(id, text)| WorkloadQuery {
+            id: (*id).into(),
+            texts: vec![QueryText {
+                language: QueryLanguage::PromQl,
+                text: (*text).into(),
+            }],
+            ..workload.queries[0].clone()
+        })
+        .collect();
+    workload.data[0].metric = "c".into();
+    workload.data[0].description.counter = true;
+    workload
+}
+
+/// Each evaluation time's answers: per query id, per series, its value.
+type AnswersOverTime = Vec<(i64, BTreeMap<String, BTreeMap<SeriesLabels, f64>>)>;
+
+/// Installs `plan_file` for `workload`, ingests its samples 10 s at a time
+/// and evaluates it at each scheduled time once its samples are in: the
+/// answers, and the most bytes the stored views held after a chunk.
+fn run_installed(workload: &WorkloadSpec, plan_file: &Path) -> (AnswersOverTime, u64) {
+    let arm = ArmSpec {
+        name: "counter".into(),
+        raw_data_retained: false,
+        engine_options: serde_json::json!({ "plan_file": plan_file }),
+    };
+    let mut installed = AsapEngine.install(workload, &arm).unwrap();
+    let schedule = ArmSchedule::for_workload(workload).unwrap();
+    let mut times = schedule.evaluate_at_ms.iter().copied().peekable();
+    let (mut answers, mut view_bytes) = (Vec::new(), 0);
+    for chunk in workload_chunks(&workload.data, 10_000).unwrap() {
+        let chunk = chunk.unwrap();
+        installed.ingest(&chunk).unwrap();
+        view_bytes = view_bytes.max(installed.footprint().unwrap().view_bytes);
+        while let Some(at_ms) = times.next_if(|&at_ms| at_ms <= chunk.end_ms) {
+            answers.push((at_ms, installed.evaluate(at_ms).unwrap().0 .0));
+        }
+    }
+    assert!(times.next().is_none(), "evaluations after the data");
+    (answers, view_bytes)
+}
+
+/// `answers` as JSON, one entry per time, query and series, each value as
+/// the hex of its bits so a comparison is bit for bit.
+fn answers_json(answers: &AnswersOverTime) -> serde_json::Value {
+    let mut entries = Vec::new();
+    for (at_ms, per_query) in answers {
+        for (query, per_series) in per_query {
+            for (series, value) in per_series {
+                entries.push(serde_json::json!({
+                    "at_ms": at_ms,
+                    "query": query,
+                    "series": series,
+                    "bits": format!("{:#018x}", value.to_bits()),
+                }));
+            }
+        }
+    }
+    serde_json::Value::Array(entries)
+}
+
+/// The answers of `rate(c[5m])` and `increase(c[5m])` planned together
+/// before they shared a state (a `Rate` chain and an `Increase` chain),
+/// from `run_installed` over `counter_workload("both", ...)`.
+const COUNTER_ANSWERS_BEFORE_SHARING: &str = "asap_lane_fixtures/rate_and_increase_two_chains.json";
+
+/// `rate(c[5m])` and `increase(c[5m])` planned together read one chain of
+/// counter states, which the executor finalizes as `rate` and as
+/// `increase`. Their answers are bit-identical to those of the two chains
+/// the same workload planned before (`COUNTER_ANSWERS_BEFORE_SHARING`) and
+/// to each query's planned alone (one chain each), and the shared
+/// chain's stored views take at most half the bytes of the two.
+#[test]
+fn rate_and_increase_of_one_counter_share_one_chain_and_answer_as_apart() {
+    const RATE: &str = "rate(c[5m])";
+    const INCREASE: &str = "increase(c[5m])";
+    let temp = TempDir::new("counter");
+    let counter = serde_json::json!({"ExactAggregate": ["Counter", "Counter"]});
+    let together = temp.0.join("together.plan.json");
+    write_counter_plan_file(&[RATE, INCREASE], &together);
+    assert_eq!(chain_summary_types(&together), vec![counter.clone()]);
+    let (answers, together_bytes) = run_installed(
+        &counter_workload("both", &[("rate", RATE), ("increase", INCREASE)]),
+        &together,
+    );
+    // Bit for bit the answers of the same workload planned before the
+    // shared state, as two chains.
+    let before: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join(COUNTER_ANSWERS_BEFORE_SHARING),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(answers_json(&answers), before);
+
+    let mut apart_bytes = 0;
+    for (id, query) in [("rate", RATE), ("increase", INCREASE)] {
+        let alone = temp.0.join(format!("{id}.plan.json"));
+        write_counter_plan_file(&[query], &alone);
+        assert_eq!(chain_summary_types(&alone), vec![counter.clone()]);
+        let (alone_answers, bytes) = run_installed(&counter_workload(id, &[(id, query)]), &alone);
+        apart_bytes += bytes;
+        assert_eq!(answers.len(), alone_answers.len());
+        for ((at_ms, together), (alone_at_ms, alone)) in answers.iter().zip(&alone_answers) {
+            assert_eq!(at_ms, alone_at_ms);
+            let (together, alone) = (&together[id], &alone[id]);
+            assert_eq!(together.len(), 2, "{id} at {at_ms}: {together:?}");
+            assert_eq!(
+                together.keys().collect::<Vec<_>>(),
+                alone.keys().collect::<Vec<_>>()
+            );
+            for (series, value) in together {
+                assert_eq!(
+                    value.to_bits(),
+                    alone[series].to_bits(),
+                    "{id} at {at_ms} {series:?}: {value} vs {}",
+                    alone[series]
+                );
+            }
+        }
+    }
+    assert!(
+        together_bytes > 0 && 2 * together_bytes <= apart_bytes + apart_bytes / 50,
+        "{together_bytes} together, {apart_bytes} apart"
+    );
+}
+
 /// `absent_over_time(m[10s])`: Stages 1-3 plan it, but the Planner's
 /// executor cannot compile it. `asap_planner` still writes the plan file
 /// (with a note), and on the ASAP lane it is a "not executable" cell, so

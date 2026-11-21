@@ -1165,7 +1165,9 @@ fn bind_operation(
         ));
     };
     match &node.payload {
-        Payload::ASAP(ASAPOp::FinalizeExactAccumulator { .. }) => {
+        Payload::ASAP(ASAPOp::FinalizeExactAccumulator {
+            counter_readout, ..
+        }) => {
             let state = summary_column(input)?;
             let statistic = match &input.fields[state].dtype {
                 FieldDataType::ExactAggregate(kind, _) => *kind,
@@ -1176,6 +1178,7 @@ fn bind_operation(
                 state,
                 SummaryEvaluation::Exact(ExactEvaluation {
                     statistic,
+                    counter_readout: *counter_readout,
                     lookback_ms: None,
                     offset_ms: 0,
                 }),

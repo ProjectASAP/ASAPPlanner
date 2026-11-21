@@ -161,9 +161,8 @@ impl FieldDataType {
             ExactKind::Count => ExactParams::Count,
             ExactKind::Min => ExactParams::Min,
             ExactKind::Max => ExactParams::Max,
-            ExactKind::Rate => ExactParams::Rate,
+            ExactKind::Counter => ExactParams::Counter,
             ExactKind::IRate => ExactParams::IRate,
-            ExactKind::Increase => ExactParams::Increase,
         };
         FieldDataType::ExactAggregate(kind, params)
     }

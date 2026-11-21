@@ -93,8 +93,8 @@ pub struct DeploymentCapabilities {
     /// The state families the executor cannot merge across windows: it
     /// builds and finalizes their state within one evaluation only, so no
     /// tumbling-window chain or state kept across evaluations of them is
-    /// offered. E.g. a target without mergeable rate state lists
-    /// `{"exact": "Rate"}`. Default: none.
+    /// offered. E.g. a target without mergeable counter state lists
+    /// `{"exact": "Counter"}`. Default: none.
     pub state_not_mergeable_across_windows: Vec<SummaryFamily>,
     /// Candidates the caller rules out directly, beyond what the fields
     /// above imply; default none. E.g. `[{"timing": "query_time",
@@ -296,13 +296,13 @@ impl DeploymentCapabilities {
                     AggIntent::Resets,
                 ]
                 .as_slice(),
-                [ExactKind::Rate, ExactKind::Increase, ExactKind::IRate].as_slice(),
+                [ExactKind::Counter, ExactKind::IRate].as_slice(),
             ),
             (
                 self.counter_semantics.extrapolation,
                 ExclusionSource::CounterNotExtrapolated,
                 [AggIntent::Rate, AggIntent::Increase, AggIntent::Delta].as_slice(),
-                [ExactKind::Rate, ExactKind::Increase].as_slice(),
+                [ExactKind::Counter].as_slice(),
             ),
         ];
         for (supported, source, functions, states) in counters {

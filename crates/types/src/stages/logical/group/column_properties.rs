@@ -524,15 +524,18 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
         // computes, over values of the state's recorded sign: a rate over
         // non-positive samples (-5 then -3: +2; -3 then -5: a reset, -5)
         // has none, a count is non-negative and a sum keeps its sign.
-        FinalizeExactAccumulator { child } => {
-            readout_columns(child, output, |state, summary_type| match summary_type {
-                FieldDataType::ExactAggregate(kind, _) => measure_sign(&kind.measure(None), state),
-                FieldDataType::SummarySample(kind, params) => sampling_finalized_sign(kind, params),
-                FieldDataType::Wavelet(kind, params) => wavelet_finalized_sign(kind, params),
-                FieldDataType::StatModel(kind, params) => stat_model_finalized_sign(kind, params),
-                FieldDataType::Plain(_) | FieldDataType::Sketch(_) => Unknown,
-            })
-        }
+        FinalizeExactAccumulator {
+            child,
+            counter_readout,
+        } => readout_columns(child, output, |state, summary_type| match summary_type {
+            FieldDataType::ExactAggregate(kind, _) => kind
+                .measure(None, *counter_readout)
+                .map_or(Unknown, |measure| measure_sign(&measure, state)),
+            FieldDataType::SummarySample(kind, params) => sampling_finalized_sign(kind, params),
+            FieldDataType::Wavelet(kind, params) => wavelet_finalized_sign(kind, params),
+            FieldDataType::StatModel(kind, params) => stat_model_finalized_sign(kind, params),
+            FieldDataType::Plain(_) | FieldDataType::Sketch(_) => Unknown,
+        }),
         MaintainPopulation { child, .. } => columns_of(child),
         EvaluatePopulation { child, .. } if output == child.schema() => columns_of(child),
         EvaluatePopulation { .. }

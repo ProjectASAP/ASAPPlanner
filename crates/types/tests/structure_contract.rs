@@ -153,7 +153,11 @@ fn state_evaluations_and_passthrough_keep_their_contracts() {
         query: SketchStatistic::Quantile { q: 0.99 }
     })
     .is_ok());
-    assert!(validate_asap_inputs(&ASAPOp::FinalizeExactAccumulator { child: state }).is_err());
+    assert!(validate_asap_inputs(&ASAPOp::FinalizeExactAccumulator {
+        child: state,
+        counter_readout: None
+    })
+    .is_err());
 }
 
 /// Both operator categories use the same fallible schema-deriving constructor.

@@ -4,7 +4,7 @@
 use asap_executor::operators::{Operator, SummaryEvaluation};
 use asap_executor::plan::PhysicalDAG;
 use asap_executor::planner::ir::schema::{DataType, Field, FieldDataType, Schema};
-use asap_executor::planner::summary_type::{ExactKind, ExactParams};
+use asap_executor::planner::summary_type::{CounterReadout, ExactKind, ExactParams};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::summary_kernels::exact::ExactEvaluation;
 use asap_executor::values::{Batch, SchemaRef, Value};
@@ -90,13 +90,21 @@ fn run(operator: Operator, inputs: Vec<Batch>) -> Vec<Batch> {
 // or one of each), row for row.
 #[test]
 fn exact_records_merge_and_evaluate_as_kernel_objects_do() {
-    for (kind, params) in [
-        (ExactKind::Sum, ExactParams::Sum),
-        (ExactKind::Count, ExactParams::Count),
-        (ExactKind::Min, ExactParams::Min),
-        (ExactKind::Max, ExactParams::Max),
-        (ExactKind::Rate, ExactParams::Rate),
-        (ExactKind::Increase, ExactParams::Increase),
+    for (kind, params, counter_readout) in [
+        (ExactKind::Sum, ExactParams::Sum, None),
+        (ExactKind::Count, ExactParams::Count, None),
+        (ExactKind::Min, ExactParams::Min, None),
+        (ExactKind::Max, ExactParams::Max, None),
+        (
+            ExactKind::Counter,
+            ExactParams::Counter,
+            Some(CounterReadout::Increase),
+        ),
+        (
+            ExactKind::Counter,
+            ExactParams::Counter,
+            Some(CounterReadout::Rate),
+        ),
     ] {
         let family = FieldDataType::ExactAggregate(kind, params);
         let build = || {
@@ -123,6 +131,7 @@ fn exact_records_merge_and_evaluate_as_kernel_objects_do() {
                 1,
                 SummaryEvaluation::Exact(ExactEvaluation {
                     statistic: kind,
+                    counter_readout,
                     lookback_ms: None,
                     offset_ms: 0,
                 }),

@@ -348,7 +348,7 @@ impl Memo {
                 | NonASAPOp::Limit { child, .. }
                 | NonASAPOp::Dedup { child, .. },
             )
-            | Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => {
+            | Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child, .. }) => {
                 return self.keys_of_values(*child);
             }
             // A merge's children are states of one definition: its first

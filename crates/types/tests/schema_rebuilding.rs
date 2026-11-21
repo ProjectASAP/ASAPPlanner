@@ -186,6 +186,7 @@ fn summary_transitions_preserve_structural_metadata() {
     let state = aggregate(source, true);
     let finalized = OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
         child: state.clone(),
+        counter_readout: None,
     }))
     .unwrap();
     assert_eq!(finalized.schema.unique_keys, state.schema.unique_keys);

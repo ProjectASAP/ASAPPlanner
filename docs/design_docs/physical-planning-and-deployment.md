@@ -95,10 +95,10 @@ separate unsupported compilation, deployment infeasibility, missing evidence,
 and a feasible candidate that loses on cost. Absence is not a cost comparison.
 
 For `sum by(job)(rate(m[1m]))`, Rate remains per series before grouped Sum.
-`CandidateLogicalASAPDAGs` offers one such candidate, with a per-series Rate state and a grouped
+`CandidateLogicalASAPDAGs` offers one such candidate, with a per-series counter state and a grouped
 Sum state. Its physical properties assignment places it: an ingestion-time Sum state
-finalizes Rate and builds Sum within a bounded precompute run; a query-time Sum
-over an ingestion-time Rate state leaves the Rate readout and Sum in the query DAG. Storing a
+finalizes the counter as Rate and builds Sum within a bounded precompute run; a query-time Sum
+over an ingestion-time counter state leaves the Rate readout and Sum in the query DAG. Storing a
 value requires its exact evaluation window, revision, readiness and serving
 cadence to match the query contract.
 
@@ -379,9 +379,9 @@ view. For `sum by(job)(rate(m[1m]))`, two materialization choices for the single
 logical candidate give:
 
 ```text
-Plan A (Rate state at ingestion time, Sum at query time):
-  refresh: counter samples → per-series Rate state            (the view)
-  query:   per-series Rate states → Rate readout → grouped Sum → result
+Plan A (counter state at ingestion time, Sum at query time):
+  refresh: counter samples → per-series counter state         (the view)
+  query:   per-series counter states → Rate readout → grouped Sum → result
 
 Plan B (Rate and Sum states at ingestion time):
   refresh: counter samples → per-series Rate → grouped Sum state (the view)
@@ -778,7 +778,7 @@ operator/runtime fixtures:
 | `kll_tumbling_window_execution::a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows` | A store that finds states only by `(definition_id, time range)` (the content id is an opaque string to the store) answers the five-tumbling-window query: the tumbling windows share one definition and request the five ranges that tile the window |
 | `runtime_install::tumbling_windows_of_one_refresh_window_read_each_raw_window_once` | A KLL chain and a DDSketch chain of 10 s tumbling windows over one `Scan` are one refresh group: each tumbling window window is read from raw data once, in one ingestion run that builds both tumbling windows; each state equals that of a run of its view alone, and both queries answer as the query-time reference |
 | `kll_tumbling_window_execution::tumbling_windows_reject_parameters_schema_and_missing_binding` | Parameter relabelling, incompatible schemas and missing views fail explicitly |
-| `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Stored Rate state and stored Sum state answer like query time; summing counters before Rate does not |
+| `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Stored counter state and stored Sum state answer like query time; summing counters before Rate does not |
 | `sql_to_physical::sql_filter_grouped_sum_executes_and_rebinds` | SQL text → candidate search → physical compilation → shared Scan predicates and grouped summary execution; NULL samples are ignored and fresh bindings produce new results |
 
 Tumbling window construction, tumbling window timestamp checks, stored identity, revisions, readiness

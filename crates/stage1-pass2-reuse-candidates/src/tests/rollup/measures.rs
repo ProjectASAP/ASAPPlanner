@@ -6,7 +6,7 @@ use asap_types::ir::schema::FieldDataType;
 
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::stages::{Memo, OriginOfCandidateForMemoGroup};
-use asap_types::summary_type::ExactKind;
+use asap_types::summary_type::{CounterReadout, ExactKind};
 use asap_types::workload::DataWorkload;
 
 use crate::test_fixtures::*;
@@ -27,14 +27,17 @@ fn a_coarse_exact_sum_rolls_up_the_finer_sum() {
     let rate = group(
         &mut memo,
         state_grouped_by(
-            FieldDataType::exact(ExactKind::Rate),
+            FieldDataType::exact(ExactKind::Counter),
             Reduction::PerEntity,
             window,
         ),
     );
     let rows = group(
         &mut memo,
-        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: rate }),
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+            child: rate,
+            counter_readout: Some(CounterReadout::Rate),
+        }),
     );
     let sum_by = |memo: &mut Memo, keys: Vec<usize>, name: &str| {
         group(

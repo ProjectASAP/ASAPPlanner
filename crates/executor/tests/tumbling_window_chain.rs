@@ -78,6 +78,7 @@ fn shift(offset_ms: i64, at: Option<AtModifier>, child: Rc<OperatorNode>) -> Rc<
 fn finalized_sum(states: Rc<OperatorNode>) -> Rc<OperatorNode> {
     node(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
         child: states,
+        counter_readout: None,
     }))
 }
 

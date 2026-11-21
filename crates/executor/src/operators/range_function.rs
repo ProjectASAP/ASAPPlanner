@@ -540,7 +540,7 @@ mod tests {
         use crate::evaluation::exact_evaluation;
         use crate::summary_kernels::exact::ExactAccumulator;
         use crate::AggregateCore;
-        use planner_types::summary_type::{ExactKind, ExactParams};
+        use planner_types::summary_type::{CounterReadout, ExactKind, ExactParams};
         let evenly_spaced = (0..17)
             .map(|i| (60_000 + 15_000 * i, (i + 1) as f64))
             .collect::<Vec<_>>();
@@ -549,49 +549,38 @@ mod tests {
         // 6 × 140 / 120 = 7 (Prometheus 3.16.0); zero point first gave 8.
         let irregular = vec![(180_000, 2.), (240_000, 5.), (270_000, 6.), (300_000, 8.)];
         let (start, end) = (0, 300_000);
-        for (points, intent, kind, params, expected) in [
+        for (points, intent, readout, expected) in [
             (
                 &evenly_spaced,
                 AggIntent::Increase,
-                ExactKind::Increase,
-                ExactParams::Increase,
+                CounterReadout::Increase,
                 16.5,
             ),
-            (
-                &evenly_spaced,
-                AggIntent::Rate,
-                ExactKind::Rate,
-                ExactParams::Rate,
-                0.055,
-            ),
+            (&evenly_spaced, AggIntent::Rate, CounterReadout::Rate, 0.055),
             (
                 &irregular,
                 AggIntent::Increase,
-                ExactKind::Increase,
-                ExactParams::Increase,
+                CounterReadout::Increase,
                 7.,
             ),
-            (
-                &irregular,
-                AggIntent::Rate,
-                ExactKind::Rate,
-                ExactParams::Rate,
-                7. / 300.,
-            ),
+            (&irregular, AggIntent::Rate, CounterReadout::Rate, 7. / 300.),
         ] {
             let raw = match range_function_value(&intent, points, start, end, end).unwrap() {
                 Some(Value::Float64(value)) => value,
                 other => panic!("{other:?}"),
             };
-            let mut state =
-                ExactAccumulator::new(SummaryFamilyType::ExactAggregate(kind, params), false)
-                    .unwrap();
+            let mut state = ExactAccumulator::new(
+                SummaryFamilyType::ExactAggregate(ExactKind::Counter, ExactParams::Counter),
+                false,
+            )
+            .unwrap();
             for &(time, value) in points {
                 state.update(None, value, time);
             }
             let exact = exact_evaluation(
                 [Arc::new(state) as Arc<dyn AggregateCore>],
-                kind,
+                ExactKind::Counter,
+                Some(readout),
                 Some((start, end)),
                 None,
             )

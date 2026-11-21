@@ -51,14 +51,33 @@ mod tests {
         );
         assert_eq!(
             SummaryFamily::of(&FieldDataType::ExactAggregate(
-                ExactKind::Rate,
-                ExactParams::Rate
+                ExactKind::Counter,
+                ExactParams::Counter
             )),
-            Some(SummaryFamily::Exact(ExactKind::Rate))
+            Some(SummaryFamily::Exact(ExactKind::Counter))
         );
         assert_eq!(
             SummaryFamily::of(&FieldDataType::Plain(DataType::Float64)),
             None
         );
+    }
+
+    /// `rate` and `increase` share the `Counter` state, written
+    /// `{"exact": "Counter"}`. The names each had before are refused, not
+    /// read as it: a deployment that listed only `Increase` would otherwise
+    /// rule out `rate` too without saying so.
+    #[test]
+    fn counter_family_is_written_counter_and_old_names_are_refused() {
+        let counter = SummaryFamily::Exact(ExactKind::Counter);
+        assert_eq!(
+            serde_json::to_string(&counter).unwrap(),
+            r#"{"exact":"Counter"}"#
+        );
+        for json in [r#"{"exact": "Rate"}"#, r#"{"exact": "Increase"}"#] {
+            assert!(
+                serde_json::from_str::<SummaryFamily>(json).is_err(),
+                "{json}"
+            );
+        }
     }
 }

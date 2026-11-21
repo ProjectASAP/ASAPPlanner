@@ -102,7 +102,7 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
                             details.push(format!("{kind}({})", params.join(", ")));
                         }
                     }
-                    // A summary type, e.g. `Kll` or `ExactAggregate(Rate)`.
+                    // A summary type, e.g. `Kll` or `ExactAggregate(Counter)`.
                     "summary_type" => details.push(summary_type_text(field)),
                     // A time range's length, e.g. `60s`.
                     "range" => details.push(duration_text(field)),
@@ -122,7 +122,7 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
 }
 
 /// A serialized summary type: `Kll` (`{"Sketch": "Kll"}`),
-/// `ExactAggregate(Rate)` (`{"ExactAggregate": ["Rate", "Rate"]}`, the
+/// `ExactAggregate(Counter)` (`{"ExactAggregate": ["Counter", "Counter"]}`, the
 /// distinct names), or the JSON of any other value.
 fn summary_type_text(value: &Value) -> String {
     match value {

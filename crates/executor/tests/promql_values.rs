@@ -198,10 +198,12 @@ fn exact_state_schema(family: planner_types::ir::schema::FieldDataType) -> Schem
     Arc::new(schema)
 }
 
-/// Merge stored exact tumbling windows per series and finalize them; a counter (`Rate`,
-/// `Increase`) over the `lookback_ms` window ending at the evaluation time.
+/// Merge stored exact tumbling windows per series and finalize them; a counter,
+/// read as `counter_readout`, over the `lookback_ms` window ending at the
+/// evaluation time.
 fn compile_exact_evaluation(
     family: planner_types::ir::schema::FieldDataType,
+    counter_readout: Option<planner_types::summary_type::CounterReadout>,
     lookback_ms: i64,
     preserve_metric_name: bool,
 ) -> Result<Computation, Error> {
@@ -214,13 +216,14 @@ fn compile_exact_evaluation(
             "exact evaluation requires an exact family".into(),
         ));
     };
-    let is_counter = matches!(statistic, ExactKind::Rate | ExactKind::Increase);
+    let is_counter = statistic == ExactKind::Counter;
     let merge = Operator::summary_merge(exact_state_schema(family), 1, vec![0])?;
     let evaluation = Operator::evaluation(
         merge.schema(),
         1,
         SummaryEvaluation::Exact(ExactEvaluation {
             statistic,
+            counter_readout,
             lookback_ms: is_counter.then_some(lookback_ms),
             offset_ms: 0,
         }),
@@ -568,7 +571,7 @@ fn exact_state_evaluations_recover_and_finalize_tumbling_windows() {
                 })
                 .collect();
             let output = run_inputs(
-                compile_exact_evaluation(family.clone(), 60_000, preserve).unwrap(),
+                compile_exact_evaluation(family.clone(), None, 60_000, preserve).unwrap(),
                 vec![Batch::try_new(exact_state_schema(family.clone()), rows).unwrap()],
             )
             .unwrap();
@@ -589,11 +592,9 @@ fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
     use planner_types::summary_type::*;
 
     use std::sync::Arc;
-    for (kind, params, expected) in [
-        (ExactKind::Rate, ExactParams::Rate, 1.),
-        (ExactKind::Increase, ExactParams::Increase, 60.),
-    ] {
-        let family = FieldDataType::ExactAggregate(kind, params);
+    // One counter state read as `rate` and as `increase`.
+    for (readout, expected) in [(CounterReadout::Rate, 1.), (CounterReadout::Increase, 60.)] {
+        let family = FieldDataType::exact(ExactKind::Counter);
         let rows = [1, 2]
             .into_iter()
             .map(|count| {
@@ -617,7 +618,7 @@ fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
             })
             .collect();
         let output = run_inputs(
-            compile_exact_evaluation(family.clone(), 60_000, false).unwrap(),
+            compile_exact_evaluation(family.clone(), Some(readout), 60_000, false).unwrap(),
             vec![Batch::try_new(exact_state_schema(family), rows).unwrap()],
         )
         .unwrap();

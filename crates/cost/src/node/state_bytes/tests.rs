@@ -9,8 +9,7 @@ fn exact_state_is_priced_at_the_executors_state_size() {
     use asap_types::summary_type::{ExactKind, ExactParams};
     for (kind, params) in [
         (ExactKind::Sum, ExactParams::Sum),
-        (ExactKind::Increase, ExactParams::Increase),
-        (ExactKind::Rate, ExactParams::Rate),
+        (ExactKind::Counter, ExactParams::Counter),
     ] {
         assert_eq!(
             summary_state_bytes(
@@ -873,8 +872,7 @@ fn priced_bytes_agree_with_the_executor() {
         exact(ExactKind::Count, ExactParams::Count),
         exact(ExactKind::Min, ExactParams::Min),
         exact(ExactKind::Max, ExactParams::Max),
-        exact(ExactKind::Increase, ExactParams::Increase),
-        exact(ExactKind::Rate, ExactParams::Rate),
+        exact(ExactKind::Counter, ExactParams::Counter),
     ];
     // Every family the executor declares is checked.
     for supported in asap_executor::supported_summary_families() {

@@ -103,9 +103,10 @@ pub(crate) fn ways_to_compute_intent(intent: &AggIntent) -> Vec<HowToComputeAggr
         AggIntent::Sum { .. } => vec![ExactKind::Sum],
         AggIntent::Min { .. } => vec![ExactKind::Min],
         AggIntent::Max { .. } => vec![ExactKind::Max],
-        AggIntent::Rate => vec![ExactKind::Rate],
+        // `rate` and `increase` read one counter state, so a workload with
+        // both over the same series and range builds it once.
+        AggIntent::Rate | AggIntent::Increase => vec![ExactKind::Counter],
         AggIntent::IRate => vec![ExactKind::IRate],
-        AggIntent::Increase => vec![ExactKind::Increase],
         AggIntent::Avg { .. } => vec![ExactKind::Sum, ExactKind::Count],
         _ => vec![],
     };

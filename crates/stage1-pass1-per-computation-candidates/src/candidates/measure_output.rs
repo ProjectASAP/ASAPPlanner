@@ -13,7 +13,7 @@ use asap_types::ir::{
     ProjectItem, ScalarExpr,
 };
 use asap_types::stages::{Memo, MemoGroupId};
-use asap_types::summary_type::{ExactKind, SketchStatistic, SummaryInputExpr};
+use asap_types::summary_type::{CounterReadout, ExactKind, SketchStatistic, SummaryInputExpr};
 
 use super::pending::{add_candidate, commit_pending, Pending};
 use super::SingleMeasure;
@@ -43,6 +43,7 @@ pub(super) fn measure_output(
             let build = accumulator_build(memo, kinds[0], measure.intent, measure, read)?;
             Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
                 child: pending.push(memo, build)?,
+                counter_readout: CounterReadout::for_intent(measure.intent),
             })
         }
         HowToComputeAggregateMeasure::Summary(algorithm) => {
@@ -96,11 +97,17 @@ pub(super) fn measure_output(
             let count = pending.push(memo, count)?;
             let sum = pending.push(
                 memo,
-                Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: sum }),
+                Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+                    child: sum,
+                    counter_readout: None,
+                }),
             )?;
             let count = pending.push(
                 memo,
-                Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: count }),
+                Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+                    child: count,
+                    counter_readout: None,
+                }),
             )?;
             if memo.groups()[measure.unfiltered_input.0 as usize]
                 .group_properties

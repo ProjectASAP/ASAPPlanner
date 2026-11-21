@@ -24,44 +24,83 @@ pub enum ExactKind {
     Min,
     /// Exact maximum accumulator (mergeable by comparison).
     Max,
-    /// Exact increase accumulator (counter-reset-aware delta).
-    Increase,
-    /// Rate accumulator (increase / time window duration).
-    Rate,
+    /// A counter's window: its first and last samples, its sample count
+    /// and the increase between them with counter resets handled. It
+    /// answers both PromQL `rate` and `increase` (a [`CounterReadout`]),
+    /// so `rate(x[1h])` and `increase(x[1h])` share one state.
+    Counter,
     /// Instant-rate accumulator retaining the final two timestamped samples.
     IRate,
 }
 
-impl ExactKind {
-    /// The aggregate an exact accumulator of this kind computes, of input
-    /// column `column` (`None`: the sample value): `ExactKind::Rate`
-    /// finalizes to what `AggIntent::Rate` computes, and
-    /// `ExactKind::Sum.measure(Some(2))` to `AggIntent::Sum { col: Some(2) }`.
-    pub(crate) fn measure(
-        self,
-        column: Option<crate::ir::schema::ColumnId>,
-    ) -> crate::ir::operator::AggIntent {
+/// What a finalize reads from a [`ExactKind::Counter`] state: PromQL
+/// `increase`, the increase extrapolated to the evaluation range, or
+/// `rate`, that increase per second of the range. Both follow Prometheus'
+/// `extrapolatedRate`. Example: samples 0 at 0 s and 60 at 60 s in
+/// `(0 s, 60 s]` finalize to increase 60 and rate 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum CounterReadout {
+    Rate,
+    Increase,
+}
+
+impl CounterReadout {
+    /// The readout that answers `intent`: `Rate` for `AggIntent::Rate`,
+    /// `Increase` for `AggIntent::Increase`, `None` for any other.
+    pub fn for_intent(intent: &crate::ir::operator::AggIntent) -> Option<Self> {
         use crate::ir::operator::AggIntent;
-        match self {
-            ExactKind::Sum => AggIntent::Sum { col: column },
-            ExactKind::Min => AggIntent::Min { col: column },
-            ExactKind::Max => AggIntent::Max { col: column },
-            ExactKind::Count => AggIntent::Count,
-            ExactKind::Rate => AggIntent::Rate,
-            ExactKind::IRate => AggIntent::IRate,
-            ExactKind::Increase => AggIntent::Increase,
+        match intent {
+            AggIntent::Rate => Some(Self::Rate),
+            AggIntent::Increase => Some(Self::Increase),
+            _ => None,
         }
     }
 
-    /// Whether this accumulator tracks a counter's increase (`Rate`,
-    /// `Increase`, `IRate`): besides its value it keeps the window's first
+    /// The aggregate this readout computes: `AggIntent::Rate` or
+    /// `AggIntent::Increase`.
+    pub(crate) fn measure(self) -> crate::ir::operator::AggIntent {
+        use crate::ir::operator::AggIntent;
+        match self {
+            Self::Rate => AggIntent::Rate,
+            Self::Increase => AggIntent::Increase,
+        }
+    }
+}
+
+impl ExactKind {
+    /// The aggregate an exact accumulator of this kind finalizes to, of
+    /// input column `column` (`None`: the sample value), read with
+    /// `counter_readout`: `ExactKind::Counter` with `CounterReadout::Rate`
+    /// finalizes to what `AggIntent::Rate` computes, and
+    /// `ExactKind::Sum.measure(Some(2), None)` to `AggIntent::Sum { col:
+    /// Some(2) }`. `None` when the readout does not fit the kind: a
+    /// `Counter` needs one, any other kind takes none.
+    pub(crate) fn measure(
+        self,
+        column: Option<crate::ir::schema::ColumnId>,
+        counter_readout: Option<CounterReadout>,
+    ) -> Option<crate::ir::operator::AggIntent> {
+        use crate::ir::operator::AggIntent;
+        match (self, counter_readout) {
+            (ExactKind::Counter, Some(readout)) => Some(readout.measure()),
+            (ExactKind::Counter, None) | (_, Some(_)) => None,
+            (ExactKind::Sum, None) => Some(AggIntent::Sum { col: column }),
+            (ExactKind::Min, None) => Some(AggIntent::Min { col: column }),
+            (ExactKind::Max, None) => Some(AggIntent::Max { col: column }),
+            (ExactKind::Count, None) => Some(AggIntent::Count),
+            (ExactKind::IRate, None) => Some(AggIntent::IRate),
+        }
+    }
+
+    /// Whether this accumulator tracks a counter's increase (`Counter`,
+    /// `IRate`): besides its value it keeps the window's first
     /// and last samples and the resets between them, so it needs its rows
     /// in time order and does more work per row than a `Sum`. Example:
     /// `rate(requests_total[5m])`'s accumulator does; `sum_over_time`'s
     /// does not.
     pub fn tracks_counter_increase(&self) -> bool {
         match self {
-            Self::Rate | Self::Increase | Self::IRate => true,
+            Self::Counter | Self::IRate => true,
             Self::Sum | Self::Min | Self::Max | Self::Count => false,
         }
     }
@@ -77,8 +116,7 @@ pub enum ExactParams {
     Count,
     Min,
     Max,
-    Increase,
-    Rate,
+    Counter,
     IRate,
 }
 

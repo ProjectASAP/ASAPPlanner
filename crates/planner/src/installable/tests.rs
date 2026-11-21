@@ -121,6 +121,7 @@ fn chain_plan(
     }));
     let root = node(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
         child: merged,
+        counter_readout: None,
     }));
     let (mut dag, nodes) =
         asap_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&[

@@ -517,13 +517,13 @@ fn value_and_absolute_timestamp_filters_lift_with_fixed_value_limits() {
 /// over the minute before it are disjoint too.
 ///
 /// ```text
-/// G2 TimeRange[5m](G1);  G3 SummaryAgg[Increase](G2)
-/// G4 TimeShift(5m)(G1);  G5 TimeRange[5m](G4);  G6 SummaryAgg[Increase](G5)
+/// G2 TimeRange[5m](G1);  G3 SummaryAgg[Counter](G2)
+/// G4 TimeShift(5m)(G1);  G5 TimeRange[5m](G4);  G6 SummaryAgg[Counter](G5)
 /// G7 SummaryMerge(G3, G6)
 /// ```
 #[test]
 fn counter_states_merge_over_windows_disjoint_in_time() {
-    let increase = || FieldDataType::exact(ExactKind::Increase);
+    let increase = || FieldDataType::exact(ExactKind::Counter);
     let mut memo = Memo::new(&DataWorkload::default());
     let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
     let g2 = memo.find_or_add_group(range(5 * MINUTE_MS, g1)).unwrap();
