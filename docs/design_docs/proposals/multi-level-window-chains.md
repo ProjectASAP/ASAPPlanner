@@ -1,6 +1,6 @@
 # Multi-level tumbling-window chains
 
-**Status:** Design proposal. Not implemented.
+**Status:** Accepted; implemented.
 
 **Audience:** Planner designers and implementers.
 
@@ -69,26 +69,28 @@ What exists and why it does not help:
    divides `C`, and `2·C ≤ W`. All levels are anchored at the epoch, like
    today's chains. A wider level need not divide the evaluation grid: only the
    narrowest level must (today's rule), because the edges are read from it.
-2. **Two builds per level.** The group `SummaryTumblingWindowChain[C](X)` gets
-   two candidates:
-   - from the rows, the existing build (one more update per row);
-   - from the next narrower level, a new operator `SummaryMergeWindows[C]`
-     over `SummaryTumblingWindowChain[c](X)`: when a window of width `C` ends,
-     it merges the `C/c` narrower windows it contains (one merge per narrower
-     state, no row work).
+2. **One build per level.** The group `SummaryTumblingWindowChain[C](X)` gets
+   one candidate per θ: a new operator `SummaryMergeWindows[C]` over the next
+   narrower level: when a window of width `C` ends, it merges the `C/c`
+   narrower windows it contains (one merge per narrower state, no row work).
+   It is placed only at ingestion time, materialized across evaluations.
 3. **Cover.** A new node `TimeRangeCover(W)` over the levels (each under the
    same `TimeShift`s), widest first, selects at each evaluation time `T` the
    windows that tile `(T − W, T]` exactly: the widest whole windows inside the
    range, then, in each uncovered edge, the next level's whole windows, down to
    the narrowest level. The state group `SummaryAgg(TimeRange(W, X))` gets
-   `SummaryMerge` over the cover as a candidate, one per subset of levels that
-   contains the narrowest.
+   `SummaryMerge` over the cover as a candidate, one per nested prefix of the
+   levels: {1 min, 15 s}, {5 min, 1 min, 15 s}, {15 min, 5 min, 1 min, 15 s}.
 4. **Cost.** The cover's selected windows per step are the mean, over the
    steps of the request grid, of the cover's window count (closed form below);
    a `SummaryMerge` over it is charged per input state, as today. Each level's
    retention `h_v` is its longest reader's, as today.
-5. **Executor.** Runs `SummaryMergeWindows` at ingestion time and
-   `TimeRangeCover` as up to `2·L − 1` window ranges for `L` levels.
+5. **Executor.** Runs `SummaryMergeWindows` in an ingestion run (a range
+   over the narrower windows, each stamped with the end of its wider window
+   on the epoch grid, merged per key), and `TimeRangeCover` as one range per
+   level that keeps the windows the cover takes from it, then their union. A
+   query run reads a chain's stored windows whole: a wider level read off its
+   grid reads its whole windows inside the range.
 
 ## 3. Algorithm
 
@@ -119,8 +121,8 @@ just leaves longer edges for the narrower levels.
 | 15 s (today) | 240 | 240 | 240 |
 | 5 min, 15 s | 30.1 | 31 | 12 |
 | 4 min, 15 s | 29.1 | 30 | 15 |
-| 5 min, 1 min, 15 s | 18.1 | 19 | 12 |
-| 15 min, 5 min, 1 min, 15 s | 12.0 | 13 | 4 |
+| 5 min, 1 min, 15 s | 18.05 | 19 | 12 |
+| 15 min, 5 min, 1 min, 15 s | 12.02 | 13 | 4 |
 | 5 min, 15 s with `W` = 57.5 min (not a multiple of 5 min) | 29.6 | 40 | 21 (flat: 230) |
 
 Example: `T` = 100 h + 105 s, levels 5 min and 15 s. The range is
@@ -186,10 +188,10 @@ merges the same kind of states, only fewer and wider.
 | Heap top-k, UnivMon entropy | Not offered, as for rollups today (no merged guarantee). |
 
 **Complexity (planner).** For each chain group: at most 6 ladder widths, so at
-most 6 more chain groups and `2^k` cover candidates for `k` admitted widths
-(here k = 4 at most, 16 covers), each times the θs of the state group. If
-Stage 3 time grows past the perf gate, keep only nested prefixes of the ladder
-(k + 1 covers).
+most 6 more chain groups and one cover per nested prefix, `k` covers for `k`
+admitted widths (here 3), each times the θs of the state group. On the
+section 1 workload the MILP grows from 219 to 660 variables and solves in
+0.4 s.
 
 ## 4. Code interface
 
@@ -242,31 +244,42 @@ edge.
 
 1. **Wider levels are extra chain groups, not a new kind of chain.** The memo
    already keys a chain by its width; a wider level is the same logical
-   expression with a wider width, so building it from the rows or from a
-   narrower level are two candidates of one group, and Stage 3 picks.
-   Rejected: a single "hierarchical chain" operator with a list of widths,
-   which would hide the per-level build choice and retention from Stage 3.
+   expression with a wider width, so its retention and its cost are Stage 3's
+   as for any chain. Rejected: a single "hierarchical chain" operator with a
+   list of widths, which would hide each level from Stage 3.
 2. **A new range node instead of changing `TimeRange`.** `TimeRange` over a
    chain keeps its meaning (windows ending in the range); the cover's rule is
    in one place. Rejected: giving `TimeRange` an alignment field, which would
    change every existing chain read.
 3. **Fixed ladder of widths.** Widths that match how ranges are written
-   (1 min … 1 d) and divide each other, so any subset nests. The best single
+   (1 min … 1 d) and divide each other, so any prefix nests. The best single
    width for range `W` and narrowest `w` is near `sqrt(W·w)` (4 min for 1 h
-   over 15 s: 29.1 vs 30.1 at 5 min), a 3% difference that does not pay for
+   over 15 s: 29.1 vs 30.05 at 5 min), a 3% difference that does not pay for
    computed, non-nesting widths.
 4. **`2·C ≤ W`.** A level of width `C` contributes whole windows to every step
    only when `W ≥ 2·C`; with `W < 2·C` some steps take none and the narrower
    edges cost as much as today.
 5. **Only the narrowest level must divide the evaluation grid.** The edges are
    always read from it, so wider levels may be off the grid (5 min under a
-   15 s grid that is not on 5 min boundaries).
+   15 s grid). Pass 2's grid check and Stage 3's delivery check exempt a
+   cover's wider levels and a `SummaryMergeWindows`'s input.
+6. **Nested prefixes only.** Pass 2 offers one cover per prefix of the
+   admitted widths (k covers for k widths), not every subset (2^k). On the
+   section 1 workload Stage 3 picks the longest prefix.
+7. **A wider level is built only from the next narrower level.** A from-rows
+   build adds one row update per level (100,000 per second here) against
+   about 870 merges per second; it is not offered.
+8. **No `TimeShift` in v1.** A range under an offset keeps its single 15 s
+   chain; a cover would need the shifts above each level.
 
-## 6. Open questions
+## 6. Cost model notes
 
-1. Cap on cover subsets (all `2^k`, or nested prefixes only).
-2. Whether to offer the from-rows build of a wider level at all, given it
-   costs one more row update per level (the cost model will reject it here).
+Cost model 1 charges the cover's merge per step times steps (241 steps every
+15 s: 16.0667 per second). It sums CPU core-seconds; neither it nor a
+query's predicted `query_ms` (one evaluation) models running a request's
+steps on several query worker threads, so the predicted request time is
+steps × per-step work on one core: about 48 s at 10,000 series with four
+levels.
 
 ## 7. Test plan (failing tests first)
 

@@ -20,6 +20,7 @@ mod joint_search_equivalence;
 mod kll_tumbling_window_execution;
 mod materialized_views;
 mod memo_value_bounds;
+mod multi_level_windows;
 mod nested;
 mod operator_design_examples;
 mod operator_sharing;
