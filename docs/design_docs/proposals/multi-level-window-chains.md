@@ -296,10 +296,30 @@ Each test is written before the code and fails on main for the reason given.
 | T7 | `stage3_picks_levels_for_a_long_range` (integration-tests) | The section 1 workload: Stage 3 selects a plan with at least one wider level, built from the narrower level; its `cost_per_second` is below main's 9.896383e4; its merge node is charged at most 31 windows per step. | Pass 2 offers no levels. |
 | T8 | `levels_cost_memory` (integration-tests) | Each level's retention is its readers' longest; the 15 s chain's retention is unchanged (7,200,000 ms); the plan's kept bytes rise by each level's states. | As T7. |
 | T9 | `merge_windows_equals_direct_build` (executor) | `SummaryMergeWindows[5 min]` over a 15 s DDSketch chain: each 5 min state equals the from-rows 5 min build bit for bit; same for exact sum and max. | Operator not in the executor. |
-| T10 | `cover_answers_equal_flat_answers` (executor) | Range query `quantile_over_time(0.99, data[1h])` and `max_over_time(data[30m])`, step 15 s, small data: the cover plan's answers equal the 15 s plan's exactly for DDSketch and max; KLL within its rank bound. Steps include `T` on and off the 5 min grid. | As T9. |
+| T10 | `cover_answers_equal_flat_answers`, `cover_quantiles_equal_flat_quantiles` (executor) | Range query `quantile_over_time(0.99, data[1h])` and `max_over_time(data[30m])`, step 15 s, small data: the cover plan's answers equal the 15 s plan's exactly for DDSketch and max; KLL within its rank bound. Steps include `T` on and off the 5 min grid. | As T9. |
 | T11 | `installable_plan_round_trips_levels` (planner) | An `InstallablePlan` with both new operators round-trips JSON and `check_compiles` on the Planner's executor. | Operators do not exist. |
 | T12 | Plan snapshots (devtools) | Corpus and sketch plan snapshots: only plans with a range read `W ≥ 2 min` change; each changed plan is listed in the PR with old → new cost. | Expected diff, reviewed, not a failing test. |
 
-Planner time: T3's workload and the snapshot corpus run under the existing
-perf gate; if the cover subsets push Stage 3 over it, open question 1 is
-answered with nested prefixes.
+T10 runs exact sums (against sums computed directly over the raw samples)
+and DDSketch p99s (cover against the 15 s chain, bit for bit), at every 15 s
+step over 5 minutes, on and off the 5 min grid.
+
+T12 result: 9 snapshots change, every one a range of at least 2 min read
+through wider levels; each plan's cost falls (old → new, per second):
+
+| Snapshot | Query | Old | New |
+| --- | --- | --- | --- |
+| o11y_bench q19 | `sum(increase(…[1h])) / sum(increase(…[1h]))` | 56.28 | 19.89 |
+| o11y_bench q25 | `sum(rate(…[1h])) / sum(rate(…[1h]))` | 56.28 | 19.89 |
+| o11y_bench q26 | `sum(rate(process_cpu_seconds_total[1h]))` | 27.72 | 9.42 |
+| chains-10m-5m-3m-10s-mvp | quantiles over 10, 5 and 3 min | 5.109e-7 | 4.693e-7 |
+| quantile-grouped-mvp | `avg by (region) (quantile_over_time(0.9, data[5m]))` | 1.903e-6 | 1.477e-6 |
+| quantile-single-mvp | `quantile_over_time(0.99, data[5m])` | 1.823e-6 | 1.397e-6 |
+| random-mixed-seed-862-long-w01-q3-mvp | `avg by (region) (quantile_over_time(0.95, data[300s]))` | 9.171e-5 | 2.508e-5 |
+| random-mixed-seed-862-w02-q2-q7-mvp | a 100 s quantile and a 5 min top-k increase | 3.238e-5 | 3.203e-5 |
+| topk-rate-guarantees-ignored-mvp | `topk(5, sum by (job) (rate(data_total[5m])))` | 3.619e-7 | 2.928e-7 |
+
+Seven more corpus snapshots (q02, q05, q06, q18, q21, q22, q23: 5 min
+ranges, offsets) differ from the committed ones on main already, by the
+counter state's bytes (144 → 137 B); they read no wider level and are left
+as they are.
