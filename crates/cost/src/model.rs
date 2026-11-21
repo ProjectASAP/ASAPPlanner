@@ -401,6 +401,10 @@ pub struct LatencySelectionChecks {
     /// Print the solver's log and the model's size by family on standard
     /// error; default false.
     pub log_solver: bool,
+    /// The most branch-and-bound nodes the default stop rule explores
+    /// before it stops without a 1 % gap; default 10,000. A test lowers it
+    /// to reach the retry from cost model 1's plan.
+    pub node_limit: i32,
 }
 
 impl Default for LatencySelectionChecks {
@@ -412,6 +416,7 @@ impl Default for LatencySelectionChecks {
             path_reads: true,
             report_root_lp_bound: false,
             log_solver: false,
+            node_limit: 10_000,
         }
     }
 }

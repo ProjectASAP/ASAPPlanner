@@ -519,11 +519,26 @@ so far and looks only for a plan at least a byte smaller
 (`objective_bound`), within 500 branch-and-bound nodes; finding none, or
 none within them, keeps the plan so far. When the nodes run out with a
 smaller plan found, that plan is kept though a still smaller one may
-exist. The reported latencies are then the chosen selection's: pinned,
-and solved once more for the mean latency (a tie-break solve's latency
-variables float within the slack it keeps on the mean latency). Node
-limits, not seconds, so the same inputs give the same plan on any host
-(one solver thread).
+exist. Node limits, not seconds, so the same inputs give the same plan
+on any host (one solver thread).
+
+**Reported latencies are the plan's own.** The chosen selection is always
+pinned and solved once more, exactly, for the mean latency: a solve
+stopped at its gap, and a tie-break solve (whose latency variables float
+within the slack it keeps on the mean latency), may leave a latency above
+the selection's own. A pinned solve that fails is an error, not the
+looser latencies. The MILP's latencies are then `plan_cost`'s for the
+selected plan, which a test checks on the measured workloads. That needs
+the candidates of an input group with one family and θ to fold the same
+rows, as Stage 3 costs a consumer over one baseline of them. A chain over
+a full window folds the same rows built at ingestion or at query time,
+both from the exact arrival rate (`rows_per_tumbling_window`). It does not
+hold in general yet: a query-time chain reading back less than a window
+folds a partial window, an ingestion-time `SummaryAgg` reports one
+second's rows per state, and candidates built by different operators
+round differently (e.g. KLL states of 200,001 against 200,010 rows). Where
+a consumer's cost depends on those rows, the MILP and `plan_cost` can
+still differ.
 
 **Pruning before the MILP.**
 - **A feasible plan's bound (T8).** Cost model 1's optimum over the same
@@ -874,8 +889,8 @@ bound, over a limit alone), `path_reads.rs` (the path-read rows) and
 | 24 | S1 (per-execution latency and freshness variables $\ell_e$, $\varphi_e$ with big-M rows, replacing the per-query reads): considered and rejected. Its LP bound stays at 0 like the McCormick reads, and it measured slower (two workloads: 4.4 s and 5.1 s against 1.2 s). | Decided (rejected) |
 | 25 | Speed-ups, each exact: reads only of kept executions; the latency-bound exclusions once per selection; θ dominance in every quantity; a feasible plan's bound (T8); reads as a flow (T9) with the valid freshness rows; lazy tie-break solves warm-started from the plan so far (500 nodes each). | Decided |
 | 29 | Reads along each path of the query's plan (an occurrence tree, where every memo group is read at most once per occurrence, the guard by construction), with the freshness big-M rows on each occurrence's sums per refresh group (section 2.5), knob `path_reads`; exact, checked on the 40 PromQL snapshot workloads. | Decided |
-| 26 | Checking and measurement switches in `CostInputs::latency_selection_checks` (`theta_dominance`, `feasible_plan_bound`, `lazy_tie_breaks`, `path_reads`, on by default; `report_root_lp_bound`, `log_solver`, off), never serialized: tools and tests set them. Turning a speed-up off must not change the optimum, which the exactness tests check. The planning crates read no environment; the `asap_planner` tool maps `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_PATH_READS=off`, `ASAP_STAGE3_ROOT_LP=1` and `ASAP_STAGE3_SOLVER_LOG=1` onto them. The one serialized setting is `CostInputs::latency_selection.exact_solve` (`ASAP_STAGE3_EXACT=1`). The earlier McCormick read rows and the MIP start from cost model 1's plan were measured, not kept (the start remains only for a solve that finds no plan within its node limit). | By this document |
-| 27 | The mean latency solve stops at a relative MIP gap of 1 % or after 10,000 branch-and-bound nodes, whichever comes first (nodes, not seconds, so the result does not depend on the host; 10,000 nodes took about 30 s on the slowest workload before the path reads), and returns its plan with the gap and the solver's lower bound (`Selection::optimality_gap`, the plan report's `optimality_gap`, the text output's mean latency line). `LatencySelection::exact_solve` (`ASAP_STAGE3_EXACT=1`) solves to optimality; the exactness tests compare in exact mode, and in the default mode check that the gap is at most 1 % and that the plan is within its gap of the exact optimum. With no plan within the nodes, the solve runs once more from cost model 1's plan (pinned and completed by HiGHS) under the same limit; with none still, the selection fails. | Decided |
+| 26 | Checking and measurement switches in `CostInputs::latency_selection_checks` (`theta_dominance`, `feasible_plan_bound`, `lazy_tie_breaks`, `path_reads`, on by default; `report_root_lp_bound`, `log_solver`, off; `node_limit`, 10,000), a field of `CostInputs` that is never serialized (`#[serde(skip)]`): a cost inputs file cannot set them; tools and tests do. Turning a speed-up off must not change the optimum, which the exactness tests check. The planning crates read no environment; the `asap_planner` tool maps `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_PATH_READS=off`, `ASAP_STAGE3_ROOT_LP=1`, `ASAP_STAGE3_SOLVER_LOG=1` and `ASAP_STAGE3_NODE_LIMIT=<n>` onto them. The one serialized setting is `CostInputs::latency_selection.exact_solve` (`ASAP_STAGE3_EXACT=1`). The earlier McCormick read rows and the MIP start from cost model 1's plan were measured, not kept (the start remains only for a solve that finds no plan within its node limit). | By this document |
+| 27 | The mean latency solve stops at a relative MIP gap of 1 % or after 10,000 branch-and-bound nodes, whichever comes first (nodes, not seconds, so the result does not depend on the host; on the measured workloads the solve stops within 1 node, 3 when exact), and returns its plan with the gap and the solver's lower bound (`Selection::optimality_gap`, the plan report's `optimality_gap`, the text output's mean latency line). `LatencySelection::exact_solve` (`ASAP_STAGE3_EXACT=1`) solves to optimality; the exactness tests compare in exact mode, and in the default mode check that the gap is at most 1 % and that the plan is within its gap of the exact optimum. With no plan within the nodes, the solve runs once more from cost model 1's plan (pinned and completed by HiGHS, on the model with that plan's executions put back) under the same limit; with none still, the selection fails. When cost model 1 selected no plan, or its plan breaks a limit, there is no start: the error says so and names each limit whose removal alone would let the plan fit. A solve stopped before HiGHS proves any bound reports a lower bound of 0. | Decided |
 | 28 | A range request's steps split over the query threads in latency: per-step work counts $\lceil s / T_{query} \rceil$ times; CPU still counts every step. | Decided |
 | 14 | Under cost model 3 the greedy cost upper bound is not applied; the `OneEvaluation` twin dominance is restated over time, memory, disk and CPU. | By this document |
 | 15 | Calibration passes when every node's predicted time per phase is within 1.5× of measured, at every series scale run (1k passes; 10k after term (3)). | Decided |

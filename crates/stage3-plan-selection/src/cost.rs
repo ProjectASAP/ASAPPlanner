@@ -721,6 +721,9 @@ fn logical_output<'a: 'b, 'b>(
             output = Some(usage.producer_output(payload, schema));
             continue;
         };
+        if known.raw_rows_per_ms != usage.raw_rows_per_ms {
+            known.raw_rows_per_ms = None;
+        }
         if usage.output.bytes > known.output.bytes {
             known.family = usage.family;
             known.state_input_rows = usage.state_input_rows;

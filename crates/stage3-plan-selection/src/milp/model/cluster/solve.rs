@@ -51,25 +51,23 @@ pub(super) enum Stop {
     /// At a proved optimum.
     Exact,
     /// At a relative gap of [`STOP_RELATIVE_GAP`] or after
-    /// [`STOP_NODES`] branch-and-bound nodes, whichever comes first.
+    /// `LatencySelectionChecks::node_limit` (10,000) branch-and-bound
+    /// nodes, whichever comes first.
     GapOrNodes,
 }
 
 /// The default stop rule of the mean latency solve: a relative gap of 1 %
-/// or 10,000 branch-and-bound nodes, whichever comes first
-/// (`LatencySelection::exact_solve` turns it off). Limits in nodes, not
-/// seconds, so the same inputs give the same plan on any host (one solver
-/// thread); 10,000 nodes took about 30 s on the slowest workload measured
-/// before the path reads.
+/// or `LatencySelectionChecks::node_limit` (10,000) branch-and-bound
+/// nodes, whichever comes first (`LatencySelection::exact_solve` turns it
+/// off). Limits in nodes, not seconds, so the same inputs give the same
+/// plan on any host (one solver thread).
 pub(super) const STOP_RELATIVE_GAP: f64 = 0.01;
-
-pub(super) const STOP_NODES: i32 = 10_000;
 
 /// What a solve that reached its node limit without a plan returns.
 pub(super) const NO_PLAN_IN_NODES: &str = "no plan within the node limit";
 
 /// The most branch-and-bound nodes a tie-break solve explores for a
-/// smaller plan (deterministic, as [`STOP_NODES`]).
+/// smaller plan (deterministic, as the default stop rule's node limit).
 pub(super) const TIE_BREAK_NODES: i32 = 500;
 
 /// The values a solve returns.
@@ -592,7 +590,10 @@ pub(super) fn build_and_solve(
     );
     model.set_option("mip_abs_gap", 0.0);
     if stop == Stop::GapOrNodes {
-        model.set_option("mip_max_nodes", STOP_NODES);
+        model.set_option(
+            "mip_max_nodes",
+            inputs.cost_inputs.latency_selection_checks.node_limit,
+        );
     }
     let log = inputs.cost_inputs.latency_selection_checks.log_solver;
     model.set_option("output_flag", log);
@@ -709,7 +710,14 @@ pub(super) fn build_and_solve(
         answering,
         latency_ms: latencies.iter().map(|&latency| value(latency)).collect(),
         objective: objective_value,
-        lower_bound: dual_bound.map_or(objective_value, |bound| bound.min(objective_value)),
+        // Not proved optimal and no finite bound from HiGHS (a solve
+        // stopped before its root finished): only 0, as every objective
+        // here (a latency, memory or disk) is at least 0.
+        lower_bound: match (proved_optimal, dual_bound) {
+            (true, _) => objective_value,
+            (false, Some(bound)) => bound.min(objective_value),
+            (false, None) => 0.0,
+        },
         memory_bytes,
         disk_bytes,
         columns,

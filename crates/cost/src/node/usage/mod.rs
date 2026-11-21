@@ -306,6 +306,14 @@ pub struct ProducerOutput<'a> {
     /// a 5 min scan spans 300,000 ms, 30 batches of 10 s, however few rows
     /// it keeps.
     pub raw_rows_span_ms: Option<u64>,
+    /// The exact rate, in rows per ms, at which its raw output rows
+    /// arrive, while its rows are that rate over their span
+    /// (`raw_rows_span_ms`): a scan's sources' arrival rate, passed on by a
+    /// `TimeRange` and the operators that keep each row's window; `None`
+    /// once a node outputs other rows (a `Limit`, a `Dedup`, rows bounded
+    /// by `rows_held`). Example: 10,000 series every 15 s arrive at
+    /// 0.6667 rows per ms, which one second's `rows` rounds to 667.
+    pub raw_rows_per_ms: Option<f64>,
 }
 
 impl ProducerOutput<'_> {
@@ -360,6 +368,9 @@ pub struct NodeResourceUsageAndCost<'a> {
     /// The time its raw output rows span
     /// ([`ProducerOutput::raw_rows_span_ms`]).
     pub raw_rows_span_ms: Option<u64>,
+    /// The exact rate its raw output rows arrive at
+    /// ([`ProducerOutput::raw_rows_per_ms`]).
+    pub raw_rows_per_ms: Option<f64>,
     /// Work of one execution, in ms on one core.
     pub work_ms_per_execution: f64,
     /// CPU operations per second.
@@ -405,6 +416,7 @@ impl<'a> NodeResourceUsageAndCost<'a> {
             chain_tumbling_window_width_ms: self.chain_tumbling_window_width_ms,
             state_input_rows: self.state_input_rows,
             raw_rows_span_ms: self.raw_rows_span_ms,
+            raw_rows_per_ms: self.raw_rows_per_ms,
         }
     }
 }
@@ -864,6 +876,10 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let input_raw_rows_span_ms = producers
         .first()
         .and_then(|producer| producer.raw_rows_span_ms);
+    // The exact rate its input's raw rows arrive at, when known.
+    let input_raw_rows_per_ms = producers
+        .first()
+        .and_then(|producer| producer.raw_rows_per_ms);
     // The times a grouping into `group_count` groups visits a group's
     // state: once per group per batch of raw rows its input arrives in
     // (`group_raw_batch_visits`).
@@ -1285,38 +1301,19 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             ..
         }) => {
             // One window's states: each input row updates the window its
-            // time falls in. At ingestion time one window holds the
-            // input's share of one second of its sources' raw rows, over
-            // the window at the exact arrival rate (one second's
-            // `input.rows` is rounded: 666.67 rows a second arrive as 667,
-            // and 60 s of them are 40,000 rows, not 40,020), so a chain
-            // built at ingestion time folds what the same chain built at
-            // query time does; without a rate, `input.rows` a second. At
-            // query time one window holds its width's share of the time
-            // its input's raw rows span (without a span, its share of the
-            // retained windows).
+            // time falls in ([`rows_per_tumbling_window`], the same rows
+            // whether the chain is built at ingestion or at query time).
             let group_count = groups(reduction)?;
-            let rows_per_tumbling_window = match (ingestion, rows_per_ms) {
-                (true, Some(rows_per_ms)) => {
-                    let raw_rows_per_second = (rows_per_ms * ONE_SECOND_MS as f64).round().max(1.0);
-                    let share_of_raw_rows = input.rows as f64 / raw_rows_per_second;
-                    ((share_of_raw_rows * rows_per_ms * *tumbling_window_width_ms as f64).round()
-                        as u64)
-                        .max(1)
-                }
-                (true, None) => u64::try_from(
-                    (u128::from(input.rows) * u128::from(*tumbling_window_width_ms))
-                        .div_ceil(u128::from(ONE_SECOND_MS)),
-                )
-                .map_err(|_| AnalyticalCostError::Overflow)?,
-                (false, _) => input_raw_rows_span_ms
-                    .filter(|span_ms| *span_ms > 0)
-                    .map_or(input.rows.div_ceil(retained_output_count), |span_ms| {
-                        ((input.rows as f64 * *tumbling_window_width_ms as f64 / span_ms as f64)
-                            .round() as u64)
-                            .clamp(1, input.rows.max(1))
-                    }),
-            };
+            let rows_per_tumbling_window = rows_per_tumbling_window(
+                ChainInputRows {
+                    rows: input.rows,
+                    raw_rows_span_ms: input_raw_rows_span_ms,
+                    raw_rows_per_ms: input_raw_rows_per_ms,
+                },
+                *tumbling_window_width_ms,
+                ingestion,
+                retained_output_count,
+            );
             let SummaryStateBuild {
                 input_rows,
                 state_bytes,
@@ -1836,6 +1833,23 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             .then_some(input_raw_rows_span_ms)
             .flatten()
     });
+    // A scan's rows arrive at its sources' rate; a time range and the
+    // operators that keep each row's window pass on their input's. The
+    // rate holds while its rows are that rate over their span.
+    let raw_rows_per_ms = if matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. })) {
+        rows_per_ms
+    } else if matches!(node.payload, Payload::NonASAP(NonASAPOp::TimeRange { .. }))
+        || node.payload.keeps_input_window()
+    {
+        input_raw_rows_per_ms
+    } else {
+        None
+    }
+    .filter(|&rows_per_ms| {
+        raw_rows_span_ms.is_some_and(|span_ms| {
+            out.rows == ((rows_per_ms * span_ms as f64).round() as u64).max(1)
+        })
+    });
     let usage = NodeResourceUsageAndCost {
         output: out,
         sources,
@@ -1845,6 +1859,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         chain_tumbling_window_width_ms,
         state_input_rows,
         raw_rows_span_ms,
+        raw_rows_per_ms,
         work_ms_per_execution: node_ms,
         cpu_ops_per_second: estimate.cpu_ops() * per_second,
         scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
@@ -1974,6 +1989,55 @@ fn selected_tumbling_windows(
     Ok(u64::try_from(range.as_millis() / u128::from(width_ms))
         .map_err(|_| AnalyticalCostError::Overflow)?
         .max(1))
+}
+
+/// A chain's input rows ([`rows_per_tumbling_window`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChainInputRows {
+    /// The rows of one execution's input.
+    pub(crate) rows: u64,
+    /// The time they span ([`ProducerOutput::raw_rows_span_ms`]).
+    pub(crate) raw_rows_span_ms: Option<u64>,
+    /// The exact rate they arrive at ([`ProducerOutput::raw_rows_per_ms`]).
+    pub(crate) raw_rows_per_ms: Option<f64>,
+}
+
+/// The rows one tumbling window of `width_ms` holds, for a chain built at
+/// ingestion time (`ingestion`) or at query time, so that the same chain
+/// folds the same rows either way. With the exact arrival rate of its
+/// input's rows, when its rows are that rate over their span: that rate
+/// over the window, at query time at most over the time the rows span.
+/// Without it: its input's rows over the window's
+/// share of their span (the rows are rounded: 667 a second for 666.67);
+/// without a span, one second's rows at ingestion time, the rows over the
+/// `retained_windows` at query time. At least one row. Example: 10,000
+/// series every 15 s in 60 s windows: 40,000 rows, at ingestion time
+/// (667 rows a second) and at query time over 300 s (200,000 rows) alike.
+pub(crate) fn rows_per_tumbling_window(
+    input: ChainInputRows,
+    width_ms: u64,
+    ingestion: bool,
+    retained_windows: u64,
+) -> u64 {
+    let span_ms = input.raw_rows_span_ms.filter(|span_ms| *span_ms > 0);
+    let window_ms = match (ingestion, span_ms) {
+        (false, Some(span_ms)) => width_ms.min(span_ms),
+        _ => width_ms,
+    };
+    let rows_per_ms = input.raw_rows_per_ms.filter(|&rows_per_ms| {
+        span_ms.is_some_and(|span_ms| {
+            input.rows == ((rows_per_ms * span_ms as f64).round() as u64).max(1)
+        })
+    });
+    let rows = match (rows_per_ms, span_ms) {
+        (Some(rows_per_ms), _) => rows_per_ms * window_ms as f64,
+        (None, Some(span_ms)) => input.rows as f64 * window_ms as f64 / span_ms as f64,
+        (None, None) => match ingestion {
+            true => input.rows as f64 * width_ms as f64 / ONE_SECOND_MS as f64,
+            false => input.rows.div_ceil(retained_windows.max(1)) as f64,
+        },
+    };
+    (rows.round() as u64).max(1)
 }
 
 /// The times a grouping into `group_count` groups visits a group's state

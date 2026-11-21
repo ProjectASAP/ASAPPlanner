@@ -269,31 +269,78 @@ pub(crate) fn solve_cluster_selection(
             }
         }
     }
+    // The executions kept, with the feasible plan's own put back (the
+    // exclusions may have left some out): the model of the retry, so the
+    // pinned plan is a solution of it.
+    let kept_with_plan: Vec<bool> = (0..kept.len())
+        .map(|index| {
+            kept[index]
+                || (costable[index]
+                    && inputs
+                        .feasible_plan
+                        .as_ref()
+                        .is_some_and(|plan| plan.executions.contains(&index)))
+        })
+        .collect();
     // A start when the first solve finds no plan within its node limit:
     // the feasible plan with its selection pinned, completed by HiGHS on
-    // the same model (same columns).
-    let pinned_start = || -> Option<(Vec<f64>, u64)> {
-        inputs.feasible_plan.as_ref().and_then(|plan| {
+    // the retry's model (same columns); or why there is none.
+    let pinned_start = || -> Result<(Vec<f64>, u64), String> {
+        let plan = inputs
+            .feasible_plan
+            .as_ref()
+            .ok_or("cost model 1 selected no plan to start from")?;
+        let pinned_under = |active: &[ClusterLimit]| {
             build_and_solve(
                 inputs,
                 &shapes,
                 &groups,
-                &kept,
+                &kept_with_plan,
                 Solve {
                     objective: Objective::MeanLatency,
                     fixed: Fixed::default(),
-                    active: &limits,
+                    active,
                     start: None,
                     improve_below: None,
                     pinned: Some(plan),
                     stop: Stop::Exact,
                 },
             )
-            .ok()
-            .map(|pinned| (pinned.columns, pinned.solve_ms))
-        })
+        };
+        match pinned_under(&limits) {
+            Ok(pinned) => Ok((pinned.columns, pinned.solve_ms)),
+            // The limits it breaks: each one whose removal alone lets it
+            // solve (none named when it breaks several together).
+            Err(SelectionMilpError::Infeasible) => {
+                let broken: Vec<ClusterLimit> = limits
+                    .iter()
+                    .filter(|&limit| {
+                        let others: Vec<ClusterLimit> = limits
+                            .iter()
+                            .copied()
+                            .filter(|other| other != limit)
+                            .collect();
+                        pinned_under(&others).is_ok()
+                    })
+                    .copied()
+                    .collect();
+                let names: Vec<String> = broken.iter().map(|limit| format!("{limit:?}")).collect();
+                Err(format!(
+                    "cost model 1's plan breaks {}, so no start was available",
+                    match names.is_empty() {
+                        true => "several limits together".to_string(),
+                        false => format!("a limit ({})", names.join(", ")),
+                    }
+                ))
+            }
+            Err(error) => Err(format!(
+                "cost model 1's plan did not solve as a start: {error:?}"
+            )),
+        }
     };
-    let solve = |objective: Objective,
+    // One solve over the executions `model` keeps.
+    let solve = |model: &[bool],
+                 objective: Objective,
                  fixed: Fixed,
                  start: Option<&[f64]>,
                  improve_below: Option<f64>,
@@ -302,7 +349,7 @@ pub(crate) fn solve_cluster_selection(
             inputs,
             &shapes,
             &groups,
-            &kept,
+            model,
             Solve {
                 objective,
                 fixed,
@@ -321,6 +368,7 @@ pub(crate) fn solve_cluster_selection(
         .report_root_lp_bound
         .then(|| {
             solve(
+                &kept,
                 Objective::Relaxation,
                 Fixed::default(),
                 None,
@@ -332,9 +380,13 @@ pub(crate) fn solve_cluster_selection(
         .flatten()
         .map(|relaxed| relaxed.objective / weights.max(f64::MIN_POSITIVE));
     let mut solve_count = 1;
+    // The model the selection is solved over: the executions kept, or,
+    // after a retry from the feasible plan, those with the plan's own.
+    let mut model: &[bool] = &kept;
     let mut start_ms = 0;
     let first = match inputs.cost_inputs.latency_selection.exact_solve {
         true => solve(
+            model,
             Objective::MeanLatency,
             Fixed::default(),
             None,
@@ -344,6 +396,7 @@ pub(crate) fn solve_cluster_selection(
         // No plan within the node limit: once more from the feasible plan,
         // under the same limit, so the second phase is bounded too.
         false => match solve(
+            model,
             Objective::MeanLatency,
             Fixed::default(),
             None,
@@ -352,17 +405,30 @@ pub(crate) fn solve_cluster_selection(
         ) {
             Err(SelectionMilpError::Solver(reason)) if reason == NO_PLAN_IN_NODES => {
                 match pinned_start() {
-                    Some((columns, ms)) => {
+                    Ok((columns, ms)) => {
                         start_ms = ms;
+                        solve_count += 1;
+                        model = &kept_with_plan;
                         solve(
+                            model,
                             Objective::MeanLatency,
                             Fixed::default(),
                             Some(&columns),
                             None,
                             Stop::GapOrNodes,
                         )
+                        .map_err(|error| match error {
+                            SelectionMilpError::Solver(again) if again == NO_PLAN_IN_NODES => {
+                                SelectionMilpError::Solver(format!(
+                                    "{NO_PLAN_IN_NODES}, nor from cost model 1's plan as a start"
+                                ))
+                            }
+                            error => error,
+                        })
                     }
-                    None => Err(SelectionMilpError::Solver(reason)),
+                    Err(why) => Err(SelectionMilpError::Solver(format!(
+                        "{NO_PLAN_IN_NODES}; {why}"
+                    ))),
                 }
             }
             solved => solved,
@@ -402,7 +468,6 @@ pub(crate) fn solve_cluster_selection(
     // the plan so far.
     let full_tie_breaks = !checks.lazy_tie_breaks;
     let mut last = first;
-    let mut tie_broken = false;
     for objective in [Objective::Memory, Objective::Disk] {
         let current = match objective {
             Objective::Memory => last.memory_bytes,
@@ -413,6 +478,7 @@ pub(crate) fn solve_cluster_selection(
             memory: (objective == Objective::Disk).then_some(last.memory_bytes),
         };
         let tried = solve(
+            model,
             objective,
             fixed,
             Some(&last.columns),
@@ -428,14 +494,15 @@ pub(crate) fn solve_cluster_selection(
             };
             if found < current - 0.5 {
                 last = better;
-                tie_broken = true;
             }
         }
     }
-    // A tie-break solve's latency variables float within the slack it keeps
-    // on the mean latency: the reported latencies are those of the chosen
-    // selection, pinned and solved for the mean latency.
-    if tie_broken {
+    // The reported latencies are those of the chosen selection, pinned and
+    // solved exactly for the mean latency: a solve stopped at its gap and a
+    // tie-break solve (whose latency variables float within the slack it
+    // keeps on the mean latency) may leave a latency above the selection's
+    // own. A pinned solve that fails is an error, not the looser latencies.
+    {
         let chosen = FeasiblePlan {
             executions: last.selected.iter().copied().collect(),
             edges: last.edges.iter().copied().collect(),
@@ -445,7 +512,7 @@ pub(crate) fn solve_cluster_selection(
             inputs,
             &shapes,
             &groups,
-            &kept,
+            model,
             Solve {
                 objective: Objective::MeanLatency,
                 fixed: Fixed::default(),
@@ -457,10 +524,13 @@ pub(crate) fn solve_cluster_selection(
             },
         );
         solve_count += 1;
-        if let Ok(pinned) = pinned {
-            solve_ms += pinned.solve_ms;
-            last.latency_ms = pinned.latency_ms;
-        }
+        let pinned = pinned.map_err(|error| {
+            ClusterSelectionError::Milp(SelectionMilpError::Solver(format!(
+                "the selected plan, pinned, did not solve for its latencies: {error:?}"
+            )))
+        })?;
+        solve_ms += pinned.solve_ms;
+        last.latency_ms = pinned.latency_ms;
     }
     // (K) holds only to the solver's tolerance: a selection that misses a
     // target, checked exactly, is refused.

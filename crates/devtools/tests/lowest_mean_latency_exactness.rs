@@ -436,5 +436,74 @@ fn the_milp_latencies_are_the_plan_costs() {
     std::fs::remove_dir_all(&scratch).ok();
 }
 
+/// A first solve that finds no plan within its node limit
+/// (`ASAP_STAGE3_NODE_LIMIT=0`) runs once more from cost model 1's plan
+/// and selects a plan (one solve more than by default); when cost model
+/// 1's plan breaks a limit (raw data on a 1 MB disk), there is no start
+/// and the error says which limit.
+#[test]
+fn a_solve_without_a_plan_in_its_node_limit_retries_from_cost_model_1_s_plan() {
+    let root = root();
+    let workload = "crates/devtools/tests/sketch_plan_snapshots/workloads/distinct-two-forms.json";
+    let cluster = "tools/dag-viewer/cost-inputs/cluster-lowest-mean-latency.json";
+    let mut small_disk: Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join(cluster)).unwrap()).unwrap();
+    small_disk["cost_model"]["cluster_capacity"]["disk_bytes"] = 1_000_000.into();
+    let small_disk_path =
+        std::env::temp_dir().join(format!("lml_small_disk_{}.json", std::process::id()));
+    std::fs::write(&small_disk_path, small_disk.to_string()).unwrap();
+    let plan = |cost_inputs: &str, node_limit: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_asap_planner"));
+        command
+            .current_dir(&root)
+            .args(["--workload", workload, "--run-until", "stage3"])
+            .args([
+                "--deployment-capabilities",
+                "crates/devtools/tests/sketch_plan_snapshots/deployments/raw-retained.capabilities.json",
+            ])
+            .args(["--cost-inputs", cost_inputs, "--out", "/dev/stdout"]);
+        if let Some(nodes) = node_limit {
+            command.env("ASAP_STAGE3_NODE_LIMIT", nodes);
+        }
+        let output = command.output().unwrap();
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let solves = |stdout: &str| {
+        stdout
+            .lines()
+            .find(|line| line.starts_with("selection MILP:"))
+            .and_then(|line| {
+                line.split(" (")
+                    .nth(1)?
+                    .split(' ')
+                    .next()?
+                    .parse::<u32>()
+                    .ok()
+            })
+    };
+    let (ok, by_default, stderr) = plan(cluster, None);
+    assert!(ok, "{stderr}");
+    let (ok, retried, stderr) = plan(cluster, Some("0"));
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        solves(&retried),
+        solves(&by_default).map(|solves| solves + 1)
+    );
+    let (ok, _, stderr) = plan(small_disk_path.to_str().unwrap(), Some("0"));
+    assert!(!ok);
+    assert!(
+        stderr.contains("no plan within the node limit; cost model 1's plan breaks a limit (DiskBytes), so no start was available"),
+        "{stderr}"
+    );
+    // With the default node limit the plan keeping no raw data fits.
+    let (ok, _, stderr) = plan(small_disk_path.to_str().unwrap(), None);
+    assert!(ok, "{stderr}");
+    std::fs::remove_file(&small_disk_path).ok();
+}
+
 const TYPICAL_VARIABLES: u64 = 2540;
 const TYPICAL_ROWS: u64 = 4585;
