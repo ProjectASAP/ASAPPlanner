@@ -115,12 +115,14 @@ fn labels(i: u32) -> [String; 3] {
     ]
 }
 
-/// The bytes `asap_sketchlib`'s DDSketch holds after adding `values`.
+/// The bytes `asap_sketchlib`'s DDSketch holds after adding `values`,
+/// sealed as the executor keeps a stored window (`shrink_to_fit`).
 fn library_ddsketch_bytes(alpha: f64, values: &[f64]) -> u64 {
     let mut sketch = asap_sketchlib::sketches::DdSketch::new(alpha);
     for value in values {
         sketch.add(value);
     }
+    sketch.shrink_to_fit();
     sketch.memory_bytes() as u64
 }
 
@@ -197,10 +199,11 @@ fn library_ddsketch_mean_bytes(
 /// DDSketch states are charged as if their values spread like an
 /// exponential's ([`exponential_values_magnitude_ratio`]); these pin how
 /// far that assumption is from other value shapes, so a change to it shows
-/// here. At α = 0.01, non-negative values, 10 to 36,000 per state:
-/// lognormal latencies with a floor (σ = 1) are over-charged 1.08–1.13x; a
-/// narrow gauge of 100 ± 10, whose states hold one first block of buckets
-/// (1,168 bytes), 2.4x at 10 values to 5.6x at 36,000.
+/// here. States are priced and held sealed (`DdSketch::shrink_to_fit`).
+/// At α = 0.01, non-negative values, 10 to 36,000 per state: lognormal
+/// latencies with a floor (σ = 1) are over-charged 1.2x at 10 values to
+/// 1.6x at 36,000; a narrow gauge of 100 ± 10, whose states hold its 11
+/// buckets (218–240 bytes), 7.9x to 23x when its range is not declared.
 #[test]
 fn ddsketch_state_bytes_over_charge_narrower_values_within_their_bands() {
     let alpha = 0.01;
@@ -219,26 +222,25 @@ fn ddsketch_state_bytes_over_charge_narrower_values_within_their_bands() {
         let lognormal_held = library_ddsketch_mean_bytes(alpha, n, false, lognormal) as f64;
         let ratio = charged(n) / lognormal_held;
         assert!(
-            (1.0..=1.25).contains(&ratio),
+            (1.0..=1.7).contains(&ratio),
             "{n} lognormal values: charged {} for {lognormal_held} held, {ratio:.2}x",
             charged(n)
         );
         let gauge_held = library_ddsketch_mean_bytes(alpha, n, false, narrow_gauge) as f64;
         let ratio = charged(n) / gauge_held;
         assert!(
-            (2.0..=6.0).contains(&ratio),
+            (7.0..=25.0).contains(&ratio),
             "{n} gauge values: charged {} for {gauge_held} held, {ratio:.2}x",
             charged(n)
         );
     }
 }
 
-/// A DDSketch state is charged what `asap_sketchlib` holds on average for
-/// latency-like values, not the most it could hold over nine decades. At
-/// α = 0.01 the executor's stored states of 1,000 latency series hold
-/// 2.9 KB at 10 rows per state and 5.8 KB at 3,000, where the library's
-/// worst case charged 18.8 KB for both, so stored quantile windows looked
-/// 4x more expensive than they are.
+/// A DDSketch state is charged what a sealed `asap_sketchlib` sketch holds
+/// on average for latency-like values, not the most it could hold over
+/// nine decades. At α = 0.01 the executor's sealed states of latency
+/// series hold 1.6 KB at 10 rows per state and 4.5 KB at 3,000, where the
+/// library's worst case for an open sketch is 18.8 KB for both.
 #[test]
 fn ddsketch_state_bytes_match_the_library_on_latency_like_values() {
     let alpha = 0.01;
@@ -318,8 +320,9 @@ fn the_assumed_ddsketch_range_is_named_only_when_the_bytes_use_it() {
 /// rows, its column's declared `column_magnitudes` and the assumed nine
 /// decades. At α = 0.01, non-negative values:
 /// - a narrow gauge declared within [90, 110] spans a ratio of 1.22, 11
-///   buckets: 1,248 bytes at any number of rows, where `asap_sketchlib`
-///   holds 1,168 (undeclared, 2,744 at 10 rows and 6,552 at 36,000);
+///   buckets: 232 bytes at any number of rows, where a sealed
+///   `asap_sketchlib` sketch holds 218–240 (undeclared, 1,728 at 10 rows
+///   and 5,536 at 36,000);
 /// - a range wider than the rows' spread (the latency generator's
 ///   [2.7e-8, 1104], 10.6 decades) leaves the spread's bytes unchanged;
 /// - with the rows unknown, a declared [0.001, 10000] spans seven decades
@@ -345,10 +348,10 @@ fn ddsketch_state_bytes_are_capped_by_the_declared_value_magnitude_range() {
     for n in [10_u32, 600, 36_000] {
         let rows = Some(u64::from(n));
         let charged = costed(rows, Some(gauge));
-        assert_eq!(charged, 1_248, "{n} gauge rows");
+        assert_eq!(charged, 232, "{n} gauge rows");
         let held = library_ddsketch_mean_bytes(alpha, n, false, narrow_gauge);
         assert!(
-            (1.0..=1.1).contains(&(charged as f64 / held as f64)),
+            (0.95..=1.1).contains(&(charged as f64 / held as f64)),
             "{n} gauge rows: {charged} charged, {held} held"
         );
     }
@@ -374,17 +377,12 @@ fn ddsketch_state_bytes_are_capped_by_the_declared_value_magnitude_range() {
 /// exponential spread of those rows, which a declared range only caps.
 /// Values spread evenly in log over the whole of a declared seven decades
 /// ([0.001, 10000]), in random order, span more than that and are
-/// under-charged, most at few rows per state: at α = 0.01 the library
-/// holds 8.2–9.5 KB from 10 rows on (the mean of 20 series), charged
-/// 2,744 bytes at 10 rows per state (0.33 of it), 3,648 at 60 (0.38),
-/// 4,728 at 600 (0.50), 5,536 at 3,600 (0.59) and 6,552 at 36,000 (0.70).
-/// A known limit: the declared range cannot raise the span, since it
-/// bounds the column, not one state's rows. Charging such a state the
-/// expected span of `n` log-uniform values over the declared range
-/// (`(n − 1) / (n + 1)` of its decades) would charge these 0.78–0.81 of
-/// what they hold, but the latency generator's states, declared over its
-/// 10.6 decades, 1.3x (36,000 rows) to 3.6x (10 rows) of theirs, where
-/// they are charged 0.88–1.07 now.
+/// under-charged, most at few rows per state: at α = 0.01 a sealed sketch
+/// of them holds 5.5–6.6 KB from 10 rows on (the mean of 20 series),
+/// charged 1,728 bytes at 10 rows per state (0.31 of it), 2,632 at 60
+/// (0.41), 3,712 at 600 (0.56), 4,520 at 3,600 (0.69) and 5,536 at 36,000
+/// (0.84). A known limit: the declared range cannot raise the span, since
+/// it bounds the column, not one state's rows.
 #[test]
 fn ddsketch_state_bytes_under_charge_log_uniform_values_over_a_declared_range() {
     let alpha = 0.01;
@@ -393,11 +391,11 @@ fn ddsketch_state_bytes_under_charge_log_uniform_values_over_a_declared_range() 
         max_abs: 10_000.0,
     };
     for (n, band) in [
-        (10_u32, 0.30..=0.37),
-        (60, 0.35..=0.42),
-        (600, 0.46..=0.55),
-        (3_600, 0.54..=0.64),
-        (36_000, 0.64..=0.75),
+        (10_u32, 0.28..=0.35),
+        (60, 0.37..=0.45),
+        (600, 0.51..=0.61),
+        (3_600, 0.63..=0.75),
+        (36_000, 0.78..=0.90),
     ] {
         let charged = sketch_state_bytes(
             &SketchParams::DDSketch { alpha },
@@ -805,11 +803,14 @@ fn priced_bytes_agree_with_the_executor() {
             None,
         ),
         // Priced for the spread its 10,000 rows are expected to span
-        // (`exponential_values_magnitude_ratio`); these span three decades.
+        // (`exponential_values_magnitude_ratio`), and fed such rows: a
+        // sealed DDSketch holds just the buckets its values span, so rows
+        // of another spread (`Rows::Values` span three decades) differ by
+        // their span alone.
         (
             sketch(A::DDSketch),
             Some(SketchParams::DDSketch { alpha: 0.01 }),
-            Rows::Values,
+            Rows::LatencyLike,
             None,
         ),
         (
