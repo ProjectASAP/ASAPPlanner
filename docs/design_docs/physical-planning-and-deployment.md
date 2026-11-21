@@ -95,10 +95,10 @@ separate unsupported compilation, deployment infeasibility, missing evidence,
 and a feasible candidate that loses on cost. Absence is not a cost comparison.
 
 For `sum by(job)(rate(m[1m]))`, Rate remains per series before grouped Sum.
-`CandidateLogicalASAPDAGs` offers one such candidate, with a per-series Rate state and a grouped
+`CandidateLogicalASAPDAGs` offers one such candidate, with a per-series counter state and a grouped
 Sum state. Its physical properties assignment places it: an ingestion-time Sum state
-finalizes Rate and builds Sum within a bounded precompute run; a query-time Sum
-over an ingestion-time Rate state leaves the Rate readout and Sum in the query DAG. Storing a
+finalizes the counter as Rate and builds Sum within a bounded precompute run; a query-time Sum
+over an ingestion-time counter state leaves the Rate readout and Sum in the query DAG. Storing a
 value requires its exact evaluation window, revision, readiness and serving
 cadence to match the query contract.
 
@@ -379,9 +379,9 @@ view. For `sum by(job)(rate(m[1m]))`, two materialization choices for the single
 logical candidate give:
 
 ```text
-Plan A (Rate state at ingestion time, Sum at query time):
-  refresh: counter samples → per-series Rate state            (the view)
-  query:   per-series Rate states → Rate readout → grouped Sum → result
+Plan A (counter state at ingestion time, Sum at query time):
+  refresh: counter samples → per-series counter state         (the view)
+  query:   per-series counter states → Rate readout → grouped Sum → result
 
 Plan B (Rate and Sum states at ingestion time):
   refresh: counter samples → per-series Rate → grouped Sum state (the view)

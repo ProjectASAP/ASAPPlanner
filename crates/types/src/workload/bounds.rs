@@ -216,7 +216,7 @@ fn at_most_one_row(node: &OperatorNode) -> bool {
             summary_input,
             query,
         }) => !matches!(query, SketchStatistic::TopK { .. }) && at_most_one_row(summary_input),
-        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => at_most_one_row(child),
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child, .. }) => at_most_one_row(child),
         // `vector(s)` turns one scalar into one row.
         Operator::NonASAP(NonASAPOp::PromqlVectorFromScalar(_)) => true,
         Operator::NonASAP(

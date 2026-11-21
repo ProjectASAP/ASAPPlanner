@@ -51,9 +51,9 @@ pub struct CandidateExclusion {
     /// `"i_rate"`. It matches the `Aggregate` only, never a state build:
     /// `{"aggregate_measure": "rate", "timing": "query_time"}` excludes an
     /// `Aggregate[rate]` over raw rows, but a query-time rate computed
-    /// from raw rows by a `SummaryAgg` of a `Rate` state is still offered.
+    /// from raw rows by a `SummaryAgg` of a `Counter` state is still offered.
     /// To rule out that state too, add `{"summary_family": {"exact":
-    /// "Rate"}}`.
+    /// "Counter"}}`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregate_measure: Option<String>,
     /// Matches a state build of this family.
@@ -180,7 +180,7 @@ impl CandidateExclusion {
     /// Why this exclusion is bad input, or `None` when it can be applied:
     /// it sets no field (so it would exclude every candidate), two of its
     /// fields match no operator in common (`{"operator": "SummaryMerge",
-    /// "summary_family": {"exact": "Rate"}}` matches nothing, since a
+    /// "summary_family": {"exact": "Counter"}}` matches nothing, since a
     /// family matches state builds only), its θ range is invalid
     /// ([`SketchParameterRange::invalid_reason`]) or ranges over another
     /// algorithm than its `summary_family` (a KLL `k` range of a DDSketch
@@ -227,7 +227,7 @@ impl CandidateExclusion {
 
     /// Each field that is set and matches only some operators, by its JSON
     /// name, with those operators, as [`Self::matches`] tests them. E.g.
-    /// `{"operator": "SummaryMerge", "summary_family": {"exact": "Rate"}}`
+    /// `{"operator": "SummaryMerge", "summary_family": {"exact": "Counter"}}`
     /// gives `[("operator", [SummaryMerge]), ("summary_family",
     /// [SummaryAgg, SummaryTumblingWindowChain])]`.
     fn operators_each_field_matches(&self) -> Vec<(&'static str, &[OperatorKind])> {

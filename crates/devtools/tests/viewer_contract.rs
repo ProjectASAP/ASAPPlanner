@@ -179,7 +179,10 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
             summary_input: (),
             query: SketchStatistic::FrequencyL2,
         },
-        ASAPOp::FinalizeExactAccumulator { child: () },
+        ASAPOp::FinalizeExactAccumulator {
+            child: (),
+            counter_readout: None,
+        },
         ASAPOp::MaintainPopulation {
             child: (),
             population: MaintainedPopulation {

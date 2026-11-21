@@ -24,7 +24,7 @@ use asap_types::ir::{
     ScalarExpr, TimeRangeKind,
 };
 use asap_types::stages::{Memo, MemoGroupId, ValueSign};
-use asap_types::summary_type::{SketchAlgorithm, SketchStatistic};
+use asap_types::summary_type::{CounterReadout, SketchAlgorithm, SketchStatistic};
 use asap_types::test_support::memo_fixtures::{
     aggregate, filter, range, readout, scan, shift, state,
 };
@@ -905,13 +905,12 @@ fn scalar_arithmetic_follows_its_operands_signs() {
 ///
 /// | Group | Expression | value sign |
 /// |---|---|---|
-/// | G4 | `Finalize(SummaryAgg[Rate](neg[1m]))` | `Unknown` (was the weight's `NonPositive`) |
-/// | G4 | `Finalize(SummaryAgg[Increase](neg[1m]))` | `Unknown` |
+/// | G4 | `Finalize[rate](SummaryAgg[Counter](neg[1m]))` | `Unknown` (was the weight's `NonPositive`) |
 /// | G4 | `Finalize(SummaryAgg[IRate](neg[1m]))` | `Unknown` |
 /// | G4 | `Finalize(SummaryAgg[Sum](neg[1m]))` | `NonPositive` |
 /// | G4 | `Finalize(SummaryAgg[Min](neg[1m]))` | `NonPositive` |
 /// | G4 | `Finalize(SummaryAgg[Count](neg[1m]))` | `NonNegative` |
-/// | G4 | `Finalize(SummaryAgg[Rate](latency[1m]))` | `NonNegative` |
+/// | G4 | `Finalize[rate](SummaryAgg[Counter](latency[1m]))` | `NonNegative` |
 #[test]
 fn a_finalized_exact_accumulator_has_its_aggregates_sign() {
     use asap_types::summary_type::ExactKind;
@@ -938,21 +937,24 @@ fn a_finalized_exact_accumulator_has_its_aggregates_sign() {
         let g1 = add(&mut memo, series(metric));
         let g2 = add(&mut memo, range(MINUTE_MS, g1));
         let g3 = add(&mut memo, state(FieldDataType::exact(kind), g2));
+        let counter_readout = (kind == ExactKind::Counter).then_some(CounterReadout::Rate);
         let g4 = add(
             &mut memo,
-            Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: g3 }),
+            Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+                child: g3,
+                counter_readout,
+            }),
         );
         signs(&memo, g4)[VALUE]
     };
     for (metric, kind, expected) in [
-        ("neg", ExactKind::Rate, Unknown),
-        ("neg", ExactKind::Increase, Unknown),
+        ("neg", ExactKind::Counter, Unknown),
         ("neg", ExactKind::IRate, Unknown),
         ("neg", ExactKind::Sum, NonPositive),
         ("neg", ExactKind::Min, NonPositive),
         ("neg", ExactKind::Max, NonPositive),
         ("neg", ExactKind::Count, NonNegative),
-        ("latency", ExactKind::Rate, NonNegative),
+        ("latency", ExactKind::Counter, NonNegative),
         ("latency", ExactKind::Sum, NonNegative),
     ] {
         assert_eq!(

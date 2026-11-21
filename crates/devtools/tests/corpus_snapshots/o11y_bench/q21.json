@@ -3,7 +3,7 @@
   "materialized_views": [
     {
       "coverage": {
-        "definition_id": "58395555aae268f4f68a8a3e82a6c45b",
+        "definition_id": "f59063d026a5d754ce7f409ff9b0b9d7",
         "selection": [
           {
             "columns": [
@@ -63,7 +63,7 @@
           "cost_per_second": 2.394,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000126,
-          "detail": "build exact Rate accumulator in tumbling windows of 60000 ms for 1000 groups: 1000 rows x 70 ops, 100 group visits, 16.7 states emitted; x 1.0000/s; keeps 18144000 bytes",
+          "detail": "build exact Counter accumulator in tumbling windows of 60000 ms for 1000 groups: 1000 rows x 70 ops, 100 group visits, 16.7 states emitted; x 1.0000/s; keeps 18144000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
@@ -197,8 +197,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Rate",
-                    "Rate"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -252,8 +252,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Rate",
-                    "Rate"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -307,8 +307,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Rate",
-                    "Rate"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -362,8 +362,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Rate",
-                    "Rate"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -582,8 +582,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Rate",
-                    "Rate"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -631,8 +631,8 @@
                 "reduction": "PerEntity",
                 "summary_type": {
                   "ExactAggregate": [
-                    "Rate",
-                    "Rate"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "tumbling_window_width_ms": 60000
@@ -641,7 +641,7 @@
           },
           "retention_ms": 7500000,
           "view_coverage": {
-            "definition_id": "58395555aae268f4f68a8a3e82a6c45b",
+            "definition_id": "f59063d026a5d754ce7f409ff9b0b9d7",
             "selection": [
               {
                 "columns": [
@@ -686,8 +686,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Rate",
-                    "Rate"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -749,8 +749,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Rate",
-                    "Rate"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -815,8 +815,8 @@
               {
                 "dtype": {
                   "ExactAggregate": [
-                    "Rate",
-                    "Rate"
+                    "Counter",
+                    "Counter"
                   ]
                 },
                 "name": "state",
@@ -909,7 +909,8 @@
           "payload": {
             "ASAP": {
               "FinalizeExactAccumulator": {
-                "child": 4
+                "child": 4,
+                "counter_readout": "Rate"
               }
             }
           }

@@ -39,7 +39,10 @@ pub fn exact_state(
     );
     let finalized = group(
         memo,
-        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: state }),
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+            child: state,
+            counter_readout: None,
+        }),
     );
     (state, finalized)
 }

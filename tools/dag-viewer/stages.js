@@ -459,6 +459,10 @@ function stageNodeLines(operator, inputSchema) {
       if (grouping) lines.push(grouping);
       break;
     case 'SummaryEstimate': lines.push(`query: ${compactWire(op.query)}`); break;
+    // A counter state is read as `rate` or `increase`.
+    case 'FinalizeExactAccumulator':
+      if (op.counter_readout) lines.push(`read: ${op.counter_readout.toLowerCase()}`);
+      break;
     case 'SummaryTumblingWindowChain':
       lines.push(`summary: ${summaryTypeText(op.summary_type)}`);
       lines.push(`tumbling windows of ${durationText(op.tumbling_window_width_ms)}`);

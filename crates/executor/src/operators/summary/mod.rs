@@ -1156,7 +1156,7 @@ fn evaluate_states(
             ));
         }
         match record
-            .evaluation(evaluation.statistic, range_ms)
+            .evaluation(evaluation.counter_readout, range_ms)
             .map_err(|e| Error::Operator(e.to_string()))?
         {
             Some(value) => Ok(Some(Value::Float64(value))),

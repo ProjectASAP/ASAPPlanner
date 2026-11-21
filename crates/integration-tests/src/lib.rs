@@ -363,8 +363,7 @@ pub mod planning {
             ExactKind::Count,
             ExactKind::Min,
             ExactKind::Max,
-            ExactKind::Increase,
-            ExactKind::Rate,
+            ExactKind::Counter,
             ExactKind::IRate,
         ];
         for kind in &exact {
@@ -373,8 +372,7 @@ pub mod planning {
                 | ExactKind::Count
                 | ExactKind::Min
                 | ExactKind::Max
-                | ExactKind::Increase
-                | ExactKind::Rate
+                | ExactKind::Counter
                 | ExactKind::IRate => {}
             }
         }

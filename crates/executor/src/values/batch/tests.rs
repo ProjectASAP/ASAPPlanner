@@ -286,7 +286,12 @@ fn a_batch_from_columns_holds_sealed_states_and_labels() {
             .as_any()
             .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
             .unwrap()
-            .evaluation(planner_types::summary_type::ExactKind::Sum, None, None)
+            .evaluation(
+                planner_types::summary_type::ExactKind::Sum,
+                None,
+                None,
+                None,
+            )
             .unwrap()
             .unwrap()
     };
@@ -428,7 +433,12 @@ fn a_selective_filter_compacts_its_state_column() {
                 .as_any()
                 .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
                 .unwrap()
-                .evaluation(planner_types::summary_type::ExactKind::Sum, None, None)
+                .evaluation(
+                    planner_types::summary_type::ExactKind::Sum,
+                    None,
+                    None,
+                    None,
+                )
                 .unwrap()
                 .unwrap()
         })
@@ -498,7 +508,12 @@ fn concat_of_different_exact_columns_keeps_records() {
                 .as_any()
                 .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
                 .unwrap()
-                .evaluation(planner_types::summary_type::ExactKind::Sum, None, None)
+                .evaluation(
+                    planner_types::summary_type::ExactKind::Sum,
+                    None,
+                    None,
+                    None,
+                )
                 .unwrap()
                 .unwrap()
         })

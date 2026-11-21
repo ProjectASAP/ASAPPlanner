@@ -57,7 +57,10 @@ fn exact_accumulator_is_a_state_group_and_a_finalize() {
         .is_none());
     // The aggregate reads it through a `FinalizeExactAccumulator`, renamed
     // to the aggregate's columns when its names differ.
-    let finalize = Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: state });
+    let finalize = Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+        child: state,
+        counter_readout: None,
+    });
     let finalize_groups = groups_where(&memo, |e| *e == finalize);
     assert!(candidates_of(&memo, s).iter().any(|c| {
         c.expression.operator == finalize

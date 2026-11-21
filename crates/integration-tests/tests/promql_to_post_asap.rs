@@ -168,7 +168,7 @@ fn promql_binary_arithmetic_retains_two_summary_leaves() {
             panic!("expected BinaryOp for {op}, got {:?}", root.operator);
         };
         for operand in [lhs, rhs] {
-            let Some(ASAPOp::FinalizeExactAccumulator { child }) = operand.asap() else {
+            let Some(ASAPOp::FinalizeExactAccumulator { child, .. }) = operand.asap() else {
                 panic!(
                     "expected an explicit exact evaluation, got {:?}",
                     operand.operator
@@ -209,7 +209,7 @@ fn value_ranked_topk_over_binary_ratio_finalizes_both_summary_operands() {
             Some(NonASAPOp::Aggregate { child, .. }) => child,
             _ => operand,
         };
-        let Some(ASAPOp::FinalizeExactAccumulator { child }) = finalized.asap() else {
+        let Some(ASAPOp::FinalizeExactAccumulator { child, .. }) = finalized.asap() else {
             panic!(
                 "expected exact accumulator finalization, got {:?}",
                 operand.operator
@@ -423,7 +423,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
 /// SummaryEstimate { query: Quantile{0.99} }          → {quantile: Float64}
 /// └─ SummaryAgg { Kll{k:269}, input: SampleValue }   → {state: Sketch(Kll)}
 ///    └─ FinalizeExactAccumulator
-///       └─ SummaryAgg { Rate, input: SampleValue }   → {ts, state: ExactAggregate(Rate), …}
+///       └─ SummaryAgg { Counter, input: SampleValue } → {ts, state: ExactAggregate(Counter), …}
 ///          └─ TimeRange{5m} → Scan                   → {ts, value}
 /// ```
 ///
@@ -493,7 +493,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         &FieldDataType::Sketch(SketchAlgorithm::Kll)
     );
 
-    let Some(ASAPOp::FinalizeExactAccumulator { child }) = child.asap() else {
+    let Some(ASAPOp::FinalizeExactAccumulator { child, .. }) = child.asap() else {
         panic!("rate needs a maintenance evaluation");
     };
 
@@ -514,12 +514,12 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     };
     assert_eq!(
         family,
-        &FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
+        &FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter)
     );
     assert_eq!(reduction, &Reduction::PerEntity);
     assert_eq!(
         dtype(&child.schema, "state"),
-        &FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
+        &FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter)
     );
     assert_eq!(
         child.schema.time_index,

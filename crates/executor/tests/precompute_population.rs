@@ -148,6 +148,7 @@ fn try_state_dag(
         id: read_id,
         payload: PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator {
             child: read_id - 1,
+            counter_readout: None,
         }),
         output_state: ExecutionDataState::INGESTION_ROWS,
         lifetime: Default::default(),

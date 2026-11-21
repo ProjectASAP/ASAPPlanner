@@ -271,13 +271,13 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
     }));
     merge.output_schema = Schema::new(vec![Field::new(
         "state",
-        FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+        FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter),
         false,
     )]);
     let merge_usage =
         node_resource_usage_and_cost(&merge, &[windows_output], (1, 1.0), None, &data, &settings)
             .unwrap();
-    assert_eq!(merge_usage.family, StateFamily::Exact(&ExactKind::Rate));
+    assert_eq!(merge_usage.family, StateFamily::Exact(&ExactKind::Counter));
     assert_eq!(
         merge_usage.cpu_ops_per_second,
         5_000.0 * crate::node::operations_per_unit::COUNTER_MERGE_OPERATIONS_PER_STATE
@@ -356,7 +356,7 @@ fn per_series_carrying_job(state_type: Option<FieldDataType>) -> Schema {
 #[test]
 fn an_ingestion_time_chain_costs_more_per_row_at_a_lower_sample_rate() {
     let settings = CostInputs::default();
-    let rate = FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate);
+    let rate = FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter);
     let scan = node(metric_scan("requests_total"));
     let chain = PhysicalASAPDAGNode {
         retention_ms: Some(300_000),
@@ -508,7 +508,7 @@ fn a_grouping_visits_each_group_once_per_raw_batch_of_the_declared_width() {
 #[test]
 fn a_query_time_rate_build_costs_more_per_row_at_a_lower_sample_rate() {
     let settings = CostInputs::default();
-    let rate = FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate);
+    let rate = FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter);
     let range = node(Payload::NonASAP(NonASAPOp::TimeRange {
         range: Duration::from_secs(300),
         kind: TimeRangeKind::Range,
@@ -2442,7 +2442,10 @@ fn a_finalize_charges_each_group_its_measured_time() {
         raw_rows_span_ms: None,
         state_input_rows: None,
     };
-    let finalize = node(Payload::ASAP(ASAPOp::FinalizeExactAccumulator { child: 0 }));
+    let finalize = node(Payload::ASAP(ASAPOp::FinalizeExactAccumulator {
+        child: 0,
+        counter_readout: None,
+    }));
     let usage = node_resource_usage_and_cost(
         &finalize,
         &[merged_output],
@@ -2991,7 +2994,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
     let none = DataWorkload::default();
 
     // Rate chains, at ingestion time and at query time.
-    let rate = FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate);
+    let rate = FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter);
     let counter_scan = node(metric_scan("requests_total"));
     let rate_chain = |output_state| PhysicalASAPDAGNode {
         retention_ms: Some(300_000),
@@ -3078,7 +3081,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
         (
             "Rate",
             rate.clone(),
-            StateFamily::Exact(&ExactKind::Rate),
+            StateFamily::Exact(&ExactKind::Counter),
             None,
         ),
         (
@@ -3360,7 +3363,10 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
     }
 
     // `FinalizeExactAccumulator` of 1,000 merged Sum states.
-    let finalize = node(Payload::ASAP(ASAPOp::FinalizeExactAccumulator { child: 0 }));
+    let finalize = node(Payload::ASAP(ASAPOp::FinalizeExactAccumulator {
+        child: 0,
+        counter_readout: None,
+    }));
     check(
         "FinalizeExactAccumulator",
         &finalize,

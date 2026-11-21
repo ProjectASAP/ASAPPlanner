@@ -499,18 +499,15 @@ fn an_exclusion_setting_no_field_is_refused_before_planning() {
 // ---------------------------------------------------------------------------
 // Capabilities a target may lack (the new dimensions).
 
-/// A target without mergeable rate state: `rate(c[5m])` no longer reads an
-/// ingestion-time chain of rate states merged across windows, but builds
-/// and finalizes the rate state within each evaluation. `increase` the
-/// same with its own state. No node of the new plans keeps a counter state
+/// A target without mergeable counter state: `rate(c[5m])` no longer reads
+/// an ingestion-time chain of counter states merged across windows, but
+/// builds and finalizes the counter state within each evaluation.
+/// `increase` the same. No node of the new plans keeps a counter state
 /// across windows.
 #[test]
 fn a_target_without_mergeable_rate_state_builds_rate_within_one_evaluation() {
     let not_mergeable = DeploymentCapabilities {
-        state_not_mergeable_across_windows: vec![
-            SummaryFamily::Exact(ExactKind::Rate),
-            SummaryFamily::Exact(ExactKind::Increase),
-        ],
+        state_not_mergeable_across_windows: vec![SummaryFamily::Exact(ExactKind::Counter)],
         ..Default::default()
     };
     // A counter state merged across windows: a chain of it, or a build of
@@ -530,8 +527,8 @@ fn a_target_without_mergeable_rate_state_builds_rate_within_one_evaluation() {
         ]
     };
     let cases = [
-        ("rate", "5m", ExactKind::Rate, 0.279284, 0.367671),
-        ("increase", "1h", ExactKind::Increase, 1.490206, 3.953715),
+        ("rate", "5m", ExactKind::Counter, 0.279284, 0.367671),
+        ("increase", "1h", ExactKind::Counter, 1.490206, 3.953715),
     ];
     for (function, range, kind, unrestricted_cost, restricted_cost) in cases {
         let workload = counter_workload(function, range);
@@ -584,7 +581,7 @@ fn a_target_without_mergeable_rate_state_builds_rate_within_one_evaluation() {
 fn excluding_rate_state_alone_rebuilds_it_as_an_aggregate_unless_its_measure_is_excluded() {
     let workload = counter_workload("rate", "5m");
     let rate_state = CandidateExclusion {
-        summary_family: Some(SummaryFamily::Exact(ExactKind::Rate)),
+        summary_family: Some(SummaryFamily::Exact(ExactKind::Counter)),
         ..Default::default()
     };
     let state_only = planned(&workload, &excluding(vec![rate_state.clone()]));

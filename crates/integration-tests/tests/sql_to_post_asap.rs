@@ -61,7 +61,7 @@ fn unary_child(node: &OperatorNode) -> Option<&Rc<OperatorNode>> {
             [child] => Some(*child),
             _ => None,
         },
-        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => Some(child),
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child, .. }) => Some(child),
         Operator::ASAP(_) => None,
     }
 }

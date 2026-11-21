@@ -313,7 +313,7 @@ fn aggregate_measure_matches_an_aggregate_computing_it() {
     ));
     assert!(!matches(
         &query_time_rate,
-        &build(exact(ExactKind::Rate)),
+        &build(exact(ExactKind::Counter)),
         qt_one()
     ));
     // A measure with arguments is named by its kind alone.
@@ -349,11 +349,11 @@ fn excluded_by(
 #[test]
 fn a_family_not_mergeable_across_windows_expands_into_its_chains_and_kept_builds() {
     let not_mergeable = DeploymentCapabilities {
-        state_not_mergeable_across_windows: vec![SummaryFamily::Exact(ExactKind::Rate)],
+        state_not_mergeable_across_windows: vec![SummaryFamily::Exact(ExactKind::Counter)],
         query_time_results_retained: true,
         ..Default::default()
     };
-    let rate = Some(SummaryFamily::Exact(ExactKind::Rate));
+    let rate = Some(SummaryFamily::Exact(ExactKind::Counter));
     let exclusion = |exclusion| DeploymentExclusion {
         source: ExclusionSource::StateNotMergeableAcrossWindows,
         exclusion,
@@ -373,8 +373,8 @@ fn a_family_not_mergeable_across_windows_expands_into_its_chains_and_kept_builds
             }),
         ]
     );
-    let rate_build = build(exact(ExactKind::Rate));
-    let rate_chain = chain(exact(ExactKind::Rate));
+    let rate_build = build(exact(ExactKind::Counter));
+    let rate_chain = chain(exact(ExactKind::Counter));
     let excluded =
         |operator: &Operator<usize>, properties| excluded_by(&not_mergeable, operator, properties);
     assert!(excluded(&rate_chain, it_across()));
@@ -433,8 +433,7 @@ fn counter_semantics_left_out_expand_into_the_functions_and_states_that_need_the
             measure(not_extrapolated, "rate"),
             measure(not_extrapolated, "increase"),
             measure(not_extrapolated, "delta"),
-            state(not_extrapolated, ExactKind::Rate),
-            state(not_extrapolated, ExactKind::Increase),
+            state(not_extrapolated, ExactKind::Counter),
         ]
     );
     let resets_not_handled = ExclusionSource::CounterResetsNotHandled;
@@ -445,8 +444,7 @@ fn counter_semantics_left_out_expand_into_the_functions_and_states_that_need_the
             measure(resets_not_handled, "increase"),
             measure(resets_not_handled, "i_rate"),
             measure(resets_not_handled, "resets"),
-            state(resets_not_handled, ExactKind::Rate),
-            state(resets_not_handled, ExactKind::Increase),
+            state(resets_not_handled, ExactKind::Counter),
             state(resets_not_handled, ExactKind::IRate),
         ]
     );
@@ -459,8 +457,8 @@ fn counter_semantics_left_out_expand_into_the_functions_and_states_that_need_the
         per_series(AggIntent::IRate),
         per_series(AggIntent::Resets),
         per_series(AggIntent::Sum { col: None }),
-        build(exact(ExactKind::Rate)),
-        chain(exact(ExactKind::Increase)),
+        build(exact(ExactKind::Counter)),
+        chain(exact(ExactKind::Counter)),
         build(exact(ExactKind::IRate)),
         build(exact(ExactKind::Sum)),
         scan(),
@@ -556,7 +554,7 @@ fn each_capability_left_out_expands_into_its_exclusions() {
             reset_handling: false,
             extrapolation: false,
         },
-        state_not_mergeable_across_windows: vec![SummaryFamily::Exact(ExactKind::Rate)],
+        state_not_mergeable_across_windows: vec![SummaryFamily::Exact(ExactKind::Counter)],
         excluded_candidates: vec![stored_only.clone()],
         ..Default::default()
     };
@@ -570,8 +568,8 @@ fn each_capability_left_out_expands_into_its_exclusions() {
         ExclusionSource::RawDataNotRetained,
         ExclusionSource::QueryTimeResultsNotRetained,
     ];
-    expected_sources.extend([ExclusionSource::CounterResetsNotHandled; 7]);
-    expected_sources.extend([ExclusionSource::CounterNotExtrapolated; 5]);
+    expected_sources.extend([ExclusionSource::CounterResetsNotHandled; 6]);
+    expected_sources.extend([ExclusionSource::CounterNotExtrapolated; 4]);
     expected_sources.extend([ExclusionSource::StateNotMergeableAcrossWindows; 2]);
     expected_sources.push(ExclusionSource::ExcludedCandidate { index: 0 });
     assert_eq!(sources, expected_sources);
@@ -755,7 +753,7 @@ fn self_contradicting_exclusions_are_rejected() {
         ..exclusion
     };
     let family = CandidateExclusion {
-        summary_family: Some(SummaryFamily::Exact(ExactKind::Rate)),
+        summary_family: Some(SummaryFamily::Exact(ExactKind::Counter)),
         ..Default::default()
     };
     let parameters = CandidateExclusion {
@@ -924,7 +922,7 @@ fn excluded_candidates_json_loads_field_by_field() {
                 ..Default::default()
             }),
             exclusion(CandidateExclusion {
-                summary_family: Some(SummaryFamily::Exact(ExactKind::Rate)),
+                summary_family: Some(SummaryFamily::Exact(ExactKind::Counter)),
                 operator: Some(OperatorKind::SummaryTumblingWindowChain),
                 ..Default::default()
             }),
@@ -978,7 +976,7 @@ fn excluded_candidates_json_loads_field_by_field() {
     );
     assert_eq!(
         counters.state_not_mergeable_across_windows,
-        vec![SummaryFamily::Exact(ExactKind::Rate)]
+        vec![SummaryFamily::Exact(ExactKind::Counter)]
     );
     assert!(serde_json::from_str::<DeploymentCapabilities>(
         r#"{"counter_semantics": {"extrapolates": false}}"#

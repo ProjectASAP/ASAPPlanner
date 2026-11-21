@@ -51,14 +51,32 @@ mod tests {
         );
         assert_eq!(
             SummaryFamily::of(&FieldDataType::ExactAggregate(
-                ExactKind::Rate,
-                ExactParams::Rate
+                ExactKind::Counter,
+                ExactParams::Counter
             )),
-            Some(SummaryFamily::Exact(ExactKind::Rate))
+            Some(SummaryFamily::Exact(ExactKind::Counter))
         );
         assert_eq!(
             SummaryFamily::of(&FieldDataType::Plain(DataType::Float64)),
             None
+        );
+    }
+
+    /// `rate` and `increase` share the `Counter` state, so the names each
+    /// had before (`{"exact": "Rate"}`, `{"exact": "Increase"}`) read as
+    /// it, and it writes as `Counter`.
+    #[test]
+    fn rate_and_increase_family_names_read_as_counter() {
+        let counter = SummaryFamily::Exact(ExactKind::Counter);
+        for json in [r#"{"exact": "Rate"}"#, r#"{"exact": "Increase"}"#] {
+            assert_eq!(
+                serde_json::from_str::<SummaryFamily>(json).unwrap(),
+                counter
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&counter).unwrap(),
+            r#"{"exact":"Counter"}"#
         );
     }
 }

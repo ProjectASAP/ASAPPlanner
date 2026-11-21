@@ -859,7 +859,10 @@ fn windowed_count_plan(shift_ms: Option<i64>) -> PhysicalASAPDAG {
     ));
     dag.nodes.push(node(
         4,
-        PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator { child: 3 }),
+        PhysicalASAPOperatorPayload::ASAP(ASAPOp::FinalizeExactAccumulator {
+            child: 3,
+            counter_readout: None,
+        }),
         &value,
         ExecutionDataState::QUERY_ROWS,
     ));

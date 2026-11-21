@@ -85,7 +85,10 @@ async fn sql_sum_projection_before_and_after_summary_rewrite() {
                 .unwrap(),
             );
             let finalize = std::rc::Rc::new(OperatorNode::with_schema(
-                asap_types::ir::Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: state }),
+                asap_types::ir::Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+                    child: state,
+                    counter_readout: None,
+                }),
                 node.schema.clone(),
             ));
             return finalize;
