@@ -236,7 +236,7 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
     );
 }
 
-/// A merge over a time range of a Rate chain's windows reads Rate
+/// A merge over a time range of a counter chain's windows reads counter
 /// accumulator states, though the time range has no family and the merge
 /// no θ: its output's state column names the family, so each of the 5,000
 /// states read costs a counter-increase merge (350 operations), not a
@@ -344,7 +344,7 @@ fn per_series_carrying_job(state_type: Option<FieldDataType>) -> Schema {
     Schema::new(fields)
 }
 
-/// A per-series Rate chain carrying `job` in 300 s windows at ingestion
+/// A per-series counter chain carrying `job` in 300 s windows at ingestion
 /// time over 1,000 series of `requests_total`: measured 106.3 ns per
 /// arriving row at 1 Hz and 87.6 at 10 Hz (a stored-only plan's ingestion
 /// CPU over its rows), 1.21x; an earlier run measured 125.6 and 85.7, as 1 Hz
@@ -500,7 +500,7 @@ fn a_grouping_visits_each_group_once_per_raw_batch_of_the_declared_width() {
     );
 }
 
-/// A per-series exact Rate carrying `job`, built at query time from 5 min
+/// A per-series exact counter carrying `job`, built at query time from 5 min
 /// of 1,000 series of `requests_total`, measures 85.9 ns per row at 1 Hz
 /// and 68.8 at 10 Hz (1.25x): its update is the same per row, and it visits
 /// each series' state once per 10 s raw batch. Charged per row alone, both
@@ -2993,7 +2993,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
     let gauge = thousand_series_sampled_every(1_000);
     let none = DataWorkload::default();
 
-    // Rate chains, at ingestion time and at query time.
+    // Counter chains, at ingestion time and at query time.
     let rate = FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter);
     let counter_scan = node(metric_scan("requests_total"));
     let rate_chain = |output_state| PhysicalASAPDAGNode {
@@ -3011,13 +3011,13 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
     };
     for (what, output_state, rows, span_ms) in [
         (
-            "ingestion-time Rate chain",
+            "ingestion-time Counter chain",
             ExecutionDataState::INGESTION_SUMMARY,
             1_000,
             1_000,
         ),
         (
-            "query-time Rate chain",
+            "query-time Counter chain",
             ExecutionDataState::QUERY_ROWS,
             300_000,
             300_000,

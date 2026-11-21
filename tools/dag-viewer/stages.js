@@ -754,7 +754,7 @@ function settingsRows(doc) {
 
 // The capabilities a deployment leaves out and the caller's exclusions, as
 // one line, e.g. "counter extrapolation not supported · not mergeable across
-// windows: exact Rate · excluded candidates: 2"; empty for the defaults.
+// windows: exact Counter · excluded candidates: 2"; empty for the defaults.
 function capabilityLimitsText(capabilities) {
   if (!capabilities || typeof capabilities !== 'object') return '';
   const parts = [];

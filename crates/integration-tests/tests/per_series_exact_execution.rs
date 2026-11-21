@@ -422,7 +422,7 @@ fn last_and_first_over_time_keep_the_metric_name() {
 
 // The example queries run end to end: lowered by the PromQL frontend,
 // planned exactly by the planner, compiled and executed. The planner keeps
-// `rate` and `irate` as an exact per-series state (Rate, and IRate's last
+// `rate` and `irate` as an exact per-series state (Counter, and IRate's last
 // two samples) and the rest as per-entity aggregates.
 #[test]
 fn planned_exact_range_functions_execute() {

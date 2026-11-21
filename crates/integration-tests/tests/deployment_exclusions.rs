@@ -574,7 +574,7 @@ fn a_target_without_mergeable_rate_state_builds_rate_within_one_evaluation() {
 }
 
 /// Why an aggregate's measure is a dimension of its own: excluding every
-/// rate state alone lets the planner rebuild the query-time rate as a
+/// counter state alone lets the planner rebuild the query-time rate as a
 /// per-series `Aggregate[rate]` over raw rows; excluding that measure too
 /// leaves no plan, reported as excluded by the deployment.
 #[test]
@@ -618,7 +618,7 @@ fn excluding_rate_state_alone_rebuilds_it_as_an_aggregate_unless_its_measure_is_
 }
 
 /// A target whose counter functions do not extrapolate plans no `rate`
-/// (every rate state and `Aggregate[rate]` needs extrapolation), but plans
+/// (every counter state and `Aggregate[rate]` needs extrapolation), but plans
 /// `irate` as before; one that does not handle counter resets plans
 /// neither.
 #[test]

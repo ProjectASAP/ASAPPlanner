@@ -674,7 +674,7 @@ pub(crate) const OUTPUT_ROW_OPERATIONS_PER_GROUP: f64 = 2_500.0;
 pub(crate) const SKETCH_CHAIN_EMIT_OPERATIONS_PER_STATE: f64 = 2_500.0;
 
 /// Per fixed-size exact state a tumbling-window chain emits (sum, count,
-/// min, max, rate): 1.9 µs per Rate state, and at ingestion time
+/// min, max, counter): 1.9 µs per counter state, and at ingestion time
 /// 1.3–2.1 µs per Max state over 100 to 10,000 series. Less than a sketch
 /// state's (`SKETCH_CHAIN_EMIT_OPERATIONS_PER_STATE`): its state is a
 /// fixed record, not a sketch to box.
@@ -1268,7 +1268,7 @@ pub(crate) fn hash_aggregate_terms_per_row(
 ///   value into its group's map, the work a further grouping key does
 ///   (`HASH_AGGREGATE_OPERATIONS_PER_FURTHER_KEY`, not measured);
 /// - a counter's rate or increase, or a regression over a series' samples
-///   (`deriv`, `predict_linear`), does about what the Rate accumulator does
+///   (`deriv`, `predict_linear`), does about what the counter accumulator does
 ///   per row (`COUNTER_UPDATE_OPERATIONS_PER_ROW`): it reads each sample's
 ///   time and value in order and keeps running terms;
 /// - any other folds the value (`AGGREGATE_MEASURE_OPERATIONS_PER_ROW`),

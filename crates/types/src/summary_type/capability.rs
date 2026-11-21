@@ -74,8 +74,9 @@ impl SketchStatistic {
 pub enum MergeInputRule {
     /// No row in two inputs: the family counts a shared row twice.
     Disjoint,
-    /// The inputs' time windows do not overlap. Counter states join consecutive windows in time order, so inputs that are
-    /// disjoint only by a value predicate would interleave in time.
+    /// The inputs' time windows do not overlap. Counter states join
+    /// consecutive windows in time order, so inputs that are disjoint only
+    /// by a value predicate would interleave in time.
     DisjointInTime,
     /// Inputs may share rows: the merge is idempotent.
     MayOverlap,

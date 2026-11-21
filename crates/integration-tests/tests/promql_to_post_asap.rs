@@ -437,7 +437,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         AccuracyTarget::max_error(0.01),
     )
     .expect("lowering failed");
-    // The KLL candidate over the per-series Rate accumulator.
+    // The KLL candidate over the per-series counter accumulator.
     let root = &candidates_using(
         &pre_asap,
         AccuracyTarget::max_error(0.01),
@@ -449,7 +449,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
                 if matches!(summary_input.asap(), Some(ASAPOp::SummaryAgg { child, .. })
                     if matches!(child.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))))
     })
-    .expect("a KLL over the finalized Rate accumulator");
+    .expect("a KLL over the finalized counter accumulator");
 
     // Root: the sketch evaluation, back to a plain row shape.
     let Some(ASAPOp::SummaryEstimate {

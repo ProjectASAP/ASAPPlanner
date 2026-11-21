@@ -30,8 +30,7 @@ pub(crate) enum ScalarState {
 /// Both the family and population layout survive persistence. One counter
 /// state answers both a `rate` and an `increase` evaluation (its
 /// [`CounterReadout`]): both extrapolate the same sampled increase to the
-/// evaluation range, as Prometheus' `extrapolatedRate` does. A state
-/// persisted as a `Rate` or `Increase` family reads back as a `Counter`.
+/// evaluation range, as Prometheus' `extrapolatedRate` does.
 ///
 /// Deserialization validates the payload against its declared family, so
 /// deployments can persist this state with any serde format without mirroring
@@ -535,9 +534,9 @@ mod tests {
     }
 
     // One counter state answers `rate` and `increase`: the increase
-    // extrapolated to the range, and that per second. A state persisted
-    // under the family names `Rate` or `Increase` (one family each before
-    // they shared a state) reads back as a `Counter` with the same answers.
+    // extrapolated to the range, and that per second; a counter evaluation
+    // without a readout is an error. A state persisted under the family
+    // names `Rate` or `Increase` (before they shared a state) is refused.
     #[test]
     fn one_counter_state_answers_rate_and_increase() {
         let counter = SummaryFamilyType::exact(ExactKind::Counter);
@@ -569,14 +568,7 @@ mod tests {
                 &format!(r#"["{old_name}","{old_name}"]"#),
             );
             assert_ne!(old, json);
-            let restored: ExactAccumulator = serde_json::from_str(&old).unwrap();
-            assert_eq!(restored.family(), &counter);
-            for readout in [CounterReadout::Rate, CounterReadout::Increase] {
-                assert_eq!(
-                    read(&restored, readout).to_bits(),
-                    read(&state, readout).to_bits()
-                );
-            }
+            assert!(serde_json::from_str::<ExactAccumulator>(&old).is_err());
         }
     }
 

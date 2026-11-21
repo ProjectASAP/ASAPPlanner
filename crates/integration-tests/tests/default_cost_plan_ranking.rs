@@ -443,7 +443,7 @@ enum Alternative {
 
 /// Measured total CPU, in CPU-ms per second of wall time, of the exact
 /// plan and of an alternative, for each query and setting. Rate's exact
-/// plan is the query-time Rate accumulator over raw data, which the
+/// plan is the query-time counter accumulator over raw data, which the
 /// measurement used because the executor cannot run rate's query-time
 /// lowering.
 const MEASURED_CPU_MS_PER_S: [(Query, Setting, Alternative, f64, f64); 15] = [
@@ -551,7 +551,7 @@ fn fixture_plan(name: &str) -> PhysicalASAPDAG {
 }
 
 /// The exact plan's predicted CPU for `query`: its query-time lowering, or
-/// for a rate the query-time Rate accumulator over raw data the
+/// for a rate the query-time counter accumulator over raw data the
 /// measurement ran (fixture `sum_rate_query_time_rate`, Stage 3's exact
 /// plan over data at rest before the measured unit costs).
 fn exact_cpu(query: Query, setting: Setting) -> f64 {

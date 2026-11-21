@@ -27,10 +27,7 @@ pub enum ExactKind {
     /// A counter's window: its first and last samples, its sample count
     /// and the increase between them with counter resets handled. It
     /// answers both PromQL `rate` and `increase` (a [`CounterReadout`]),
-    /// so `rate(x[1h])` and `increase(x[1h])` share one state. Written
-    /// `Rate` or `Increase` before the two shared it; those names read as
-    /// this.
-    #[serde(alias = "Rate", alias = "Increase")]
+    /// so `rate(x[1h])` and `increase(x[1h])` share one state.
     Counter,
     /// Instant-rate accumulator retaining the final two timestamped samples.
     IRate,
@@ -61,7 +58,7 @@ impl CounterReadout {
 
     /// The aggregate this readout computes: `AggIntent::Rate` or
     /// `AggIntent::Increase`.
-    pub fn measure(self) -> crate::ir::operator::AggIntent {
+    pub(crate) fn measure(self) -> crate::ir::operator::AggIntent {
         use crate::ir::operator::AggIntent;
         match self {
             Self::Rate => AggIntent::Rate,
@@ -119,8 +116,6 @@ pub enum ExactParams {
     Count,
     Min,
     Max,
-    /// Written `Rate` or `Increase` before the two shared one state.
-    #[serde(alias = "Rate", alias = "Increase")]
     Counter,
     IRate,
 }

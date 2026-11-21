@@ -777,7 +777,7 @@ fn self_contradicting_exclusions_are_rejected() {
     };
     let contradicting = [
         // The review's repro: `{"operator": "SummaryMerge", "summary_family":
-        // {"exact": "Rate"}}`.
+        // {"exact": "Counter"}}`.
         with_operator(OperatorKind::SummaryMerge, family.clone()),
         with_operator(OperatorKind::SummaryEstimate, parameters.clone()),
         with_operator(OperatorKind::SummaryAgg, measure.clone()),
@@ -880,7 +880,7 @@ fn excluded_candidates_json_loads_field_by_field() {
         {"timing": "query_time", "operator": "SummaryTumblingWindowChain"},
         {"summary_family": {"sketch": "Kll"}, "sketch_parameter_range": {"kll_k": {"at_most": 1403}}},
         {"timing": "query_time", "aggregate_measure": "rate"},
-        {"summary_family": {"exact": "Rate"}, "operator": "SummaryTumblingWindowChain"},
+        {"summary_family": {"exact": "Counter"}, "operator": "SummaryTumblingWindowChain"},
         {"readout": {"summary_type": "Kll", "statistic": "Total"}},
         {"operator": "Scan", "kept_across_evaluations": true}]}"#;
     let loaded: DeploymentCapabilities = serde_json::from_str(json).unwrap();
@@ -950,7 +950,7 @@ fn excluded_candidates_json_loads_field_by_field() {
         // Counter semantics and mergeability are capabilities, not
         // exclusion fields; θ ranges are `sketch_parameter_range`.
         r#"{"excluded_candidates": [{"counter_semantics": "extrapolation"}]}"#,
-        r#"{"excluded_candidates": [{"summary_family": {"exact": "Rate"}, "merged_across_windows": true}]}"#,
+        r#"{"excluded_candidates": [{"summary_family": {"exact": "Counter"}, "merged_across_windows": true}]}"#,
         r#"{"excluded_candidates": [{"sketch_parameters": {"kll_k": {"at_most": 1403}}}]}"#,
     ] {
         assert!(
@@ -964,7 +964,7 @@ fn excluded_candidates_json_loads_field_by_field() {
     );
     let counters: DeploymentCapabilities = serde_json::from_str(
         r#"{"counter_semantics": {"extrapolation": false},
-            "state_not_mergeable_across_windows": [{"exact": "Rate"}]}"#,
+            "state_not_mergeable_across_windows": [{"exact": "Counter"}]}"#,
     )
     .unwrap();
     assert_eq!(

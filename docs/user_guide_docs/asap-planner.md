@@ -105,8 +105,8 @@ do or what the caller rules out:
   `rate`, `increase` or `delta` and no `Counter` state is planned;
   without `reset_handling`, no `rate`, `increase`, `irate` or `resets`
   and no `Counter` or `IRate` state. One `Counter` state answers both
-  `rate` and `increase`; the names `Rate` and `Increase` from before
-  still read as `Counter`.
+  `rate` and `increase`; the earlier names `Rate` and `Increase` are
+  refused.
 - `state_not_mergeable_across_windows` (default none): for each family
   listed, no tumbling-window chain and no state kept across evaluations;
   its state is built and finalized within one evaluation.

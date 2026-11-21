@@ -62,21 +62,22 @@ mod tests {
         );
     }
 
-    /// `rate` and `increase` share the `Counter` state, so the names each
-    /// had before (`{"exact": "Rate"}`, `{"exact": "Increase"}`) read as
-    /// it, and it writes as `Counter`.
+    /// `rate` and `increase` share the `Counter` state, written
+    /// `{"exact": "Counter"}`. The names each had before are refused, not
+    /// read as it: a deployment that listed only `Increase` would otherwise
+    /// rule out `rate` too without saying so.
     #[test]
-    fn rate_and_increase_family_names_read_as_counter() {
+    fn counter_family_is_written_counter_and_old_names_are_refused() {
         let counter = SummaryFamily::Exact(ExactKind::Counter);
-        for json in [r#"{"exact": "Rate"}"#, r#"{"exact": "Increase"}"#] {
-            assert_eq!(
-                serde_json::from_str::<SummaryFamily>(json).unwrap(),
-                counter
-            );
-        }
         assert_eq!(
             serde_json::to_string(&counter).unwrap(),
             r#"{"exact":"Counter"}"#
         );
+        for json in [r#"{"exact": "Rate"}"#, r#"{"exact": "Increase"}"#] {
+            assert!(
+                serde_json::from_str::<SummaryFamily>(json).is_err(),
+                "{json}"
+            );
+        }
     }
 }

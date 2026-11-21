@@ -198,7 +198,7 @@ test('the deployment settings name each capability left out and the caller exclu
     raw_data_retained: true,
     query_time_results_retained: false,
     counter_semantics: { reset_handling: true, extrapolation: false },
-    state_not_mergeable_across_windows: [{ exact: 'Rate' }],
+    state_not_mergeable_across_windows: [{ exact: 'Counter' }],
     excluded_candidates: [
       { timing: 'query_time', operator: 'Scan' },
       { operator: 'Aggregate', per_entity_reduction: true },
@@ -206,7 +206,7 @@ test('the deployment settings name each capability left out and the caller exclu
   });
   assert.match(text, /counter extrapolation not supported/);
   assert.doesNotMatch(text, /counter resets not handled/);
-  assert.match(text, /not mergeable across windows: exact Rate/);
+  assert.match(text, /not mergeable across windows: exact Counter/);
   assert.match(text, /excluded candidates: 2/);
   // Each supported summary by its wire field `summary_type`.
   const kllOnly = call('settingsRows', {

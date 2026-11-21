@@ -384,10 +384,35 @@ fn run_installed(workload: &WorkloadSpec, plan_file: &Path) -> (AnswersOverTime,
     (answers, view_bytes)
 }
 
+/// `answers` as JSON, one entry per time, query and series, each value as
+/// the hex of its bits so a comparison is bit for bit.
+fn answers_json(answers: &AnswersOverTime) -> serde_json::Value {
+    let mut entries = Vec::new();
+    for (at_ms, per_query) in answers {
+        for (query, per_series) in per_query {
+            for (series, value) in per_series {
+                entries.push(serde_json::json!({
+                    "at_ms": at_ms,
+                    "query": query,
+                    "series": series,
+                    "bits": format!("{:#018x}", value.to_bits()),
+                }));
+            }
+        }
+    }
+    serde_json::Value::Array(entries)
+}
+
+/// The answers of `rate(c[5m])` and `increase(c[5m])` planned together
+/// before they shared a state (a `Rate` chain and an `Increase` chain),
+/// from `run_installed` over `counter_workload("both", ...)`.
+const COUNTER_ANSWERS_BEFORE_SHARING: &str = "asap_lane_fixtures/rate_and_increase_two_chains.json";
+
 /// `rate(c[5m])` and `increase(c[5m])` planned together read one chain of
 /// counter states, which the executor finalizes as `rate` and as
-/// `increase`. Their answers are bit-identical to each query's planned
-/// alone (one chain each, as both together used to plan), and the shared
+/// `increase`. Their answers are bit-identical to those of the two chains
+/// the same workload planned before (`COUNTER_ANSWERS_BEFORE_SHARING`) and
+/// to each query's planned alone (one chain each), and the shared
 /// chain's stored views take at most half the bytes of the two.
 #[test]
 fn rate_and_increase_of_one_counter_share_one_chain_and_answer_as_apart() {
@@ -402,6 +427,18 @@ fn rate_and_increase_of_one_counter_share_one_chain_and_answer_as_apart() {
         &counter_workload("both", &[("rate", RATE), ("increase", INCREASE)]),
         &together,
     );
+    // Bit for bit the answers of the same workload planned before the
+    // shared state, as two chains.
+    let before: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join(COUNTER_ANSWERS_BEFORE_SHARING),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(answers_json(&answers), before);
 
     let mut apart_bytes = 0;
     for (id, query) in [("rate", RATE), ("increase", INCREASE)] {
