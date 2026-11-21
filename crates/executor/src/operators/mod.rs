@@ -156,6 +156,16 @@ enum Kind {
         /// Set by [`Operator::with_tumbling_window_ends`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tumbling_window_width_ms: Option<i64>,
+        /// Set by [`Operator::with_cover_level`]: keep only the windows a
+        /// `TimeRangeCover` over chains of these widths (widest first) takes
+        /// from level `.1`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cover_level: Option<(Vec<u64>, usize)>,
+        /// Set by [`Operator::with_tumbling_window_ends_from_epoch`]: the
+        /// tumbling windows are anchored at the epoch, not at the range's
+        /// end.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        tumbling_window_ends_from_epoch: bool,
     },
     Limit {
         n: u64,

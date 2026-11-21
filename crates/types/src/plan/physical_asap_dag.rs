@@ -595,6 +595,7 @@ fn edge_roles<C: Copy + PartialEq>(operator: &Operator<C>) -> Vec<(C, EdgeRole)>
                 vec![Left, Right]
             }
             NonASAPOp::Concat { children, .. } => vec![Input; children.len()],
+            NonASAPOp::TimeRangeCover { levels, .. } => vec![Input; levels.len()],
             NonASAPOp::Scan { .. }
             | NonASAPOp::Values { .. }
             | NonASAPOp::PromqlVectorFromScalar(_) => vec![],
@@ -621,6 +622,7 @@ fn edge_roles<C: Copy + PartialEq>(operator: &Operator<C>) -> Vec<(C, EdgeRole)>
             | ASAPOp::MaintainPopulation { .. }
             | ASAPOp::EvaluatePopulation { .. }
             | ASAPOp::SummaryTumblingWindowChain { .. }
+            | ASAPOp::SummaryMergeWindows { .. }
             | ASAPOp::SummaryDelete { .. }
             | ASAPOp::Extension { .. } => vec![Input],
         },
@@ -637,13 +639,15 @@ fn edge_roles<C: Copy + PartialEq>(operator: &Operator<C>) -> Vec<(C, EdgeRole)>
 }
 
 /// Whether `operator`'s output is a sub-DAG output that materialization may
-/// store: a `SummaryAgg`, a `SummaryTumblingWindowChain` or a `MaintainPopulation`.
+/// store: a `SummaryAgg`, a `SummaryTumblingWindowChain`, a
+/// `SummaryMergeWindows` or a `MaintainPopulation`.
 pub(crate) fn is_materializable_state_output<C>(operator: &Operator<C>) -> bool {
     matches!(
         operator,
         Operator::ASAP(
             ASAPOp::SummaryAgg { .. }
                 | ASAPOp::SummaryTumblingWindowChain { .. }
+                | ASAPOp::SummaryMergeWindows { .. }
                 | ASAPOp::MaintainPopulation { .. }
         )
     )

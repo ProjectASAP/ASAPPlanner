@@ -35,6 +35,7 @@ use asap_types::deployment_capabilities::FinalResultsCache;
 
 use asap_types::ir::operator::AtModifier;
 use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::plan::materialized_view::RefreshWindow;
 use asap_types::stages::{
     anchor_is_evaluation_time, producer_satisfies_physical_requirements, queries_of_context,
@@ -187,7 +188,7 @@ impl SelectableExecutions {
                     continue;
                 }
                 if let Some(execution) =
-                    selectable.execution_reading(physical, context, PhysicalCandidateId(v))
+                    selectable.execution_reading(physical, context, PhysicalCandidateId(v), false)
                 {
                     executions.push(execution);
                     if reached.insert(execution) {
@@ -201,10 +202,21 @@ impl SelectableExecutions {
         while let Some(consumer) = pending.pop() {
             let c = consumer.candidate;
             let context = selectable.input_context(physical, entries, consumer);
+            // A cover reads its wider levels' stored windows whatever its
+            // grid: it takes only whole windows from them, and its edges
+            // from the narrowest level, which is on the grid.
+            let wider_levels = match physical.operator(c) {
+                Operator::NonASAP(NonASAPOp::TimeRangeCover { levels, .. }) => {
+                    levels.len().saturating_sub(1)
+                }
+                _ => 0,
+            };
             for input in 0..physical.input_count(c) {
                 for &edge in physical.admissible_edges_into(c, input) {
                     let u = physical.edge(edge).producer_candidate_id;
-                    if let Some(producer) = selectable.execution_reading(physical, context, u) {
+                    if let Some(producer) =
+                        selectable.execution_reading(physical, context, u, input < wider_levels)
+                    {
                         edges.insert((consumer, edge, producer));
                         if reached.insert(producer) {
                             pending.push(producer);
@@ -265,7 +277,9 @@ impl SelectableExecutions {
     }
 
     /// The execution of producer `u` a consumer whose inputs run in
-    /// `context` reads, when `u` delivers on it: its own for an
+    /// `context` reads, when `u` delivers on it (a wider level of a
+    /// `TimeRangeCover`, `wider_level_of_cover`, delivers whenever it is
+    /// stored across evaluations): its own for an
     /// `AcrossEvaluations` producer, the one ingestion context
     /// `ExecutionContext::EVERY_ARRIVING_ROW` for another ingestion-time producer, otherwise
     /// its run in `context`.
@@ -274,9 +288,12 @@ impl SelectableExecutions {
         physical: &PhysicalASAPMemoCandidates,
         context: ExecutionContextId,
         u: PhysicalCandidateId,
+        wider_level_of_cover: bool,
     ) -> Option<Execution> {
         let producer = &physical.physical_candidates[u.0];
-        if !physical.delivers_on(u, &self.contexts[context.0]) {
+        let stored_windows =
+            wider_level_of_cover && producer.physical_properties.is_across_evaluations();
+        if !stored_windows && !physical.delivers_on(u, &self.contexts[context.0]) {
             return None;
         }
         let properties = producer.physical_properties;

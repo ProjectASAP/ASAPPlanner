@@ -101,6 +101,20 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         #[serde(alias = "pane_width_ms")]
         tumbling_window_width_ms: u64,
     },
+    /// A chain of wider tumbling windows built from a narrower chain
+    /// `child` (a `SummaryTumblingWindowChain` or another
+    /// `SummaryMergeWindows`, whose width divides
+    /// `tumbling_window_width_ms`): its window `(k·w, (k+1)·w]`, `w` =
+    /// `tumbling_window_width_ms`, is the merge of `child`'s windows inside
+    /// it, per key. Same output schema as `child` (window_end, keys, state).
+    /// A candidate of the group `SummaryTumblingWindowChain[w](X)` of the
+    /// same build: it holds the same states as that chain built from the
+    /// rows, for a merge per narrower state instead of an update per row.
+    /// Example: 5 min windows from 1 min windows, five merges per key each.
+    SummaryMergeWindows {
+        child: C,
+        tumbling_window_width_ms: u64,
+    },
     // ── Reserved: migrated but unimplemented ──
     SummarySubtract {
         left: C,
@@ -136,6 +150,7 @@ impl<C> ASAPOp<C> {
             FinalizeExactAccumulator { child, .. }
             | MaintainPopulation { child, .. }
             | EvaluatePopulation { child, .. }
+            | SummaryMergeWindows { child, .. }
             | Extension { child, .. } => vec![child],
             SummaryEstimate { summary_input, .. } | SummaryDelete { summary_input, .. } => {
                 vec![summary_input]
@@ -181,6 +196,13 @@ impl<C> ASAPOp<C> {
                 filter: filter
                     .as_ref()
                     .map(|p| crate::ir::scalar::Predicate(p.0.map_operator_refs(&mut f))),
+                tumbling_window_width_ms: *tumbling_window_width_ms,
+            },
+            SummaryMergeWindows {
+                child,
+                tumbling_window_width_ms,
+            } => SummaryMergeWindows {
+                child: f(child),
                 tumbling_window_width_ms: *tumbling_window_width_ms,
             },
             SummaryEstimate {
@@ -245,6 +267,7 @@ impl<C> ASAPOp<C> {
             EvaluatePopulation { .. } => "EvaluatePopulation",
             SummaryMerge { .. } => "SummaryMerge",
             SummaryTumblingWindowChain { .. } => "SummaryTumblingWindowChain",
+            SummaryMergeWindows { .. } => "SummaryMergeWindows",
             SummarySubtract { .. } => "SummarySubtract",
             SummaryDelete { .. } => "SummaryDelete",
             SummaryJoin { .. } => "SummaryJoin",
@@ -276,6 +299,7 @@ impl<I: OperatorInput> ASAPOp<I> {
             ASAPOp::SummaryMerge { children, .. } => children
                 .first()
                 .and_then(|child| child.schema().summary_state_type()),
+            ASAPOp::SummaryMergeWindows { child, .. } => child.schema().summary_state_type(),
             _ => None,
         }
     }
@@ -299,6 +323,10 @@ impl<I: OperatorInput> ASAPOp<I> {
                 reduction,
                 ..
             } => chain_schema(child.schema(), family, reduction)?,
+            SummaryMergeWindows { child, .. } => {
+                self.validate_inputs()?;
+                child.schema().clone()
+            }
             SummaryEstimate {
                 summary_input,
                 query,
@@ -457,6 +485,7 @@ impl<I: OperatorInput> ASAPOp<I> {
         match self {
             SummaryAgg { .. }
             | SummaryTumblingWindowChain { .. }
+            | SummaryMergeWindows { .. }
             | MaintainPopulation { .. }
             | SummaryMerge { .. }
             | SummarySubtract { .. }
@@ -505,15 +534,22 @@ impl<I: OperatorInput> ASAPOp<I> {
                     ));
                 }
                 // Over a time-indexed state: the windows one `TimeRange`
-                // over a chain selects, not the whole chain.
+                // over a chain, or one `TimeRangeCover` over levels,
+                // selects, not the whole chain.
                 if children.iter().any(is_time_indexed_state)
                     && !matches!(
                         children.as_slice(),
-                        [child] if matches!(child.operator(), Operator::NonASAP(NonASAPOp::TimeRange { .. }))
+                        [child] if matches!(
+                            child.operator(),
+                            Operator::NonASAP(
+                                NonASAPOp::TimeRange { .. } | NonASAPOp::TimeRangeCover { .. }
+                            )
+                        )
                     )
                 {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
-                        "a summary merge over a time-indexed state reads one TimeRange over a chain"
+                        "a summary merge over a time-indexed state reads one TimeRange over a \
+                         chain or one TimeRangeCover"
                             .into(),
                     ));
                 }
@@ -623,6 +659,25 @@ impl<I: OperatorInput> ASAPOp<I> {
                 self.summary_agg_inputs()
             }
             SummaryAgg { .. } => self.summary_agg_inputs(),
+            SummaryMergeWindows {
+                child,
+                tumbling_window_width_ms,
+            } => {
+                let narrower_width_ms = child.operator().chain_tumbling_window_width_ms();
+                match narrower_width_ms {
+                    Some(narrower_width_ms)
+                        if narrower_width_ms > 0
+                            && *tumbling_window_width_ms > narrower_width_ms
+                            && tumbling_window_width_ms.is_multiple_of(narrower_width_ms) =>
+                    {
+                        Ok(())
+                    }
+                    _ => Err(SchemaDerivationError::InvalidScalarSignature(format!(
+                        "SummaryMergeWindows of {tumbling_window_width_ms} ms needs a narrower \
+                         chain whose width divides it, got {narrower_width_ms:?}"
+                    ))),
+                }
+            }
             MaintainPopulation { child, population } => {
                 if !population.matches_node(child) {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
@@ -953,6 +1008,9 @@ pub fn selected_from<I: OperatorInput>(node: &I) -> Option<I> {
             | NonASAPOp::TimeRange { child, .. }
             | NonASAPOp::TimeShift { child, .. },
         ) if node.result_kind() == OperatorResultKind::State => Some(child),
+        // A cover selects windows of its narrowest level (and of wider
+        // levels of the same build).
+        Operator::NonASAP(NonASAPOp::TimeRangeCover { levels, .. }) => levels.last().cloned(),
         _ => None,
     }
 }
@@ -976,7 +1034,12 @@ pub fn summary_build<I: OperatorInput>(state: &I) -> Option<ASAPOp<I>> {
         }) => summary_build(children.first()?),
         Operator::NonASAP(
             NonASAPOp::TimeRange { child, .. } | NonASAPOp::TimeShift { child, .. },
-        ) => summary_build(&child),
+        )
+        | Operator::ASAP(ASAPOp::SummaryMergeWindows { child, .. }) => summary_build(&child),
+        // Every level of a cover holds states of one build.
+        Operator::NonASAP(NonASAPOp::TimeRangeCover { levels, .. }) => {
+            summary_build(levels.last()?)
+        }
         _ => None,
     }
 }

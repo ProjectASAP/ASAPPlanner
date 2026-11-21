@@ -107,9 +107,16 @@ fn a_subquery_s_resolution_is_the_grid_of_the_groups_below_it() {
     let period = |group: usize| logical.evaluation_grid_of_group[group].map(|grid| grid.period_ms);
     assert_eq!(period(subquery), Some(60_000));
     assert_eq!(period(child), Some(30_000));
+    // The narrowest chain is on the 30 s grid; a wider level (1 min over
+    // the 2 min range) is a multiple of it, read off the grid only by a
+    // cover, which takes its edges from the narrowest.
     let widths = chain_widths(&logical);
-    assert!(!widths.is_empty());
-    assert!(widths.iter().all(|width| 30_000 % width == 0), "{widths:?}");
+    let narrowest = *widths.iter().min().expect("a chain");
+    assert_eq!(30_000 % narrowest, 0, "{widths:?}");
+    assert!(
+        widths.iter().all(|width| width % narrowest == 0),
+        "{widths:?}"
+    );
     let without_resolution = pass2("max_over_time(rate(c[2m])[10m:])", rank);
     assert_eq!(chain_widths(&without_resolution), Vec::<u64>::new());
 }

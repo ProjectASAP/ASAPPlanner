@@ -16,6 +16,24 @@
       "node_id": 1,
       "refresh": "at_ingestion",
       "retention_ms": 300000
+    },
+    {
+      "coverage": {
+        "definition_id": "0c7f962d8fde713c1de7a58752019151",
+        "selection": [
+          {
+            "columns": []
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [
+          1
+        ]
+      },
+      "node_id": 2,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000
     }
   ],
   "queries": [
@@ -32,8 +50,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 1.90265409966e-6,
-      "cpu_core_seconds_per_second": 0.111971,
+      "cost_per_second": 1.47708006533e-6,
+      "cpu_core_seconds_per_second": 0.0621566666667,
       "per_node": {
         "0": {
           "cost_per_second": 6.52152e-9,
@@ -54,24 +72,33 @@
           "timing": "ingestion_time"
         },
         "2": {
-          "cost_per_second": 3.71052068321e-9,
+          "cost_per_second": 1.68608653469e-7,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.00033,
-          "detail": "time range 300s: 30 tumbling windows of states; x 0.1000/s; holds 1800 bytes for 3.300 ms",
+          "cpu_core_seconds_per_second": 0.00291666666667,
+          "detail": "merge tumbling windows of 10000 ms into 60000 ms for 10000 groups: 1000.0 states merged, 166.7 states emitted; x 1.0000/s; keeps 118080000 bytes",
           "multiplier": 1,
-          "operator": "TimeRange",
-          "timing": "query_time"
+          "operator": "SummaryMergeWindows",
+          "timing": "ingestion_time"
         },
         "3": {
-          "cost_per_second": 8.57517011534e-7,
+          "cost_per_second": 1.11315621772e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.0761,
-          "detail": "merge 300000 states into 10000; x 0.1000/s; holds 21120000 bytes for 761.000 ms",
+          "cpu_core_seconds_per_second": 0.000099,
+          "detail": "time range cover 300s: 4.17 + 5.00 tumbling windows of states per level; x 0.1000/s; holds 1912 bytes for 0.990 ms",
+          "multiplier": 1,
+          "operator": "TimeRangeCover",
+          "timing": "query_time"
+        },
+        "4": {
+          "cost_per_second": 2.65931688202e-7,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 0.0236,
+          "detail": "merge 90000 states into 10000; x 0.1000/s; holds 21120000 bytes for 236.000 ms",
           "multiplier": 1,
           "operator": "SummaryMerge",
           "timing": "query_time"
         },
-        "4": {
+        "5": {
           "cost_per_second": 3.9354e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0035,
@@ -80,7 +107,7 @@
           "operator": "SummaryEstimate",
           "timing": "query_time"
         },
-        "5": {
+        "6": {
           "cost_per_second": 1.12440000552e-11,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1e-6,
@@ -89,7 +116,7 @@
           "operator": "Project",
           "timing": "query_time"
         },
-        "6": {
+        "7": {
           "cost_per_second": 3.02475975973e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00269,
@@ -101,11 +128,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 559608308.594,
-        "cpu_ops_per_second": 111491000.0,
+        "average_memory_bytes": 676579508.189,
+        "cpu_ops_per_second": 61676666.6667,
         "disk_bytes": 0,
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 579521896,
+        "peak_memory_bytes": 697602008,
         "scanned_bytes_per_second": 4800000.0
       }
     },
@@ -218,7 +245,7 @@
           "consumer": 3,
           "data_state": {
             "primitive": "SummaryState",
-            "timing": "query_time"
+            "timing": "ingestion_time"
           },
           "grouping": "NotApplicable",
           "intermediate_schema": {
@@ -267,10 +294,10 @@
           "window": "NotApplicable"
         },
         {
-          "consumer": 4,
+          "consumer": 3,
           "data_state": {
             "primitive": "SummaryState",
-            "timing": "query_time"
+            "timing": "ingestion_time"
           },
           "grouping": "NotApplicable",
           "intermediate_schema": {
@@ -280,7 +307,7 @@
                 "dtype": {
                   "Plain": "timestamp"
                 },
-                "name": "ts",
+                "name": "window_end",
                 "nullable": false
               },
               {
@@ -308,8 +335,61 @@
             "time_index": 0,
             "unique_keys": [
               [
-                3,
-                0
+                0,
+                2,
+                3
+              ]
+            ]
+          },
+          "producer": 1,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 4,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "window_end",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Sketch": "DDSketch"
+                },
+                "name": "state",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                0,
+                2,
+                3
               ]
             ]
           },
@@ -320,7 +400,7 @@
         {
           "consumer": 5,
           "data_state": {
-            "primitive": "Raw",
+            "primitive": "SummaryState",
             "timing": "query_time"
           },
           "grouping": "NotApplicable",
@@ -336,9 +416,9 @@
               },
               {
                 "dtype": {
-                  "Plain": "float64"
+                  "Sketch": "DDSketch"
                 },
-                "name": "quantile",
+                "name": "state",
                 "nullable": false
               },
               {
@@ -389,7 +469,7 @@
                 "dtype": {
                   "Plain": "float64"
                 },
-                "name": "value",
+                "name": "quantile",
                 "nullable": false
               },
               {
@@ -416,6 +496,57 @@
             ]
           },
           "producer": 5,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 7,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                3,
+                0
+              ]
+            ]
+          },
+          "producer": 6,
           "role": "Input",
           "window": "NotApplicable"
         }
@@ -607,6 +738,79 @@
         },
         {
           "id": 2,
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
+          },
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "window_end",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Sketch": "DDSketch"
+                },
+                "name": "state",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "region",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                0,
+                2,
+                3
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "parameters": {
+            "DDSketch": {
+              "alpha": 0.05
+            }
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryMergeWindows": {
+                "child": 1,
+                "tumbling_window_width_ms": 60000
+              }
+            }
+          },
+          "retention_ms": 300000,
+          "view_coverage": {
+            "definition_id": "0c7f962d8fde713c1de7a58752019151",
+            "selection": [
+              {
+                "columns": []
+              }
+            ]
+          }
+        },
+        {
+          "id": 3,
           "lifetime": "None",
           "output_schema": {
             "closed": true,
@@ -660,9 +864,11 @@
           },
           "payload": {
             "NonASAP": {
-              "TimeRange": {
-                "child": 1,
-                "kind": "range",
+              "TimeRangeCover": {
+                "levels": [
+                  2,
+                  1
+                ],
                 "range": {
                   "nanos": 0,
                   "secs": 300
@@ -672,7 +878,7 @@
           }
         },
         {
-          "id": 3,
+          "id": 4,
           "lifetime": {
             "OneEvaluation": "Memory"
           },
@@ -729,14 +935,14 @@
             "ASAP": {
               "SummaryMerge": {
                 "children": [
-                  2
+                  3
                 ]
               }
             }
           }
         },
         {
-          "id": 4,
+          "id": 5,
           "lifetime": "None",
           "output_schema": {
             "closed": true,
@@ -790,13 +996,13 @@
                     "q": 0.9
                   }
                 },
-                "summary_input": 3
+                "summary_input": 4
               }
             }
           }
         },
         {
-          "id": 5,
+          "id": 6,
           "lifetime": "None",
           "output_schema": {
             "closed": true,
@@ -845,7 +1051,7 @@
           "payload": {
             "NonASAP": {
               "Project": {
-                "child": 4,
+                "child": 5,
                 "cols": [
                   {
                     "alias": "ts",
@@ -877,7 +1083,7 @@
           }
         },
         {
-          "id": 6,
+          "id": 7,
           "lifetime": {
             "OneEvaluation": "Memory"
           },
@@ -913,7 +1119,7 @@
           "payload": {
             "NonASAP": {
               "Aggregate": {
-                "child": 5,
+                "child": 6,
                 "filters": [],
                 "having": null,
                 "measures": [
@@ -936,7 +1142,7 @@
         }
       ],
       "roots": [
-        6
+        7
       ],
       "scalar_roots": []
     }

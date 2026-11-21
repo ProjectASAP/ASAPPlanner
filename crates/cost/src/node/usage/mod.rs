@@ -40,6 +40,7 @@ use crate::{
     CalibrationFit, CostInputs, NodeCostSource, OperatorKind, COST_SOURCE, MEASURED_COST_SOURCE,
     MIXED_COST_SOURCE,
 };
+use asap_types::ir::operator::tumbling_window_chain::mean_cover_windows_per_level;
 use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::scalar::resolve_column_ref;
@@ -137,10 +138,12 @@ fn state_family<'a>(
         // A merge over a time range of a chain's windows reads states whose
         // producer (the time range) has no family: they are its own θ's, or
         // the exact accumulator its output column holds.
-        Payload::ASAP(ASAPOp::SummaryMerge { .. }) => match producer_family {
-            None | Some(StateFamily::None) => merged_state_family(node),
-            Some(family) => family,
-        },
+        Payload::ASAP(ASAPOp::SummaryMerge { .. } | ASAPOp::SummaryMergeWindows { .. }) => {
+            match producer_family {
+                None | Some(StateFamily::None) => merged_state_family(node),
+                Some(family) => family,
+            }
+        }
         Payload::ASAP(ASAPOp::SummaryEstimate { .. } | ASAPOp::FinalizeExactAccumulator { .. }) => {
             producer_family.unwrap_or(StateFamily::None)
         }
@@ -160,6 +163,7 @@ fn state_family<'a>(
             | NonASAPOp::SQLWindowFunc { .. }
             | NonASAPOp::TimeRange { .. }
             | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::TimeRangeCover { .. }
             | NonASAPOp::PromqlVectorFromScalar(..)
             | NonASAPOp::PromqlRelabel { .. }
             | NonASAPOp::PromqlInfoEnrich { .. }
@@ -462,6 +466,8 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // What each summary state it outputs folds, when it builds or merges
     // states (else passed on below).
     let mut built_state_input_rows: Option<StateInputRows> = None;
+    // The narrower states a `SummaryMergeWindows` merges per execution.
+    let mut merged_windows_states: u64 = 0;
     // The time its raw output rows span, when it reads or narrows raw rows
     // (else passed on below).
     let mut read_raw_rows_span_ms: Option<u64> = None;
@@ -487,12 +493,23 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // The tumbling windows its rows span: those a `TimeRange` selects from
     // a chain (through the operators that keep each row's window, which
     // pass them on: `Operator::keeps_input_window`), 1 otherwise.
+    // A cover's mean windows per level ([`cover_windows_per_level`]).
+    let cover_windows =
+        if let Payload::NonASAP(NonASAPOp::TimeRangeCover { range, .. }) = &node.payload {
+            Some(cover_windows_per_level(range, producers))
+        } else {
+            None
+        };
     let tumbling_windows = match &node.payload {
         Payload::NonASAP(NonASAPOp::TimeRange { range, .. })
             if chain_tumbling_window_width_ms(producers).is_some() =>
         {
             selected_tumbling_windows(range, producers)?
         }
+        Payload::NonASAP(NonASAPOp::TimeRangeCover { .. }) => cover_windows
+            .as_ref()
+            .map_or(1, |per_level| per_level.iter().sum::<f64>().round() as u64)
+            .max(1),
         payload if payload.keeps_input_window() => producers
             .first()
             .map_or(1, |producer| producer.tumbling_windows),
@@ -580,6 +597,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             | NonASAPOp::SQLWindowFunc { .. }
             | NonASAPOp::TimeRange { .. }
             | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::TimeRangeCover { .. }
             | NonASAPOp::PromqlVectorFromScalar(..)
             | NonASAPOp::PromqlRelabel { .. }
             | NonASAPOp::PromqlInfoEnrich { .. }
@@ -594,6 +612,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             | ASAPOp::EvaluatePopulation { .. }
             | ASAPOp::SummaryMerge { .. }
             | ASAPOp::SummaryTumblingWindowChain { .. }
+            | ASAPOp::SummaryMergeWindows { .. }
             | ASAPOp::SummarySubtract { .. }
             | ASAPOp::SummaryDelete { .. }
             | ASAPOp::SummaryJoin { .. }
@@ -1068,6 +1087,64 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                     format!("time shift: pass {} rows, free", input.rows),
                 )
             }
+            NonASAPOp::TimeRangeCover { range, .. } => {
+                // Each level's mean windows per evaluation, its states per
+                // window each: wider levels' states are fewer and larger.
+                // Every level holds one state per group per window: the
+                // groups times the windows selected, in rows; the bytes by
+                // each level's states.
+                let per_level = cover_windows.clone().unwrap_or_default();
+                let group_count = producers.iter().map(|p| p.output.rows).max().unwrap_or(1);
+                let mut bytes = 0_u64;
+                for (producer, windows) in producers.iter().zip(&per_level) {
+                    bytes = bytes
+                        .checked_add((producer.output.bytes as f64 * windows).round() as u64)
+                        .ok_or(AnalyticalCostError::Overflow)?;
+                }
+                let out = EdgeStatistics {
+                    rows: group_count
+                        .checked_mul(tumbling_windows)
+                        .ok_or(AnalyticalCostError::Overflow)?
+                        .max(1),
+                    bytes,
+                };
+                // What each selected state folds on average: the range's
+                // rows of one group over the windows selected.
+                built_state_input_rows = producers.last().and_then(|narrowest| {
+                    let mut rows = narrowest.state_input_rows?;
+                    let narrowest_width_ms = narrowest.chain_tumbling_window_width_ms?.max(1);
+                    let range_ms = u64::try_from(range.as_millis()).unwrap_or(u64::MAX);
+                    rows.rows_per_state = rows.rows_per_state.map(|per_window| {
+                        ((per_window as f64 * (range_ms / narrowest_width_ms) as f64)
+                            / tumbling_windows.max(1) as f64)
+                            .ceil() as u64
+                    });
+                    Some(rows)
+                });
+                let estimate = estimate_operator_with_terms(
+                    PhysicalOperator::TimeRange,
+                    OperatorStatistics::PassThrough {
+                        edges: UnaryEdgeStatistics {
+                            input: out,
+                            output: out,
+                            promql: None,
+                        },
+                    },
+                );
+                let windows_text = per_level
+                    .iter()
+                    .map(|windows| format!("{windows:.2}"))
+                    .collect::<Vec<_>>()
+                    .join(" + ");
+                (
+                    out,
+                    estimate,
+                    format!(
+                        "time range cover {range:?}: {windows_text} tumbling windows of states \
+                         per level"
+                    ),
+                )
+            }
             NonASAPOp::TimeRange { range, .. }
                 if chain_tumbling_window_width_ms(producers).is_some() =>
             {
@@ -1313,6 +1390,79 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 ),
             )
         }
+        Payload::ASAP(ASAPOp::SummaryMergeWindows {
+            tumbling_window_width_ms,
+            ..
+        }) => {
+            // Each wider window, when it ends, merges the narrower windows
+            // inside it, per group: at ingestion time one second's share,
+            // `group_count · 1000 / narrower width` merges and
+            // `group_count · 1000 / width` states emitted per second.
+            let narrower = producers
+                .first()
+                .ok_or(AnalyticalCostError::UnsupportedCandidate)?;
+            let narrower_width_ms = narrower
+                .chain_tumbling_window_width_ms
+                .ok_or(AnalyticalCostError::UnsupportedCandidate)?
+                .max(1);
+            let width_ms = (*tumbling_window_width_ms).max(1);
+            let windows_per_window = (width_ms / narrower_width_ms).max(1);
+            let group_count = narrower.output.rows.max(1);
+            let (merged, emitted) = match ingestion {
+                true => (
+                    group_count as f64 * ONE_SECOND_MS as f64 / narrower_width_ms as f64,
+                    group_count as f64 * ONE_SECOND_MS as f64 / width_ms as f64,
+                ),
+                false => (
+                    (group_count * windows_per_window * retained_output_count) as f64,
+                    (group_count * retained_output_count) as f64,
+                ),
+            };
+            merged_windows_states = merged.round() as u64;
+            let merged_input_rows = narrower.state_input_rows.map(|mut rows| {
+                rows.rows_per_state = rows
+                    .rows_per_state
+                    .map(|per_window| per_window.saturating_mul(windows_per_window));
+                rows
+            });
+            built_state_input_rows = merged_input_rows;
+            let input_state_bytes = state_bytes_per_row(narrower.output, narrower.output_schema);
+            let merged_state_bytes = match (family, merged_input_rows) {
+                (StateFamily::Sketch(params), Some(rows)) => sketch_state_bytes(params, rows),
+                _ => input_state_bytes,
+            };
+            let terms = merge_terms_per_state(
+                family,
+                input_state_bytes,
+                merged_state_bytes,
+                narrower.state_input_rows,
+                windows_per_window,
+            )
+            .times(merged)
+            .plus_terms(
+                &node
+                    .output_schema
+                    .summary_state_type()
+                    .map_or_else(NodeCostTerms::default, chain_emit_terms_per_state)
+                    .times(emitted),
+            );
+            let out = EdgeStatistics {
+                rows: group_count,
+                bytes: group_count
+                    .checked_mul(
+                        merged_state_bytes + state_row_bytes_beside_state(&node.output_schema),
+                    )
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            };
+            (
+                out,
+                Ok(charged(terms, out.bytes, 0)),
+                format!(
+                    "merge tumbling windows of {narrower_width_ms} ms into {width_ms} ms for \
+                     {group_count} groups: {merged:.1} states merged, {emitted:.1} states emitted"
+                ),
+            )
+        }
         Payload::ASAP(ASAPOp::SummaryMerge { group_by, .. }) => {
             // Each input state read is merged into its group's (by the
             // states' family, `merge_ops` below); one state per group
@@ -1474,6 +1624,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let units = match &node.payload {
         Payload::NonASAP(NonASAPOp::Scan { .. }) => out.rows,
         Payload::ASAP(ASAPOp::SummaryMerge { .. }) => merged_states(producers)?,
+        // The narrower states it merges in one execution (one second at
+        // ingestion time).
+        Payload::ASAP(ASAPOp::SummaryMergeWindows { .. }) => merged_windows_states,
         Payload::NonASAP(
             NonASAPOp::Values { .. }
             | NonASAPOp::Filter { .. }
@@ -1489,6 +1642,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             | NonASAPOp::SQLWindowFunc { .. }
             | NonASAPOp::TimeRange { .. }
             | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::TimeRangeCover { .. }
             | NonASAPOp::PromqlVectorFromScalar(..)
             | NonASAPOp::PromqlRelabel { .. }
             | NonASAPOp::PromqlInfoEnrich { .. }
@@ -1784,6 +1938,28 @@ pub(crate) fn cost_source(per_node: &BTreeMap<PhysicalASAPNodeId, NodeCost>) -> 
 /// `TimeRange` over it selects windows.
 fn chain_tumbling_window_width_ms(producers: &[ProducerOutput<'_>]) -> Option<u64> {
     producers.first()?.chain_tumbling_window_width_ms
+}
+
+/// The mean windows per evaluation a `TimeRangeCover` of `range` selects
+/// from each of its levels, `producers` (widest first), averaged over the
+/// evaluation times on the narrowest level's grid
+/// ([`mean_cover_windows_per_level`]). Example: 1 h over 5 min and 15 s:
+/// `[11.05, 19.0]`.
+fn cover_windows_per_level(
+    range: &std::time::Duration,
+    producers: &[ProducerOutput<'_>],
+) -> Vec<f64> {
+    let widths: Vec<u64> = producers
+        .iter()
+        .map(|producer| producer.chain_tumbling_window_width_ms.unwrap_or(1).max(1))
+        .collect();
+    let narrowest = widths.last().copied().unwrap_or(1);
+    mean_cover_windows_per_level(
+        u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
+        0,
+        narrowest,
+        &widths,
+    )
 }
 
 /// The windows a `TimeRange` of `range` selects from the chain

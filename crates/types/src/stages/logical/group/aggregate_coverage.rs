@@ -176,6 +176,21 @@ pub(super) fn aggregate_coverage<'m>(
         {
             of_window_selection(operator)
         }
+        // The windows tiling the range, from levels of one build: what the
+        // same range over its narrowest level selects.
+        Operator::NonASAP(NonASAPOp::TimeRangeCover { range, levels }) => {
+            let narrowest = *levels.last().ok_or(CoverageError::NoCoverage)?;
+            of_window_selection(&Operator::NonASAP(NonASAPOp::TimeRange {
+                range: *range,
+                kind: TimeRangeKind::Range,
+                child: narrowest,
+            }))
+        }
+        // The narrower chain's states merged into wider windows: the same
+        // build, its time unconstrained.
+        Operator::ASAP(ASAPOp::SummaryMergeWindows { child, .. }) => stored_coverage(child)
+            .cloned()
+            .ok_or(CoverageError::NoCoverage),
         Operator::NonASAP(_) => match selected_build(operator)? {
             Some(build) => of_summary_agg(&build),
             None => Err(CoverageError::NoCoverage),

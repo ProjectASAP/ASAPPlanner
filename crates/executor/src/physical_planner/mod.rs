@@ -207,11 +207,9 @@ fn compile_internal(
             // A chain's rows are read through the `TimeRange`s above it,
             // which select its windows; any other view's state is read for
             // the window of data it summarizes. Either is exact, so bounded.
-            let read_window = match node.payload {
-                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => {
-                    window_read_above(id, &graph)
-                }
-                _ => window_below(id, &graph),
+            let read_window = match node.payload.chain_tumbling_window_width_ms() {
+                Some(_) => window_read_above(id, &graph),
+                None => window_below(id, &graph),
             }
             .ok_or_else(|| invalid(format!("materialized view {id} is read unbounded")))?;
             physical_dag.add_materialized_view(
@@ -220,6 +218,7 @@ fn compile_internal(
                     view: (*view).clone(),
                     schema: output,
                     read_window,
+                    tumbling_window_width_ms: node.payload.chain_tumbling_window_width_ms(),
                 },
             )?;
         } else if let Payload::NonASAP(NonASAPOp::Scan {
@@ -588,6 +587,117 @@ fn compile_internal(
                 } else {
                     physical_dag.add(id, vec![helper_id(id, 1)?], stamped)?;
                 }
+                continue;
+            }
+            // Wider windows merged from a narrower chain, refreshed in an
+            // ingestion run: the narrower windows inside the wider window
+            // ending at the run's end, each stamped with that end, merged
+            // per key, then laid out as the chain's rows (window_end, keys,
+            // state).
+            if let Payload::ASAP(ASAPOp::SummaryMergeWindows {
+                tumbling_window_width_ms,
+                ..
+            }) = &node.payload
+            {
+                let [input] = schemas.as_slice() else {
+                    return Err(invalid("SummaryMergeWindows reads one chain"));
+                };
+                let time = input
+                    .time_index
+                    .ok_or_else(|| invalid("SummaryMergeWindows reads a chain's window ends"))?;
+                let width_ms = i64::try_from(*tumbling_window_width_ms)
+                    .map_err(|_| invalid("tumbling-window width exceeds Int64"))?;
+                let millis =
+                    |ms: u64| i64::try_from(ms).map_err(|_| invalid("a window overflows Int64"));
+                // Refreshed: the narrower windows inside its newest window.
+                // Built for its readers: those inside what they read; the
+                // wider windows reaching past it are partial, and a cover
+                // takes none of them.
+                let (end_offset_ms, length_ms) = match graph.input_time_access(id).reads {
+                    InputRows::LastWindow { length_ms } => (0, millis(length_ms)?),
+                    _ => {
+                        let read = window_read_above(id, &graph).ok_or_else(|| {
+                            invalid(format!(
+                                "node {id}: SummaryMergeWindows built for its readers is read \
+                                 outside the time ranges above it"
+                            ))
+                        })?;
+                        (
+                            millis(read.ends_before_evaluation_ms)?,
+                            millis(read.length_ms)?,
+                        )
+                    }
+                };
+                let window = Operator::time_range(
+                    input.clone(),
+                    time,
+                    end_offset_ms,
+                    length_ms,
+                    None,
+                    None,
+                )?
+                .with_tumbling_window_ends_from_epoch(width_ms)?;
+                let windowed = window.schema();
+                let state = summary_column(&windowed)?;
+                // The keys, then the wider window's end.
+                let groups = (0..windowed.fields.len())
+                    .filter(|&column| column != state && column != time)
+                    .collect();
+                let merge = Operator::summary_merge(windowed.clone(), state, groups)?
+                    .with_emit_empty_global(false, node.parameters.clone())?;
+                let compact = merge.schema();
+                let window_end_in_compact = compact
+                    .fields
+                    .iter()
+                    .position(|field| field.name == crate::operators::TUMBLING_WINDOW_END_COLUMN);
+                physical_dag.add(auxiliary, inputs, window)?;
+                physical_dag.add(helper_id(id, 1)?, vec![auxiliary], merge)?;
+                physical_dag.add(
+                    id,
+                    vec![helper_id(id, 1)?],
+                    Operator::window_end_timestamp(compact, output, window_end_in_compact)?,
+                )?;
+                continue;
+            }
+            // A cover's levels: from each, the windows the cover takes from
+            // it at this run's evaluation time, then their union.
+            if let Payload::NonASAP(NonASAPOp::TimeRangeCover { range, levels }) = &node.payload {
+                // Each level by its id, widest first, as the payload lists
+                // them (the inputs may come in another order).
+                let levels = levels
+                    .iter()
+                    .map(|&level| {
+                        let level = level as NodeId;
+                        let width = nodes
+                            .get(&level)
+                            .and_then(|level| level.payload.chain_tumbling_window_width_ms())
+                            .ok_or_else(|| invalid("a time-range cover reads chains"))?;
+                        Ok((level, width, Arc::new(nodes[&level].output_schema.clone())))
+                    })
+                    .collect::<Result<Vec<(NodeId, u64, SchemaRef)>, Error>>()?;
+                let widths: Vec<u64> = levels.iter().map(|(_, width, _)| *width).collect();
+                let range_ms = i64::try_from(range.as_millis())
+                    .map_err(|_| invalid("a time-range cover overflows Int64"))?;
+                let mut selected = Vec::with_capacity(levels.len());
+                for (index, (level, _, schema)) in levels.iter().enumerate() {
+                    let time = schema
+                        .time_index
+                        .ok_or_else(|| invalid("a time-range cover reads window ends"))?;
+                    let helper = helper_id(id, index as u64 + 1)?;
+                    physical_dag.add(
+                        helper,
+                        vec![*level],
+                        Operator::time_range(schema.clone(), time, 0, range_ms, None, None)?
+                            .with_cover_level(widths.clone(), index)?,
+                    )?;
+                    selected.push(helper);
+                }
+                let first = levels[0].2.clone();
+                physical_dag.add(
+                    id,
+                    selected,
+                    Operator::union(first, levels.len())?.with_output_schema(output)?,
+                )?;
                 continue;
             }
             // A chain refreshed in an ingestion run builds the window of
