@@ -358,7 +358,7 @@ impl Batch {
             *slot = Some(Arc::new(match state_column.storage() {
                 super::StateStorage::Exact(records) => StateColumn::from_exact(
                     family,
-                    used.iter().map(|&index| records[index].clone()).collect(),
+                    used.iter().map(|&index| records.get(index)).collect(),
                 ),
                 // Shared by pointer: stored sketches are not charged again.
                 super::StateStorage::Objects(_) => StateColumn::from_objects_of(
@@ -494,7 +494,7 @@ impl Batch {
                     let new_index = *moved.entry(index).or_insert_with(|| {
                         match state_column.storage() {
                             super::StateStorage::Exact(states) if all_exact => {
-                                records.push(states[index as usize].clone())
+                                records.push(states.get(index as usize))
                             }
                             // An object is shared by pointer (not charged
                             // again when held outside the run); an exact
@@ -656,13 +656,29 @@ impl Batch {
     /// `Self::mark_states_held_outside_run`). Constant time in the number
     /// of rows.
     pub fn memory_bytes(&self) -> usize {
+        self.bytes(StateColumn::charged_state_bytes)
+    }
+
+    /// Memory the batch holds, counting every state column in full: what a
+    /// store of tumbling windows reports for the batches it keeps. Unlike
+    /// [`Self::memory_bytes`], it does not drop the states once a run has
+    /// read them (a run marks a store's states as held outside it, and
+    /// the mark is on the store's own state columns). Constant time in the
+    /// number of rows.
+    pub fn stored_bytes(&self) -> usize {
+        self.bytes(StateColumn::state_memory_bytes)
+    }
+
+    /// The column buffers, a fixed slot per row, and `state_bytes` of each
+    /// state column once.
+    fn bytes(&self, state_bytes: fn(&StateColumn) -> usize) -> usize {
         let mut seen = std::collections::BTreeSet::new();
         let states = self
             .state_columns
             .iter()
             .flatten()
             .filter(|column| seen.insert(Arc::as_ptr(column)))
-            .map(|column| column.charged_state_bytes())
+            .map(|column| state_bytes(column))
             .sum::<usize>();
         std::mem::size_of::<Self>()
             + self.record_batch.get_array_memory_size()

@@ -593,7 +593,8 @@ fn derived_columns_of_stored_exact_records_charge_the_copies() {
     let stored = state_batch(100, true);
     stored.mark_states_held_outside_run();
     assert_eq!(charged_states(&stored), 0);
-    let record = std::mem::size_of::<crate::summary_kernels::exact::ScalarState>();
+    // A sum record: its compensated sum and whether it saw a sample.
+    let record = 24;
     let keep = BooleanArray::from((0..100).map(|i| i % 10 == 0).collect::<Vec<_>>());
     let kept = stored.filter(&keep).unwrap();
     assert_eq!(charged_states(&kept), 10 * record);
@@ -601,6 +602,24 @@ fn derived_columns_of_stored_exact_records_charge_the_copies() {
     other.mark_states_held_outside_run();
     let joined = Batch::concat(&stored.schema().clone(), &[stored, other]).unwrap();
     assert!(charged_states(&joined) >= 150 * record);
+}
+
+// A store reports its batches with `stored_bytes`, which still counts
+// their states after a run read them (a run marks the store's own state
+// columns as held outside it, and `memory_bytes` then drops them).
+#[test]
+fn stored_bytes_count_states_a_run_has_read() {
+    for exact in [false, true] {
+        let stored = state_batch(100, exact);
+        let before = stored.memory_bytes();
+        assert_eq!(stored.stored_bytes(), before);
+        // What a run reading the store's batch does (`Scan` of a view).
+        stored.clone().mark_states_held_outside_run();
+        let states = stored.state_column(0).unwrap().state_memory_bytes();
+        assert!(states > 0);
+        assert_eq!(stored.memory_bytes(), before - states, "exact: {exact}");
+        assert_eq!(stored.stored_bytes(), before, "exact: {exact}");
+    }
 }
 
 // Deriving twice keeps each sketch's "held outside the run" bit: concat

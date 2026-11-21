@@ -939,7 +939,7 @@ async fn merge_summary(
         entries.sort_by_cached_key(|&entry| {
             let (states, index) = state_of(entry);
             match states.storage() {
-                StateStorage::Exact(records) => records[index].earliest_sample_ms(),
+                StateStorage::Exact(records) => records.get(index).earliest_sample_ms(),
                 StateStorage::Objects(objects) => objects[index]
                     .as_any()
                     .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
@@ -965,9 +965,9 @@ async fn merge_summary(
                 };
                 let slot = &mut merged[entry.2 as usize];
                 *slot = Some(match slot.take() {
-                    None => records[index].clone(),
+                    None => records.get(index),
                     Some(existing) => existing
-                        .merge(&records[index])
+                        .merge(&records.get(index))
                         .map_err(|e| Error::Operator(e.to_string()))?,
                 });
             }
@@ -1175,7 +1175,7 @@ fn evaluate_states(
         match states.storage() {
             StateStorage::Exact(records) => {
                 evaluation.statistic == statistic_of(states.family())
-                    && records[index].insufficient_counter_raw_data_samples()
+                    && records.get(index).insufficient_counter_raw_data_samples()
             }
             StateStorage::Objects(objects) => {
                 crate::evaluation::insufficient_counter_raw_data_samples(
@@ -1196,7 +1196,7 @@ fn evaluate_states(
         keep.push(true);
         values.push(match (query, states.storage()) {
             (SummaryEvaluation::Exact(evaluation), StateStorage::Exact(records)) => {
-                exact_value(&records[index], evaluation)?
+                exact_value(&records.get(index), evaluation)?
             }
             (SummaryEvaluation::Exact(evaluation), StateStorage::Objects(objects)) => {
                 let exact = objects[index]
