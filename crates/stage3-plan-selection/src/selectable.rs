@@ -31,6 +31,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use asap_types::deployment_capabilities::FinalResultsCache;
+
 use asap_types::ir::operator::AtModifier;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::plan::materialized_view::RefreshWindow;
@@ -122,6 +124,13 @@ pub(crate) struct SelectableExecutions {
     /// Example: a query every 60 s is evaluated in the context of grid
     /// 60 s at phase 0.
     evaluation_context_of_query: Vec<Option<ExecutionContextId>>,
+    /// Per query, by [`QueryId`], how far back from a request's end its
+    /// evaluations' inputs are kept beyond their look-back, in ms
+    /// ([`QueryWorkloadEntry::retained_range_span_ms`]).
+    ///
+    /// Example: a 1 h range evaluation at 15 s steps every 15 s: 3,600,000
+    /// ms, or 15,000 ms when the data plane caches final query results.
+    retained_span_ms_of_query: Vec<u64>,
 }
 
 impl SelectableExecutions {
@@ -131,11 +140,14 @@ impl SelectableExecutions {
     /// per output the executions that may answer it: a candidate of its
     /// group a query-time consumer may read
     /// (`producer_satisfies_physical_requirements`) that delivers on the
-    /// query's context.
+    /// query's context. `final_results_cache` (whether the data plane
+    /// caches final query results) sets how far back each query's
+    /// evaluations are read ([`Self::retained_span_ms_of_query`]).
     pub(crate) fn new(
         physical: &PhysicalASAPMemoCandidates,
         entries: &[QueryWorkloadEntry],
         outputs: &[(QueryId, MemoGroupId)],
+        final_results_cache: FinalResultsCache,
     ) -> Self {
         let mut selectable = Self {
             reads_of_group: reads_of_groups(physical, entries, outputs),
@@ -148,6 +160,10 @@ impl SelectableExecutions {
             edges_out_of: Vec::new(),
             answering: Vec::new(),
             evaluation_context_of_query: vec![None; entries.len()],
+            retained_span_ms_of_query: entries
+                .iter()
+                .map(|entry| entry.retained_range_span_ms(final_results_cache))
+                .collect(),
         };
         let mut reached: BTreeSet<Execution> = BTreeSet::new();
         let mut pending: Vec<Execution> = Vec::new();
@@ -426,25 +442,31 @@ impl SelectableExecutions {
     /// in ms, `None` when unbounded): each selectable edge into its
     /// producer, `need_ms_per_edge` by edge position
     /// (`crate::retention::edge_retention_need_ms`), and each query output
-    /// into each execution that may answer it, the query's range-evaluation
-    /// span. Costing ($h_v$ at its largest), (R), the least $h_v$ of a
+    /// into each execution that may answer it, the query's retained span
+    /// ([`Self::retained_span_ms_of_query`]). Costing ($h_v$ at its largest), (R), the least $h_v$ of a
     /// selection and the greedy bound each fold it.
     pub(crate) fn reads_back<'a>(
         &'a self,
         need_ms_per_edge: &'a [Option<u64>],
-        entries: &'a [QueryWorkloadEntry],
     ) -> impl Iterator<Item = (usize, Reader, Option<u64>)> + 'a {
         let edges =
             self.edges().iter().zip(need_ms_per_edge).enumerate().map(
                 |(position, (edge, &need_ms))| (edge.producer, Reader::Edge(position), need_ms),
             );
         let outputs = self.answering().iter().flat_map(move |(query, answering)| {
-            let need_ms = entries[query.0].range_span_ms();
+            let need_ms = self.retained_span_ms_of_query[query.0];
             answering
                 .iter()
                 .map(move |&index| (index, Reader::Output(*query), Some(need_ms)))
         });
         edges.chain(outputs)
+    }
+
+    /// Per query, by [`QueryId`], how far back from a request's end its
+    /// evaluations' inputs are kept beyond their look-back, in ms
+    /// ([`QueryWorkloadEntry::retained_range_span_ms`]).
+    pub(crate) fn retained_span_ms_of_query(&self) -> &[u64] {
+        &self.retained_span_ms_of_query
     }
 
     /// The positions in [`Self::edges`] of the edges into input `input` of

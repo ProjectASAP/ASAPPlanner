@@ -17,7 +17,8 @@ static DEFAULT_DEPLOYMENT: std::sync::LazyLock<DeploymentCapabilities> =
 /// The facade splits them by stage: Stage 1 reads the supported summaries
 /// of `deployment_capabilities`, Pass 2 the accuracy `evidence`, Stage 2 the
 /// deployment's retention, and Stage 3 (plan selection) compares candidates
-/// under `cost_inputs` ([`CostInputs`]).
+/// under `cost_inputs` ([`CostInputs`]) and reads whether the deployment
+/// caches final query results (`DeploymentCapabilities::final_results_cache`).
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct PlanningModels<'a> {
@@ -28,10 +29,13 @@ pub struct PlanningModels<'a> {
     /// cost model 1 with illustrative unit costs), the resource speed and
     /// the non-repeating query horizon.
     pub cost_inputs: &'a CostInputs,
-    /// What the deployment's executor can run and keep: the summaries it
-    /// supports (Stage 1), whether it retains raw data (Stage 3) and
-    /// whether it keeps query-time results across evaluations (Stage 2);
-    /// default [`DeploymentCapabilities::default`].
+    /// What the deployment's executor can run and keep. The facade hands
+    /// Pass 1 and Stage 2 the exclusions it expands into (the summaries it
+    /// supports, whether it retains raw data, whether it keeps query-time
+    /// results across evaluations, its counter semantics, the families it
+    /// cannot merge across windows, the candidates it rules out), and Stage
+    /// 3 one fact: whether the data plane caches final query results
+    /// (`final_results_cache`). Default [`DeploymentCapabilities::default`].
     pub deployment_capabilities: &'a DeploymentCapabilities,
     /// Do not enforce accuracy: the facade gives every query "no accuracy
     /// target" before Pass 2, so no readout gets a required accuracy and

@@ -234,7 +234,13 @@ pub fn run_planning_until(
         }
         // Stage 3: the selection and the plan it builds.
         let started = Instant::now();
-        let selection = select_plan(physical, entries, data, models.cost_inputs);
+        let selection = select_plan(
+            physical,
+            entries,
+            data,
+            models.cost_inputs,
+            models.deployment_capabilities.final_results_cache(),
+        );
         report.stage3_ms = elapsed_ms(started);
         selection.map_err(SelectionError::Selection)
     })();

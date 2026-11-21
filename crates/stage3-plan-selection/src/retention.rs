@@ -13,7 +13,6 @@ use asap_types::plan::time_window::{InputTimeAccess, TimeIndexedPlan};
 use asap_types::stages::{
     MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdge, PhysicalEdgeId,
 };
-use asap_types::workload::QueryWorkloadEntry;
 
 use crate::cost::ExecutionCosts;
 use crate::selectable::{Reader, SelectableExecutions};
@@ -21,14 +20,18 @@ use crate::selectable::{Reader, SelectableExecutions};
 /// $\operatorname{need}_{\kappa,u,c,i}$: how far back from the evaluation
 /// time `edge`'s producer $u$ must keep its rows for its consumer $c$, with
 /// $c$ $u$'s only reader and every candidate that may read $c$ above it
-/// ([`read_back`]), at each reader the longest range-evaluation span of
-/// the queries reaching it; `None` when read unbounded.
+/// ([`read_back`]), at each reader the longest retained span
+/// (`retained_span_ms_of_query`, by query: the range-evaluation span, or
+/// the refresh interval when the data plane caches final query results,
+/// `SelectableExecutions::retained_span_ms_of_query`) of the queries
+/// reaching it; `None` when read unbounded.
 ///
 /// Example: `TimeRange(5m)` over a chain of 10 s windows, read by a range
-/// query with a 1 h span: 3,900,000 ms.
+/// query with a 1 h span: 3,900,000 ms; refreshed every 15 s with final
+/// query results cached: 315,000 ms.
 pub(crate) fn edge_retention_need_ms(
     physical: &PhysicalASAPMemoCandidates,
-    entries: &[QueryWorkloadEntry],
+    retained_span_ms_of_query: &[u64],
     edge: PhysicalEdgeId,
 ) -> Option<u64> {
     let memo = &physical.logical_candidates.memo;
@@ -37,8 +40,7 @@ pub(crate) fn edge_retention_need_ms(
         memo.groups()[group.0 as usize]
             .reached_by_queries()
             .iter()
-            .filter_map(|&query| entries.get(query))
-            .map(QueryWorkloadEntry::range_span_ms)
+            .filter_map(|&query| retained_span_ms_of_query.get(query).copied())
             .max()
             .unwrap_or(0)
     })
@@ -65,12 +67,9 @@ pub(crate) fn edge_scan_read_ms(
 pub(crate) fn least_retention_ms_per_execution(
     selectable: &SelectableExecutions,
     costs: &ExecutionCosts,
-    entries: &[QueryWorkloadEntry],
 ) -> Vec<Option<u64>> {
     let mut least_retention_ms = vec![None; selectable.executions().len()];
-    for (index, reader, need_ms) in
-        selectable.reads_back(&costs.retention_need_ms_per_edge, entries)
-    {
+    for (index, reader, need_ms) in selectable.reads_back(&costs.retention_need_ms_per_edge) {
         let costed = match reader {
             Reader::Edge(position) => costs.per_edge[position].is_some(),
             Reader::Output(_) => true,

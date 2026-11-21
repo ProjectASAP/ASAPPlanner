@@ -32,6 +32,7 @@ mod retention;
 mod selectable;
 
 use asap_cost::{request_overhead_cost_per_second, CostInputs, CostModel};
+use asap_types::deployment_capabilities::FinalResultsCache;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::{MemoGroupId, PhysicalASAPMemoCandidates, PruneReason, PrunedCandidate};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
@@ -53,7 +54,11 @@ pub use report::{
 /// materialized view node's `view_coverage` from its memo group
 /// (`asap_types::plan::view_coverage`).
 /// `entries[q]` is query `q`'s workload entry; `data` the data workload
-/// with its bounds.
+/// with its bounds. `final_results_cache` is whether the deployment's data
+/// plane caches final query results (`DeploymentCapabilities::final_results_cache`):
+/// when it does, a range evaluation repeating on its step grid retains its
+/// inputs for its refresh interval beyond their look-back, not for its
+/// whole span ([`QueryWorkloadEntry::retained_range_span_ms`]).
 ///
 /// Err: invalid or unsupported cost inputs, an infeasible catalog (reported
 /// as excluded by the deployment when Stage 2 pruned some candidate as
@@ -63,6 +68,7 @@ pub fn select_plan(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     cost_inputs: &CostInputs,
+    final_results_cache: FinalResultsCache,
 ) -> Result<(PhysicalASAPDAG, Selection), ErrorSelectingPlan> {
     cost_inputs
         .validate()
@@ -87,7 +93,8 @@ pub fn select_plan(
         .into_iter()
         .map(|(query, group)| (QueryId(query), group))
         .collect();
-    let mut selectable = SelectableExecutions::new(physical, entries, &outputs);
+    let mut selectable =
+        SelectableExecutions::new(physical, entries, &outputs, final_results_cache);
     let request_overhead_cost_per_second = request_overhead_cost_per_second(entries, cost_inputs)
         .map_err(|error| ErrorSelectingPlan::Cost {
         candidate: "every plan (the request overhead)".into(),
