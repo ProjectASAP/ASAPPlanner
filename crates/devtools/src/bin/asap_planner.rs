@@ -304,7 +304,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     // turn one off; `ASAP_STAGE3_ROOT_LP=1` reports the LP bound;
     // `ASAP_STAGE3_FEASIBLE_PLAN_START=on` starts from cost model 1's plan;
     // `ASAP_STAGE3_SOLVER_LOG=1` prints the solver's log;
-    // `ASAP_STAGE3_EXACT=1` solves the mean latency to optimality.
+    // `ASAP_STAGE3_EXACT=1` solves the mean latency to optimality;
+    // `ASAP_STAGE3_PATH_READS=off` drops the path read rows.
     let knob = |name: &str| std::env::var(name).ok();
     let checks = &mut cost_inputs.latency_selection_checks;
     if knob("ASAP_STAGE3_THETA_DOMINANCE").as_deref() == Some("off") {
@@ -327,6 +328,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     if knob("ASAP_STAGE3_SOLVER_LOG").is_some() {
         checks.log_solver = true;
+    }
+    if knob("ASAP_STAGE3_PATH_READS").as_deref() == Some("off") {
+        checks.path_reads = false;
     }
     if knob("ASAP_STAGE3_EXACT").is_some() {
         checks.exact_solve = true;

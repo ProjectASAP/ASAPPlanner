@@ -387,6 +387,11 @@ pub struct LatencySelectionChecks {
     /// relative gap of 1 % or after 30 s, whichever comes first, and
     /// report the gap and the lower bound beside the plan.
     pub exact_solve: bool,
+    /// Bound each query's reads from below along each path of its plan
+    /// (the sub-DAG unfolded into occurrences, each a flow of at most 1),
+    /// with the freshness rows on those sums; default true (false: only the
+    /// per-edge and per-execution rows, to compare).
+    pub path_reads: bool,
 }
 
 impl Default for LatencySelectionChecks {
@@ -400,6 +405,7 @@ impl Default for LatencySelectionChecks {
             log_solver: false,
             feasible_plan_start: false,
             exact_solve: false,
+            path_reads: true,
         }
     }
 }

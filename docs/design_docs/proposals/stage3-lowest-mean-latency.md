@@ -482,6 +482,35 @@ freshness without the big-M: $F_q \ge a + (p_e + \text{wait}) a_{q,e}$, valid
 because a read execution is selected and $f_G \ge a + p_e x_e$; and per
 group $G$, $F_q \ge a + \sum_{e \in G} p_e a_{q,e}$ (T10).
 
+**Reads along each path.** $a_{q,u} \ge r_{q,u\to c}$ per edge keeps a
+producer shared by two branches of one query (a diamond: `avg` as a sum
+over a count off one state) counted once, but in the LP it lets a read
+split over alternative consumers and halve at each layer where they meet
+a shared producer: on seed-862 the 2.5 s merge a query reads was read at
+0.03 in the LP. Summing the edge reads into a producer is exact only
+where the query reads the consumer memo group at most once; a per-query
+bound on that count (1 per output reference, and below, the readers'
+counts times their most inputs into the group) is the guard, but on
+seed-862 and typical-dashboard the diamonds sit above the slow states,
+so the guard leaves the rows out where they matter (measured: seed-862
+114 s, typical-dashboard 380 s). The rows are therefore stated per path:
+the query's sub-DAG is unfolded into a tree of occurrences, one per
+output reference (its reads are the answering $z_{q,c}$) and, below an
+occurrence, one per (input, producer memo group) of its executions. A
+path reaches each memo group at most once, so the guard holds on every
+occurrence by construction: in a plan, an occurrence reads one
+execution and one edge per input of it, so per occurrence $o$ the edge
+reads are a flow, $\sum_u s_{o,c\to u} = r_{o,c}$ per input with
+$s \le y$, its child reads are $r_{o',u} = \sum_c s_{o,c\to u}$, and
+$a_{q,u} \ge r_{o',u}$. The freshness big-M row is carried on the sum
+over an occurrence's executions in one refresh group $G$:
+$F_q \ge f_G - M_G(1 - \sum_{e \in o \cap G} r_{o,e})$, with
+$F_q \ge a + \sum_{e \in o \cap G} (p_e + \text{wait}) r_{o,e}$. Every
+row holds in the plan's own reads, so the optimum is kept. A memo group
+already on the path (a cycle) is not unfolded again, and past 4,096
+occurrences per query only the per-query rows remain. Knob `path_reads`
+(`ASAP_STAGE3_PATH_READS=off`).
+
 **Tie-breaks only when needed.** Each tie-break solve starts from the plan
 so far and looks only for a plan at least a byte smaller
 (`objective_bound`), for as long as the first solve took (at least 0.05 s,
@@ -835,6 +864,7 @@ tie-break solves from `CostModel`.
 | 18 | Latency bounds become exclusions before the MILP (least possible latency per execution, in f64); the remaining bounds are rows; per-execution bottom-up latency variables considered and rejected (decision 24). | Decided |
 | 24 | S1 (per-execution latency and freshness variables $\ell_e$, $\varphi_e$ with big-M rows, replacing the per-query reads): considered and rejected. Its LP bound stays at 0 like the McCormick reads, and it measured slower (two workloads: 4.4 s and 5.1 s against 1.2 s). | Decided (rejected) |
 | 25 | Speed-ups, each exact: reads only of kept executions; the latency-bound exclusions once per selection; θ dominance in every quantity; a feasible plan's bound (T8); reads as a flow (T9) with the valid freshness rows; lazy tie-break solves warm-started from the plan so far (2 s each). | Decided |
+| 29 | Reads along each path of the query's plan (an occurrence tree, where every memo group is read at most once per occurrence, the guard by construction), with the freshness big-M rows on each occurrence's sums per refresh group (section 2.5), knob `path_reads`; exact, checked on the 40 PromQL snapshot workloads. | Decided |
 | 26 | Checking knobs in `CostInputs::latency_selection_checks` (`theta_dominance`, `feasible_plan_bound`, `lazy_tie_breaks`, `flow_reads`, all on by default; `report_root_lp_bound`, off): turning a speed-up off must not change the optimum, which the exactness tests check. The planning crates read no environment; the `asap_planner` tool maps `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_LATENCY_READS=mccormick` and `ASAP_STAGE3_ROOT_LP=1` onto them; `feasible_plan_start` (off; `ASAP_STAGE3_FEASIBLE_PLAN_START=on`) and `log_solver` (off; `ASAP_STAGE3_SOLVER_LOG=1`, the solver's log and the model's size by family) are measurements. | By this document |
 | 27 | The mean latency solve stops at a relative MIP gap of 1 % or after 30 s, whichever comes first, and returns its plan with the gap and the solver's lower bound (`Selection::optimality_gap`, the plan report's `optimality_gap`, the text output's mean latency line). `LatencySelectionChecks::exact_solve` (`ASAP_STAGE3_EXACT=1`) solves to optimality; the exactness tests compare in exact mode, and in the default mode check that the gap is at most 1 % (unless stopped on time) and that the plan is within its gap of the exact optimum. With no plan in 30 s, the solve continues to the 1 % gap. | Decided |
 | 28 | A range request's steps split over the query threads in latency: per-step work counts $\lceil s / T_{query} \rceil$ times; CPU still counts every step. | Decided |
