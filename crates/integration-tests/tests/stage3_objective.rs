@@ -574,8 +574,10 @@ fn the_objective_is_the_plan_cost_on_anchored_and_plain_queries_on_one_grid() {
 /// most one row in a batch narrower than 15 s, so at the 10 s default every
 /// row is a visit, the raw scan costs more than the views and the two
 /// plans are the same. With 30 min batches, a series has 120 rows in a
-/// batch, and the plan selected with raw data kept costs 4.7e5/s against
-/// 7.1e5/s for the views.
+/// batch, and reading them was cheaper than the views (4.7e5/s against
+/// 7.1e5/s) while stored DDSketch windows were priced at their open size;
+/// priced sealed (as the executor keeps them), the views are the cheapest
+/// plan, 2.5e5/s, with raw data kept or not.
 #[test]
 fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     let query = |query: &str| {
@@ -611,8 +613,9 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     // deployment that stores nothing, as `mixed` arrival does): only
     // ingestion-time views over the arriving rows can answer them, the
     // kind of plan the objective's scale once led the solver to at 2,000x
-    // the cost of the best. With raw data kept in 30 min batches, reading
-    // them at query time is cheaper, so the selection costs less.
+    // the cost of the best. With raw data kept the selection can only cost
+    // less or the same; with sealed DDSketch windows the views are the
+    // cheapest either way.
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         ..Default::default()
@@ -628,7 +631,7 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     let (_, (_, views_only_plan_cost)) =
         selected_plan_objective_and_plan_cost_with(&ingesting, views_only, &settings);
     assert!(
-        plan_cost < views_only_plan_cost,
+        plan_cost <= views_only_plan_cost,
         "selected {plan_cost} is above the ingestion-time views plan, {views_only_plan_cost}"
     );
 }
