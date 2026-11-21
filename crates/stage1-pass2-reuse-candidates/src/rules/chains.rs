@@ -180,23 +180,22 @@ pub(crate) const WIDER_LEVEL_WIDTHS_MS: [u64; 6] =
 pub(crate) const MOST_WIDER_LEVELS: usize = 3;
 
 /// The θs of `state`'s surviving builds (`parameters`) that get wider
-/// levels: for each reader of `state` (a candidate an edge from its builds
-/// reaches, `edges` before the chains), the smallest θ by state size
-/// ([`nominal_state_size`]) whose edge meets that reader's accuracy. A
-/// larger θ's levels and covers cost more in states, merges and memory
-/// for an accuracy a smaller one already meets, so no reader needs them.
-/// Example: one state read at relative error 0.05 every 60 s and at 0.005
-/// every 15 s: DDSketch α = 0.05 for the first and the smallest α meeting
-/// 0.005 for the second. Exact states (no θ): `[None]`.
+/// levels: per reader of `state` (a candidate an edge from its builds
+/// reaches, `edges` before the chains) and per θ type, the smallest θ by
+/// state size ([`nominal_state_size`], compared only within one type) whose
+/// edge meets that reader's accuracy. A larger θ's levels cost more for an
+/// accuracy a smaller one meets, so no reader needs a larger one than its
+/// own. Example: one state read at relative error 0.05 every 60 s and at
+/// 0.005 every 15 s: DDSketch α = 0.05 for the first and the smallest α
+/// meeting 0.005 for the second. Exact states (no θ): `[None]`.
 fn smallest_parameters_per_reader(
     memo: &Memo,
     state: MemoGroupId,
     parameters: &[Option<SketchParams>],
     edges: &[CandidateEdge],
 ) -> Vec<Option<SketchParams>> {
-    let size = |theta: &Option<SketchParams>| nominal_state_size(theta.as_ref());
-    let mut smallest_per_reader: BTreeMap<CandidateForMemoGroupId, Option<SketchParams>> =
-        BTreeMap::new();
+    // Every (reader, θ) whose edge meets the reader's accuracy.
+    let mut satisfied: Vec<(CandidateForMemoGroupId, Option<SketchParams>)> = Vec::new();
     for edge in edges {
         if edge.producer.group != state || edge.satisfies.is_err() {
             continue;
@@ -206,30 +205,55 @@ fn smallest_parameters_per_reader(
             .logical_properties
             .parameters()
             .cloned();
-        if !parameters.contains(&theta) {
-            continue;
+        if parameters.contains(&theta) && !satisfied.contains(&(edge.consumer, theta.clone())) {
+            satisfied.push((edge.consumer, theta));
         }
-        let smallest = smallest_per_reader
-            .entry(edge.consumer)
-            .or_insert(theta.clone());
-        if size(&theta) < size(smallest) {
-            *smallest = theta;
+    }
+    // Per reader and θ type, the smallest θ meeting the reader.
+    let mut smallest: Vec<(CandidateForMemoGroupId, Option<SketchParams>)> = Vec::new();
+    for (reader, theta) in &satisfied {
+        match smallest
+            .iter_mut()
+            .find(|(known_reader, known)| known_reader == reader && same_type(known, theta))
+        {
+            Some((_, known)) => {
+                if smaller_of_one_type(theta, known) {
+                    *known = theta.clone();
+                }
+            }
+            None => smallest.push((*reader, theta.clone())),
         }
     }
     let mut chosen: Vec<Option<SketchParams>> = Vec::new();
-    for theta in smallest_per_reader.into_values() {
+    for (_, theta) in smallest {
         if !chosen.contains(&theta) {
             chosen.push(theta);
         }
     }
-    chosen.sort_by(|a, b| size(a).total_cmp(&size(b)));
     chosen
 }
 
-/// A θ's state size, to order θs of one family smallest first: its counters
+/// Whether two θs (or two exact states) are of one type, whose sizes
+/// compare ([`nominal_state_size`]).
+fn same_type(a: &Option<SketchParams>, b: &Option<SketchParams>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => std::mem::discriminant(a) == std::mem::discriminant(b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// Whether `a` is a smaller state than `b`, both of one type; `false`
+/// across types, whose sizes do not compare.
+fn smaller_of_one_type(a: &Option<SketchParams>, b: &Option<SketchParams>) -> bool {
+    same_type(a, b) && nominal_state_size(a.as_ref()) < nominal_state_size(b.as_ref())
+}
+
+/// A θ's state size, to order θs of one type smallest first: its counters
 /// or items (a KLL's `k`, a Count-Min's width × depth, an HLL's 2^p
 /// registers, a DDSketch's buckets per unit of log range, `1 / α`). An
-/// exact state (`None`) is 0. Only the order within one family matters.
+/// exact state (`None`) is 0. Sizes of different types do not compare
+/// ([`smaller_of_one_type`]); a Hydra structure has no order (every one 0).
 fn nominal_state_size(parameters: Option<&SketchParams>) -> f64 {
     let Some(parameters) = parameters else {
         return 0.0;
@@ -260,7 +284,7 @@ fn nominal_state_size(parameters: Option<&SketchParams>) -> f64 {
             f64::from(*layers)
                 * (f64::from(*sketch_rows) * f64::from(*sketch_cols) + f64::from(*heap_size))
         }
-        SketchParams::Hydra(_) => f64::MAX,
+        SketchParams::Hydra(_) => 0.0,
     }
 }
 
@@ -497,4 +521,34 @@ fn gcd_closure(widths: impl IntoIterator<Item = u64>) -> BTreeSet<u64> {
         closure.extend(gcds);
     }
     closure
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// θs of different types never compare by size, whatever their counts:
+    /// a Count-Min of 100 × 5 is not "smaller" than a Count Sketch of
+    /// 1,000 × 5 or a Hydra; within one type the smaller counts order first.
+    #[test]
+    fn state_sizes_compare_only_within_one_type() {
+        let cms = |width| Some(SketchParams::Cms { width, depth: 5 });
+        let count_sketch = |width| Some(SketchParams::CountSketch { width, depth: 5 });
+        let hydra = Some(SketchParams::Hydra(
+            asap_types::summary_type::HydraParams::HydraCms {
+                width: 100,
+                depth: 5,
+                shared_rows: 5,
+                shared_columns: 1_000,
+            },
+        ));
+        assert!(smaller_of_one_type(&cms(100), &cms(1_000)));
+        assert!(!smaller_of_one_type(&cms(1_000), &cms(100)));
+        assert!(!smaller_of_one_type(&cms(100), &count_sketch(1_000)));
+        assert!(!smaller_of_one_type(&count_sketch(100), &cms(1_000)));
+        assert!(!smaller_of_one_type(&cms(100), &hydra));
+        assert!(!smaller_of_one_type(&hydra, &cms(100)));
+        assert!(!smaller_of_one_type(&None, &cms(100)));
+        assert!(same_type(&cms(1), &cms(2)) && !same_type(&cms(1), &count_sketch(1)));
+    }
 }

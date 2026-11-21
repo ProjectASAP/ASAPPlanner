@@ -68,10 +68,12 @@ What exists and why it does not help:
    1 h, 6 h, 1 d), kept when `w` divides `C`, every narrower level's width
    divides `C`, and `2·C ≤ W`; at most three (of more, the narrowest, the
    middle one and the widest), only over a chain whose width divides the
-   state's evaluation grid, and only for the smallest θ that met the
-   state's accuracy target (a larger θ's levels hold larger states at more
-   cost). All levels are anchored at the epoch, like today's chains. A wider level need not divide the evaluation grid: only the
-   narrowest level must (today's rule), because the edges are read from it.
+   state's evaluation grid, and per reader of the state only for the
+   smallest θ (by state size, compared within one sketch type) whose edge
+   meets that reader's accuracy (a larger θ's levels hold larger states at
+   more cost). All levels are anchored at the epoch, like today's chains.
+   A wider level need not divide the evaluation grid: only the narrowest
+   level must (today's rule), because the edges are read from it.
 2. **One build per level.** The group `SummaryTumblingWindowChain[C](X)` gets
    one candidate per θ: a new operator `SummaryMergeWindows[C]` over the next
    narrower level: when a window of width `C` ends, it merges the `C/c`
@@ -361,7 +363,7 @@ Each test is written before the code and fails on main for the reason given.
 | T3 | `a_long_range_gets_wider_levels` (stage1-pass2) | `quantile_over_time(0.99, data[1h])`, step 15 s: chain groups at 15 s, 1 min, 5 min, 15 min (not 1 h: `2·C ≤ W`); each wider group's only candidates are `SummaryMergeWindows` over the next narrower group; the state group merges over covers over (1 min, 15 s) and over all four levels. | Pass 2 adds only the 15 s chain. |
 | T4 | `a_short_range_gets_no_wider_level` (stage1-pass2) | `data[1m]` step 15 s: only the 15 s chain. | Passes on main; guards against regressions. |
 | T5 | `wider_levels_need_a_merging_summary` (stage1-pass2) | An `irate` state (no merge) over an hour gets no chain and no level. | Passes on main; guards the capability rule. |
-| T6 | `cover_merge_is_charged_its_mean_windows` (integration-tests) | The section 1 plan's merge is charged 120,000 states into 10,000 per step, × 16.0667/s; each `SummaryMergeWindows` is charged the states it merges per second at ingestion time. | Neither node is costed. |
+| T6 | `cover_merge_is_charged_its_mean_windows` (integration-tests) | The section 1 plan's merge is charged 120,167 states into 10,000 per step, × 16.0667/s; each `SummaryMergeWindows` is charged the states it merges per second at ingestion time. | Neither node is costed. |
 | T7 | `stage3_picks_levels_for_a_long_range` (integration-tests) | The section 1 workload: Stage 3 selects wider levels and a cover; cost below main's 9.896383e4; at most 31 windows per series per step. | Pass 2 offers no levels. |
 | T8 | `levels_cost_memory` (integration-tests) | Every level and the 15 s chain keep 7,200,000 ms; the 15 s chain keeps 8,773,440,000 bytes, as on main. | As T7. |
 | T9 | `merge_windows_equals_direct_build` (executor) | Each 5 min window `SummaryMergeWindows` merges from 15 s windows holds what the 5 min chain built from the rows holds (exact sums per job, stamped with the window's end). | Operator not in the executor. |
