@@ -29,6 +29,9 @@ pub(super) struct MaterializedViewSlot {
     /// chain, the windows the `TimeRange`s above it select; for any other
     /// view, the data its state summarizes.
     pub(super) read_window: TimeWindow,
+    /// A chain's tumbling-window width: a query run reads its whole
+    /// windows inside `read_window` ([`Scan::materialized_view`]).
+    pub(super) tumbling_window_width_ms: Option<u64>,
 }
 
 /// A `Scan` leaf, computed once at compile time: what [`CompiledPhysicalDAG::instantiate`]
@@ -195,6 +198,7 @@ impl CompiledPhysicalDAG {
                         slot.view.clone(),
                         slot.schema.clone(),
                         slot.read_window,
+                        slot.tumbling_window_width_ms,
                     );
                     dag.add(id, vec![], scan, lifetime)?;
                 }

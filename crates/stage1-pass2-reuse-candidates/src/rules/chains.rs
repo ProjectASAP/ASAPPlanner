@@ -110,6 +110,7 @@ pub(crate) fn add_chain_groups(
         chains_of_states.push((state, path, chain_groups));
     }
     for (state, path, chain_groups) in chains_of_states {
+        add_wider_levels(memo, state, &path, &chain_groups)?;
         for chain_group in chain_groups {
             let mut top = chain_group;
             for shift in path.shifts.iter().rev() {
@@ -139,6 +140,84 @@ pub(crate) fn add_chain_groups(
                     group_by: None,
                 }),
                 OriginOfCandidateForMemoGroup::TumblingWindows,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The widths a wider chain level may take (1 min, 5 min, 15 min, 1 h,
+/// 6 h, 1 d), each a multiple of the one before, so any of them nest.
+pub(crate) const WIDER_LEVEL_WIDTHS_MS: [u64; 6] =
+    [60_000, 300_000, 900_000, 3_600_000, 21_600_000, 86_400_000];
+
+/// Wider chain levels for state group `state` (design doc
+/// `multi-level-window-chains.md`): for each of its chain groups $G_w$, the
+/// widths $C$ of [`WIDER_LEVEL_WIDTHS_MS`] that $w$ divides with $2C \le W$
+/// (W the state's range), narrowest first. Each is the chain group
+/// `SummaryTumblingWindowChain[C](X)` with one `SummaryMergeWindows[C]`
+/// candidate over the next narrower level per θ (built only from the
+/// narrower level, never from the rows), and each nested prefix of the
+/// levels, $\{C_1, w\}, \{C_2, C_1, w\}, \ldots$, is a `TimeRangeCover(W)`
+/// group over them, widest first, with a `SummaryMerge` over it in the
+/// state group. Only for a range with no `TimeShift`. Example:
+/// `quantile_over_time(0.99, m[1h])` every 15 s: levels 1 min, 5 min and
+/// 15 min over the 15 s chain (not 1 h: 2 h > 1 h), and three covers.
+fn add_wider_levels(
+    memo: &mut Memo,
+    state: MemoGroupId,
+    path: &ChainPath,
+    chain_groups: &[MemoGroupId],
+) -> Result<(), Pass2RuleError> {
+    if !path.shifts.is_empty() || path.anchored_at_ms.is_some() {
+        return Ok(());
+    }
+    for &narrowest in chain_groups {
+        let Some(narrowest_width_ms) = memo.groups()[narrowest.0 as usize]
+            .expression
+            .chain_tumbling_window_width_ms()
+        else {
+            continue;
+        };
+        let widths: Vec<u64> = WIDER_LEVEL_WIDTHS_MS
+            .into_iter()
+            .filter(|&width| {
+                width > narrowest_width_ms
+                    && width.is_multiple_of(narrowest_width_ms)
+                    && width.saturating_mul(2) <= path.window_ms
+            })
+            .collect();
+        // Levels narrowest first; each built from the one before.
+        let mut levels = vec![narrowest];
+        for width in widths {
+            let narrower = *levels.last().expect("the narrowest level");
+            let level = memo.find_or_add_group(path.chain(width))?;
+            add_candidates_per_input_parameters(
+                memo,
+                level,
+                Operator::ASAP(ASAPOp::SummaryMergeWindows {
+                    child: narrower,
+                    tumbling_window_width_ms: width,
+                }),
+                OriginOfCandidateForMemoGroup::MultiLevelWindows,
+            )?;
+            levels.push(level);
+            let cover = add_group_computing_itself(
+                memo,
+                Operator::NonASAP(NonASAPOp::TimeRangeCover {
+                    range: std::time::Duration::from_millis(path.window_ms),
+                    levels: levels.iter().rev().copied().collect(),
+                }),
+                OriginOfCandidateForMemoGroup::MultiLevelWindows,
+            )?;
+            add_candidates_per_input_parameters(
+                memo,
+                state,
+                Operator::ASAP(ASAPOp::SummaryMerge {
+                    children: vec![cover],
+                    group_by: None,
+                }),
+                OriginOfCandidateForMemoGroup::MultiLevelWindows,
             )?;
         }
     }

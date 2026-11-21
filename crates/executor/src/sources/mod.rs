@@ -55,6 +55,9 @@ enum ScanInput {
         view: MaterializedView,
         /// The rows a read selects, back from the evaluation time.
         read_window: TimeWindow,
+        /// A chain's tumbling-window width: a query run reads its whole
+        /// windows inside `read_window`.
+        tumbling_window_width_ms: Option<u64>,
     },
 }
 
@@ -90,17 +93,26 @@ impl Scan {
         }
     }
     /// A materialized view slot reading the rows of `view` that
-    /// `read_window` selects.
+    /// `read_window` selects: for a chain of `tumbling_window_width_ms`, in
+    /// a query run, its whole windows inside it (a wider level of a
+    /// `TimeRangeCover` is read off its grid). Example: windows of 5 min
+    /// read for `(T - 1h, T]` at `T` = 100 h + 105 s: `(99 h + 300 s, 100
+    /// h]`.
     pub(crate) fn materialized_view(
         store: Arc<dyn DataStore>,
         view: MaterializedView,
         output: SchemaRef,
         read_window: TimeWindow,
+        tumbling_window_width_ms: Option<u64>,
     ) -> Self {
         Self {
             store,
             output,
-            input: ScanInput::MaterializedView { view, read_window },
+            input: ScanInput::MaterializedView {
+                view,
+                read_window,
+                tumbling_window_width_ms,
+            },
         }
     }
     /// `batch` in the slot's schema; bad input when its columns differ.
@@ -164,9 +176,16 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 predicate_hints,
                 read_window,
             } => self.start_raw_data(source, predicates, predicate_hints, *read_window, context),
-            ScanInput::MaterializedView { view, read_window } => {
-                self.start_materialized_view(view, *read_window, context)
-            }
+            ScanInput::MaterializedView {
+                view,
+                read_window,
+                tumbling_window_width_ms,
+            } => self.start_materialized_view(
+                view,
+                *read_window,
+                *tumbling_window_width_ms,
+                context,
+            ),
         }
     }
 }
@@ -175,6 +194,7 @@ impl Scan {
         &'a self,
         view: &'a MaterializedView,
         read_window: TimeWindow,
+        tumbling_window_width_ms: Option<u64>,
         context: RunContext,
     ) -> Result<OutputStream<'a, Batch>, Error> {
         // A query run reads the window back from its evaluation time; an
@@ -187,6 +207,19 @@ impl Scan {
             ),
         };
         let time_range_ms = read_window.bounds_ms(at_ms);
+        // A chain's whole windows inside the window: the same window when
+        // the evaluation time is on the chain's grid.
+        let time_range_ms = match (&context.scope, tumbling_window_width_ms) {
+            (Scope::Query { .. }, Some(width_ms)) if width_ms > 0 => {
+                let width = i64::try_from(width_ms).unwrap_or(i64::MAX);
+                let (start, end) = time_range_ms;
+                let start = start.div_euclid(width) * width
+                    + if start.rem_euclid(width) == 0 { 0 } else { width };
+                let end = end.div_euclid(width) * width;
+                (start.min(end), end)
+            }
+            _ => time_range_ms,
+        };
         let opening = context.clone();
         let stream = stream::once(async move {
             if opening.is_cancelled() {

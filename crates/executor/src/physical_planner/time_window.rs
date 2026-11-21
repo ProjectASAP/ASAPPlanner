@@ -112,10 +112,16 @@ pub(super) fn time_window_operator(
     };
     let chain_width_ms = match &nodes[&below].payload {
         Payload::NonASAP(NonASAPOp::Scan { .. }) => None,
-        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-            tumbling_window_width_ms,
-            ..
-        }) => Some(
+        Payload::ASAP(
+            ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }
+            | ASAPOp::SummaryMergeWindows {
+                tumbling_window_width_ms,
+                ..
+            },
+        ) => Some(
             i64::try_from(*tumbling_window_width_ms)
                 .map_err(|_| invalid("tumbling-window width exceeds Int64"))?,
         ),

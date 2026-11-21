@@ -56,7 +56,9 @@ pub(super) struct OfferedPhysicalProperties {
 ///   read under an absolute `@ T`);
 /// - (IngestionTime, None) not for a summary build (`SummaryAgg`, a chain,
 ///   `MaintainPopulation`): fed at ingestion time, it keeps its state
-///   between batches, so it is materialized.
+///   between batches, so it is materialized;
+/// - for a `SummaryMergeWindows`, only (IngestionTime, AcrossEvaluations):
+///   it is a chain built from a narrower chain as each window ends.
 ///
 /// A value not offered is not returned, and neither is the invalid
 /// (IngestionTime, OneEvaluation). The prune rules, in order: a Count-Min
@@ -97,6 +99,10 @@ pub(super) fn offered_physical_properties(
     let has_ingestion_pipeline = data.arrival.rows_per_second().is_some();
     let builds_summary =
         build.is_some() || matches!(operator, Operator::ASAP(ASAPOp::MaintainPopulation { .. }));
+    // Wider windows merged from a narrower chain are kept as a chain is,
+    // built at ingestion time as each wider window ends; at query time a
+    // chain built from the rows serves the same readers.
+    let merges_windows = matches!(operator, Operator::ASAP(ASAPOp::SummaryMergeWindows { .. }));
     let mut offered = Vec::new();
     for timing in TIMINGS {
         if timing == ExecutionTiming::IngestionTime && !ingestion_time_offered {
@@ -110,6 +116,11 @@ pub(super) fn offered_physical_properties(
             if builds_summary
                 && timing == ExecutionTiming::IngestionTime
                 && lifetime == Lifetime::None
+            {
+                continue;
+            }
+            if merges_windows
+                && (timing != ExecutionTiming::IngestionTime || !across_evaluations)
             {
                 continue;
             }
