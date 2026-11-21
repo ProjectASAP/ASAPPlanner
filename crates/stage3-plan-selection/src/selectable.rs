@@ -34,8 +34,8 @@ use std::collections::{BTreeSet, HashMap};
 use asap_types::deployment_capabilities::FinalResultsCache;
 
 use asap_types::ir::operator::AtModifier;
-use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::plan::materialized_view::RefreshWindow;
 use asap_types::stages::{
     anchor_is_evaluation_time, producer_satisfies_physical_requirements, queries_of_context,

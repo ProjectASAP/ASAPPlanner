@@ -57,7 +57,11 @@ fn cover_into(
     let narrowest = level + 1 == level_widths_ms.len();
     // The whole windows of this level inside the interval: ends in `(lo, hi]`.
     let lo = start_ms.div_euclid(width) * width
-        + if start_ms.rem_euclid(width) == 0 { 0 } else { width };
+        + if start_ms.rem_euclid(width) == 0 {
+            0
+        } else {
+            width
+        };
     let hi = end_ms.div_euclid(width) * width;
     if narrowest {
         let mut end = start_ms + width;

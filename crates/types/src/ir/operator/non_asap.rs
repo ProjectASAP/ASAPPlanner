@@ -1190,11 +1190,15 @@ impl<I: OperatorInput> NonASAPOp<I> {
                         level
                             .operator()
                             .chain_tumbling_window_width_ms()
-                            .ok_or_else(|| invalid("a time-range cover reads tumbling-window chains"))
+                            .ok_or_else(|| {
+                                invalid("a time-range cover reads tumbling-window chains")
+                            })
                     })
                     .collect::<Result<_, _>>()?;
                 if widths.len() < 2 {
-                    return Err(invalid("a time-range cover reads at least two chain levels"));
+                    return Err(invalid(
+                        "a time-range cover reads at least two chain levels",
+                    ));
                 }
                 for pair in widths.windows(2) {
                     if pair[1] == 0 || pair[0] <= pair[1] || !pair[0].is_multiple_of(pair[1]) {
@@ -1208,8 +1212,13 @@ impl<I: OperatorInput> NonASAPOp<I> {
                         "a time-range cover's range is whole windows of its narrowest level",
                     ));
                 }
-                if levels.iter().any(|level| level.schema() != levels[0].schema()) {
-                    return Err(invalid("a time-range cover's levels have different schemas"));
+                if levels
+                    .iter()
+                    .any(|level| level.schema() != levels[0].schema())
+                {
+                    return Err(invalid(
+                        "a time-range cover's levels have different schemas",
+                    ));
                 }
             }
             Aggregate {

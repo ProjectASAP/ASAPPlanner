@@ -139,6 +139,7 @@ fn chain(width_ms: i64) -> Rc<OperatorNode> {
 
 fn finalized_merge(windows: Rc<OperatorNode>) -> Rc<OperatorNode> {
     node(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+        counter_readout: None,
         child: node(Operator::ASAP(ASAPOp::SummaryMerge {
             children: vec![windows],
             group_by: None,
@@ -215,7 +216,10 @@ fn plan() -> Plan {
         direct_wide: ids[2],
         cover: id_of(&nodes, &cover),
         flat: id_of(&nodes, &flat),
-        newest_wide: [id_of(&nodes, &newest_wide[0]), id_of(&nodes, &newest_wide[1])],
+        newest_wide: [
+            id_of(&nodes, &newest_wide[0]),
+            id_of(&nodes, &newest_wide[1]),
+        ],
         dag,
         views,
     }
@@ -226,7 +230,11 @@ fn plan() -> Plan {
 /// each 5 min window, the 5 min level (reading the 15 s chain's stored
 /// windows) and the 5 min chain built from the rows, each run's rows
 /// appended to `store`. The 5 min level's rows of each of its runs.
-fn refresh_all(plan: &Plan, store: &mut Arc<InMemoryDataStore>, until: i64) -> Vec<(i64, Vec<Vec<Value>>)> {
+fn refresh_all(
+    plan: &Plan,
+    store: &mut Arc<InMemoryDataStore>,
+    until: i64,
+) -> Vec<(i64, Vec<Vec<Value>>)> {
     let view = |node| {
         plan.views
             .iter()
@@ -246,7 +254,11 @@ fn refresh_all(plan: &Plan, store: &mut Arc<InMemoryDataStore>, until: i64) -> V
         )
     };
     let compiled = [
-        (plan.narrow, NARROW_MS, compile(&plan.dag, &[], &[plan.narrow as u64]).unwrap()),
+        (
+            plan.narrow,
+            NARROW_MS,
+            compile(&plan.dag, &[], &[plan.narrow as u64]).unwrap(),
+        ),
         (
             plan.wide,
             WIDE_MS,
@@ -319,8 +331,13 @@ fn merge_windows_equals_direct_build() {
     let query = compile(&plan.dag, &views, &roots).unwrap();
     // The windows the 2 h retention still keeps at 3 h.
     for (end, _) in merged.into_iter().filter(|(end, _)| *end > HOUR_MS) {
-        let context =
-            RunContext::new(Scope::Query { evaluation_time_ms: end }, Limits::default()).unwrap();
+        let context = RunContext::new(
+            Scope::Query {
+                evaluation_time_ms: end,
+            },
+            Limits::default(),
+        )
+        .unwrap();
         let answers = {
             let query = query.instantiate(store.clone()).unwrap();
             run(&query, &roots, context)
@@ -349,8 +366,13 @@ fn cover_answers_equal_flat_answers() {
     let query = compile(&plan.dag, &views, &[plan.cover as u64, plan.flat as u64]).unwrap();
     let mut t = 3 * HOUR_MS - WIDE_MS;
     while t <= 3 * HOUR_MS {
-        let context =
-            RunContext::new(Scope::Query { evaluation_time_ms: t }, Limits::default()).unwrap();
+        let context = RunContext::new(
+            Scope::Query {
+                evaluation_time_ms: t,
+            },
+            Limits::default(),
+        )
+        .unwrap();
         let answers = {
             let query = query.instantiate(store.clone()).unwrap();
             run(&query, &[plan.cover as u64, plan.flat as u64], context)

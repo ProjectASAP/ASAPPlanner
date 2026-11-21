@@ -119,9 +119,7 @@ pub(super) fn offered_physical_properties(
             {
                 continue;
             }
-            if merges_windows
-                && (timing != ExecutionTiming::IngestionTime || !across_evaluations)
-            {
+            if merges_windows && (timing != ExecutionTiming::IngestionTime || !across_evaluations) {
                 continue;
             }
             let Ok(physical_properties) = PhysicalProperties::new(timing, lifetime) else {

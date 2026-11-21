@@ -84,7 +84,10 @@ async fn cover_merge_is_charged_its_mean_windows() {
         matches!(operator, Operator::ASAP(ASAPOp::SummaryMergeWindows { .. }))
     }) {
         let detail = &cost.per_node[&level].detail;
-        assert!(detail.contains("states merged") && detail.contains("x 1.0000/s"), "{detail}");
+        assert!(
+            detail.contains("states merged") && detail.contains("x 1.0000/s"),
+            "{detail}"
+        );
     }
 }
 
@@ -95,7 +98,10 @@ async fn cover_merge_is_charged_its_mean_windows() {
 async fn stage3_picks_levels_for_a_long_range() {
     let plan = planned().await;
     let covers = nodes_where(&plan, |operator| {
-        matches!(operator, Operator::NonASAP(NonASAPOp::TimeRangeCover { .. }))
+        matches!(
+            operator,
+            Operator::NonASAP(NonASAPOp::TimeRangeCover { .. })
+        )
     });
     assert_eq!(covers.len(), 1);
     assert!(!nodes_where(&plan, |operator| {
@@ -136,7 +142,9 @@ async fn levels_cost_memory() {
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
         )
     })[0];
-    assert!(cost.per_node[&narrowest].detail.contains("keeps 8773440000 bytes"));
+    assert!(cost.per_node[&narrowest]
+        .detail
+        .contains("keeps 8773440000 bytes"));
 }
 
 /// T11. The plan file with both new operators reads back as written, and
