@@ -70,7 +70,15 @@ pub(crate) struct ClusterInputs<'a> {
     pub(crate) data: &'a DataWorkload,
     /// The executions of a feasible plan (cost model 1's), by position: its
     /// weighted latency bounds the optimum (T8).
-    pub(crate) feasible_plan: Option<Vec<usize>>,
+    pub(crate) feasible_plan: Option<FeasiblePlan>,
+}
+
+/// A feasible plan (cost model 1's), by position: its executions, its
+/// edges and the execution answering each query output reference.
+pub(crate) struct FeasiblePlan {
+    pub(crate) executions: BTreeSet<usize>,
+    pub(crate) edges: BTreeSet<usize>,
+    pub(crate) answering: BTreeSet<(QueryId, usize)>,
 }
 
 /// One limit of the cluster, which a plan must fit.
@@ -146,6 +154,10 @@ struct Solve<'s> {
     /// `tie_break_seconds`.
     improve_below: Option<f64>,
     tie_break_seconds: f64,
+    /// A plan to pin: its selection variables fixed to 1, every other
+    /// selection variable to 0; HiGHS completes the continuous ones. The
+    /// pinned solve's columns are the next solve's MIP start.
+    pinned: Option<&'s FeasiblePlan>,
 }
 
 /// The longest a tie-break solve looks for a smaller plan: as long as the
@@ -224,6 +236,9 @@ pub(crate) fn solve_cluster_selection(
         inputs.memory,
         inputs.disk,
     ];
+    // What can be costed, before any dominance: a feasible plan's
+    // executions are all in it.
+    let costable = costed.clone();
     let dominated = dominated_in_every_quantity(selection, &quantities, Pairing::OneEvaluationTwin);
     for (costed, dominated) in costed.iter_mut().zip(dominated) {
         *costed &= !dominated;
@@ -257,6 +272,9 @@ pub(crate) fn solve_cluster_selection(
         }
         limits
     };
+    if inputs.cost_inputs.latency_selection_checks.log_solver {
+        log_duplicates(inputs, &costed);
+    }
     let limits = all_limits();
     // The exclusions are computed once for the selection; only the
     // diagnosis of an infeasible one recomputes them without a bound.
@@ -273,8 +291,10 @@ pub(crate) fn solve_cluster_selection(
     // T8: the weighted latency of a feasible plan bounds the optimum;
     // executions no plan with them can beat it with are left out.
     if let (Some(plan), true) = (&inputs.feasible_plan, checks.feasible_plan_bound) {
+        // The plan as cost model 1 selected it, whatever the dominance
+        // left out: a feasible plan of the whole model.
         let only_plan: Vec<bool> = (0..kept.len())
-            .map(|index| kept[index] && plan.contains(&index))
+            .map(|index| costable[index] && plan.executions.contains(&index))
             .collect();
         let bound = build_and_solve(
             inputs,
@@ -288,6 +308,7 @@ pub(crate) fn solve_cluster_selection(
                 start: None,
                 improve_below: None,
                 tie_break_seconds: 0.0,
+                pinned: None,
             },
         );
         if let Ok(bound) = bound {
@@ -297,6 +318,32 @@ pub(crate) fn solve_cluster_selection(
             }
         }
     }
+    // The first solve's MIP start: the feasible plan with its selection
+    // pinned, completed by HiGHS on the same model (same columns); a plan
+    // the kept executions cannot form gives no start, which only costs time.
+    let pinned_start: Option<(Vec<f64>, u64)> = inputs
+        .feasible_plan
+        .as_ref()
+        .filter(|_| checks.feasible_plan_start)
+        .and_then(|plan| {
+            build_and_solve(
+                inputs,
+                &shapes,
+                &groups,
+                &kept,
+                Solve {
+                    objective: Objective::MeanLatency,
+                    fixed: Fixed::default(),
+                    active: &limits,
+                    start: None,
+                    improve_below: None,
+                    tie_break_seconds: 0.0,
+                    pinned: Some(plan),
+                },
+            )
+            .ok()
+        })
+        .map(|pinned| (pinned.columns, pinned.solve_ms));
     let solve = |objective: Objective,
                  fixed: Fixed,
                  start: Option<&[f64]>,
@@ -313,6 +360,7 @@ pub(crate) fn solve_cluster_selection(
                 start,
                 improve_below: tie_break.map(|(below, _)| below),
                 tie_break_seconds: tie_break.map_or(0.0, |(_, seconds)| seconds),
+                pinned: None,
             },
         )
     };
@@ -325,7 +373,12 @@ pub(crate) fn solve_cluster_selection(
         .flatten()
         .map(|relaxed| relaxed.objective / weights.max(f64::MIN_POSITIVE));
     let mut solve_count = 1;
-    let first = match solve(Objective::MeanLatency, Fixed::default(), None, None) {
+    let first = match solve(
+        Objective::MeanLatency,
+        Fixed::default(),
+        pinned_start.as_ref().map(|(columns, _)| columns.as_slice()),
+        None,
+    ) {
         Ok(first) => first,
         Err(SelectionMilpError::Infeasible) => {
             return Err(diagnose(&limits, |objective, active| {
@@ -342,6 +395,7 @@ pub(crate) fn solve_cluster_selection(
                         start: None,
                         improve_below: None,
                         tie_break_seconds: 0.0,
+                        pinned: None,
                     },
                 )
                 .ok()
@@ -349,7 +403,7 @@ pub(crate) fn solve_cluster_selection(
         }
         Err(error) => return Err(ClusterSelectionError::Milp(error)),
     };
-    let mut solve_ms = first.solve_ms;
+    let mut solve_ms = first.solve_ms + pinned_start.as_ref().map_or(0, |&(_, ms)| ms);
     let tie_break_seconds =
         (first.solve_ms as f64 / 1_000.0).clamp(SHORTEST_TIE_BREAK_SECONDS, TIE_BREAK_SECONDS);
     let weighted = first.objective;
@@ -451,6 +505,51 @@ pub(crate) fn solve_cluster_selection(
             .collect(),
         pruned_by_latency_bound,
     })
+}
+
+/// For the solver log: how many executions are duplicates, equal to
+/// another in context, memo group, operator, sketch parameters, physical
+/// properties and the candidates each input may read.
+fn log_duplicates(inputs: &ClusterInputs<'_>, kept: &[bool]) {
+    let selection = &inputs.selection;
+    let selectable = selection.selectable;
+    let physical = selection.physical;
+    let memo = &physical.logical_candidates.memo;
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (index, execution) in selectable.executions().iter().enumerate() {
+        if !kept[index] {
+            continue;
+        }
+        let candidate = &physical.physical_candidates[execution.candidate.0];
+        let logical = memo.candidate(candidate.logical_candidate_id);
+        let producers: Vec<Vec<usize>> = (0..selectable.input_count(index))
+            .map(|input| {
+                let mut producers: Vec<usize> = selectable
+                    .edges_into(index, input)
+                    .iter()
+                    .map(|&position| selectable.edges()[position].producer)
+                    .collect();
+                producers.sort_unstable();
+                producers
+            })
+            .collect();
+        let key = format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            execution.context,
+            candidate.logical_candidate_id.group,
+            logical.expression.operator,
+            logical.logical_properties.parameters(),
+            candidate.physical_properties,
+            producers
+        );
+        *seen.entry(key).or_default() += 1;
+    }
+    let duplicates: usize = seen.values().map(|&count| count - 1).sum();
+    eprintln!(
+        "cluster MILP: {} kept executions, {} duplicates of another",
+        kept.iter().filter(|&&kept| kept).count(),
+        duplicates
+    );
 }
 
 /// Which limits alone block every plan: for each, a solve without it that
@@ -708,9 +807,34 @@ fn least_latency(inputs: &ClusterInputs<'_>, kept: &[bool]) -> Vec<f64> {
         below.insert(group, seen.clone());
         seen
     };
-    let inputs_disjoint: Vec<bool> = (0..count)
+    // The most one execution of each memo group can add to a least work:
+    // its own share and every positive edge share into it, at the largest
+    // retention.
+    let mut most_of_group: HashMap<_, f64> = HashMap::new();
+    for index in (0..count).filter(|&index| kept[index] && !at_ingestion(inputs, index)) {
+        let positive_shares: f64 = (0..selectable.input_count(index))
+            .map(|input| {
+                selectable
+                    .edges_into(index, input)
+                    .iter()
+                    .filter_map(|&position| inputs.query_ms.per_edge[position])
+                    .fold(0.0, f64::max)
+            })
+            .sum();
+        let most = time_of(inputs.query_ms, index)
+            .max(of(inputs.query_ms, index))
+            .max(0.0)
+            + positive_shares;
+        let entry = most_of_group.entry(group_of(index)).or_insert(0.0);
+        *entry = entry.max(most);
+    }
+    // Per execution, the most its inputs' least works may count twice: each
+    // memo group below more than one input counts once per extra input, at
+    // most what one of its executions adds. Their sub-DAGs' union has at
+    // least the sum of their least works less this.
+    let counted_twice: Vec<f64> = (0..count)
         .map(|index| {
-            let mut union = BTreeSet::new();
+            let mut inputs_reaching: HashMap<_, usize> = HashMap::new();
             for input in 0..selectable.input_count(index) {
                 let mut reached = BTreeSet::new();
                 for &position in selectable.edges_into(index, input) {
@@ -722,12 +846,17 @@ fn least_latency(inputs: &ClusterInputs<'_>, kept: &[bool]) -> Vec<f64> {
                         &mut below,
                     ));
                 }
-                if !union.is_disjoint(&reached) {
-                    return false;
+                for group in reached {
+                    *inputs_reaching.entry(group).or_default() += 1;
                 }
-                union.extend(reached);
             }
-            true
+            inputs_reaching
+                .iter()
+                .filter(|(_, &reaching)| reaching > 1)
+                .map(|(group, &reaching)| {
+                    (reaching - 1) as f64 * most_of_group.get(group).copied().unwrap_or(0.0)
+                })
+                .sum()
         })
         .collect();
     let mut work = vec![0.0_f64; count];
@@ -763,7 +892,8 @@ fn least_latency(inputs: &ClusterInputs<'_>, kept: &[bool]) -> Vec<f64> {
                 // a sum would count a shared execution twice and overstate
                 // the bound.
                 let mut least_work = of(inputs.query_ms, index);
-                let mut least_inputs = 0.0_f64;
+                let mut sum_of_inputs = 0.0_f64;
+                let mut largest_input = 0.0_f64;
                 let mut least_fresh = lateness;
                 for input in 0..selectable.input_count(index) {
                     let choices: Vec<(f64, f64, f64)> = selectable
@@ -783,13 +913,14 @@ fn least_latency(inputs: &ClusterInputs<'_>, kept: &[bool]) -> Vec<f64> {
                         choices.iter().map(pick).fold(f64::INFINITY, f64::min)
                     };
                     least_work += least(|choice| choice.0);
-                    least_inputs = match inputs_disjoint[index] {
-                        true => least_inputs + least(|choice| choice.1),
-                        false => least_inputs.max(least(|choice| choice.1)),
-                    };
+                    sum_of_inputs += least(|choice| choice.1);
+                    largest_input = largest_input.max(least(|choice| choice.1));
                     least_fresh = least_fresh.max(least(|choice| choice.2));
                 }
-                least_work += least_inputs;
+                // The union of the inputs' sub-DAGs: at least their least
+                // works' sum less what may be counted twice, and at least
+                // the largest.
+                least_work += largest_input.max(sum_of_inputs - counted_twice[index]);
                 (least_work, least_fresh)
             };
             let new_work = new_work.max(0.0);
@@ -1005,6 +1136,7 @@ fn build_and_solve(
         start,
         improve_below,
         tie_break_seconds,
+        pinned,
     } = solve;
     let selection = &inputs.selection;
     let selectable = selection.selectable;
@@ -1014,6 +1146,8 @@ fn build_and_solve(
     let shared = copies_in_equivalent_contexts(selection, kept, rules.as_ref());
     let mut problem = ProblemVariables::new();
     let variables = selection_variables(selection, kept, &shared, &components, &mut problem);
+    // Variable counts by family, for the solver log (`log_solver`).
+    let mut families: Vec<(&str, usize)> = vec![("selection (x, y, z, t, h, r, a)", problem.len())];
     let accuracy_rows = rules
         .as_ref()
         .map(|rules| {
@@ -1030,6 +1164,7 @@ fn build_and_solve(
             )
         })
         .unwrap_or_default();
+    families.push(("accuracy", problem.len()));
     let mut rows: Vec<Constraint> = Vec::new();
     // The quantities' expressions.
     let memory = quantity_expression(
@@ -1056,6 +1191,8 @@ fn build_and_solve(
         &mut problem,
         &mut rows,
     );
+    families.push(("quantities (raw data per source)", problem.len()));
+    let quantity_rows = rows.len();
     // Refresh groups: each one's refresh wall time per window, P_G.
     let wait_per_run = inputs
         .cost_inputs
@@ -1114,6 +1251,7 @@ fn build_and_solve(
             expression
         })
         .collect();
+    families.push(("refresh groups", problem.len()));
     let big_m = freshness_big_m(&refresh_bound, &groups.windows, &groups.reads, threads);
     // Per query: reads a, edge reads w, freshness F, latency L.
     let mut latencies: Vec<Variable> = Vec::new();
@@ -1224,6 +1362,8 @@ fn build_and_solve(
         }
         latencies.push(latency);
     }
+    families.push(("latency (reads, edge reads, F, L)", problem.len()));
+    let latency_rows = rows.len();
     // The cluster's limits.
     let limits = inputs.limits;
     if active.contains(&ClusterLimit::MemoryBytes) {
@@ -1279,6 +1419,20 @@ fn build_and_solve(
             memory.clone() <= best * (1.0 + LEXICOGRAPHIC_SLACK) + 1.0
         ));
     }
+    if let Some(plan) = pinned {
+        let pin = |variable: Variable, chosen: bool| {
+            constraint!(variable == if chosen { 1.0 } else { 0.0 })
+        };
+        for (index, &x) in variables.x.iter().enumerate() {
+            rows.push(pin(x, plan.executions.contains(&index)));
+        }
+        for (&position, &y) in &variables.y {
+            rows.push(pin(y, plan.edges.contains(&position)));
+        }
+        for (&(query, index), &z) in &variables.z {
+            rows.push(pin(z, plan.answering.contains(&(query, index))));
+        }
+    }
     let goal: Expression = match objective {
         Objective::MeanLatency | Objective::Relaxation => weighted,
         Objective::Memory | Objective::Limit(ClusterLimit::MemoryBytes) => memory.clone(),
@@ -1295,6 +1449,8 @@ fn build_and_solve(
         true => LARGEST_SCALED_COEFFICIENT / largest,
         false => 1.0,
     };
+    let accuracy_count = accuracy_rows.len();
+    let rows_total = rows.len();
     let constraints: Vec<Constraint> = [
         input_satisfaction_constraints(selection, &variables),
         producer_selection_constraints(selection, &variables),
@@ -1328,15 +1484,38 @@ fn build_and_solve(
         .collect();
     let constraint_count = constraints.len();
     let goal_scaled = goal.clone() * scale;
-    let mut model = problem
+    let builder = problem
         .minimise(goal_scaled)
         .using(highs)
-        .with_all(constraints)
+        .with_all(constraints);
+    let mut model = builder
         .try_into_inner()
         .map_err(|error| SelectionMilpError::Solver(error.to_string()))?;
     model.set_option("mip_rel_gap", 0.0);
     model.set_option("mip_abs_gap", 0.0);
-    model.set_option("output_flag", false);
+    let log = inputs.cost_inputs.latency_selection_checks.log_solver;
+    model.set_option("output_flag", log);
+    model.set_option("log_to_console", log);
+    if log {
+        let mut previous = 0;
+        let counts: Vec<String> = families
+            .iter()
+            .map(|&(name, total)| {
+                let count = total - previous;
+                previous = total;
+                format!("{name} {count}")
+            })
+            .collect();
+        eprintln!(
+            "cluster MILP {objective:?}: variables: {}; rows: structure {}, accuracy {}, quantities {}, latency {}, limits and fixed {}",
+            counts.join(", "),
+            constraint_count - rows_total - accuracy_count,
+            accuracy_count,
+            quantity_rows,
+            latency_rows - quantity_rows,
+            rows_total - latency_rows,
+        );
+    }
     model.set_option("threads", 1);
     if objective == Objective::Relaxation {
         model.set_option("solve_relaxation", true);

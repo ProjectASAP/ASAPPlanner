@@ -374,6 +374,13 @@ pub struct LatencySelectionChecks {
     /// Solve the LP relaxation too and report its mean latency
     /// (`Selection::milp_root_lp_mean_latency_ms`); default false.
     pub report_root_lp_bound: bool,
+    /// Start the first solve from cost model 1's plan (a MIP start);
+    /// default false: measured, it did not speed up any workload and
+    /// slowed the slowest one 3.5 times.
+    pub feasible_plan_start: bool,
+    /// Print the solver's log and the model's size by family on standard
+    /// error (a measurement); default false.
+    pub log_solver: bool,
 }
 
 impl Default for LatencySelectionChecks {
@@ -384,6 +391,8 @@ impl Default for LatencySelectionChecks {
             lazy_tie_breaks: true,
             flow_reads: true,
             report_root_lp_bound: false,
+            log_solver: false,
+            feasible_plan_start: false,
         }
     }
 }
