@@ -5,6 +5,7 @@
 mod asap_lane;
 mod asap_planner;
 mod asap_planner_acceptance;
+mod compressed_samples_snapshot;
 mod cross_language;
 mod lowest_mean_latency_exactness;
 mod planner_fuzz;

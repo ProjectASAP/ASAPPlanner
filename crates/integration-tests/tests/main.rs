@@ -9,6 +9,7 @@ mod accuracy_at_query_roots;
 mod aggregate;
 mod binary_op;
 mod calibration_terms;
+mod compressed_sample_windows;
 mod crate_graph;
 mod default_cost_plan_ranking;
 mod deployment_exclusions;
