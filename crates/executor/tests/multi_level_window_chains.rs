@@ -15,7 +15,9 @@ use planner_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use planner_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, TimeRangeKind};
 use planner_types::plan::materialized_view::MaterializedView;
 use planner_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
-use planner_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
+use planner_types::summary_type::{
+    ExactKind, ExactParams, SketchAlgorithm, SketchParams, SketchStatistic, SummaryUpdate,
+};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -122,14 +124,25 @@ fn id_of(nodes: &[Rc<OperatorNode>], operator: &Rc<OperatorNode>) -> PhysicalASA
         .unwrap()
 }
 
-fn chain(width_ms: i64) -> Rc<OperatorNode> {
+/// What the plan builds and reads: exact sums, or DDSketch states read
+/// out as their p99.
+#[derive(Clone, Copy)]
+enum Built {
+    Sum,
+    DDSketchP99,
+}
+
+fn chain(width_ms: i64, built: Built) -> Rc<OperatorNode> {
     node(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: node(Operator::NonASAP(NonASAPOp::Scan {
             source: source(),
             predicates: vec![],
             schema: samples_schema(),
         })),
-        summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+        summary_type: match built {
+            Built::Sum => FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            Built::DDSketchP99 => FieldDataType::Sketch(SketchAlgorithm::DDSketch),
+        },
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::by(vec![0]),
         filter: None,
@@ -137,13 +150,21 @@ fn chain(width_ms: i64) -> Rc<OperatorNode> {
     }))
 }
 
-fn finalized_merge(windows: Rc<OperatorNode>) -> Rc<OperatorNode> {
-    node(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
-        counter_readout: None,
-        child: node(Operator::ASAP(ASAPOp::SummaryMerge {
-            children: vec![windows],
-            group_by: None,
-        })),
+/// The merge of `windows`, read out: finalized sums, or each p99.
+fn finalized_merge(windows: Rc<OperatorNode>, built: Built) -> Rc<OperatorNode> {
+    let merged = node(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![windows],
+        group_by: None,
+    }));
+    node(Operator::ASAP(match built {
+        Built::Sum => ASAPOp::FinalizeExactAccumulator {
+            counter_readout: None,
+            child: merged,
+        },
+        Built::DDSketchP99 => ASAPOp::SummaryEstimate {
+            summary_input: merged,
+            query: SketchStatistic::Quantile { q: 0.99 },
+        },
     }))
 }
 
@@ -163,13 +184,14 @@ struct Plan {
     views: Vec<MaterializedView>,
 }
 
-fn plan() -> Plan {
-    let narrow = chain(NARROW_MS);
+fn plan(built: Built) -> Plan {
+    let finalized_merge = |windows| finalized_merge(windows, built);
+    let narrow = chain(NARROW_MS, built);
     let wide = node(Operator::ASAP(ASAPOp::SummaryMergeWindows {
         child: narrow.clone(),
         tumbling_window_width_ms: WIDE_MS as u64,
     }));
-    let direct_wide = chain(WIDE_MS);
+    let direct_wide = chain(WIDE_MS, built);
     let cover = finalized_merge(node(Operator::NonASAP(NonASAPOp::TimeRangeCover {
         range: Duration::from_millis(HOUR_MS as u64),
         levels: vec![wide.clone(), narrow.clone()],
@@ -208,6 +230,12 @@ fn plan() -> Plan {
     ];
     for node in dag.nodes.iter_mut().filter(|node| ids.contains(&node.id)) {
         node.retention_ms = Some(2 * HOUR_MS as u64);
+    }
+    // The sketches' θ, on every build and merge of windows.
+    for node in dag.nodes.iter_mut().filter(|node| ids.contains(&node.id)) {
+        if let Built::DDSketchP99 = built {
+            node.parameters = Some(SketchParams::DDSketch { alpha: 0.01 });
+        }
     }
     let views = views_at(&mut dag, &ids.map(|id| id as u64)).unwrap();
     Plan {
@@ -309,7 +337,7 @@ fn refresh_all(
 /// sum per job read back.
 #[test]
 fn merge_windows_equals_direct_build() {
-    let plan = plan();
+    let plan = plan(Built::Sum);
     let mut store = Arc::new(store_with_samples());
     let view = |node| {
         plan.views
@@ -352,7 +380,7 @@ fn merge_windows_equals_direct_build() {
 /// and off it (every 15 s over 5 minutes).
 #[test]
 fn cover_answers_equal_flat_answers() {
-    let plan = plan();
+    let plan = plan(Built::Sum);
     let mut store = Arc::new(store_with_samples());
     let view = |node| {
         plan.views
@@ -380,6 +408,43 @@ fn cover_answers_equal_flat_answers() {
         let expected = direct_sums(t - HOUR_MS, t);
         assert_eq!(sums_of(answers[0].clone()), expected, "cover at {t}");
         assert_eq!(sums_of(answers[1].clone()), expected, "flat at {t}");
+        t += NARROW_MS;
+    }
+}
+
+/// T10, sketches. Over DDSketch states (merges are exact: the merged state
+/// is the state built over the union), the p99 the cover reads equals the
+/// p99 the 15 s chain reads, bit for bit, at every 15 s over 5 minutes.
+#[test]
+fn cover_quantiles_equal_flat_quantiles() {
+    let plan = plan(Built::DDSketchP99);
+    let mut store = Arc::new(store_with_samples());
+    let view = |node| {
+        plan.views
+            .iter()
+            .find(|view| view.node_id == node)
+            .unwrap()
+            .clone()
+    };
+    refresh_all(&plan, &mut store, 3 * HOUR_MS);
+    let views = [view(plan.narrow), view(plan.wide)];
+    let query = compile(&plan.dag, &views, &[plan.cover as u64, plan.flat as u64]).unwrap();
+    let mut t = 3 * HOUR_MS - WIDE_MS;
+    while t <= 3 * HOUR_MS {
+        let context = RunContext::new(
+            Scope::Query {
+                evaluation_time_ms: t,
+            },
+            Limits::default(),
+        )
+        .unwrap();
+        let answers = {
+            let query = query.instantiate(store.clone()).unwrap();
+            run(&query, &[plan.cover as u64, plan.flat as u64], context)
+        };
+        let (cover, flat) = (sums_of(answers[0].clone()), sums_of(answers[1].clone()));
+        assert_eq!(cover.len(), 2, "at {t}");
+        assert_eq!(cover, flat, "at {t}");
         t += NARROW_MS;
     }
 }

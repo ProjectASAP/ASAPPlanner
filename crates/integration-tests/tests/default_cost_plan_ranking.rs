@@ -97,10 +97,9 @@ fn planning_run(workload: &PlanningWorkload, raw_data_retained: bool) -> Plannin
     // range, before wider levels: a deployment without them plans those.
     let capabilities = DeploymentCapabilities {
         raw_data_retained,
-        excluded_candidates: vec![serde_json::from_str(
-            r#"{"operator": "SummaryMergeWindows"}"#,
-        )
-        .unwrap()],
+        excluded_candidates: vec![
+            serde_json::from_str(r#"{"operator": "SummaryMergeWindows"}"#).unwrap(),
+        ],
         ..Default::default()
     };
     let models = PlanningModels::builtin()

@@ -113,7 +113,10 @@ fn a_subquery_s_resolution_is_the_grid_of_the_groups_below_it() {
     let widths = chain_widths(&logical);
     let narrowest = *widths.iter().min().expect("a chain");
     assert_eq!(30_000 % narrowest, 0, "{widths:?}");
-    assert!(widths.iter().all(|width| width % narrowest == 0), "{widths:?}");
+    assert!(
+        widths.iter().all(|width| width % narrowest == 0),
+        "{widths:?}"
+    );
     let without_resolution = pass2("max_over_time(rate(c[2m])[10m:])", rank);
     assert_eq!(chain_widths(&without_resolution), Vec::<u64>::new());
 }
