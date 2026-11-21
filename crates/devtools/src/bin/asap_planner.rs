@@ -301,7 +301,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     // environment (the planning crates read none):
     // `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`,
     // `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_LATENCY_READS=mccormick`
-    // turn one off; `ASAP_STAGE3_ROOT_LP=1` reports the LP bound.
+    // turn one off; `ASAP_STAGE3_ROOT_LP=1` reports the LP bound;
+    // `ASAP_STAGE3_FEASIBLE_PLAN_START=on` starts from cost model 1's plan;
+    // `ASAP_STAGE3_SOLVER_LOG=1` prints the solver's log.
     let knob = |name: &str| std::env::var(name).ok();
     let checks = &mut cost_inputs.latency_selection_checks;
     if knob("ASAP_STAGE3_THETA_DOMINANCE").as_deref() == Some("off") {
@@ -318,6 +320,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     if knob("ASAP_STAGE3_ROOT_LP").is_some() {
         checks.report_root_lp_bound = true;
+    }
+    if knob("ASAP_STAGE3_FEASIBLE_PLAN_START").as_deref() == Some("on") {
+        checks.feasible_plan_start = true;
+    }
+    if knob("ASAP_STAGE3_SOLVER_LOG").is_some() {
+        checks.log_solver = true;
     }
     // Price a given plan instead of planning: its report only.
     if let Some(path) = price_plan {

@@ -41,11 +41,13 @@ use asap_types::stages::{MemoGroupId, PhysicalASAPMemoCandidates, PruneReason, P
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::cost::{execution_costs, execution_quantities, Quantity};
-use crate::milp::model::cluster::{solve_cluster_selection, ClusterInputs, ClusterSelectionError};
+use crate::milp::model::cluster::{
+    solve_cluster_selection, ClusterInputs, ClusterSelectionError, FeasiblePlan,
+};
 use crate::milp::model::{solve_selection, SelectionInputs, SelectionMilpError};
 use crate::plan::plan_of;
 use crate::report::{accepted_accuracy, excluded_by_deployment, infeasible};
-use crate::selectable::{QueryId, SelectableExecutions};
+use crate::selectable::{Execution, QueryId, SelectableExecutions};
 
 pub use milp::model::cluster::{ClusterLimit, ClusterLimitShortfall};
 pub use report::{
@@ -230,13 +232,33 @@ pub fn select_plan(
                 // A feasible plan's executions for T8: cost model 1's
                 // optimum (when it is solved), by position.
                 let feasible_plan = solve_selection(&selection_inputs).ok().map(|solved| {
-                    selectable
-                        .executions()
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, execution)| solved.executions.contains(execution))
-                        .map(|(index, _)| index)
-                        .collect()
+                    let executions = selectable.executions();
+                    let position =
+                        |execution: &Execution| executions.iter().position(|e| e == execution);
+                    FeasiblePlan {
+                        executions: solved.executions.iter().filter_map(position).collect(),
+                        edges: selectable
+                            .edges()
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, edge)| {
+                                solved.edges.iter().any(|selected| {
+                                    selected.edge == edge.edge
+                                        && selected.consumer == executions[edge.consumer]
+                                        && selected.producer == executions[edge.producer]
+                                })
+                            })
+                            .map(|(position, _)| position)
+                            .collect(),
+                        answering: selectable
+                            .answering()
+                            .iter()
+                            .zip(&solved.outputs)
+                            .filter_map(|((query, _), output)| {
+                                position(output).map(|index| (*query, index))
+                            })
+                            .collect(),
+                    }
                 });
                 let solved = solve_cluster_selection(&ClusterInputs {
                     selection: selection_inputs,

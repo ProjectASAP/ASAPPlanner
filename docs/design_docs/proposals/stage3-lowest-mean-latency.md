@@ -529,12 +529,14 @@ is kept though a still smaller one may exist.
   is reported (`Selection::executions_pruned_by_latency_bound`). A
   producer's negative edge share counts at its value (a consumer is costed
   over its dearest producer, and the share takes that back), and each share
-  at its least retention, and an execution's inputs' least works add up
-  only when their sub-DAGs cannot share an execution (their memo groups'
-  descendants are disjoint); otherwise (an in-query diamond, such as two
-  quantiles of one state, which a sum would count twice) only the largest
-  counts, so the bound stays at or below every plan's latency: a plan
-  exactly at its bound is kept. It is computed once per
+  at its least retention. An execution's inputs count over the union of
+  their sub-DAGs, each shared node once: their least works' sum, less, per
+  memo group below more than one input, one count per extra input of the
+  most one execution of that group adds (its own time and its positive
+  edge shares); and never less than the largest input. In an in-query
+  diamond (two quantiles of one state, `avg` as a sum over a count) the
+  shared state is subtracted rather than counted twice, so the bound stays
+  at or below every plan's latency: a plan exactly at its bound is kept. It is computed once per
   selection; only the diagnosis of an infeasible selection recomputes it
   without the bound it relaxes. The MILP has no read variables for the
   executions left out.
@@ -828,7 +830,7 @@ tie-break solves from `CostModel`.
 | 18 | Latency bounds become exclusions before the MILP (least possible latency per execution, in f64); the remaining bounds are rows; per-execution bottom-up latency variables considered and rejected (decision 24). | Decided |
 | 24 | S1 (per-execution latency and freshness variables $\ell_e$, $\varphi_e$ with big-M rows, replacing the per-query reads): considered and rejected. Its LP bound stays at 0 like the McCormick reads, and it measured slower (two workloads: 4.4 s and 5.1 s against 1.2 s). | Decided (rejected) |
 | 25 | Speed-ups, each exact: reads only of kept executions; the latency-bound exclusions once per selection; θ dominance in every quantity; a feasible plan's bound (T8); reads as a flow (T9) with the valid freshness rows; lazy tie-break solves warm-started from the plan so far (2 s each). | Decided |
-| 26 | Checking knobs in `CostInputs::latency_selection_checks` (`theta_dominance`, `feasible_plan_bound`, `lazy_tie_breaks`, `flow_reads`, all on by default; `report_root_lp_bound`, off): turning a speed-up off must not change the optimum, which the exactness tests check. The planning crates read no environment; the `asap_planner` tool maps `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_LATENCY_READS=mccormick` and `ASAP_STAGE3_ROOT_LP=1` onto them. | By this document |
+| 26 | Checking knobs in `CostInputs::latency_selection_checks` (`theta_dominance`, `feasible_plan_bound`, `lazy_tie_breaks`, `flow_reads`, all on by default; `report_root_lp_bound`, off): turning a speed-up off must not change the optimum, which the exactness tests check. The planning crates read no environment; the `asap_planner` tool maps `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_LATENCY_READS=mccormick` and `ASAP_STAGE3_ROOT_LP=1` onto them; `feasible_plan_start` (off; `ASAP_STAGE3_FEASIBLE_PLAN_START=on`) and `log_solver` (off; `ASAP_STAGE3_SOLVER_LOG=1`, the solver's log and the model's size by family) are measurements. | By this document |
 | 14 | Under cost model 3 the greedy cost upper bound is not applied; the `OneEvaluation` twin dominance is restated over time, memory, disk and CPU. | By this document |
 | 15 | Calibration passes when every node's predicted time per phase is within 1.5× of measured, at every series scale run (1k passes; 10k after term (3)). | Decided |
 | 16 | Ingest and query CPU are not hard constraints against thread counts; the report gives per role (ingest, precompute, query) the predicted CPU core-seconds per second and the recommended threads, $\lceil$cores$/\rho_{\max}\rceil$; `precompute_threads` stays an input for $\rho$, and a deployment may set it from the recommendation and replan. | Decided |
@@ -867,6 +869,25 @@ tie-break solves from `CostModel`.
    least works and leaves out 4 of 154 executions; adding them (as a
    diagnosis measured, 6.5 s) is unsound there and, on a ratio of two
    quantiles, left out the optimal plan.
+
+   Measured on seed-862 workload-01 (HiGHS log, one thread): presolve
+   0.4–0.8 s, root gap 96.7 %, 18,562 nodes; the first incumbent is the
+   optimum, found at 4–8 s, and the remaining ~56 s prove it. Cost model
+   1's plan evaluated by this MILP is within 0.01 % of the optimum, so the
+   time is in the lower bound, not in finding the plan. Variables by
+   family: selection 485, accuracy 108, latency 455; rows: structure 637,
+   accuracy 198, latency 766. Four further changes were measured, each
+   with the optimum unchanged on the 40 PromQL snapshot workloads:
+
+   | Change | Result |
+   | --- | --- |
+   | Union bound for shared sub-DAGs (above) | sound on the ratio of quantiles and `avg`; seed-862 unchanged (it leaves out the same executions) |
+   | Cost model 1's plan as a MIP start (`feasible_plan_start`, completed by HiGHS with the plan's selection pinned) | accepted by HiGHS; no workload faster, seed-862 3.5× slower (212 s, 71,305 nodes); off by default |
+   | Independent query groups (no shared memo group, edge, or reading or coinciding refresh group) | 4 of 40 workloads split, each solved under 0.5 s; seed-862 is one group (its refresh groups coincide; without them still 6 of 9 queries share memo groups); not built |
+   | Merging equivalent executions | 0 duplicates (same context, memo group, operator, θ, physical properties and producers) on every workload: the twin, θ-family and equivalent-context steps already remove them; not built |
+
+   No cost-model-3 greedy plan exists to start from; cost model 1's plan
+   is the only feasible plan at hand.
 
 ## 6. Test plan (for approval)
 
