@@ -99,8 +99,11 @@ pub struct DeploymentCapabilities {
     /// request evaluates only the steps newer than the query's previous
     /// request. Stage 3 then retains a range evaluation's inputs for its
     /// refresh interval instead of its whole span
-    /// ([`QueryWorkloadEntry::retained_range_span_ms`](crate::workload::QueryWorkloadEntry::retained_range_span_ms));
-    /// default `false`.
+    /// ([`QueryWorkloadEntry::retained_range_span_ms`](crate::workload::QueryWorkloadEntry::retained_range_span_ms)).
+    /// It assumes the cache holds every step of the span for as long as the
+    /// query repeats (no eviction, and no restart that empties it); a
+    /// deployment that may lose cached steps leaves it unset. Default
+    /// `false`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub final_query_results_cached: bool,
     /// What the executor's counter functions do; default: they handle
@@ -130,6 +133,19 @@ impl Default for DeploymentCapabilities {
             excluded_candidates: Vec::new(),
         }
     }
+}
+
+/// Whether the data plane caches final query results
+/// ([`DeploymentCapabilities::final_query_results_cached`]): the one fact
+/// Stage 3 reads from the capabilities
+/// ([`DeploymentCapabilities::final_results_cache`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalResultsCache {
+    /// Each range request's per-step answers are kept for its span; a
+    /// request evaluates only the steps newer than the previous one.
+    Cached,
+    /// Every request evaluates every step of its span.
+    NotCached,
 }
 
 /// What a deployment's counter functions (`rate`, `increase`, `irate`,
@@ -222,6 +238,16 @@ pub struct DeploymentExclusion {
 }
 
 impl DeploymentCapabilities {
+    /// Whether the data plane caches final query results, as the one fact
+    /// Stage 3 reads ([`FinalResultsCache`]).
+    pub fn final_results_cache(&self) -> FinalResultsCache {
+        if self.final_query_results_cached {
+            FinalResultsCache::Cached
+        } else {
+            FinalResultsCache::NotCached
+        }
+    }
+
     /// The exclusions these capabilities expand into, the caller's
     /// `excluded_candidates` last (in their order): the one list Pass 1 and
     /// Stage 2 read. A capability the deployment has expands into nothing,

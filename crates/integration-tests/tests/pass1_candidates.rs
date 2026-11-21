@@ -396,7 +396,7 @@ async fn avg_as_sum_and_count(
         &[single_query_entry(accuracy())],
         &declared_data(&exact),
         &asap_cost::CostInputs::default(),
-        &asap_types::deployment_capabilities::DeploymentCapabilities::default(),
+        asap_types::deployment_capabilities::FinalResultsCache::NotCached,
     )
     .expect("a plan computing avg as sum over count");
     match plan.query_roots().unwrap().as_slice() {

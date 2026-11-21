@@ -1,6 +1,7 @@
 //! The query workload: each query, its requirements and its recurrence.
 
 use crate::accuracy::AccuracyTarget;
+use crate::deployment_capabilities::FinalResultsCache;
 use crate::ir::operator::AtModifier;
 use crate::stages::EvaluationGrid;
 use serde::{Deserialize, Serialize};
@@ -463,7 +464,8 @@ impl QueryWorkloadEntry {
     /// How far back from a request's end the inputs of its evaluations are
     /// kept beyond their own look-back, in ms: [`Self::range_span_ms`],
     /// except when the data plane caches final query results
-    /// (`final_query_results_cached`, a deployment capability) and the
+    /// ([`FinalResultsCache::Cached`], from the deployment capability
+    /// `final_query_results_cached`) and the
     /// query repeats at a fixed interval that is a whole number of steps.
     /// Then consecutive requests evaluate at the same step times, every
     /// step but those newer than the previous request is answered from the
@@ -473,14 +475,14 @@ impl QueryWorkloadEntry {
     /// Example: a range request over the last hour at 15 s steps, every
     /// 15 s, cached: 15,000 ms (not 3,600,000). Uncached, or every 10 s
     /// (not a whole number of steps), or a one-off request: 3,600,000 ms.
-    pub fn retained_range_span_ms(&self, final_query_results_cached: bool) -> u64 {
+    pub fn retained_range_span_ms(&self, final_results_cache: FinalResultsCache) -> u64 {
         let span_ms = self.range_span_ms();
         match (
-            final_query_results_cached,
+            final_results_cache,
             self.range_evaluation,
             self.recurrence.fixed_interval_ms(),
         ) {
-            (true, Some(range), Some(interval_ms))
+            (FinalResultsCache::Cached, Some(range), Some(interval_ms))
                 if range.step_ms > 0 && interval_ms % range.step_ms == 0 =>
             {
                 span_ms.min(interval_ms)
@@ -1004,18 +1006,33 @@ mod tests {
             })
         };
         let dashboard = entry(every(15_000), Some(hour_at_15s));
-        assert_eq!(dashboard.retained_range_span_ms(false), 3_600_000);
-        assert_eq!(dashboard.retained_range_span_ms(true), 15_000);
+        assert_eq!(
+            dashboard.retained_range_span_ms(FinalResultsCache::NotCached),
+            3_600_000
+        );
+        assert_eq!(
+            dashboard.retained_range_span_ms(FinalResultsCache::Cached),
+            15_000
+        );
         // Every minute: four new steps per request.
         let minutely = entry(every(60_000), Some(hour_at_15s));
-        assert_eq!(minutely.retained_range_span_ms(true), 60_000);
+        assert_eq!(
+            minutely.retained_range_span_ms(FinalResultsCache::Cached),
+            60_000
+        );
         // Refreshing less often than the span re-evaluates every step.
         let daily = entry(every(86_400_000), Some(hour_at_15s));
-        assert_eq!(daily.retained_range_span_ms(true), 3_600_000);
+        assert_eq!(
+            daily.retained_range_span_ms(FinalResultsCache::Cached),
+            3_600_000
+        );
         // Every 10 s at 15 s steps: requests evaluate at other step times,
         // so the cache answers none of them.
         let off_grid = entry(every(10_000), Some(hour_at_15s));
-        assert_eq!(off_grid.retained_range_span_ms(true), 3_600_000);
+        assert_eq!(
+            off_grid.retained_range_span_ms(FinalResultsCache::Cached),
+            3_600_000
+        );
         // No known interval: the whole span.
         let one_off = entry(
             QueryRecurrence::OneTime {
@@ -1024,10 +1041,16 @@ mod tests {
             },
             Some(hour_at_15s),
         );
-        assert_eq!(one_off.retained_range_span_ms(true), 3_600_000);
+        assert_eq!(
+            one_off.retained_range_span_ms(FinalResultsCache::Cached),
+            3_600_000
+        );
         // An instant query has no span either way.
         let instant = entry(every(15_000), None);
-        assert_eq!(instant.retained_range_span_ms(true), 0);
-        assert_eq!(instant.retained_range_span_ms(false), 0);
+        assert_eq!(instant.retained_range_span_ms(FinalResultsCache::Cached), 0);
+        assert_eq!(
+            instant.retained_range_span_ms(FinalResultsCache::NotCached),
+            0
+        );
     }
 }

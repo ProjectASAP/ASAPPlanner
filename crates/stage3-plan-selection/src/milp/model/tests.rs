@@ -178,8 +178,12 @@ fn selection_inputs(
     edge_costs: &[((usize, usize), f64)],
     retention: &[(usize, f64)],
 ) -> (SelectableExecutions, ExecutionCosts) {
-    let mut selectable =
-        SelectableExecutions::new(physical, entries, &output_groups(physical), false);
+    let mut selectable = SelectableExecutions::new(
+        physical,
+        entries,
+        &output_groups(physical),
+        asap_types::deployment_capabilities::FinalResultsCache::NotCached,
+    );
     selectable.retain_answering(|query, _, execution| {
         !physical.logical_candidates.query_must_not_read(
             query.0,

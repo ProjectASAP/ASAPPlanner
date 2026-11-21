@@ -31,6 +31,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use asap_types::deployment_capabilities::FinalResultsCache;
+
 use asap_types::ir::operator::AtModifier;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::plan::materialized_view::RefreshWindow;
@@ -138,14 +140,14 @@ impl SelectableExecutions {
     /// per output the executions that may answer it: a candidate of its
     /// group a query-time consumer may read
     /// (`producer_satisfies_physical_requirements`) that delivers on the
-    /// query's context. `final_query_results_cached` is the deployment
-    /// capability of that name: it sets how far back each query's
+    /// query's context. `final_results_cache` (whether the data plane
+    /// caches final query results) sets how far back each query's
     /// evaluations are read ([`Self::retained_span_ms_of_query`]).
     pub(crate) fn new(
         physical: &PhysicalASAPMemoCandidates,
         entries: &[QueryWorkloadEntry],
         outputs: &[(QueryId, MemoGroupId)],
-        final_query_results_cached: bool,
+        final_results_cache: FinalResultsCache,
     ) -> Self {
         let mut selectable = Self {
             reads_of_group: reads_of_groups(physical, entries, outputs),
@@ -160,7 +162,7 @@ impl SelectableExecutions {
             evaluation_context_of_query: vec![None; entries.len()],
             retained_span_ms_of_query: entries
                 .iter()
-                .map(|entry| entry.retained_range_span_ms(final_query_results_cached))
+                .map(|entry| entry.retained_range_span_ms(final_results_cache))
                 .collect(),
         };
         let mut reached: BTreeSet<Execution> = BTreeSet::new();

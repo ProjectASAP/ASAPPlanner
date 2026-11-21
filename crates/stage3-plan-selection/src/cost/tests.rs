@@ -178,7 +178,7 @@ fn no_execution_reading_a_producer_costs_less_than_nothing() {
         &physical,
         &entries,
         &[(QueryId(0), state), (QueryId(1), newest_day)],
-        false,
+        asap_types::deployment_capabilities::FinalResultsCache::NotCached,
     );
     let costs = execution_costs(
         &physical,

@@ -239,7 +239,7 @@ pub fn run_planning_until(
             entries,
             data,
             models.cost_inputs,
-            models.deployment_capabilities,
+            models.deployment_capabilities.final_results_cache(),
         );
         report.stage3_ms = elapsed_ms(started);
         selection.map_err(SelectionError::Selection)
