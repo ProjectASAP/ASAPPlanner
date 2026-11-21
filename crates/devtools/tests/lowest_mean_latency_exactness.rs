@@ -1,0 +1,225 @@
+//! The speed-ups of cost model 3's `lowest_mean_latency` keep its optimum
+//! (`docs/design_docs/proposals/stage3-lowest-mean-latency.md`, section
+//! 2.5): with the pre-solve exclusions (θ dominance, the feasible-plan
+//! bound), the flow-formulated reads and the lazy tie-break solves, the
+//! selected plan's mean latency is the one the full MILP finds without
+//! them, on sketch plan snapshot workloads and on a query that reads one
+//! state twice (an in-query diamond: a ratio of two quantiles).
+
+use std::path::PathBuf;
+use std::process::Command;
+
+use serde_json::Value;
+
+/// The repository root.
+fn root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// What a selection under cost model 3 gives: the MILP's mean latency and
+/// its size.
+struct Selected {
+    mean_latency_ms: f64,
+    variables: u64,
+    rows: u64,
+}
+
+/// The selection for `workload` on `deployment` (a sketch plan snapshot
+/// deployment), cost model 3 with the viewer's cluster inputs, with the
+/// speed-ups or without (`full`).
+fn selected(workload: &str, deployment: &str, ignore_accuracy: bool, full: bool) -> Selected {
+    let root = root();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_asap_planner"));
+    command
+        .current_dir(&root)
+        .args(["--workload", workload, "--run-until", "stage3"])
+        .args([
+            "--deployment-capabilities",
+            &format!("crates/devtools/tests/sketch_plan_snapshots/deployments/{deployment}.capabilities.json"),
+        ])
+        .args([
+            "--cost-inputs",
+            "tools/dag-viewer/cost-inputs/cluster-lowest-mean-latency.json",
+        ])
+        .args(["--format", "json"]);
+    if ignore_accuracy {
+        command.arg("--ignore-accuracy-guarantees");
+    }
+    if full {
+        command
+            .env("ASAP_STAGE3_THETA_DOMINANCE", "off")
+            .env("ASAP_STAGE3_FEASIBLE_PLAN_BOUND", "off")
+            .env("ASAP_STAGE3_TIE_BREAKS", "full")
+            .env("ASAP_STAGE3_LATENCY_READS", "mccormick");
+    }
+    let output = command.output().unwrap();
+    let document: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)));
+    let stage3 = &document["stage3_plan_selection"];
+    Selected {
+        mean_latency_ms: stage3["milp_objective_mean_latency_ms"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{workload}: no plan: {}", stage3["error"])),
+        variables: stage3["milp_variables"].as_u64().unwrap(),
+        rows: stage3["milp_constraints"].as_u64().unwrap(),
+    }
+}
+
+/// Assert the mean latency is the full MILP's, to the solver's precision.
+fn assert_same_optimum(workload: &str, deployment: &str, ignore_accuracy: bool) {
+    let fast = selected(workload, deployment, ignore_accuracy, false).mean_latency_ms;
+    let full = selected(workload, deployment, ignore_accuracy, true).mean_latency_ms;
+    assert!(
+        (fast - full).abs() <= 1e-6 * full.abs().max(1.0),
+        "{workload}: {fast} ms with the speed-ups, {full} ms without"
+    );
+}
+
+/// The workloads below solve in seconds; the rest of the snapshot set,
+/// slower without the speed-ups, is in the ignored test.
+#[test]
+fn the_speed_ups_keep_the_optimum() {
+    let workloads = "crates/devtools/tests/sketch_plan_snapshots/workloads";
+    for (workload, deployment, ignore_accuracy) in [
+        ("topk-rate.json", "mvp", true),
+        ("mixed-quantiles.json", "raw-retained", false),
+        ("distinct-two-forms.json", "raw-retained", false),
+        // An in-query diamond: one state read by both quantiles.
+        ("ratio-of-quantiles-1h.json", "mvp", false),
+    ] {
+        assert_same_optimum(
+            &format!("{workloads}/{workload}"),
+            deployment,
+            ignore_accuracy,
+        );
+    }
+}
+
+/// Every sketch plan snapshot workload (minutes without the speed-ups):
+/// `cargo test -p asap-devtools --test devtools -- --ignored the_speed_ups_keep_every`.
+#[test]
+#[ignore]
+fn the_speed_ups_keep_every_snapshot_workloads_optimum() {
+    let root = root();
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            root.join("crates/devtools/tests/sketch_plan_snapshots/manifest.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    for entry in manifest["workloads"].as_array().unwrap() {
+        let deployment = match entry["deployment"].as_str().unwrap() {
+            "raw_retained" => "raw-retained",
+            other => other,
+        };
+        let ignore = entry["accuracy_guarantees"] == "ignored";
+        assert_same_optimum(entry["workload"].as_str().unwrap(), deployment, ignore);
+    }
+}
+
+/// The four workloads the solve time was measured on keep their optimum
+/// (pinned, as the full MILP found it) in a model no larger than measured
+/// with the speed-ups (plus a quarter): a change that loses a speed-up or
+/// moves the optimum fails here.
+#[test]
+fn the_measured_workloads_keep_their_optimum_in_a_bounded_model() {
+    let snapshots = "crates/devtools/tests/sketch_plan_snapshots/workloads";
+    for (workload, deployment, ignore_accuracy, mean_latency_ms, variables, rows) in [
+        (
+            format!("{snapshots}/topk-rate.json"),
+            "mvp",
+            true,
+            186.89267,
+            TOPK_VARIABLES,
+            TOPK_ROWS,
+        ),
+        (
+            format!("{snapshots}/mixed-quantiles.json"),
+            "raw-retained",
+            false,
+            44.6893333333,
+            MIXED_VARIABLES,
+            MIXED_ROWS,
+        ),
+        (
+            format!("{snapshots}/distinct-two-forms.json"),
+            "raw-retained",
+            false,
+            36.7112080558,
+            DISTINCT_VARIABLES,
+            DISTINCT_ROWS,
+        ),
+        (
+            "tools/dag-viewer/workloads/random-mixed-seed-862/workload-01.json".to_string(),
+            "mvp",
+            false,
+            1990.46913043,
+            SEED_VARIABLES,
+            SEED_ROWS,
+        ),
+    ] {
+        let selected = selected(&workload, deployment, ignore_accuracy, false);
+        assert!(
+            (selected.mean_latency_ms - mean_latency_ms).abs() <= 1e-6 * mean_latency_ms,
+            "{workload}: mean latency {} ms, pinned {mean_latency_ms} ms",
+            selected.mean_latency_ms
+        );
+        assert!(
+            selected.variables <= variables * 5 / 4 && selected.rows <= rows * 5 / 4,
+            "{workload}: {} variables and {} rows, measured {variables} and {rows}",
+            selected.variables,
+            selected.rows
+        );
+    }
+}
+
+/// θ-family dominance leaves out dominated families: with guarantees
+/// ignored, the top-k of a rate has θ-families of its CMS heap that others
+/// match or beat in every quantity, so its model is smaller with the
+/// pruning (the feasible-plan bound, which would leave most of them out
+/// too, off in both), at the same optimum.
+#[test]
+fn dominated_theta_families_are_left_out() {
+    let workload = "crates/devtools/tests/sketch_plan_snapshots/workloads/topk-rate.json";
+    let run = |theta_dominance: &str| -> Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_asap_planner"))
+            .current_dir(root())
+            .env("ASAP_STAGE3_FEASIBLE_PLAN_BOUND", "off")
+            .env("ASAP_STAGE3_THETA_DOMINANCE", theta_dominance)
+            .args(["--workload", workload, "--run-until", "stage3"])
+            .args([
+                "--deployment-capabilities",
+                "crates/devtools/tests/sketch_plan_snapshots/deployments/mvp.capabilities.json",
+                "--cost-inputs",
+                "tools/dag-viewer/cost-inputs/cluster-lowest-mean-latency.json",
+                "--ignore-accuracy-guarantees",
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap();
+        let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+        document["stage3_plan_selection"].clone()
+    };
+    let (pruned, unpruned) = (run("on"), run("off"));
+    let variables = |stage3: &Value| stage3["milp_variables"].as_u64().unwrap();
+    let mean = |stage3: &Value| stage3["milp_objective_mean_latency_ms"].as_f64().unwrap();
+    assert!(
+        variables(&pruned) < variables(&unpruned),
+        "{} variables with the pruning, {} without",
+        variables(&pruned),
+        variables(&unpruned)
+    );
+    assert!((mean(&pruned) - mean(&unpruned)).abs() <= 1e-6 * mean(&unpruned));
+}
+
+/// The model sizes measured with the speed-ups (variables, rows).
+const TOPK_VARIABLES: u64 = 1195;
+const TOPK_ROWS: u64 = 2356;
+const MIXED_VARIABLES: u64 = 561;
+const MIXED_ROWS: u64 = 846;
+const DISTINCT_VARIABLES: u64 = 349;
+const DISTINCT_ROWS: u64 = 584;
+const SEED_VARIABLES: u64 = 1048;
+const SEED_ROWS: u64 = 1606;

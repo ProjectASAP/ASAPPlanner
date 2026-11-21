@@ -346,6 +346,52 @@ pub struct CostInputs {
     /// uncalibrated times for testing. Default not checked.
     #[serde(skip_serializing_if = "LatencyCalibration::is_not_checked")]
     pub latency_calibration: LatencyCalibration,
+    /// Which of `lowest_mean_latency`'s exact speed-ups run, and whether it
+    /// reports its LP bound: every speed-up by default. Turning one off
+    /// checks it (the optimum must not change).
+    #[serde(skip_serializing_if = "LatencySelectionChecks::is_default")]
+    pub latency_selection_checks: LatencySelectionChecks,
+}
+
+/// The speed-ups of cost model 3's `lowest_mean_latency` (each exact) and
+/// its LP-bound report (`docs/design_docs/proposals/stage3-lowest-mean-latency.md`,
+/// section 2.5). In JSON an object with these fields; an omitted field
+/// takes its default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LatencySelectionChecks {
+    /// Leave out θ-families another family does as well as; default true.
+    pub theta_dominance: bool,
+    /// Leave out executions no plan with them beats a feasible plan with
+    /// (cost model 1's); default true.
+    pub feasible_plan_bound: bool,
+    /// Run the tie-break solves only to find a smaller plan within a short
+    /// time; default true (false: to optimality).
+    pub lazy_tie_breaks: bool,
+    /// Formulate each query's reads as a flow; default true (false: the
+    /// earlier rows, whose LP bound vanishes).
+    pub flow_reads: bool,
+    /// Solve the LP relaxation too and report its mean latency
+    /// (`Selection::milp_root_lp_mean_latency_ms`); default false.
+    pub report_root_lp_bound: bool,
+}
+
+impl Default for LatencySelectionChecks {
+    fn default() -> Self {
+        Self {
+            theta_dominance: true,
+            feasible_plan_bound: true,
+            lazy_tie_breaks: true,
+            flow_reads: true,
+            report_root_lp_bound: false,
+        }
+    }
+}
+
+impl LatencySelectionChecks {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Whether a deployment's predicted times passed its calibration gate
@@ -382,6 +428,7 @@ impl Default for CostInputs {
             frozen_calibration_factor: None,
             data_plane_execution: DataPlaneExecution::default(),
             latency_calibration: LatencyCalibration::NotChecked,
+            latency_selection_checks: LatencySelectionChecks::default(),
         }
     }
 }

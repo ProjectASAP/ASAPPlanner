@@ -297,6 +297,28 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         deployment_capabilities.supported_summaries =
             Some(asap_executor::supported_summary_families());
     }
+    // The checking knobs of `lowest_mean_latency`'s speed-ups, from the
+    // environment (the planning crates read none):
+    // `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`,
+    // `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_LATENCY_READS=mccormick`
+    // turn one off; `ASAP_STAGE3_ROOT_LP=1` reports the LP bound.
+    let knob = |name: &str| std::env::var(name).ok();
+    let checks = &mut cost_inputs.latency_selection_checks;
+    if knob("ASAP_STAGE3_THETA_DOMINANCE").as_deref() == Some("off") {
+        checks.theta_dominance = false;
+    }
+    if knob("ASAP_STAGE3_FEASIBLE_PLAN_BOUND").as_deref() == Some("off") {
+        checks.feasible_plan_bound = false;
+    }
+    if knob("ASAP_STAGE3_TIE_BREAKS").as_deref() == Some("full") {
+        checks.lazy_tie_breaks = false;
+    }
+    if knob("ASAP_STAGE3_LATENCY_READS").as_deref() == Some("mccormick") {
+        checks.flow_reads = false;
+    }
+    if knob("ASAP_STAGE3_ROOT_LP").is_some() {
+        checks.report_root_lp_bound = true;
+    }
     // Price a given plan instead of planning: its report only.
     if let Some(path) = price_plan {
         let report_path =
@@ -1054,6 +1076,7 @@ fn selection_json(
         "milp_objective_cost_per_second": selection.selected_plan_cost_per_second,
         "milp_objective_mean_latency_ms": selection.selected_plan_mean_latency_ms,
         "milp_latency_ms_per_query": selection.selected_plan_latency_ms_per_query,
+        "milp_root_lp_mean_latency_ms": selection.milp_root_lp_mean_latency_ms,
         "executions_pruned_by_latency_bound": selection.executions_pruned_by_latency_bound,
     })
 }

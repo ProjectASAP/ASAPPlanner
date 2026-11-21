@@ -35,7 +35,7 @@ use asap_types::stages::PhysicalCandidateId;
 use asap_types::workload::DataWorkload;
 
 use super::super::accuracy::{accuracy_constraints, AccuracyRules, AccuracyVariables, ErrorModel};
-use super::super::dominance::dominated_by_one_evaluation_twin;
+use super::super::dominance::{dominated_in_every_quantity, dominated_theta_families, Pairing};
 use super::super::equivalent_contexts::copies_in_equivalent_contexts;
 use super::super::exact_only::exact_only_constraints;
 use super::super::graph::Components;
@@ -68,6 +68,9 @@ pub(crate) struct ClusterInputs<'a> {
     pub(crate) limits: &'a ClusterLimits,
     pub(crate) cost_inputs: &'a CostInputs,
     pub(crate) data: &'a DataWorkload,
+    /// The executions of a feasible plan (cost model 1's), by position: its
+    /// weighted latency bounds the optimum (T8).
+    pub(crate) feasible_plan: Option<Vec<usize>>,
 }
 
 /// One limit of the cluster, which a plan must fit.
@@ -105,6 +108,8 @@ pub(crate) enum ClusterSelectionError {
 pub(crate) struct ClusterSolved {
     pub(crate) solved: SolvedSelection,
     pub(crate) mean_latency_ms: f64,
+    /// The LP relaxation's mean latency, when asked for.
+    pub(crate) root_lp_mean_latency_ms: Option<f64>,
     /// Each query's latency in the MILP's optimum: (query, ms).
     pub(crate) latency_ms_per_query: Vec<(usize, f64)>,
     /// The executions left out before the MILP for a latency bound.
@@ -115,6 +120,8 @@ pub(crate) struct ClusterSolved {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Objective {
     MeanLatency,
+    /// The mean latency's LP relaxation (a measurement).
+    Relaxation,
     Memory,
     Disk,
     Limit(ClusterLimit),
@@ -135,7 +142,16 @@ struct Solve<'s> {
     fixed: Fixed,
     active: &'s [ClusterLimit],
     start: Option<&'s [f64]>,
+    /// A tie-break solve: only a plan whose objective is below this, within
+    /// `tie_break_seconds`.
+    improve_below: Option<f64>,
+    tie_break_seconds: f64,
 }
+
+/// The longest a tie-break solve looks for a smaller plan: as long as the
+/// first solve took, between `SHORTEST_TIE_BREAK_SECONDS` and this.
+const TIE_BREAK_SECONDS: f64 = 2.0;
+const SHORTEST_TIE_BREAK_SECONDS: f64 = 0.05;
 
 /// Per query, its static facts: weight, fixed cost per request, bound, the
 /// executions and edges it may read.
@@ -174,6 +190,9 @@ struct Solution {
     objective: f64,
     /// Every column's value, the next solve's start.
     columns: Vec<f64>,
+    /// The plan's peak memory and disk, in bytes.
+    memory_bytes: f64,
+    disk_bytes: f64,
     variable_count: usize,
     constraint_count: usize,
     solve_ms: u64,
@@ -205,16 +224,7 @@ pub(crate) fn solve_cluster_selection(
         inputs.memory,
         inputs.disk,
     ];
-    let mut dominated = vec![true; executions.len()];
-    for costs in quantities {
-        let of = dominated_by_one_evaluation_twin(&SelectionInputs {
-            costs,
-            ..*selection
-        });
-        for (all, one) in dominated.iter_mut().zip(of) {
-            *all &= one;
-        }
-    }
+    let dominated = dominated_in_every_quantity(selection, &quantities, Pairing::OneEvaluationTwin);
     for (costed, dominated) in costed.iter_mut().zip(dominated) {
         *costed &= !dominated;
     }
@@ -250,8 +260,47 @@ pub(crate) fn solve_cluster_selection(
     let limits = all_limits();
     // The exclusions are computed once for the selection; only the
     // diagnosis of an infeasible one recomputes them without a bound.
-    let (kept, pruned_by_latency_bound) = kept_for(&limits);
-    let solve = |objective: Objective, fixed: Fixed, start: Option<&[f64]>| {
+    let (mut kept, pruned_by_latency_bound) = kept_for(&limits);
+    // θ-families another family does as well as (T5).
+    let checks = inputs.cost_inputs.latency_selection_checks;
+    if checks.theta_dominance {
+        let rules = AccuracyRules::of(selection);
+        let dominated = dominated_theta_families(selection, &quantities, &kept, rules.as_ref());
+        for (kept, dominated) in kept.iter_mut().zip(dominated) {
+            *kept &= !dominated;
+        }
+    }
+    // T8: the weighted latency of a feasible plan bounds the optimum;
+    // executions no plan with them can beat it with are left out.
+    if let (Some(plan), true) = (&inputs.feasible_plan, checks.feasible_plan_bound) {
+        let only_plan: Vec<bool> = (0..kept.len())
+            .map(|index| kept[index] && plan.contains(&index))
+            .collect();
+        let bound = build_and_solve(
+            inputs,
+            &shapes,
+            &groups,
+            &only_plan,
+            Solve {
+                objective: Objective::MeanLatency,
+                fixed: Fixed::default(),
+                active: &limits,
+                start: None,
+                improve_below: None,
+                tie_break_seconds: 0.0,
+            },
+        );
+        if let Ok(bound) = bound {
+            let dearer = dearer_than_a_feasible_plan(inputs, &shapes, &kept, bound.objective);
+            for (kept, dearer) in kept.iter_mut().zip(dearer) {
+                *kept &= !dearer;
+            }
+        }
+    }
+    let solve = |objective: Objective,
+                 fixed: Fixed,
+                 start: Option<&[f64]>,
+                 tie_break: Option<(f64, f64)>| {
         build_and_solve(
             inputs,
             &shapes,
@@ -262,11 +311,21 @@ pub(crate) fn solve_cluster_selection(
                 fixed,
                 active: &limits,
                 start,
+                improve_below: tie_break.map(|(below, _)| below),
+                tie_break_seconds: tie_break.map_or(0.0, |(_, seconds)| seconds),
             },
         )
     };
+    // The LP relaxation's mean latency, when asked for: the formulation's
+    // bound, a measurement.
+    let weights: f64 = shapes.iter().map(|shape| shape.weight).sum();
+    let root_lp_mean_latency_ms = checks
+        .report_root_lp_bound
+        .then(|| solve(Objective::Relaxation, Fixed::default(), None, None).ok())
+        .flatten()
+        .map(|relaxed| relaxed.objective / weights.max(f64::MIN_POSITIVE));
     let mut solve_count = 1;
-    let first = match solve(Objective::MeanLatency, Fixed::default(), None) {
+    let first = match solve(Objective::MeanLatency, Fixed::default(), None, None) {
         Ok(first) => first,
         Err(SelectionMilpError::Infeasible) => {
             return Err(diagnose(&limits, |objective, active| {
@@ -281,6 +340,8 @@ pub(crate) fn solve_cluster_selection(
                         fixed: Fixed::default(),
                         active,
                         start: None,
+                        improve_below: None,
+                        tie_break_seconds: 0.0,
                     },
                 )
                 .ok()
@@ -289,25 +350,42 @@ pub(crate) fn solve_cluster_selection(
         Err(error) => return Err(ClusterSelectionError::Milp(error)),
     };
     let mut solve_ms = first.solve_ms;
+    let tie_break_seconds =
+        (first.solve_ms as f64 / 1_000.0).clamp(SHORTEST_TIE_BREAK_SECONDS, TIE_BREAK_SECONDS);
     let weighted = first.objective;
-    let fixed = Fixed {
-        weighted_latency: Some(weighted),
-        memory: None,
-    };
-    // Each tie-break solve starts from the previous solve's plan, which
-    // meets its rows.
-    let second = solve(Objective::Memory, fixed, Some(&first.columns))
-        .map_err(ClusterSelectionError::Milp)?;
-    solve_count += 1;
-    solve_ms += second.solve_ms;
-    let fixed = Fixed {
-        memory: Some(second.objective),
-        ..fixed
-    };
-    let last = solve(Objective::Disk, fixed, Some(&second.columns))
-        .map_err(ClusterSelectionError::Milp)?;
-    solve_count += 1;
-    solve_ms += last.solve_ms;
+    // Tie-breaks only when an alternative optimum may exist: each starts
+    // from the plan so far and only looks for one at least a byte smaller
+    // within `TIE_BREAK_SECONDS`; finding none (or none in time) keeps the
+    // plan so far.
+    let full_tie_breaks = !checks.lazy_tie_breaks;
+    let mut last = first;
+    for objective in [Objective::Memory, Objective::Disk] {
+        let current = match objective {
+            Objective::Memory => last.memory_bytes,
+            _ => last.disk_bytes,
+        };
+        let fixed = Fixed {
+            weighted_latency: Some(weighted),
+            memory: (objective == Objective::Disk).then_some(last.memory_bytes),
+        };
+        let tried = solve(
+            objective,
+            fixed,
+            Some(&last.columns),
+            (!full_tie_breaks).then_some((current - 0.5, tie_break_seconds)),
+        );
+        solve_count += 1;
+        if let Ok(better) = tried {
+            solve_ms += better.solve_ms;
+            let found = match objective {
+                Objective::Memory => better.memory_bytes,
+                _ => better.disk_bytes,
+            };
+            if found < current - 0.5 {
+                last = better;
+            }
+        }
+    }
     // (K) holds only to the solver's tolerance: a selection that misses a
     // target, checked exactly, is refused.
     if let Some(rules) = AccuracyRules::of(selection) {
@@ -323,7 +401,6 @@ pub(crate) fn solve_cluster_selection(
             ));
         }
     }
-    let weights: f64 = shapes.iter().map(|shape| shape.weight).sum();
     let mean_latency_ms = shapes
         .iter()
         .zip(&last.latency_ms)
@@ -366,6 +443,7 @@ pub(crate) fn solve_cluster_selection(
     Ok(ClusterSolved {
         solved,
         mean_latency_ms,
+        root_lp_mean_latency_ms,
         latency_ms_per_query: shapes
             .iter()
             .map(|shape| shape.query.0)
@@ -557,6 +635,31 @@ fn over_every_readers_bound(
     kept: &[bool],
     active: &[ClusterLimit],
 ) -> Vec<bool> {
+    let least = least_latency(inputs, kept);
+    (0..least.len())
+        .map(|index| {
+            let readers: Vec<&QueryShape> = shapes
+                .iter()
+                .filter(|shape| shape.reach.contains(&index))
+                .collect();
+            !readers.is_empty()
+                && readers.iter().all(|shape| {
+                    let bounded = active.contains(&ClusterLimit::QueryLatencyMs {
+                        query: shape.query.0,
+                    });
+                    bounded
+                        && shape.max_latency_ms.is_some_and(|bound| {
+                            least[index] + shape.request_ms > bound * (1.0 + 1e-9)
+                        })
+                })
+        })
+        .collect()
+}
+
+/// Per execution, the least latency of its sub-DAG (work plus freshness,
+/// [`over_every_readers_bound`]), without a query's fixed cost per
+/// request: a lower bound on any plan's latency through it.
+fn least_latency(inputs: &ClusterInputs<'_>, kept: &[bool]) -> Vec<f64> {
     let selectable = inputs.selection.selectable;
     let count = selectable.executions().len();
     let lateness = inputs.cost_inputs.data_plane_execution.allowed_lateness_ms as f64;
@@ -566,6 +669,67 @@ fn over_every_readers_bound(
         .refresh_io_wait
         .ns_per_refresh
         * 1e-6;
+    // Whether an execution's inputs may share executions below it (an
+    // in-query diamond): their memo groups' descendants (over the
+    // selectable edges) intersect. Without one, their least works add up.
+    let group_of = |index: usize| {
+        let v = selectable.executions()[index].candidate;
+        inputs.selection.physical.physical_candidates[v.0]
+            .logical_candidate_id
+            .group
+    };
+    // Only query-time producers count: an ingestion-time execution's work
+    // is in the freshness, which takes the largest, not a sum.
+    let mut group_inputs: HashMap<_, BTreeSet<_>> = HashMap::new();
+    for edge in selectable
+        .edges()
+        .iter()
+        .filter(|edge| !at_ingestion(inputs, edge.producer))
+    {
+        group_inputs
+            .entry(group_of(edge.consumer))
+            .or_default()
+            .insert(group_of(edge.producer));
+    }
+    let mut below: HashMap<_, BTreeSet<_>> = HashMap::new();
+    let descendants = |group, below: &mut HashMap<_, BTreeSet<_>>| -> BTreeSet<_> {
+        if let Some(known) = below.get(&group) {
+            return known.clone();
+        }
+        let mut seen = BTreeSet::from([group]);
+        let mut stack = vec![group];
+        while let Some(next) = stack.pop() {
+            for &input in group_inputs.get(&next).into_iter().flatten() {
+                if seen.insert(input) {
+                    stack.push(input);
+                }
+            }
+        }
+        below.insert(group, seen.clone());
+        seen
+    };
+    let inputs_disjoint: Vec<bool> = (0..count)
+        .map(|index| {
+            let mut union = BTreeSet::new();
+            for input in 0..selectable.input_count(index) {
+                let mut reached = BTreeSet::new();
+                for &position in selectable.edges_into(index, input) {
+                    if at_ingestion(inputs, selectable.edges()[position].producer) {
+                        continue;
+                    }
+                    reached.extend(descendants(
+                        group_of(selectable.edges()[position].producer),
+                        &mut below,
+                    ));
+                }
+                if !union.is_disjoint(&reached) {
+                    return false;
+                }
+                union.extend(reached);
+            }
+            true
+        })
+        .collect();
     let mut work = vec![0.0_f64; count];
     let mut fresh = vec![lateness; count];
     for _ in 0..count.max(1) {
@@ -575,38 +739,57 @@ fn over_every_readers_bound(
                 continue;
             }
             let (new_work, new_fresh) = if at_ingestion(inputs, index) {
-                (0.0, lateness + of(inputs.refresh_ms, index) + wait_per_run)
+                // Its refresh with each producer's least share (a share
+                // may take some of its baseline back).
+                let shares: f64 = (0..selectable.input_count(index))
+                    .map(|input| {
+                        selectable
+                            .edges_into(index, input)
+                            .iter()
+                            .filter_map(|&position| inputs.refresh_ms.per_edge[position])
+                            .fold(0.0, f64::min)
+                    })
+                    .sum();
+                let refresh = (of(inputs.refresh_ms, index) + shares).max(0.0);
+                (0.0, lateness + refresh + wait_per_run)
             } else {
+                // Its own work: its baseline plus, per input, the least
+                // share any producer leaves it (a negative share included:
+                // a consumer's baseline is costed over its dearest
+                // producer, and the share takes that back). Its inputs'
+                // least works add up when their sub-DAGs cannot share an
+                // execution; when they can (an in-query diamond, e.g. two
+                // quantiles read off one state), only the largest counts:
+                // a sum would count a shared execution twice and overstate
+                // the bound.
                 let mut least_work = of(inputs.query_ms, index);
+                let mut least_inputs = 0.0_f64;
                 let mut least_fresh = lateness;
                 for input in 0..selectable.input_count(index) {
-                    let choices: Vec<(f64, f64)> = selectable
+                    let choices: Vec<(f64, f64, f64)> = selectable
                         .edges_into(index, input)
                         .iter()
                         .filter(|&&position| kept[selectable.edges()[position].producer])
                         .map(|&position| {
                             let producer = selectable.edges()[position].producer;
                             let edge = inputs.query_ms.per_edge[position].unwrap_or(0.0);
-                            (edge + work[producer], fresh[producer])
+                            (edge, work[producer], fresh[producer])
                         })
                         .collect();
                     if choices.is_empty() {
                         continue;
                     }
-                    // The true least, a producer's negative share included:
-                    // a consumer's baseline is costed over its dearest
-                    // producer, and the share takes that back.
-                    least_work += choices
-                        .iter()
-                        .map(|&(work, _)| work)
-                        .fold(f64::INFINITY, f64::min);
-                    least_fresh = least_fresh.max(
-                        choices
-                            .iter()
-                            .map(|&(_, fresh)| fresh)
-                            .fold(f64::INFINITY, f64::min),
-                    );
+                    let least = |pick: fn(&(f64, f64, f64)) -> f64| {
+                        choices.iter().map(pick).fold(f64::INFINITY, f64::min)
+                    };
+                    least_work += least(|choice| choice.0);
+                    least_inputs = match inputs_disjoint[index] {
+                        true => least_inputs + least(|choice| choice.1),
+                        false => least_inputs.max(least(|choice| choice.1)),
+                    };
+                    least_fresh = least_fresh.max(least(|choice| choice.2));
                 }
+                least_work += least_inputs;
                 (least_work, least_fresh)
             };
             let new_work = new_work.max(0.0);
@@ -620,25 +803,85 @@ fn over_every_readers_bound(
             break;
         }
     }
-    (0..count)
-        .map(|index| {
-            let readers: Vec<&QueryShape> = shapes
+    work.iter()
+        .zip(&fresh)
+        .map(|(work, fresh)| work + fresh)
+        .collect()
+}
+
+/// Per execution, whether it is in no optimal plan given a feasible plan
+/// of weighted latency `upper_bound` (T8): any plan in which a query $q$
+/// reads it has $\sum_{q'} w_{q'} L_{q'} \ge w_q (\ell^{min}_e + r_q) +
+/// \sum_{q' \ne q} w_{q'} L^{min}_{q'}$ ($\ell^{min}_e$ its least latency,
+/// $r_q$ the fixed cost per request, $L^{min}_{q'}$ the least latency of
+/// any answer of $q'$), and an execution is selected only when some query
+/// reads it ((F): every selected execution is used, down from an output).
+/// When that bound is over `upper_bound` for every query that may read it,
+/// every plan selecting it is worse than the feasible one: it is in no
+/// optimal plan, and leaving it out keeps every optimum.
+fn dearer_than_a_feasible_plan(
+    inputs: &ClusterInputs<'_>,
+    shapes: &[QueryShape],
+    kept: &[bool],
+    upper_bound: f64,
+) -> Vec<bool> {
+    let least = least_latency(inputs, kept);
+    let least_of_query: Vec<f64> = shapes
+        .iter()
+        .map(|shape| {
+            shape
+                .answering
                 .iter()
-                .filter(|shape| shape.reach.contains(&index))
+                .filter(|&&index| kept[index])
+                .map(|&index| least[index])
+                .fold(f64::INFINITY, f64::min)
+                .min(f64::MAX)
+                + shape.request_ms
+        })
+        .collect();
+    let everyone: f64 = shapes
+        .iter()
+        .zip(&least_of_query)
+        .map(|(shape, least)| shape.weight * least)
+        .sum();
+    let limit = upper_bound * (1.0 + 1e-9) + 1e-9;
+    (0..least.len())
+        .map(|index| {
+            let readers: Vec<usize> = (0..shapes.len())
+                .filter(|&q| shapes[q].reach.contains(&index))
                 .collect();
-            let least = work[index] + fresh[index];
-            !readers.is_empty()
-                && readers.iter().all(|shape| {
-                    let bounded = active.contains(&ClusterLimit::QueryLatencyMs {
-                        query: shape.query.0,
-                    });
-                    bounded
-                        && shape
-                            .max_latency_ms
-                            .is_some_and(|bound| least + shape.request_ms > bound * (1.0 + 1e-9))
-                })
+            let over_alone = over_a_limit_alone(inputs, index);
+            kept[index]
+                && (over_alone
+                    || !readers.is_empty()
+                        && readers.iter().all(|&q| {
+                            let shape = &shapes[q];
+                            everyone - shape.weight * least_of_query[q]
+                                + shape.weight * (least[index] + shape.request_ms)
+                                > limit
+                        }))
         })
         .collect()
+}
+
+/// Whether execution `index` alone is over the cluster's memory or disk,
+/// with every producer share at its most favourable: in no plan.
+fn over_a_limit_alone(inputs: &ClusterInputs<'_>, index: usize) -> bool {
+    let selectable = inputs.selection.selectable;
+    let least = |costs: &ExecutionCosts| {
+        of(costs, index)
+            + (0..selectable.input_count(index))
+                .map(|input| {
+                    selectable
+                        .edges_into(index, input)
+                        .iter()
+                        .filter_map(|&position| costs.per_edge[position])
+                        .fold(0.0, f64::min)
+                })
+                .sum::<f64>()
+    };
+    least(inputs.memory) > inputs.limits.memory_bytes as f64 * (1.0 + 1e-9)
+        || least(inputs.disk) > inputs.limits.disk_bytes as f64 * (1.0 + 1e-9)
 }
 
 /// Per refresh group, its big-M: the most $f_G$ can exceed the allowed
@@ -760,6 +1003,8 @@ fn build_and_solve(
         fixed,
         active,
         start,
+        improve_below,
+        tie_break_seconds,
     } = solve;
     let selection = &inputs.selection;
     let selectable = selection.selectable;
@@ -896,25 +1141,59 @@ fn build_and_solve(
         let fresh = problem.add(variable().min(lateness));
         let latency = problem.add(variable().min(0));
         let mut execution_ms = Expression::from(shape.request_ms);
+        // Reads as a flow (T9): what the query reads of a consumer flows
+        // into exactly one selected producer per input, `Σ read = a_c` over
+        // the input's edges with `read ≤ y`, and a producer is read at
+        // least as much as any edge into it. Unlike `read ≥ a_c + y − 1`,
+        // whose LP relaxation vanishes for fractional values, the flow
+        // carries a fractional read down the sub-DAG.
+        let mut flows: BTreeMap<(usize, usize), Expression> = BTreeMap::new();
+        // Without flow reads, the earlier rows, to compare.
+        let mccormick = !inputs.cost_inputs.latency_selection_checks.flow_reads;
         for &position in &shape.edges {
             let Some(&y) = variables.y.get(&position) else {
                 continue;
             };
             let edge = selectable.edges()[position];
-            let (Some(&consumer), Some(&producer)) =
-                (reads.get(&edge.consumer), reads.get(&edge.producer))
+            let (Some(_), Some(&producer)) = (reads.get(&edge.consumer), reads.get(&edge.producer))
             else {
                 continue;
             };
             let read = problem.add(variable().min(0).max(1));
-            rows.push(constraint!(read >= consumer + y - 1));
+            rows.push(constraint!(read <= y));
             rows.push(constraint!(producer >= read));
-            let d = inputs.query_ms.per_edge[position].unwrap_or(0.0) * runs(edge.consumer);
-            if d < 0.0 {
-                rows.push(constraint!(read <= y));
-                rows.push(constraint!(read <= consumer));
+            if mccormick {
+                rows.push(constraint!(read >= reads[&edge.consumer] + y - 1));
+                rows.push(constraint!(read <= reads[&edge.consumer]));
+                let d = inputs.query_ms.per_edge[position].unwrap_or(0.0) * runs(edge.consumer);
+                execution_ms += d * read;
+                continue;
             }
+            let input = inputs
+                .selection
+                .physical
+                .edge(edge.edge)
+                .input_index_of_consumer;
+            *flows.entry((edge.consumer, input)).or_default() += read;
+            let d = inputs.query_ms.per_edge[position].unwrap_or(0.0) * runs(edge.consumer);
             execution_ms += d * read;
+        }
+        for ((consumer, _), flow) in flows {
+            rows.push(constraint!(flow == reads[&consumer]));
+        }
+        // Valid freshness cuts without the big-M (T10): a query waits at
+        // least for the refresh of the executions of one group it reads.
+        let mut read_refresh_of_group: BTreeMap<usize, Expression> = BTreeMap::new();
+        for (&index, &read) in &reads {
+            if let (Some(&group), true) =
+                (groups.of_execution.get(&index), at_ingestion(inputs, index))
+            {
+                *read_refresh_of_group.entry(group).or_default() +=
+                    time_of(inputs.refresh_ms, index).max(0.0) * read;
+            }
+        }
+        for (_, refresh) in read_refresh_of_group {
+            rows.push(constraint!(fresh >= lateness + refresh));
         }
         for (&index, &read) in &reads {
             if !kept[index] {
@@ -925,6 +1204,12 @@ fn build_and_solve(
                     rows.push(constraint!(
                         fresh >= freshness[group].clone() - big_m[group] * (1 - read)
                     ));
+                    // Valid without the big-M: reading the execution waits
+                    // at least for its own refresh ($f_G \ge a + p_e x_e$
+                    // and a read execution is selected), which keeps the
+                    // LP bound off zero.
+                    let own = time_of(inputs.refresh_ms, index).max(0.0) + wait_per_run;
+                    rows.push(constraint!(fresh >= lateness + own * read));
                 }
                 _ => execution_ms += time_of(inputs.query_ms, index) * runs(index) * read,
             }
@@ -995,9 +1280,9 @@ fn build_and_solve(
         ));
     }
     let goal: Expression = match objective {
-        Objective::MeanLatency => weighted,
-        Objective::Memory | Objective::Limit(ClusterLimit::MemoryBytes) => memory,
-        Objective::Disk | Objective::Limit(ClusterLimit::DiskBytes) => disk,
+        Objective::MeanLatency | Objective::Relaxation => weighted,
+        Objective::Memory | Objective::Limit(ClusterLimit::MemoryBytes) => memory.clone(),
+        Objective::Disk | Objective::Limit(ClusterLimit::DiskBytes) => disk.clone(),
         Objective::Limit(ClusterLimit::CpuCores) => cpu,
         Objective::Limit(ClusterLimit::PrecomputeLoad) => load,
         Objective::Limit(ClusterLimit::QueryLatencyMs { query }) => shapes
@@ -1053,6 +1338,13 @@ fn build_and_solve(
     model.set_option("mip_abs_gap", 0.0);
     model.set_option("output_flag", false);
     model.set_option("threads", 1);
+    if objective == Objective::Relaxation {
+        model.set_option("solve_relaxation", true);
+    }
+    if let Some(below) = improve_below {
+        model.set_option("time_limit", tie_break_seconds);
+        model.set_option("objective_bound", below * scale);
+    }
     if let Some(start) = start.filter(|start| start.len() == variable_count) {
         // The variables are built in the same order every solve, so a
         // column is the same variable in each; a start HiGHS refuses is
@@ -1067,7 +1359,7 @@ fn build_and_solve(
     use highs::{HighsModelStatus, HighsSolutionStatus};
     let columns: Vec<f64> = match solved.status() {
         HighsModelStatus::ModelEmpty => vec![0.0; variable_count],
-        HighsModelStatus::Optimal
+        HighsModelStatus::Optimal | HighsModelStatus::ReachedTimeLimit
             if solved.primal_solution_status() == HighsSolutionStatus::Feasible =>
         {
             solved.get_solution().columns().to_vec()
@@ -1088,9 +1380,12 @@ fn build_and_solve(
         .filter(|&(_, &y)| chosen(y))
         .map(|(&position, _)| position)
         .collect();
+    // The LP relaxation answers fractionally: no plan to read off.
+    let relaxed = objective == Objective::Relaxation;
     let answering: Vec<(QueryId, usize)> = selectable
         .answering()
         .iter()
+        .filter(|_| !relaxed)
         .map(|(query, answering)| {
             let execution = answering
                 .iter()
@@ -1100,6 +1395,15 @@ fn build_and_solve(
             (*query, execution)
         })
         .collect();
+    let evaluate = |expression: &Expression| {
+        expression
+            .linear_coefficients()
+            .map(|(variable, coefficient)| coefficient * value(variable))
+            .sum::<f64>()
+            + expression.constant()
+    };
+    let memory_bytes = evaluate(&memory);
+    let disk_bytes = evaluate(&disk);
     let objective_value = (&goal)
         .linear_coefficients()
         .map(|(variable, coefficient)| coefficient * value(variable))
@@ -1111,6 +1415,8 @@ fn build_and_solve(
         answering,
         latency_ms: latencies.iter().map(|&latency| value(latency)).collect(),
         objective: objective_value,
+        memory_bytes,
+        disk_bytes,
         columns,
         variable_count,
         constraint_count,

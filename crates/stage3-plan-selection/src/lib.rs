@@ -200,13 +200,14 @@ pub fn select_plan(
             failure_probability_bound,
         },
     };
-    let (solved, mean_latency_ms, latency_ms_per_query, pruned_by_latency_bound) =
+    let (solved, mean_latency_ms, latency_ms_per_query, pruned_by_latency_bound, root_lp) =
         match cluster_limits {
             None => (
                 solve_selection(&selection_inputs).map_err(milp_error)?,
                 None,
                 None,
                 0,
+                None,
             ),
             Some(limits) => {
                 let quantity = |quantity| {
@@ -226,6 +227,17 @@ pub fn select_plan(
                     quantity(Quantity::PeakMemoryBytes),
                     quantity(Quantity::DiskBytes),
                 );
+                // A feasible plan's executions for T8: cost model 1's
+                // optimum (when it is solved), by position.
+                let feasible_plan = solve_selection(&selection_inputs).ok().map(|solved| {
+                    selectable
+                        .executions()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, execution)| solved.executions.contains(execution))
+                        .map(|(index, _)| index)
+                        .collect()
+                });
                 let solved = solve_cluster_selection(&ClusterInputs {
                     selection: selection_inputs,
                     query_ms: &query_ms,
@@ -236,6 +248,7 @@ pub fn select_plan(
                     limits,
                     cost_inputs,
                     data,
+                    feasible_plan,
                 })
                 .map_err(|error| match error {
                     ClusterSelectionError::Milp(error) => milp_error(error),
@@ -267,6 +280,7 @@ pub fn select_plan(
                     Some(solved.mean_latency_ms),
                     Some(per_query),
                     solved.pruned_by_latency_bound,
+                    solved.root_lp_mean_latency_ms,
                 )
             }
         };
@@ -300,6 +314,7 @@ pub fn select_plan(
         milp_solve_count: solved.solve_count,
         selected_plan_mean_latency_ms: mean_latency_ms,
         selected_plan_latency_ms_per_query: latency_ms_per_query,
+        milp_root_lp_mean_latency_ms: root_lp,
         executions_pruned_by_latency_bound: pruned_by_latency_bound,
     };
     Ok((plan, selection))
