@@ -326,7 +326,7 @@ fn per_series_workload(queries: &[&str]) -> FuzzWorkload {
 /// offset 1 h by `job`. The front end scans `queue_depth` with the labels
 /// each query reads, so each state reads its own scan; one 15 s Max chain
 /// of every label, kept 2 h, serves all three, and costs less than a chain
-/// per label set (2.237e-6/s for two chains, 1.699e-6/s for one, under the
+/// per label set (1.847e-6/s for two chains, 1.439e-6/s for one, under the
 /// AWS Fargate unit costs).
 #[test]
 fn per_series_states_over_different_labels_share_one_chain() {
@@ -352,8 +352,8 @@ fn per_series_states_over_different_labels_share_one_chain() {
 /// scan `c` with different labels. Pass 2 offers one 15 s `Increase`
 /// chain of every label that both states read; plan selection keeps a
 /// chain per label set here, because the shared chain stores `region` and
-/// `service` in each of its 6 h of windows: 2.31 GB against 1.84 GB + 0.19
-/// GB for the two chains, 6.996e-6/s against 6.707e-6/s under the AWS
+/// `service` in each of its 6 h of windows: 2.20 GB against 1.74 GB + 0.19
+/// GB for the two chains, 6.880e-6/s against 6.581e-6/s under the AWS
 /// Fargate unit costs.
 #[test]
 fn per_series_states_over_different_labels_are_offered_one_chain() {

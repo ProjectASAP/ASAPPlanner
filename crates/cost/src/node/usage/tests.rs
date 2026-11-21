@@ -326,7 +326,7 @@ fn a_project_or_filter_over_states_passes_their_family_on() {
         };
         let usage = node_resource_usage_and_cost(
             &passing,
-            &[states_output.clone()],
+            std::slice::from_ref(&states_output),
             (1, 1.0),
             None,
             &data,
