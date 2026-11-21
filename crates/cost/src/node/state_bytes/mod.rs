@@ -31,7 +31,7 @@ fn column_bytes(field: &Field) -> u64 {
 /// identity, whose texts are held once per batch or, stored, once per
 /// view: [`text_dictionary_bytes`]), each other column at 8 (its window's
 /// time) and the batch's 8-byte slot per row. Example: a stored per-series
-/// Sum carrying `job`, at its window's time: 4 + 4 + 4 + 8 + 8 = 28 bytes
+/// Count carrying `job`, at its window's time: 4 + 4 + 4 + 8 + 8 = 28 bytes
 /// beside its 8-byte record.
 pub(crate) fn state_row_bytes_beside_state(schema: &Schema) -> u64 {
     ROW_SLOT_BYTES
@@ -80,7 +80,7 @@ pub(crate) fn state_rows_bytes(schema: &Schema, rows: u64, state_bytes: u64) -> 
 /// Bytes of the state one row of `edge` holds: its bytes without the
 /// batch's texts ([`text_dictionary_bytes`]), per row, without what the
 /// row holds beside its state ([`state_row_bytes_beside_state`] of the
-/// producer's `schema`). Example: 1,000 rows of per-series Sums carrying
+/// producer's `schema`). Example: 1,000 rows of per-series Counts carrying
 /// `job`, 116,000 bytes, of which 80,000 are texts, hold 36 − 28 = 8 bytes
 /// of state each.
 pub(crate) fn state_bytes_per_row(edge: EdgeStatistics, schema: &Schema) -> u64 {

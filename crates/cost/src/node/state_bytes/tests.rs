@@ -1000,7 +1000,7 @@ fn priced_bytes_agree_with_the_executor() {
 /// (`job` and the series identity), its window's time and the batch's
 /// row slot beside the state, and the batch holds the texts once; the
 /// state's own bytes, which a merge is costed by, leave them out. 1,000
-/// per-series Sums carrying `job`: 116,000 bytes, 80,000 of them texts,
+/// per-series Counts carrying `job`: 116,000 bytes, 80,000 of them texts,
 /// 28 per row beside each 8-byte record.
 #[test]
 fn state_bytes_per_row_leave_out_what_the_row_holds_beside_its_state() {
@@ -1010,7 +1010,7 @@ fn state_bytes_per_row_leave_out_what_the_row_holds_beside_its_state() {
         Field::new("ts", FieldDataType::Plain(DataType::Int64), false),
         Field::new(
             "state",
-            FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
             false,
         ),
         Field::new("job", FieldDataType::Plain(DataType::Utf8), false),
