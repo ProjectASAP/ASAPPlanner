@@ -14,6 +14,7 @@ extensions. A design document is not a promise of downstream runtime support.
 - [Memo-based joint optimization with MILP](joint-planning-search.md)
 - [Window and materialization choices](window-materialization-choices.md)
 - [Multi-level tumbling-window chains](multi-level-window-chains.md)
+- [Wider tumbling windows per reader](wider-tumbling-windows-per-reader.md)
 - [Schema and physical data for ASAP primitives](asap-primitive-schema.md)
 
 - [Joint planning implementation plan](joint-planning-implementation-plan.md)
