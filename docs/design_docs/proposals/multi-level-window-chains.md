@@ -309,9 +309,9 @@ through wider levels; each plan's cost falls (old → new, per second):
 
 | Snapshot | Query | Old | New |
 | --- | --- | --- | --- |
-| o11y_bench q19 | `sum(increase(…[1h])) / sum(increase(…[1h]))` | 56.28 | 19.89 |
-| o11y_bench q25 | `sum(rate(…[1h])) / sum(rate(…[1h]))` | 56.28 | 19.89 |
-| o11y_bench q26 | `sum(rate(process_cpu_seconds_total[1h]))` | 27.72 | 9.42 |
+| o11y_bench q19 | `sum(increase(…[1h])) / sum(increase(…[1h]))` | 56.06 | 19.89 |
+| o11y_bench q25 | `sum(rate(…[1h])) / sum(rate(…[1h]))` | 56.06 | 19.89 |
+| o11y_bench q26 | `sum(rate(process_cpu_seconds_total[1h]))` | 27.61 | 9.42 |
 | chains-10m-5m-3m-10s-mvp | quantiles over 10, 5 and 3 min | 5.109e-7 | 4.693e-7 |
 | quantile-grouped-mvp | `avg by (region) (quantile_over_time(0.9, data[5m]))` | 1.903e-6 | 1.477e-6 |
 | quantile-single-mvp | `quantile_over_time(0.99, data[5m])` | 1.823e-6 | 1.397e-6 |
@@ -319,7 +319,3 @@ through wider levels; each plan's cost falls (old → new, per second):
 | random-mixed-seed-862-w02-q2-q7-mvp | a 100 s quantile and a 5 min top-k increase | 3.238e-5 | 3.203e-5 |
 | topk-rate-guarantees-ignored-mvp | `topk(5, sum by (job) (rate(data_total[5m])))` | 3.619e-7 | 2.928e-7 |
 
-Seven more corpus snapshots (q02, q05, q06, q18, q21, q22, q23: 5 min
-ranges, offsets) differ from the committed ones on main already, by the
-counter state's bytes (144 → 137 B); they read no wider level and are left
-as they are.
