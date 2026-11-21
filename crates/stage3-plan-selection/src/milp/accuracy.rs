@@ -268,6 +268,34 @@ impl Ord for RootLimits {
 impl AccuracyRules {
     /// The rules over `inputs`; `None` when no query has an accuracy
     /// target, so (K) has no rows.
+    /// Whether execution `b`'s own error is no more than `a`'s in every
+    /// metric and failure probability (an unbounded one, `None`, is more
+    /// than any bound), both of one memo group.
+    pub(super) fn own_error_no_more(&self, b: usize, a: usize) -> bool {
+        let (eb, ea) = (
+            &self.own_error_per_execution[b],
+            &self.own_error_per_execution[a],
+        );
+        let no_more = |x: Option<f64>, y: Option<f64>| match (x, y) {
+            (_, None) => true,
+            (None, Some(_)) => false,
+            (Some(x), Some(y)) => x <= y,
+        };
+        eb.error_bound_per_metric
+            .iter()
+            .zip(&ea.error_bound_per_metric)
+            .all(|(x, y)| x <= y)
+            && no_more(
+                eb.failure_probability_of_one_value,
+                ea.failure_probability_of_one_value,
+            )
+            && no_more(
+                eb.failure_probability_of_all_values,
+                ea.failure_probability_of_all_values,
+            )
+            && self.candidate_of_execution[b].group == self.candidate_of_execution[a].group
+    }
+
     pub(super) fn of(inputs: &SelectionInputs<'_>) -> Option<Self> {
         let physical = inputs.physical;
         let memo = &physical.logical_candidates.memo;

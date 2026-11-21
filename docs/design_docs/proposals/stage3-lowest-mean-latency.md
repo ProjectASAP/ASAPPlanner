@@ -452,9 +452,52 @@ set both use it; without it, `plan_cost` derives the threads from the
 ingestion work of the node and its producers, the MILP from the node's
 own (a candidate does not know its producers).
 
+**Reads as a flow.** A query's reads are a flow down its sub-DAG: for each
+consumer $c$ it may read and each input $i$, $\sum_{u} r_{q,u \to c} =
+a_{q,c}$ over the input's edges, with $r_{q,u\to c} \le y_{u\to c}$ and
+$a_{q,u} \ge r_{q,u \to c}$. The earlier rows $r \ge a_{q,c} + y - 1$
+vanish in the LP relaxation for fractional values (the root LP bound of
+the mean latency was near 0); the flow carries a fractional read down to
+the producers. Each read ingestion-time execution also bounds the
+freshness without the big-M: $F_q \ge a + (p_e + \text{wait}) a_{q,e}$, valid
+because a read execution is selected and $f_G \ge a + p_e x_e$; and per
+group $G$, $F_q \ge a + \sum_{e \in G} p_e a_{q,e}$ (T10).
+
+**Tie-breaks only when needed.** Each tie-break solve starts from the plan
+so far and looks only for a plan at least a byte smaller
+(`objective_bound`), for as long as the first solve took (at least 0.05 s,
+at most 2 s); finding none, or none in time, keeps the plan so far. When the 2 s run out with a smaller plan found, that plan
+is kept though a still smaller one may exist.
+
 **Pruning before the MILP.**
-- `dearer_than_a_feasible_plan` (the greedy cost upper bound) is cost model
-  1's and is not applied under cost model 3 in v1.
+- **A feasible plan's bound (T8).** Cost model 1's optimum over the same
+  executions, evaluated by this MILP restricted to its executions, is a
+  feasible plan of weighted latency $U$. Any plan in which a query $q$
+  reads execution $e$ has $\sum_{q'} w_{q'} L_{q'} \ge w_q(\ell^{min}_e +
+  r_q) + \sum_{q' \ne q} w_{q'} L^{min}_{q'}$ ($\ell^{min}_e$ the least
+  latency through $e$, below; $L^{min}_{q'}$ the least of any answer of
+  $q'$), and a selected execution is read by some query ((F): every
+  selected execution is used, down from an output). An execution for which
+  that bound is over $U$ for every query that may read it is in no optimal
+  plan and is left out: every optimum is kept.
+- **θ-family dominance (T5).** A θ-family is a connected set of executions
+  with one sketch parameterisation θ (linked by selectable edges between
+  executions of that θ), each in its own slot (context, memo group,
+  operator, physical properties). A family is left out when another
+  family over the same slots is no worse, slot by slot, in every quantity
+  the MILP reads (query time per run, refresh time per window, CPU, peak
+  memory, disk, and cost model 1's cost that fixes retention), has no more
+  own error in any metric or failure probability, answers every output the
+  other answers, and has a counterpart at no more of every quantity for
+  each edge into, out of and within the family. A plan using the dominated
+  family uses the other in its place: every optimum is kept. Equal families
+  keep the first. Pruning single executions by θ is not safe: a readout's
+  more accurate chain is a family, not one execution.
+- **Over a limit alone.** An execution whose memory or disk, with every
+  producer share at its most favourable, is over the cluster's limit is in
+  no plan.
+- The `OneEvaluation` twin dominance holds in every quantity at once, by
+  one twin.
 - `dominated_by_one_evaluation_twin` is applied with its condition restated
   over the cluster quantities: the twin is no slower ($d$, $p$), uses no
   more peak memory, disk and CPU, and answers the same outputs.
@@ -472,16 +515,20 @@ own (a candidate does not know its producers).
   is reported (`Selection::executions_pruned_by_latency_bound`). A
   producer's negative edge share counts at its value (a consumer is costed
   over its dearest producer, and the share takes that back), and each share
-  at its least retention, so the bound stays at or below every plan's
-  latency: a plan exactly at its bound is kept. It is computed once per
+  at its least retention, and an execution's inputs' least works add up
+  only when their sub-DAGs cannot share an execution (their memo groups'
+  descendants are disjoint); otherwise (an in-query diamond, such as two
+  quantiles of one state, which a sum would count twice) only the largest
+  counts, so the bound stays at or below every plan's latency: a plan
+  exactly at its bound is kept. It is computed once per
   selection; only the diagnosis of an infeasible selection recomputes it
   without the bound it relaxes. The MILP has no read variables for the
   executions left out.
-  Considered and deferred: per-execution bottom-up latency and freshness
-  variables $\ell_e$, $\varphi_e$ in place of the per-query reads
-  $a_{q,e}$. They need far fewer variables, but are conservative where two
-  paths of one query meet below it (a diamond counts the shared node on
-  both paths).
+  Considered and rejected (decision 24): per-execution bottom-up latency
+  and freshness variables $\ell_e$, $\varphi_e$ in place of the per-query
+  reads $a_{q,e}$; they are conservative where two paths of one query meet
+  below it (a diamond counts the shared node on both paths), and their LP
+  bound is no better.
 
 ### 2.6 Report
 
@@ -764,7 +811,10 @@ tie-break solves from `CostModel`.
 | 22 | `CostInputs::latency_calibration` (`not_checked`, `passed_gate`, `uncalibrated_for_testing`); `lowest_mean_latency` refuses `not_checked`. | Decided (review) |
 | 23 | Latency rows use times at the largest retention; partial copies in the MILP's refresh time and memory; per-step work × steps. | By this document |
 | 19 | `DataPlaneExecution::ingest_work_at_refresh` for a data plane that inserts a window's rows at its close (the measured one does). | By this document |
-| 18 | Latency bounds become exclusions before the MILP (least possible latency per execution, in f64); the remaining bounds are rows; per-execution bottom-up latency variables considered and deferred. | Decided |
+| 18 | Latency bounds become exclusions before the MILP (least possible latency per execution, in f64); the remaining bounds are rows; per-execution bottom-up latency variables considered and rejected (decision 24). | Decided |
+| 24 | S1 (per-execution latency and freshness variables $\ell_e$, $\varphi_e$ with big-M rows, replacing the per-query reads): considered and rejected. Its LP bound stays at 0 like the McCormick reads, and it measured slower (two workloads: 4.4 s and 5.1 s against 1.2 s). | Decided (rejected) |
+| 25 | Speed-ups, each exact: reads only of kept executions; the latency-bound exclusions once per selection; θ dominance in every quantity; a feasible plan's bound (T8); reads as a flow (T9) with the valid freshness rows; lazy tie-break solves warm-started from the plan so far (2 s each). | Decided |
+| 26 | Checking knobs in `CostInputs::latency_selection_checks` (`theta_dominance`, `feasible_plan_bound`, `lazy_tie_breaks`, `flow_reads`, all on by default; `report_root_lp_bound`, off): turning a speed-up off must not change the optimum, which the exactness tests check. The planning crates read no environment; the `asap_planner` tool maps `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_LATENCY_READS=mccormick` and `ASAP_STAGE3_ROOT_LP=1` onto them. | By this document |
 | 14 | Under cost model 3 the greedy cost upper bound is not applied; the `OneEvaluation` twin dominance is restated over time, memory, disk and CPU. | By this document |
 | 15 | Calibration passes when every node's predicted time per phase is within 1.5× of measured, at every series scale run (1k passes; 10k after term (3)). | Decided |
 | 16 | Ingest and query CPU are not hard constraints against thread counts; the report gives per role (ingest, precompute, query) the predicted CPU core-seconds per second and the recommended threads, $\lceil$cores$/\rho_{\max}\rceil$; `precompute_threads` stays an input for $\rho$, and a deployment may set it from the recommendation and replan. | Decided |
@@ -786,11 +836,23 @@ tie-break solves from `CostModel`.
    choice. The alternative is a working-set term (bytes held ÷ cache size)
    in the formulas, which needs no per-scale measurement but a cache
    model.
-4. **Solve time.** The first solve (mean latency) of a 9-query workload
-   takes 80–170 s (1,100 variables, 1,500 rows), the tie-break solves under
-   a second; single-query workloads solve in milliseconds. The per-query
-   reads $a_{q,e}$ with big-M freshness rows are the likely cause; the
-   deferred per-execution formulation would shrink the model.
+4. **Solve time.** With the speed-ups (decision 25), measured on one
+   host, release build, viewer cluster inputs:
+
+   | Workload | Before: variables, rows, wall | After: variables, rows, solve, wall | Mean latency (both) |
+   | --- | --- | --- | --- |
+   | topk-rate, guarantees ignored, mvp | 6,823, 10,714, 43.7 s | 1,195, 2,356, 0.05 s, 0.50 s | 186.893 ms |
+   | mixed-quantiles, raw retained | 647, 850, 12.8 s | 561, 846, 0.33 s, 0.45 s | 44.689 ms |
+   | distinct-two-forms, raw retained | 811, 1,059, 14.1 s | 349, 584, 0.54 s, 0.66 s | 36.711 ms |
+   | seed-862 workload-01, mvp | 1,120, 1,461, 156 s | 1,048, 1,606, 57.6 s, 58.1 s | 1,990.469 ms |
+
+   The root LP bound of the mean latency rose from about 0 (5e-6, 0.01,
+   0.006 and 14.6 ms) to 56.5, 20.0, 12.0 and 96.2 ms. seed-862 stays
+   slow: its `avg` queries divide a sum by a count read off one state (an
+   in-query diamond), so the feasible-plan bound may not add their inputs'
+   least works and leaves out 4 of 154 executions; adding them (as a
+   diagnosis measured, 6.5 s) is unsound there and, on a ratio of two
+   quantiles, left out the optimal plan.
 
 ## 6. Test plan (for approval)
 

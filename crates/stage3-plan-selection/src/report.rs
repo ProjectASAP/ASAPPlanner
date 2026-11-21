@@ -198,6 +198,9 @@ pub struct Selection {
     /// Under `lowest_mean_latency`, each query's latency in ms in the
     /// selection MILP's optimum, by query; `None` otherwise.
     pub selected_plan_latency_ms_per_query: Option<Vec<f64>>,
+    /// Under `lowest_mean_latency` with `report_root_lp_bound`, the LP
+    /// relaxation's mean latency in ms: the formulation's bound.
+    pub milp_root_lp_mean_latency_ms: Option<f64>,
     /// Under cost model 3's `lowest_mean_latency`, the executions left out
     /// before the MILP because their least possible latency is over the
     /// `max_latency_ms` of every query that may read them; 0 otherwise.
