@@ -31,7 +31,7 @@ use asap_cost::plan::execution_demand::evaluation_rate;
 use asap_cost::{close_together, ClusterLimits, CostInputs};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::plan::materialized_view::RefreshWindow;
-use asap_types::stages::PhysicalCandidateId;
+use asap_types::stages::{MemoGroupId, PhysicalCandidateId};
 use asap_types::workload::DataWorkload;
 
 use super::super::accuracy::{accuracy_constraints, AccuracyRules, AccuracyVariables, ErrorModel};
@@ -720,6 +720,160 @@ fn query_shapes(inputs: &ClusterInputs<'_>) -> Result<Vec<QueryShape>, Selection
             })
         })
         .collect()
+}
+
+/// The memo group of execution `index`.
+fn memo_group_of(inputs: &ClusterInputs<'_>, index: usize) -> MemoGroupId {
+    let v = inputs.selection.selectable.executions()[index].candidate;
+    inputs.selection.physical.physical_candidates[v.0]
+        .logical_candidate_id
+        .group
+}
+
+/// The most occurrences [`path_reads`] unfolds per query; past it, the
+/// query keeps only its per-edge reads (exact either way).
+const MOST_OCCURRENCES_PER_QUERY: usize = 4_096;
+
+/// What [`path_reads`]'s freshness rows read.
+struct PathReadRows<'a> {
+    groups: &'a Groups,
+    freshness: &'a [Expression],
+    big_m: &'a [f64],
+    fresh: Variable,
+    lateness: f64,
+    wait_per_run: f64,
+}
+
+/// Reads along each path of query `shape`'s plan. The per-query reads
+/// $a_{q,e}$ are bounded below by the largest edge read into $e$ only, so
+/// that a producer two branches of the query share (a diamond: `avg` as a
+/// sum over a count off one state) counts once; in the LP relaxation a
+/// read then splits over alternative consumers and halves at every layer
+/// where they meet a shared producer. Here the query's sub-DAG is
+/// unfolded into a tree of occurrences: one per output reference (reading
+/// its answering executions by $z$), and below an occurrence, one per
+/// (input, producer memo group) of its executions. In a plan an occurrence
+/// reads one execution and one edge per input of it, so per occurrence
+/// the reads are a flow summing to at most 1, and each bounds $a_{q,e}$
+/// from below: $a_{q,u} \ge \sum_c s_{o,c \to u}$. The same sums carry the
+/// freshness rows over a refresh group's executions in one occurrence.
+/// Every row holds in the plan's own reads, so the optimum is kept. A
+/// memo group already on an occurrence's path (a cycle) is not unfolded.
+fn path_reads(
+    inputs: &ClusterInputs<'_>,
+    shape: &QueryShape,
+    reads: &BTreeMap<usize, Variable>,
+    variables: &SelectionVariables,
+    freshness_rows: PathReadRows<'_>,
+    problem: &mut ProblemVariables,
+    rows: &mut Vec<Constraint>,
+) {
+    let selectable = inputs.selection.selectable;
+    let PathReadRows {
+        groups,
+        freshness,
+        big_m,
+        fresh,
+        lateness,
+        wait_per_run,
+    } = freshness_rows;
+    // An occurrence: its reads by execution and the memo groups above it.
+    let mut pending: Vec<(BTreeMap<usize, Expression>, Vec<MemoGroupId>)> = selectable
+        .answering()
+        .iter()
+        .filter(|(query, _)| *query == shape.query)
+        .map(|(query, answering)| {
+            let occurrence: BTreeMap<usize, Expression> = answering
+                .iter()
+                .filter(|index| reads.contains_key(index))
+                .filter_map(|&index| {
+                    variables
+                        .z
+                        .get(&(*query, index))
+                        .map(|&z| (index, Expression::from(z)))
+                })
+                .collect();
+            (occurrence, Vec::new())
+        })
+        .collect();
+    let mut unfolded = 0;
+    while let Some((occurrence, path)) = pending.pop() {
+        unfolded += 1;
+        // Below the root, each read bounds the query's read from below.
+        if !path.is_empty() {
+            for (index, read) in &occurrence {
+                rows.push(constraint!(reads[index] >= read.clone()));
+            }
+        }
+        // Freshness over the occurrence's executions in one refresh group.
+        let mut by_refresh_group: BTreeMap<usize, (Expression, Expression, usize)> =
+            BTreeMap::new();
+        for (&index, read) in &occurrence {
+            if let (Some(&group), true) =
+                (groups.of_execution.get(&index), at_ingestion(inputs, index))
+            {
+                let own = time_of(inputs.refresh_ms, index).max(0.0) + wait_per_run;
+                let entry = by_refresh_group.entry(group).or_default();
+                entry.0 += read.clone();
+                entry.1 += read.clone() * own;
+                entry.2 += 1;
+            }
+        }
+        for (group, (read, own, executions)) in by_refresh_group {
+            if executions > 1 {
+                rows.push(constraint!(
+                    fresh >= freshness[group].clone() - big_m[group] + big_m[group] * read
+                ));
+                rows.push(constraint!(fresh >= lateness + own));
+            }
+        }
+        if unfolded + pending.len() >= MOST_OCCURRENCES_PER_QUERY {
+            continue;
+        }
+        // Its children: per (input, producer memo group), the edge reads.
+        let mut children: BTreeMap<(usize, MemoGroupId), BTreeMap<usize, Expression>> =
+            BTreeMap::new();
+        for (&consumer, read) in &occurrence {
+            if at_ingestion(inputs, consumer) {
+                continue;
+            }
+            for input in 0..selectable.input_count(consumer) {
+                let mut flow = Expression::default();
+                let mut any = false;
+                for &position in selectable.edges_into(consumer, input) {
+                    let (Some(&y), producer) = (
+                        variables.y.get(&position),
+                        selectable.edges()[position].producer,
+                    ) else {
+                        continue;
+                    };
+                    if !reads.contains_key(&producer) {
+                        continue;
+                    }
+                    let edge_read = problem.add(variable().min(0).max(1));
+                    rows.push(constraint!(edge_read <= y));
+                    flow += edge_read;
+                    any = true;
+                    *children
+                        .entry((input, memo_group_of(inputs, producer)))
+                        .or_default()
+                        .entry(producer)
+                        .or_default() += edge_read;
+                }
+                if any {
+                    rows.push(constraint!(flow == read.clone()));
+                }
+            }
+        }
+        for ((_, group), child) in children {
+            if path.contains(&group) {
+                continue;
+            }
+            let mut below = path.clone();
+            below.push(group);
+            pending.push((child, below));
+        }
+    }
 }
 
 /// Whether execution `index` runs at ingestion time.
@@ -1414,6 +1568,27 @@ fn build_and_solve(
         }
         for (_, refresh) in read_refresh_of_group {
             rows.push(constraint!(fresh >= lateness + refresh));
+        }
+        // Reads along each path of the query's plan (exact): the plan's
+        // sub-DAG of the query unfolded into a tree of occurrences, each
+        // reading one execution in a plan; see `path_reads`.
+        if inputs.cost_inputs.latency_selection_checks.path_reads {
+            path_reads(
+                inputs,
+                shape,
+                &reads,
+                &variables,
+                PathReadRows {
+                    groups,
+                    freshness: &freshness,
+                    big_m: &big_m,
+                    fresh,
+                    lateness,
+                    wait_per_run,
+                },
+                &mut problem,
+                &mut rows,
+            );
         }
         for (&index, &read) in &reads {
             if !kept[index] {

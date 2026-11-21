@@ -67,7 +67,8 @@ fn selected_with(
             .env("ASAP_STAGE3_THETA_DOMINANCE", "off")
             .env("ASAP_STAGE3_FEASIBLE_PLAN_BOUND", "off")
             .env("ASAP_STAGE3_TIE_BREAKS", "full")
-            .env("ASAP_STAGE3_LATENCY_READS", "mccormick");
+            .env("ASAP_STAGE3_LATENCY_READS", "mccormick")
+            .env("ASAP_STAGE3_PATH_READS", "off");
     }
     let output = command.output().unwrap();
     let document: Value = serde_json::from_slice(&output.stdout)
@@ -248,15 +249,12 @@ fn the_measured_workloads_keep_their_optimum_in_a_bounded_model() {
             selected.variables,
             selected.rows
         );
-        // seed-862 proves its optimum in about 60 s: the default rule stops
-        // it at 30 s, above 1 %.
-        let may_stop_on_time = workload.contains("seed-862");
         assert_within_gap(
             &workload,
             deployment,
             ignore_accuracy,
             mean_latency_ms,
-            may_stop_on_time,
+            false,
         );
     }
 }
@@ -303,11 +301,11 @@ fn dominated_theta_families_are_left_out() {
 }
 
 /// The model sizes measured with the speed-ups (variables, rows).
-const TOPK_VARIABLES: u64 = 1195;
-const TOPK_ROWS: u64 = 2356;
-const MIXED_VARIABLES: u64 = 561;
-const MIXED_ROWS: u64 = 846;
-const DISTINCT_VARIABLES: u64 = 349;
-const DISTINCT_ROWS: u64 = 584;
-const SEED_VARIABLES: u64 = 1048;
-const SEED_ROWS: u64 = 1606;
+const TOPK_VARIABLES: u64 = 1216;
+const TOPK_ROWS: u64 = 2408;
+const MIXED_VARIABLES: u64 = 580;
+const MIXED_ROWS: u64 = 933;
+const DISTINCT_VARIABLES: u64 = 425;
+const DISTINCT_ROWS: u64 = 747;
+const SEED_VARIABLES: u64 = 1550;
+const SEED_ROWS: u64 = 2763;
