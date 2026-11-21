@@ -322,6 +322,10 @@ impl AccumulatorUpdater for DDSketchAccumulatorUpdater {
     fn memory_usage_bytes(&self) -> usize {
         self.acc.approx_memory_bytes()
     }
+
+    fn shrink_to_fit(&mut self) {
+        self.acc.inner.shrink_to_fit();
+    }
 }
 
 // ---------------------------------------------------------------------------

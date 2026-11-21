@@ -152,12 +152,16 @@ pub struct SourceFacts {
     /// series name: a histogram or summary family's range does not apply to
     /// its `_sum`, `_count` or `_bucket` series. A DDSketch state built from
     /// the column unchanged is costed at the buckets its own rows are
-    /// expected to span, and the declared range only caps that span: a
-    /// gauge declared within [90, 110] is charged 11 buckets however many
-    /// rows a state folds, while a range wider than the rows' expected
-    /// spread changes nothing. It never raises the charge. The deployment
-    /// must ensure it: a range that is too narrow under-charges the states,
-    /// so Stage 3 may pick a sketch that holds more than it was charged.
+    /// expected to span, within the declared range: the range caps that
+    /// span (a gauge declared within [90, 110] is charged 11 buckets however
+    /// many rows a state folds) and floors it at the spread of the state's
+    /// rows log-uniform over the range (so values that fill a wide range are
+    /// not under-charged at a few rows per state). A wide range can thus
+    /// raise the charge, and does when a state's rows are unknown (an
+    /// ingestion-time build), which is charged the whole range. The
+    /// deployment must ensure it: a range that is too narrow under-charges
+    /// the states, so Stage 3 may pick a sketch that holds more than it was
+    /// charged.
     /// Omitted from JSON when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub column_magnitudes: BTreeMap<String, ValueMagnitudeRange>,

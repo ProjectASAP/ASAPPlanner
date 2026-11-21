@@ -179,7 +179,11 @@ fn fingerprint(state: &dyn AggregateCore) -> String {
         );
     }
     if let Some(s) = any.downcast_ref::<DDSketchAccumulator>() {
-        return format!("{s:?}");
+        // Shrunk, as a sealed state is: the buckets it holds, without the
+        // empty slots an open store grows by.
+        let mut sketch = s.sketch().clone();
+        sketch.shrink_to_fit();
+        return format!("{sketch:?}");
     }
     if let Some(s) = any.downcast_ref::<HllSketchAccumulator>() {
         return format!("{s:?}");
