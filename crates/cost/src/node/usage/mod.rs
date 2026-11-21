@@ -32,8 +32,9 @@ use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
 use crate::node::state_bytes::{
-    assumed_magnitude_range, keeps_every_value, row_bytes, sketch_state_bytes, state_bytes_per_row,
-    state_row_bytes_beside_state, summary_state_bytes, StateInputRows,
+    assumed_magnitude_range, keeps_every_value, open_sketch_state_bytes, open_summary_state_bytes,
+    row_bytes, sketch_state_bytes, state_bytes_per_row, state_row_bytes_beside_state,
+    summary_state_bytes, StateInputRows,
 };
 use crate::{aggregate_lookup, lookup, StateFamily};
 use crate::{
@@ -462,6 +463,10 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // What each summary state it outputs folds, when it builds or merges
     // states (else passed on below).
     let mut built_state_input_rows: Option<StateInputRows> = None;
+    // A summary build's output while its states still receive values
+    // (each state open): what a query-time build holds while it runs and
+    // what an ingestion-time chain's current window holds.
+    let mut open_output_bytes: Option<u64> = None;
     // The time its raw output rows span, when it reads or narrows raw rows
     // (else passed on below).
     let mut read_raw_rows_span_ms: Option<u64> = None;
@@ -746,6 +751,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             node.parameters.as_ref(),
             input_rows,
         )?);
+        let open_state_bytes = measured_state_bytes.unwrap_or(open_summary_state_bytes(
+            family,
+            node.parameters.as_ref(),
+            input_rows,
+        )?);
         let update_terms_per_row = update_terms_per_row(
             family,
             node.parameters.as_ref(),
@@ -756,6 +766,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         Ok(SummaryStateBuild {
             input_rows,
             state_bytes,
+            open_state_bytes,
             update_terms_per_row,
             magnitude_range_fact: assumed_magnitude_range_fact(column, input_rows),
         })
@@ -1174,6 +1185,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let SummaryStateBuild {
                 input_rows,
                 state_bytes,
+                open_state_bytes,
                 update_terms_per_row: update_terms,
                 magnitude_range_fact,
             } = summary_state_build(
@@ -1183,6 +1195,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
             )?;
             built_state_input_rows = Some(input_rows);
+            open_output_bytes = Some(
+                group_count
+                    .checked_mul(
+                        open_state_bytes + state_row_bytes_beside_state(&node.output_schema),
+                    )
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            );
             assumed_data_facts.extend(magnitude_range_fact);
             let update_ops = update_terms.operations();
             let out = EdgeStatistics {
@@ -1251,6 +1270,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let SummaryStateBuild {
                 input_rows,
                 state_bytes,
+                open_state_bytes,
                 update_terms_per_row: update_terms,
                 magnitude_range_fact,
             } = summary_state_build(
@@ -1260,6 +1280,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
             )?;
             built_state_input_rows = Some(input_rows);
+            open_output_bytes = Some(
+                group_count
+                    .checked_mul(
+                        open_state_bytes + state_row_bytes_beside_state(&node.output_schema),
+                    )
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            );
             assumed_data_facts.extend(magnitude_range_fact);
             let update_ops = update_terms.operations();
             // The states it completes in one execution, each allocated
@@ -1351,8 +1378,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                     .map(|rows| (rows, producer.output.rows.div_ceil(group_count.max(1))))
             }));
             built_state_input_rows = merged_input_rows;
+            // A merge target receives its inputs' states: priced open.
             let merged_state_bytes = match (family, merged_input_rows) {
-                (StateFamily::Sketch(params), Some(rows)) => sketch_state_bytes(params, rows),
+                (StateFamily::Sketch(params), Some(rows)) => open_sketch_state_bytes(params, rows),
                 _ => producers.iter().map(input_state_bytes).max().unwrap_or(0),
             };
             // Each input state's merge, by the states' family and bytes,
@@ -1556,9 +1584,17 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // keeps per group when that is more. A computation that keeps nothing holds its
     // working memory while it runs.
     let state = out.bytes.max(estimate.peak_memory_bytes());
+    // The output being built, its states still open: what a query-time
+    // build holds while it runs, and the newest window an ingestion-time
+    // view keeps besides its sealed ones.
+    let open_state = open_output_bytes.map_or(state, |open| state.max(open));
     let (materialized_bytes, medium) = match (ingestion, node.lifetime, &node.payload) {
         (_, Lifetime::None, _) => {
-            let working_memory_bytes = estimate.peak_memory_bytes();
+            // A summary build holds its states open while it runs.
+            let working_memory_bytes = match open_output_bytes {
+                Some(open) => estimate.peak_memory_bytes().max(open),
+                None => estimate.peak_memory_bytes(),
+            };
             peak_memory_bytes = working_memory_bytes.saturating_mul(multiplier);
             if !ingestion && working_memory_bytes > 0 {
                 held_bytes = Some(working_memory_bytes);
@@ -1591,8 +1627,8 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         (_, Lifetime::OneEvaluation(medium), _) => {
             match medium {
                 StorageMedium::Memory => {
-                    held_bytes = Some(state);
-                    peak_memory_bytes = state;
+                    held_bytes = Some(open_state);
+                    peak_memory_bytes = open_state;
                 }
                 StorageMedium::Disk => disk_bytes = state,
             }
@@ -1608,11 +1644,8 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         // that much longer before its readers read it.
         (true, Lifetime::AcrossEvaluations(medium), _) => (
             state
-                .checked_mul(
-                    retained_output_count
-                        .checked_add(1)
-                        .ok_or(AnalyticalCostError::Overflow)?,
-                )
+                .checked_mul(retained_output_count)
+                .and_then(|sealed| sealed.checked_add(open_state))
                 .ok_or(AnalyticalCostError::Overflow)?,
             medium,
         ),
@@ -1749,7 +1782,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
 /// `SummaryTumblingWindowChain`.
 struct SummaryStateBuild {
     input_rows: StateInputRows,
+    /// Bytes of one sealed state, as a stored window keeps it.
     state_bytes: u64,
+    /// Bytes of one state still receiving values (a chain's current window,
+    /// a query-time build before it is sealed).
+    open_state_bytes: u64,
     update_terms_per_row: NodeCostTerms,
     magnitude_range_fact: Option<AssumedDataFact>,
 }

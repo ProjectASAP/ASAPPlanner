@@ -2013,9 +2013,10 @@ fn a_ddsketch_over_a_scan_is_costed_at_its_declared_value_magnitude_range() {
         state_bytes(&data(Some(latency)), BTreeSet::from(["ts"])),
         ddsketch_costed_bytes(false, None)
     );
-    // 600 rows span less than the declared seven decades, so the declared
-    // range does not lower their bytes; it never raises them.
-    assert!(ddsketch_costed_bytes(false, Some(latency)) <= ddsketch_costed_bytes(false, None));
+    // A declared range is charged in full: the seven decades cost more than
+    // the wide-spread margin of 600 undeclared rows, and less than the
+    // assumed nine decades of unknown rows.
+    assert!(ddsketch_costed_bytes(false, Some(latency)) > ddsketch_costed_bytes(false, None));
 }
 
 /// A DDSketch over a scan of `latency` whose `value` declares no
@@ -4074,4 +4075,74 @@ fn a_heap_over_few_distinct_items_is_read_and_merged_for_the_items_it_holds() {
         few.merge_ms,
         many.merge_ms
     );
+}
+
+/// A DDSketch build holds its states open while it runs and passes them on
+/// sealed: a query-time build over 600 rows of unknown sign into one group
+/// holds the open state (a 1 KiB first block per store beyond the sealed
+/// one), and its output
+/// edge carries the sealed state.
+#[test]
+fn a_ddsketch_build_holds_open_states_and_keeps_sealed_ones() {
+    use crate::node::state_bytes::{open_sketch_state_bytes, sketch_state_bytes, StateInputRows};
+    use asap_types::ir::schema::{DataType, Field};
+    use asap_types::summary_type::SketchAlgorithm;
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let params = SketchParams::DDSketch { alpha: 0.01 };
+    let producer = PhysicalASAPDAGNode {
+        output_schema: Schema::new(vec![
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+        ]),
+        ..node(metric_scan("a"))
+    };
+    let producer_output = |rows| ProducerOutput {
+        payload: &producer.payload,
+        output_schema: &producer.output_schema,
+        output: EdgeStatistics {
+            rows,
+            bytes: rows * 16,
+        },
+        sources: BTreeSet::from(["a"]),
+        family: StateFamily::None,
+        unchanged_columns: BTreeSet::from(["ts", "value"]),
+        tumbling_windows: 1,
+        chain_tumbling_window_width_ms: None,
+        state_input_rows: None,
+        raw_rows_span_ms: None,
+    };
+    let rows = StateInputRows {
+        rows_per_state: Some(600),
+        // The scan's values are of unknown sign: two stores.
+        non_negative: false,
+        value_magnitude_range: None,
+        distinct_values: None,
+    };
+    let (sealed, open) = (
+        sketch_state_bytes(&params, rows),
+        open_sketch_state_bytes(&params, rows),
+    );
+    assert!(open > sealed + 1_000, "{open} open, {sealed} sealed");
+    let build = PhysicalASAPDAGNode {
+        parameters: Some(params.clone()),
+        ..node(Payload::ASAP(ASAPOp::SummaryAgg {
+            child: 0,
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::DDSketch),
+            input: SummaryUpdate::column(ColumnRef::Named("value".to_string())),
+            reduction: Reduction::Reduce(GroupKeys::default()),
+            filter: None,
+        }))
+    };
+    let usage = node_resource_usage_and_cost(
+        &build,
+        &[producer_output(600)],
+        (1, 1.0),
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
+    assert_eq!(usage.output.bytes, sealed, "{}", usage.cost.detail);
+    assert_eq!(usage.peak_memory_bytes, open, "{}", usage.cost.detail);
 }
