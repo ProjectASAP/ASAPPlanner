@@ -193,7 +193,9 @@ fn some_node_matches(plan: &PhysicalASAPDAG, exclusion: &CandidateExclusion) -> 
 /// Asserts the selected plan costs `expected` per second, as observed (six
 /// decimals).
 fn assert_cost(selection: &Selection, expected: f64) {
-    let cost = selection.selected_plan_cost_per_second;
+    let cost = selection
+        .selected_plan_cost_per_second
+        .expect("cost model 1");
     assert!(
         (cost - expected).abs() <= 5e-7,
         "cost {cost} per second, expected {expected}"

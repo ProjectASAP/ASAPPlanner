@@ -78,7 +78,9 @@ fn selected_plan_objective_and_plan_cost_with(
     (
         plan.clone(),
         (
-            selection.selected_plan_cost_per_second,
+            selection
+                .selected_plan_cost_per_second
+                .expect("cost model 1"),
             cost.cost_per_second.expect("cost model 1"),
         ),
     )

@@ -637,7 +637,8 @@ fn compaction_latency_charges_each_merge_its_family_s_merge_time() {
         &CostInputs::default(),
     )
     .unwrap();
-    let compaction_ms = cost.usage.latency_per_query[0].compaction_ms;
+    // The newest window's refresh, its compaction included.
+    let compaction_ms = cost.usage.latency_per_query[0].precompute_execution_ms;
     assert!(
         compaction_ms >= 100_000.0 * 1.8e-3,
         "predicted compaction {compaction_ms} ms, measured merges take at least 180 ms"
@@ -729,7 +730,7 @@ fn compaction_latency_is_zero_for_ingestion_time_nodes_holding_no_states() {
             "{kept}: ingestion takes {ingest_ms_per_second} ms per second, one core"
         );
         assert_eq!(
-            cost.usage.latency_per_query[0].compaction_ms, 0.0,
+            cost.usage.latency_per_query[0].precompute_execution_ms, 0.0,
             "{kept} kept at ingestion time"
         );
     }

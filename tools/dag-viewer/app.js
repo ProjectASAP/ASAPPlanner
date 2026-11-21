@@ -151,7 +151,11 @@
     const accepted = acceptedText(stage3.accepted_accuracy_per_query);
     $('lane1-meta').innerHTML = `${stage3.plan.nodes.length} nodes · ${costText(stage3.cost)}` +
       (accepted ? ` · <span class="accepted">${esc(accepted)}</span>` : '') +
-      (stage3.cost && stage3.cost.usage ? `<br>Stage 3 usage: ${esc(usageText(stage3.cost.usage))}` : '');
+      (stage3.cost && stage3.cost.usage ? `<br>Stage 3 usage: ${esc(usageText(stage3.cost.usage))}` : '') +
+      (stage3.cost && latencyBreakdownText(stage3.cost.usage) ? `<br>Latency: ${esc(latencyBreakdownText(stage3.cost.usage))}` : '') +
+      (stage3.cost && threadsText(stage3.cost.usage) ? `<br>${esc(threadsText(stage3.cost.usage))}` : '') +
+      (typeof stage3.milp_objective_mean_latency_ms === 'number' ? `<br>MILP mean latency ${esc(stage3.milp_objective_mean_latency_ms.toPrecision(4))} ms` +
+        (stage3.executions_pruned_by_latency_bound ? ` · ${stage3.executions_pruned_by_latency_bound} executions left out by latency bounds` : '') : '');
   }
 
   function restyle() { cys.forEach((cy) => cy && cy.style(style())); if (window.MemoView) window.MemoView.restyle(); }

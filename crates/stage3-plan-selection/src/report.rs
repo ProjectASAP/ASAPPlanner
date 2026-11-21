@@ -175,10 +175,10 @@ pub struct Selection {
     /// The candidates Stage 3 ruled out before the selection MILP:
     /// dominated ones and those whose usage could not be costed.
     pub pruned_candidates: Vec<PrunedCandidate<PhysicalCandidate>>,
-    /// The selection MILP's optimum: the selected plan's cost per second
-    /// under cost model 1, which `asap_cost::plan_cost` of the plan
-    /// reports too.
-    pub selected_plan_cost_per_second: f64,
+    /// The selection MILP's optimum under cost model 1: the selected plan's
+    /// cost per second, which `asap_cost::plan_cost` of the plan reports
+    /// too; `None` under cost model 3, which has no prices.
+    pub selected_plan_cost_per_second: Option<f64>,
     /// The selection MILP's variables (columns).
     pub milp_variable_count: usize,
     /// The selection MILP's constraint rows.
@@ -192,6 +192,38 @@ pub struct Selection {
     /// HiGHS's default feasibility tolerances (1e-7) missed an accuracy
     /// target when checked exactly and was solved again at 1e-10.
     pub milp_solve_count: usize,
+    /// Under cost model 3's `lowest_mean_latency`, the selected plan's
+    /// frequency-weighted mean query latency in ms; `None` otherwise.
+    pub selected_plan_mean_latency_ms: Option<f64>,
+    /// Under `lowest_mean_latency`, each query's latency in ms in the
+    /// selection MILP's optimum, by query; `None` otherwise.
+    pub selected_plan_latency_ms_per_query: Option<Vec<f64>>,
+    /// Under `lowest_mean_latency` with `report_root_lp_bound`, the LP
+    /// relaxation's mean latency in ms: the formulation's bound.
+    pub milp_root_lp_mean_latency_ms: Option<f64>,
+    /// Under `lowest_mean_latency`, how far the selected plan may be from
+    /// the optimum: the solve stops at a relative gap of 1 % or after 30 s
+    /// unless `LatencySelectionChecks::exact_solve`; `None` otherwise.
+    pub optimality_gap: Option<OptimalityGap>,
+    /// Under cost model 3's `lowest_mean_latency`, the executions left out
+    /// before the MILP because their least possible latency is over the
+    /// `max_latency_ms` of every query that may read them; 0 otherwise.
+    pub executions_pruned_by_latency_bound: usize,
+}
+
+/// How far a selected plan's mean latency may be from the optimum: no
+/// plan has a mean latency below `mean_latency_lower_bound_ms`, and
+/// `relative_gap` = (`mean_latency_ms` − bound) / `mean_latency_ms` (0 when
+/// the solve proved the plan optimal).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptimalityGap {
+    /// The selected plan's frequency-weighted mean query latency, ms.
+    pub mean_latency_ms: f64,
+    /// The solver's lower bound on any plan's mean latency, ms.
+    pub mean_latency_lower_bound_ms: f64,
+    /// The relative gap between the two.
+    pub relative_gap: f64,
 }
 
 /// Why Stage 3 selected no plan.
@@ -233,9 +265,49 @@ pub enum ErrorSelectingPlan {
         query: usize,
         failure_probability_bound: Option<FailureProbabilityBound>,
     },
-    /// The selection MILP implements cost model 1 only (#1095 §3).
+    /// The selection MILP implements cost model 1 and cost model 3's
+    /// `lowest_mean_latency` only.
     #[error("the selection MILP does not support {0}")]
     UnsupportedCostModel(String),
+    /// Under cost model 3, no plan fits the cluster's limits: each listed
+    /// limit alone blocks every plan meeting the others, with the least any
+    /// such plan needs.
+    #[error("no plan fits the cluster's limits: {}", shortfalls_in_words(.0))]
+    OverClusterLimits(Vec<crate::ClusterLimitShortfall>),
+    /// Cost model 3's `lowest_mean_latency` ranks plans by predicted
+    /// latency, which the cost inputs do not say passed the calibration
+    /// gate (`CostInputs::latency_calibration`).
+    #[error(
+        "lowest_mean_latency needs cost inputs whose times passed the calibration gate \
+         (latency_calibration: passed_gate), or the opt-in latency_calibration: \
+         uncalibrated_for_testing"
+    )]
+    LatencyNotCalibrated,
+}
+
+/// Each shortfall in words, e.g. "memory: the least any plan needs is
+/// 40064 bytes, the limit is 1 bytes (MemoryBytes)".
+fn shortfalls_in_words(shortfalls: &[crate::ClusterLimitShortfall]) -> String {
+    use crate::ClusterLimit;
+    shortfalls
+        .iter()
+        .map(|shortfall| {
+            let (name, unit) = match shortfall.limit {
+                ClusterLimit::MemoryBytes => ("memory".to_string(), " bytes"),
+                ClusterLimit::DiskBytes => ("disk".to_string(), " bytes"),
+                ClusterLimit::CpuCores => ("CPU cores (average)".to_string(), ""),
+                ClusterLimit::PrecomputeLoad => ("precompute load".to_string(), ""),
+                ClusterLimit::QueryLatencyMs { query } => {
+                    (format!("query {} latency", query + 1), " ms")
+                }
+            };
+            format!(
+                "{name}: the least any plan needs is {:.6}{unit}, the limit is {}{unit} ({:?})",
+                shortfall.least_needed, shortfall.available, shortfall.limit
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// `bound` in words for [`ErrorSelectingPlan::AccuracyTargetBelowSolverPrecision`]:

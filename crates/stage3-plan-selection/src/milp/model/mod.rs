@@ -37,7 +37,10 @@ use super::upper_bound::dearer_than_a_feasible_plan;
 use crate::cost::ExecutionCosts;
 use crate::selectable::{Execution, QueryId, SelectableExecutions};
 
+pub(crate) mod cluster;
+
 /// What the MILP is built over.
+#[derive(Clone, Copy)]
 pub(crate) struct SelectionInputs<'a> {
     pub(crate) physical: &'a PhysicalASAPMemoCandidates,
     /// Each query's workload entry, for the retention needs of (R).

@@ -1,0 +1,17 @@
+{
+  "cost_model": {
+    "cluster_capacity": {
+      "memory_bytes": 8589934592,
+      "disk_bytes": 107374182400,
+      "cpu_cores": 16,
+      "objective": "lowest_mean_latency"
+    }
+  },
+  "data_plane_execution": {
+    "precompute_threads": 2,
+    "query_threads": 4,
+    "allowed_lateness_ms": 0,
+    "max_thread_utilization": 0.7
+  },
+  "latency_calibration": "uncalibrated_for_testing"
+}

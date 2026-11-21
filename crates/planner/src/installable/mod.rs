@@ -25,7 +25,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use asap_cost::{NodeCostSource, OperatorKind, PlanCost};
+use asap_cost::{NodeCostSource, OperatorKind, PlanCost, RecommendedThreads};
 use asap_executor::physical_planner::CompiledPhysicalDAG;
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::plan::materialized_view::{
@@ -79,6 +79,12 @@ pub struct SelectedPlanReport {
     /// empty in a report written without it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assumed_data_facts: Vec<AssumedDataFact>,
+    /// Under cost model 3's `lowest_mean_latency`, the mean latency the
+    /// selection reached, the lower bound no plan beats and the relative
+    /// gap between them (the solve stops at 1 % or 30 s unless asked to be
+    /// exact); omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimality_gap: Option<asap_stage3_plan_selection::OptimalityGap>,
 }
 
 /// What Stage 3 predicts the selected plan uses, per second of wall time
@@ -103,6 +109,16 @@ pub struct PredictedUsage {
     pub per_node: Vec<PredictedNodeUsage>,
     /// One per workload query, in workload order.
     pub per_query: Vec<PredictedQueryUsage>,
+    /// The fraction of the precompute threads' time spent refreshing (ρ);
+    /// 0 in a report written without it.
+    #[serde(default)]
+    pub precompute_load: f64,
+    /// Per thread role (ingest, precompute, query), the CPU the plan is
+    /// predicted to use and the threads that serve it at the target
+    /// utilisation: what a data plane configures its threads from; zeros
+    /// in a report written without it.
+    #[serde(default)]
+    pub recommended_configuration: RecommendedThreads,
 }
 
 /// One operator node's predicted usage.
@@ -122,17 +138,52 @@ pub struct PredictedNodeUsage {
     pub cost_per_second: Option<f64>,
     /// Whether its CPU came from the measured cost table or the formulas.
     pub cost_source: NodeCostSource,
+    /// At ingestion time: its ingest work, core-seconds per second.
+    #[serde(default)]
+    pub ingest_cpu_core_seconds_per_second: f64,
+    /// At ingestion time: its refresh work's CPU ms per window close.
+    #[serde(default)]
+    pub refresh_cpu_ms_per_window: f64,
+    /// At ingestion time: its refresh work's wall ms per window close (CPU
+    /// plus I/O wait).
+    #[serde(default)]
+    pub refresh_wall_ms_per_window: f64,
+    /// At query time: ms of one computation (one step).
+    #[serde(default)]
+    pub query_ms_per_step: f64,
+    /// Whether its measured price came from the nearest measured series
+    /// count, its own being outside them.
+    #[serde(default)]
+    pub priced_outside_measured_scale: bool,
 }
 
-/// One query's predicted latency per evaluation.
+/// One query's predicted latency per request: the freshness wait, then the
+/// request's execution (`asap_cost::QueryLatency`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PredictedQueryUsage {
-    /// Milliseconds compacting the newest window of the ingestion-time
-    /// state it reads.
-    pub compaction_ms: f64,
-    /// Milliseconds of its query-time work, its per-request cost included.
-    pub query_ms: f64,
+    /// The data plane's allowed lateness.
+    #[serde(default)]
+    pub allowed_lateness_ms: f64,
+    /// Queueing behind the other refreshes of its newest window's instant.
+    #[serde(default)]
+    pub precompute_queueing_ms: f64,
+    /// The refresh of the newest window of the views it reads, the merging
+    /// of the ingest threads' partial copies included (a report written
+    /// before the breakdown names it `compaction_ms`).
+    #[serde(default, alias = "compaction_ms")]
+    pub precompute_execution_ms: f64,
+    /// Its query-time work, its fixed cost per request and step included
+    /// (`query_ms` in a report written before the breakdown).
+    #[serde(alias = "query_ms")]
+    pub query_execution_ms: f64,
+    /// The four parts' sum; 0 in a report written before the breakdown.
+    #[serde(default)]
+    pub latency_ms: f64,
+    /// Its evaluations per second, its weight in the mean latency; 0 in a
+    /// report written before the breakdown.
+    #[serde(default)]
+    pub evaluations_per_second: f64,
 }
 
 /// Why an installable plan could not be built or is not consistent.
@@ -229,7 +280,9 @@ pub async fn plan_installable(
     )?;
     let assumed_data_facts = assumed_data_facts(&output.plan, &cost, &data);
     let installable = installable_plan_of(output.plan, &entries).map_err(PlanError::Installable)?;
-    Ok((installable, report_of(&cost, assumed_data_facts)))
+    let mut report = selected_plan_report(&cost, assumed_data_facts);
+    report.optimality_gap = output.optimality_gap;
+    Ok((installable, report))
 }
 
 /// The installable plan of `plan`, the plan Stage 3 built for a workload
@@ -604,8 +657,12 @@ pub fn assumed_data_facts(
     facts
 }
 
-/// The report of the selected plan's `cost` and the data facts it assumed.
-fn report_of(cost: &PlanCost, assumed_data_facts: Vec<AssumedDataFact>) -> SelectedPlanReport {
+/// The report of the selected plan's `cost` and the data facts it assumed,
+/// as [`plan_installable`] returns it beside the plan.
+pub fn selected_plan_report(
+    cost: &PlanCost,
+    assumed_data_facts: Vec<AssumedDataFact>,
+) -> SelectedPlanReport {
     SelectedPlanReport {
         cost_per_second: cost.cost_per_second,
         predicted_usage: PredictedUsage {
@@ -629,6 +686,13 @@ fn report_of(cost: &PlanCost, assumed_data_facts: Vec<AssumedDataFact>) -> Selec
                     cpu_core_seconds_per_second: node.cpu_core_seconds_per_second,
                     cost_per_second: node.cost_per_second,
                     cost_source: node.cost_source,
+                    ingest_cpu_core_seconds_per_second: node
+                        .phase_times
+                        .ingest_cpu_core_seconds_per_second,
+                    refresh_cpu_ms_per_window: node.phase_times.refresh_cpu_ms_per_window,
+                    refresh_wall_ms_per_window: node.phase_times.refresh_wall_ms_per_window,
+                    query_ms_per_step: node.phase_times.query_ms_per_step,
+                    priced_outside_measured_scale: node.priced_outside_measured_scale,
                 })
                 .collect(),
             per_query: cost
@@ -636,12 +700,19 @@ fn report_of(cost: &PlanCost, assumed_data_facts: Vec<AssumedDataFact>) -> Selec
                 .latency_per_query
                 .iter()
                 .map(|latency| PredictedQueryUsage {
-                    compaction_ms: latency.compaction_ms,
-                    query_ms: latency.query_ms,
+                    allowed_lateness_ms: latency.allowed_lateness_ms,
+                    precompute_queueing_ms: latency.precompute_queueing_ms,
+                    precompute_execution_ms: latency.precompute_execution_ms,
+                    query_execution_ms: latency.query_execution_ms,
+                    latency_ms: latency.latency_ms(),
+                    evaluations_per_second: latency.evaluations_per_second,
                 })
                 .collect(),
+            precompute_load: cost.usage.precompute_load,
+            recommended_configuration: cost.usage.recommended_configuration,
         },
         assumed_data_facts,
+        optimality_gap: None,
     }
 }
 

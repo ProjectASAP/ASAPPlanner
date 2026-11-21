@@ -62,6 +62,43 @@ pub struct MeasuredOperationCosts {
     /// CPU nanoseconds the runtime pays once per query request, whatever
     /// its plan: scheduling, request handling and result encoding. Default 0.
     pub ns_per_evaluation: f64,
+    /// CPU nanoseconds the runtime pays once per engine query run: one run
+    /// per step of a request (an instant request is one step). Default 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub ns_per_evaluation_step: f64,
+    /// CPU nanoseconds per arriving sample outside every plan node (decode,
+    /// append), the same for every plan: it counts in the ingest role and in
+    /// cost model 3's CPU limit, not in cost model 1's cost. Default 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub ns_per_ingested_sample: f64,
+    /// Wall time a window-close refresh waits on I/O (writing views,
+    /// syncs), not CPU. Default none.
+    #[serde(skip_serializing_if = "RefreshIoWait::is_none")]
+    pub refresh_io_wait: RefreshIoWait,
+}
+
+/// Wall time a refresh waits on I/O, beside its CPU
+/// ([`MeasuredOperationCosts::refresh_io_wait`]). It adds to the refresh's
+/// latency and to the precompute load (a waiting thread is busy), not to
+/// CPU or cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RefreshIoWait {
+    /// Wall nanoseconds per refresh-group run (per window close).
+    pub ns_per_refresh: f64,
+    /// Wall nanoseconds per window state a refresh emits.
+    pub ns_per_state_emitted: f64,
+}
+
+impl RefreshIoWait {
+    /// No wait.
+    pub fn is_none(&self) -> bool {
+        self.ns_per_refresh == 0.0 && self.ns_per_state_emitted == 0.0
+    }
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
 }
 
 /// The measured CPU time of one operator kind, at one phase, for one family.
@@ -122,6 +159,23 @@ pub struct OperatorCost {
     /// derive from the sketch's parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bytes_per_state: Option<f64>,
+    /// At ingestion time: CPU nanoseconds per window state the node emits
+    /// at a refresh (window close), charged beside `ns_per_unit` and
+    /// `ns_per_invocation`. Default 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ns_per_state_emitted: f64,
+    /// The series the node's sources held when it was measured. Entries of
+    /// one class at several counts are interpolated by the node's own
+    /// series count, linearly in log(price) over log(series) ([`lookup`]);
+    /// `None`: one price at every scale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_series_count: Option<u64>,
+    /// For an `Aggregate`: the exact combination of measures the entry was
+    /// measured on (their `kind`s, e.g. `["sum", "count"]`); it prices an
+    /// `Aggregate` with exactly those measures, winning over the
+    /// single-measure entries. Empty: not a combination entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub measures: Vec<String>,
 }
 
 /// The state family a summary node works on, which selects its entries.
@@ -139,6 +193,11 @@ pub struct UnitPrice {
     pub ns_per_unit: f64,
     pub ns_per_invocation: f64,
     pub memory_bytes_per_state: Option<f64>,
+    /// CPU ns per window state emitted at a refresh.
+    pub ns_per_state_emitted: f64,
+    /// Whether the node's series count is outside the measured series
+    /// counts, so the nearest scale's price was taken.
+    pub outside_measured_scale: bool,
 }
 
 /// The price of `operator` at `phase` on `family`, if the table has an
@@ -155,6 +214,29 @@ pub fn lookup(
     family: StateFamily<'_>,
     size_of: impl Fn(&SketchParams) -> f64,
 ) -> Option<UnitPrice> {
+    lookup_at_scale(table, operator, phase, family, size_of, None)
+}
+
+/// [`lookup`] for a node whose sources hold `series` series. When some of
+/// the matching entries name a `measured_series_count`, only those are
+/// used: the sketch parameters are chosen as [`lookup`] chooses them (the
+/// exact parameters, else the nearest size), then the two entries of those
+/// parameters whose series counts are nearest below and above `series`
+/// are interpolated linearly in log(price) over log(series); a count
+/// outside the measured ones (or unknown) takes the nearest entry's price
+/// and marks the price [`UnitPrice::outside_measured_scale`].
+///
+/// Example: `SummaryMerge` entries of 100 ns per state at 1,000 series and
+/// 1,000 ns at 10,000: about 316 ns at 3,162 series; 1,000 ns, outside
+/// the measured scale, at 20,000.
+pub fn lookup_at_scale(
+    table: &MeasuredOperationCosts,
+    operator: OperatorKind,
+    phase: ExecutionTiming,
+    family: StateFamily<'_>,
+    size_of: impl Fn(&SketchParams) -> f64,
+    series: Option<u64>,
+) -> Option<UnitPrice> {
     let matching = |for_phase: Option<ExecutionTiming>| {
         table
             .operators
@@ -163,6 +245,7 @@ pub fn lookup(
                 entry.operator == operator
                     && entry.phase == for_phase
                     && entry.measure.is_none()
+                    && entry.measures.is_empty()
                     && match family {
                         StateFamily::None => entry.sketch.is_none() && entry.exact.is_none(),
                         StateFamily::Exact(kind) => {
@@ -182,6 +265,32 @@ pub fn lookup(
     let mut entries = matching(Some(phase));
     if entries.is_empty() {
         entries = matching(None);
+    }
+    if entries
+        .iter()
+        .any(|entry| entry.measured_series_count.is_some())
+    {
+        entries.retain(|entry| entry.measured_series_count.is_some());
+        if let StateFamily::Sketch(params) = family {
+            // The parameters measured: the node's own, else the nearest size.
+            let target = size_of(params).ln();
+            let chosen = entries
+                .iter()
+                .find(|entry| entry.sketch.as_ref() == Some(params))
+                .or_else(|| {
+                    entries.iter().min_by(|a, b| {
+                        let distance = |entry: &&OperatorCost| {
+                            (size_of(entry.sketch.as_ref().expect("a sketch entry")).ln() - target)
+                                .abs()
+                        };
+                        distance(a).total_cmp(&distance(b))
+                    })
+                })?
+                .sketch
+                .clone();
+            entries.retain(|entry| entry.sketch == chosen);
+        }
+        return at_series_count(&entries, series);
     }
     let StateFamily::Sketch(params) = family else {
         return entries.first().map(|entry| price_of(entry));
@@ -211,6 +320,8 @@ pub fn lookup(
                     .memory_bytes_per_state
                     .zip(high.memory_bytes_per_state)
                     .map(|(a, b)| mix(a, b)),
+                ns_per_state_emitted: mix(low.ns_per_state_emitted, high.ns_per_state_emitted),
+                outside_measured_scale: false,
             })
         }
         (Some(nearest), _) | (None, Some(nearest)) => Some(price_of(nearest)),
@@ -218,31 +329,139 @@ pub fn lookup(
     }
 }
 
-/// The price of an `Aggregate` at `phase` per input row: the sum over its
-/// measures, when each has an entry (one for its own phase winning over
-/// one for both).
+/// The price of the entries `entries` (one class and parameters, each with
+/// a `measured_series_count`) at `series`: interpolated linearly in
+/// log(price) over log(series) between the nearest counts below and above,
+/// else the nearest count's, marked outside the measured scale. A zero
+/// price interpolates linearly.
+fn at_series_count(entries: &[&OperatorCost], series: Option<u64>) -> Option<UnitPrice> {
+    if entries.is_empty() {
+        return None;
+    }
+    let count = |entry: &&&OperatorCost| entry.measured_series_count.expect("a scaled entry");
+    let nearest_outside = |entry: &OperatorCost| {
+        let mut price = price_of(entry);
+        price.outside_measured_scale = true;
+        Some(price)
+    };
+    let Some(series) = series else {
+        return nearest_outside(entries.iter().max_by_key(count)?);
+    };
+    if let Some(entry) = entries.iter().find(|entry| count(entry) == series) {
+        return Some(price_of(entry));
+    }
+    let below = entries
+        .iter()
+        .filter(|e| count(e) < series)
+        .max_by_key(count);
+    let above = entries
+        .iter()
+        .filter(|e| count(e) > series)
+        .min_by_key(count);
+    match (below, above) {
+        (Some(low), Some(high)) => {
+            let at = ((series as f64).ln() - (count(&low) as f64).ln())
+                / ((count(&high) as f64).ln() - (count(&low) as f64).ln());
+            let mix = |a: f64, b: f64| match a > 0.0 && b > 0.0 {
+                true => (a.ln() + (b.ln() - a.ln()) * at).exp(),
+                false => a + (b - a) * at,
+            };
+            let (low, high) = (price_of(low), price_of(high));
+            Some(UnitPrice {
+                ns_per_unit: mix(low.ns_per_unit, high.ns_per_unit),
+                ns_per_invocation: mix(low.ns_per_invocation, high.ns_per_invocation),
+                memory_bytes_per_state: low
+                    .memory_bytes_per_state
+                    .zip(high.memory_bytes_per_state)
+                    .map(|(a, b)| mix(a, b)),
+                ns_per_state_emitted: mix(low.ns_per_state_emitted, high.ns_per_state_emitted),
+                outside_measured_scale: false,
+            })
+        }
+        (Some(nearest), None) | (None, Some(nearest)) => nearest_outside(nearest),
+        (None, None) => None,
+    }
+}
+
+/// The price of an `Aggregate` at `phase` per input row: an entry for
+/// exactly its combination of measures (`OperatorCost::measures`) when the
+/// table has one, else the sum over its measures, when each has an entry
+/// (one for its own phase winning over one for both).
 pub(crate) fn aggregate_lookup(
     table: &MeasuredOperationCosts,
     phase: ExecutionTiming,
     measures: &[AggIntent],
+    series: Option<u64>,
 ) -> Option<UnitPrice> {
+    let mut names: Vec<String> = measures.iter().map(AggIntent::kind_name).collect();
+    names.sort();
+    // The entries of one class at `series`: interpolated by series count
+    // when they name one ([`at_series_count`]), else the first.
+    let priced = |entries: Vec<&OperatorCost>| -> Option<UnitPrice> {
+        if entries
+            .iter()
+            .any(|entry| entry.measured_series_count.is_some())
+        {
+            let scaled: Vec<&OperatorCost> = entries
+                .into_iter()
+                .filter(|entry| entry.measured_series_count.is_some())
+                .collect();
+            return at_series_count(&scaled, series);
+        }
+        entries.first().map(|entry| price_of(entry))
+    };
+    let combination = |for_phase: Option<ExecutionTiming>| -> Vec<&OperatorCost> {
+        table
+            .operators
+            .iter()
+            .filter(|entry| {
+                entry.operator == OperatorKind::Aggregate
+                    && entry.phase == for_phase
+                    && !entry.measures.is_empty()
+                    && {
+                        let mut measured = entry.measures.clone();
+                        measured.sort();
+                        measured == names
+                    }
+            })
+            .collect()
+    };
+    let mut entries = combination(Some(phase));
+    if entries.is_empty() {
+        entries = combination(None);
+    }
+    if !entries.is_empty() {
+        return priced(entries);
+    }
     let mut total = UnitPrice {
         ns_per_unit: 0.0,
         ns_per_invocation: 0.0,
         memory_bytes_per_state: None,
+        ns_per_state_emitted: 0.0,
+        outside_measured_scale: false,
     };
     for measure in measures {
         let name = measure.kind_name();
-        let find = |for_phase: Option<ExecutionTiming>| {
-            table.operators.iter().find(|e| {
-                e.operator == OperatorKind::Aggregate
-                    && e.phase == for_phase
-                    && e.measure.as_deref() == Some(name.as_str())
-            })
+        let find = |for_phase: Option<ExecutionTiming>| -> Vec<&OperatorCost> {
+            table
+                .operators
+                .iter()
+                .filter(|e| {
+                    e.operator == OperatorKind::Aggregate
+                        && e.phase == for_phase
+                        && e.measure.as_deref() == Some(name.as_str())
+                })
+                .collect()
         };
-        let entry = find(Some(phase)).or_else(|| find(None))?;
+        let mut entries = find(Some(phase));
+        if entries.is_empty() {
+            entries = find(None);
+        }
+        let entry = priced(entries)?;
         total.ns_per_unit += entry.ns_per_unit;
         total.ns_per_invocation += entry.ns_per_invocation;
+        total.ns_per_state_emitted += entry.ns_per_state_emitted;
+        total.outside_measured_scale |= entry.outside_measured_scale;
     }
     (!measures.is_empty()).then_some(total)
 }
@@ -252,6 +471,8 @@ fn price_of(entry: &OperatorCost) -> UnitPrice {
         ns_per_unit: entry.ns_per_unit,
         ns_per_invocation: entry.ns_per_invocation,
         memory_bytes_per_state: entry.memory_bytes_per_state,
+        ns_per_state_emitted: entry.ns_per_state_emitted,
+        outside_measured_scale: false,
     }
 }
 
@@ -263,7 +484,10 @@ pub(crate) fn validate(
     table: &MeasuredOperationCosts,
     ms_per_cpu_op: f64,
 ) -> Result<(), AnalyticalCostError> {
-    let measured = !table.operators.is_empty() || table.ns_per_evaluation != 0.0;
+    let measured = !table.operators.is_empty()
+        || table.ns_per_evaluation != 0.0
+        || table.ns_per_evaluation_step != 0.0
+        || table.ns_per_ingested_sample != 0.0;
     if measured && ms_per_cpu_op <= 0.0 {
         return Err(AnalyticalCostError::MeasuredCostsWithoutCpuSpeed(
             ms_per_cpu_op,
@@ -273,15 +497,39 @@ pub(crate) fn validate(
         true => Ok(()),
         false => Err(AnalyticalCostError::InvalidCalibration(name, value)),
     };
-    check(
-        "measured_operation_costs.ns_per_evaluation",
-        table.ns_per_evaluation,
-    )?;
+    for (name, value) in [
+        (
+            "measured_operation_costs.ns_per_evaluation",
+            table.ns_per_evaluation,
+        ),
+        (
+            "measured_operation_costs.ns_per_evaluation_step",
+            table.ns_per_evaluation_step,
+        ),
+        (
+            "measured_operation_costs.ns_per_ingested_sample",
+            table.ns_per_ingested_sample,
+        ),
+        (
+            "measured_operation_costs.refresh_io_wait.ns_per_refresh",
+            table.refresh_io_wait.ns_per_refresh,
+        ),
+        (
+            "measured_operation_costs.refresh_io_wait.ns_per_state_emitted",
+            table.refresh_io_wait.ns_per_state_emitted,
+        ),
+    ] {
+        check(name, value)?;
+    }
     for (index, entry) in table.operators.iter().enumerate() {
         check("measured_operation_costs.ns_per_unit", entry.ns_per_unit)?;
         check(
             "measured_operation_costs.ns_per_invocation",
             entry.ns_per_invocation,
+        )?;
+        check(
+            "measured_operation_costs.ns_per_state_emitted",
+            entry.ns_per_state_emitted,
         )?;
         if let Some(bytes) = entry.memory_bytes_per_state {
             check("measured_operation_costs.memory_bytes_per_state", bytes)?;
@@ -290,6 +538,7 @@ pub(crate) fn validate(
             entry.sketch.is_some(),
             entry.exact.is_some(),
             entry.measure.is_some(),
+            !entry.measures.is_empty(),
         ];
         let key = || {
             format!(
@@ -300,6 +549,7 @@ pub(crate) fn validate(
                     (Some(sketch), _, _) => format!("{sketch:?}"),
                     (_, Some(exact), _) => format!("{exact:?}"),
                     (_, _, Some(measure)) => measure.clone(),
+                    _ if !entry.measures.is_empty() => entry.measures.join("+"),
                     _ => "no family".to_string(),
                 }
             )
@@ -313,6 +563,8 @@ pub(crate) fn validate(
                 && earlier.sketch == entry.sketch
                 && earlier.exact == entry.exact
                 && earlier.measure == entry.measure
+                && earlier.measures == entry.measures
+                && earlier.measured_series_count == entry.measured_series_count
         }) {
             return Err(AnalyticalCostError::DuplicateOperatorCost(key()));
         }

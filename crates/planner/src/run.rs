@@ -304,8 +304,9 @@ impl OptimizationPass for Stage1ToStage3Pass {
             input.models,
             PlanSearchSettings::default(),
         )?;
-        let (plan, _selection) = run.selection?;
-        let output = PlanOutput::new(plan);
+        let (plan, selection) = run.selection?;
+        let mut output = PlanOutput::new(plan);
+        output.optimality_gap = selection.optimality_gap;
         Ok(output)
     }
 }
