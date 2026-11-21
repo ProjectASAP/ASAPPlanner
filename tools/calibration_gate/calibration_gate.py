@@ -23,7 +23,7 @@ Measured file (one per case), JSON:
          "cpu_ms_per_window": 12.5, "wall_ms_per_window": 20.1}
       ],
       "queries": [
-        {"query": 0, "cpu_ms_per_request": 31.0}
+        {"query": 0, "cpu_ms_per_request": 31.0, "wall_ms_per_request": 33.5}
       ]
     }
 
@@ -105,7 +105,13 @@ def check(report, plan, measured, ratio, label):
         if "wall_ms_per_window" in group:
             row(f"group {group['views']} wall ms/window", group["wall_ms_per_window"], wall)
     for query in measured.get("queries", []):
-        row(f"query {query['query']} ms/request", query["cpu_ms_per_request"],
+        # A query's execution is its wall time per request: a node it
+        # shares with another query is computed once, by the first reader,
+        # and waited for by the others, so its CPU is the first reader's
+        # but its time is on every reader's path. CPU when no wall time is
+        # given.
+        measured_ms = query.get("wall_ms_per_request", query["cpu_ms_per_request"])
+        row(f"query {query['query']} ms/request", measured_ms,
             per_query[query["query"]]["query_execution_ms"])
     return ok
 

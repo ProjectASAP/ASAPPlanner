@@ -347,17 +347,31 @@ log-ratio of 0.36.
 **Gate status.** At 1k series the gate passes at 1.5× with terms (1) and
 (2). At 10k series it does not until (3) is modelled.
 
-C10 run (`tools/calibration_gate`, the fitted file with terms (1) and (2)
-in the new fields, every run's plan priced as it ran, queries with failed
-evaluations left out):
+C10 runs (`tools/calibration_gate`; every run's plan priced as it ran;
+queries with failed evaluations left out; a query compared by its wall time
+per request, since a node it shares with another query is computed once and
+waited for, so its CPU is the first reader's alone):
 
-| Series | Refresh-group CPU | Refresh-group wall | Query time per request |
-| --- | --- | --- | --- |
-| 1k | 11 of 11 within 1.5× | 7 of 11 (no `refresh_io_wait` fitted yet) | 25 of 31 (6 over-predicted 1.6–3×, one workload family) |
-| 10k | 20 of 20 | 14 of 20 | 4 of 6 (2 under-predicted 1.5–1.65×: term (3)) |
+| Calibration | Series | Refresh-group CPU | Refresh-group wall | Query time per request |
+| --- | --- | --- | --- | --- |
+| first fit (one table for both scales, terms (1) and (2)) | 1k | 11 of 11 | 7 of 11 | 25 of 31 |
+| | 10k | 20 of 20 | 14 of 20 | 4 of 6 |
+| refit on a newer data plane (per-scale entries, `refresh_io_wait`, no fixed term the table cannot hold per scale) | 1k | 14 of 14 | 14 of 14 | 42 of 43 |
+| | 10k | 31 of 32 | 31 of 32 | 51 of 54 |
 
-Both scales fail the gate: the remaining work is fitting `refresh_io_wait`
-and per-scale entries (`measured_series_count`), then running it again. **Prerequisites
+The refit fits each scale on its own runs (in sample) and keeps each
+operator class's price at both series counts (`measured_series_count`
+1,000 and 10,000). The newer data plane persists views asynchronously: a
+refresh's wall time is its CPU (within 0.5 ms), so `refresh_io_wait` is
+0.54 ms per run. A fixed cost per engine run fitted at 10k (61.5 ms) but
+not at 1k (0) cannot be one table-wide `ns_per_evaluation_step`; leaving
+it out lets the per-scale prices absorb it. Still failing: at 1k a range
+request of `quantile_over_time(0.99, data[1h])` (1.59×); at 10k
+`avg by (region, service) (avg_over_time(data[30m]))` and `max by (region)
+(max_over_time(data[1h]))` (1.56–1.63×), and one 60 s refresh group of
+twelve views (1.65×), all under-predicted. The gate does not pass yet.
+
+**Prerequisites
 before the objective:** terms (1), (2), (3) implemented and the gate passing
 at 1k and 10k series; (4) before the latency rows (refresh wall time);
 (5) before the ingest recommendation and the CPU limit count ingest
