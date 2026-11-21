@@ -18,16 +18,20 @@ use crate::Pass2RuleError;
 use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::operator::Source;
 use asap_types::ir::scalar::{ProjectItem, ScalarExpr};
-use asap_types::ir::schema::{Schema, PROMQL_SERIES_IDENTITY};
+use asap_types::ir::schema::{FieldDataType, Schema, PROMQL_SERIES_IDENTITY};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
+use asap_types::summary_type::{SketchParams, SummaryUpdate};
 
-/// For each metric with predicate-free scan groups that read different
-/// labels, the widened scan W of every label they read; then, for each
-/// per-series state group S = `SummaryAgg(TimeRange(W_S, TimeShift*(N)))`
-/// with no filter over such a scan N ≠ W, the state group S_W over W
-/// (`SummaryAgg(TimeRange(W_S, TimeShift*(W)))`, with S's builds) and the
-/// candidate `Project` of S's columns by name over S_W in S.
+/// For each per-series state group S = `SummaryAgg(TimeRange(W_S,
+/// TimeShift*(N)))` with no filter over a predicate-free scan N of a
+/// metric whose build another such state over another scan of the metric
+/// shares (the same summary type, input and a θ in common): the widened
+/// scan W of every label those states' scans read, and, when N ≠ W, the
+/// state group S_W over W (`SummaryAgg(TimeRange(W_S, TimeShift*(W)))`,
+/// with S's shared θ) and the candidate `Project` of S's columns by name
+/// over S_W in S. A state no other scan's state could share a build with
+/// is left as it is, and a metric with none gets no widened scan.
 ///
 /// Example: `sum by (region) (increase(c[30m]))` and `increase(c[6h])`.
 /// The first state already reads W (`c` with `region`); the second gets
@@ -40,17 +44,31 @@ use asap_types::stages::{Memo, MemoGroupId, OriginOfCandidateForMemoGroup};
 /// columns, so its rows over W are its rows over N with more labels, and
 /// the `Project` gives back N's.
 pub(crate) fn add_widened_scan_candidates(memo: &mut Memo) -> Result<(), Pass2RuleError> {
-    let mut scans_of_metric: BTreeMap<String, Vec<MemoGroupId>> = BTreeMap::new();
-    for (index, group) in memo.groups().iter().enumerate() {
-        if let Some(metric) = predicate_free_metric_scan(&group.expression) {
-            scans_of_metric
-                .entry(metric.to_string())
+    let candidates = widening_candidates(memo);
+    // Per metric, the states to widen and the scans they read.
+    let mut by_metric: BTreeMap<String, Vec<&WideningCandidate>> = BTreeMap::new();
+    for candidate in &candidates {
+        let others_share = candidates.iter().any(|other| {
+            other.metric == candidate.metric
+                && other.scan != candidate.scan
+                && other.summary_type == candidate.summary_type
+                && other.input == candidate.input
+                && other
+                    .parameters
+                    .iter()
+                    .any(|theta| candidate.parameters.contains(theta))
+        });
+        if others_share {
+            by_metric
+                .entry(candidate.metric.clone())
                 .or_default()
-                .push(MemoGroupId(index as u32));
+                .push(candidate);
         }
     }
-    let mut widened_scan_of: BTreeMap<MemoGroupId, MemoGroupId> = BTreeMap::new();
-    for scans in scans_of_metric.values().filter(|scans| scans.len() > 1) {
+    for states in by_metric.values() {
+        let mut scans: Vec<MemoGroupId> = states.iter().map(|state| state.scan).collect();
+        scans.sort();
+        scans.dedup();
         let schemas: Vec<&Schema> = scans
             .iter()
             .map(|scan| &memo.groups()[scan.0 as usize].group_properties.schema)
@@ -76,72 +94,110 @@ pub(crate) fn add_widened_scan_candidates(memo: &mut Memo) -> Result<(), Pass2Ru
             None,
             OriginOfCandidateForMemoGroup::WidenedScans,
         )?;
-        for &scan in scans.iter().filter(|&&scan| scan != widened_scan) {
-            widened_scan_of.insert(scan, widened_scan);
+        for state in states.iter().filter(|state| state.scan != widened_scan) {
+            widen_state(memo, state, widened_scan)?;
         }
     }
-    if widened_scan_of.is_empty() {
-        return Ok(());
-    }
-    for state in 0..memo.groups().len() {
-        let state = MemoGroupId(state as u32);
-        let Some((path, scan)) = per_series_state_over_scan(memo, state) else {
-            continue;
-        };
-        let Some(&widened_scan) = widened_scan_of.get(&scan) else {
-            continue;
-        };
-        let group = &memo.groups()[state.0 as usize];
-        let parameters = distinct_parameters(
-            group
-                .candidates
-                .iter()
-                .filter(|candidate| candidate.expression.operator == group.expression),
-        );
-        if parameters.is_empty() {
-            continue;
-        }
-        // The same time path over W, each group computing itself.
-        let mut rows = widened_scan;
-        for operator in path.iter().rev() {
-            rows = add_group_computing_itself(
-                memo,
-                operator.map_children(|_| rows),
-                OriginOfCandidateForMemoGroup::WidenedScans,
-            )?;
-        }
-        let build = memo.groups()[state.0 as usize]
-            .expression
-            .map_children(|_| rows);
-        let widened_state = memo.find_or_add_group(build.clone())?;
-        for theta in parameters {
-            add_candidate_if_output_matches(
-                memo,
-                widened_state,
-                build.clone(),
-                theta,
-                OriginOfCandidateForMemoGroup::WidenedScans,
-            )?;
-        }
-        let Some(cols) = columns_by_name(
-            &memo.groups()[state.0 as usize].group_properties.schema,
-            &memo.groups()[widened_state.0 as usize]
-                .group_properties
-                .schema,
-        ) else {
-            continue;
-        };
-        add_candidates_per_input_parameters(
+    Ok(())
+}
+
+/// A per-series state over a predicate-free metric scan, which a widened
+/// scan may serve: its group, the `TimeRange` and shifts above the scan
+/// (top down), the scan, its metric, its builds' summary type and input
+/// (as a chain over the scan keeps them) and their θ.
+struct WideningCandidate {
+    state: MemoGroupId,
+    time_path: Vec<Operator<MemoGroupId>>,
+    scan: MemoGroupId,
+    metric: String,
+    summary_type: FieldDataType,
+    input: SummaryUpdate,
+    parameters: Vec<Option<SketchParams>>,
+}
+
+/// Every per-series state without a filter over a range `TimeRange` over
+/// `TimeShift`s over a predicate-free metric scan, with its builds' θ.
+fn widening_candidates(memo: &Memo) -> Vec<WideningCandidate> {
+    (0..memo.groups().len())
+        .filter_map(|index| {
+            let state = MemoGroupId(index as u32);
+            let (time_path, scan) = per_series_state_over_scan(memo, state)?;
+            let metric = predicate_free_metric_scan(&memo.groups()[scan.0 as usize].expression)?;
+            let group = &memo.groups()[index];
+            let Operator::ASAP(ASAPOp::SummaryAgg {
+                summary_type,
+                input,
+                ..
+            }) = &group.expression
+            else {
+                return None;
+            };
+            let parameters = distinct_parameters(
+                group
+                    .candidates
+                    .iter()
+                    .filter(|candidate| candidate.expression.operator == group.expression),
+            );
+            (!parameters.is_empty()).then(|| WideningCandidate {
+                state,
+                time_path,
+                scan,
+                metric: metric.to_string(),
+                summary_type: summary_type.clone(),
+                input: input.clone(),
+                parameters,
+            })
+        })
+        .collect()
+}
+
+/// Adds to `candidate`'s state the `Project` of its columns over the same
+/// state over `widened_scan`, built with its θ.
+fn widen_state(
+    memo: &mut Memo,
+    candidate: &WideningCandidate,
+    widened_scan: MemoGroupId,
+) -> Result<(), Pass2RuleError> {
+    // The same time path over W, each group computing itself.
+    let mut time_path_group = widened_scan;
+    for operator in candidate.time_path.iter().rev() {
+        time_path_group = add_group_computing_itself(
             memo,
-            state,
-            Operator::NonASAP(NonASAPOp::Project {
-                cols,
-                child: widened_state,
-            }),
+            operator.map_children(|_| time_path_group),
             OriginOfCandidateForMemoGroup::WidenedScans,
         )?;
     }
-    Ok(())
+    let state = candidate.state;
+    let build = memo.groups()[state.0 as usize]
+        .expression
+        .map_children(|_| time_path_group);
+    let widened_state = memo.find_or_add_group(build.clone())?;
+    for theta in &candidate.parameters {
+        add_candidate_if_output_matches(
+            memo,
+            widened_state,
+            build.clone(),
+            theta.clone(),
+            OriginOfCandidateForMemoGroup::WidenedScans,
+        )?;
+    }
+    let Some(cols) = columns_by_name(
+        &memo.groups()[state.0 as usize].group_properties.schema,
+        &memo.groups()[widened_state.0 as usize]
+            .group_properties
+            .schema,
+    ) else {
+        return Ok(());
+    };
+    add_candidates_per_input_parameters(
+        memo,
+        state,
+        Operator::NonASAP(NonASAPOp::Project {
+            cols,
+            child: widened_state,
+        }),
+        OriginOfCandidateForMemoGroup::WidenedScans,
+    )
 }
 
 /// The metric of a PromQL scan without predicates.
@@ -159,10 +215,13 @@ fn predicate_free_metric_scan(expression: &Operator<MemoGroupId>) -> Option<&str
 /// The scan schema with every label of `schemas`: the first one's columns,
 /// then each other label, by name, before the series identity, with the
 /// time index and unique keys moved with their columns. `None` when the
-/// schemas differ in a column of the same name, or the first one has no
-/// series identity.
+/// schemas differ in a column of the same name or in whether they list
+/// every column (`closed`), or the first one has no series identity.
 fn union_of_labels(schemas: &[&Schema]) -> Option<Schema> {
     let first = schemas[0];
+    if schemas.iter().any(|schema| schema.closed != first.closed) {
+        return None;
+    }
     let identity = first
         .fields
         .iter()
