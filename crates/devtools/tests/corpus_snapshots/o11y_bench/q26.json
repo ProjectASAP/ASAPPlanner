@@ -64,8 +64,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 9.4212387276,
-      "cpu_core_seconds_per_second": 0.00707679783333,
+      "cost_per_second": 9.44582866475,
+      "cpu_core_seconds_per_second": 0.00710138795,
       "per_node": {
         "0": {
           "cost_per_second": 0.0042,
@@ -104,19 +104,19 @@
           "timing": "ingestion_time"
         },
         "4": {
-          "cost_per_second": 0.100650001535,
+          "cost_per_second": 0.101399284867,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.00010065,
-          "detail": "time range cover 3600s: 3.07 + 2.00 + 4.00 tumbling windows of states per level; x 1.0167/s; holds 122 bytes for 0.099 ms",
+          "cpu_core_seconds_per_second": 0.000101399283333,
+          "detail": "time range cover 3600s: 3.07 + 2.00 + 4.00 tumbling windows of states per level; x 1.0167/s; holds 121 bytes for 0.100 ms",
           "multiplier": 1,
           "operator": "TimeRangeCover",
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 4.32089922604,
+          "cost_per_second": 4.34473987986,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.00432083333333,
-          "detail": "merge 9000 states into 1000; x 1.0167/s; holds 122000 bytes for 4.250 ms",
+          "cpu_core_seconds_per_second": 0.00434467416667,
+          "detail": "merge 9067 states into 1000; x 1.0167/s; holds 121000 bytes for 4.273 ms",
           "multiplier": 1,
           "operator": "SummaryMerge",
           "timing": "query_time"
@@ -142,11 +142,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 18755527.1541,
-        "cpu_ops_per_second": 7073597.83333,
+        "average_memory_bytes": 18755525.718,
+        "cpu_ops_per_second": 7098187.95,
         "disk_bytes": 0,
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 18877178,
+        "peak_memory_bytes": 18876177,
         "scanned_bytes_per_second": 32000.0
       }
     },

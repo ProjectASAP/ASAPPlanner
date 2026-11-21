@@ -61,8 +61,8 @@ fn nodes_where(plan: &InstallablePlan, f: impl Fn(&Operator<usize>) -> bool) -> 
 }
 
 /// T6. The cover's merge is charged per state it reads at each of the
-/// request's 241 steps every 15 s: about 12 windows per series (15 min,
-/// 5 min, 1 min and 15 s levels: 3.02 + 2 + 4 + 3 on average), 120,000
+/// request's 241 steps every 15 s: 12.02 windows per series on average
+/// (15 min, 5 min, 1 min and 15 s levels: 3.02 + 2 + 4 + 3), 120,167
 /// states, at 16.0667 per second; each wider level is charged the narrower
 /// states it merges per second at ingestion time.
 #[tokio::test]
@@ -77,7 +77,7 @@ async fn cover_merge_is_charged_its_mean_windows() {
     };
     let detail = &cost.per_node[merge].detail;
     assert!(
-        detail.starts_with("merge 120000 states into 10000") && detail.contains("x 16.0667/s"),
+        detail.starts_with("merge 120167 states into 10000") && detail.contains("x 16.0667/s"),
         "{detail}"
     );
     for level in nodes_where(&plan, |operator| {
@@ -237,4 +237,70 @@ async fn a_cover_reads_wider_levels_only_from_ingestion_time() {
             );
         }
     }
+}
+
+/// A cover is charged its windows on the grid of the reader it runs for,
+/// and Stage 3's objective is the plan's cost. `quantile_over_time(0.99,
+/// data[1h])` as a range request every 15 s (step 15 s) and every 60 s
+/// (step 60 s): the 15 s reader's cover takes 3.02 + 2 + 4 + 3 = 12.02
+/// windows per step, the 60 s reader's 3.07 + 2 + 4 + 0 = 9.07.
+#[tokio::test]
+async fn a_cover_is_charged_on_its_readers_grid() {
+    let mut workload = workload();
+    let queries = workload.query_workload.repeating_queries.as_mut().unwrap();
+    let mut every_60_s: serde_json::Value = serde_json::to_value(&queries[0]).unwrap();
+    every_60_s["demand"] =
+        serde_json::json!({"fixed_interval_at": {"evaluation_phase": 0, "interval": 60000}});
+    every_60_s["range_evaluation"] = serde_json::json!({"span_ms": 3600000, "step_ms": 60000});
+    queries.push(serde_json::from_value(every_60_s).unwrap());
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap();
+    let run = asap_devtools::planning_stages::run_planning_stages_over(
+        asap_devtools::planning_stages::lower_promql_roots(&workload).unwrap(),
+        &entries,
+        &data,
+        PlanningModels::builtin(),
+    )
+    .unwrap()
+    .run;
+    let (dag, selection) = run.selection.as_ref().expect("a plan is selected");
+    let plan = InstallablePlan {
+        wire_version: asap_planner::INSTALLABLE_PLAN_WIRE_VERSION,
+        dag: dag.clone(),
+        query_texts: vec![],
+    };
+    let cost = plan_cost(&plan.dag, &entries, &data, &CostInputs::default())
+        .unwrap()
+        .0;
+    let mut charged: Vec<&str> = nodes_where(&plan, |operator| {
+        matches!(
+            operator,
+            Operator::NonASAP(NonASAPOp::TimeRangeCover { .. })
+        )
+    })
+    .into_iter()
+    .map(|id| cost.per_node[&id].detail.as_str())
+    .collect();
+    charged.sort();
+    assert_eq!(charged.len(), 2, "{charged:?}");
+    assert!(
+        charged
+            .iter()
+            .any(|detail| detail.contains("3.02 + 2.00 + 4.00 + 3.00")),
+        "{charged:?}"
+    );
+    assert!(
+        charged
+            .iter()
+            .any(|detail| detail.contains("3.07 + 2.00 + 4.00 + 0.00")),
+        "{charged:?}"
+    );
+    // Stage 3's objective charges each context's cover as the plan's cost
+    // does.
+    let plan_cost_per_second = cost.cost_per_second.unwrap();
+    let objective = selection.selected_plan_cost_per_second;
+    assert!(
+        (plan_cost_per_second - objective).abs() <= 1e-6 * objective,
+        "{plan_cost_per_second} vs {objective}"
+    );
 }

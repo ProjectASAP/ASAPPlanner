@@ -48,8 +48,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 2.92841237242e-7,
-      "cpu_core_seconds_per_second": 0.020858267,
+      "cost_per_second": 2.93517831833e-7,
+      "cpu_core_seconds_per_second": 0.0209184457,
       "per_node": {
         "0": {
           "cost_per_second": 6.52152e-9,
@@ -79,19 +79,19 @@
           "timing": "ingestion_time"
         },
         "3": {
-          "cost_per_second": 1.11315601594e-9,
+          "cost_per_second": 1.13377413869e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.000099,
-          "detail": "time range cover 300s: 4.17 + 5.00 tumbling windows of states per level; x 0.1000/s; holds 140 bytes for 0.990 ms",
+          "cpu_core_seconds_per_second": 0.0001008337,
+          "detail": "time range cover 300s: 4.17 + 5.00 tumbling windows of states per level; x 0.1000/s; holds 137 bytes for 1.008 ms",
           "multiplier": 1,
           "operator": "TimeRangeCover",
           "timing": "query_time"
         },
         "4": {
-          "cost_per_second": 4.77938435911e-8,
+          "cost_per_second": 4.84498200599e-8,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.00425,
-          "detail": "merge 90000 states into 10000; x 0.1000/s; holds 1400000 bytes for 42.500 ms",
+          "cpu_core_seconds_per_second": 0.004308345,
+          "detail": "merge 91667 states into 10000; x 0.1000/s; holds 1370000 bytes for 43.083 ms",
           "multiplier": 1,
           "operator": "SummaryMerge",
           "timing": "query_time"
@@ -126,11 +126,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 50697031.5563,
-        "cpu_ops_per_second": 20378267.0,
+        "average_memory_bytes": 50696983.9889,
+        "cpu_ops_per_second": 20438445.7,
         "disk_bytes": 0,
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 52570204,
+        "peak_memory_bytes": 52540201,
         "scanned_bytes_per_second": 4800000.0
       }
     },

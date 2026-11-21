@@ -66,8 +66,11 @@ What exists and why it does not help:
 1. **Levels.** For a chain group of width `w` read by a range `W`, Pass 2 adds
    chain groups of wider widths `C` from a fixed ladder (1 min, 5 min, 15 min,
    1 h, 6 h, 1 d), kept when `w` divides `C`, every narrower level's width
-   divides `C`, and `2·C ≤ W`. All levels are anchored at the epoch, like
-   today's chains. A wider level need not divide the evaluation grid: only the
+   divides `C`, and `2·C ≤ W`; at most three (of more, the narrowest, the
+   middle one and the widest), only over a chain whose width divides the
+   state's evaluation grid, and only for the smallest θ that met the
+   state's accuracy target (a larger θ's levels hold larger states at more
+   cost). All levels are anchored at the epoch, like today's chains. A wider level need not divide the evaluation grid: only the
    narrowest level must (today's rule), because the edges are read from it.
 2. **One build per level.** The group `SummaryTumblingWindowChain[C](X)` gets
    one candidate per θ: a new operator `SummaryMergeWindows[C]` over the next
@@ -86,8 +89,11 @@ What exists and why it does not help:
    `SummaryMerge` over the cover as a candidate, one per nested prefix of the
    levels: {1 min, 15 s}, {5 min, 1 min, 15 s}, {15 min, 5 min, 1 min, 15 s}.
 4. **Cost.** The cover's selected windows per step are the mean, over the
-   steps of the request grid, of the cover's window count (closed form below);
-   a `SummaryMerge` over it is charged per input state, as today. Each level's
+   evaluation times of the reader it runs for (its context's grid), of the
+   cover's window count (closed form below), not rounded; a `SummaryMerge`
+   over it is charged per input state, as today. Stage 3 costs a cover, and
+   its readers, at each context's grid, so its objective is the plan's
+   cost. Each level's
    retention `h_v` is its longest reader's, as today.
 5. **Executor.** Runs `SummaryMergeWindows` in an ingestion run (a range
    over the narrower windows, each stamped with the end of its wider window
@@ -134,10 +140,15 @@ Example: `T` = 100 h + 105 s, levels 5 min and 15 s. The range is
 13 windows of 15 s at the old edge `(99 h + 105 s, 99 h + 300 s]` and 7 at the
 new edge `(100 h, 100 h + 105 s]`: 31 merges instead of 240.
 
-**Mean selected windows (cost).** The count depends only on `T mod c_1`
-(and the shift), so the mean over steps is the mean over the
-`lcm(c_1, step)/step` residues, at most `c_1 / gcd(c_1, step)` evaluations of
-`cover` (20 for 5 min over 15 s steps); computed once per cover node.
+**Mean selected windows (cost), closed form.** The levels from the widest
+down to `i` cover the whole windows of `c_i` inside the range:
+`U_i = max(0, ⌊T⌋_{c_i} − ⌈T − W⌉_{c_i})`, so level `i` takes
+`(U_i − U_{i−1}) / c_i` windows. On a grid of period `p` and phase `φ`, the
+residues of `T` modulo `c_i` are `φ mod g + j·g` (`g = gcd(p, c_i)`,
+`j < c_i/g`), each equally often, so `E[U_i] = W − E[T mod c_i] −
+E[(c_i − (T − W) mod c_i) mod c_i]` when `W ≥ 2·c_i` (the `max` cannot
+bind); otherwise the `c_i/g` residues are summed. Example, 1 h over 15 min,
+5 min, 1 min and 15 s: 12.02 windows every 15 s, 9.07 every 60 s.
 
 **Predicted plan after** (per-step merge work scales with merges; the state
 size of a 5 min DDSketch is larger, which the cost model's state bytes already
@@ -191,11 +202,9 @@ merges the same kind of states, only fewer and wider.
 | KLL | Not bit-identical (compaction depends on merge order), but keeps its rank bound: the bound holds for any merge tree. |
 | Heap top-k, UnivMon entropy | Not offered, as for rollups today (no merged guarantee). |
 
-**Complexity (planner).** For each chain group: at most 6 ladder widths, so at
-most 6 more chain groups and one cover per nested prefix, `k` covers for `k`
-admitted widths (here 3), each times the θs of the state group. On the
-section 1 workload the MILP grows from 219 to 660 variables and solves in
-0.4 s.
+**Complexity (planner).** For each chain group: at most 3 levels and one
+cover per nested prefix, each for one θ. Planning time over the 56
+snapshot workloads is in the PR body (before and after the caps).
 
 ## 4. Code interface
 
@@ -322,13 +331,13 @@ through wider levels; each plan's cost falls (old → new, per second):
 
 | Snapshot | Query | Old | New |
 | --- | --- | --- | --- |
-| o11y_bench q19 | `sum(increase(…[1h])) / sum(increase(…[1h]))` | 56.06 | 19.89 |
-| o11y_bench q25 | `sum(rate(…[1h])) / sum(rate(…[1h]))` | 56.06 | 19.89 |
-| o11y_bench q26 | `sum(rate(process_cpu_seconds_total[1h]))` | 27.61 | 9.42 |
-| chains-10m-5m-3m-10s-mvp | quantiles over 10, 5 and 3 min | 5.109e-7 | 4.693e-7 |
-| quantile-grouped-mvp | `avg by (region) (quantile_over_time(0.9, data[5m]))` | 1.903e-6 | 1.477e-6 |
-| quantile-single-mvp | `quantile_over_time(0.99, data[5m])` | 1.823e-6 | 1.397e-6 |
+| o11y_bench q19 | `sum(increase(…[1h])) / sum(increase(…[1h]))` | 56.06 | 19.94 |
+| o11y_bench q25 | `sum(rate(…[1h])) / sum(rate(…[1h]))` | 56.06 | 19.94 |
+| o11y_bench q26 | `sum(rate(process_cpu_seconds_total[1h]))` | 27.61 | 9.45 |
+| chains-10m-5m-3m-10s-mvp | quantiles over 10, 5 and 3 min | 5.109e-7 | 4.714e-7 |
+| quantile-grouped-mvp | `avg by (region) (quantile_over_time(0.9, data[5m]))` | 1.903e-6 | 1.482e-6 |
+| quantile-single-mvp | `quantile_over_time(0.99, data[5m])` | 1.823e-6 | 1.401e-6 |
 | random-mixed-seed-862-long-w01-q3-mvp | `avg by (region) (quantile_over_time(0.95, data[300s]))` | 9.171e-5 | 2.508e-5 |
 | random-mixed-seed-862-w02-q2-q7-mvp | a 100 s quantile and a 5 min top-k increase | 3.238e-5 | 3.203e-5 |
-| topk-rate-guarantees-ignored-mvp | `topk(5, sum by (job) (rate(data_total[5m])))` | 3.619e-7 | 2.928e-7 |
+| topk-rate-guarantees-ignored-mvp | `topk(5, sum by (job) (rate(data_total[5m])))` | 3.619e-7 | 2.935e-7 |
 

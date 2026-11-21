@@ -76,7 +76,7 @@ pub(crate) fn add_chain_groups(
     states.sort_by_key(|(_, path, _)| path.anchored_at_ms.is_some());
     // First every chain group with its builds, then the groups reading
     // them, so a chain shared by state groups offers each every θ it has.
-    let mut chains_of_states: Vec<(MemoGroupId, ChainPath, Vec<MemoGroupId>)> = Vec::new();
+    let mut chains_of_states: Vec<ChainsOfState> = Vec::new();
     for (state, path, parameters) in states {
         let divisor = path.shifts.iter().fold(path.window_ms, |gcd, shift| {
             greatest_common_divisor(gcd, shift.offset_ms.unsigned_abs())
@@ -107,10 +107,22 @@ pub(crate) fn add_chain_groups(
             }
             chain_groups.push(chain_group);
         }
-        chains_of_states.push((state, path, chain_groups));
+        chains_of_states.push((state, path, chain_groups, parameters));
     }
-    for (state, path, chain_groups) in chains_of_states {
-        add_wider_levels(memo, state, &path, &chain_groups)?;
+    for (state, path, chain_groups, parameters) in chains_of_states {
+        let state_grid_ms =
+            state_evaluation_grid_ms(&evaluation_period_ms_per_query[state.0 as usize]);
+        // The smallest θs that met the state's accuracy (listed smallest
+        // first): a larger θ's levels hold larger states at more cost.
+        let level_parameters = &parameters[..parameters.len().min(MOST_LEVEL_PARAMETERS)];
+        add_wider_levels(
+            memo,
+            state,
+            &path,
+            &chain_groups,
+            state_grid_ms,
+            level_parameters,
+        )?;
         for chain_group in chain_groups {
             let mut top = chain_group;
             for shift in path.shifts.iter().rev() {
@@ -146,10 +158,43 @@ pub(crate) fn add_chain_groups(
     Ok(())
 }
 
+/// A state group, its chain walk, its chain groups and the θs of its
+/// surviving builds, smallest first.
+type ChainsOfState = (
+    MemoGroupId,
+    ChainPath,
+    Vec<MemoGroupId>,
+    Vec<Option<SketchParams>>,
+);
+
 /// The widths a wider chain level may take (1 min, 5 min, 15 min, 1 h,
 /// 6 h, 1 d), each a multiple of the one before, so any of them nest.
 pub(crate) const WIDER_LEVEL_WIDTHS_MS: [u64; 6] =
     [60_000, 300_000, 900_000, 3_600_000, 21_600_000, 86_400_000];
+
+/// The most wider levels over one chain: of more admitted widths, the
+/// narrowest, the widest and the middle one (each further level saves at
+/// most a few windows per step, and every level is a group, a merge per θ
+/// and a cover). Example: a 1 d range over 15 s: 1 min, 15 min and 6 h of
+/// 1 min, 5 min, 15 min, 1 h and 6 h.
+pub(crate) const MOST_WIDER_LEVELS: usize = 3;
+
+/// The most θs per state whose builds get wider levels: the smallest that
+/// survived (a larger θ's levels and covers cost more in states, merges
+/// and memory for an accuracy the smaller already meets; the second keeps
+/// a choice when readers of the state share it at another target).
+pub(crate) const MOST_LEVEL_PARAMETERS: usize = 1;
+
+/// A state group's evaluation grid, the gcd of its readers' periods
+/// (`evaluation_period_ms_per_query`); `None` when one reader's is unknown
+/// or none reads it.
+fn state_evaluation_grid_ms(periods_ms: &BTreeMap<usize, Option<u64>>) -> Option<u64> {
+    let mut grid_ms = 0;
+    for period_ms in periods_ms.values() {
+        grid_ms = greatest_common_divisor(grid_ms, (*period_ms)?);
+    }
+    (grid_ms > 0).then_some(grid_ms)
+}
 
 /// Wider chain levels for state group `state` (design doc
 /// `multi-level-window-chains.md`): for each of its chain groups $G_w$, the
@@ -160,18 +205,27 @@ pub(crate) const WIDER_LEVEL_WIDTHS_MS: [u64; 6] =
 /// narrower level, never from the rows), and each nested prefix of the
 /// levels, $\{C_1, w\}, \{C_2, C_1, w\}, \ldots$, is a `TimeRangeCover(W)`
 /// group over them, widest first, with a `SummaryMerge` over it in the
-/// state group. Only for a range with no `TimeShift`. Example:
-/// `quantile_over_time(0.99, m[1h])` every 15 s: levels 1 min, 5 min and
-/// 15 min over the 15 s chain (not 1 h: 2 h > 1 h), and three covers.
+/// state group. At most [`MOST_WIDER_LEVELS`] levels;
+/// only over a chain $G_w$ whose width divides the state's evaluation grid
+/// `state_grid_ms` (a cover over any other would fail Pass 2's grid check:
+/// its edges are read from $G_w$); only for a range with no `TimeShift`.
+/// Example: `quantile_over_time(0.99, m[1h])` every 15 s: levels 1 min,
+/// 5 min and 15 min over the 15 s chain (not 1 h: 2 h > 1 h), and three
+/// covers; read every 15 s and every 60 s, none over the 60 s chain.
 fn add_wider_levels(
     memo: &mut Memo,
     state: MemoGroupId,
     path: &ChainPath,
     chain_groups: &[MemoGroupId],
+    state_grid_ms: Option<u64>,
+    level_parameters: &[Option<SketchParams>],
 ) -> Result<(), Pass2RuleError> {
     if !path.shifts.is_empty() || path.anchored_at_ms.is_some() {
         return Ok(());
     }
+    let Some(state_grid_ms) = state_grid_ms else {
+        return Ok(());
+    };
     for &narrowest in chain_groups {
         let Some(narrowest_width_ms) = memo.groups()[narrowest.0 as usize]
             .expression
@@ -179,7 +233,10 @@ fn add_wider_levels(
         else {
             continue;
         };
-        let widths: Vec<u64> = WIDER_LEVEL_WIDTHS_MS
+        if !state_grid_ms.is_multiple_of(narrowest_width_ms) {
+            continue;
+        }
+        let mut widths: Vec<u64> = WIDER_LEVEL_WIDTHS_MS
             .into_iter()
             .filter(|&width| {
                 width > narrowest_width_ms
@@ -187,38 +244,48 @@ fn add_wider_levels(
                     && width.saturating_mul(2) <= path.window_ms
             })
             .collect();
+        if widths.len() > MOST_WIDER_LEVELS {
+            // The narrowest, the widest and one between: the edges stay
+            // short and the middle stays few windows.
+            widths = vec![
+                widths[0],
+                widths[widths.len() / 2],
+                widths[widths.len() - 1],
+            ];
+        }
         // Levels narrowest first; each built from the one before.
         let mut levels = vec![narrowest];
         for width in widths {
             let narrower = *levels.last().expect("the narrowest level");
             let level = memo.find_or_add_group(path.chain(width))?;
-            add_candidates_per_input_parameters(
-                memo,
-                level,
-                Operator::ASAP(ASAPOp::SummaryMergeWindows {
-                    child: narrower,
-                    tumbling_window_width_ms: width,
-                }),
-                OriginOfCandidateForMemoGroup::MultiLevelWindows,
-            )?;
+            let merge_windows = Operator::ASAP(ASAPOp::SummaryMergeWindows {
+                child: narrower,
+                tumbling_window_width_ms: width,
+            });
             levels.push(level);
-            let cover = add_group_computing_itself(
-                memo,
-                Operator::NonASAP(NonASAPOp::TimeRangeCover {
-                    range: std::time::Duration::from_millis(path.window_ms),
-                    levels: levels.iter().rev().copied().collect(),
-                }),
-                OriginOfCandidateForMemoGroup::MultiLevelWindows,
-            )?;
-            add_candidates_per_input_parameters(
-                memo,
-                state,
-                Operator::ASAP(ASAPOp::SummaryMerge {
-                    children: vec![cover],
-                    group_by: None,
-                }),
-                OriginOfCandidateForMemoGroup::MultiLevelWindows,
-            )?;
+            let cover = memo.find_or_add_group(Operator::NonASAP(NonASAPOp::TimeRangeCover {
+                range: std::time::Duration::from_millis(path.window_ms),
+                levels: levels.iter().rev().copied().collect(),
+            }))?;
+            let merge = Operator::ASAP(ASAPOp::SummaryMerge {
+                children: vec![cover],
+                group_by: None,
+            });
+            for theta in level_parameters {
+                for (group, operator) in [
+                    (level, merge_windows.clone()),
+                    (cover, memo.groups()[cover.0 as usize].expression.clone()),
+                    (state, merge.clone()),
+                ] {
+                    add_candidate_if_output_matches(
+                        memo,
+                        group,
+                        operator,
+                        theta.clone(),
+                        OriginOfCandidateForMemoGroup::MultiLevelWindows,
+                    )?;
+                }
+            }
         }
     }
     Ok(())

@@ -551,7 +551,7 @@ fn a_target_without_mergeable_rate_state_builds_rate_within_one_evaluation() {
     };
     let cases = [
         ("rate", "5m", ExactKind::Counter, 0.274034, 0.367670),
-        ("increase", "1h", ExactKind::Counter, 1.373535, 3.953712),
+        ("increase", "1h", ExactKind::Counter, 1.374738, 3.953712),
     ];
     for (function, range, kind, unrestricted_cost, restricted_cost) in cases {
         let workload = counter_workload(function, range);

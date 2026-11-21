@@ -82,8 +82,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 4.69326245364e-7,
-      "cpu_core_seconds_per_second": 0.0319234334,
+      "cost_per_second": 4.71442412256e-7,
+      "cpu_core_seconds_per_second": 0.032110956586,
       "per_node": {
         "0": {
           "cost_per_second": 3.14989416e-11,
@@ -122,27 +122,27 @@
           "timing": "ingestion_time"
         },
         "12": {
-          "cost_per_second": 8.65788032326e-10,
+          "cost_per_second": 8.8640615517e-10,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.000077,
-          "detail": "time range cover 180s: 2.17 + 5.00 tumbling windows of states per level; x 0.1000/s; holds 365 bytes for 0.770 ms",
+          "cpu_core_seconds_per_second": 0.0000788337,
+          "detail": "time range cover 180s: 2.17 + 5.00 tumbling windows of states per level; x 0.1000/s; holds 357 bytes for 0.788 ms",
           "multiplier": 1,
           "operator": "TimeRangeCover",
           "timing": "query_time"
         },
         "13": {
-          "cost_per_second": 2.71406075712e-7,
+          "cost_per_second": 2.7325875408e-7,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.02412542,
-          "detail": "merge 70000 states into 10000; x 0.1000/s; holds 5040000 bytes for 241.254 ms",
+          "cpu_core_seconds_per_second": 0.024289509486,
+          "detail": "merge 71667 states into 10000; x 0.1000/s; holds 5280000 bytes for 242.895 ms",
           "multiplier": 1,
           "operator": "SummaryMerge",
           "timing": "query_time"
         },
         "14": {
-          "cost_per_second": 3.24816672e-8,
+          "cost_per_second": 3.27245376e-8,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.0028888,
+          "cpu_core_seconds_per_second": 0.0029104,
           "detail": "estimate 10000 groups x 1; x 0.1000/s",
           "multiplier": 1,
           "operator": "SummaryEstimate",
@@ -232,11 +232,11 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 95966575.5631,
-        "cpu_ops_per_second": 31921299.0,
+        "average_memory_bytes": 95973232.0564,
+        "cpu_ops_per_second": 32108822.186,
         "disk_bytes": 0,
         "peak_cpu_cores": 4,
-        "peak_memory_bytes": 112641501,
+        "peak_memory_bytes": 112881493,
         "scanned_bytes_per_second": 21344.0
       }
     },
@@ -1626,7 +1626,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -1702,7 +1702,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -1765,7 +1765,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -1827,7 +1827,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {

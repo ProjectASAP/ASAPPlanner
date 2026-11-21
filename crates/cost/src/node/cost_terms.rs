@@ -358,7 +358,7 @@ pub fn node_cost_terms<'a>(
 ) -> Result<NodeCostTerms, AnalyticalCostError> {
     // Its usage at one execution per second: the terms are computed before
     // the measured table or the calibration factor apply.
-    node_usage_and_cost_terms(node, producers, (1, 1.0), window_ms, data, settings)
+    node_usage_and_cost_terms(node, producers, (1, 1.0), window_ms, None, data, settings)
         .map(|(_, terms)| terms)
 }
 
