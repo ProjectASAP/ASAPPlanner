@@ -83,7 +83,7 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
 ///   `ASSUMED_VALUE_KEY_BYTES`;
 /// - KMV: the rows the state folds, at least one (any number when
 ///   unknown), each a distinct item;
-/// - DDSketch: what it is expected to hold, not the most it can
+/// - DDSketch: what it is expected to hold sealed, not the most it can
 ///   ([`ddsketch_state_bytes`]).
 ///
 /// KLL is priced as the executor keeps a sealed state (it shrinks every
@@ -414,27 +414,26 @@ fn exponential_values_magnitude_ratio(rows: u64) -> f64 {
 }
 
 /// The bytes a DDSketch of relative accuracy `alpha` is expected to hold
-/// after folding `input_rows`: its struct, and per sign it holds (one when
-/// its values are proven non-negative or it folds one row, else two) the
-/// dense bucket store `asap_sketchlib` grows, one first block of buckets
-/// (`DdSketch::estimated_memory_bytes` of one value) plus one 8-byte
-/// counter per bucket its values span beyond the first.
+/// after folding `input_rows`, as the executor keeps it sealed (it shrinks
+/// every DDSketch when it seals a window, `DdSketch::shrink_to_fit`): its
+/// struct, and per sign it holds (one when its values are proven
+/// non-negative or it folds one row, else two) one 8-byte counter per
+/// bucket its values span.
 ///
 /// The span is that of the values the state folds, not of the column: the
 /// smaller of the magnitude ratio its rows are assumed to span
 /// ([`exponential_values_magnitude_ratio`]) and the ratio of
 /// `column_range`, its column's declared `column_magnitudes`, or the range
 /// [`assumed_magnitude_range`] assumes when none is declared; without known
-/// rows, the ratio of `column_range`. The library's worst case over every order of
-/// inserts and merges (`estimated_memory_bytes`) is about twice the span
-/// over the whole range, which is not what a state holds on average.
+/// rows, the ratio of `column_range`. An open sketch (one a query-time
+/// merge folds windows into) holds more, its store grown 128 slots at a
+/// time; this leaves that uncharged, as KLL's pricing leaves its open
+/// buffer.
 ///
 /// Example: at α = 0.01, 10 exponential samples span a ratio of 52, 198
-/// buckets: 144 + 1,024 + 8 × 197 = 2,744 bytes, where `asap_sketchlib`
-/// holds 2,910 on average; 3,000 samples span 538 buckets, 5,464 bytes
-/// against 5,769 held. The library's bound for either is 18,752. A gauge
-/// declared within [90, 110] spans a ratio of 1.22, 11 buckets: 1,248
-/// bytes for any number of rows.
+/// buckets: 144 + 8 × 198 = 1,728 bytes; 3,000 samples span 537 buckets,
+/// 4,440 bytes. A gauge declared within [90, 110] spans a ratio of 1.22,
+/// 11 buckets: 232 bytes for any number of rows.
 fn ddsketch_state_bytes(
     alpha: f64,
     input_rows: StateInputRows,
@@ -442,9 +441,6 @@ fn ddsketch_state_bytes(
 ) -> u64 {
     use asap_sketchlib::DdSketch;
     let struct_bytes = std::mem::size_of::<DdSketch>() as u64;
-    // One value allocates one store's first block.
-    let block_bytes =
-        DdSketch::estimated_memory_bytes(alpha, 1, 1.0, 1.0, false) as u64 - struct_bytes;
     let sketch = DdSketch::new(alpha);
     // Buckets a ratio of `ratio` between the largest and smallest
     // magnitude spans, at least one.
@@ -467,12 +463,14 @@ fn ddsketch_state_bytes(
     // The most the column's values span: its declared range, else the
     // assumed one.
     let column_ratio = column_range.map_or(f64::INFINITY, |range| range.magnitude_ratio());
-    let span = buckets_spanned(rows_per_store.map_or(column_ratio, |rows| {
-        exponential_values_magnitude_ratio(rows).min(column_ratio)
-    }));
-    let one_value = rows_per_store == Some(1);
-    let buckets_beyond_first = if one_value { 0 } else { span - 1 };
-    struct_bytes + stores * (block_bytes + 8 * buckets_beyond_first)
+    let span = if rows_per_store == Some(1) {
+        1
+    } else {
+        buckets_spanned(rows_per_store.map_or(column_ratio, |rows| {
+            exponential_values_magnitude_ratio(rows).min(column_ratio)
+        }))
+    };
+    struct_bytes + stores * 8 * span
 }
 
 #[cfg(test)]
