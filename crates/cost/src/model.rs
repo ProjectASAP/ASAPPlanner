@@ -384,7 +384,8 @@ pub struct LatencySelectionChecks {
     /// error (a measurement); default false.
     pub log_solver: bool,
     /// Solve the mean latency to optimality; default false: stop at a
-    /// relative gap of 1 % or after 30 s, whichever comes first, and
+    /// relative gap of 1 % or after 10,000 branch-and-bound nodes,
+    /// whichever comes first, and
     /// report the gap and the lower bound beside the plan.
     pub exact_solve: bool,
     /// Bound each query's reads from below along each path of its plan

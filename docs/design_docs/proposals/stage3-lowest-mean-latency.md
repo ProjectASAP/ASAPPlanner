@@ -507,15 +507,23 @@ over an occurrence's executions in one refresh group $G$:
 $F_q \ge f_G - M_G(1 - \sum_{e \in o \cap G} r_{o,e})$, with
 $F_q \ge a + \sum_{e \in o \cap G} (p_e + \text{wait}) r_{o,e}$. Every
 row holds in the plan's own reads, so the optimum is kept. A memo group
-already on the path (a cycle) is not unfolded again, and past 4,096
-occurrences per query only the per-query rows remain. Knob `path_reads`
+already on the path (a cycle) gets no child occurrence (its edge read
+stays in the flow). An occurrence is expanded, with all its children at
+once, only while the query's tree stays within 4,096 occurrences; one
+left unexpanded keeps its own rows, and the per-query rows still bound
+what lies below it. Knob `path_reads`
 (`ASAP_STAGE3_PATH_READS=off`).
 
 **Tie-breaks only when needed.** Each tie-break solve starts from the plan
 so far and looks only for a plan at least a byte smaller
-(`objective_bound`), for as long as the first solve took (at least 0.05 s,
-at most 2 s); finding none, or none in time, keeps the plan so far. When the 2 s run out with a smaller plan found, that plan
-is kept though a still smaller one may exist.
+(`objective_bound`), within 500 branch-and-bound nodes; finding none, or
+none within them, keeps the plan so far. When the nodes run out with a
+smaller plan found, that plan is kept though a still smaller one may
+exist. The reported latencies are then the chosen selection's: pinned,
+and solved once more for the mean latency (a tie-break solve's latency
+variables float within the slack it keeps on the mean latency). Node
+limits, not seconds, so the same inputs give the same plan on any host
+(one solver thread).
 
 **Pruning before the MILP.**
 - **A feasible plan's bound (T8).** Cost model 1's optimum over the same
@@ -863,10 +871,10 @@ tie-break solves from `CostModel`.
 | 19 | `DataPlaneExecution::ingest_work_at_refresh` for a data plane that inserts a window's rows at its close (the measured one does). | By this document |
 | 18 | Latency bounds become exclusions before the MILP (least possible latency per execution, in f64); the remaining bounds are rows; per-execution bottom-up latency variables considered and rejected (decision 24). | Decided |
 | 24 | S1 (per-execution latency and freshness variables $\ell_e$, $\varphi_e$ with big-M rows, replacing the per-query reads): considered and rejected. Its LP bound stays at 0 like the McCormick reads, and it measured slower (two workloads: 4.4 s and 5.1 s against 1.2 s). | Decided (rejected) |
-| 25 | Speed-ups, each exact: reads only of kept executions; the latency-bound exclusions once per selection; θ dominance in every quantity; a feasible plan's bound (T8); reads as a flow (T9) with the valid freshness rows; lazy tie-break solves warm-started from the plan so far (2 s each). | Decided |
+| 25 | Speed-ups, each exact: reads only of kept executions; the latency-bound exclusions once per selection; θ dominance in every quantity; a feasible plan's bound (T8); reads as a flow (T9) with the valid freshness rows; lazy tie-break solves warm-started from the plan so far (500 nodes each). | Decided |
 | 29 | Reads along each path of the query's plan (an occurrence tree, where every memo group is read at most once per occurrence, the guard by construction), with the freshness big-M rows on each occurrence's sums per refresh group (section 2.5), knob `path_reads`; exact, checked on the 40 PromQL snapshot workloads. | Decided |
 | 26 | Checking knobs in `CostInputs::latency_selection_checks` (`theta_dominance`, `feasible_plan_bound`, `lazy_tie_breaks`, `flow_reads`, all on by default; `report_root_lp_bound`, off): turning a speed-up off must not change the optimum, which the exactness tests check. The planning crates read no environment; the `asap_planner` tool maps `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_LATENCY_READS=mccormick` and `ASAP_STAGE3_ROOT_LP=1` onto them; `feasible_plan_start` (off; `ASAP_STAGE3_FEASIBLE_PLAN_START=on`) and `log_solver` (off; `ASAP_STAGE3_SOLVER_LOG=1`, the solver's log and the model's size by family) are measurements. | By this document |
-| 27 | The mean latency solve stops at a relative MIP gap of 1 % or after 30 s, whichever comes first, and returns its plan with the gap and the solver's lower bound (`Selection::optimality_gap`, the plan report's `optimality_gap`, the text output's mean latency line). `LatencySelectionChecks::exact_solve` (`ASAP_STAGE3_EXACT=1`) solves to optimality; the exactness tests compare in exact mode, and in the default mode check that the gap is at most 1 % (unless stopped on time) and that the plan is within its gap of the exact optimum. With no plan in 30 s, the solve continues to the 1 % gap. | Decided |
+| 27 | The mean latency solve stops at a relative MIP gap of 1 % or after 10,000 branch-and-bound nodes, whichever comes first (nodes, not seconds, so the result does not depend on the host; 10,000 nodes took about 30 s on the slowest workload before the path reads), and returns its plan with the gap and the solver's lower bound (`Selection::optimality_gap`, the plan report's `optimality_gap`, the text output's mean latency line). `LatencySelectionChecks::exact_solve` (`ASAP_STAGE3_EXACT=1`) solves to optimality; the exactness tests compare in exact mode, and in the default mode check that the gap is at most 1 % and that the plan is within its gap of the exact optimum. With no plan within the nodes, the solve runs once more from cost model 1's plan (pinned and completed by HiGHS) under the same limit; with none still, the selection fails. | Decided |
 | 28 | A range request's steps split over the query threads in latency: per-step work counts $\lceil s / T_{query} \rceil$ times; CPU still counts every step. | Decided |
 | 14 | Under cost model 3 the greedy cost upper bound is not applied; the `OneEvaluation` twin dominance is restated over time, memory, disk and CPU. | By this document |
 | 15 | Calibration passes when every node's predicted time per phase is within 1.5× of measured, at every series scale run (1k passes; 10k after term (3)). | Decided |

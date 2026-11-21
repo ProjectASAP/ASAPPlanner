@@ -81,7 +81,7 @@ pub struct SelectedPlanReport {
     pub assumed_data_facts: Vec<AssumedDataFact>,
     /// Under cost model 3's `lowest_mean_latency`, the mean latency the
     /// selection reached, the lower bound no plan beats and the relative
-    /// gap between them (the solve stops at 1 % or 30 s unless asked to be
+    /// gap between them (the solve stops at 1 % or 10,000 nodes unless asked to be
     /// exact); omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optimality_gap: Option<asap_stage3_plan_selection::OptimalityGap>,

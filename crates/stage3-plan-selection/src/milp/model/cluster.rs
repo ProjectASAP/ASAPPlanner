@@ -154,9 +154,8 @@ struct Solve<'s> {
     active: &'s [ClusterLimit],
     start: Option<&'s [f64]>,
     /// A tie-break solve: only a plan whose objective is below this, within
-    /// `tie_break_seconds`.
+    /// [`TIE_BREAK_NODES`] branch-and-bound nodes.
     improve_below: Option<f64>,
-    tie_break_seconds: f64,
     /// A plan to pin: its selection variables fixed to 1, every other
     /// selection variable to 0; HiGHS completes the continuous ones. The
     /// pinned solve's columns are the next solve's MIP start.
@@ -170,26 +169,25 @@ enum Stop {
     /// At a proved optimum.
     Exact,
     /// At a relative gap of [`STOP_RELATIVE_GAP`] or after
-    /// [`STOP_SECONDS`], whichever comes first.
-    GapOrTime,
-    /// At a relative gap of [`STOP_RELATIVE_GAP`]: when no plan was found
-    /// in [`STOP_SECONDS`].
-    Gap,
+    /// [`STOP_NODES`] branch-and-bound nodes, whichever comes first.
+    GapOrNodes,
 }
 
 /// The default stop rule of the mean latency solve: a relative gap of 1 %
-/// or 30 s, whichever comes first (`LatencySelectionChecks::exact_solve`
-/// turns it off).
+/// or 10,000 branch-and-bound nodes, whichever comes first
+/// (`LatencySelection::exact_solve` turns it off). Limits in nodes, not
+/// seconds, so the same inputs give the same plan on any host (one solver
+/// thread); 10,000 nodes took about 30 s on the slowest workload measured
+/// before the path reads.
 const STOP_RELATIVE_GAP: f64 = 0.01;
-const STOP_SECONDS: f64 = 30.0;
+const STOP_NODES: i32 = 10_000;
 
-/// What a solve that ran out of time without a plan returns.
-const NO_PLAN_IN_TIME: &str = "no plan within the time limit";
+/// What a solve that reached its node limit without a plan returns.
+const NO_PLAN_IN_NODES: &str = "no plan within the node limit";
 
-/// The longest a tie-break solve looks for a smaller plan: as long as the
-/// first solve took, between `SHORTEST_TIE_BREAK_SECONDS` and this.
-const TIE_BREAK_SECONDS: f64 = 2.0;
-const SHORTEST_TIE_BREAK_SECONDS: f64 = 0.05;
+/// The most branch-and-bound nodes a tie-break solve explores for a
+/// smaller plan (deterministic, as [`STOP_NODES`]).
+const TIE_BREAK_NODES: i32 = 500;
 
 /// Per query, its static facts: weight, fixed cost per request, bound, the
 /// executions and edges it may read.
@@ -339,7 +337,6 @@ pub(crate) fn solve_cluster_selection(
                 active: &limits,
                 start: None,
                 improve_below: None,
-                tie_break_seconds: 0.0,
                 pinned: None,
                 stop: Stop::Exact,
             },
@@ -351,14 +348,11 @@ pub(crate) fn solve_cluster_selection(
             }
         }
     }
-    // The first solve's MIP start: the feasible plan with its selection
-    // pinned, completed by HiGHS on the same model (same columns); a plan
-    // the kept executions cannot form gives no start, which only costs time.
-    let pinned_start: Option<(Vec<f64>, u64)> = inputs
-        .feasible_plan
-        .as_ref()
-        .filter(|_| checks.feasible_plan_start)
-        .and_then(|plan| {
+    // A start when the first solve finds no plan within its node limit:
+    // the feasible plan with its selection pinned, completed by HiGHS on
+    // the same model (same columns).
+    let pinned_start = || -> Option<(Vec<f64>, u64)> {
+        inputs.feasible_plan.as_ref().and_then(|plan| {
             build_and_solve(
                 inputs,
                 &shapes,
@@ -370,18 +364,18 @@ pub(crate) fn solve_cluster_selection(
                     active: &limits,
                     start: None,
                     improve_below: None,
-                    tie_break_seconds: 0.0,
                     pinned: Some(plan),
                     stop: Stop::Exact,
                 },
             )
             .ok()
+            .map(|pinned| (pinned.columns, pinned.solve_ms))
         })
-        .map(|pinned| (pinned.columns, pinned.solve_ms));
+    };
     let solve = |objective: Objective,
                  fixed: Fixed,
                  start: Option<&[f64]>,
-                 tie_break: Option<(f64, f64)>,
+                 improve_below: Option<f64>,
                  stop: Stop| {
         build_and_solve(
             inputs,
@@ -393,8 +387,7 @@ pub(crate) fn solve_cluster_selection(
                 fixed,
                 active: &limits,
                 start,
-                improve_below: tie_break.map(|(below, _)| below),
-                tie_break_seconds: tie_break.map_or(0.0, |(_, seconds)| seconds),
+                improve_below,
                 pinned: None,
                 stop,
             },
@@ -418,30 +411,39 @@ pub(crate) fn solve_cluster_selection(
         .flatten()
         .map(|relaxed| relaxed.objective / weights.max(f64::MIN_POSITIVE));
     let mut solve_count = 1;
-    let start = pinned_start.as_ref().map(|(columns, _)| columns.as_slice());
+    let mut start_ms = 0;
     let first = match checks.exact_solve {
         true => solve(
             Objective::MeanLatency,
             Fixed::default(),
-            start,
+            None,
             None,
             Stop::Exact,
         ),
-        // No plan in the time limit: on to the gap alone.
+        // No plan within the node limit: once more from the feasible plan,
+        // under the same limit, so the second phase is bounded too.
         false => match solve(
             Objective::MeanLatency,
             Fixed::default(),
-            start,
             None,
-            Stop::GapOrTime,
+            None,
+            Stop::GapOrNodes,
         ) {
-            Err(SelectionMilpError::Solver(reason)) if reason == NO_PLAN_IN_TIME => solve(
-                Objective::MeanLatency,
-                Fixed::default(),
-                start,
-                None,
-                Stop::Gap,
-            ),
+            Err(SelectionMilpError::Solver(reason)) if reason == NO_PLAN_IN_NODES => {
+                match pinned_start() {
+                    Some((columns, ms)) => {
+                        start_ms = ms;
+                        solve(
+                            Objective::MeanLatency,
+                            Fixed::default(),
+                            Some(&columns),
+                            None,
+                            Stop::GapOrNodes,
+                        )
+                    }
+                    None => Err(SelectionMilpError::Solver(reason)),
+                }
+            }
             solved => solved,
         },
     };
@@ -461,7 +463,6 @@ pub(crate) fn solve_cluster_selection(
                         active,
                         start: None,
                         improve_below: None,
-                        tie_break_seconds: 0.0,
                         pinned: None,
                         stop: Stop::Exact,
                     },
@@ -471,17 +472,16 @@ pub(crate) fn solve_cluster_selection(
         }
         Err(error) => return Err(ClusterSelectionError::Milp(error)),
     };
-    let mut solve_ms = first.solve_ms + pinned_start.as_ref().map_or(0, |&(_, ms)| ms);
-    let tie_break_seconds =
-        (first.solve_ms as f64 / 1_000.0).clamp(SHORTEST_TIE_BREAK_SECONDS, TIE_BREAK_SECONDS);
+    let mut solve_ms = first.solve_ms + start_ms;
     let weighted = first.objective;
     let weighted_lower_bound = first.lower_bound;
     // Tie-breaks only when an alternative optimum may exist: each starts
     // from the plan so far and only looks for one at least a byte smaller
-    // within `TIE_BREAK_SECONDS`; finding none (or none in time) keeps the
-    // plan so far.
+    // within `TIE_BREAK_NODES`; finding none (or none in those nodes) keeps
+    // the plan so far.
     let full_tie_breaks = !checks.lazy_tie_breaks;
     let mut last = first;
+    let mut tie_broken = false;
     for objective in [Objective::Memory, Objective::Disk] {
         let current = match objective {
             Objective::Memory => last.memory_bytes,
@@ -495,7 +495,7 @@ pub(crate) fn solve_cluster_selection(
             objective,
             fixed,
             Some(&last.columns),
-            (!full_tie_breaks).then_some((current - 0.5, tie_break_seconds)),
+            (!full_tie_breaks).then_some(current - 0.5),
             Stop::Exact,
         );
         solve_count += 1;
@@ -507,7 +507,38 @@ pub(crate) fn solve_cluster_selection(
             };
             if found < current - 0.5 {
                 last = better;
+                tie_broken = true;
             }
+        }
+    }
+    // A tie-break solve's latency variables float within the slack it keeps
+    // on the mean latency: the reported latencies are those of the chosen
+    // selection, pinned and solved for the mean latency.
+    if tie_broken {
+        let chosen = FeasiblePlan {
+            executions: last.selected.iter().copied().collect(),
+            edges: last.edges.iter().copied().collect(),
+            answering: last.answering.iter().copied().collect(),
+        };
+        let pinned = build_and_solve(
+            inputs,
+            &shapes,
+            &groups,
+            &kept,
+            Solve {
+                objective: Objective::MeanLatency,
+                fixed: Fixed::default(),
+                active: &limits,
+                start: Some(&last.columns),
+                improve_below: None,
+                pinned: Some(&chosen),
+                stop: Stop::Exact,
+            },
+        );
+        solve_count += 1;
+        if let Ok(pinned) = pinned {
+            solve_ms += pinned.solve_ms;
+            last.latency_ms = pinned.latency_ms;
         }
     }
     // (K) holds only to the solver's tolerance: a selection that misses a
@@ -730,9 +761,132 @@ fn memo_group_of(inputs: &ClusterInputs<'_>, index: usize) -> MemoGroupId {
         .group
 }
 
-/// The most occurrences [`path_reads`] unfolds per query; past it, the
-/// query keeps only its per-edge reads (exact either way).
+/// The most occurrences [`unfold_paths`] builds per query. An occurrence
+/// is expanded (all its children built at once) only while the tree stays
+/// within this many; one left unexpanded keeps its own rows, and the
+/// per-query rows still bound what lies below it (exact either way).
 const MOST_OCCURRENCES_PER_QUERY: usize = 4_096;
+
+/// One edge out of an expanded occurrence: into consumer `consumer` on its
+/// input `input`, from `producer`, edge `position`; `child` is the
+/// occurrence reading `producer` through it, `None` when the producer's
+/// memo group is already on the path (a cycle).
+#[derive(Debug, Clone, PartialEq)]
+struct OccurrenceEdge {
+    consumer: usize,
+    input: usize,
+    position: usize,
+    producer: usize,
+    child: Option<usize>,
+}
+
+/// One occurrence of a query's plan unfolded along its paths: the
+/// executions it may read, and, when expanded, the edges out of them.
+#[derive(Debug, Clone, PartialEq)]
+struct Occurrence<G> {
+    executions: BTreeSet<usize>,
+    /// Whether it is an output reference's (its reads are the $z$).
+    root: bool,
+    /// The memo groups from the root down to it, its own included.
+    path: Vec<G>,
+    /// `None` when left unexpanded (a leaf, or past the cap).
+    edges: Option<Vec<OccurrenceEdge>>,
+}
+
+/// A query's plan unfolded into a tree of occurrences: one per output
+/// reference (`roots`), and below an occurrence, one per (input, producer
+/// memo group) of its executions (`inputs_of(c)`: per input, the
+/// (position, producer) pairs). Executions `expands` rejects (ingestion
+/// time) are leaves; a producer group already on the path gets no child
+/// (a cycle); an occurrence is expanded only if all its children fit
+/// within `cap` occurrences.
+fn unfold_paths<G: Ord + Copy>(
+    roots: Vec<BTreeSet<usize>>,
+    inputs_of: impl Fn(usize) -> Vec<Vec<(usize, usize)>>,
+    group_of: impl Fn(usize) -> G,
+    expands: impl Fn(usize) -> bool,
+    cap: usize,
+) -> Vec<Occurrence<G>> {
+    let mut occurrences: Vec<Occurrence<G>> = roots
+        .into_iter()
+        .take(cap)
+        .map(|executions| {
+            let mut path: Vec<G> = executions.iter().map(|&c| group_of(c)).collect();
+            path.sort_unstable();
+            path.dedup();
+            Occurrence {
+                executions,
+                root: true,
+                path,
+                edges: None,
+            }
+        })
+        .collect();
+    let mut next = 0;
+    while next < occurrences.len() {
+        let occurrence = next;
+        next += 1;
+        let mut edges = Vec::new();
+        let mut children: BTreeMap<(usize, G), BTreeSet<usize>> = BTreeMap::new();
+        for &consumer in occurrences[occurrence]
+            .executions
+            .iter()
+            .filter(|&&c| expands(c))
+        {
+            for (input, producers) in inputs_of(consumer).into_iter().enumerate() {
+                for (position, producer) in producers {
+                    let group = group_of(producer);
+                    let on_path = occurrences[occurrence].path.contains(&group);
+                    if !on_path {
+                        children.entry((input, group)).or_default().insert(producer);
+                    }
+                    edges.push((
+                        consumer,
+                        input,
+                        position,
+                        producer,
+                        (!on_path).then_some(group),
+                    ));
+                }
+            }
+        }
+        if edges.is_empty() || occurrences.len() + children.len() > cap {
+            continue;
+        }
+        let first_child = occurrences.len();
+        let child_of: BTreeMap<(usize, G), usize> = children
+            .keys()
+            .enumerate()
+            .map(|(offset, &key)| (key, first_child + offset))
+            .collect();
+        let path = occurrences[occurrence].path.clone();
+        for ((_, group), executions) in children {
+            let mut below = path.clone();
+            below.push(group);
+            occurrences.push(Occurrence {
+                executions,
+                root: false,
+                path: below,
+                edges: None,
+            });
+        }
+        occurrences[occurrence].edges = Some(
+            edges
+                .into_iter()
+                .map(
+                    |(consumer, input, position, producer, group)| OccurrenceEdge {
+                        consumer,
+                        input,
+                        position,
+                        producer,
+                        child: group.map(|group| child_of[&(input, group)]),
+                    },
+                )
+                .collect(),
+        );
+    }
+    occurrences
+}
 
 /// What [`path_reads`]'s freshness rows read.
 struct PathReadRows<'a> {
@@ -749,16 +903,15 @@ struct PathReadRows<'a> {
 /// that a producer two branches of the query share (a diamond: `avg` as a
 /// sum over a count off one state) counts once; in the LP relaxation a
 /// read then splits over alternative consumers and halves at every layer
-/// where they meet a shared producer. Here the query's sub-DAG is
-/// unfolded into a tree of occurrences: one per output reference (reading
-/// its answering executions by $z$), and below an occurrence, one per
-/// (input, producer memo group) of its executions. In a plan an occurrence
-/// reads one execution and one edge per input of it, so per occurrence
-/// the reads are a flow summing to at most 1, and each bounds $a_{q,e}$
-/// from below: $a_{q,u} \ge \sum_c s_{o,c \to u}$. The same sums carry the
-/// freshness rows over a refresh group's executions in one occurrence.
-/// Every row holds in the plan's own reads, so the optimum is kept. A
-/// memo group already on an occurrence's path (a cycle) is not unfolded.
+/// where they meet a shared producer. Here the query's plan is unfolded
+/// ([`unfold_paths`]); along one path a memo group is read at most once,
+/// so in a plan an occurrence reads one execution and one edge per input
+/// of it: per expanded occurrence $o$, consumer $c$ and input $i$, the
+/// edge reads are a flow, $\sum_u s_{o,c\to u} = r_{o,c}$ with $s \le y$;
+/// a child's reads are $r_{o',u} = \sum s_{o,c\to u}$, each bounding
+/// $a_{q,u}$ from below; and the freshness big-M row is carried on an
+/// occurrence's sums per refresh group. Every row holds in the plan's own
+/// reads, so the optimum is kept.
 fn path_reads(
     inputs: &ClusterInputs<'_>,
     shape: &QueryShape,
@@ -777,38 +930,79 @@ fn path_reads(
         lateness,
         wait_per_run,
     } = freshness_rows;
-    // An occurrence: its reads by execution and the memo groups above it.
-    let mut pending: Vec<(BTreeMap<usize, Expression>, Vec<MemoGroupId>)> = selectable
+    let roots: Vec<BTreeSet<usize>> = selectable
         .answering()
         .iter()
         .filter(|(query, _)| *query == shape.query)
-        .map(|(query, answering)| {
-            let occurrence: BTreeMap<usize, Expression> = answering
+        .map(|(_, answering)| {
+            answering
                 .iter()
+                .copied()
                 .filter(|index| reads.contains_key(index))
-                .filter_map(|&index| {
-                    variables
-                        .z
-                        .get(&(*query, index))
-                        .map(|&z| (index, Expression::from(z)))
-                })
-                .collect();
-            (occurrence, Vec::new())
+                .collect()
         })
         .collect();
-    let mut unfolded = 0;
-    while let Some((occurrence, path)) = pending.pop() {
-        unfolded += 1;
+    let inputs_of = |consumer: usize| -> Vec<Vec<(usize, usize)>> {
+        (0..selectable.input_count(consumer))
+            .map(|input| {
+                selectable
+                    .edges_into(consumer, input)
+                    .iter()
+                    .map(|&position| (position, selectable.edges()[position].producer))
+                    .filter(|&(position, producer)| {
+                        variables.y.contains_key(&position) && reads.contains_key(&producer)
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let occurrences = unfold_paths(
+        roots,
+        inputs_of,
+        |index| memo_group_of(inputs, index),
+        |index| !at_ingestion(inputs, index),
+        MOST_OCCURRENCES_PER_QUERY,
+    );
+    // Each occurrence's reads: a root's are its answering z, a child's the
+    // edge reads into it.
+    let mut read_of: Vec<BTreeMap<usize, Expression>> = vec![BTreeMap::new(); occurrences.len()];
+    for (occurrence, root) in occurrences.iter().enumerate().filter(|(_, o)| o.root) {
+        for &index in &root.executions {
+            if let Some(&z) = variables.z.get(&(shape.query, index)) {
+                read_of[occurrence].insert(index, Expression::from(z));
+            }
+        }
+    }
+    // In order: a child comes after its parent, whose reads are complete.
+    for (own, occurrence) in occurrences.iter().enumerate() {
+        let Some(edges) = &occurrence.edges else {
+            continue;
+        };
+        let mut flows: BTreeMap<(usize, usize), Expression> = BTreeMap::new();
+        for edge in edges {
+            let edge_read = problem.add(variable().min(0).max(1));
+            rows.push(constraint!(edge_read <= variables.y[&edge.position]));
+            *flows.entry((edge.consumer, edge.input)).or_default() += edge_read;
+            if let Some(child) = edge.child {
+                *read_of[child].entry(edge.producer).or_default() += edge_read;
+            }
+        }
+        for ((consumer, _), flow) in flows {
+            let read = read_of[own].get(&consumer).cloned().unwrap_or_default();
+            rows.push(constraint!(flow == read));
+        }
+    }
+    for (occurrence, read) in occurrences.iter().zip(&read_of) {
         // Below the root, each read bounds the query's read from below.
-        if !path.is_empty() {
-            for (index, read) in &occurrence {
+        if !occurrence.root {
+            for (index, read) in read {
                 rows.push(constraint!(reads[index] >= read.clone()));
             }
         }
         // Freshness over the occurrence's executions in one refresh group.
         let mut by_refresh_group: BTreeMap<usize, (Expression, Expression, usize)> =
             BTreeMap::new();
-        for (&index, read) in &occurrence {
+        for (&index, read) in read {
             if let (Some(&group), true) =
                 (groups.of_execution.get(&index), at_ingestion(inputs, index))
             {
@@ -826,52 +1020,6 @@ fn path_reads(
                 ));
                 rows.push(constraint!(fresh >= lateness + own));
             }
-        }
-        if unfolded + pending.len() >= MOST_OCCURRENCES_PER_QUERY {
-            continue;
-        }
-        // Its children: per (input, producer memo group), the edge reads.
-        let mut children: BTreeMap<(usize, MemoGroupId), BTreeMap<usize, Expression>> =
-            BTreeMap::new();
-        for (&consumer, read) in &occurrence {
-            if at_ingestion(inputs, consumer) {
-                continue;
-            }
-            for input in 0..selectable.input_count(consumer) {
-                let mut flow = Expression::default();
-                let mut any = false;
-                for &position in selectable.edges_into(consumer, input) {
-                    let (Some(&y), producer) = (
-                        variables.y.get(&position),
-                        selectable.edges()[position].producer,
-                    ) else {
-                        continue;
-                    };
-                    if !reads.contains_key(&producer) {
-                        continue;
-                    }
-                    let edge_read = problem.add(variable().min(0).max(1));
-                    rows.push(constraint!(edge_read <= y));
-                    flow += edge_read;
-                    any = true;
-                    *children
-                        .entry((input, memo_group_of(inputs, producer)))
-                        .or_default()
-                        .entry(producer)
-                        .or_default() += edge_read;
-                }
-                if any {
-                    rows.push(constraint!(flow == read.clone()));
-                }
-            }
-        }
-        for ((_, group), child) in children {
-            if path.contains(&group) {
-                continue;
-            }
-            let mut below = path.clone();
-            below.push(group);
-            pending.push((child, below));
         }
     }
 }
@@ -1370,7 +1518,6 @@ fn build_and_solve(
         active,
         start,
         improve_below,
-        tie_break_seconds,
         pinned,
         stop,
     } = solve;
@@ -1752,12 +1899,12 @@ fn build_and_solve(
         "mip_rel_gap",
         match stop {
             Stop::Exact => 0.0,
-            Stop::GapOrTime | Stop::Gap => STOP_RELATIVE_GAP,
+            Stop::GapOrNodes => STOP_RELATIVE_GAP,
         },
     );
     model.set_option("mip_abs_gap", 0.0);
-    if stop == Stop::GapOrTime {
-        model.set_option("time_limit", STOP_SECONDS);
+    if stop == Stop::GapOrNodes {
+        model.set_option("mip_max_nodes", STOP_NODES);
     }
     let log = inputs.cost_inputs.latency_selection_checks.log_solver;
     model.set_option("output_flag", log);
@@ -1787,7 +1934,7 @@ fn build_and_solve(
         model.set_option("solve_relaxation", true);
     }
     if let Some(below) = improve_below {
-        model.set_option("time_limit", tie_break_seconds);
+        model.set_option("mip_max_nodes", TIE_BREAK_NODES);
         model.set_option("objective_bound", below * scale);
     }
     if let Some(start) = start.filter(|start| start.len() == variable_count) {
@@ -1804,7 +1951,7 @@ fn build_and_solve(
     use highs::{HighsModelStatus, HighsSolutionStatus};
     let columns: Vec<f64> = match solved.status() {
         HighsModelStatus::ModelEmpty => vec![0.0; variable_count],
-        HighsModelStatus::Optimal | HighsModelStatus::ReachedTimeLimit
+        HighsModelStatus::Optimal | HighsModelStatus::ReachedSolutionLimit
             if solved.primal_solution_status() == HighsSolutionStatus::Feasible =>
         {
             solved.get_solution().columns().to_vec()
@@ -1812,8 +1959,8 @@ fn build_and_solve(
         HighsModelStatus::Infeasible | HighsModelStatus::UnboundedOrInfeasible => {
             return Err(SelectionMilpError::Infeasible)
         }
-        HighsModelStatus::ReachedTimeLimit if improve_below.is_none() => {
-            return Err(SelectionMilpError::Solver(NO_PLAN_IN_TIME.to_string()))
+        HighsModelStatus::ReachedSolutionLimit if improve_below.is_none() => {
+            return Err(SelectionMilpError::Solver(NO_PLAN_IN_NODES.to_string()))
         }
         other => return Err(SelectionMilpError::Solver(format!("{other:?}"))),
     };
@@ -1887,6 +2034,93 @@ fn build_and_solve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A toy plan for [`unfold_paths`]: per execution, per input, the
+    /// (edge position, producer) pairs, and each execution's memo group.
+    fn unfold(
+        inputs: &[Vec<Vec<(usize, usize)>>],
+        groups: &[u32],
+        roots: Vec<BTreeSet<usize>>,
+        cap: usize,
+    ) -> Vec<Occurrence<u32>> {
+        unfold_paths(roots, |c| inputs[c].clone(), |c| groups[c], |_| true, cap)
+    }
+
+    /// A cycle of memo groups: execution 0 (group 0) reads 1 (group 1),
+    /// which reads 2 (group 0 again). Group 0 is on the path, so the edge
+    /// into 2 has no child occurrence: the tree stops instead of looping,
+    /// and the edge is still listed (its read stays in the flow).
+    #[test]
+    fn a_cycle_is_not_unfolded_again() {
+        let inputs = vec![
+            vec![vec![(10, 1)]],
+            vec![vec![(11, 2)]],
+            vec![vec![(12, 1)]],
+        ];
+        let occurrences = unfold(&inputs, &[0, 1, 0], vec![BTreeSet::from([0])], 100);
+        assert_eq!(occurrences.len(), 2, "{occurrences:?}");
+        let below = occurrences[1].edges.as_ref().expect("expanded");
+        assert_eq!(below.len(), 1);
+        assert_eq!((below[0].position, below[0].child), (11, None));
+        assert_eq!(occurrences[1].path, vec![0, 1]);
+    }
+
+    /// A diamond: 0 reads groups 1 and 2 on its two inputs, both reading
+    /// the shared group 3 (execution 3 or its alternative 4): 3 is unfolded
+    /// once per path (two occurrences), each reading 3 or 4.
+    #[test]
+    fn a_diamond_unfolds_once_per_path() {
+        let inputs = vec![
+            vec![vec![(10, 1)], vec![(11, 2)]],
+            vec![vec![(12, 3), (13, 4)]],
+            vec![vec![(14, 3), (15, 4)]],
+            vec![],
+            vec![],
+        ];
+        let occurrences = unfold(&inputs, &[0, 1, 2, 3, 3], vec![BTreeSet::from([0])], 100);
+        let shared: Vec<_> = occurrences
+            .iter()
+            .filter(|o| o.executions == BTreeSet::from([3, 4]))
+            .collect();
+        assert_eq!(shared.len(), 2, "{occurrences:?}");
+    }
+
+    /// The cap: a chain of diamonds doubles the occurrences per level; with
+    /// a cap of 10 the tree stays within 10, and every expanded occurrence
+    /// has all its children (so its flow rows are complete).
+    #[test]
+    fn the_cap_bounds_the_tree_and_expands_whole_occurrences() {
+        // Levels of two executions each, both reading both of the next.
+        let levels = 6;
+        let mut inputs = Vec::new();
+        let mut groups = Vec::new();
+        for level in 0..levels {
+            for _ in 0..2 {
+                let next = 2 * (level + 1);
+                inputs.push(match level + 1 < levels {
+                    true => vec![vec![(next, next)], vec![(next + 1, next + 1)]],
+                    false => vec![],
+                });
+                groups.push(level as u32 * 2 + (inputs.len() as u32 - 1) % 2);
+            }
+        }
+        let occurrences = unfold(&inputs, &groups, vec![BTreeSet::from([0])], 10);
+        assert!(occurrences.len() <= 10, "{}", occurrences.len());
+        let unbounded = unfold(&inputs, &groups, vec![BTreeSet::from([0])], usize::MAX);
+        assert!(unbounded.len() > 10);
+        for occurrence in &occurrences {
+            if let Some(edges) = &occurrence.edges {
+                for &consumer in &occurrence.executions {
+                    let expected: usize = inputs[consumer].iter().map(Vec::len).sum();
+                    let listed = edges.iter().filter(|e| e.consumer == consumer).count();
+                    assert_eq!(listed, expected);
+                }
+                assert!(edges
+                    .iter()
+                    .all(|e| e.child.is_some_and(|c| c < occurrences.len())));
+            }
+        }
+    }
 
     fn window(width_ms: u64, phase_ms: u64) -> RefreshWindow {
         RefreshWindow { width_ms, phase_ms }

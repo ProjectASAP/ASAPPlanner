@@ -51,10 +51,7 @@ fn selected_with(
             "--deployment-capabilities",
             &format!("crates/devtools/tests/sketch_plan_snapshots/deployments/{deployment}.capabilities.json"),
         ])
-        .args([
-            "--cost-inputs",
-            "tools/dag-viewer/cost-inputs/cluster-lowest-mean-latency.json",
-        ])
+        .args(["--cost-inputs", cost_inputs_of(workload)])
         .args(["--format", "json"]);
     if ignore_accuracy {
         command.arg("--ignore-accuracy-guarantees");
@@ -96,19 +93,13 @@ fn selected(workload: &str, deployment: &str, ignore_accuracy: bool, full: bool)
 
 /// The default stop rule's plan is within its reported gap of the exact
 /// optimum `optimum_ms`: its lower bound is at most the optimum, and its
-/// mean latency at most the optimum plus the gap; the gap is at most 1 %
-/// unless the solve stopped on time (`may_stop_on_time`).
-fn assert_within_gap(
-    workload: &str,
-    deployment: &str,
-    ignore_accuracy: bool,
-    optimum_ms: f64,
-    may_stop_on_time: bool,
-) {
+/// mean latency at most the optimum plus the gap, which is at most 1 %
+/// (every workload here solves within the node limit).
+fn assert_within_gap(workload: &str, deployment: &str, ignore_accuracy: bool, optimum_ms: f64) {
     let stopped = selected_with(workload, deployment, ignore_accuracy, false, false);
     let tolerance = 1e-6 * optimum_ms.max(1.0);
     assert!(
-        may_stop_on_time || stopped.relative_gap <= 0.01 + 1e-9,
+        stopped.relative_gap <= 0.01 + 1e-9,
         "{workload}: gap {} over 1 %",
         stopped.relative_gap
     );
@@ -192,7 +183,7 @@ fn the_speed_ups_keep_every_snapshot_workloads_optimum() {
         let workload = entry["workload"].as_str().unwrap();
         assert_same_optimum(workload, deployment, ignore);
         let optimum = selected(workload, deployment, ignore, false).mean_latency_ms;
-        assert_within_gap(workload, deployment, ignore, optimum, false);
+        assert_within_gap(workload, deployment, ignore, optimum);
     }
 }
 
@@ -236,6 +227,16 @@ fn the_measured_workloads_keep_their_optimum_in_a_bounded_model() {
             SEED_VARIABLES,
             SEED_ROWS,
         ),
+        // A dashboard at 10,000 series, priced with measured operation
+        // costs (`cluster-lowest-mean-latency-measured.json`).
+        (
+            TYPICAL_DASHBOARD.to_string(),
+            "mvp",
+            false,
+            847.206346,
+            TYPICAL_VARIABLES,
+            TYPICAL_ROWS,
+        ),
     ] {
         let selected = selected(&workload, deployment, ignore_accuracy, false);
         assert!(
@@ -249,13 +250,7 @@ fn the_measured_workloads_keep_their_optimum_in_a_bounded_model() {
             selected.variables,
             selected.rows
         );
-        assert_within_gap(
-            &workload,
-            deployment,
-            ignore_accuracy,
-            mean_latency_ms,
-            false,
-        );
+        assert_within_gap(&workload, deployment, ignore_accuracy, mean_latency_ms);
     }
 }
 
@@ -300,6 +295,18 @@ fn dominated_theta_families_are_left_out() {
     assert!((mean(&pruned) - mean(&unpruned)).abs() <= 1e-6 * mean(&unpruned));
 }
 
+/// The dashboard workload at 10,000 series and its measured cost inputs.
+const TYPICAL_DASHBOARD: &str = "tools/dag-viewer/workloads/typical-dashboard-10k/workload.json";
+
+/// The cost inputs a workload is planned with: the viewer's cluster
+/// inputs, or the measured ones for the dashboard at 10,000 series.
+fn cost_inputs_of(workload: &str) -> &'static str {
+    match workload == TYPICAL_DASHBOARD {
+        true => "tools/dag-viewer/cost-inputs/cluster-lowest-mean-latency-measured.json",
+        false => "tools/dag-viewer/cost-inputs/cluster-lowest-mean-latency.json",
+    }
+}
+
 /// The model sizes measured with the speed-ups (variables, rows).
 const TOPK_VARIABLES: u64 = 1216;
 const TOPK_ROWS: u64 = 2408;
@@ -309,3 +316,5 @@ const DISTINCT_VARIABLES: u64 = 425;
 const DISTINCT_ROWS: u64 = 747;
 const SEED_VARIABLES: u64 = 1550;
 const SEED_ROWS: u64 = 2763;
+const TYPICAL_VARIABLES: u64 = 2540;
+const TYPICAL_ROWS: u64 = 4585;

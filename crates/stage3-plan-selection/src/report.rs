@@ -202,7 +202,8 @@ pub struct Selection {
     /// relaxation's mean latency in ms: the formulation's bound.
     pub milp_root_lp_mean_latency_ms: Option<f64>,
     /// Under `lowest_mean_latency`, how far the selected plan may be from
-    /// the optimum: the solve stops at a relative gap of 1 % or after 30 s
+    /// the optimum: the solve stops at a relative gap of 1 % or after 10,000
+    /// branch-and-bound nodes
     /// unless `LatencySelectionChecks::exact_solve`; `None` otherwise.
     pub optimality_gap: Option<OptimalityGap>,
     /// Under cost model 3's `lowest_mean_latency`, the executions left out
