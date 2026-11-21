@@ -92,7 +92,8 @@ fn mapped(batch: &Batch) -> Batch {
         ScalarBuffer::from(offsets),
     )
     .unwrap();
-    assert!(column.mapped_state_address(0).is_some());
+    // Held outside the run: charged nothing.
+    assert_eq!(column.state_memory_bytes(), 0);
     Batch::try_from_columns(
         batch.schema().clone(),
         vec![
@@ -207,6 +208,14 @@ fn mapped_states_merge_as_owned_states() {
             true,
         ),
         (
+            FieldDataType::Sketch(SketchAlgorithm::Cms),
+            Some(SketchParams::Cms {
+                width: 64,
+                depth: 3,
+            }),
+            false,
+        ),
+        (
             FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
             None,
             false,
@@ -267,6 +276,75 @@ fn mapped_counters_merge_in_time_order() {
     let expected = by_series(&merge(owned.clone(), LIMIT).unwrap(), false);
     let reversed: Vec<Batch> = owned.iter().rev().map(mapped).collect();
     assert_eq!(by_series(&merge(reversed, LIMIT).unwrap(), false), expected);
+}
+
+/// A mapped irate record reads back as the owned record (irate states are
+/// read, not merged).
+#[test]
+fn mapped_irate_records_read_as_owned() {
+    let family = FieldDataType::ExactAggregate(ExactKind::IRate, ExactParams::IRate);
+    let owned = window(&family, None, 3, 20, 5);
+    let maps = mapped(&owned);
+    let (a, b) = (
+        owned.state_column(1).unwrap(),
+        maps.state_column(1).unwrap(),
+    );
+    for index in 0..20 {
+        assert_eq!(
+            state_view_bytes(a.state(index).as_ref()),
+            state_view_bytes(b.state(index).as_ref())
+        );
+    }
+}
+
+/// Past KLL's first compaction (12 windows of 1,100 samples per series),
+/// mapped windows answer within KLL's bound of the owned ones, and the
+/// same mapped windows merge to the same sketch on every run (each group's
+/// accumulator is seeded from its key).
+#[test]
+fn mapped_kll_merges_are_reproducible_and_within_the_bound() {
+    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let params = Some(SketchParams::Kll { k: 200 });
+    let owned: Vec<Batch> = (0..12)
+        .map(|w| window(&family, params.as_ref(), w, 20, 1_100))
+        .collect();
+    let maps: Vec<Batch> = owned.iter().map(mapped).collect();
+    let first = by_series(&merge(maps.clone(), LIMIT).unwrap(), true);
+    for _ in 0..4 {
+        assert_eq!(by_series(&merge(maps.clone(), LIMIT).unwrap(), true), first);
+    }
+    let expected = by_series(&merge(owned, LIMIT).unwrap(), true);
+    // Values of a series span about 12 x 1,100 x 0.5 = 6,600; k = 200
+    // keeps ranks within about 1.7 %, so quantiles within 3 % of the span.
+    for ((ks, vs), (ke, ve)) in first.iter().zip(&expected) {
+        assert_eq!(ks, ke);
+        for (a, b) in vs.chunks(8).zip(ve.chunks(8)) {
+            let (a, b) = (
+                f64::from_le_bytes(a.try_into().unwrap()),
+                f64::from_le_bytes(b.try_into().unwrap()),
+            );
+            assert!((a - b).abs() <= 0.03 * 6_600.0, "{ks}: {a} vs {b}");
+        }
+    }
+}
+
+/// Mapped windows are charged nothing until merged: a merge over them
+/// peaks no higher than over the same windows owned.
+#[test]
+fn a_merge_over_mapped_windows_peaks_no_higher_than_over_owned() {
+    let family = FieldDataType::Sketch(SketchAlgorithm::DDSketch);
+    let params = Some(SketchParams::DDSketch { alpha: 0.01 });
+    let owned: Vec<Batch> = (0..12)
+        .map(|w| window(&family, params.as_ref(), w, 2_000, 15))
+        .collect();
+    let maps: Vec<Batch> = owned.iter().map(mapped).collect();
+    let (_, owned_peak) = merge_with_peak(owned, LIMIT).unwrap();
+    let (_, mapped_peak) = merge_with_peak(maps, LIMIT).unwrap();
+    assert!(owned_peak > 0);
+    assert!(
+        mapped_peak <= owned_peak,
+        "mapped {mapped_peak} B, owned {owned_peak} B"
+    );
 }
 
 /// Malformed mapped bytes are refused when the column is built.

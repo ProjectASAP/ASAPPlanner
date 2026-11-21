@@ -36,6 +36,8 @@ ahash = { version = "0.8", default-features = false, features = ["std", "runtime
 # (branch `planner-pin/dd-kll-shrink-to-fit`: 21b6357, #267's commit, and
 # #270's change and tests, since main has renamed the capability
 # vocabulary since). Moves to a release once #267 and #270 are in one.
+# Plus the zero-copy sketch views of #271 (branch `feat/zero-copy-views`,
+# on that branch), which the executor's mapped state columns read.
 asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "93d56eff7a549ae411b90859b000cbecda5cf587" }
 
 [profile.dev]

@@ -949,22 +949,20 @@ async fn merge_summary(
         let (states, indices) = columns[batch];
         (states, indices.value(row) as usize)
     };
-    // Counter states join consecutive windows pairwise, which is exact only
-    // in time order: order the inputs by their window start.
-    if SummaryTypeCapability::of(family).merge_inputs == Some(MergeInputRule::DisjointInTime) {
-        entries.sort_by_cached_key(|&entry| {
-            let (states, index) = state_of(entry);
-            match states.storage() {
-                StateStorage::Exact(records) => records.get(index).earliest_sample_ms(),
-                StateStorage::Objects(objects) => objects[index]
-                    .as_any()
-                    .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
-                    .and_then(|state| state.earliest_sample_ms()),
-                // Mapped sketch states are not counters.
-                StateStorage::Mapped(_) => None,
-            }
-        });
-    }
+    // Counter states (the only family this path merges) join consecutive
+    // windows pairwise, which is exact only in time order: order the inputs
+    // by their window start.
+    entries.sort_by_cached_key(|&entry| {
+        let (states, index) = state_of(entry);
+        match states.storage() {
+            StateStorage::Exact(records) => records.get(index).earliest_sample_ms(),
+            _ => states
+                .state(index)
+                .as_any()
+                .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
+                .and_then(|state| state.earliest_sample_ms()),
+        }
+    });
     let all_exact = columns
         .iter()
         .all(|(states, _)| matches!(states.storage(), StateStorage::Exact(_)));
@@ -1037,7 +1035,9 @@ async fn merge_objects<'b>(
     for &entry in entries {
         work.checkpoint().await?;
         let (states, index) = state_of(entry);
-        merger.add(states, index, entry.2 as usize, group_count)?;
+        // Counter states are records or objects, never mapped sketches: no
+        // KLL accumulator is seeded here.
+        merger.add(states, index, entry.2 as usize, group_count, &|| 0)?;
     }
     Ok(merger.finish())
 }
@@ -1083,13 +1083,15 @@ impl ObjectMerger {
     }
 
     /// Merges state `index` of `states` into group `group` (of `group_count`
-    /// so far).
+    /// so far). `seed` is the group's seed for a KLL accumulator built from
+    /// a mapped state, so the merge is the same on every run.
     fn add(
         &mut self,
         states: &StateColumn,
         index: usize,
         group: usize,
         group_count: usize,
+        seed: &dyn Fn() -> u64,
     ) -> Result<(), Error> {
         use crate::summary_kernels::HydraCmsGroup;
         use crate::values::StateStorage;
@@ -1101,7 +1103,7 @@ impl ObjectMerger {
         if let StateStorage::Mapped(mapped) = states.storage() {
             let slot = &mut self.merged[group];
             let Some((existing, existing_held_outside_run)) = slot else {
-                let accumulator = mapped.state(index, states.family());
+                let accumulator = mapped.accumulator(index, seed());
                 self.retained = self
                     .retained
                     .checked_add(accumulator.approx_memory_bytes() + 64)
@@ -1125,6 +1127,13 @@ impl ObjectMerger {
                     .ok_or(Error::MemoryLimit)?;
             }
             let old_bytes = existing.approx_memory_bytes();
+            // Reserved before merging: a merge grows the accumulator by at
+            // most the merged state's size.
+            self.memory.resize(
+                self.retained
+                    .checked_add(mapped.state_len(index))
+                    .ok_or(Error::MemoryLimit)?,
+            )?;
             let accumulator = Arc::get_mut(existing).expect("the accumulator is the merger's own");
             mapped.merge_into(index, accumulator)?;
             self.retained = self
@@ -1222,6 +1231,11 @@ impl ObjectMerger {
         self.memory.resize(self.retained)
     }
 
+    /// Each group's merged state so far, `None` for a group it merged none.
+    fn finish_partial(mut self) -> Vec<Option<(Arc<dyn crate::AggregateCore>, bool)>> {
+        std::mem::take(&mut self.merged)
+    }
+
     /// Each group's merged state, with whether something outside the run
     /// holds it.
     fn finish(self) -> Vec<(Arc<dyn crate::AggregateCore>, bool)> {
@@ -1250,7 +1264,10 @@ async fn merge_summary_streaming(
     let exact_family = matches!(family, SummaryFamilyType::ExactAggregate(..));
     let mut table = GroupTable::new(groups.to_vec());
     let mut work = Cooperative::new(context);
+    // Exact records merge in place, one record per group; a group with a
+    // keyed exact state (an object, not a record) merges as objects.
     let mut exact: Vec<Option<ScalarState>> = Vec::new();
+    let mut as_objects: Vec<bool> = Vec::new();
     let mut workspace = Workspace::new(context)?;
     let mut objects = ObjectMerger::new(0, context)?;
     let mut table_bytes = 0;
@@ -1259,41 +1276,51 @@ async fn merge_summary_streaming(
         let _held = context.reserve(batch.memory_bytes())?;
         let ids = table.group_ids(&batch)?;
         let (states, indices) = state_indices(&batch, state_column)?;
+        objects.table_grew(table_bytes, table.memory_bytes())?;
+        table_bytes = table.memory_bytes();
+        exact.resize(table.len(), None);
+        as_objects.resize(table.len(), false);
         if exact_family {
-            exact.resize(table.len(), None);
-            workspace.set_bytes(
-                exact.len() * std::mem::size_of::<Option<ScalarState>>() + table.memory_bytes(),
-            )?;
-            for (row, &group) in ids.iter().enumerate() {
-                let index = indices.value(row) as usize;
-                let record = match states.storage() {
-                    StateStorage::Exact(records) => records.get(index),
-                    _ => states
-                        .state(index)
-                        .as_any()
-                        .downcast_ref::<ExactAccumulator>()
-                        .and_then(ExactAccumulator::scalar)
-                        .cloned()
-                        .ok_or_else(|| invalid("exact merge requires unkeyed exact states"))?,
-                };
-                let slot = &mut exact[group as usize];
-                *slot = Some(match slot.take() {
-                    None => record,
-                    Some(existing) => existing
-                        .merge(&record)
-                        .map_err(|e| Error::Operator(e.to_string()))?,
-                });
+            workspace.set_bytes(exact.len() * std::mem::size_of::<Option<ScalarState>>())?;
+        }
+        for (row, &group) in ids.iter().enumerate() {
+            let (index, group) = (indices.value(row) as usize, group as usize);
+            let seed = || group_seed(&table, group as u32, groups.len());
+            if !exact_family {
+                objects.add(states, index, group, table.len(), &seed)?;
+                continue;
             }
-        } else {
-            objects.table_grew(table_bytes, table.memory_bytes())?;
-            table_bytes = table.memory_bytes();
-            for (row, &group) in ids.iter().enumerate() {
-                objects.add(
-                    states,
-                    indices.value(row) as usize,
-                    group as usize,
-                    table.len(),
-                )?;
+            let record = match states.storage() {
+                StateStorage::Exact(records) => Some(records.get(index)),
+                _ => states
+                    .state(index)
+                    .as_any()
+                    .downcast_ref::<ExactAccumulator>()
+                    .and_then(ExactAccumulator::scalar)
+                    .cloned(),
+            };
+            match (record, as_objects[group]) {
+                (Some(record), false) => {
+                    let slot = &mut exact[group];
+                    *slot = Some(match slot.take() {
+                        None => record,
+                        Some(existing) => existing
+                            .merge(&record)
+                            .map_err(|e| Error::Operator(e.to_string()))?,
+                    });
+                }
+                _ => {
+                    // A keyed state: this group merges as objects from now
+                    // on, starting from the records merged so far.
+                    if !as_objects[group] {
+                        as_objects[group] = true;
+                        if let Some(record) = exact[group].take() {
+                            let column = StateColumn::from_exact(family.clone(), vec![record]);
+                            objects.add(&column, 0, group, table.len(), &seed)?;
+                        }
+                    }
+                    objects.add(states, index, group, table.len(), &seed)?;
+                }
             }
         }
         work.checkpoint_rows(batch.num_rows()).await?;
@@ -1307,7 +1334,7 @@ async fn merge_summary_streaming(
             return grouped_states(&table, updater.seal(), input_schema, output);
         }
     }
-    let states = if exact_family {
+    let states = if exact_family && !as_objects.contains(&true) {
         StateColumn::from_exact(
             family.clone(),
             exact
@@ -1315,10 +1342,42 @@ async fn merge_summary_streaming(
                 .map(|record| record.expect("every group has a row"))
                 .collect(),
         )
+    } else if exact_family {
+        // Some groups merged as objects: every group as an object.
+        let mut merged = objects.finish_partial();
+        merged.resize(exact.len(), None);
+        for (group, record) in exact.into_iter().enumerate() {
+            if let Some(record) = record {
+                merged[group] = Some((
+                    Arc::new(ExactAccumulator::from_scalar(family.clone(), record))
+                        as Arc<dyn crate::AggregateCore>,
+                    false,
+                ));
+            }
+        }
+        StateColumn::from_objects_of(
+            family.clone(),
+            merged
+                .into_iter()
+                .map(|state| state.expect("every group has a row"))
+                .collect(),
+        )
     } else {
         StateColumn::from_objects_of(family.clone(), objects.finish())
     };
     grouped_states(&table, states, input_schema, output)
+}
+
+/// The seed of group `group`'s KLL accumulator: a hash of its key values,
+/// so the same group merges the same way on every run.
+fn group_seed(table: &GroupTable, group: u32, key_columns: usize) -> u64 {
+    (0..key_columns).fold(0xcbf2_9ce4_8422_2325u64, |hash, column| {
+        format!("{:?}", table.label(group, column))
+            .bytes()
+            .fold(hash, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            })
+    })
 }
 
 /// `SummaryEstimate` / `FinalizeExactAccumulator`: each row's state read
@@ -1401,8 +1460,9 @@ fn evaluate_states(
             (SummaryEvaluation::Exact(evaluation), StateStorage::Exact(records)) => {
                 exact_value(&records.get(index), evaluation)?
             }
-            (SummaryEvaluation::Exact(evaluation), StateStorage::Objects(objects)) => {
-                let exact = objects[index]
+            (SummaryEvaluation::Exact(evaluation), _) => {
+                let state = states.state(index);
+                let exact = state
                     .as_any()
                     .downcast_ref::<ExactAccumulator>()
                     .ok_or_else(|| invalid("exact evaluation requires exact state"))?;
@@ -1410,10 +1470,6 @@ fn evaluate_states(
                     .scalar()
                     .ok_or_else(|| invalid("exact evaluation requires an unkeyed state"))?;
                 exact_value(record, evaluation)?
-            }
-            // Exact records are stored as records, mapped or not.
-            (SummaryEvaluation::Exact(_), StateStorage::Mapped(_)) => {
-                return Err(invalid("exact evaluation requires exact state"));
             }
             (SummaryEvaluation::Sketch(query), storage) => {
                 let summary = match storage {

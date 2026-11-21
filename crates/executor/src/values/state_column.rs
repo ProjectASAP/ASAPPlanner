@@ -1,5 +1,5 @@
 //! The summary states of one batch column.
-use super::mapped_states::{MappedKernel, MappedStates};
+use super::mapped_states::{mapped, Mapped, MappedRecords, MappedSketches};
 use crate::summary_kernels::exact::{ExactAccumulator, ScalarState};
 use crate::summary_kernels::increase::IncreaseAccumulator;
 use crate::AggregateCore;
@@ -42,7 +42,7 @@ pub(crate) enum StateStorage {
     Exact(ExactRecords),
     /// Sketch states read where a deployment stores them, through
     /// read-only views ([`super::mapped_states`]).
-    Mapped(MappedStates),
+    Mapped(MappedSketches),
 }
 
 /// The exact records of one column, each stored in the size its family
@@ -63,7 +63,7 @@ pub(crate) enum ExactRecords {
     /// irate: the last two samples.
     LastTwoSamples(Box<[LastTwoSamples]>),
     /// Records of any exact kind, read where a deployment stores them.
-    Mapped(MappedStates),
+    Mapped(MappedRecords),
 }
 
 /// An irate record: the last two samples, `(time, value)`, the newer second.
@@ -184,7 +184,7 @@ impl ExactRecords {
             Self::Max(records) => ScalarState::Max(records.get(index)),
             Self::Counter(records) => ScalarState::Counter(records.get(index)),
             Self::LastTwoSamples(records) => ScalarState::LastTwoSamples(records[index]),
-            Self::Mapped(records) => records.scalar(index),
+            Self::Mapped(records) => records.get(index),
         }
     }
 
@@ -286,27 +286,21 @@ impl StateColumn {
         bytes: arrow::buffer::Buffer,
         offsets: arrow::buffer::ScalarBuffer<u32>,
     ) -> Result<Self, crate::Error> {
-        let mapped = MappedStates::new(&family, bytes, offsets)?;
-        let storage = match mapped.kernel() {
-            MappedKernel::Exact(_) => StateStorage::Exact(ExactRecords::Mapped(mapped)),
-            _ => StateStorage::Mapped(mapped),
+        let storage = match mapped(&family, bytes, offsets)? {
+            Mapped::Sketches(sketches) => StateStorage::Mapped(sketches),
+            Mapped::Records(records) => StateStorage::Exact(ExactRecords::Mapped(records)),
         };
-        Ok(Self {
+        Ok(Self::mapped_column(family, storage))
+    }
+
+    /// The column of mapped `storage`: held outside any run, charged nothing.
+    pub(crate) fn mapped_column(family: FieldDataType, storage: StateStorage) -> Self {
+        Self {
             family,
             storage,
             state_memory_bytes: 0,
             held_outside_run: AtomicBool::new(true),
             objects_held_outside_run: None,
-        })
-    }
-
-    /// The address of state `index`'s bytes when the column is mapped.
-    pub fn mapped_state_address(&self, index: usize) -> Option<usize> {
-        match &self.storage {
-            StateStorage::Mapped(states) | StateStorage::Exact(ExactRecords::Mapped(states)) => {
-                Some(states.state_address(index))
-            }
-            _ => None,
         }
     }
 
@@ -343,7 +337,7 @@ impl StateColumn {
                 self.family.clone(),
                 states.get(index),
             )),
-            StateStorage::Mapped(states) => states.state(index, &self.family),
+            StateStorage::Mapped(states) => states.accumulator(index, 0),
         }
     }
 
