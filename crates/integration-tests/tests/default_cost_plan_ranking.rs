@@ -365,10 +365,14 @@ fn quantile_at_10_hz_under_column_wide_declared_ranges_follows_the_floor() {
     }
 }
 
+/// A declared `column_magnitudes` entry: the (min, max) of the values'
+/// magnitudes.
+type MagnitudeRange = (f64, f64);
+
 /// The `column_magnitudes` (min, max of the values' magnitudes) the
 /// benchmark's value modes declare for its gauge and its counter: none; the
 /// default (Pareto gauge) mode; Zipf integers; the realistic mode.
-const BENCHMARK_RANGES: [(Option<(f64, f64)>, Option<(f64, f64)>); 4] = [
+const BENCHMARK_RANGES: [(Option<MagnitudeRange>, Option<MagnitudeRange>); 4] = [
     (None, None),
     (Some((0.0603, 1.51e9)), Some((0.0603, 1.64e8))),
     (Some((1.0, 1.51e9)), Some((1.0, 5.6e9))),
