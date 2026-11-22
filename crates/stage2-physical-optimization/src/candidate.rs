@@ -103,9 +103,22 @@ pub(super) fn offered_physical_properties(
     // built at ingestion time as each wider window ends; at query time a
     // chain built from the rows serves the same readers.
     let merges_windows = matches!(operator, Operator::ASAP(ASAPOp::SummaryMergeWindows { .. }));
+    // A compressed-samples chain is kept for decodes of its windows, stored
+    // as the samples arrive: built at query time it would only re-read the
+    // raw rows its decode stands for.
+    let compressed_samples_chain = matches!(
+        operator,
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            summary_type: FieldDataType::CompressedSamples,
+            ..
+        })
+    );
     let mut offered = Vec::new();
     for timing in TIMINGS {
         if timing == ExecutionTiming::IngestionTime && !ingestion_time_offered {
+            continue;
+        }
+        if timing == ExecutionTiming::QueryTime && compressed_samples_chain {
             continue;
         }
         for lifetime in LIFETIMES {
