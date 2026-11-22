@@ -859,6 +859,14 @@ fn logical_output<'a: 'b, 'b, 'c>(
         if known.raw_rows_per_ms != usage.raw_rows_per_ms {
             known.raw_rows_per_ms = None;
         }
+        // The source rows behind an aggregate's rows are the same for every
+        // candidate of the group (each folds the same samples); kept as a
+        // total so that the rows the baseline takes (the most any outputs)
+        // times the rows each folds still count each source row once.
+        let source_rows_behind = known
+            .folded_per_row
+            .and_then(|folded| folded.folded_rows_per_state)
+            .map(|per_row| per_row * known.output.rows as f64);
         // Short of its range only when every candidate is: a consumer may
         // read one that is not.
         if usage.raw_rows_short_of_range.is_none() {
@@ -870,6 +878,9 @@ fn logical_output<'a: 'b, 'b, 'c>(
         }
         known.raw_rows_span_ms = known.raw_rows_span_ms.max(usage.raw_rows_span_ms);
         known.output.rows = known.output.rows.max(usage.output.rows);
+        if let (Some(folded), Some(total)) = (known.folded_per_row.as_mut(), source_rows_behind) {
+            folded.folded_rows_per_state = Some(total / known.output.rows.max(1) as f64);
+        }
         known.output.bytes = known.output.bytes.max(usage.output.bytes);
         known.sources.extend(usage.sources.iter().copied());
         known

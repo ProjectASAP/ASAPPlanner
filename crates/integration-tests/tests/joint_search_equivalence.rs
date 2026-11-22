@@ -594,7 +594,26 @@ fn one_source_workload(
     rows_held: u64,
     arrival: DataArrival,
 ) -> PlanningWorkload {
-    let mut workload = workload_of(&[(query, every_ms)], accuracy);
+    one_source_workload_of(
+        &[(query, every_ms)],
+        accuracy,
+        series,
+        sample_interval_ms,
+        rows_held,
+        arrival,
+    )
+}
+
+/// Queries (each every so many ms) over `m` alone, as [`one_source_workload`].
+fn one_source_workload_of(
+    queries: &[(&str, u32)],
+    accuracy: AccuracyTarget,
+    series: u64,
+    sample_interval_ms: u64,
+    rows_held: u64,
+    arrival: DataArrival,
+) -> PlanningWorkload {
+    let mut workload = workload_of(queries, accuracy);
     let data = workload.data_workload.as_mut().unwrap();
     data.arrival = arrival;
     data.sources.retain(|source, _| source == "m");
@@ -736,4 +755,59 @@ fn an_offset_counts_in_the_range_a_read_needs() {
         Err(error) => error.to_string().contains("fewer samples than asked"),
     };
     assert!(rejected_for_rows, "{query}");
+}
+
+/// A short range sharing its scan with a longer one reads the newest rows,
+/// not the oldest part of the longer reach: with 30 min of 8 series held,
+/// `absent_over_time(m[5m])` (only a query-time plan) reads its 5 min in
+/// full, while `sum_over_time(m[1h])` short of its hour builds at ingestion
+/// time.
+#[test]
+fn a_short_range_sharing_a_scan_with_a_longer_one_reads_its_newest_rows() {
+    let workload = one_source_workload_of(
+        &[
+            ("absent_over_time(m[5m])", 60_000),
+            ("sum_over_time(m[1h])", 60_000),
+        ],
+        AccuracyTarget::exact(),
+        8,
+        1_000,
+        8 * 1_800,
+        DataArrival::Ingesting {
+            rows_per_second: 8.0,
+            max_out_of_order_ms: None,
+        },
+    );
+    run_workload(
+        &workload,
+        &CostInputs::default(),
+        &DeploymentCapabilities::default(),
+    );
+}
+
+/// A per-series aggregate feeding a build counts each source row once:
+/// `sum(sum_over_time(m[10s]))` over 1,000 series every 15 s folds 666.67
+/// samples per 10 s whether its sum is built over the per-series sums or
+/// over the samples (the debug assertion in `logical_output`).
+#[test]
+fn a_per_series_aggregate_under_a_build_counts_each_source_row_once() {
+    for accuracy in [AccuracyTarget::exact(), AccuracyTarget::max_error(0.05)] {
+        let workload = one_source_workload(
+            "sum(sum_over_time(m[10s]))",
+            10_000,
+            accuracy,
+            1_000,
+            15_000,
+            100_000_000,
+            DataArrival::Ingesting {
+                rows_per_second: 1_000.0 / 15.0,
+                max_out_of_order_ms: None,
+            },
+        );
+        run_workload(
+            &workload,
+            &CostInputs::default(),
+            &DeploymentCapabilities::default(),
+        );
+    }
 }

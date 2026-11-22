@@ -1494,31 +1494,19 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 read_raw_rows_span_ms = Some(
                     input_raw_rows_span_ms.map_or(range_ms, |input_ms| input_ms.min(range_ms)),
                 );
-                // Over raw rows short of their range, a range's rows are
-                // short when fewer than arrive over it.
-                // Over raw rows short of how far back they reach, the
-                // range's rows are those held inside it: its window is the
-                // oldest part of the reach (an offset, a subquery's earlier
-                // steps lie after it), and the rows held are the newest.
-                // Example: 5 min held, read back 10 min for `[5m] offset
-                // 5m`: none of the 2,400 rows its range needs.
-                read_raw_rows_short_of_range = Some(match (kind, input_short_of_range) {
-                    (TimeRangeKind::Range, Some(short)) => {
-                        let rows_in_range = rows_per_ms
-                            .map_or(short.rows_in_range, |rows_per_ms| {
-                                (rows_per_ms * range.as_millis() as f64).round() as u64
-                            })
-                            .min(short.rows_in_range);
-                        let rows_after_range = short.rows_in_range - rows_in_range;
-                        let rows = short.rows.saturating_sub(rows_after_range).min(out.rows);
-                        (rows < rows_in_range).then_some(RawRowsShortOfRange {
-                            rows,
-                            rows_in_range,
-                        })
-                    }
-                    // Shifted back by an offset: the rows held must reach
-                    // the offset and the range back from the newest.
-                    (TimeRangeKind::Range, None) if input_shifted_back_ms > 0 => {
+                // A range of raw rows its sources hold too few of: its own
+                // window, ending its offset (`raw_rows_shifted_back_ms`)
+                // before the newest row, needs the rows arriving over the
+                // offset and the range held; those inside it are the rows
+                // held less the ones after it. Its scan may reach further
+                // for another reader (a 1 h range beside this 5 min one):
+                // that does not move its window. Example: 5 min held,
+                // `[5m] offset 5m`: none of the 2,400 rows its range needs;
+                // 30 min held, `[5m]` beside `[1h]`: all 2,400.
+                read_raw_rows_short_of_range = Some(match kind {
+                    TimeRangeKind::Range
+                        if input_short_of_range.is_some() || input_shifted_back_ms > 0 =>
+                    {
                         let range_ms = u64::try_from(range.as_millis()).unwrap_or(u64::MAX);
                         short_of(Some(input_shifted_back_ms.saturating_add(range_ms)))
                             .map(|reach| {
@@ -1532,7 +1520,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                             })
                             .filter(|short| short.rows < short.rows_in_range)
                     }
-                    _ => None,
+                    TimeRangeKind::Range | TimeRangeKind::Instant => None,
                 });
                 let estimate = estimate_operator_with_terms(
                     PhysicalOperator::TimeRange,
