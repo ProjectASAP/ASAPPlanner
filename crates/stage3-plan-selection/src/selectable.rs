@@ -567,21 +567,32 @@ fn is_compressed_samples_chain(operator: &Operator<MemoGroupId>) -> bool {
 
 /// Whether candidate `c` reads a compressed-samples chain only for decodes
 /// of its open window: such a decode itself, or a `TimeShift` every
-/// admissible reader of which does. A shift a sealed decode also reads
-/// keeps the chain's delivery check.
+/// admissible reader of which does (through further shifts). A shift a
+/// sealed decode also reads keeps the chain's delivery check; so does one
+/// on a cycle of shifts (no decode reads it).
 fn reads_open_windows(physical: &PhysicalASAPMemoCandidates, c: PhysicalCandidateId) -> bool {
-    match physical.operator(c) {
-        Operator::ASAP(ASAPOp::DecodeSamplesInRange {
-            reads_unsealed_window,
-            ..
-        }) => *reads_unsealed_window,
-        Operator::NonASAP(NonASAPOp::TimeShift { .. }) => {
-            let readers = physical.readers_of(c);
-            !readers.is_empty()
-                && readers
-                    .into_iter()
-                    .all(|reader| reads_open_windows(physical, reader))
+    let mut seen = BTreeSet::from([c]);
+    let mut pending = vec![c];
+    while let Some(v) = pending.pop() {
+        match physical.operator(v) {
+            Operator::ASAP(ASAPOp::DecodeSamplesInRange {
+                reads_unsealed_window: true,
+                ..
+            }) => {}
+            Operator::NonASAP(NonASAPOp::TimeShift { .. }) => {
+                let readers = physical.readers_of(v);
+                if readers.is_empty() {
+                    return false;
+                }
+                for reader in readers {
+                    if !seen.insert(reader) {
+                        return false;
+                    }
+                    pending.push(reader);
+                }
+            }
+            _ => return false,
         }
-        _ => false,
     }
+    true
 }
