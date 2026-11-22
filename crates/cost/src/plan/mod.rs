@@ -2,4 +2,5 @@
 //! ([`execution_demand`]) and the plan's cost (`cost`).
 
 pub(crate) mod cost;
+pub(crate) mod resident_windows;
 pub mod execution_demand;
