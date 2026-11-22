@@ -4683,6 +4683,7 @@ fn a_negating_projection_drops_the_non_negative_fact() {
             std::slice::from_ref(&summed),
             (1, 1.0),
             None,
+            None,
             &data,
             &settings,
         )

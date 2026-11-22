@@ -702,39 +702,38 @@ fn a_filtered_quantile_folds_the_same_rows_at_every_timing() {
 /// a chain at ingestion time, which keeps ten minutes).
 #[test]
 fn an_offset_counts_in_the_range_a_read_needs() {
-    for query in ["sum_over_time(m[5m] offset 5m)"] {
-        let workload = one_source_workload(
-            query,
-            60_000,
-            AccuracyTarget::exact(),
-            8,
-            1_000,
-            8 * 300,
-            DataArrival::Ingesting {
-                rows_per_second: 8.0,
-                max_out_of_order_ms: None,
-            },
-        );
-        let roots = lower_promql_roots(&workload).unwrap();
-        let entries: Vec<_> = workload.query_workload.entries().collect();
-        let settings = CostInputs::default();
-        let deployment = DeploymentCapabilities {
-            raw_data_retained: true,
-            ..Default::default()
-        };
-        let run = run(
-            &roots,
-            &entries,
-            workload.data_workload.as_ref().unwrap(),
-            PlanningModels::builtin()
-                .with_cost_inputs(&settings)
-                .with_deployment_capabilities(&deployment),
-            false,
-        );
-        let rejected_for_rows = match &run.selection {
-            Ok(_) => pruned_for_too_few_rows(&run),
-            Err(error) => error.to_string().contains("fewer samples than asked"),
-        };
-        assert!(rejected_for_rows, "{query}");
-    }
+    let query = "sum_over_time(m[5m] offset 5m)";
+    let workload = one_source_workload(
+        query,
+        60_000,
+        AccuracyTarget::exact(),
+        8,
+        1_000,
+        8 * 300,
+        DataArrival::Ingesting {
+            rows_per_second: 8.0,
+            max_out_of_order_ms: None,
+        },
+    );
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let settings = CostInputs::default();
+    let deployment = DeploymentCapabilities {
+        raw_data_retained: true,
+        ..Default::default()
+    };
+    let run = run(
+        &roots,
+        &entries,
+        workload.data_workload.as_ref().unwrap(),
+        PlanningModels::builtin()
+            .with_cost_inputs(&settings)
+            .with_deployment_capabilities(&deployment),
+        false,
+    );
+    let rejected_for_rows = match &run.selection {
+        Ok(_) => pruned_for_too_few_rows(&run),
+        Err(error) => error.to_string().contains("fewer samples than asked"),
+    };
+    assert!(rejected_for_rows, "{query}");
 }

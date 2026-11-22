@@ -1406,10 +1406,14 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                     let mut rows = narrowest.state_input_rows?;
                     let narrowest_width_ms = narrowest.chain_tumbling_window_width_ms?.max(1);
                     let range_ms = u64::try_from(range.as_millis()).unwrap_or(u64::MAX);
-                    rows.rows_per_state = rows.rows_per_state.map(|per_window| {
-                        ((per_window as f64 * (range_ms / narrowest_width_ms) as f64)
-                            / tumbling_windows.max(1.0))
-                        .ceil() as u64
+                    // Exact, rounded once where read (`rows_per_state`): the
+                    // range's rows over the states per group it outputs
+                    // (`out.rows` over the groups, as a merge reading it
+                    // counts them), so the merge sums the range's rows.
+                    let states_per_group = (out.rows as f64 / group_count.max(1) as f64).max(1.0);
+                    rows.folded_rows_per_state = rows.folded_rows_per_state.map(|per_window| {
+                        per_window * (range_ms as f64 / narrowest_width_ms as f64)
+                            / states_per_group
                     });
                     Some(rows)
                 });
@@ -1777,9 +1781,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let emitted = group_count as f64 * ONE_SECOND_MS as f64 / width_ms as f64;
             narrower_states_merged_per_execution = merged.round() as u64;
             let merged_input_rows = narrower.state_input_rows.map(|mut rows| {
-                rows.rows_per_state = rows
-                    .rows_per_state
-                    .map(|per_window| per_window.saturating_mul(windows_per_window));
+                rows.folded_rows_per_state = rows
+                    .folded_rows_per_state
+                    .map(|per_window| per_window * (width_ms as f64 / narrower_width_ms as f64));
                 rows
             });
             built_state_input_rows = merged_input_rows;
@@ -2251,7 +2255,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             .and_then(|producer| producer.state_data_span_ms);
         let filled = match (&node.payload, width_ms, data_span_ms) {
             (Payload::NonASAP(NonASAPOp::TimeRange { .. }), Some(width_ms), Some(span_ms)) => {
-                let covered_ms = (tumbling_windows as f64) * width_ms as f64;
+                let covered_ms = tumbling_windows * width_ms as f64;
                 (span_ms as f64 / covered_ms.max(1.0)).min(1.0)
             }
             _ => 1.0,
@@ -2328,12 +2332,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 .and_then(|producer| producer.folded_per_row)
         })
         .flatten()?;
-        let computes_a_column = match &node.payload {
-            Payload::NonASAP(NonASAPOp::Project { cols, .. }) => cols
-                .iter()
-                .any(|item| !matches!(item.expr, ScalarExpr::Column(_))),
-            _ => false,
-        };
+        let computes_a_column =
+            if let Payload::NonASAP(NonASAPOp::Project { cols, .. }) = &node.payload {
+                cols.iter()
+                    .any(|item| !matches!(item.expr, ScalarExpr::Column(_)))
+            } else {
+                false
+            };
         Some(StateInputRows {
             non_negative: input.non_negative && !computes_a_column,
             ..input
@@ -2349,13 +2354,18 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     });
     // A `TimeShift` adds its offset back; the operators that keep each
     // row's window pass it on; any other node starts its own window.
-    let raw_rows_shifted_back_ms = match &node.payload {
-        Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) if shift.at.is_none() => {
-            input_shifted_back_ms.saturating_add(u64::try_from(shift.offset_ms).unwrap_or(0))
-        }
-        payload if payload.keeps_input_window() => input_shifted_back_ms,
-        _ => 0,
-    };
+    let raw_rows_shifted_back_ms =
+        if let Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) = &node.payload {
+            match shift.at {
+                None => input_shifted_back_ms
+                    .saturating_add(u64::try_from(shift.offset_ms).unwrap_or(0)),
+                Some(_) => 0,
+            }
+        } else if node.payload.keeps_input_window() {
+            input_shifted_back_ms
+        } else {
+            0
+        };
     let usage = NodeResourceUsageAndCost {
         output: out,
         sources,

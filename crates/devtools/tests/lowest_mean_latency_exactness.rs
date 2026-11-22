@@ -399,7 +399,11 @@ fn assert_milp_latencies_are_plan_costs(
 ) {
     let root = root();
     let name = workload.rsplit('/').next().unwrap();
-    let scratch = std::env::temp_dir().join(format!("lml_plan_cost_{}", std::process::id()));
+    // A directory of its own per call (tests run in parallel, and a
+    // workload may appear twice, on two deployments), removed at the end.
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let scratch = std::env::temp_dir().join(format!("lml_plan_cost_{}_{call}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let plan = scratch.join(format!("{name}-{exact}.plan.json"));
     let report = scratch.join(format!("{name}-{exact}.report.json"));
@@ -484,6 +488,7 @@ fn assert_milp_latencies_are_plan_costs(
             "{name} (exact {exact}): q{query} MILP {milp} ms, plan_cost {plan_cost} ms"
         );
     }
+    std::fs::remove_dir_all(&scratch).ok();
 }
 
 /// A first solve that finds no plan within its node limit
