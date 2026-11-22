@@ -171,8 +171,8 @@ pub(crate) fn solve_cluster_selection(
     let executions = selectable.executions();
     let shapes = query_shapes(inputs).map_err(ClusterSelectionError::Milp)?;
     let groups = refresh_groups(inputs);
-    // Left out: executions that cannot be costed, those their
-    // `OneEvaluation` twin dominates in every quantity, and those whose
+    // Left out: executions that cannot be costed, those their lifetime
+    // twin dominates in every quantity, and those whose
     // least latency is over every reader's bound.
     let mut costed: Vec<bool> = selection
         .costs
