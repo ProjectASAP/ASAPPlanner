@@ -191,14 +191,15 @@ fn the_speed_ups_keep_every_snapshot_workloads_optimum() {
 /// The four workloads the solve time was measured on keep their optimum
 /// (pinned, as the full MILP found it) in a model no larger than measured
 /// with the speed-ups (plus a quarter): a change that loses a speed-up or
-/// moves the optimum fails here.
+/// moves the optimum fails here. Measured over single chains (no wider
+/// tumbling-window levels), as the speed-ups were.
 #[test]
 fn the_measured_workloads_keep_their_optimum_in_a_bounded_model() {
     let snapshots = "crates/devtools/tests/sketch_plan_snapshots/workloads";
     for (workload, deployment, ignore_accuracy, mean_latency_ms, variables, rows) in [
         (
             format!("{snapshots}/topk-rate.json"),
-            "mvp",
+            "mvp-single-chains",
             true,
             186.89267,
             TOPK_VARIABLES,
@@ -222,7 +223,7 @@ fn the_measured_workloads_keep_their_optimum_in_a_bounded_model() {
         ),
         (
             "tools/dag-viewer/workloads/random-mixed-seed-862/workload-01.json".to_string(),
-            "mvp",
+            "mvp-single-chains",
             false,
             1990.46913043,
             SEED_VARIABLES,
@@ -232,7 +233,7 @@ fn the_measured_workloads_keep_their_optimum_in_a_bounded_model() {
         // costs (`cluster-lowest-mean-latency-measured.json`).
         (
             TYPICAL_DASHBOARD.to_string(),
-            "mvp",
+            "mvp-single-chains",
             false,
             847.206346,
             TYPICAL_VARIABLES,
@@ -346,7 +347,12 @@ fn the_milp_latencies_are_the_plan_costs() {
             "mvp",
             false,
         ),
-        ("typical", TYPICAL_DASHBOARD.to_string(), "mvp", false),
+        (
+            "typical",
+            TYPICAL_DASHBOARD.to_string(),
+            "mvp-single-chains",
+            false,
+        ),
     ] {
         for exact in [true, false] {
             let plan = scratch.join(format!("{name}-{exact}.plan.json"));
@@ -507,3 +513,137 @@ fn a_solve_without_a_plan_in_its_node_limit_retries_from_cost_model_1_s_plan() {
 
 const TYPICAL_VARIABLES: u64 = 2540;
 const TYPICAL_ROWS: u64 = 4585;
+
+/// Stage 3's output for `workload` on `deployment` under cost model 3
+/// with the default stop rule, with the extra environment `knobs`.
+fn stage3_of(workload: &str, deployment: &str, knobs: &[(&str, &str)]) -> Value {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_asap_planner"));
+    command
+        .current_dir(root())
+        .args(["--workload", workload, "--run-until", "stage3"])
+        .args([
+            "--deployment-capabilities",
+            &format!("crates/devtools/tests/sketch_plan_snapshots/deployments/{deployment}.capabilities.json"),
+        ])
+        .args(["--cost-inputs", cost_inputs_of(workload)])
+        .args(["--format", "json"])
+        .envs(knobs.iter().copied());
+    let output = command.output().unwrap();
+    let document: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)));
+    document["stage3_plan_selection"].clone()
+}
+
+/// The mean latency, its lower bound and the relative gap Stage 3
+/// reports, checked to be consistent: the bound is at most the plan and
+/// the gap is (plan - bound) / plan.
+fn reported_gap(workload: &str, stage3: &Value) -> (f64, f64, f64) {
+    let mean = stage3["milp_objective_mean_latency_ms"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("{workload}: no plan: {}", stage3["error"]));
+    let gap = &stage3["milp_optimality_gap"];
+    let bound = gap["mean_latency_lower_bound_ms"].as_f64().unwrap();
+    let relative = gap["relative_gap"].as_f64().unwrap();
+    assert!(
+        bound <= mean * (1.0 + 1e-9),
+        "{workload}: bound {bound} over plan {mean}"
+    );
+    assert!(
+        (relative - (mean - bound) / mean).abs() <= 1e-9,
+        "{workload}: gap {relative} is not (plan - bound) / plan"
+    );
+    (mean, bound, relative)
+}
+
+/// With wider tumbling-window levels selectable, cost model 3 starts from
+/// the plan without them (the same workload on a deployment that excludes
+/// `SummaryMergeWindows` and `TimeRangeCover`) and is never worse than
+/// it; on these workloads the levels make it faster, and the plan is the
+/// same on every run.
+#[test]
+fn wider_levels_are_never_worse_than_the_plan_without_them() {
+    let snapshots = "crates/devtools/tests/sketch_plan_snapshots/workloads";
+    for (workload, single_chain_ms, with_levels_ms) in [
+        ("ratio-of-quantiles-1h.json", 1612.63, 571.194837),
+        ("topk-rate.json", 186.89267, 147.684457),
+        ("quantile-single.json", 824.31, 476.185837),
+    ] {
+        let workload = format!("{snapshots}/{workload}");
+        let (without, _, _) =
+            reported_gap(&workload, &stage3_of(&workload, "mvp-single-chains", &[]));
+        let stage3 = stage3_of(&workload, "mvp", &[]);
+        let (with, _, _) = reported_gap(&workload, &stage3);
+        assert!(
+            (without - single_chain_ms).abs() <= 1e-6 * single_chain_ms
+                && (with - with_levels_ms).abs() <= 1e-6 * with_levels_ms,
+            "{workload}: {without} ms without levels, {with} ms with them"
+        );
+        assert!(
+            with <= without,
+            "{workload}: {with} ms with levels, {without} ms without"
+        );
+        assert_eq!(
+            stage3["plan"],
+            stage3_of(&workload, "mvp", &[])["plan"],
+            "{workload}: two runs selected different plans"
+        );
+    }
+}
+
+/// A level node limit of 0 stops at the start: the plan without levels,
+/// at its mean latency, with the gap reported.
+#[test]
+fn a_level_node_limit_of_zero_keeps_the_plan_without_levels() {
+    let workload =
+        "crates/devtools/tests/sketch_plan_snapshots/workloads/ratio-of-quantiles-1h.json";
+    let (without, _, _) = reported_gap(workload, &stage3_of(workload, "mvp-single-chains", &[]));
+    let (stopped, _, relative) = reported_gap(
+        workload,
+        &stage3_of(workload, "mvp", &[("ASAP_STAGE3_LEVEL_NODE_LIMIT", "0")]),
+    );
+    assert!(
+        (stopped - without).abs() <= 1e-6 * without,
+        "{stopped} ms at the start, {without} ms without levels"
+    );
+    assert!(relative > 0.0, "a stop at the start reports a gap");
+}
+
+/// The dashboard at 10,000 series with levels (minutes in a debug build):
+/// it plans within the level node limit; it is never worse than the plan
+/// without levels it starts from (a level node limit of 0 stops there),
+/// and within the default stop rule's 1 % of the selection on a
+/// deployment without the level operators; it reports its gap and selects
+/// the same plan on a second run.
+/// `cargo test --release -p asap-devtools --test devtools -- --ignored typical_dashboard_with_levels`.
+#[test]
+#[ignore]
+fn typical_dashboard_with_levels_plans_within_the_level_node_limit() {
+    let (single_chains, _, _) = reported_gap(
+        TYPICAL_DASHBOARD,
+        &stage3_of(TYPICAL_DASHBOARD, "mvp-single-chains", &[]),
+    );
+    let (start, _, _) = reported_gap(
+        TYPICAL_DASHBOARD,
+        &stage3_of(
+            TYPICAL_DASHBOARD,
+            "mvp",
+            &[("ASAP_STAGE3_LEVEL_NODE_LIMIT", "0")],
+        ),
+    );
+    let stage3 = stage3_of(TYPICAL_DASHBOARD, "mvp", &[]);
+    let (with, _, relative) = reported_gap(TYPICAL_DASHBOARD, &stage3);
+    assert!(
+        with <= start * (1.0 + 1e-9),
+        "{with} ms with levels, {start} ms at the start without them"
+    );
+    assert!(
+        with <= single_chains * 1.01,
+        "{with} ms with levels, {single_chains} ms without the level operators"
+    );
+    assert!(relative > 0.0 && relative < 1.0, "gap {relative}");
+    assert_eq!(
+        stage3["plan"],
+        stage3_of(TYPICAL_DASHBOARD, "mvp", &[])["plan"],
+        "two runs selected different plans"
+    );
+}

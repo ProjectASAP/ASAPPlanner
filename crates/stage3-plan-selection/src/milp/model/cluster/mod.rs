@@ -73,10 +73,15 @@ pub(crate) struct ClusterInputs<'a> {
     /// The executions of a feasible plan (cost model 1's), by position: its
     /// weighted latency bounds the optimum (T8).
     pub(crate) feasible_plan: Option<FeasiblePlan>,
+    /// A plan the mean latency solve starts from (the selection without
+    /// wider tumbling-window levels); with it, the solve stops at a 1 % gap
+    /// or after `LatencySelectionChecks::level_node_limit` nodes.
+    pub(crate) start_plan: Option<FeasiblePlan>,
 }
 
 /// A feasible plan (cost model 1's), by position: its executions, its
 /// edges and the execution answering each query output reference.
+#[derive(Clone)]
 pub(crate) struct FeasiblePlan {
     pub(crate) executions: BTreeSet<usize>,
     pub(crate) edges: BTreeSet<usize>,
@@ -380,12 +385,62 @@ pub(crate) fn solve_cluster_selection(
         .flatten()
         .map(|relaxed| relaxed.objective / weights.max(f64::MIN_POSITIVE));
     let mut solve_count = 1;
+    // From a given plan (the selection without wider tumbling-window
+    // levels, when they are selectable): the model keeps its executions,
+    // and the plan, pinned in it, is the first solve's start.
+    let exact = inputs.cost_inputs.latency_selection.exact_solve;
+    let kept_with_start: Vec<bool> = (0..kept.len())
+        .map(|index| {
+            kept[index]
+                || (costable[index]
+                    && inputs
+                        .start_plan
+                        .as_ref()
+                        .is_some_and(|plan| plan.executions.contains(&index)))
+        })
+        .collect();
+    let start = inputs.start_plan.as_ref().and_then(|plan| {
+        solve_count += 1;
+        build_and_solve(
+            inputs,
+            &shapes,
+            &groups,
+            &kept_with_start,
+            Solve {
+                objective: Objective::MeanLatency,
+                fixed: Fixed::default(),
+                active: &limits,
+                start: None,
+                improve_below: None,
+                pinned: Some(plan),
+                stop: Stop::Exact,
+            },
+        )
+        .ok()
+    });
     // The model the selection is solved over: the executions kept, or,
     // after a retry from the feasible plan, those with the plan's own.
     let mut model: &[bool] = &kept;
     let mut start_ms = 0;
-    let first = match inputs.cost_inputs.latency_selection.exact_solve {
-        true => solve(
+    let first = match (exact, start) {
+        // The start is a plan of the model: HiGHS keeps it until it finds
+        // a better one, so the solve stops with a plan.
+        (_, Some(start)) => {
+            start_ms = start.solve_ms;
+            model = &kept_with_start;
+            solve(
+                model,
+                Objective::MeanLatency,
+                Fixed::default(),
+                Some(&start.columns),
+                None,
+                match exact {
+                    true => Stop::Exact,
+                    false => Stop::GapOrLevelNodes,
+                },
+            )
+        }
+        (true, None) => solve(
             model,
             Objective::MeanLatency,
             Fixed::default(),
@@ -395,7 +450,7 @@ pub(crate) fn solve_cluster_selection(
         ),
         // No plan within the node limit: once more from the feasible plan,
         // under the same limit, so the second phase is bounded too.
-        false => match solve(
+        (false, None) => match solve(
             model,
             Objective::MeanLatency,
             Fixed::default(),

@@ -405,6 +405,11 @@ pub struct LatencySelectionChecks {
     /// before it stops without a 1 % gap; default 10,000. A test lowers it
     /// to reach the retry from cost model 1's plan.
     pub node_limit: i32,
+    /// The most branch-and-bound nodes the mean latency solve explores
+    /// when wider tumbling-window levels are selectable: it starts from the
+    /// plan without them and stops at a 1 % gap or after these nodes,
+    /// whichever comes first; default 200.
+    pub level_node_limit: i32,
 }
 
 impl Default for LatencySelectionChecks {
@@ -417,6 +422,7 @@ impl Default for LatencySelectionChecks {
             report_root_lp_bound: false,
             log_solver: false,
             node_limit: 10_000,
+            level_node_limit: 200,
         }
     }
 }
