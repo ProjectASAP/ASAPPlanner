@@ -119,10 +119,13 @@ pub fn summary_state_bytes(
 /// not a summary sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StateInputRows {
-    /// Input rows one state folds, the average over its states rounded up;
-    /// `None` when unknown, which sizes it for every value it can be assumed
-    /// to see.
-    pub rows_per_state: Option<u64>,
+    /// Source rows one state folds, on average over its states, exactly
+    /// (not rounded: a merge of 30 windows of 0.67 rows folds 20, not 30);
+    /// [`StateInputRows::rows_per_state`] rounds it once. A state over
+    /// rows another node already folded (a sum of per-series sums) counts
+    /// the source rows behind them. `None` when unknown, which sizes it
+    /// for every value it can be assumed to see.
+    pub folded_rows_per_state: Option<f64>,
     /// Whether every value folded is proven non-negative (a source column
     /// passed on unchanged, which every source declares non-negative), so a
     /// DDSketch fills no negative store.
@@ -146,28 +149,48 @@ pub struct StateInputRows {
 }
 
 impl StateInputRows {
+    /// The source rows one state folds, rounded up once from
+    /// [`StateInputRows::folded_rows_per_state`] (within a relative 1e-9,
+    /// so 200,001.000000001 rows are 200,001), at least 1; `None` when
+    /// unknown. Every formula reads the rows through this.
+    pub fn rows_per_state(&self) -> Option<u64> {
+        self.folded_rows_per_state
+            .map(|rows| ((rows - 1e-9 * rows.abs().max(1.0)).ceil().max(1.0)) as u64)
+    }
+
+    /// Whether `other` folds what this does: the same rows once rounded,
+    /// sign, magnitude range and distinct values. Candidates of one input
+    /// group computing the same states fold the same.
+    pub fn folds_the_same_as(&self, other: &Self) -> bool {
+        self.rows_per_state() == other.rows_per_state()
+            && self.non_negative == other.non_negative
+            && self.value_magnitude_range == other.value_magnitude_range
+            && self.distinct_values == other.distinct_values
+    }
+
     /// What one state folds when each group merges, from every input, that
-    /// input's states (`Some((rows each folds, states per group))`): their
-    /// rows summed, non-negative when all are, within the magnitude range
+    /// input's states (`Some((rows each folds, states per group))`, the
+    /// states per group exact, not rounded): their rows summed,
+    /// non-negative when all are, within the magnitude range
     /// spanning all of theirs, of the most distinct values any declares.
     /// `None` when any input's is unknown. Example:
     /// 360 states of 10 rows and 60 of 100 merge into one of 9,600 rows.
-    pub(crate) fn merged(inputs: impl IntoIterator<Item = Option<(Self, u64)>>) -> Option<Self> {
+    pub(crate) fn merged(inputs: impl IntoIterator<Item = Option<(Self, f64)>>) -> Option<Self> {
         let mut merged: Option<Self> = None;
         for (rows, states) in inputs.into_iter().collect::<Option<Vec<_>>>()? {
             let input = Self {
-                rows_per_state: rows
-                    .rows_per_state
-                    .map(|per_state| per_state.saturating_mul(states)),
+                folded_rows_per_state: rows
+                    .folded_rows_per_state
+                    .map(|per_state| per_state * states),
                 ..rows
             };
             merged = Some(match merged {
                 None => input,
                 Some(sum) => Self {
-                    rows_per_state: sum
-                        .rows_per_state
-                        .zip(input.rows_per_state)
-                        .map(|(a, b)| a.saturating_add(b)),
+                    folded_rows_per_state: sum
+                        .folded_rows_per_state
+                        .zip(input.folded_rows_per_state)
+                        .map(|(a, b)| a + b),
                     non_negative: sum.non_negative && input.non_negative,
                     value_magnitude_range: sum
                         .value_magnitude_range
@@ -188,7 +211,7 @@ impl StateInputRows {
 
     /// Unknown rows of unknown sign: the most a state is assumed to hold.
     pub const UNKNOWN: Self = Self {
-        rows_per_state: None,
+        folded_rows_per_state: None,
         non_negative: false,
         value_magnitude_range: None,
         distinct_values: None,
@@ -235,7 +258,7 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
         DdSketch, HyperLogLog, Kmv, RegularPath, UnivMon, Vector2D,
     };
     let heap_key = DataInput::Bytes(&[0; ASSUMED_HEAP_KEY_BYTES]);
-    let rows = input_rows.rows_per_state.map_or(usize::MAX, |rows| {
+    let rows = input_rows.rows_per_state().map_or(usize::MAX, |rows| {
         usize::try_from(rows.max(1)).unwrap_or(usize::MAX)
     });
     match params {
@@ -313,7 +336,7 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
 /// 248 + 8 · 2 + 8 · 15 = 384 bytes.
 fn kll_sealed_bytes(k: u32, input_rows: StateInputRows) -> u64 {
     let k = u64::from(k.clamp(8, KLL_MAX_K));
-    let (levels, items) = match input_rows.rows_per_state {
+    let (levels, items) = match input_rows.rows_per_state() {
         None => (KLL_MAX_LEVELS as u64, kll_capacity_items(k, KLL_MAX_LEVELS)),
         Some(rows) => {
             let rows = rows.max(1);
@@ -525,12 +548,12 @@ fn ddsketch_buckets_spanned(alpha: f64, ratio: f64) -> u64 {
 
 fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
     let buckets_spanned = |ratio: f64| ddsketch_buckets_spanned(alpha, ratio);
-    let stores = match (input_rows.non_negative, input_rows.rows_per_state) {
+    let stores = match (input_rows.non_negative, input_rows.rows_per_state()) {
         (true, _) | (false, Some(0 | 1)) => 1,
         (false, _) => 2,
     };
     let rows_per_store = input_rows
-        .rows_per_state
+        .rows_per_state()
         .map(|rows| rows.div_ceil(stores).max(1));
     if rows_per_store == Some(1) {
         return (1, stores);
@@ -624,7 +647,7 @@ fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
     // The most buckets a store's values can occupy: the declared (or
     // assumed) range's, plus one for a range that does not start on a
     // bucket boundary.
-    let column_span = match input_rows.rows_per_state {
+    let column_span = match input_rows.rows_per_state() {
         Some(0 | 1) => 1,
         _ => {
             let ratio = input_rows
@@ -634,7 +657,7 @@ fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
             ddsketch_buckets_spanned(alpha, ratio) + 1
         }
     };
-    let Some(rows) = input_rows.rows_per_state else {
+    let Some(rows) = input_rows.rows_per_state() else {
         return HEADER_BYTES + OFFSET_BYTES + stores * padded(8 * column_span);
     };
     // No count exceeds the rows, so they bound the width.

@@ -51,12 +51,13 @@
 
 use std::collections::HashMap;
 
+use asap_cost::node::analytical::AnalyticalCostError;
 use asap_cost::plan::execution_demand::{
     context_executions_per_second, executions_per_second as rate_of_materialized,
 };
 use asap_cost::{
     node_resource_usage_and_cost, output_interval_ms, raw_data_disk_cost_per_second, CostInputs,
-    NodeResourceUsageAndCost, ProducerOutput,
+    NodeResourceUsageAndCost, ProducerOutput, RawRowsShortOfRange,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
@@ -124,6 +125,11 @@ pub(crate) struct ExecutionCosts {
     /// The cost per second of the raw data a query-time `Scan` without
     /// $h_v$ keeps on disk, retaining everything.
     pub(crate) unbounded_raw_data_on_disk_cost_per_second: HashMap<PhysicalCandidateId, f64>,
+    /// Each query-time computation not offered because it would read
+    /// fewer raw rows than arrive over its range
+    /// ([`asap_cost::query_time_computation_short_of_source_rows`]), with that
+    /// shortfall: reported as `PruneReason::ReadsFewerSourceRowsThanItsRange`.
+    pub(crate) short_of_source_rows: HashMap<PhysicalCandidateId, RawRowsShortOfRange>,
 }
 
 impl ExecutionCosts {
@@ -364,6 +370,7 @@ pub(crate) fn execution_quantities(
             data,
             cost_inputs,
         )
+        .map_err(|error| error.to_string())
         .and_then(|usage| quantity_of(quantity, &usage, node, cost_inputs))
     };
     // The evaluation grid of a context, which a cover's windows are
@@ -383,6 +390,7 @@ pub(crate) fn execution_quantities(
     let mut usage: Vec<Option<Result<NodeResourceUsageAndCost<'_>, String>>> =
         (0..count).map(|_| None).collect();
     let mut baseline: Vec<Option<Vec<ProducerOutput<'_>>>> = vec![None; count];
+    let mut short_of_source_rows = HashMap::new();
     for group in order {
         for &v in &candidates_of_group[group.0 as usize] {
             baseline[v.0] = baseline_inputs(memo, physical, &group_payloads, &nodes, &usage, v);
@@ -397,7 +405,26 @@ pub(crate) fn execution_quantities(
                     None,
                     data,
                     cost_inputs,
-                ),
+                )
+                .map_err(|error| {
+                    // A query-time computation over too few raw rows is
+                    // reported by name (`PruneReason`), not as uncostable.
+                    if let AnalyticalCostError::FewerSourceRowsThanItsRange {
+                        rows,
+                        rows_in_range,
+                        ..
+                    } = error
+                    {
+                        short_of_source_rows.insert(
+                            v,
+                            RawRowsShortOfRange {
+                                rows,
+                                rows_in_range,
+                            },
+                        );
+                    }
+                    error.to_string()
+                }),
                 None => Err("an input has no costable producer".to_string()),
             });
         }
@@ -651,6 +678,7 @@ pub(crate) fn execution_quantities(
         least_retention_ms_per_execution: Vec::new(),
         raw_data_source,
         unbounded_raw_data_on_disk_cost_per_second,
+        short_of_source_rows,
     };
     costs.least_retention_ms_per_execution = least_retention_ms_per_execution(selectable, &costs);
     costs
@@ -753,7 +781,7 @@ fn baseline_inputs<'a>(
                     .iter()
                     .map(|&edge| physical.edge(edge).producer_candidate_id)
                     .filter(|&u| !reads_one_batch_of(physical, nodes, v, u))
-                    .filter_map(|u| usage[u.0].as_ref()?.as_ref().ok()),
+                    .filter_map(|u| Some((&nodes[u.0], usage[u.0].as_ref()?.as_ref().ok()?))),
             )
         })
         .collect()
@@ -787,13 +815,43 @@ fn reads_one_batch_of(
 /// fold 10 rows and one at k = 1,404 whose states fold 3,600, the larger
 /// gives both its family and its rows, so a merge over the input never
 /// sizes one candidate's `k` for the other's rows.
-fn logical_output<'a: 'b, 'b>(
+fn logical_output<'a: 'b, 'b, 'c>(
     payload: &'a PhysicalASAPOperatorPayload,
     schema: &'a asap_types::ir::schema::Schema,
-    usages: impl Iterator<Item = &'b NodeResourceUsageAndCost<'a>>,
+    usages: impl Iterator<Item = (&'c PhysicalASAPDAGNode, &'b NodeResourceUsageAndCost<'a>)>,
 ) -> Option<ProducerOutput<'a>> {
     let mut output: Option<ProducerOutput<'a>> = None;
-    for usage in usages {
+    // The rows each state family (with θ) folds, of the first candidate
+    // with it: every candidate of the input group with that family and θ
+    // computes the same states, whichever operator and timing build them,
+    // so it folds the same rows, and the baseline is exact for each.
+    let mut folded_by_family: Vec<(&'c PhysicalASAPDAGNode, &'b NodeResourceUsageAndCost<'a>)> =
+        Vec::new();
+    for (candidate, usage) in usages {
+        let folds_the_same = |first: &NodeResourceUsageAndCost<'_>| match (
+            first.state_input_rows,
+            usage.state_input_rows,
+        ) {
+            (Some(a), Some(b)) => a.folds_the_same_as(&b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        match folded_by_family
+            .iter()
+            .find(|(_, first)| first.family == usage.family)
+        {
+            Some((first_candidate, first)) => debug_assert!(
+                usage.family == asap_cost::StateFamily::None || folds_the_same(first),
+                "candidates with the same family and θ fold different rows: {:?}\n  {:?} {:?} {:?}\n  {:?} {:?} {:?}",
+                usage.family,
+                first_candidate.output_state.timing,
+                first_candidate.payload,
+                first.state_input_rows,
+                candidate.output_state.timing,
+                candidate.payload,
+                usage.state_input_rows,
+            ),
+            None => folded_by_family.push((candidate, usage)),
+        }
         let Some(known) = output.as_mut() else {
             output = Some(usage.producer_output(payload, schema));
             continue;
@@ -801,12 +859,35 @@ fn logical_output<'a: 'b, 'b>(
         if known.raw_rows_per_ms != usage.raw_rows_per_ms {
             known.raw_rows_per_ms = None;
         }
+        // The source rows behind an aggregate's rows are the same for every
+        // candidate of the group (each folds the same samples); kept as a
+        // total so that the rows the baseline takes (the most any outputs)
+        // times the rows each folds still count each source row once.
+        let source_rows_behind = known
+            .folded_per_row
+            .and_then(|folded| folded.folded_rows_per_state)
+            .map(|per_row| per_row * known.output.rows as f64);
+        // Short of its range only when every candidate is: a consumer may
+        // read one that is not.
+        if usage.raw_rows_short_of_range.is_none() {
+            known.raw_rows_short_of_range = None;
+        }
+        // States built at query time from raw rows only when every
+        // candidate's are: a consumer may read an ingestion-time chain,
+        // which saw every row. An edge to a query-time chain is checked
+        // against that chain's own output (`per_edge`).
+        if usage.state_data_span_ms.is_none() {
+            known.state_data_span_ms = None;
+        }
         if usage.output.bytes > known.output.bytes {
             known.family = usage.family;
             known.state_input_rows = usage.state_input_rows;
         }
         known.raw_rows_span_ms = known.raw_rows_span_ms.max(usage.raw_rows_span_ms);
         known.output.rows = known.output.rows.max(usage.output.rows);
+        if let (Some(folded), Some(total)) = (known.folded_per_row.as_mut(), source_rows_behind) {
+            folded.folded_rows_per_state = Some(total / known.output.rows.max(1) as f64);
+        }
         known.output.bytes = known.output.bytes.max(usage.output.bytes);
         known.sources.extend(usage.sources.iter().copied());
         known
@@ -831,7 +912,7 @@ fn cost_node<'a>(
     evaluation_grid: Option<EvaluationGrid>,
     data: &DataWorkload,
     cost_inputs: &'a CostInputs,
-) -> Result<NodeResourceUsageAndCost<'a>, String> {
+) -> Result<NodeResourceUsageAndCost<'a>, AnalyticalCostError> {
     let window_ms = match node.output_state.timing {
         ExecutionTiming::QueryTime => scan_read_ms,
         ExecutionTiming::IngestionTime => ingestion_window_ms(physical, v),
@@ -845,7 +926,6 @@ fn cost_node<'a>(
         data,
         cost_inputs,
     )
-    .map_err(|error| error.to_string())
 }
 
 /// The time between two outputs of ingestion-time candidate `v`: the

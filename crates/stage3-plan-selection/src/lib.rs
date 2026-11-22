@@ -349,10 +349,20 @@ pub fn select_plan(
         pruned_candidates: costed
             .iter()
             .zip(&physical.physical_candidates)
-            .filter(|(costed, _)| **costed == Some(false))
-            .map(|(_, &candidate)| PrunedCandidate {
+            .enumerate()
+            .filter(|(_, (costed, _))| **costed == Some(false))
+            .map(|(v, (_, &candidate))| PrunedCandidate {
                 candidate,
-                reason: PruneReason::UsageNotCostable,
+                reason: match costs
+                    .short_of_source_rows
+                    .get(&asap_types::stages::PhysicalCandidateId(v))
+                {
+                    Some(short) => PruneReason::ReadsFewerSourceRowsThanItsRange {
+                        rows: short.rows,
+                        rows_in_range: short.rows_in_range,
+                    },
+                    None => PruneReason::UsageNotCostable,
+                },
             })
             .collect(),
         selected_plan_cost_per_second: cluster_limits.is_none().then_some(

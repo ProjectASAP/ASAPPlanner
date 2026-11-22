@@ -31,21 +31,21 @@ fn exact_state_is_priced_at_the_executors_sealed_record() {
 #[test]
 fn merged_input_rows_keep_the_larger_distinct_values() {
     let rows = |rows_per_state, distinct_values| StateInputRows {
-        rows_per_state: Some(rows_per_state),
+        folded_rows_per_state: Some((rows_per_state) as f64),
         non_negative: true,
         value_magnitude_range: None,
         distinct_values,
     };
     let merged = StateInputRows::merged([
-        Some((rows(12_000, Some(1_000)), 2)),
-        Some((rows(6_000, Some(1_000_000)), 1)),
+        Some((rows(12_000, Some(1_000)), 2.0)),
+        Some((rows(6_000, Some(1_000_000)), 1.0)),
     ])
     .unwrap();
-    assert_eq!(merged.rows_per_state, Some(30_000));
+    assert_eq!(merged.rows_per_state(), Some(30_000));
     assert_eq!(merged.distinct_values, Some(1_000_000));
     let merged = StateInputRows::merged([
-        Some((rows(12_000, Some(1_000)), 1)),
-        Some((rows(6_000, None), 1)),
+        Some((rows(12_000, Some(1_000)), 1.0)),
+        Some((rows(6_000, None), 1.0)),
     ])
     .unwrap();
     assert_eq!(merged.distinct_values, None);
@@ -210,7 +210,7 @@ fn library_ddsketch_mean_bytes(
 #[test]
 fn the_assumed_ddsketch_range_is_named_only_when_the_bytes_use_it() {
     let rows = |value_magnitude_range| StateInputRows {
-        rows_per_state: Some(600),
+        folded_rows_per_state: Some((600) as f64),
         non_negative: true,
         value_magnitude_range,
         distinct_values: None,
@@ -266,11 +266,11 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
         sketch.shrink_to_fit();
         sketch.memory_bytes() as u64
     };
-    let model_bytes = |rows_per_state| {
+    let model_bytes = |rows_per_state: Option<u64>| {
         sketch_state_bytes(
             &SketchParams::Kll { k },
             StateInputRows {
-                rows_per_state,
+                folded_rows_per_state: rows_per_state.map(|rows: u64| rows as f64),
                 non_negative: true,
                 value_magnitude_range: None,
                 distinct_values: None,
@@ -514,7 +514,7 @@ fn state_bytes_bound_the_executors_charge() {
                 + sketch_state_bytes(
                     params,
                     StateInputRows {
-                        rows_per_state: Some(u64::from(n)),
+                        folded_rows_per_state: Some((u64::from(n)) as f64),
                         non_negative: false,
                         value_magnitude_range: None,
                         distinct_values: None,
@@ -613,7 +613,7 @@ fn priced_bytes_agree_with_the_executor() {
     const DISTINCT_KEYS: u32 = 1_000;
     const HYDRA_GROUPS: u32 = 10;
     let input_rows = |rows_per_state: u32| StateInputRows {
-        rows_per_state: Some(u64::from(rows_per_state)),
+        folded_rows_per_state: Some((u64::from(rows_per_state)) as f64),
         non_negative: true,
         value_magnitude_range: None,
         distinct_values: None,
@@ -1007,7 +1007,7 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
             let charged = sketch_state_bytes(
                 &SketchParams::DDSketch { alpha },
                 StateInputRows {
-                    rows_per_state: Some(u64::from(n)),
+                    folded_rows_per_state: Some((u64::from(n)) as f64),
                     non_negative: true,
                     value_magnitude_range,
                     distinct_values: None,
@@ -1036,7 +1036,7 @@ fn stored_ddsketch_states_are_priced_at_their_view_layout() {
         sketch_state_bytes(
             &SketchParams::DDSketch { alpha },
             StateInputRows {
-                rows_per_state,
+                folded_rows_per_state: rows_per_state.map(|rows: u64| rows as f64),
                 non_negative,
                 value_magnitude_range,
                 distinct_values: None,
@@ -1055,9 +1055,10 @@ fn stored_ddsketch_states_are_priced_at_their_view_layout() {
     assert_eq!(priced(Some(10), true, gauge), 92 + 16);
     assert_eq!(priced(Some(600), true, gauge), 92 + 24);
     assert_eq!(priced(Some(36_000), true, gauge), 92 + 24);
-    // 4 bytes up to u32::MAX rows, then 8.
+    // 4 bytes up to u32::MAX rows, then 8 (2^33: past u32::MAX once the
+    // rows are rounded within their relative 1e-9, `rows_per_state`).
     assert_eq!(priced(Some(u64::from(u32::MAX)), true, gauge), 92 + 48);
-    assert_eq!(priced(Some(1 << 32), true, gauge), 92 + 96);
+    assert_eq!(priced(Some(1 << 33), true, gauge), 92 + 96);
     assert!(priced(Some(10), true, None) < priced(Some(100), true, None));
     // Unknown rows: the assumed range, dense at 8 bytes.
     let unknown = priced(None, true, None);
@@ -1078,7 +1079,7 @@ fn stored_ddsketch_states_are_priced_at_their_view_layout() {
 #[test]
 fn open_ddsketch_states_hold_their_first_blocks() {
     let rows = |non_negative| StateInputRows {
-        rows_per_state: Some(100),
+        folded_rows_per_state: Some((100) as f64),
         non_negative,
         value_magnitude_range: None,
         distinct_values: None,
@@ -1233,7 +1234,7 @@ fn stored_ddsketch_prices_never_fall_below_what_the_executor_holds() {
                         let priced = sketch_state_bytes(
                             &SketchParams::DDSketch { alpha },
                             StateInputRows {
-                                rows_per_state: Some(u64::from(n)),
+                                folded_rows_per_state: Some(f64::from(n)),
                                 non_negative: !signed,
                                 value_magnitude_range,
                                 distinct_values: None,
