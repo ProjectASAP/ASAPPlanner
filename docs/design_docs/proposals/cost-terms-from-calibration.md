@@ -1,15 +1,18 @@
 # Cost Terms From Calibration
 
 **Status:** Sections 1 and 2 implemented, in `plan_cost` and Stage 3's
-selection. Sections for the fixed CPU per refresh run and the per-step
-query cost follow, one per change.
+selection. The other two costs, a fixed CPU per refresh run and a
+per-request time left after the priced work, were regressed first against
+the states each refresh writes and each request reads from views: neither
+tracks them (R² 0.04 and 0.02 over the calibration's groups and queries),
+so no term is added for them.
 
 **Audience:** Implementers of the cost model (`asap-cost`) and of
 deployment calibration (`tools/calibration_gate/`).
 
 A calibration of a data plane against the planner's predictions (the C10
-gate of `stage3-lowest-mean-latency.md`, section 6.2) found four costs
-the cost inputs cannot express. This document adds them, one section
+gate of `stage3-lowest-mean-latency.md`, section 6.2) found costs the
+cost inputs cannot express. This document adds them, one section
 each: the components (what is measured and what it means), the algorithm
 (how the cost model charges it) and the code interface.
 
