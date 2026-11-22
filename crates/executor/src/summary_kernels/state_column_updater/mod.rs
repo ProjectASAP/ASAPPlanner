@@ -10,7 +10,7 @@ use crate::{AggregateCore, Error};
 
 use planner_types::ir::scalar::ColumnRef;
 use planner_types::ir::schema::FieldDataType;
-use planner_types::summary_type::{SketchParams, SummaryUpdate};
+use planner_types::summary_type::{SketchAlgorithm, SketchParams, SummaryUpdate};
 use std::sync::Arc;
 
 mod reorder_buffer;
@@ -514,17 +514,25 @@ impl StateColumnUpdater {
         self.release_all_held();
         match self.states {
             GroupStates::Exact { states, .. } => StateColumn::from_exact(self.family, states),
-            GroupStates::Sketches(states) => StateColumn::from_objects(
-                self.family,
-                states
-                    .into_iter()
-                    .map(|mut state| {
-                        // No sample follows: drop what only updates need.
-                        state.shrink_to_fit();
-                        Arc::from(state.into_accumulator())
-                    })
-                    .collect(),
-            ),
+            GroupStates::Sketches(states) => {
+                let sealed = states.into_iter().map(|mut state| {
+                    // No sample follows: drop what only updates need.
+                    state.shrink_to_fit();
+                    Arc::from(state.into_accumulator())
+                });
+                // A DDSketch window is stored in its view layout (narrow
+                // counts, dense or sparse), the bytes its price assumes.
+                if matches!(
+                    self.family,
+                    FieldDataType::Sketch(SketchAlgorithm::DDSketch)
+                ) {
+                    let sealed: Vec<Arc<dyn AggregateCore>> = sealed.collect();
+                    StateColumn::from_sealed_views(self.family.clone(), sealed.iter().cloned())
+                        .unwrap_or_else(|| StateColumn::from_objects(self.family, sealed))
+                } else {
+                    StateColumn::from_objects(self.family, sealed.collect())
+                }
+            }
             GroupStates::Keyed { states, .. } => StateColumn::from_objects(
                 self.family,
                 states

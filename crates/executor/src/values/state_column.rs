@@ -40,8 +40,10 @@ pub(crate) enum StateStorage {
     /// (sum, count, min, max, rate, increase) of one population: one
     /// contiguous buffer, no allocation per state.
     Exact(ExactRecords),
-    /// Sketch states read where a deployment stores them, through
-    /// read-only views ([`super::mapped_states`]).
+    /// Sketch states in their view layout, read through read-only views
+    /// ([`super::mapped_states`]): where a deployment stores them (charged
+    /// nothing), or sealed DDSketch windows the run holds in that layout
+    /// ([`StateColumn::from_sealed_views`]).
     Mapped(MappedSketches),
 }
 
@@ -291,6 +293,62 @@ impl StateColumn {
             Mapped::Records(records) => StateStorage::Exact(ExactRecords::Mapped(records)),
         };
         Ok(Self::mapped_column(family, storage))
+    }
+
+    /// The sealed sketch `states` of `family`, stored in their view layout
+    /// (the layout a stored window is priced at) in one buffer the run
+    /// holds: charged the views, each padded to 8 bytes, and the column's
+    /// 4-byte offsets. `None` for a family with no mapped sketch form.
+    pub(crate) fn from_sealed_views(
+        family: FieldDataType,
+        states: impl ExactSizeIterator<Item = Arc<dyn AggregateCore>>,
+    ) -> Option<Self> {
+        let mut words: Vec<u64> = Vec::new();
+        let mut offsets = Vec::with_capacity(states.len() + 1);
+        offsets.push(0u32);
+        for state in states {
+            let view = super::mapped_states::state_view_bytes(state.as_ref())?;
+            let start = words.len();
+            words.resize(start + view.len().div_ceil(8), 0);
+            // The view's bytes, little-endian, into the 8-byte words.
+            for (word, chunk) in words[start..].iter_mut().zip(view.chunks(8)) {
+                let mut bytes = [0u8; 8];
+                bytes[..chunk.len()].copy_from_slice(chunk);
+                *word = u64::from_le_bytes(bytes);
+            }
+            offsets.push(u32::try_from(words.len() * 8).ok()?);
+        }
+        let state_memory_bytes = words.len() * 8 + offsets.len() * 4;
+        let Mapped::Sketches(sketches) = mapped(
+            &family,
+            arrow::buffer::Buffer::from(words),
+            arrow::buffer::ScalarBuffer::from(offsets),
+        )
+        .ok()?
+        else {
+            return None;
+        };
+        Some(Self::stored_views(
+            family,
+            StateStorage::Mapped(sketches),
+            state_memory_bytes,
+        ))
+    }
+
+    /// The column of view-layout `storage` the run holds, charged
+    /// `state_memory_bytes`.
+    pub(crate) fn stored_views(
+        family: FieldDataType,
+        storage: StateStorage,
+        state_memory_bytes: usize,
+    ) -> Self {
+        Self {
+            family,
+            storage,
+            state_memory_bytes,
+            held_outside_run: AtomicBool::new(false),
+            objects_held_outside_run: None,
+        }
     }
 
     /// The column of mapped `storage`: held outside any run, charged nothing.
