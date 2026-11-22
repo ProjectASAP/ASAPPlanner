@@ -72,7 +72,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 0.0000312343142845,
+      "cost_per_second": 0.0000305212005812,
       "cpu_core_seconds_per_second": 2.6724601426,
       "per_node": {
         "0": {
@@ -90,10 +90,10 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 1.58256828585e-6,
+          "cost_per_second": 8.69454590464e-7,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.05127,
-          "detail": "build DDSketch in tumbling windows of 1000 ms for 10000 groups: 100000 rows x 247 ops, 1000 group visits, 10000.0 states emitted; x 1.0000/s; keeps 874720000 bytes",
+          "detail": "build DDSketch in tumbling windows of 1000 ms for 10000 groups: 100000 rows x 247 ops, 1000 group visits, 10000.0 states emitted; x 1.0000/s; keeps 254720000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.02627,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -160,10 +160,10 @@
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 1.2368401083e-7,
+          "cost_per_second": 1.23684002986e-7,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.011,
-          "detail": "time range 100s: 100 tumbling windows of states; x 1.0000/s; holds 856 bytes for 11.000 ms",
+          "detail": "time range 100s: 100 tumbling windows of states; x 1.0000/s; holds 236 bytes for 11.000 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
@@ -274,7 +274,7 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 1030420419.93,
+        "average_memory_bytes": 410420413.11,
         "cpu_ops_per_second": 2671500142.6,
         "disk_bytes": 0,
         "latency_per_query": [
@@ -296,7 +296,7 @@
           }
         ],
         "peak_cpu_cores": 4,
-        "peak_memory_bytes": 994131138,
+        "peak_memory_bytes": 374130518,
         "precompute_load": 0.02895,
         "recommended_configuration": {
           "ingest": {
