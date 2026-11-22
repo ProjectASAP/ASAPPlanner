@@ -190,7 +190,7 @@ pub(crate) fn solve_cluster_selection(
     // What can be costed, before any dominance: a feasible plan's
     // executions are all in it.
     let costable = costed.clone();
-    let dominated = dominated_in_every_quantity(selection, &quantities, Pairing::OneEvaluationTwin);
+    let dominated = dominated_in_every_quantity(selection, &quantities, Pairing::LifetimeTwin);
     for (costed, dominated) in costed.iter_mut().zip(dominated) {
         *costed &= !dominated;
     }

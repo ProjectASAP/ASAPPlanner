@@ -29,7 +29,7 @@ use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, Physic
 use asap_types::workload::QueryWorkloadEntry;
 
 use super::accuracy::{accuracy_constraints, AccuracyRules, AccuracyVariables, ErrorModel};
-use super::dominance::dominated_by_one_evaluation_twin;
+use super::dominance::dominated_by_lifetime_twin;
 use super::equivalent_contexts::{copies_in_equivalent_contexts, SharedVariables};
 use super::exact_only::{exact_only_constraints, exact_only_variables};
 use super::graph::Components;
@@ -437,7 +437,7 @@ const LARGEST_SCALED_OBJECTIVE_COEFFICIENT: f64 = 1e6;
 /// [`raw_data_disk_rows`], (R), (X) and (K), with HiGHS at gap 0 on one
 /// thread. The executions dearer than a feasible plan
 /// ([`dearer_than_a_feasible_plan`]) or dominated by their lifetime twin
-/// ([`dominated_by_one_evaluation_twin`]) are left out first (and a
+/// ([`dominated_by_lifetime_twin`]) are left out first (and a
 /// copy of an equivalent context shares its original's variables,
 /// [`copies_in_equivalent_contexts`]), with
 /// the $h_v$ of a candidate whose
@@ -457,7 +457,7 @@ pub(crate) fn solve_selection(
     let rules = AccuracyRules::of(inputs);
     let kept: Vec<bool> = dearer_than_a_feasible_plan(inputs, rules.as_ref())
         .iter()
-        .zip(dominated_by_one_evaluation_twin(inputs))
+        .zip(dominated_by_lifetime_twin(inputs))
         .zip(&costs.per_execution)
         .map(|((&dearer, dominated), cost)| cost.is_ok() && !dearer && !dominated)
         .collect();

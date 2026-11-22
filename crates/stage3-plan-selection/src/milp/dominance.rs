@@ -2,7 +2,7 @@
 //! well: one with $\ell$ = None whose `OneEvaluation` twin does all it
 //! does at no more cost is left out, and so is a `OneEvaluation` one that
 //! at most one consumer or output can read when its None twin does all it
-//! does at less ([`dominated_by_one_evaluation_twin`]);
+//! does at less ([`dominated_by_lifetime_twin`]);
 //! under cost model 3, the twin dominance holds in every quantity at once
 //! ([`dominated_in_every_quantity`]), and whole θ-families another
 //! θ-family does as well as are left out ([`dominated_theta_families`]).
@@ -40,8 +40,8 @@ use crate::selectable::QueryId;
 /// execution is left out. A `TimeRangeCover` read only by its merge,
 /// offered with $\ell$ = None (137 bytes held) and `OneEvaluation` (19 MB
 /// held) at the same time: the `OneEvaluation` execution is left out.
-pub(crate) fn dominated_by_one_evaluation_twin(inputs: &SelectionInputs<'_>) -> Vec<bool> {
-    dominated_in_every_quantity(inputs, &[inputs.costs], Pairing::OneEvaluationTwin)
+pub(crate) fn dominated_by_lifetime_twin(inputs: &SelectionInputs<'_>) -> Vec<bool> {
+    dominated_in_every_quantity(inputs, &[inputs.costs], Pairing::LifetimeTwin)
 }
 
 /// Which executions [`dominated_in_every_quantity`] compares.
@@ -50,7 +50,7 @@ pub(crate) enum Pairing {
     /// An execution with $\ell$ = None and its `OneEvaluation` twin (the
     /// same logical candidate, context and timing), each of which may
     /// dominate the other.
-    OneEvaluationTwin,
+    LifetimeTwin,
 }
 
 /// Per execution, whether another execution `b` it is paired with
@@ -60,7 +60,7 @@ pub(crate) enum Pairing {
 /// every query output it answers and may be read by every query that may
 /// read it (exact-only reads, (X)). A plan selecting it selects $b$ in its
 /// place at no more of any quantity and stays feasible (module doc of
-/// [`dominated_by_one_evaluation_twin`]). A `OneEvaluation` execution is
+/// [`dominated_by_lifetime_twin`]). A `OneEvaluation` execution is
 /// left out only when its None twin is not itself left out for it (when
 /// each is no worse than the other, the None one is left out), so the
 /// twins of a class are never all left out, and "no worse" being
@@ -107,7 +107,7 @@ pub(crate) fn dominated_in_every_quantity(
             continue;
         }
         match pairing {
-            Pairing::OneEvaluationTwin => {
+            Pairing::LifetimeTwin => {
                 if properties.timing() != ExecutionTiming::QueryTime
                     || matches!(properties.lifetime(), Lifetime::AcrossEvaluations(_))
                 {
@@ -179,7 +179,7 @@ pub(crate) fn dominated_in_every_quantity(
             dominated[a] = members.iter().any(|&b| {
                 b != a
                     && match pairing {
-                        Pairing::OneEvaluationTwin => match (lifetime(a), lifetime(b)) {
+                        Pairing::LifetimeTwin => match (lifetime(a), lifetime(b)) {
                             // `OneEvaluation` does all `None` does.
                             (Lifetime::None, Lifetime::OneEvaluation(_)) => no_worse(a, b),
                             // `None` does all a `OneEvaluation` read at most
