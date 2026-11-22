@@ -149,7 +149,8 @@ fn bits_assumptions(cost: &NodeCost) -> Vec<f64> {
                 assert_eq!(fact.sources, ["data"]);
                 Some(*assumed_bits_per_sample)
             }
-            _ => None,
+            DataFactAssumption::DDSketchValueMagnitudeRange { .. }
+            | DataFactAssumption::InOrderArrival => None,
         })
         .collect()
 }

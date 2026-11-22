@@ -189,15 +189,13 @@ impl SelectableExecutions {
                 {
                     continue;
                 }
-                if let Some(execution) =
-                    selectable.execution_reading(
-                        physical,
-                        context,
-                        PhysicalCandidateId(v),
-                        false,
-                        false,
-                    )
-                {
+                if let Some(execution) = selectable.execution_reading(
+                    physical,
+                    context,
+                    PhysicalCandidateId(v),
+                    false,
+                    false,
+                ) {
                     executions.push(execution);
                     if reached.insert(execution) {
                         pending.push(execution);
@@ -221,8 +219,7 @@ impl SelectableExecutions {
                         u,
                         off_the_grid,
                         reads_open_window,
-                    )
-                    {
+                    ) {
                         edges.insert((consumer, edge, producer));
                         if reached.insert(producer) {
                             pending.push(producer);
