@@ -54,6 +54,11 @@ pub(super) enum Stop {
     /// `LatencySelectionChecks::node_limit` (10,000) branch-and-bound
     /// nodes, whichever comes first.
     GapOrNodes,
+    /// At a relative gap of [`STOP_RELATIVE_GAP`] or after
+    /// `LatencySelectionChecks::level_node_limit` (200) nodes: the mean
+    /// latency solve with wider tumbling-window levels, which starts from
+    /// the plan without them.
+    GapOrLevelNodes,
 }
 
 /// The default stop rule of the mean latency solve: a relative gap of 1 %
@@ -585,15 +590,15 @@ pub(super) fn build_and_solve(
         "mip_rel_gap",
         match stop {
             Stop::Exact => 0.0,
-            Stop::GapOrNodes => STOP_RELATIVE_GAP,
+            Stop::GapOrNodes | Stop::GapOrLevelNodes => STOP_RELATIVE_GAP,
         },
     );
     model.set_option("mip_abs_gap", 0.0);
-    if stop == Stop::GapOrNodes {
-        model.set_option(
-            "mip_max_nodes",
-            inputs.cost_inputs.latency_selection_checks.node_limit,
-        );
+    let checks = &inputs.cost_inputs.latency_selection_checks;
+    match stop {
+        Stop::Exact => {}
+        Stop::GapOrNodes => model.set_option("mip_max_nodes", checks.node_limit),
+        Stop::GapOrLevelNodes => model.set_option("mip_max_nodes", checks.level_node_limit),
     }
     let log = inputs.cost_inputs.latency_selection_checks.log_solver;
     model.set_option("output_flag", log);

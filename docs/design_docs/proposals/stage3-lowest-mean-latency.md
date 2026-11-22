@@ -653,6 +653,98 @@ work implements `LowestMeanLatency` only; the other two keep returning
 `UnsupportedCostModel` until a follow-up enables them on these rows. Cost
 model 2 keeps returning `UnsupportedCostModel`.
 
+### 2.8 Wider tumbling-window levels
+
+Wider tumbling-window levels and their covers
+(`multi-level-window-chains.md`) make a long range read cheap at query
+time, but under this objective each level is one more ingestion-time
+execution whose refresh adds precompute queueing to every query whose
+refresh group closes with it. The MILP's lower bound does not see that
+queueing (below), so with levels the dashboard at 10,000 series did not
+reach the 1 % gap in 10 minutes.
+
+**Components.**
+- The selection without levels: the same selection with every
+  `MultiLevelWindows` execution (levels and covers) left out, as Stage 3
+  selected before levels were admitted.
+- The selection with levels, started from that plan.
+- `LatencySelectionChecks::level_node_limit` (default 200,
+  `ASAP_STAGE3_LEVEL_NODE_LIMIT`): the most branch-and-bound nodes of the
+  selection with levels (stop rule `Stop::GapOrLevelNodes`: 1 % gap or
+  these nodes).
+
+**Algorithm.** When the selectable executions include levels:
+
+1. Select without levels, as before (its own T8 bound from cost model 1's
+   plan without levels, tie-breaks, pinned latencies).
+2. Select with levels: the model keeps the first plan's executions, the
+   first plan is pinned in it for a start, and the mean latency solve
+   starts from it and stops at a 1 % gap or after `level_node_limit`
+   nodes (to optimality with `exact_solve`).
+3. Keep the plan with the lower mean latency (each its own, pinned); the
+   lower bound reported is the second selection's, which holds over every
+   plan with or without levels. If the second selection fails, the first
+   plan is kept with the trivial bound 0.
+
+**Soundness.** The plan selected is never slower than the plan without
+levels (step 3 compares their pinned latencies), and the reported bound is
+a bound of the model with levels, which contains the one without. The
+search is bounded: each step stops within its node limit, deterministic on
+any host (one solver thread, node limits, not seconds).
+
+**Measured (typical-dashboard-10k, measured cost inputs, release build).**
+
+| Level node limit | Planning time | Mean latency | Lower bound | Reported gap |
+| --- | --- | --- | --- | --- |
+| levels left out (before) | 2.7 s | 848.55 ms | 846.92 ms | 0.19 % |
+| 0 | 25.7 s | 848.55 ms | 0 | 100 % |
+| 200 (default) | 132 s | 848.55 ms | 468.08 ms | 44.8 % |
+| 1,000 | 372 s | 836.74 ms | 563.08 ms | 32.7 % |
+
+Two runs at 200 select the same plan. A deployment that excludes the
+level operators plans 847.21 ms (gap 0.84 %): its memo has no level
+groups, so the 1 % stop rule stops at another plan of the same model; the
+plan with levels is within that 1 %. On the snapshot workloads with a
+long range read, levels make the plan faster and solve to optimality
+within the limit: `ratio-of-quantiles-1h` 1,612.63 → 571.19 ms,
+`topk-rate` 186.89 → 147.68 ms, `quantile-single` 824.31 → 476.19 ms.
+
+**Why the bound is weak.** Root LP (mean ms, freshness + query execution):
+without levels 321 (22 + 299), with levels 125 (27 + 98), against an
+optimum of 848.5 (277 + 571). The LP drops nearly all freshness already
+without levels (cuts recover it at the first node); with levels it also
+drops most query execution, because a cover is cheap at query time and its
+cost, the queueing it adds to every query (cost model 1's plan with levels
+waits 967 ms on freshness), is a product of a query's read of a group and
+the selection of other queries' executions, which the LP relaxes to ~0.
+
+**Measured and rejected.**
+- (c1) A query reading an ingestion-time execution waits for the refresh
+  of the producer it is built from (a flow over its input edges): root LP
+  125 → 137 ms; one wider level 445 → 551 s; all levels' gap at 600 s
+  26.8 % → 27.1 %.
+- (c2) The freshness big-M row disaggregated per term of $f_G$
+  ($v \ge c\,(x + g - 1)$ per term, $g \ge$ the group's reads): root LP
+  unchanged (321 and 125 ms); without levels the solve went from 2.7 s to
+  over 336 s (tie-break solves).
+- A least-latency row per answer ($L_q \ge (\ell^{min}_c + r_q) z_{q,c}$):
+  gap at 600 s 26.8 % → 14.9 %, still not solved; one level 445 → 551 s;
+  without levels 2.7 → 7.0 s.
+- Pricing a level before the MILP (left out when its least added queueing
+  breaks the plan without levels' bound): a level adds at most 36 ms mean
+  queueing, all 27 together about 250 ms, against a slack of about 667 ms
+  (848.5 ms bound − 181.3 ms of least latencies): nothing pruned.
+- The plan without levels as T8's bound (in place of cost model 1's):
+  the same slack; no execution's least latency comes near it: nothing
+  pruned.
+- One wider level per θ (Pass 2 cap): 445 s to a 1 % gap, the same
+  836.74 ms plan.
+
+**Future design.** Closing the gap needs a formulation of precompute
+queueing whose LP does not relax away: queueing is charged to each query
+through the selections of other queries' executions. That is a separate
+design.
+
 ## 3. Code interface
 
 ### 3.1 Cost inputs (`asap-cost`, `model.rs`)
@@ -1011,3 +1103,13 @@ on formula constants.
   (enumerated).
 - The reads $a_{q,e}$ of the optimum equal the sub-DAG reachable from
   $q$'s output in the selected plan.
+
+### 6.5 Wider tumbling-window levels (section 2.8)
+
+| # | Test (devtools `lowest_mean_latency_exactness`) | Checks |
+| --- | --- | --- |
+| L1 | `wider_levels_are_never_worse_than_the_plan_without_them` | `ratio-of-quantiles-1h`, `topk-rate`, `quantile-single` on `mvp` and on `mvp-single-chains` (both level operators excluded): the plan with levels is at most the one without, at the pinned mean latencies; the reported gap is (plan − bound) / plan with the bound at most the plan; two runs select the same plan. |
+| L2 | `a_level_node_limit_of_zero_keeps_the_plan_without_levels` | `ASAP_STAGE3_LEVEL_NODE_LIMIT=0`: the plan without levels, with a gap reported. |
+| L3 | `typical_dashboard_with_levels_plans_within_the_level_node_limit` (ignored: minutes in debug) | typical-dashboard-10k plans within the level node limit; at most the plan without levels it starts from (level node limit 0), and within 1 % of the plan on `mvp-single-chains`; a gap in (0, 1); the same plan on a second run. |
+| L4 | Existing pins | the measured-workload pins and model sizes, and the MILP-vs-`plan_cost` latencies on the dashboard, run on `mvp-single-chains` (the single-chain models they were measured on). |
+| L5 | Cost model 1 unchanged | sketch plan and corpus snapshots unchanged (levels were never excluded under cost model 1). |

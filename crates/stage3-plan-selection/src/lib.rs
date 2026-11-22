@@ -43,11 +43,11 @@ use asap_types::stages::{
 };
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
-use crate::cost::{execution_costs, execution_quantities, Quantity};
+use crate::cost::{execution_costs, execution_quantities, ExecutionCosts, Quantity};
 use crate::milp::model::cluster::{
-    solve_cluster_selection, ClusterInputs, ClusterSelectionError, FeasiblePlan,
+    solve_cluster_selection, ClusterInputs, ClusterSelectionError, ClusterSolved, FeasiblePlan,
 };
-use crate::milp::model::{solve_selection, SelectionInputs, SelectionMilpError};
+use crate::milp::model::{solve_selection, SelectionInputs, SelectionMilpError, SolvedSelection};
 use crate::plan::plan_of;
 use crate::report::{accepted_accuracy, excluded_by_deployment, infeasible};
 use crate::selectable::{Execution, QueryId, SelectableExecutions};
@@ -160,29 +160,13 @@ pub fn select_plan(
         node: 0,
         error,
     })?;
-    let mut costs = execution_costs(
+    let costs = execution_costs(
         physical,
         &selectable,
         entries,
         data,
         cost_inputs_for_structure,
     );
-    // Cost model 3's latency selection does not take wider tumbling-window
-    // levels and covers yet: its model over them is not bounded (a 10,000
-    // series dashboard did not solve in minutes). They are left out, so it
-    // selects among the single-chain plans it did before them.
-    if cluster_limits.is_some() {
-        let memo = &physical.logical_candidates.memo;
-        for (index, execution) in selectable.executions().iter().enumerate() {
-            let logical = physical.physical_candidates[execution.candidate.0].logical_candidate_id;
-            if memo.candidate(logical).origin == OriginOfCandidateForMemoGroup::MultiLevelWindows {
-                costs.per_execution[index] = Err(
-                    "wider tumbling-window levels are not selected under lowest_mean_latency yet"
-                        .into(),
-                );
-            }
-        }
-    }
     // A query output is answered by an execution that could be costed and
     // that its query may read (X).
     selectable.retain_answering(|query, index, execution| {
@@ -256,9 +240,9 @@ pub fn select_plan(
                 quantity(Quantity::PeakMemoryBytes),
                 quantity(Quantity::DiskBytes),
             );
-            // A feasible plan's executions for T8: cost model 1's
-            // optimum (when it is solved), by position.
-            let feasible_plan = solve_selection(&selection_inputs).ok().map(|solved| {
+            // A plan by position in `selectable`: its executions, edges and
+            // answering executions.
+            let plan_by_position = |solved: &SolvedSelection| {
                 let executions = selectable.executions();
                 let position =
                     |execution: &Execution| executions.iter().position(|e| e == execution);
@@ -286,33 +270,98 @@ pub fn select_plan(
                         })
                         .collect(),
                 }
-            });
-            let solved = solve_cluster_selection(&ClusterInputs {
-                selection: selection_inputs,
-                query_ms: &query_ms,
-                refresh_ms: &refresh_ms,
-                cpu: &cpu,
-                memory: &memory,
-                disk: &disk,
-                limits,
-                cost_inputs,
-                data,
-                feasible_plan,
-            })
-            .map_err(|error| match error {
-                ClusterSelectionError::Milp(error) => milp_error(error),
-                ClusterSelectionError::OverLimits(shortfalls) => {
-                    ErrorSelectingPlan::OverClusterLimits(
-                        shortfalls
-                            .into_iter()
-                            .map(|shortfall| ClusterLimitShortfall {
-                                available: available(limits, cost_inputs, entries, shortfall.limit),
-                                ..shortfall
-                            })
-                            .collect(),
-                    )
+            };
+            // One cost model 3 selection over the executions `costs` can
+            // cost, from `start_plan` when given.
+            let select = |costs: &ExecutionCosts, start_plan: Option<FeasiblePlan>| {
+                let selection_inputs = SelectionInputs {
+                    physical,
+                    entries,
+                    selectable: &selectable,
+                    costs,
+                };
+                // A feasible plan's executions for T8: cost model 1's
+                // optimum over the same executions (when it is solved).
+                let feasible_plan = solve_selection(&selection_inputs)
+                    .ok()
+                    .map(|solved| plan_by_position(&solved));
+                solve_cluster_selection(&ClusterInputs {
+                    selection: selection_inputs,
+                    query_ms: &query_ms,
+                    refresh_ms: &refresh_ms,
+                    cpu: &cpu,
+                    memory: &memory,
+                    disk: &disk,
+                    limits,
+                    cost_inputs,
+                    data,
+                    feasible_plan,
+                    start_plan,
+                })
+                .map_err(|error| match error {
+                    ClusterSelectionError::Milp(error) => milp_error(error),
+                    ClusterSelectionError::OverLimits(shortfalls) => {
+                        ErrorSelectingPlan::OverClusterLimits(
+                            shortfalls
+                                .into_iter()
+                                .map(|shortfall| ClusterLimitShortfall {
+                                    available: available(
+                                        limits,
+                                        cost_inputs,
+                                        entries,
+                                        shortfall.limit,
+                                    ),
+                                    ..shortfall
+                                })
+                                .collect(),
+                        )
+                    }
+                })
+            };
+            // Wider tumbling-window levels and covers: the selection
+            // without them first, then the one with them from its plan,
+            // stopped within the level node limit; the faster plan, never
+            // the slower, with the bound of the model with levels.
+            let levels = wider_level_executions(physical, &selectable);
+            let solved = match levels.iter().any(|&level| level) {
+                false => select(&costs, None)?,
+                true => {
+                    let mut single_chains = costs.clone();
+                    for (cost, _) in single_chains
+                        .per_execution
+                        .iter_mut()
+                        .zip(&levels)
+                        .filter(|(_, &level)| level)
+                    {
+                        *cost = Err("left out of the selection without wider levels".into());
+                    }
+                    let without = select(&single_chains, None)?;
+                    let start = plan_by_position(&without.solved);
+                    match select(&costs, Some(start)) {
+                        Ok(with) => {
+                            let (solve_ms, solve_count) = (
+                                with.solved.solve_ms + without.solved.solve_ms,
+                                with.solved.solve_count + without.solved.solve_count,
+                            );
+                            let bound = with.mean_latency_lower_bound_ms;
+                            let mut chosen = match with.mean_latency_ms <= without.mean_latency_ms {
+                                true => with,
+                                false => without,
+                            };
+                            chosen.solved.solve_ms = solve_ms;
+                            chosen.solved.solve_count = solve_count;
+                            chosen.mean_latency_lower_bound_ms = bound.min(chosen.mean_latency_ms);
+                            chosen
+                        }
+                        // Only the trivial bound holds over the model with
+                        // levels.
+                        Err(_) => ClusterSolved {
+                            mean_latency_lower_bound_ms: 0.0,
+                            ..without
+                        },
+                    }
                 }
-            })?;
+            };
             let mut per_query = vec![0.0; entries.len()];
             for &(query, latency) in &solved.latency_ms_per_query {
                 if let Some(slot) = per_query.get_mut(query) {
@@ -370,4 +419,21 @@ pub fn select_plan(
         executions_pruned_by_latency_bound: pruned_by_latency_bound,
     };
     Ok((plan, selection))
+}
+
+/// Per selectable execution, whether it is a wider tumbling-window level's
+/// or a cover's (`OriginOfCandidateForMemoGroup::MultiLevelWindows`).
+fn wider_level_executions(
+    physical: &PhysicalASAPMemoCandidates,
+    selectable: &SelectableExecutions,
+) -> Vec<bool> {
+    let memo = &physical.logical_candidates.memo;
+    selectable
+        .executions()
+        .iter()
+        .map(|execution| {
+            let logical = physical.physical_candidates[execution.candidate.0].logical_candidate_id;
+            memo.candidate(logical).origin == OriginOfCandidateForMemoGroup::MultiLevelWindows
+        })
+        .collect()
 }

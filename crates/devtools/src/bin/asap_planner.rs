@@ -304,7 +304,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     // and `ASAP_STAGE3_PATH_READS=off` turn a speed-up off;
     // `ASAP_STAGE3_ROOT_LP=1` reports the LP bound;
     // `ASAP_STAGE3_SOLVER_LOG=1` prints the solver's log;
-    // `ASAP_STAGE3_NODE_LIMIT=<n>` sets the default stop rule's node limit.
+    // `ASAP_STAGE3_NODE_LIMIT=<n>` sets the default stop rule's node limit;
+    // `ASAP_STAGE3_LEVEL_NODE_LIMIT=<n>` its node limit with wider levels.
     // `ASAP_STAGE3_EXACT=1` sets the cost inputs' `latency_selection.exact_solve`.
     let knob = |name: &str| std::env::var(name).ok();
     let checks = &mut cost_inputs.latency_selection_checks;
@@ -329,6 +330,13 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     if let Some(nodes) = knob("ASAP_STAGE3_NODE_LIMIT") {
         checks.node_limit = nodes.parse().map_err(|_| {
             Failure::Usage(format!("ASAP_STAGE3_NODE_LIMIT={nodes}: not a node count"))
+        })?;
+    }
+    if let Some(nodes) = knob("ASAP_STAGE3_LEVEL_NODE_LIMIT") {
+        checks.level_node_limit = nodes.parse().map_err(|_| {
+            Failure::Usage(format!(
+                "ASAP_STAGE3_LEVEL_NODE_LIMIT={nodes}: not a node count"
+            ))
         })?;
     }
     if knob("ASAP_STAGE3_EXACT").is_some() {
