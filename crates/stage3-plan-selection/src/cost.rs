@@ -51,13 +51,13 @@
 
 use std::collections::HashMap;
 
+use asap_cost::node::analytical::AnalyticalCostError;
 use asap_cost::plan::execution_demand::{
     context_executions_per_second, executions_per_second as rate_of_materialized,
 };
 use asap_cost::{
-    node_resource_usage_and_cost, output_interval_ms, query_time_computation_short_of_source_rows,
-    raw_data_disk_cost_per_second, CostInputs, NodeResourceUsageAndCost, ProducerOutput,
-    RawRowsShortOfRange,
+    node_resource_usage_and_cost, output_interval_ms, raw_data_disk_cost_per_second, CostInputs,
+    NodeResourceUsageAndCost, ProducerOutput, RawRowsShortOfRange,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
@@ -370,6 +370,7 @@ pub(crate) fn execution_quantities(
             data,
             cost_inputs,
         )
+        .map_err(|error| error.to_string())
         .and_then(|usage| quantity_of(quantity, &usage, node, cost_inputs))
     };
     // The evaluation grid of a context, which a cover's windows are
@@ -393,12 +394,6 @@ pub(crate) fn execution_quantities(
     for group in order {
         for &v in &candidates_of_group[group.0 as usize] {
             baseline[v.0] = baseline_inputs(memo, physical, &group_payloads, &nodes, &usage, v);
-            if let Some(short) = baseline[v.0]
-                .as_ref()
-                .and_then(|inputs| query_time_computation_short_of_source_rows(&nodes[v.0], inputs))
-            {
-                short_of_source_rows.insert(v, short);
-            }
             usage[v.0] = Some(match &baseline[v.0] {
                 Some(inputs) => cost_node(
                     physical,
@@ -410,7 +405,26 @@ pub(crate) fn execution_quantities(
                     None,
                     data,
                     cost_inputs,
-                ),
+                )
+                .map_err(|error| {
+                    // A query-time computation over too few raw rows is
+                    // reported by name (`PruneReason`), not as uncostable.
+                    if let AnalyticalCostError::FewerSourceRowsThanItsRange {
+                        rows,
+                        rows_in_range,
+                        ..
+                    } = error
+                    {
+                        short_of_source_rows.insert(
+                            v,
+                            RawRowsShortOfRange {
+                                rows,
+                                rows_in_range,
+                            },
+                        );
+                    }
+                    error.to_string()
+                }),
                 None => Err("an input has no costable producer".to_string()),
             });
         }
@@ -880,7 +894,7 @@ fn cost_node<'a>(
     evaluation_grid: Option<EvaluationGrid>,
     data: &DataWorkload,
     cost_inputs: &'a CostInputs,
-) -> Result<NodeResourceUsageAndCost<'a>, String> {
+) -> Result<NodeResourceUsageAndCost<'a>, AnalyticalCostError> {
     let window_ms = match node.output_state.timing {
         ExecutionTiming::QueryTime => scan_read_ms,
         ExecutionTiming::IngestionTime => ingestion_window_ms(physical, v),
@@ -894,7 +908,6 @@ fn cost_node<'a>(
         data,
         cost_inputs,
     )
-    .map_err(|error| error.to_string())
 }
 
 /// The time between two outputs of ingestion-time candidate `v`: the
