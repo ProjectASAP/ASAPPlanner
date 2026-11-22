@@ -1,6 +1,8 @@
 //! Executions the selection MILP need not choose because another does as
 //! well: one with $\ell$ = None whose `OneEvaluation` twin does all it
-//! does at no more cost is left out ([`dominated_by_one_evaluation_twin`]);
+//! does at no more cost is left out, and so is a `OneEvaluation` one that
+//! at most one consumer or output can read when its None twin does all it
+//! does at less ([`dominated_by_one_evaluation_twin`]);
 //! under cost model 3, the twin dominance holds in every quantity at once
 //! ([`dominated_in_every_quantity`]), and whole θ-families another
 //! θ-family does as well as are left out ([`dominated_theta_families`]).
@@ -17,21 +19,27 @@ use crate::cost::ExecutionCosts;
 use crate::selectable::QueryId;
 
 /// Per execution, by position in `SelectableExecutions::executions`,
-/// whether it is a query-time execution with $\ell$ = None that its
-/// `OneEvaluation` twin $b$ (the same logical candidate, so the same θ and
-/// the same error bounds, in the same context) dominates: $b$ costs no
+/// whether it is a query-time execution its twin $b$ (the same logical
+/// candidate, so the same θ and the same error bounds, in the same context)
+/// dominates: one with $\ell$ = None whose `OneEvaluation` twin $b$, or
+/// one with `OneEvaluation` that at most one consumer edge or query output
+/// can read whose None twin $b$ (not itself left out for it): $b$ costs no
 /// more, reads each of its producers on the same input at no more, is
 /// read by each of its consumers on the same input at no more, and answers
 /// every query output it answers. A plan selecting it selects $b$ in its
-/// place at no more cost and stays feasible: $b$'s (F) is the looser
-/// $x \le$ uses, its edges are the same ones (so (A), (B), (E) and (X)
-/// hold as before), and (K), per execution, sees the same θ through the
-/// same producers. A candidate with $h_v$ or raw data on disk is never
-/// left out so, its retention depending on its own readers.
+/// place at no more cost and stays feasible: its edges are the same ones
+/// (so (A), (B), (E) and (X) hold as before), (K), per execution, sees the
+/// same θ through the same producers, and (F) holds: a `OneEvaluation`
+/// $b$'s is the looser $x \le$ uses, and a None $b$'s, uses $= x$, holds
+/// because the execution it replaces, selected, is used at least once (its
+/// own (F)) and at most once. A candidate with $h_v$ or raw data on disk is
+/// never left out so, its retention depending on its own readers.
 ///
-/// Example: a `SummaryAgg` KLL build read by one readout in a context,
+/// Examples: a `SummaryAgg` KLL build read by one readout in a context,
 /// offered with $\ell$ = None and `OneEvaluation` at equal cost: the None
-/// execution is left out.
+/// execution is left out. A `TimeRangeCover` read only by its merge,
+/// offered with $\ell$ = None (137 bytes held) and `OneEvaluation` (19 MB
+/// held) at the same time: the `OneEvaluation` execution is left out.
 pub(crate) fn dominated_by_one_evaluation_twin(inputs: &SelectionInputs<'_>) -> Vec<bool> {
     dominated_in_every_quantity(inputs, &[inputs.costs], Pairing::OneEvaluationTwin)
 }
@@ -153,23 +161,32 @@ pub(crate) fn dominated_in_every_quantity(
                         .query_must_not_read(query, logical(a))
             })
     };
+    // Whether at most one consumer edge or query output can read `index`
+    // in any plan: a None execution is read exactly that once.
+    let read_at_most_once =
+        |index: usize| selectable.edges_out_of(index).len() + answers[index].len() <= 1;
+    let lifetime = |index: usize| {
+        physical.physical_candidates[executions[index].candidate.0]
+            .physical_properties
+            .lifetime()
+    };
     let mut dominated = vec![false; count];
     for members in classes.values() {
         for &a in members {
             dominated[a] = members.iter().any(|&b| {
                 b != a
                     && match pairing {
-                        // Only `OneEvaluation` dominates `None`.
-                        Pairing::OneEvaluationTwin => {
-                            let lifetime = |index: usize| {
-                                physical.physical_candidates[executions[index].candidate.0]
-                                    .physical_properties
-                                    .lifetime()
-                            };
-                            lifetime(a) == Lifetime::None
-                                && matches!(lifetime(b), Lifetime::OneEvaluation(_))
-                                && no_worse(a, b)
-                        }
+                        Pairing::OneEvaluationTwin => match (lifetime(a), lifetime(b)) {
+                            // `OneEvaluation` does all `None` does.
+                            (Lifetime::None, Lifetime::OneEvaluation(_)) => no_worse(a, b),
+                            // `None` does all a `OneEvaluation` read at most
+                            // once does; not when `OneEvaluation` is no
+                            // worse too, which leaves `None` out above.
+                            (Lifetime::OneEvaluation(_), Lifetime::None) => {
+                                read_at_most_once(a) && no_worse(a, b) && !no_worse(b, a)
+                            }
+                            _ => false,
+                        },
                     }
             });
         }

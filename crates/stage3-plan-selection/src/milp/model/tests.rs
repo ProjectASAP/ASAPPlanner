@@ -1051,7 +1051,10 @@ fn a_one_evaluation_execution_read_at_most_once_is_left_out_for_its_cheaper_none
             .filter(|(_, dominated)| *dominated)
             .map(|(execution, _)| execution.candidate.0)
             .collect();
-        (left_out, self::candidates(&solve_selection(&inputs).unwrap()))
+        (
+            left_out,
+            self::candidates(&solve_selection(&inputs).unwrap()),
+        )
     };
     assert_eq!(left_out_and_selected(false), (vec![1], vec![0, 2]));
     assert_eq!(left_out_and_selected(true), (vec![], vec![1, 2, 3]));
