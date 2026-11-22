@@ -324,12 +324,13 @@ fn per_series_workload(queries: &[&str]) -> FuzzWorkload {
 /// Three queries keep a per-series `max_over_time` of `queue_depth`: over
 /// 1 h by `region` and `service`, over 1 m by `job`, and over 1 h and 1 h
 /// offset 1 h by `job`. The front end scans `queue_depth` with the labels
-/// each query reads, so each state reads its own scan; one 15 s Max chain
-/// of every label, kept 2 h, serves all three, and costs less than a chain
-/// per label set (1.847e-6/s for two chains, 1.439e-6/s for one, under the
-/// AWS Fargate unit costs).
+/// each query reads. A chain over the scan of every label would serve all
+/// three, but its readers would read it through a `Project` back to their
+/// own labels, which costs each of them more than its own chain does, so
+/// it could replace their chains in no plan exactly: Pass 2 does not offer
+/// it, and each label set keeps its own chain.
 #[test]
-fn per_series_states_over_different_labels_share_one_chain() {
+fn per_series_states_over_different_labels_keep_their_own_chains() {
     let w = per_series_workload(&[
         "sum by (region) (max by (region, service) (max_over_time(queue_depth[1h])))",
         "topk(10, max by (job) (max_over_time(queue_depth[1m])))",
@@ -338,25 +339,17 @@ fn per_series_states_over_different_labels_share_one_chain() {
     ]);
     let plan = selected_plan(&w, &CostInputs::default());
     let chains = chains_with_retention(&plan);
-    assert_eq!(chains.len(), 1, "one chain: {chains:?}");
-    assert_eq!(chains[0].1, Some(7_200_000), "kept for the longest reader");
-    for &root in &plan.roots {
-        assert!(reaches(&plan, root, chains[0].0), "root {root}");
-    }
+    assert_eq!(chains.len(), 2, "a chain per label set: {chains:?}");
     let planning = w.planning_workload();
     let entries: Vec<_> = planning.query_workload.entries().collect();
     asap_planner::installable_plan_of(plan, &entries).expect("the executor compiles the plan");
 }
 
 /// `sum by (region, service) (increase(c[30m]))` and `increase(c[6h])`
-/// scan `c` with different labels. Pass 2 offers one 15 s `Increase`
-/// chain of every label that both states read; plan selection keeps a
-/// chain per label set here, because the shared chain stores `region` and
-/// `service` in each of its 6 h of windows: 2.20 GB against 1.74 GB + 0.19
-/// GB for the two chains, 6.880e-6/s against 6.581e-6/s under the AWS
-/// Fargate unit costs.
+/// scan `c` with different labels. Pass 2 adds no scan of both label sets
+/// and no chain both queries reach: the memo does not grow for them.
 #[test]
-fn per_series_states_over_different_labels_are_offered_one_chain() {
+fn per_series_states_over_different_labels_add_no_shared_chain() {
     let w = per_series_workload(&[
         "count by (region) (sum by (region, service) (increase(requests_total[30m])) > 1000)",
         "increase(requests_total[6h])",
@@ -375,9 +368,10 @@ fn per_series_states_over_different_labels_are_offered_one_chain() {
     )
     .unwrap();
     let memo = run.run.logical_asap_candidates.unwrap().memo;
-    let shared = memo.groups().iter().filter(|group| {
-        group.expression.chain_tumbling_window_width_ms() == Some(15_000)
-            && group.reached_by_queries() == [0, 1]
-    });
-    assert_eq!(shared.count(), 1, "one chain both queries reach");
+    let reached_by_both = memo
+        .groups()
+        .iter()
+        .filter(|group| group.reached_by_queries() == [0, 1])
+        .count();
+    assert_eq!(reached_by_both, 0, "no group both queries reach");
 }
