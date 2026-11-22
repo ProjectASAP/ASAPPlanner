@@ -1050,6 +1050,24 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let input_short_of_range = producers
         .first()
         .and_then(|producer| producer.raw_rows_short_of_range);
+    // A range of `range_ms` checked against what its sources hold, whatever
+    // its scan's other readers: its own window, ending its offset
+    // (`raw_rows_shifted_back_ms`) before the newest row, needs the rows
+    // arriving over the offset and the range held; those inside it are the
+    // rows held less the ones after it. `None` when every row is held (or
+    // nothing arrives). Example: 5 min held, `[5m] offset 5m`: none of the
+    // 2,400 rows its range needs; 10 min held, `[1h]`: 4,800 of 28,800.
+    let range_short_of_rows_held = |range_ms: u64| {
+        short_of(Some(input_shifted_back_ms.saturating_add(range_ms)))
+            .map(|reach| {
+                let rows_after_range = raw_rows(Some(input_shifted_back_ms)).0.unwrap_or(0);
+                RawRowsShortOfRange {
+                    rows: reach.rows.saturating_sub(rows_after_range),
+                    rows_in_range: reach.rows_in_range - rows_after_range.min(reach.rows_in_range),
+                }
+            })
+            .filter(|short| short.rows < short.rows_in_range)
+    };
     // The exact rate its input's raw rows arrive at, when known.
     let input_raw_rows_per_ms = producers
         .first()
@@ -1457,6 +1475,20 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         .checked_mul(windows)
                         .ok_or(AnalyticalCostError::Overflow)?,
                 };
+                // States a query-time chain built from raw rows
+                // (`state_data_span_ms`) hold the rows its sources held: a
+                // range of them is checked as a range of those rows is.
+                // An ingestion-time chain saw every row.
+                read_raw_rows_short_of_range = Some(
+                    producers
+                        .first()
+                        .and_then(|producer| producer.state_data_span_ms)
+                        .and_then(|_| {
+                            range_short_of_rows_held(
+                                u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
+                            )
+                        }),
+                );
                 // It reads those windows' states from the chain's store.
                 let estimate = estimate_operator_with_terms(
                     PhysicalOperator::TimeRange,
@@ -1494,33 +1526,17 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 read_raw_rows_span_ms = Some(
                     input_raw_rows_span_ms.map_or(range_ms, |input_ms| input_ms.min(range_ms)),
                 );
-                // A range of raw rows its sources hold too few of: its own
-                // window, ending its offset (`raw_rows_shifted_back_ms`)
-                // before the newest row, needs the rows arriving over the
-                // offset and the range held; those inside it are the rows
-                // held less the ones after it. Its scan may reach further
-                // for another reader (a 1 h range beside this 5 min one):
-                // that does not move its window. Example: 5 min held,
-                // `[5m] offset 5m`: none of the 2,400 rows its range needs;
-                // 30 min held, `[5m]` beside `[1h]`: all 2,400.
+                // Every range of raw rows is checked against what its
+                // sources hold (`range_short_of_rows_held`).
                 read_raw_rows_short_of_range = Some(match kind {
-                    TimeRangeKind::Range
-                        if input_short_of_range.is_some() || input_shifted_back_ms > 0 =>
-                    {
-                        let range_ms = u64::try_from(range.as_millis()).unwrap_or(u64::MAX);
-                        short_of(Some(input_shifted_back_ms.saturating_add(range_ms)))
-                            .map(|reach| {
-                                let rows_after_range =
-                                    raw_rows(Some(input_shifted_back_ms)).0.unwrap_or(0);
-                                RawRowsShortOfRange {
-                                    rows: reach.rows.saturating_sub(rows_after_range).min(out.rows),
-                                    rows_in_range: reach.rows_in_range
-                                        - rows_after_range.min(reach.rows_in_range),
-                                }
-                            })
-                            .filter(|short| short.rows < short.rows_in_range)
-                    }
-                    TimeRangeKind::Range | TimeRangeKind::Instant => None,
+                    TimeRangeKind::Range => range_short_of_rows_held(
+                        u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
+                    )
+                    .map(|short| RawRowsShortOfRange {
+                        rows: short.rows.min(out.rows),
+                        ..short
+                    }),
+                    TimeRangeKind::Instant => None,
                 });
                 let estimate = estimate_operator_with_terms(
                     PhysicalOperator::TimeRange,

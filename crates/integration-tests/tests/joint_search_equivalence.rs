@@ -811,3 +811,49 @@ fn a_per_series_aggregate_under_a_build_counts_each_source_row_once() {
         );
     }
 }
+
+/// Every range read of raw rows is checked against what its sources hold,
+/// whatever the other readers of its scan: with 10 min of 8 series held
+/// while rows keep arriving, `sum_over_time(m[1h])` beside
+/// `sum_over_time(m[5m] offset 5m)` is not offered at query time (it would
+/// read 4,800 of the 28,800 rows of its hour), and the plan builds it at
+/// ingestion time.
+#[test]
+fn a_long_range_beside_an_offset_one_is_checked_against_the_rows_held() {
+    use asap_types::stages::PruneReason;
+    let workload = one_source_workload_of(
+        &[
+            ("sum_over_time(m[1h])", 60_000),
+            ("sum_over_time(m[5m] offset 5m)", 60_000),
+        ],
+        AccuracyTarget::exact(),
+        8,
+        1_000,
+        8 * 600,
+        DataArrival::Ingesting {
+            rows_per_second: 8.0,
+            max_out_of_order_ms: None,
+        },
+    );
+    let run = run_workload(
+        &workload,
+        &CostInputs::default(),
+        &DeploymentCapabilities::default(),
+    );
+    let (_, selection) = run.selection.as_ref().unwrap();
+    assert!(
+        selection.pruned_candidates.iter().any(|pruned| matches!(
+            pruned.reason,
+            PruneReason::ReadsFewerSourceRowsThanItsRange {
+                rows_in_range: 28_800,
+                ..
+            }
+        )),
+        "the hour's query-time read is not pruned: {:?}",
+        selection
+            .pruned_candidates
+            .iter()
+            .map(|pruned| pruned.reason)
+            .collect::<Vec<_>>()
+    );
+}
