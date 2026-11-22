@@ -338,18 +338,21 @@ fn quantile_at_10_hz_with_raw_data_keeps_stored_ddsketch_windows() {
 /// With the default (Pareto) and Zipf modes' declared ranges, ten and nine
 /// decades across every series' scale, a stored DDSketch state is charged
 /// at least the spread of its rows log-uniform over that range (the
-/// declared range's floor, so values that fill it are not under-charged):
-/// the stored plan is then priced above the exact one at 10 s and 300 s.
+/// declared range's floor, so values that fill it are not under-charged).
+/// Priced at the view layout a stored window takes (narrow counts, sparse
+/// when few buckets are occupied), the stored plan stays below the exact
+/// one at every interval even at that floor; at 8 bytes per bucket of an
+/// owned sketch it was priced above it at 10 s and 300 s.
 /// Per-series values of these modes may span much less than the column
 /// does; which plan is cheaper for them is for a measured table's bytes
 /// per state (fitted from the data plane's stored states) to settle. These
 /// pin the selection the floor gives until calibration.
 #[test]
 fn quantile_at_10_hz_under_column_wide_declared_ranges_follows_the_floor() {
-    use PlanKind::{ExactScan, StoredStates};
+    use PlanKind::StoredStates;
     let expected = [
-        (BENCHMARK_RANGES[1], [ExactScan, ExactScan, ExactScan]),
-        (BENCHMARK_RANGES[2], [ExactScan, StoredStates, ExactScan]),
+        (BENCHMARK_RANGES[1], [StoredStates; 3]),
+        (BENCHMARK_RANGES[2], [StoredStates; 3]),
     ];
     for ((gauge, counter), kinds) in expected {
         let settings = [TEN_HZ_EVERY_10_S, TEN_HZ_EVERY_60_S, TEN_HZ_EVERY_300_S];

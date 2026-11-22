@@ -576,10 +576,10 @@ fn the_objective_is_the_plan_cost_on_anchored_and_plain_queries_on_one_grid() {
 /// most one row in a batch narrower than 15 s, so at the 10 s default every
 /// row is a visit, the raw scan costs more than the views and the two
 /// plans are the same. With 30 min batches, a series has 120 rows in a
-/// batch. Stored DDSketch windows priced sealed (as the executor keeps
-/// them), the views are the cheapest plan (4.3e5/s) with raw data kept or
-/// not; with memory priced 100x higher, reading the raw rows is cheaper
-/// and is selected.
+/// batch. Stored DDSketch windows priced at their view layout, the views
+/// are the cheapest plan with raw data kept or not. The same deployment
+/// asked one p99 over the last hour reads the raw rows at query time,
+/// which costs less than maintaining views for it.
 #[test]
 fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     let query = |query: &str| {
@@ -635,20 +635,20 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
         plan_cost <= views_only_plan_cost,
         "selected {plan_cost} is above the ingestion-time views plan, {views_only_plan_cost}"
     );
-    // When memory is priced 100x higher (each byte-second of the views'
-    // years of windows), reading the raw rows at query time beats the
-    // views: the selection costs strictly less than the views-only plan.
-    let mut costly_memory = settings.clone();
-    let CostModel::UsageOverTime(unit_costs) = &mut costly_memory.cost_model else {
-        unreachable!("the default cost model is cost model 1")
-    };
-    unit_costs.cost_per_memory_byte_second *= 100.0;
+    // Stored DDSketch windows are priced at their view layout, lighter
+    // than the raw rows they summarize, so no memory price makes reading
+    // years of raw rows cheaper. One p99 over the last hour, once, is the
+    // case where raw rows win: the selection reads them at query time and
+    // costs less than maintaining the views for it.
+    let mut last_hour = serde_json::to_value(&w).unwrap();
+    last_hour["query_workload"]["query_batch"] =
+        serde_json::json!([query("quantile_over_time(0.99, latency_ms[1h])")]);
+    let last_hour: PlanningWorkload = serde_json::from_value(last_hour).unwrap();
     let raw_kept = PlanningModels::builtin()
         .with_ignore_accuracy_guarantees(true)
-        .with_cost_inputs(&costly_memory);
+        .with_cost_inputs(&settings);
     let (raw_kept_plan, (_, raw_kept_plan_cost)) =
-        selected_plan_objective_and_plan_cost_with(&w, raw_kept, &costly_memory);
-    // The selection reads raw rows at query time.
+        selected_plan_objective_and_plan_cost_with(&last_hour, raw_kept, &settings);
     assert!(
         raw_kept_plan.nodes.iter().any(|node| {
             matches!(
@@ -656,17 +656,22 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
                 PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
             ) && node.output_state.timing == ExecutionTiming::QueryTime
         }),
-        "memory at 100x: the selection scans no raw rows at query time"
+        "one-off last hour: the selection scans no raw rows at query time"
     );
+    let mut last_hour_ingesting = serde_json::to_value(&last_hour).unwrap();
+    last_hour_ingesting["data_workload"]["arrival"] =
+        serde_json::json!({"ingesting": {"rows_per_second": 1_000_000.0 / 15.0}});
+    let last_hour_ingesting: PlanningWorkload =
+        serde_json::from_value(last_hour_ingesting).unwrap();
     let views_only = PlanningModels::builtin()
         .with_ignore_accuracy_guarantees(true)
-        .with_cost_inputs(&costly_memory)
+        .with_cost_inputs(&settings)
         .with_deployment_capabilities(&capabilities);
     let (_, (_, views_only_plan_cost)) =
-        selected_plan_objective_and_plan_cost_with(&ingesting, views_only, &costly_memory);
+        selected_plan_objective_and_plan_cost_with(&last_hour_ingesting, views_only, &settings);
     assert!(
         raw_kept_plan_cost < views_only_plan_cost,
-        "memory at 100x: selected {raw_kept_plan_cost}, views {views_only_plan_cost}"
+        "one-off last hour: selected {raw_kept_plan_cost}, views {views_only_plan_cost}"
     );
 }
 
