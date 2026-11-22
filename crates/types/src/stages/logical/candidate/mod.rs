@@ -107,9 +107,6 @@ pub enum OriginOfCandidateForMemoGroup {
     Rollup,
     /// A top-k read from another group's ranking.
     TopKReuse,
-    /// The scan of every label a metric's scans read, a per-series state
-    /// over it, or the `Project` of a narrower state's columns from it.
-    WidenedScans,
 }
 
 /// $e_v = \operatorname{op}_v(G_{v,1}, \dots, G_{v,n})$: one operator, with
