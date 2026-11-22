@@ -556,3 +556,71 @@ async fn c11_a_window_cache_keeps_only_recently_read_windows_in_memory() {
         "disk added {disk_added} bytes for memory {memory_without} -> {memory_with}"
     );
 }
+
+/// C12. With an answer cache kept 1 min beyond the plan's longest
+/// retention, `max_over_time(m[5m])` every 10 s keeps an answer per
+/// evaluation time within that horizon: 300 s of retention and 60 s of
+/// margin keep 37, 120 s of margin 43; the memory per answer is what the
+/// six more cost, and 37 of them are the first margin's memory.
+#[tokio::test]
+async fn c12_an_answer_cache_keeps_an_answer_per_evaluation_time() {
+    let workload = max_chain_workload(1000);
+    let memory = |data_plane_execution: Value| {
+        let workload = workload.clone();
+        async move {
+            let report = plan(
+                &workload,
+                &cost_inputs(
+                    usage_over_time(),
+                    chain_table(json!({}), vec![]),
+                    json!({}),
+                    data_plane_execution,
+                ),
+                false,
+            )
+            .await
+            .report;
+            number(&report["predicted_usage"], "average_memory_bytes")
+        }
+    };
+    let without = memory(json!({})).await;
+    let one_minute = memory(json!({"answer_cache": {"retention_margin_ms": 60_000}})).await;
+    let two_minutes = memory(json!({"answer_cache": {"retention_margin_ms": 120_000}})).await;
+    let per_answer = (two_minutes - one_minute) / 6.0;
+    assert!(per_answer > 0.0, "{without} {one_minute} {two_minutes}");
+    assert_close("37 answers", one_minute - without, 37.0 * per_answer);
+}
+
+/// C13. A 1 h range at 15 s steps (241 steps) requested every 15 s: with
+/// an answer cache, each request computes only its newest step, so its
+/// query-time work per request is a 241st of what it is without.
+#[tokio::test]
+async fn c13_a_range_request_computes_only_its_new_steps_with_an_answer_cache() {
+    let mut range = every("max_over_time(m[5m])", 15_000, None);
+    range["range_evaluation"] = json!({"step_ms": 15_000, "span_ms": 3_600_000});
+    let workload = over_m(vec![range], 1000);
+    let query_ms = |data_plane_execution: Value| {
+        let workload = workload.clone();
+        async move {
+            let report = plan(
+                &workload,
+                &cost_inputs(
+                    usage_over_time(),
+                    chain_table(json!({}), vec![]),
+                    json!({}),
+                    data_plane_execution,
+                ),
+                false,
+            )
+            .await
+            .report;
+            number(
+                &report["predicted_usage"]["per_query"][0],
+                "query_execution_ms",
+            )
+        }
+    };
+    let without = query_ms(json!({})).await;
+    let with = query_ms(json!({"answer_cache": {"retention_margin_ms": 60_000}})).await;
+    assert_close("241 steps to 1", without / with, 241.0);
+}
