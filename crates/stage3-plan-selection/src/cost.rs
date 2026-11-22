@@ -872,6 +872,13 @@ fn logical_output<'a: 'b, 'b, 'c>(
         if usage.raw_rows_short_of_range.is_none() {
             known.raw_rows_short_of_range = None;
         }
+        // States built at query time from raw rows only when every
+        // candidate's are: a consumer may read an ingestion-time chain,
+        // which saw every row. An edge to a query-time chain is checked
+        // against that chain's own output (`per_edge`).
+        if usage.state_data_span_ms.is_none() {
+            known.state_data_span_ms = None;
+        }
         if usage.output.bytes > known.output.bytes {
             known.family = usage.family;
             known.state_input_rows = usage.state_input_rows;

@@ -721,6 +721,8 @@ fn a_filtered_quantile_folds_the_same_rows_at_every_timing() {
 /// a chain at ingestion time, which keeps ten minutes).
 #[test]
 fn an_offset_counts_in_the_range_a_read_needs() {
+    use asap_types::ir::properties::ExecutionTiming;
+    use asap_types::ir::ASAPOp;
     let query = "sum_over_time(m[5m] offset 5m)";
     let workload = one_source_workload(
         query,
@@ -750,11 +752,26 @@ fn an_offset_counts_in_the_range_a_read_needs() {
             .with_deployment_capabilities(&deployment),
         false,
     );
-    let rejected_for_rows = match &run.selection {
-        Ok(_) => pruned_for_too_few_rows(&run),
-        Err(error) => error.to_string().contains("fewer samples than asked"),
-    };
-    assert!(rejected_for_rows, "{query}");
+    let (plan, _) = run
+        .selection
+        .as_ref()
+        .unwrap_or_else(|error| panic!("{query}: {error}"));
+    assert!(pruned_for_too_few_rows(&run), "{query}");
+    // The plan builds its chain at ingestion time.
+    let chains: Vec<_> = plan
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+        })
+        .collect();
+    assert!(!chains.is_empty(), "{query}: the plan builds no chain");
+    assert!(chains
+        .iter()
+        .all(|node| node.output_state.timing == ExecutionTiming::IngestionTime));
 }
 
 /// A short range sharing its scan with a longer one reads the newest rows,

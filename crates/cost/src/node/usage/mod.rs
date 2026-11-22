@@ -1054,15 +1054,16 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // its scan's other readers: its own window, ending its offset
     // (`raw_rows_shifted_back_ms`) before the newest row, needs the rows
     // arriving over the offset and the range held; those inside it are the
-    // rows held less the ones after it. `None` when every row is held (or
-    // nothing arrives). Example: 5 min held, `[5m] offset 5m`: none of the
-    // 2,400 rows its range needs; 10 min held, `[1h]`: 4,800 of 28,800.
-    let range_short_of_rows_held = |range_ms: u64| {
+    // rows held less the ones after it, and at most `rows_read`. `None` when
+    // every row is held (or nothing arrives). Example: 5 min held, `[5m]
+    // offset 5m`: none of the 2,400 rows its range needs; 10 min held,
+    // `[1h]`: 4,800 of 28,800.
+    let range_short_of_rows_held = |range_ms: u64, rows_read: u64| {
         short_of(Some(input_shifted_back_ms.saturating_add(range_ms)))
             .map(|reach| {
                 let rows_after_range = raw_rows(Some(input_shifted_back_ms)).0.unwrap_or(0);
                 RawRowsShortOfRange {
-                    rows: reach.rows.saturating_sub(rows_after_range),
+                    rows: reach.rows.saturating_sub(rows_after_range).min(rows_read),
                     rows_in_range: reach.rows_in_range - rows_after_range.min(reach.rows_in_range),
                 }
             })
@@ -1486,6 +1487,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         .and_then(|_| {
                             range_short_of_rows_held(
                                 u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
+                                u64::MAX,
                             )
                         }),
                 );
@@ -1531,11 +1533,8 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 read_raw_rows_short_of_range = Some(match kind {
                     TimeRangeKind::Range => range_short_of_rows_held(
                         u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
-                    )
-                    .map(|short| RawRowsShortOfRange {
-                        rows: short.rows.min(out.rows),
-                        ..short
-                    }),
+                        out.rows,
+                    ),
                     TimeRangeKind::Instant => None,
                 });
                 let estimate = estimate_operator_with_terms(
