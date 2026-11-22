@@ -99,6 +99,10 @@ fn one_second_of_rows(scan: &PhysicalASAPDAGNode) -> ProducerOutput<'_> {
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: Some(1_000),
         raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
         state_input_rows: None,
     }
 }
