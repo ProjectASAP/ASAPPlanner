@@ -3,7 +3,9 @@
 //! `asap_cost::plan_cost` of the selected plan, under the default unit
 //! costs and under unit costs that charge per-request overhead and disk.
 
-use asap_cost::{CostInputs, CostModel, ResourceUnitCost, ViewWindowCache};
+use asap_cost::{
+    AnswerCache, CostInputs, CostModel, KeptQueryTimeResults, ResourceUnitCost, ViewWindowCache,
+};
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_planner::{DeploymentCapabilities, PlanningModels};
 use asap_types::ir::properties::ExecutionTiming;
@@ -935,4 +937,70 @@ fn the_objective_is_the_plan_cost_with_a_window_cache() {
             objective_and_plan_cost(&over_m(entries), &with_window_cache(), false),
         );
     }
+}
+
+/// The default cost inputs with the data plane's window cache (idle 60 s),
+/// its query-time results kept 60 s and its answers kept 60 s beyond the
+/// plan's longest retention, each cache bounded by `max_bytes`.
+fn with_result_caches(max_bytes: Option<u64>) -> CostInputs {
+    let mut settings = with_window_cache();
+    settings.data_plane_execution.kept_query_time_results = Some(KeptQueryTimeResults {
+        retention_ms: 60_000,
+        max_bytes,
+    });
+    settings.data_plane_execution.answer_cache = Some(AnswerCache {
+        retention_margin_ms: 60_000,
+        max_bytes,
+    });
+    settings
+}
+
+/// With the result and answer caches, unbounded and bounded at 64 KiB
+/// (below what they keep): the MILP charges each `OneEvaluation`
+/// execution's kept results, each query's answers over the plan's longest
+/// retention ($H$, $w_{q,e}$), each bound as the least of the pool and the
+/// bound ($t$, $b$), and a range request's new steps only, as `plan_cost`
+/// does. Workloads: two windowed quantiles sharing a query-time scan (raw
+/// data retained), a 1 h range at 15 s steps every 15 s, and a 1 h range of
+/// `rate(..[5m] offset 1h)` every 60 s. Under the bound the shared-scan
+/// plan costs less than without it.
+#[test]
+fn the_objective_is_the_plan_cost_with_result_and_answer_caches() {
+    let quantiles = over_m(vec![
+        every_10s("quantile_over_time(0.5, m[1m])"),
+        every_10s("quantile_over_time(0.9, m[5m])"),
+    ]);
+    let range = over_m(vec![requested(
+        "max_over_time(m[5m])",
+        15_000,
+        Some((15_000, 3_600_000)),
+    )]);
+    let offset_range = over_m(vec![requested(
+        "max_over_time(m[5m] offset 1h)",
+        60_000,
+        Some((60_000, 3_600_000)),
+    )]);
+    for (name, workload, raw_data_retained) in [
+        ("shared scan", &quantiles, true),
+        ("1 h range every 15 s", &range, false),
+        ("offset 1 h range every 60 s", &offset_range, false),
+    ] {
+        for max_bytes in [None, Some(64 * 1024)] {
+            assert_equal(
+                &format!("{name}, caches bounded at {max_bytes:?}"),
+                objective_and_plan_cost(
+                    workload,
+                    &with_result_caches(max_bytes),
+                    raw_data_retained,
+                ),
+            );
+        }
+    }
+    let (_, unbounded) = objective_and_plan_cost(&quantiles, &with_result_caches(None), true);
+    let (_, bounded) =
+        objective_and_plan_cost(&quantiles, &with_result_caches(Some(64 * 1024)), true);
+    assert!(
+        bounded < unbounded,
+        "bounded {bounded} is not below unbounded {unbounded}"
+    );
 }
