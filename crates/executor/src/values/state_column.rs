@@ -303,22 +303,19 @@ impl StateColumn {
         family: FieldDataType,
         states: impl ExactSizeIterator<Item = Arc<dyn AggregateCore>>,
     ) -> Option<Self> {
-        let mut words: Vec<u64> = Vec::new();
-        let mut offsets = Vec::with_capacity(states.len() + 1);
-        offsets.push(0u32);
-        for state in states {
-            let view = super::mapped_states::state_view_bytes(state.as_ref())?;
-            let start = words.len();
-            words.resize(start + view.len().div_ceil(8), 0);
-            // The view's bytes, little-endian, into the 8-byte words.
-            for (word, chunk) in words[start..].iter_mut().zip(view.chunks(8)) {
-                let mut bytes = [0u8; 8];
-                bytes[..chunk.len()].copy_from_slice(chunk);
-                *word = u64::from_le_bytes(bytes);
-            }
-            offsets.push(u32::try_from(words.len() * 8).ok()?);
+        let views = states
+            .map(|state| super::mapped_states::state_view_bytes(state.as_ref()))
+            .collect::<Option<Vec<Vec<u8>>>>()?;
+        let words_len = views.iter().map(|view| view.len().div_ceil(8)).sum();
+        if words_len * 8 > u32::MAX as usize {
+            return None;
         }
-        let state_memory_bytes = words.len() * 8 + offsets.len() * 4;
+        // One allocation of exactly the views' words, so the charge is
+        // what the run holds.
+        let (words, offsets) =
+            super::mapped_states::pack_words(words_len, views.iter().map(Vec::as_slice));
+        drop(views);
+        let state_memory_bytes = words.capacity() * 8 + offsets.capacity() * 4;
         let Mapped::Sketches(sketches) = mapped(
             &family,
             arrow::buffer::Buffer::from(words),

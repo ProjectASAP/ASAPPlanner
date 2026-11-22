@@ -10,6 +10,7 @@ mod batch;
 mod mapped_states;
 mod state_column;
 pub use batch::{Batch, BatchColumn};
+pub(crate) use mapped_states::MappedSketchKernel;
 pub use mapped_states::{family_has_mapped_form, state_view_bytes};
 pub use state_column::StateColumn;
 pub(crate) use state_column::StateStorage;

@@ -301,6 +301,7 @@ impl Operator {
                 groups,
                 emit_empty_global: false,
                 parameters: None,
+                seal_output: false,
             },
             inputs: vec![input],
             output: schema(fields),
@@ -520,6 +521,7 @@ pub(super) fn execute_merge<'a>(
             groups,
             emit_empty_global,
             parameters,
+            seal_output,
         } = &operator.kind
         else {
             unreachable!()
@@ -528,7 +530,10 @@ pub(super) fn execute_merge<'a>(
             input,
             *state,
             groups,
-            emit_empty_global.then_some(parameters.as_ref()),
+            MergeOutput {
+                empty_global: emit_empty_global.then_some(parameters.as_ref()),
+                seal: *seal_output,
+            },
             &input_schema,
             &output,
             &context,
@@ -884,14 +889,23 @@ fn state_indices(batch: &Batch, state: usize) -> Result<(&StateColumn, &UInt32Ar
     Ok((states, indices))
 }
 
-/// Merge the states of each group across all input rows; with
-/// `empty_global` (`Some` of the states' θ), one empty state when there is
-/// no input state.
+/// What a `SummaryMerge` outputs beyond the merged states.
+#[derive(Clone, Copy)]
+struct MergeOutput<'a> {
+    /// `Some` of the states' θ: one empty state when there is no input
+    /// state, as a global SQL aggregate has one row over no input rows.
+    empty_global: Option<Option<&'a SketchParams>>,
+    /// Whether the merged states are a stored level's windows, sealed as a
+    /// chain seals its own.
+    seal: bool,
+}
+
+/// Merge the states of each group across all input rows, as `shape` says.
 async fn merge_summary(
     mut input: Input<'_, Batch>,
     state_column: usize,
     groups: &[usize],
-    empty_global: Option<Option<&SketchParams>>,
+    shape: MergeOutput<'_>,
     input_schema: &SchemaRef,
     output: &SchemaRef,
     context: &RunContext,
@@ -908,7 +922,7 @@ async fn merge_summary(
             input,
             state_column,
             groups,
-            empty_global,
+            shape,
             input_schema,
             output,
             context,
@@ -935,7 +949,7 @@ async fn merge_summary(
         );
     }
     // A global SQL aggregate's one row over no input rows: one empty state.
-    if let (true, Some(parameters)) = (entries.is_empty(), empty_global) {
+    if let (true, Some(parameters)) = (entries.is_empty(), shape.empty_global) {
         table.add_empty_group()?;
         let mut updater = StateColumnUpdater::new(family, parameters)?;
         updater.add_group()?;
@@ -1253,7 +1267,7 @@ async fn merge_summary_streaming(
     mut input: Input<'_, Batch>,
     state_column: usize,
     groups: &[usize],
-    empty_global: Option<Option<&SketchParams>>,
+    shape: MergeOutput<'_>,
     input_schema: &SchemaRef,
     output: &SchemaRef,
     context: &RunContext,
@@ -1326,7 +1340,7 @@ async fn merge_summary_streaming(
         work.checkpoint_rows(batch.num_rows()).await?;
     }
     if table.len() == 0 {
-        if let Some(parameters) = empty_global {
+        if let Some(parameters) = shape.empty_global {
             // A global SQL aggregate's one row over no input rows: one empty state.
             table.add_empty_group()?;
             let mut updater = StateColumnUpdater::new(family, parameters)?;
@@ -1362,6 +1376,15 @@ async fn merge_summary_streaming(
                 .map(|state| state.expect("every group has a row"))
                 .collect(),
         )
+    } else if shape.seal {
+        // A stored level's windows, sealed as a chain seals its own.
+        let merged: Vec<_> = objects
+            .finish()
+            .into_iter()
+            .map(|(state, _)| state)
+            .collect();
+        StateColumn::from_sealed_views(family.clone(), merged.iter().cloned())
+            .unwrap_or_else(|| StateColumn::from_objects(family.clone(), merged))
     } else {
         StateColumn::from_objects_of(family.clone(), objects.finish())
     };
@@ -1470,6 +1493,28 @@ fn evaluate_states(
                     .scalar()
                     .ok_or_else(|| invalid("exact evaluation requires an unkeyed state"))?;
                 exact_value(record, evaluation)?
+            }
+            // A mapped DDSketch's quantile, read on its view: no owned
+            // sketch is built.
+            (
+                SummaryEvaluation::Sketch(planner_types::summary_type::SketchStatistic::Quantile {
+                    q,
+                }),
+                StateStorage::Mapped(mapped),
+            ) if !integral && mapped.kernel() == crate::values::MappedSketchKernel::DDSketch => {
+                match mapped
+                    .ddsketch_quantile(index, *q)
+                    .map_err(Error::Operator)?
+                {
+                    Some(value) => Some(Value::Float64(value)),
+                    // A filtered or NULL-only group's quantile is SQL NULL.
+                    None if nullable => None,
+                    None => {
+                        return Err(Error::Operator(
+                            "DDSketch quantile of an empty population".into(),
+                        ))
+                    }
+                }
             }
             (SummaryEvaluation::Sketch(query), storage) => {
                 let summary = match storage {
