@@ -142,17 +142,16 @@ fn over_time(
     (window, root)
 }
 
+/// A raw-range group of [`typical_dashboard`]: the group, its metric and
+/// the labels its scan projects.
+type RangeGroup = (MemoGroupId, &'static str, Vec<String>);
+
 /// The typical-dashboard shape of section 1 (per-series parts only): the
 /// gauge `data` read over 5 min to 1 h by scans projecting `job`,
 /// `region`, and `region, service`, and the counter `data_total` by scans
 /// projecting `job` and `region`, refreshed every 10–30 s. Returns the
 /// range groups with their metric and labels, and the workload entries.
-fn typical_dashboard(
-    memo: &mut Memo,
-) -> (
-    Vec<(MemoGroupId, &'static str, Vec<String>)>,
-    Vec<QueryWorkloadEntry>,
-) {
+fn typical_dashboard(memo: &mut Memo) -> (Vec<RangeGroup>, Vec<QueryWorkloadEntry>) {
     let readers: [(&str, &[&str], AggIntent, i64, u32); 9] = [
         ("data", &["job"], AggIntent::Avg { col: None }, 300, 10_000),
         ("data", &["job"], AggIntent::Max { col: None }, 900, 15_000),

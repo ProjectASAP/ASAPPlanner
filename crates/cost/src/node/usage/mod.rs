@@ -1080,9 +1080,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         let open_state_bytes = match (measured_state_bytes, &compressed_bits) {
             (Some(bytes), _) => bytes,
             (None, Some(_)) => state_bytes,
-            (None, None) => {
-                open_summary_state_bytes(family, node.parameters.as_ref(), input_rows)?
-            }
+            (None, None) => open_summary_state_bytes(family, node.parameters.as_ref(), input_rows)?,
         };
         // A compressed window's append and seal at the deployment's
         // calibrated ns per sample, when declared.
