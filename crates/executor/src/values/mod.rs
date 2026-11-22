@@ -7,8 +7,10 @@ use planner_types::ir::schema::{
 use std::{cmp::Ordering, sync::Arc};
 pub(crate) mod arrow_columns;
 mod batch;
+mod mapped_states;
 mod state_column;
 pub use batch::{Batch, BatchColumn};
+pub use mapped_states::{family_has_mapped_form, state_view_bytes};
 pub use state_column::StateColumn;
 pub(crate) use state_column::StateStorage;
 /// Shared ownership of schema metadata; the field model is identical at planning

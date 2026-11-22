@@ -119,11 +119,13 @@ fn reading_stored_tumbling_windows_does_not_charge_their_states() {
     );
 }
 
-// The merged states themselves (about 11 MB) do not fit in 4 MiB.
+// The merged states themselves (one KLL per series, about 3.5 MB) do not
+// fit in 2 MiB. (The merge folds its input batch by batch, so it holds one
+// tumbling window's batch at a time, not all twelve.)
 #[test]
 fn a_merge_that_allocates_past_the_limit_still_fails() {
     assert!(matches!(
-        merge_stored_tumbling_windows(4 << 20),
+        merge_stored_tumbling_windows(2 << 20),
         Err(Error::MemoryLimit)
     ));
 }

@@ -1,4 +1,5 @@
 //! The summary states of one batch column.
+use super::mapped_states::{mapped, Mapped, MappedRecords, MappedSketches};
 use crate::summary_kernels::exact::{ExactAccumulator, ScalarState};
 use crate::summary_kernels::increase::IncreaseAccumulator;
 use crate::AggregateCore;
@@ -39,6 +40,9 @@ pub(crate) enum StateStorage {
     /// (sum, count, min, max, rate, increase) of one population: one
     /// contiguous buffer, no allocation per state.
     Exact(ExactRecords),
+    /// Sketch states read where a deployment stores them, through
+    /// read-only views ([`super::mapped_states`]).
+    Mapped(MappedSketches),
 }
 
 /// The exact records of one column, each stored in the size its family
@@ -58,6 +62,8 @@ pub(crate) enum ExactRecords {
     Counter(Optional<IncreaseAccumulator>),
     /// irate: the last two samples.
     LastTwoSamples(Box<[LastTwoSamples]>),
+    /// Records of any exact kind, read where a deployment stores them.
+    Mapped(MappedRecords),
 }
 
 /// An irate record: the last two samples, `(time, value)`, the newer second.
@@ -178,6 +184,7 @@ impl ExactRecords {
             Self::Max(records) => ScalarState::Max(records.get(index)),
             Self::Counter(records) => ScalarState::Counter(records.get(index)),
             Self::LastTwoSamples(records) => ScalarState::LastTwoSamples(records[index]),
+            Self::Mapped(records) => records.get(index),
         }
     }
 
@@ -189,6 +196,7 @@ impl ExactRecords {
             Self::Min(records) | Self::Max(records) => records.values.len(),
             Self::Counter(records) => records.values.len(),
             Self::LastTwoSamples(records) => records.len(),
+            Self::Mapped(records) => records.len(),
         }
     }
 
@@ -200,6 +208,8 @@ impl ExactRecords {
             Self::Min(records) | Self::Max(records) => records.memory_bytes(),
             Self::Counter(records) => records.memory_bytes(),
             Self::LastTwoSamples(records) => std::mem::size_of_val(&**records),
+            // Held outside the run, in pages the deployment maps.
+            Self::Mapped(_) => 0,
         }
     }
 }
@@ -266,6 +276,34 @@ impl StateColumn {
         }
     }
 
+    /// The states of `family` stored in `bytes` (state `i` at
+    /// `bytes[offsets[i]..offsets[i + 1]]`, in the layout
+    /// [`super::mapped_states::state_view_bytes`] writes), read in place.
+    /// The bytes are held outside any run, so a run is not charged for
+    /// them. Fails for a family with no mapped form or malformed states.
+    pub fn from_mapped(
+        family: FieldDataType,
+        bytes: arrow::buffer::Buffer,
+        offsets: arrow::buffer::ScalarBuffer<u32>,
+    ) -> Result<Self, crate::Error> {
+        let storage = match mapped(&family, bytes, offsets)? {
+            Mapped::Sketches(sketches) => StateStorage::Mapped(sketches),
+            Mapped::Records(records) => StateStorage::Exact(ExactRecords::Mapped(records)),
+        };
+        Ok(Self::mapped_column(family, storage))
+    }
+
+    /// The column of mapped `storage`: held outside any run, charged nothing.
+    pub(crate) fn mapped_column(family: FieldDataType, storage: StateStorage) -> Self {
+        Self {
+            family,
+            storage,
+            state_memory_bytes: 0,
+            held_outside_run: AtomicBool::new(true),
+            objects_held_outside_run: None,
+        }
+    }
+
     /// The family and parameters of every state.
     pub(crate) fn family(&self) -> &FieldDataType {
         &self.family
@@ -281,6 +319,7 @@ impl StateColumn {
         match &self.storage {
             StateStorage::Objects(states) => states.len(),
             StateStorage::Exact(states) => states.len(),
+            StateStorage::Mapped(states) => states.len(),
         }
     }
 
@@ -298,6 +337,7 @@ impl StateColumn {
                 self.family.clone(),
                 states.get(index),
             )),
+            StateStorage::Mapped(states) => states.accumulator(index, 0),
         }
     }
 
