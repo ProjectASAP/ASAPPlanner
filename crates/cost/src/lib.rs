@@ -32,20 +32,24 @@ mod resources;
 pub use asap_types::plan::time_window::read_back_ms;
 pub(crate) use measured::aggregate_lookup;
 pub use measured::{
-    lookup, MeasuredOperationCosts, NodeCostSource, OperatorCost, OperatorKind, StateFamily,
+    lookup, lookup_at_scale, MeasuredOperationCosts, NodeCostSource, OperatorCost, OperatorKind,
+    RefreshIoWait, StateFamily,
 };
 pub use model::{
-    CalibrationFit, ClusterLimits, ClusterObjective, CostInputs, CostModel, ResourceSpeed,
-    ResourceUnitCost, COST_SOURCE, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
+    CalibrationFit, ClusterLimits, ClusterObjective, CostInputs, CostModel, DataPlaneExecution,
+    LatencyCalibration, LatencySelection, LatencySelectionChecks, ResourceSpeed, ResourceUnitCost,
+    COST_SOURCE, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 pub use node::cost_terms::{node_cost_terms, CostConstant, NodeCostTerms};
 pub use node::operator_statistics::EdgeStatistics;
 pub use node::usage::{
     node_resource_usage_and_cost, output_interval_ms, reads_one_batch_of, summary_type_name,
-    NodeCost, NodeResourceUsageAndCost, ProducerOutput,
+    NodeCost, NodeResourceUsageAndCost, PhaseTimes, ProducerOutput,
 };
 pub use plan::cost::{
-    plan_cost, raw_data_disk_cost_per_second, request_overhead_cost_per_second, PlanCost,
-    QueryLatency,
+    close_together, ingest_decode_cpu_core_seconds_per_second, ingest_threads_building_copies,
+    partial_copy_merge_ms, plan_cost, raw_data_disk_cost_per_second,
+    request_overhead_cost_per_second, step_rounds, PlanCost, QueryLatency, RecommendedThreads,
+    RoleThreads,
 };
 pub use resources::ResourceUsage;

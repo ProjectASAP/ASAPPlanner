@@ -348,7 +348,9 @@ fn rootless_request_overhead_is_charged() {
     );
     let (plan, selection) = result.selection.as_ref().unwrap();
     assert!(plan.nodes.is_empty(), "a literal needs no operator node");
-    let cost = selection.selected_plan_cost_per_second;
+    let cost = selection
+        .selected_plan_cost_per_second
+        .expect("cost model 1");
     assert!((cost - 2_000.0).abs() < 1e-6, "{cost}");
 }
 

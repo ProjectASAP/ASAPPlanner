@@ -59,11 +59,17 @@ pub enum OptimizationInputError {
 #[non_exhaustive]
 pub struct PlanOutput {
     pub plan: PhysicalASAPDAG,
+    /// Under cost model 3's `lowest_mean_latency`, how far the plan's mean
+    /// latency may be from the optimum; `None` otherwise.
+    pub optimality_gap: Option<asap_stage3_plan_selection::OptimalityGap>,
 }
 
 impl PlanOutput {
     pub fn new(plan: PhysicalASAPDAG) -> Self {
-        Self { plan }
+        Self {
+            plan,
+            optimality_gap: None,
+        }
     }
 }
 

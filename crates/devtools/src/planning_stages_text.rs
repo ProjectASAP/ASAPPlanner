@@ -1431,7 +1431,7 @@ fn write_selection(
     let _ = writeln!(
         out,
         "selection MILP: {} variables, {} constraints, {} ms building, {} ms solving \
-         ({} {}), objective {:.6e}/s",
+         ({} {}), objective {}",
         selection.milp_variable_count,
         selection.milp_constraint_count,
         selection.milp_construction_ms,
@@ -1442,7 +1442,22 @@ fn write_selection(
         } else {
             "solves"
         },
-        selection.selected_plan_cost_per_second
+        match (
+            selection.selected_plan_cost_per_second,
+            selection.selected_plan_mean_latency_ms
+        ) {
+            (Some(cost), _) => format!("{cost:.6e}/s"),
+            (None, Some(latency)) => match selection.optimality_gap {
+                // Below 1e-6, the solver's rounding: optimal.
+                Some(gap) if gap.relative_gap > 1e-6 => format!(
+                    "mean latency {latency:.6} ms (gap {:.3} %, no plan below {:.6} ms)",
+                    gap.relative_gap * 100.0,
+                    gap.mean_latency_lower_bound_ms
+                ),
+                _ => format!("mean latency {latency:.6} ms (optimal)"),
+            },
+            (None, None) => "none".to_string(),
+        }
     );
     let physical = run.physical_asap_candidates.as_ref();
     let rows = plan

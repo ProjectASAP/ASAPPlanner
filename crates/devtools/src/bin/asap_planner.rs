@@ -55,6 +55,15 @@
 //     (`PlanningModels::ignore_accuracy_guarantees`), comparing candidates
 //     on cost alone. By default it enforces them, as `plan_installable`
 //     does.
+//   - `--report-file <file>`: besides the stage output, writes the selected
+//     plan's `SelectedPlanReport` JSON (its predicted usage, per node by
+//     phase, per query latency, recommended threads), as `plan_installable`
+//     returns it; the calibration gate (`tools/calibration_gate`) reads it.
+//     Without a costed plan, no file is written and the run exits 1.
+//   - `--price-plan <file>` (needs `--report-file`): instead of planning,
+//     cost the `InstallablePlan` in `<file>` (a plan that ran) for the
+//     workload and cost inputs, and write its report; a calibration
+//     compares it with the plan's measured times.
 //   - `--plan-file <file>` (needs `--run-until stage3`): besides the stage
 //     output, writes the selected plan as an `InstallablePlan` JSON plan
 //     file (`InstallablePlan::of_dag`), which a runtime reads with
@@ -180,7 +189,7 @@ use serde_json::{json, Value};
 const USAGE: &str = "usage: asap_planner (--workload <file>)... \
 --run-until stage0|stage1_pass1|stage1_pass2|stage2|stage3 [--format text|json] [--verbose] [--out <file>] \
 [--sql-catalog-table <json>]... [--cost-inputs <file>] [--deployment-capabilities <file>] \
-[--ignore-accuracy-guarantees] [--plan-file <file>]";
+[--ignore-accuracy-guarantees] [--plan-file <file>] [--report-file <file>] [--price-plan <file>]";
 
 fn main() {
     match run(std::env::args().skip(1).collect()) {
@@ -226,6 +235,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut ignore_accuracy_guarantees = false;
     let mut verbose = false;
     let mut plan_file = None;
+    let mut report_file = None;
+    let mut price_plan = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let mut value = || {
@@ -256,6 +267,8 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 ))
             }
             "--plan-file" => plan_file = Some(value()?),
+            "--report-file" => report_file = Some(value()?),
+            "--price-plan" => price_plan = Some(value()?),
             other => return Err(Failure::Usage(format!("unknown argument {other}"))),
         }
     }
@@ -284,6 +297,61 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         deployment_capabilities.supported_summaries =
             Some(asap_executor::supported_summary_families());
     }
+    // The checking and measurement switches of `lowest_mean_latency`
+    // (never in a cost inputs file), from the environment (the planning
+    // crates read none): `ASAP_STAGE3_THETA_DOMINANCE=off`,
+    // `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`
+    // and `ASAP_STAGE3_PATH_READS=off` turn a speed-up off;
+    // `ASAP_STAGE3_ROOT_LP=1` reports the LP bound;
+    // `ASAP_STAGE3_SOLVER_LOG=1` prints the solver's log;
+    // `ASAP_STAGE3_NODE_LIMIT=<n>` sets the default stop rule's node limit.
+    // `ASAP_STAGE3_EXACT=1` sets the cost inputs' `latency_selection.exact_solve`.
+    let knob = |name: &str| std::env::var(name).ok();
+    let checks = &mut cost_inputs.latency_selection_checks;
+    if knob("ASAP_STAGE3_THETA_DOMINANCE").as_deref() == Some("off") {
+        checks.theta_dominance = false;
+    }
+    if knob("ASAP_STAGE3_FEASIBLE_PLAN_BOUND").as_deref() == Some("off") {
+        checks.feasible_plan_bound = false;
+    }
+    if knob("ASAP_STAGE3_TIE_BREAKS").as_deref() == Some("full") {
+        checks.lazy_tie_breaks = false;
+    }
+    if knob("ASAP_STAGE3_PATH_READS").as_deref() == Some("off") {
+        checks.path_reads = false;
+    }
+    if knob("ASAP_STAGE3_ROOT_LP").is_some() {
+        checks.report_root_lp_bound = true;
+    }
+    if knob("ASAP_STAGE3_SOLVER_LOG").is_some() {
+        checks.log_solver = true;
+    }
+    if let Some(nodes) = knob("ASAP_STAGE3_NODE_LIMIT") {
+        checks.node_limit = nodes.parse().map_err(|_| {
+            Failure::Usage(format!("ASAP_STAGE3_NODE_LIMIT={nodes}: not a node count"))
+        })?;
+    }
+    if knob("ASAP_STAGE3_EXACT").is_some() {
+        cost_inputs.latency_selection.exact_solve = true;
+    }
+    // Price a given plan instead of planning: its report only.
+    if let Some(path) = price_plan {
+        let report_path =
+            report_file.ok_or(Failure::Usage("--price-plan needs --report-file".into()))?;
+        cost_inputs
+            .validate()
+            .map_err(|e| format!("--cost-inputs: {e}"))?;
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+        let plan = InstallablePlan::from_json(&text).map_err(|e| format!("{path}: {e}"))?;
+        let (cost, _) = asap_cost::plan_cost(&plan.dag, &entries, &data, &cost_inputs)
+            .map_err(|(node, e)| format!("--price-plan {path}: node {node}: {e}"))?;
+        let facts = assumed_data_facts(&plan.dag, &cost, &data);
+        let report = asap_planner::selected_plan_report(&cost, facts);
+        let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+        std::fs::write(&report_path, json + "\n")
+            .map_err(|e| format!("--report-file {report_path}: {e}"))?;
+        return Ok(());
+    }
     let models = PlanningModels::builtin()
         .with_cost_inputs(&cost_inputs)
         .with_deployment_capabilities(&deployment_capabilities)
@@ -296,6 +364,18 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         .and_then(|run| run.run.selection.as_ref().ok())
         .and_then(|(plan, _)| asap_cost::plan_cost(plan, &entries, &data, &cost_inputs).ok())
         .map(|(cost, _)| cost);
+    // The plan report `plan_installable` returns beside the plan.
+    let selected_plan_report = result
+        .as_ref()
+        .ok()
+        .and_then(|run| run.run.selection.as_ref().ok())
+        .zip(plan_cost.as_ref())
+        .map(|((plan, selection), cost)| {
+            let facts = asap_planner::assumed_data_facts(plan, cost, &data);
+            let mut report = asap_planner::selected_plan_report(cost, facts);
+            report.optimality_gap = selection.optimality_gap;
+            report
+        });
     // The selected plan as a runtime installs it, validated.
     let installable = result
         .as_ref()
@@ -381,6 +461,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         // Read-only: the deployment inputs the run planned with.
         document["deployment_capabilities"] =
             serde_json::to_value(&deployment_capabilities).map_err(|e| e.to_string())?;
+        document["cost_inputs"] = serde_json::to_value(&cost_inputs).map_err(|e| e.to_string())?;
         serde_json::to_string_pretty(&document).map_err(|e| e.to_string())? + "\n"
     } else {
         let mut text = match result {
@@ -404,6 +485,21 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     }
     if let Some(Err(reason)) = &executor_can_run {
         eprintln!("note: the Planner's executor cannot run this plan: {reason}");
+    }
+    if let Some(path) = report_file {
+        match &selected_plan_report {
+            Some(report) => {
+                let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+                std::fs::write(&path, json + "\n")
+                    .map_err(|e| format!("--report-file {path}: {e}"))?;
+            }
+            _ => {
+                failure = Some(failure.map_or_else(
+                    || format!("no plan was costed (no report file written to {path})"),
+                    |error| format!("{error} (no report file written to {path})"),
+                ))
+            }
+        }
     }
     if let Some(path) = plan_file {
         match installable {
@@ -913,6 +1009,12 @@ fn cost_json(cost: &PlanCost) -> Value {
                     "multiplier": charge.multiplier,
                     "detail": charge.detail,
                     "cost_source": charge.cost_source,
+                    "ingest_cpu_core_seconds_per_second":
+                        charge.phase_times.ingest_cpu_core_seconds_per_second,
+                    "refresh_cpu_ms_per_window": charge.phase_times.refresh_cpu_ms_per_window,
+                    "refresh_wall_ms_per_window": charge.phase_times.refresh_wall_ms_per_window,
+                    "query_ms_per_step": charge.phase_times.query_ms_per_step,
+                    "priced_outside_measured_scale": charge.priced_outside_measured_scale,
                 }),
             )
         })
@@ -935,6 +1037,20 @@ fn cost_json(cost: &PlanCost) -> Value {
             "peak_memory_bytes": usage.peak_memory_bytes,
             "disk_bytes": usage.disk_bytes,
             "peak_cpu_cores": usage.peak_cpu_cores,
+            "latency_per_query": usage
+                .latency_per_query
+                .iter()
+                .map(|latency| json!({
+                    "allowed_lateness_ms": latency.allowed_lateness_ms,
+                    "precompute_queueing_ms": latency.precompute_queueing_ms,
+                    "precompute_execution_ms": latency.precompute_execution_ms,
+                    "query_execution_ms": latency.query_execution_ms,
+                    "latency_ms": latency.latency_ms(),
+                    "evaluations_per_second": latency.evaluations_per_second,
+                }))
+                .collect::<Vec<_>>(),
+            "precompute_load": usage.precompute_load,
+            "recommended_configuration": usage.recommended_configuration,
         },
         "per_node": per_node,
     })
@@ -975,6 +1091,11 @@ fn selection_json(
         "milp_variables": selection.milp_variable_count,
         "milp_constraints": selection.milp_constraint_count,
         "milp_objective_cost_per_second": selection.selected_plan_cost_per_second,
+        "milp_objective_mean_latency_ms": selection.selected_plan_mean_latency_ms,
+        "milp_latency_ms_per_query": selection.selected_plan_latency_ms_per_query,
+        "milp_root_lp_mean_latency_ms": selection.milp_root_lp_mean_latency_ms,
+        "milp_optimality_gap": selection.optimality_gap,
+        "executions_pruned_by_latency_bound": selection.executions_pruned_by_latency_bound,
     })
 }
 
