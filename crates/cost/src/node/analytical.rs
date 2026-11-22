@@ -1537,6 +1537,21 @@ pub enum AnalyticalCostError {
         source_name: String,
         missing: &'static str,
     },
+    /// A query-time computation reads fewer of `source_name`'s raw rows
+    /// than arrive over the range it needs, because the source holds no
+    /// more (`rows_held`): it would answer from fewer samples than its
+    /// query asks for, so it is not offered (an ingestion-time build sees
+    /// every row). A data fact that rules out this candidate, not a bug.
+    #[error(
+        "a query-time computation would read {rows} of {source_name}'s rows, but {rows_in_range} \
+         arrive over the range it needs and the source holds no more: it would answer \
+         from fewer samples than asked, so it is not offered"
+    )]
+    FewerSourceRowsThanItsRange {
+        source_name: String,
+        rows: u64,
+        rows_in_range: u64,
+    },
 }
 
 fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {

@@ -327,6 +327,50 @@ pub struct ProducerOutput<'a> {
     /// source rows behind its rows. Example: a per-series sum over 5 min of
     /// 1 Hz samples: 300 source rows a row.
     pub folded_per_row: Option<StateInputRows>,
+    /// When its raw rows are fewer than arrive over the range they are read
+    /// for, because the sources hold fewer (`rows_held`): how many it has
+    /// and how many the range holds. Set by a scan (or raw data
+    /// materialized at ingestion time), narrowed by a `TimeRange`, passed on
+    /// by the operators that keep each row's window; `None` otherwise.
+    pub raw_rows_short_of_range: Option<RawRowsShortOfRange>,
+}
+
+/// Raw rows fewer than arrive over the range they are read for
+/// ([`ProducerOutput::raw_rows_short_of_range`]). Example: a source
+/// holding 80 rows, read back 60 s at 8 rows a second: 80 of 480.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawRowsShortOfRange {
+    /// The raw rows read.
+    pub rows: u64,
+    /// The raw rows that arrive over the range.
+    pub rows_in_range: u64,
+}
+
+/// A query-time computation over raw rows its sources hold fewer of than
+/// arrive over the range it reads would answer from fewer samples than its
+/// query asks for, so it is not offered: the shortfall of its input
+/// (`producers`), or `None` when it is not such a computation. Every node
+/// that computes from rows counts (a summary build, an aggregate, a sort, a
+/// join); a scan, a time range and the operators that keep each row's
+/// window only pass the rows (and their shortfall) on. Example: a
+/// query-time chain, or a query-time `sum` over 60 s, of a source holding
+/// 80 rows that arrive at 8 a second: 80 of 480; the same chain built at
+/// ingestion time sees every row.
+pub fn query_time_computation_short_of_source_rows(
+    node: &asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode,
+    producers: &[ProducerOutput<'_>],
+) -> Option<RawRowsShortOfRange> {
+    let passes_rows_on = matches!(
+        node.payload,
+        Payload::NonASAP(NonASAPOp::Scan { .. } | NonASAPOp::TimeRange { .. })
+    ) || node.payload.keeps_input_window();
+    (!passes_rows_on && node.output_state.timing == ExecutionTiming::QueryTime)
+        .then(|| {
+            producers
+                .iter()
+                .find_map(|producer| producer.raw_rows_short_of_range)
+        })
+        .flatten()
 }
 
 impl ProducerOutput<'_> {
@@ -387,6 +431,9 @@ pub struct NodeResourceUsageAndCost<'a> {
     /// What each output row already folds
     /// ([`ProducerOutput::folded_per_row`]).
     pub folded_per_row: Option<StateInputRows>,
+    /// Its raw rows' shortfall against their range
+    /// ([`ProducerOutput::raw_rows_short_of_range`]).
+    pub raw_rows_short_of_range: Option<RawRowsShortOfRange>,
     /// Work of one execution, in ms on one core.
     pub work_ms_per_execution: f64,
     /// CPU operations per second.
@@ -434,6 +481,7 @@ impl<'a> NodeResourceUsageAndCost<'a> {
             raw_rows_span_ms: self.raw_rows_span_ms,
             raw_rows_per_ms: self.raw_rows_per_ms,
             folded_per_row: self.folded_per_row,
+            raw_rows_short_of_range: self.raw_rows_short_of_range,
         }
     }
 }
@@ -524,6 +572,20 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     data: &DataWorkload,
     settings: &'a CostInputs,
 ) -> Result<(NodeResourceUsageAndCost<'a>, NodeCostTerms), AnalyticalCostError> {
+    // A query-time computation over raw rows short of their range is not
+    // offered.
+    if let Some(short) = query_time_computation_short_of_source_rows(node, producers) {
+        let source = producers
+            .iter()
+            .find(|producer| producer.raw_rows_short_of_range.is_some())
+            .and_then(|producer| producer.sources.first().copied())
+            .unwrap_or("(none)");
+        return Err(AnalyticalCostError::FewerSourceRowsThanItsRange {
+            source_name: source.to_string(),
+            rows: short.rows,
+            rows_in_range: short.rows_in_range,
+        });
+    }
     // The formulas' CPU scaled by the deployment's calibration, 1 unset.
     let formula_scale = settings.frozen_calibration_factor.unwrap_or(1.0);
     let table = &settings.measured_operation_costs;
@@ -543,6 +605,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let mut built_state_input_rows: Option<StateInputRows> = None;
     // What each output row of an `Aggregate` folds (else passed on below).
     let mut built_folded_per_row: Option<StateInputRows> = None;
+    // A scan's or a time range's raw-row shortfall, `Some` when the node
+    // reads raw rows itself (else passed on below).
+    let mut read_raw_rows_short_of_range: Option<Option<RawRowsShortOfRange>> = None;
     // A summary build's output while its states still receive values
     // (each state open): what a query-time build holds while it runs and
     // what an ingestion-time chain's current window holds.
@@ -641,6 +706,15 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             (by_rate, rows_held) => by_rate.or(rows_held),
         }
         .map(|rows| rows.max(1))
+    };
+    // The shortfall of the raw rows held back `lookback_ms`: the rows held
+    // when fewer than arrive over it.
+    let short_of = |lookback_ms: Option<u64>| match raw_rows(lookback_ms) {
+        (Some(by_rate), Some(held)) if held < by_rate => Some(RawRowsShortOfRange {
+            rows: held.max(1),
+            rows_in_range: by_rate,
+        }),
+        _ => None,
     };
     // The fact a rate needs, named when it is missing.
     let retained_without_a_bound = |source: &str| AnalyticalCostError::MissingSourceFact {
@@ -935,6 +1009,10 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let input_raw_rows_span_ms = producers
         .first()
         .and_then(|producer| producer.raw_rows_span_ms);
+    // Its input's raw-row shortfall against their range, when short.
+    let input_short_of_range = producers
+        .first()
+        .and_then(|producer| producer.raw_rows_short_of_range);
     // The exact rate its input's raw rows arrive at, when known.
     let input_raw_rows_per_ms = producers
         .first()
@@ -1024,6 +1102,12 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 // the retention of raw data materialized there, at query
                 // time the rows read at the sources' rate (its lookback,
                 // less when fewer rows are held).
+                read_raw_rows_short_of_range =
+                    Some(match (ingestion, raw_rows_materialized_at_ingestion) {
+                        (_, true) => short_of(node.retention_ms),
+                        (true, false) => None,
+                        (false, false) => short_of(lookback),
+                    });
                 read_raw_rows_span_ms = match (ingestion, raw_rows_materialized_at_ingestion) {
                     (_, true) => node.retention_ms,
                     (true, false) => Some(ONE_SECOND_MS),
@@ -1047,39 +1131,41 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 // rows read; its values are proven non-negative when every
                 // measure keeps its input's sign (a sum, a min, a max, an
                 // average of non-negative values) or counts.
-                let measure_non_negative = |measure: &AggIntent| match measure {
-                    AggIntent::Count => true,
-                    AggIntent::Sum { col }
+                let measure_non_negative = |measure: &AggIntent| {
+                    if matches!(measure, AggIntent::Count) {
+                        return true;
+                    }
+                    let (AggIntent::Sum { col }
                     | AggIntent::Min { col }
                     | AggIntent::Max { col }
-                    | AggIntent::Avg { col } => {
-                        let column = match col {
-                            None => SummaryInputExpr::Column(ColumnRef::SampleValue),
-                            Some(index) => {
-                                match input_schema.and_then(|schema| schema.fields.get(*index)) {
-                                    Some(field) => SummaryInputExpr::Column(ColumnRef::Named(
-                                        field.name.clone(),
-                                    )),
-                                    None => return false,
+                    | AggIntent::Avg { col }) = measure
+                    else {
+                        return false;
+                    };
+                    let column = match col {
+                        None => SummaryInputExpr::Column(ColumnRef::SampleValue),
+                        Some(index) => {
+                            match input_schema.and_then(|schema| schema.fields.get(*index)) {
+                                Some(field) => {
+                                    SummaryInputExpr::Column(ColumnRef::Named(field.name.clone()))
                                 }
+                                None => return false,
                             }
-                        };
-                        let input_non_negative = producers.first().is_some_and(|producer| {
-                            match producer.unchanged_column(&column) {
-                                Some(column) => {
-                                    !sources.is_empty()
-                                        && sources.iter().all(|source| {
-                                            declared_non_negative(data, source, column)
-                                        })
-                                }
-                                None => producer
-                                    .folded_per_row
-                                    .is_some_and(|folded| folded.non_negative),
+                        }
+                    };
+                    producers.first().is_some_and(|producer| {
+                        match producer.unchanged_column(&column) {
+                            Some(column) => {
+                                !sources.is_empty()
+                                    && sources
+                                        .iter()
+                                        .all(|source| declared_non_negative(data, source, column))
                             }
-                        });
-                        input_non_negative
-                    }
-                    _ => false,
+                            None => producer
+                                .folded_per_row
+                                .is_some_and(|folded| folded.non_negative),
+                        }
+                    })
                 };
                 built_folded_per_row = Some(StateInputRows {
                     folded_rows_per_state: Some(
@@ -1234,6 +1320,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 let out = match raw_rows_materialized_at_ingestion {
                     true => {
                         read_raw_rows_span_ms = node.retention_ms;
+                        read_raw_rows_short_of_range = Some(short_of(node.retention_ms));
                         raw_retained_rows = raw_rows_back(node.retention_ms);
                         let source = sources.first().copied().unwrap_or("(none)");
                         edge(raw_retained_rows.ok_or(retained_without_a_bound(source))?)?
@@ -1359,6 +1446,21 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 read_raw_rows_span_ms = Some(
                     input_raw_rows_span_ms.map_or(range_ms, |input_ms| input_ms.min(range_ms)),
                 );
+                // Over raw rows short of their range, a range's rows are
+                // short when fewer than arrive over it.
+                read_raw_rows_short_of_range = Some(match (kind, input_short_of_range) {
+                    (TimeRangeKind::Range, Some(short)) => {
+                        let rows_in_range = rows_per_ms
+                            .map_or(short.rows_in_range, |rows_per_ms| {
+                                (rows_per_ms * range.as_millis() as f64).round() as u64
+                            });
+                        (out.rows < rows_in_range).then_some(RawRowsShortOfRange {
+                            rows: out.rows,
+                            rows_in_range,
+                        })
+                    }
+                    _ => None,
+                });
                 let estimate = estimate_operator_with_terms(
                     PhysicalOperator::TimeRange,
                     OperatorStatistics::PassThrough { edges: unary(out) },
@@ -2124,6 +2226,14 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         })
         .flatten()
     });
+    // A scan or a time range over raw rows says its shortfall; an operator
+    // keeping each row's window passes on its input's.
+    let raw_rows_short_of_range = read_raw_rows_short_of_range.unwrap_or_else(|| {
+        node.payload
+            .keeps_input_window()
+            .then_some(input_short_of_range)
+            .flatten()
+    });
     let usage = NodeResourceUsageAndCost {
         output: out,
         sources,
@@ -2135,6 +2245,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         raw_rows_span_ms,
         raw_rows_per_ms,
         folded_per_row,
+        raw_rows_short_of_range,
         work_ms_per_execution: node_ms,
         cpu_ops_per_second: estimate.cpu_ops() * per_second,
         scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,

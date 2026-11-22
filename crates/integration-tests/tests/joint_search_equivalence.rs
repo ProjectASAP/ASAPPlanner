@@ -60,7 +60,10 @@ fn workload_of(queries: &[(&str, u32)], accuracy: AccuracyTarget) -> PlanningWor
                         metric.into(),
                         SourceFacts {
                             series_count: Some(8),
-                            rows_held: Some(80),
+                            // Five minutes of each series, the longest
+                            // range these queries read: a query-time plan
+                            // reads every row it asks for.
+                            rows_held: Some(2_400),
                             sample_interval: Some(DurationMs(1000)),
                             metric_type: Some(if metric == "c_total" {
                                 PrometheusMetricType::Counter
@@ -475,4 +478,107 @@ fn seeded_small_mixed_workloads_return_validated_plans() {
             &DeploymentCapabilities::default(),
         );
     }
+}
+
+/// A query-time computation over raw rows its source holds fewer of than
+/// arrive over the range it needs is not offered: it would answer from fewer
+/// samples than asked. `sum_over_time(m[1m])` every 60 s over 8 series at one
+/// sample a second needs 60 rows a series per state, 480 over the minute,
+/// but `m` holds 80 rows: every query-time chain (and the query-time exact
+/// sum) is pruned with `ReadsFewerSourceRowsThanItsRange { rows: 80,
+/// rows_in_range: 480 }`, and the selected plan builds the chain at
+/// ingestion time, where it sees every row.
+#[test]
+fn a_query_time_computation_short_of_its_source_rows_is_not_offered() {
+    use asap_types::ir::properties::ExecutionTiming;
+    use asap_types::ir::ASAPOp;
+    use asap_types::ir::Operator;
+    use asap_types::stages::PruneReason;
+    let mut workload = workload_of(&[("sum_over_time(m[1m])", 60_000)], AccuracyTarget::exact());
+    // `m` holds 80 rows, ten seconds of its 8 series.
+    workload
+        .data_workload
+        .as_mut()
+        .unwrap()
+        .sources
+        .get_mut("m")
+        .unwrap()
+        .rows_held = Some(80);
+    let run = run_workload(
+        &workload,
+        &CostInputs::default(),
+        &DeploymentCapabilities {
+            raw_data_retained: true,
+            ..Default::default()
+        },
+    );
+    let physical = run.physical_asap_candidates.as_ref().unwrap();
+    let is_chain = |candidate: &asap_types::stages::PhysicalCandidate| {
+        matches!(
+            physical
+                .logical_candidates
+                .memo
+                .candidate(candidate.logical_candidate_id)
+                .expression
+                .operator,
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+        )
+    };
+    let (plan, selection) = run.selection.as_ref().unwrap();
+    // Every query-time chain the selection could have read is pruned for
+    // reading 80 of the 480 rows of its minute.
+    let query_time_chains: Vec<_> = physical
+        .physical_candidates
+        .iter()
+        .filter(|candidate| {
+            is_chain(candidate)
+                && candidate.physical_properties.timing() == ExecutionTiming::QueryTime
+        })
+        .collect();
+    assert!(
+        !query_time_chains.is_empty(),
+        "Stage 2 offers a query-time chain"
+    );
+    for chain in &query_time_chains {
+        assert!(
+            selection.pruned_candidates.iter().any(|pruned| {
+                pruned.candidate == **chain
+                    && pruned.reason
+                        == PruneReason::ReadsFewerSourceRowsThanItsRange {
+                            rows: 80,
+                            rows_in_range: 480,
+                        }
+            }),
+            "{chain:?} is not pruned for its source rows: {:?}",
+            selection.pruned_candidates
+        );
+    }
+    // The selected plan builds the chain at ingestion time.
+    let chains: Vec<_> = plan
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+        })
+        .collect();
+    assert!(
+        !chains.is_empty(),
+        "the plan builds a chain: {:#?}",
+        plan.nodes
+            .iter()
+            .map(|n| (
+                format!("{:?}", n.payload)
+                    .chars()
+                    .take(90)
+                    .collect::<String>(),
+                n.output_state.timing
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert!(chains
+        .iter()
+        .all(|node| node.output_state.timing == ExecutionTiming::IngestionTime));
 }

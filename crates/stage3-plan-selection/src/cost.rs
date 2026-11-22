@@ -55,8 +55,9 @@ use asap_cost::plan::execution_demand::{
     context_executions_per_second, executions_per_second as rate_of_materialized,
 };
 use asap_cost::{
-    node_resource_usage_and_cost, output_interval_ms, raw_data_disk_cost_per_second, CostInputs,
-    NodeResourceUsageAndCost, ProducerOutput,
+    node_resource_usage_and_cost, output_interval_ms, query_time_computation_short_of_source_rows,
+    raw_data_disk_cost_per_second, CostInputs, NodeResourceUsageAndCost, ProducerOutput,
+    RawRowsShortOfRange,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
@@ -124,6 +125,11 @@ pub(crate) struct ExecutionCosts {
     /// The cost per second of the raw data a query-time `Scan` without
     /// $h_v$ keeps on disk, retaining everything.
     pub(crate) unbounded_raw_data_on_disk_cost_per_second: HashMap<PhysicalCandidateId, f64>,
+    /// Each query-time computation not offered because it would read
+    /// fewer raw rows than arrive over its range
+    /// ([`asap_cost::query_time_computation_short_of_source_rows`]), with that
+    /// shortfall: reported as `PruneReason::ReadsFewerSourceRowsThanItsRange`.
+    pub(crate) short_of_source_rows: HashMap<PhysicalCandidateId, RawRowsShortOfRange>,
 }
 
 impl ExecutionCosts {
@@ -383,9 +389,16 @@ pub(crate) fn execution_quantities(
     let mut usage: Vec<Option<Result<NodeResourceUsageAndCost<'_>, String>>> =
         (0..count).map(|_| None).collect();
     let mut baseline: Vec<Option<Vec<ProducerOutput<'_>>>> = vec![None; count];
+    let mut short_of_source_rows = HashMap::new();
     for group in order {
         for &v in &candidates_of_group[group.0 as usize] {
             baseline[v.0] = baseline_inputs(memo, physical, &group_payloads, &nodes, &usage, v);
+            if let Some(short) = baseline[v.0]
+                .as_ref()
+                .and_then(|inputs| query_time_computation_short_of_source_rows(&nodes[v.0], inputs))
+            {
+                short_of_source_rows.insert(v, short);
+            }
             usage[v.0] = Some(match &baseline[v.0] {
                 Some(inputs) => cost_node(
                     physical,
@@ -651,6 +664,7 @@ pub(crate) fn execution_quantities(
         least_retention_ms_per_execution: Vec::new(),
         raw_data_source,
         unbounded_raw_data_on_disk_cost_per_second,
+        short_of_source_rows,
     };
     costs.least_retention_ms_per_execution = least_retention_ms_per_execution(selectable, &costs);
     costs
@@ -830,6 +844,11 @@ fn logical_output<'a: 'b, 'b, 'c>(
         };
         if known.raw_rows_per_ms != usage.raw_rows_per_ms {
             known.raw_rows_per_ms = None;
+        }
+        // Short of its range only when every candidate is: a consumer may
+        // read one that is not.
+        if usage.raw_rows_short_of_range.is_none() {
+            known.raw_rows_short_of_range = None;
         }
         if usage.output.bytes > known.output.bytes {
             known.family = usage.family;

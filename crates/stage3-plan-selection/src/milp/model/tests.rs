@@ -242,6 +242,7 @@ fn selection_inputs(
         least_retention_ms_per_execution: Vec::new(),
         raw_data_source: HashMap::new(),
         unbounded_raw_data_on_disk_cost_per_second: HashMap::new(),
+        short_of_source_rows: HashMap::new(),
     };
     costs.least_retention_ms_per_execution = least_retention_ms_per_execution(&selectable, &costs);
     (selectable, costs)

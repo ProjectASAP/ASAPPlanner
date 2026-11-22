@@ -147,4 +147,13 @@ pub enum PruneReason {
     /// Stage 3: `asap-cost` could not cost it, so the selection MILP leaves
     /// it out.
     UsageNotCostable,
+    /// Stage 3: a query-time computation (a summary build, an aggregate)
+    /// that would read `rows` raw rows
+    /// where `rows_in_range` arrive over the range it needs, because the
+    /// source holds no more (its `rows_held`): it would answer from fewer
+    /// samples than its query asks for. A data fact, not a bug; an
+    /// ingestion-time build sees every row. Example: a source holding 80
+    /// rows read back 60 s at 8 rows a second: `{rows: 80, rows_in_range:
+    /// 480}`.
+    ReadsFewerSourceRowsThanItsRange { rows: u64, rows_in_range: u64 },
 }
