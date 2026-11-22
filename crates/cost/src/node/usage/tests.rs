@@ -4238,23 +4238,25 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
         &analytical,
     )
     .unwrap();
-    let mut measured = CostInputs::default();
-    measured.measured_operation_costs = MeasuredOperationCosts {
-        operators: vec![OperatorCost {
-            operator: OperatorKind::SummaryAgg,
-            phase: None,
-            sketch: Some(params.clone()),
-            exact: None,
-            measure: None,
-            ns_per_unit: 100.0,
-            ns_per_invocation: 0.0,
-            memory_bytes_per_state: Some(900.0),
-            ns_per_state_emitted: 0.0,
-            measured_series_count: None,
-            measures: Vec::new(),
-        }],
-        ns_per_evaluation: 0.0,
-        ..MeasuredOperationCosts::default()
+    let measured = CostInputs {
+        measured_operation_costs: MeasuredOperationCosts {
+            operators: vec![OperatorCost {
+                operator: OperatorKind::SummaryAgg,
+                phase: None,
+                sketch: Some(params.clone()),
+                exact: None,
+                measure: None,
+                ns_per_unit: 100.0,
+                ns_per_invocation: 0.0,
+                memory_bytes_per_state: Some(900.0),
+                ns_per_state_emitted: 0.0,
+                measured_series_count: None,
+                measures: Vec::new(),
+            }],
+            ns_per_evaluation: 0.0,
+            ..MeasuredOperationCosts::default()
+        },
+        ..CostInputs::default()
     };
     let usage =
         node_resource_usage_and_cost(&build, &[producer_output], (1, 1.0), None, &data, &measured)
