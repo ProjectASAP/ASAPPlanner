@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 
 use asap_types::ir::operator::arguments::Reduction;
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::stages::{Memo, MemoGroupId};
 use asap_types::summary_type::{ExactKind, SketchAlgorithm};
@@ -16,8 +17,21 @@ use asap_types::test_support::memo_fixtures::range;
 fn chain_widths(memo: &Memo) -> BTreeSet<u64> {
     memo.groups()
         .iter()
+        .filter(|group| !is_compressed_samples_chain(&group.expression))
         .filter_map(|group| group.expression.chain_tumbling_window_width_ms())
         .collect()
+}
+
+/// Whether `expression` is a compressed-samples chain: Pass 2 offers those
+/// for every raw range, at their own widths, and never levels them.
+fn is_compressed_samples_chain(expression: &Operator<MemoGroupId>) -> bool {
+    matches!(
+        expression,
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            summary_type: FieldDataType::CompressedSamples,
+            ..
+        })
+    )
 }
 
 /// The widths of the levels each `TimeRangeCover` that state group `state`
@@ -65,6 +79,9 @@ fn a_long_range_gets_wider_levels() {
         BTreeSet::from([15_000, 60_000, 300_000, 900_000])
     );
     for group in memo.groups() {
+        if is_compressed_samples_chain(&group.expression) {
+            continue;
+        }
         let Some(width) = group.expression.chain_tumbling_window_width_ms() else {
             continue;
         };
