@@ -131,6 +131,12 @@ pub struct PhaseTimes {
     pub query_ms_per_step: f64,
 }
 
+/// Whether a row of `schema` holds a summary state (a sketch or an exact
+/// aggregate column), as a `Filter` or `Project` over states outputs.
+fn outputs_states(schema: &Schema) -> bool {
+    schema.fields.iter().any(|field| !field.is_plain())
+}
+
 /// The state family of `node` whose first producer has `producer_family`:
 /// a build's own, its θ (`node.parameters`; one sketch instance per group;
 /// a shared Hydra structure is not that sketch), inherited by the merges,
@@ -184,11 +190,7 @@ fn state_family<'a>(
         // A `Filter` or `Project` outputting states passes them on as they
         // are: an estimate reading them is costed by their family.
         Payload::NonASAP(NonASAPOp::Filter { .. } | NonASAPOp::Project { .. })
-            if node
-                .output_schema
-                .fields
-                .iter()
-                .any(|field| !field.is_plain()) =>
+            if outputs_states(&node.output_schema) =>
         {
             producer_family.unwrap_or(StateFamily::None)
         }
@@ -1596,11 +1598,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 // beside it: a `Project` dropping a label drops its bytes.
                 let out = match (operator, producers.first()) {
                     (NonASAPOp::Filter { .. } | NonASAPOp::Project { .. }, Some(producer))
-                        if node
-                            .output_schema
-                            .fields
-                            .iter()
-                            .any(|field| !field.is_plain()) =>
+                        if outputs_states(&node.output_schema) =>
                     {
                         let state_bytes =
                             state_bytes_per_row(producer.output, producer.output_schema);
@@ -2419,15 +2417,10 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         } else {
             0
         };
-    let outputs_states = node
-        .output_schema
-        .fields
-        .iter()
-        .any(|field| !field.is_plain());
     let states_last_merged = match &node.payload {
         Payload::ASAP(ASAPOp::SummaryMerge { .. }) => true,
         Payload::NonASAP(NonASAPOp::Filter { .. } | NonASAPOp::Project { .. }) => {
-            outputs_states
+            outputs_states(&node.output_schema)
                 && producers
                     .first()
                     .is_some_and(|producer| producer.states_last_merged)
