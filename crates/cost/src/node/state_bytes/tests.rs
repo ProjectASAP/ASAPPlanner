@@ -1055,9 +1055,10 @@ fn stored_ddsketch_states_are_priced_at_their_view_layout() {
     assert_eq!(priced(Some(10), true, gauge), 92 + 16);
     assert_eq!(priced(Some(600), true, gauge), 92 + 24);
     assert_eq!(priced(Some(36_000), true, gauge), 92 + 24);
-    // 4 bytes up to u32::MAX rows, then 8.
+    // 4 bytes up to u32::MAX rows, then 8 (2^33: past u32::MAX once the
+    // rows are rounded within their relative 1e-9, `rows_per_state`).
     assert_eq!(priced(Some(u64::from(u32::MAX)), true, gauge), 92 + 48);
-    assert_eq!(priced(Some(1 << 32), true, gauge), 92 + 96);
+    assert_eq!(priced(Some(1 << 33), true, gauge), 92 + 96);
     assert!(priced(Some(10), true, None) < priced(Some(100), true, None));
     // Unknown rows: the assumed range, dense at 8 bytes.
     let unknown = priced(None, true, None);
@@ -1233,7 +1234,7 @@ fn stored_ddsketch_prices_never_fall_below_what_the_executor_holds() {
                         let priced = sketch_state_bytes(
                             &SketchParams::DDSketch { alpha },
                             StateInputRows {
-                                rows_per_state: Some(u64::from(n)),
+                                folded_rows_per_state: Some(f64::from(n)),
                                 non_negative: !signed,
                                 value_magnitude_range,
                                 distinct_values: None,

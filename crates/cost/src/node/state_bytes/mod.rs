@@ -647,7 +647,7 @@ fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
     // The most buckets a store's values can occupy: the declared (or
     // assumed) range's, plus one for a range that does not start on a
     // bucket boundary.
-    let column_span = match input_rows.rows_per_state {
+    let column_span = match input_rows.rows_per_state() {
         Some(0 | 1) => 1,
         _ => {
             let ratio = input_rows
@@ -657,7 +657,7 @@ fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
             ddsketch_buckets_spanned(alpha, ratio) + 1
         }
     };
-    let Some(rows) = input_rows.rows_per_state else {
+    let Some(rows) = input_rows.rows_per_state() else {
         return HEADER_BYTES + OFFSET_BYTES + stores * padded(8 * column_span);
     };
     // No count exceeds the rows, so they bound the width.
