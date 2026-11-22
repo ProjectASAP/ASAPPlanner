@@ -468,7 +468,7 @@ async fn c7_a_query_time_fixed_cost_is_charged_per_run() {
 fn c8_a_declared_value_range_replaces_the_ddsketch_default() {
     let params = SketchParams::DDSketch { alpha: 0.01 };
     let rows = |range| StateInputRows {
-        rows_per_state: Some(1_000_000),
+        folded_rows_per_state: Some((1_000_000) as f64),
         non_negative: true,
         value_magnitude_range: range,
         distinct_values: None,

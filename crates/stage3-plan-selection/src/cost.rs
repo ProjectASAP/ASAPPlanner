@@ -753,7 +753,7 @@ fn baseline_inputs<'a>(
                     .iter()
                     .map(|&edge| physical.edge(edge).producer_candidate_id)
                     .filter(|&u| !reads_one_batch_of(physical, nodes, v, u))
-                    .filter_map(|u| usage[u.0].as_ref()?.as_ref().ok()),
+                    .filter_map(|u| Some((&nodes[u.0], usage[u.0].as_ref()?.as_ref().ok()?))),
             )
         })
         .collect()
@@ -787,13 +787,43 @@ fn reads_one_batch_of(
 /// fold 10 rows and one at k = 1,404 whose states fold 3,600, the larger
 /// gives both its family and its rows, so a merge over the input never
 /// sizes one candidate's `k` for the other's rows.
-fn logical_output<'a: 'b, 'b>(
+fn logical_output<'a: 'b, 'b, 'c>(
     payload: &'a PhysicalASAPOperatorPayload,
     schema: &'a asap_types::ir::schema::Schema,
-    usages: impl Iterator<Item = &'b NodeResourceUsageAndCost<'a>>,
+    usages: impl Iterator<Item = (&'c PhysicalASAPDAGNode, &'b NodeResourceUsageAndCost<'a>)>,
 ) -> Option<ProducerOutput<'a>> {
     let mut output: Option<ProducerOutput<'a>> = None;
-    for usage in usages {
+    // The rows each state family (with θ) folds, of the first candidate
+    // with it: every candidate of the input group with that family and θ
+    // computes the same states, whichever operator and timing build them,
+    // so it folds the same rows, and the baseline is exact for each.
+    let mut folded_by_family: Vec<(&'c PhysicalASAPDAGNode, &'b NodeResourceUsageAndCost<'a>)> =
+        Vec::new();
+    for (candidate, usage) in usages {
+        let folds_the_same = |first: &NodeResourceUsageAndCost<'_>| match (
+            first.state_input_rows,
+            usage.state_input_rows,
+        ) {
+            (Some(a), Some(b)) => a.folds_the_same_as(&b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        match folded_by_family
+            .iter()
+            .find(|(_, first)| first.family == usage.family)
+        {
+            Some((first_candidate, first)) => debug_assert!(
+                usage.family == asap_cost::StateFamily::None || folds_the_same(first),
+                "candidates with the same family and θ fold different rows: {:?}\n  {:?} {:?} {:?}\n  {:?} {:?} {:?}",
+                usage.family,
+                first_candidate.output_state.timing,
+                first_candidate.payload,
+                first.state_input_rows,
+                candidate.output_state.timing,
+                candidate.payload,
+                usage.state_input_rows,
+            ),
+            None => folded_by_family.push((candidate, usage)),
+        }
         let Some(known) = output.as_mut() else {
             output = Some(usage.producer_output(payload, schema));
             continue;

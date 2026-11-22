@@ -62,6 +62,7 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         chain_tumbling_window_width_ms: Some(60_000),
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     };
     let windows = node(Payload::NonASAP(NonASAPOp::TimeRange {
@@ -172,6 +173,7 @@ fn an_operator_keeping_its_input_window_over_a_chain_or_its_windows_selects_what
             chain_tumbling_window_width_ms: Some(60_000),
             raw_rows_span_ms: None,
             raw_rows_per_ms: None,
+            folded_per_row: None,
             state_input_rows: None,
         };
         for &step in path {
@@ -232,6 +234,7 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     };
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
@@ -289,6 +292,7 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     };
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
@@ -356,6 +360,7 @@ fn raw_rows<'a>(
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: Some(span_ms),
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     }
 }
@@ -624,6 +629,7 @@ fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     };
     let chain = PhysicalASAPDAGNode {
@@ -828,7 +834,9 @@ fn a_query_time_chain_sizes_its_windows_from_the_time_its_input_spans() {
         node_resource_usage_and_cost(&chain, &[kept], (1, 1.0), None, None, &data, &settings)
             .unwrap();
     assert_eq!(
-        usage.state_input_rows.and_then(|rows| rows.rows_per_state),
+        usage
+            .state_input_rows
+            .and_then(|rows| rows.rows_per_state()),
         Some(6)
     );
 }
@@ -855,7 +863,7 @@ fn a_merge_reading_one_state_per_group_passes_it_through() {
         let state_bytes = crate::node::state_bytes::sketch_state_bytes(
             &parameters,
             StateInputRows {
-                rows_per_state: Some(100),
+                folded_rows_per_state: Some((100) as f64),
                 non_negative: true,
                 value_magnitude_range: None,
                 distinct_values: None,
@@ -875,8 +883,9 @@ fn a_merge_reading_one_state_per_group_passes_it_through() {
             chain_tumbling_window_width_ms: None,
             raw_rows_span_ms: None,
             raw_rows_per_ms: None,
+            folded_per_row: None,
             state_input_rows: Some(StateInputRows {
-                rows_per_state: Some(100),
+                folded_rows_per_state: Some((100) as f64),
                 non_negative: true,
                 value_magnitude_range: None,
                 distinct_values: None,
@@ -1411,7 +1420,7 @@ fn a_kmv_merge_charges_its_measured_time_per_state() {
     ] {
         let parameters = SketchParams::Kmv { k };
         let input_rows = StateInputRows {
-            rows_per_state: Some(rows),
+            folded_rows_per_state: Some((rows) as f64),
             distinct_values: Some(users),
             ..StateInputRows::UNKNOWN
         };
@@ -1439,13 +1448,13 @@ fn a_kmv_merge_charges_its_measured_time_per_state() {
 fn a_kmv_merge_of_states_with_unknown_rows_retains_at_most_the_column_s_values() {
     use crate::node::operations_per_unit::merge_terms_per_state;
     let parameters = SketchParams::Kmv { k: 4_323 };
-    let charge = |rows_per_state, distinct_values| {
+    let charge = |rows_per_state: Option<u64>, distinct_values| {
         merge_terms_per_state(
             StateFamily::Sketch(&parameters),
             0,
             0,
             Some(StateInputRows {
-                rows_per_state,
+                folded_rows_per_state: rows_per_state.map(|rows: u64| rows as f64),
                 distinct_values,
                 ..StateInputRows::UNKNOWN
             }),
@@ -1481,7 +1490,7 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
     .unwrap();
     let parameters = SketchParams::Kmv { k: 106_263 };
     let rows = StateInputRows {
-        rows_per_state: Some(12_000),
+        folded_rows_per_state: Some((12_000) as f64),
         non_negative: false,
         value_magnitude_range: None,
         distinct_values: Some(1_000_000),
@@ -1516,6 +1525,7 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: Some(rows),
     };
     let rollup = PhysicalASAPDAGNode {
@@ -1554,7 +1564,7 @@ fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
     .unwrap();
     let parameters = SketchParams::Kmv { k: 26_656 };
     let rows = StateInputRows {
-        rows_per_state: Some(12_000),
+        folded_rows_per_state: Some((12_000) as f64),
         non_negative: false,
         value_magnitude_range: None,
         distinct_values: None,
@@ -1589,6 +1599,7 @@ fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: Some(rows),
     };
     let merge_ms = |group_by: Option<Vec<usize>>| {
@@ -1651,6 +1662,7 @@ fn query_time_memory_is_held_only_while_the_node_computes() {
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     };
     let merge = PhysicalASAPDAGNode {
@@ -1785,6 +1797,7 @@ fn an_ingestion_time_view_of_raw_rows_keeps_the_rows_its_retention_covers() {
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     };
     let row_schema = Schema::new(vec![
@@ -1851,6 +1864,7 @@ fn a_view_without_retention_is_not_costed() {
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     };
     let shift = PhysicalASAPDAGNode {
@@ -1927,6 +1941,7 @@ fn a_view_over_an_ingestion_time_chain_keeps_one_output_per_chain_window() {
         chain_tumbling_window_width_ms: Some(60_000),
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     };
     let usage = node_resource_usage_and_cost(
@@ -1996,6 +2011,7 @@ fn ddsketch_build_cost(
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     };
     let settings = CostInputs::default();
@@ -2022,7 +2038,7 @@ fn ddsketch_costed_bytes(
     sketch_state_bytes(
         &SketchParams::DDSketch { alpha: 0.01 },
         StateInputRows {
-            rows_per_state: Some(600),
+            folded_rows_per_state: Some((600) as f64),
             non_negative,
             value_magnitude_range,
             distinct_values: None,
@@ -2222,6 +2238,7 @@ fn ddsketch_assumed_facts_over_sources(
         state_input_rows: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
     };
     let settings = CostInputs::default();
     node_resource_usage_and_cost(
@@ -2414,6 +2431,7 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     };
     let mut chain = node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -2536,6 +2554,7 @@ fn a_finalize_charges_each_group_its_measured_time() {
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     };
     let finalize = node(Payload::ASAP(ASAPOp::FinalizeExactAccumulator {
@@ -2588,6 +2607,7 @@ fn a_per_series_aggregate_charges_the_labels_it_carries() {
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     };
     let ms_per_row = |labels: &[&str]| {
@@ -2687,7 +2707,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         }))
     };
     let rows = StateInputRows {
-        rows_per_state: Some(10),
+        folded_rows_per_state: Some((10) as f64),
         non_negative: true,
         value_magnitude_range: None,
         distinct_values: None,
@@ -2706,6 +2726,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         chain_tumbling_window_width_ms: Some(10_000),
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: Some(rows),
     };
     let wider = ProducerOutput {
@@ -2717,8 +2738,9 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         chain_tumbling_window_width_ms: Some(60_000),
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: Some(StateInputRows {
-            rows_per_state: Some(100),
+            folded_rows_per_state: Some((100) as f64),
             ..rows
         }),
         ..input.clone()
@@ -2741,15 +2763,17 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
     .unwrap();
     assert_eq!(usage.output.rows, 1_000);
     let merged = StateInputRows {
-        rows_per_state: Some(9_600),
+        folded_rows_per_state: Some((9_600) as f64),
         ..rows
     };
     assert_eq!(
-        usage.state_input_rows.and_then(|rows| rows.rows_per_state),
+        usage
+            .state_input_rows
+            .and_then(|rows| rows.rows_per_state()),
         Some(9_600)
     );
     let from_first_alone = StateInputRows {
-        rows_per_state: Some(4_200),
+        folded_rows_per_state: Some((4_200) as f64),
         ..rows
     };
     assert!(
@@ -2785,8 +2809,9 @@ fn kll_estimate_us_per_group(producer: Payload, rows_per_state: u64, state_bytes
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: Some(StateInputRows {
-            rows_per_state: Some(rows_per_state),
+            folded_rows_per_state: Some((rows_per_state) as f64),
             non_negative: true,
             value_magnitude_range: None,
             distinct_values: None,
@@ -3233,7 +3258,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             }))
         };
         let rows_per_state = StateInputRows {
-            rows_per_state: Some(60),
+            folded_rows_per_state: Some((60) as f64),
             non_negative: true,
             value_magnitude_range: None,
             distinct_values: None,
@@ -3256,6 +3281,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             chain_tumbling_window_width_ms: Some(60_000),
             raw_rows_span_ms: None,
             raw_rows_per_ms: None,
+            folded_per_row: None,
             state_input_rows: Some(rows_per_state),
         };
         let windows = PhysicalASAPDAGNode {
@@ -3354,7 +3380,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
     .unwrap();
     let kmv = SketchParams::Kmv { k: 106_263 };
     let kmv_rows = StateInputRows {
-        rows_per_state: Some(12_000),
+        folded_rows_per_state: Some((12_000) as f64),
         non_negative: false,
         value_magnitude_range: None,
         distinct_values: None,
@@ -3399,6 +3425,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             chain_tumbling_window_width_ms: None,
             raw_rows_span_ms: None,
             raw_rows_per_ms: None,
+            folded_per_row: None,
             state_input_rows: Some(kmv_rows),
         }],
         None,
@@ -3470,8 +3497,9 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
                 chain_tumbling_window_width_ms: None,
                 raw_rows_span_ms: None,
                 raw_rows_per_ms: None,
+                folded_per_row: None,
                 state_input_rows: Some(StateInputRows {
-                    rows_per_state: Some(rows_per_state),
+                    folded_rows_per_state: Some((rows_per_state) as f64),
                     non_negative: true,
                     value_magnitude_range: None,
                     distinct_values: None,
@@ -3504,6 +3532,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             chain_tumbling_window_width_ms: None,
             raw_rows_span_ms: None,
             raw_rows_per_ms: None,
+            folded_per_row: None,
             state_input_rows: None,
         }],
         None,
@@ -3750,6 +3779,7 @@ fn rows_of<'a>(producer: &'a PhysicalASAPDAGNode, rows: u64) -> ProducerOutput<'
         state_input_rows: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
     }
 }
 
@@ -3971,6 +4001,7 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
         state_input_rows: None,
     };
     let family = FieldDataType::Sketch(algorithm);
@@ -4257,9 +4288,10 @@ fn a_ddsketch_build_holds_open_states_and_keeps_sealed_ones() {
         state_input_rows: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
     };
     let rows = StateInputRows {
-        rows_per_state: Some(600),
+        folded_rows_per_state: Some((600) as f64),
         // The scan's values are of unknown sign: two stores.
         non_negative: false,
         value_magnitude_range: None,
@@ -4328,6 +4360,7 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
         state_input_rows: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
     };
     let build = PhysicalASAPDAGNode {
         parameters: Some(params.clone()),
@@ -4390,47 +4423,68 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
 /// them), at a fractional arrival rate and over a share of it, as a filter
 /// keeping a third of the series would pass on: 10,000 series every 15 s
 /// (666.67 rows a second, which one second's rows rounds to 667) in 60 s
-/// windows hold 40,000 rows, not 40,020; a third of them 13,333, not
+/// windows hold 40,000 rows, not 40,020; a third of them 13,333.33, not
 /// 13,320 (222 rows a second). Without the rate the rounded rows are all
-/// there is, and the two timings differ.
+/// there is, and the two timings differ. In 10 s windows a window holds
+/// 6,666.67 rows, not rounded, so 30 of them merged are the 200,000 a
+/// 300 s build folds.
 #[test]
 fn a_chain_folds_the_same_rows_at_ingestion_and_at_query_time() {
     let width_ms = 60_000;
     let rows_over =
         |rows_per_ms: f64, span_ms: u64| ((rows_per_ms * span_ms as f64).round() as u64).max(1);
+    let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1.0);
     for (rows_per_ms, expected) in [
-        (10_000.0 / 15_000.0, 40_000),
-        (10_000.0 / 15_000.0 / 3.0, 13_333),
+        (10_000.0 / 15_000.0, 40_000.0),
+        (10_000.0 / 15_000.0 / 3.0, 40_000.0 / 3.0),
     ] {
-        let input = |span_ms: u64, rate: Option<f64>| ChainInputRows {
+        let input = |span_ms: u64, rate: Option<f64>| SourceRowsInput {
             rows: rows_over(rows_per_ms, span_ms),
             raw_rows_span_ms: Some(span_ms),
             raw_rows_per_ms: rate,
+            source_rows_per_row: 1.0,
         };
         let at_ingestion =
-            rows_per_tumbling_window(input(1_000, Some(rows_per_ms)), width_ms, true, 5);
+            source_rows_in_window(input(1_000, Some(rows_per_ms)), width_ms, true, 5);
         let at_query_time =
-            rows_per_tumbling_window(input(300_000, Some(rows_per_ms)), width_ms, false, 5);
-        assert_eq!(
-            (at_ingestion, at_query_time),
-            (expected, expected),
-            "{rows_per_ms} rows per ms"
+            source_rows_in_window(input(300_000, Some(rows_per_ms)), width_ms, false, 5);
+        assert!(
+            close(at_ingestion, expected) && close(at_query_time, expected),
+            "{rows_per_ms} rows per ms: {at_ingestion} and {at_query_time}, not {expected}"
         );
         // The rounded rows alone: 667 x 60 and 222 x 60.
-        let rounded = rows_per_tumbling_window(input(1_000, None), width_ms, true, 5);
-        assert_ne!(rounded, expected, "{rows_per_ms} rows per ms");
+        let rounded = source_rows_in_window(input(1_000, None), width_ms, true, 5);
+        assert!(!close(rounded, expected), "{rows_per_ms} rows per ms");
+        // Thirty 10 s windows hold what 300 s do.
+        let ten_seconds =
+            source_rows_in_window(input(300_000, Some(rows_per_ms)), 10_000, false, 30);
+        assert!(close(30.0 * ten_seconds, rows_per_ms * 300_000.0));
     }
     // A rate its rows do not match (they were narrowed after it) is not
     // used: the rows over the window's share of their span.
-    let narrowed = ChainInputRows {
+    let narrowed = SourceRowsInput {
         rows: 30_000,
         raw_rows_span_ms: Some(300_000),
         raw_rows_per_ms: Some(1.0),
+        source_rows_per_row: 1.0,
     };
-    assert_eq!(
-        rows_per_tumbling_window(narrowed, width_ms, false, 5),
-        6_000
-    );
+    assert!(close(
+        source_rows_in_window(narrowed, width_ms, false, 5),
+        6_000.0
+    ));
+    // Rows an `Aggregate` built count the source rows behind them: 1,000
+    // per-series sums of 300 samples each over 300 s hold 60,000 source
+    // rows a 60 s window.
+    let sums = SourceRowsInput {
+        rows: 1_000,
+        raw_rows_span_ms: Some(300_000),
+        raw_rows_per_ms: None,
+        source_rows_per_row: 300.0,
+    };
+    assert!(close(
+        source_rows_in_window(sums, width_ms, false, 5),
+        60_000.0
+    ));
 }
 
 /// End to end: an ingestion-time chain over one second of a scan's rows
@@ -4488,7 +4542,9 @@ fn ingestion_and_query_time_chains_over_a_fractional_rate_fold_the_same_rows() {
         .unwrap();
         (
             scan_usage.output.rows,
-            usage.state_input_rows.and_then(|rows| rows.rows_per_state),
+            usage
+                .state_input_rows
+                .and_then(|rows| rows.rows_per_state()),
         )
     };
     let at_ingestion = folded(

@@ -920,7 +920,7 @@ fn heap_residents_per_update(
 fn heap_residents(heap_size: u32, input_rows: Option<StateInputRows>) -> f64 {
     let heap = f64::from(heap_size);
     input_rows
-        .and_then(|rows| Some((rows.rows_per_state?, rows.distinct_values)))
+        .and_then(|rows| Some((rows.rows_per_state()?, rows.distinct_values)))
         .map_or(heap, |(rows, distinct_items)| {
             distinct_items_seen(rows as f64, distinct_items).min(heap)
         })
@@ -991,7 +991,7 @@ pub(crate) fn merge_terms_per_state(
             // retains the `k` smallest hashes: all `values` when its rows
             // are unknown (a state never folds more).
             let folded_values = input_rows
-                .and_then(|rows| rows.rows_per_state)
+                .and_then(|rows| rows.rows_per_state())
                 .map(|rows| distinct_items_seen(rows as f64, values))
                 .or(values.map(|values| values.max(1) as f64));
             let retained_hashes =
@@ -1175,7 +1175,7 @@ pub(crate) fn estimate_terms_per_group(
                 state_bytes as f64,
             ),
             StateLastWrittenBy::Updates { input_rows } => {
-                let rows_per_state = input_rows.and_then(|rows| rows.rows_per_state);
+                let rows_per_state = input_rows.and_then(|rows| rows.rows_per_state());
                 let k = u64::from(*k);
                 let unsorted_items = rows_per_state.map_or(k, |rows| rows.min(k));
                 output_row.plus(

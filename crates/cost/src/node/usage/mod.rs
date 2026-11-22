@@ -44,7 +44,7 @@ use crate::{
 use asap_types::ir::operator::tumbling_window_chain::mean_cover_windows_per_level;
 use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::scalar::resolve_column_ref;
+use asap_types::ir::scalar::{resolve_column_ref, ColumnRef};
 use asap_types::ir::schema::{ColumnId, FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::plan::physical_asap_dag::{
@@ -319,6 +319,14 @@ pub struct ProducerOutput<'a> {
     /// by `rows_held`). Example: 10,000 series every 15 s arrive at
     /// 0.6667 rows per ms, which one second's `rows` rounds to 667.
     pub raw_rows_per_ms: Option<f64>,
+    /// What each of its output rows already folds when an `Aggregate`
+    /// built them from source rows (the source rows behind each, and
+    /// whether their values are proven non-negative), passed on by a
+    /// `TimeRange` and the operators that keep each row's window; `None`
+    /// when each row is one source row. A summary built over it counts the
+    /// source rows behind its rows. Example: a per-series sum over 5 min of
+    /// 1 Hz samples: 300 source rows a row.
+    pub folded_per_row: Option<StateInputRows>,
 }
 
 impl ProducerOutput<'_> {
@@ -376,6 +384,9 @@ pub struct NodeResourceUsageAndCost<'a> {
     /// The exact rate its raw output rows arrive at
     /// ([`ProducerOutput::raw_rows_per_ms`]).
     pub raw_rows_per_ms: Option<f64>,
+    /// What each output row already folds
+    /// ([`ProducerOutput::folded_per_row`]).
+    pub folded_per_row: Option<StateInputRows>,
     /// Work of one execution, in ms on one core.
     pub work_ms_per_execution: f64,
     /// CPU operations per second.
@@ -422,6 +433,7 @@ impl<'a> NodeResourceUsageAndCost<'a> {
             state_input_rows: self.state_input_rows,
             raw_rows_span_ms: self.raw_rows_span_ms,
             raw_rows_per_ms: self.raw_rows_per_ms,
+            folded_per_row: self.folded_per_row,
         }
     }
 }
@@ -529,6 +541,8 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // What each summary state it outputs folds, when it builds or merges
     // states (else passed on below).
     let mut built_state_input_rows: Option<StateInputRows> = None;
+    // What each output row of an `Aggregate` folds (else passed on below).
+    let mut built_folded_per_row: Option<StateInputRows> = None;
     // A summary build's output while its states still receive values
     // (each state open): what a query-time build holds while it runs and
     // what an ingestion-time chain's current window holds.
@@ -825,11 +839,18 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let summary_state_build = |family: &FieldDataType,
                                update: &SummaryUpdate,
                                reduction: &Reduction,
-                               rows_per_state: Option<u64>|
+                               folded_rows_per_state: Option<f64>|
      -> Result<SummaryStateBuild, AnalyticalCostError> {
         let (column, non_negative, value_magnitude_range) = folded_values(update);
+        // Over rows an `Aggregate` built, their sign is what it proved.
+        let non_negative = non_negative
+            || (column.is_none()
+                && producers
+                    .first()
+                    .and_then(|producer| producer.folded_per_row)
+                    .is_some_and(|folded| folded.non_negative));
         let input_rows = StateInputRows {
-            rows_per_state,
+            folded_rows_per_state,
             non_negative,
             value_magnitude_range,
             distinct_values: folded_distinct_values(update),
@@ -847,7 +868,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         let update_terms_per_row = update_terms_per_row(
             family,
             node.parameters.as_ref(),
-            input_rows.rows_per_state,
+            input_rows.rows_per_state(),
             input_rows.distinct_values,
         )
         .plus_terms(&carried_label_terms_per_row(&node.output_schema, reduction));
@@ -918,6 +939,18 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let input_raw_rows_per_ms = producers
         .first()
         .and_then(|producer| producer.raw_rows_per_ms);
+    // Its input rows as a summary built over them counts them
+    // ([`source_rows_in_window`]): each row the source rows behind it.
+    let source_rows_input = SourceRowsInput {
+        rows: input.rows,
+        raw_rows_span_ms: input_raw_rows_span_ms,
+        raw_rows_per_ms: input_raw_rows_per_ms,
+        source_rows_per_row: producers
+            .first()
+            .and_then(|producer| producer.folded_per_row)
+            .and_then(|folded| folded.folded_rows_per_state)
+            .unwrap_or(1.0),
+    };
     // The times a grouping into `group_count` groups visits a group's
     // state: once per group per batch of raw rows its input arrives in
     // (`group_raw_batch_visits`).
@@ -1010,6 +1043,53 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 let keys = grouping_key_count(reduction);
                 let out = edge(group_count)?;
                 let held = input.rows.div_ceil(group_count.max(1));
+                // Each output row folds its group's share of the source
+                // rows read; its values are proven non-negative when every
+                // measure keeps its input's sign (a sum, a min, a max, an
+                // average of non-negative values) or counts.
+                let measure_non_negative = |measure: &AggIntent| match measure {
+                    AggIntent::Count => true,
+                    AggIntent::Sum { col }
+                    | AggIntent::Min { col }
+                    | AggIntent::Max { col }
+                    | AggIntent::Avg { col } => {
+                        let column = match col {
+                            None => SummaryInputExpr::Column(ColumnRef::SampleValue),
+                            Some(index) => {
+                                match input_schema.and_then(|schema| schema.fields.get(*index)) {
+                                    Some(field) => SummaryInputExpr::Column(ColumnRef::Named(
+                                        field.name.clone(),
+                                    )),
+                                    None => return false,
+                                }
+                            }
+                        };
+                        let input_non_negative = producers.first().is_some_and(|producer| {
+                            match producer.unchanged_column(&column) {
+                                Some(column) => {
+                                    !sources.is_empty()
+                                        && sources.iter().all(|source| {
+                                            declared_non_negative(data, source, column)
+                                        })
+                                }
+                                None => producer
+                                    .folded_per_row
+                                    .is_some_and(|folded| folded.non_negative),
+                            }
+                        });
+                        input_non_negative
+                    }
+                    _ => false,
+                };
+                built_folded_per_row = Some(StateInputRows {
+                    folded_rows_per_state: Some(
+                        source_rows_input.rows as f64 * source_rows_input.source_rows_per_row
+                            / group_count.max(1) as f64,
+                    ),
+                    non_negative: !measures.is_empty() && measures.iter().all(measure_non_negative),
+                    value_magnitude_range: None,
+                    distinct_values: None,
+                });
                 // The values its distinct counts and frequency statistics
                 // read: the most any one's columns take together, as
                 // declared for source columns passed on unchanged, else
@@ -1326,9 +1406,25 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             ..
         }) => {
             let group_count = groups(reduction)?;
-            // At query time, each state sees its group's input rows; at
-            // ingestion time, the rows of a window one second of
-            // arriving rows does not bound.
+            // The source rows each state folds: at query time its group's
+            // share of the rows read; at ingestion time of those arriving
+            // over the window it maintains, or without one of every row
+            // its sources hold ([`source_rows_in_window`]; unbounded,
+            // `None`, when they declare none).
+            let folded_rows = match (ingestion, window_ms) {
+                (false, _) => {
+                    Some(source_rows_input.rows as f64 * source_rows_input.source_rows_per_row)
+                }
+                (true, Some(window_ms)) => Some(source_rows_in_window(
+                    source_rows_input,
+                    window_ms,
+                    true,
+                    retained_output_count,
+                )),
+                (true, None) => raw_rows(None).1.map(|rows_held| {
+                    rows_held as f64 * source_rows_input.share_of_one_second(rows_per_ms)
+                }),
+            };
             let SummaryStateBuild {
                 input_rows,
                 state_bytes,
@@ -1339,7 +1435,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 family,
                 update,
                 reduction,
-                (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
+                folded_rows.map(|rows| rows / group_count.max(1) as f64),
             )?;
             built_state_input_rows = Some(input_rows);
             open_output_bytes = Some(
@@ -1394,15 +1490,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             ..
         }) => {
             // One window's states: each input row updates the window its
-            // time falls in ([`rows_per_tumbling_window`], the same rows
+            // time falls in ([`source_rows_in_window`], the same rows
             // whether the chain is built at ingestion or at query time).
             let group_count = groups(reduction)?;
-            let rows_per_tumbling_window = rows_per_tumbling_window(
-                ChainInputRows {
-                    rows: input.rows,
-                    raw_rows_span_ms: input_raw_rows_span_ms,
-                    raw_rows_per_ms: input_raw_rows_per_ms,
-                },
+            let rows_per_tumbling_window = source_rows_in_window(
+                source_rows_input,
                 *tumbling_window_width_ms,
                 ingestion,
                 retained_output_count,
@@ -1417,7 +1509,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 family,
                 update,
                 reduction,
-                Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
+                Some(rows_per_tumbling_window / group_count.max(1) as f64),
             )?;
             built_state_input_rows = Some(input_rows);
             open_output_bytes = Some(
@@ -1590,9 +1682,12 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             };
             // Each input's states per group, every one folding its rows.
             let merged_input_rows = StateInputRows::merged(producers.iter().map(|producer| {
-                producer
-                    .state_input_rows
-                    .map(|rows| (rows, producer.output.rows.div_ceil(group_count.max(1))))
+                producer.state_input_rows.map(|rows| {
+                    (
+                        rows,
+                        producer.output.rows as f64 / group_count.max(1) as f64,
+                    )
+                })
             }));
             built_state_input_rows = merged_input_rows;
             // A merge target receives its inputs' states: priced open.
@@ -2017,6 +2112,18 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             out.rows == ((rows_per_ms * span_ms as f64).round() as u64).max(1)
         })
     });
+    // An `Aggregate` says what its rows fold; a time range and an operator
+    // keeping each row's window pass on their input's.
+    let folded_per_row = built_folded_per_row.or_else(|| {
+        (matches!(node.payload, Payload::NonASAP(NonASAPOp::TimeRange { .. }))
+            || node.payload.keeps_input_window())
+        .then(|| {
+            producers
+                .first()
+                .and_then(|producer| producer.folded_per_row)
+        })
+        .flatten()
+    });
     let usage = NodeResourceUsageAndCost {
         output: out,
         sources,
@@ -2027,6 +2134,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         state_input_rows,
         raw_rows_span_ms,
         raw_rows_per_ms,
+        folded_per_row,
         work_ms_per_execution: node_ms,
         cpu_ops_per_second: estimate.cpu_ops() * per_second,
         scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
@@ -2191,34 +2299,53 @@ fn selected_tumbling_windows(
         .max(1))
 }
 
-/// A chain's input rows ([`rows_per_tumbling_window`]).
+/// The rows a summary is built over ([`source_rows_in_window`]).
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ChainInputRows {
+pub(crate) struct SourceRowsInput {
     /// The rows of one execution's input.
     pub(crate) rows: u64,
     /// The time they span ([`ProducerOutput::raw_rows_span_ms`]).
     pub(crate) raw_rows_span_ms: Option<u64>,
     /// The exact rate they arrive at ([`ProducerOutput::raw_rows_per_ms`]).
     pub(crate) raw_rows_per_ms: Option<f64>,
+    /// The source rows behind each ([`ProducerOutput::folded_per_row`]),
+    /// 1 for source rows themselves.
+    pub(crate) source_rows_per_row: f64,
 }
 
-/// The rows one tumbling window of `width_ms` holds, for a chain built at
-/// ingestion time (`ingestion`) or at query time, so that the same chain
-/// folds the same rows either way. With the exact arrival rate of its
-/// input's rows, when its rows are that rate over their span: that rate
-/// over the window, at query time at most over the time the rows span.
-/// Without it: its input's rows over the window's
-/// share of their span (the rows are rounded: 667 a second for 666.67);
-/// without a span, one second's rows at ingestion time, the rows over the
-/// `retained_windows` at query time. At least one row. Example: 10,000
-/// series every 15 s in 60 s windows: 40,000 rows, at ingestion time
-/// (667 rows a second) and at query time over 300 s (200,000 rows) alike.
-pub(crate) fn rows_per_tumbling_window(
-    input: ChainInputRows,
+impl SourceRowsInput {
+    /// The share of one second of its sources' rows (arriving at
+    /// `rows_per_ms`) these rows are, when they are one second of them; 1
+    /// otherwise. Example: 222 rows of 666.67 a second: a third.
+    pub(crate) fn share_of_one_second(&self, rows_per_ms: Option<f64>) -> f64 {
+        match (rows_per_ms, self.raw_rows_span_ms) {
+            (Some(rows_per_ms), Some(ONE_SECOND_MS)) if rows_per_ms > 0.0 => {
+                self.rows as f64 / (rows_per_ms * ONE_SECOND_MS as f64).round().max(1.0)
+            }
+            _ => 1.0,
+        }
+    }
+}
+
+/// The source rows one tumbling window of `width_ms` holds, exactly (not
+/// rounded), for a summary built over `input` at ingestion time
+/// (`ingestion`) or at query time, so that the same states fold the same
+/// rows whichever builds them: every state's rows come from this one
+/// function. With the exact arrival rate of its input's rows, when its
+/// rows are that rate over their span: that rate over the window, at query
+/// time at most over the time the rows span. Without it: its input's rows
+/// over the window's share of their span; without a span, one second's
+/// rows at ingestion time, the rows over the `retained_windows` at query
+/// time. Each row counts the source rows behind it. Example: 10,000 series
+/// every 15 s in 60 s windows: 40,000 rows, at ingestion time (667 rows a
+/// second) and at query time over 300 s (200,000 rows) alike; in 10 s
+/// windows 6,666.67, and 30 of them merged 200,000.
+pub(crate) fn source_rows_in_window(
+    input: SourceRowsInput,
     width_ms: u64,
     ingestion: bool,
     retained_windows: u64,
-) -> u64 {
+) -> f64 {
     let span_ms = input.raw_rows_span_ms.filter(|span_ms| *span_ms > 0);
     let window_ms = match (ingestion, span_ms) {
         (false, Some(span_ms)) => width_ms.min(span_ms),
@@ -2234,10 +2361,10 @@ pub(crate) fn rows_per_tumbling_window(
         (None, Some(span_ms)) => input.rows as f64 * window_ms as f64 / span_ms as f64,
         (None, None) => match ingestion {
             true => input.rows as f64 * width_ms as f64 / ONE_SECOND_MS as f64,
-            false => input.rows.div_ceil(retained_windows.max(1)) as f64,
+            false => input.rows as f64 / retained_windows.max(1) as f64,
         },
     };
-    (rows.round() as u64).max(1)
+    rows * input.source_rows_per_row
 }
 
 /// The times a grouping into `group_count` groups visits a group's state
