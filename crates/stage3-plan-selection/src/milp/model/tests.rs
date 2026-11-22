@@ -962,8 +962,10 @@ fn the_bound_counts_the_least_retention_an_execution_pays() {
 
 /// `m[5m]` every 10 s over a scan offered with ℓ = None (v0) and
 /// `OneEvaluation` (v1). At equal cost and with the same consumer, v1
-/// dominates v0, which is left out; v0 is kept when v1 costs more, or when
-/// v1 cannot be read by v0's consumer (its edge is not costed).
+/// dominates v0, which is left out; v0 is kept when v1 costs more (and v1,
+/// read at most once, is left out for it), or when v1 cannot be read by
+/// v0's consumer (its edge is not costed, and v1, which no plan can read,
+/// is left out).
 #[test]
 fn a_none_execution_its_one_evaluation_twin_dominates_is_left_out() {
     let mut memo = empty_memo();
@@ -1003,8 +1005,56 @@ fn a_none_execution_its_one_evaluation_twin_dominates_is_left_out() {
         (candidates, self::candidates(&solved))
     };
     assert_eq!(dominated(&[1.0, 1.0, 1.0], true), (vec![0], vec![1, 2]));
-    assert_eq!(dominated(&[1.0, 2.0, 1.0], true), (vec![], vec![0, 2]));
-    assert_eq!(dominated(&[1.0, 1.0, 1.0], false), (vec![], vec![0, 2]));
+    assert_eq!(dominated(&[1.0, 2.0, 1.0], true), (vec![1], vec![0, 2]));
+    assert_eq!(dominated(&[1.0, 1.0, 1.0], false), (vec![1], vec![0, 2]));
+}
+
+/// A `OneEvaluation` execution that at most one consumer or output can read
+/// is left out when its ℓ = None twin does all it does at no more of any
+/// cost: a None execution is read exactly once (F), which is all the
+/// `OneEvaluation` one can be. `m[5m]` every 10 s over a scan offered with
+/// ℓ = None (v0, cost 1) and `OneEvaluation` (v1, cost 2): v1 is left out.
+/// With a second reader of the scan (`m[10m]`), v1 may be read twice, which
+/// v0 cannot be: v1 is kept, and the optimum reads it from both.
+#[test]
+fn a_one_evaluation_execution_read_at_most_once_is_left_out_for_its_cheaper_none_twin() {
+    let left_out_and_selected = |second_reader: bool| {
+        let mut memo = empty_memo();
+        let m = scan(&mut memo);
+        let last_5m = range(&mut memo, 300, m);
+        query(&mut memo, last_5m, None);
+        let mut candidates = vec![
+            (own_candidate(m), NONE),
+            (own_candidate(m), ONE_EVALUATION),
+            (own_candidate(last_5m), NONE),
+        ];
+        let mut weights = vec![1.0, 2.0, 1.0];
+        if second_reader {
+            let last_10m = range(&mut memo, 600, m);
+            query(&mut memo, last_10m, None);
+            candidates.push((own_candidate(last_10m), NONE));
+            weights.push(1.0);
+        }
+        let physical = physical(memo, &candidates);
+        let entries = every_10s(if second_reader { 2 } else { 1 });
+        let (selectable, costs) = selection_inputs(&physical, &entries, &weights, &[], &[]);
+        let inputs = SelectionInputs {
+            physical: &physical,
+            entries: &entries,
+            selectable: &selectable,
+            costs: &costs,
+        };
+        let left_out: Vec<usize> = selectable
+            .executions()
+            .iter()
+            .zip(dominated_by_one_evaluation_twin(&inputs))
+            .filter(|(_, dominated)| *dominated)
+            .map(|(execution, _)| execution.candidate.0)
+            .collect();
+        (left_out, self::candidates(&solve_selection(&inputs).unwrap()))
+    };
+    assert_eq!(left_out_and_selected(false), (vec![1], vec![0, 2]));
+    assert_eq!(left_out_and_selected(true), (vec![], vec![1, 2, 3]));
 }
 
 /// The same query `m[5m]` every 10 s and every 20 s: two evaluation
