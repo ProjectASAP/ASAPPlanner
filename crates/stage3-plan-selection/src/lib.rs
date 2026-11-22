@@ -37,7 +37,10 @@ use asap_cost::{
 };
 use asap_types::deployment_capabilities::FinalResultsCache;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
-use asap_types::stages::{MemoGroupId, PhysicalASAPMemoCandidates, PruneReason, PrunedCandidate};
+use asap_types::stages::{
+    MemoGroupId, OriginOfCandidateForMemoGroup, PhysicalASAPMemoCandidates, PruneReason,
+    PrunedCandidate,
+};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::cost::{execution_costs, execution_quantities, Quantity};
@@ -157,13 +160,29 @@ pub fn select_plan(
         node: 0,
         error,
     })?;
-    let costs = execution_costs(
+    let mut costs = execution_costs(
         physical,
         &selectable,
         entries,
         data,
         cost_inputs_for_structure,
     );
+    // Cost model 3's latency selection does not take wider tumbling-window
+    // levels and covers yet: its model over them is not bounded (a 10,000
+    // series dashboard did not solve in minutes). They are left out, so it
+    // selects among the single-chain plans it did before them.
+    if cluster_limits.is_some() {
+        let memo = &physical.logical_candidates.memo;
+        for (index, execution) in selectable.executions().iter().enumerate() {
+            let logical = physical.physical_candidates[execution.candidate.0].logical_candidate_id;
+            if memo.candidate(logical).origin == OriginOfCandidateForMemoGroup::MultiLevelWindows {
+                costs.per_execution[index] = Err(
+                    "wider tumbling-window levels are not selected under lowest_mean_latency yet"
+                        .into(),
+                );
+            }
+        }
+    }
     // A query output is answered by an execution that could be costed and
     // that its query may read (X).
     selectable.retain_answering(|query, index, execution| {

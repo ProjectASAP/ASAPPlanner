@@ -344,7 +344,9 @@ async fn a_cover_is_charged_on_its_readers_grid() {
     // Stage 3's objective charges each context's cover as the plan's cost
     // does.
     let plan_cost_per_second = cost.cost_per_second.unwrap();
-    let objective = selection.selected_plan_cost_per_second;
+    let objective = selection
+        .selected_plan_cost_per_second
+        .expect("cost model 1 prices the plan");
     assert!(
         (plan_cost_per_second - objective).abs() <= 1e-6 * objective,
         "{plan_cost_per_second} vs {objective}"

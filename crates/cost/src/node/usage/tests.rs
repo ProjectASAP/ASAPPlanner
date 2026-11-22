@@ -4466,13 +4466,21 @@ fn ingestion_and_query_time_chains_over_a_fractional_rate_fold_the_same_rows() {
             output_state: scan_state,
             ..node(metric_scan("latency"))
         };
-        let scan_usage =
-            node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(window_ms), &data, &settings)
-                .unwrap();
+        let scan_usage = node_resource_usage_and_cost(
+            &scan,
+            &[],
+            (1, 1.0),
+            Some(window_ms),
+            None,
+            &data,
+            &settings,
+        )
+        .unwrap();
         let usage = node_resource_usage_and_cost(
             &chain,
             &[produced(&scan, &scan_usage)],
             (1, 1.0),
+            None,
             None,
             &data,
             &settings,
