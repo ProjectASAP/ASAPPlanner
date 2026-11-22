@@ -65,12 +65,17 @@ fn a_function_of_the_value_keeps_the_readouts_below_it() {
     }
 }
 
-/// The groups whose expression is a tumbling-window chain, with its width.
+/// The groups whose expression is a tumbling-window chain built from the
+/// rows, with its width. A wider level (a chain group whose every
+/// candidate merges a narrower chain's windows, `SummaryMergeWindows`) is
+/// read only through a `TimeRangeCover` whose narrowest level is one of
+/// these, so it is left out: [`wider_levels_feed_only_covers`] checks it.
 fn chain_widths(logical: &LogicalASAPMemoCandidates) -> Vec<u64> {
     logical
         .memo
         .groups()
         .iter()
+        .filter(|group| !is_wider_level(group))
         .filter_map(|group| match group.expression {
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms,
@@ -79,6 +84,44 @@ fn chain_widths(logical: &LogicalASAPMemoCandidates) -> Vec<u64> {
             _ => None,
         })
         .collect()
+}
+
+/// Whether `group` is a wider chain level: a chain group whose every
+/// candidate merges a narrower chain's windows.
+fn is_wider_level(group: &asap_types::stages::MemoGroup) -> bool {
+    !group.candidates.is_empty()
+        && group.candidates.iter().all(|candidate| {
+            matches!(
+                candidate.expression.operator,
+                Operator::ASAP(ASAPOp::SummaryMergeWindows { .. })
+            )
+        })
+}
+
+/// Every reader of a wider level is a wider level built from it or a
+/// `TimeRangeCover` that reads it as other than its narrowest level.
+fn wider_levels_feed_only_covers(logical: &LogicalASAPMemoCandidates) {
+    let memo = &logical.memo;
+    for (index, group) in memo.groups().iter().enumerate() {
+        for candidate in &group.candidates {
+            for (input, child) in candidate
+                .expression
+                .operator
+                .children()
+                .into_iter()
+                .enumerate()
+            {
+                if !is_wider_level(&memo.groups()[child.0 as usize]) {
+                    continue;
+                }
+                let ok = candidate
+                    .expression
+                    .operator
+                    .reads_input_off_the_grid(input);
+                assert!(ok, "G{index} reads wider level G{}: {candidate:?}", child.0);
+            }
+        }
+    }
 }
 
 /// `quantile_over_time(0.9, rate(c[2m])[10m:30s])` read every 60 s
@@ -110,6 +153,7 @@ fn a_subquery_s_resolution_is_the_grid_of_the_groups_below_it() {
     let widths = chain_widths(&logical);
     assert!(!widths.is_empty());
     assert!(widths.iter().all(|width| 30_000 % width == 0), "{widths:?}");
+    wider_levels_feed_only_covers(&logical);
     let without_resolution = pass2("max_over_time(rate(c[2m])[10m:])", rank);
     assert_eq!(chain_widths(&without_resolution), Vec::<u64>::new());
 }

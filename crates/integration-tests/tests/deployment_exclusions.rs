@@ -193,7 +193,9 @@ fn some_node_matches(plan: &PhysicalASAPDAG, exclusion: &CandidateExclusion) -> 
 /// Asserts the selected plan costs `expected` per second, as observed (six
 /// decimals).
 fn assert_cost(selection: &Selection, expected: f64) {
-    let cost = selection.selected_plan_cost_per_second;
+    let cost = selection
+        .selected_plan_cost_per_second
+        .expect("cost model 1");
     assert!(
         (cost - expected).abs() <= 5e-7,
         "cost {cost} per second, expected {expected}"
@@ -549,23 +551,33 @@ fn a_target_without_mergeable_rate_state_builds_rate_within_one_evaluation() {
     };
     let cases = [
         ("rate", "5m", ExactKind::Counter, 0.274034, 0.367670),
-        ("increase", "1h", ExactKind::Counter, 1.436831, 3.953712),
+        ("increase", "1h", ExactKind::Counter, 1.374738, 3.953712),
     ];
     for (function, range, kind, unrestricted_cost, restricted_cost) in cases {
         let workload = counter_workload(function, range);
         let unrestricted = planned(&workload, &DeploymentCapabilities::default());
         let (plan, selection) = selected(&unrestricted);
-        assert_eq!(
-            operators(plan),
-            [
-                (OperatorKind::Scan, IngestionTime),
-                (OperatorKind::SummaryTumblingWindowChain, IngestionTime),
-                (OperatorKind::TimeRange, QueryTime),
-                (OperatorKind::SummaryMerge, QueryTime),
-                (OperatorKind::FinalizeExactAccumulator, QueryTime),
+        // Over an hour, a 1 min level merged from the chain and a cover
+        // over both (`multi_level_window_chains.md`); over 5 min, the chain.
+        let windows: &[(OperatorKind, ExecutionTiming)] = match range {
+            "1h" => &[
+                (OperatorKind::SummaryMergeWindows, IngestionTime),
+                (OperatorKind::TimeRangeCover, QueryTime),
             ],
-            "{function}"
-        );
+            _ => &[(OperatorKind::TimeRange, QueryTime)],
+        };
+        let expected: Vec<(OperatorKind, ExecutionTiming)> = [
+            (OperatorKind::Scan, IngestionTime),
+            (OperatorKind::SummaryTumblingWindowChain, IngestionTime),
+        ]
+        .into_iter()
+        .chain(windows.iter().copied())
+        .chain([
+            (OperatorKind::SummaryMerge, QueryTime),
+            (OperatorKind::FinalizeExactAccumulator, QueryTime),
+        ])
+        .collect();
+        assert_eq!(operators(plan), expected, "{function}");
         assert_eq!(builds(plan), vec![(FieldDataType::exact(kind), None)]);
         assert_cost(selection, unrestricted_cost);
 

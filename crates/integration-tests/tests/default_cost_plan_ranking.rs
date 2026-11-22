@@ -89,12 +89,24 @@ fn workload(query: Query, setting: Setting) -> PlanningWorkload {
     .unwrap()
 }
 
+/// The exclusions of a deployment that runs neither wider tumbling-window
+/// levels nor covers over them: both operators, as a runtime lacking them
+/// declares.
+fn without_wider_levels() -> Vec<asap_planner::CandidateExclusion> {
+    serde_json::from_str(r#"[{"operator": "SummaryMergeWindows"}, {"operator": "TimeRangeCover"}]"#)
+        .unwrap()
+}
+
 /// The planning stages' run over `workload` under the default cost inputs,
 /// with raw data kept or not.
 fn planning_run(workload: &PlanningWorkload, raw_data_retained: bool) -> PlanningStagesRun {
     let settings = CostInputs::default();
+    // The stored plans were measured with one tumbling-window chain per
+    // range, before wider levels and covers: a deployment without both
+    // operators plans those.
     let capabilities = DeploymentCapabilities {
         raw_data_retained,
+        excluded_candidates: without_wider_levels(),
         ..Default::default()
     };
     let models = PlanningModels::builtin()
@@ -708,7 +720,8 @@ fn compaction_latency_charges_each_merge_its_family_s_merge_time() {
         &CostInputs::default(),
     )
     .unwrap();
-    let compaction_ms = cost.usage.latency_per_query[0].compaction_ms;
+    // The newest window's refresh, its compaction included.
+    let compaction_ms = cost.usage.latency_per_query[0].precompute_execution_ms;
     assert!(
         compaction_ms >= 100_000.0 * 1.8e-3,
         "predicted compaction {compaction_ms} ms, measured merges take at least 180 ms"
@@ -800,7 +813,7 @@ fn compaction_latency_is_zero_for_ingestion_time_nodes_holding_no_states() {
             "{kept}: ingestion takes {ingest_ms_per_second} ms per second, one core"
         );
         assert_eq!(
-            cost.usage.latency_per_query[0].compaction_ms, 0.0,
+            cost.usage.latency_per_query[0].precompute_execution_ms, 0.0,
             "{kept} kept at ingestion time"
         );
     }

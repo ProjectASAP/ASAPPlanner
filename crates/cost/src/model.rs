@@ -219,6 +219,96 @@ pub enum ClusterObjective {
     LowestLatency,
     /// The smallest peak memory; ties by disk, then worst-query latency.
     LeastMemory,
+    /// The smallest frequency-weighted mean query latency (each query
+    /// weighted by its evaluations per second; latency = freshness wait +
+    /// query execution); ties by peak memory, then disk. Each query's
+    /// `max_latency_ms` and the precompute load bound
+    /// ([`DataPlaneExecution::max_thread_utilization`]) are hard limits.
+    LowestMeanLatency,
+}
+
+/// How the deployment's data plane runs work: its threads, the lateness it
+/// allows before closing a window, and the utilisation its threads may
+/// run at. Latency, the precompute load and the recommended thread counts
+/// read it, under every cost model; only cost model 3's
+/// `lowest_mean_latency` selects with it. In JSON an object with these
+/// fields; an omitted field takes its default.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DataPlaneExecution {
+    /// Threads inserting arriving rows, each building a partial copy of an
+    /// in-memory state's newest window; `None` (default): one per core the
+    /// ingestion work needs.
+    pub ingest_threads: Option<u32>,
+    /// Threads running window-close refreshes of ingestion-time views;
+    /// default 1.
+    pub precompute_threads: u32,
+    /// Threads running query requests; default 1. A range request's steps
+    /// split over them (`step_rounds`): its per-step work takes
+    /// ⌈steps ÷ threads⌉ rounds of latency, its CPU is unchanged. Not a
+    /// limit: the report recommends how many a plan needs.
+    pub query_threads: u32,
+    /// Milliseconds the data plane waits after a window's end before
+    /// closing it; every query waits for it. Default 0.
+    pub allowed_lateness_ms: u64,
+    /// The largest precompute load (the fraction of the precompute threads'
+    /// time spent refreshing) a plan may have under `lowest_mean_latency`,
+    /// and the utilisation the recommended thread counts are sized for;
+    /// default 0.7.
+    pub max_thread_utilization: f64,
+    /// Whether the data plane buffers a window's arriving rows and inserts
+    /// them when the window closes, in the refresh: its ingest work is
+    /// then refresh work (on the precompute threads, in the freshness wait
+    /// and the precompute load). Default false: rows are inserted as they
+    /// arrive, on the ingest threads.
+    pub ingest_work_at_refresh: bool,
+}
+
+impl Default for DataPlaneExecution {
+    fn default() -> Self {
+        Self {
+            ingest_threads: None,
+            precompute_threads: 1,
+            query_threads: 1,
+            allowed_lateness_ms: 0,
+            max_thread_utilization: 0.7,
+            ingest_work_at_refresh: false,
+        }
+    }
+}
+
+impl DataPlaneExecution {
+    /// Whether every field has its default, so JSON leaves it out.
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Bad input: a thread count of 0, or a utilisation outside (0, 1].
+    fn validate(&self) -> Result<(), AnalyticalCostError> {
+        for (name, threads) in [
+            (
+                "data_plane_execution.ingest_threads",
+                self.ingest_threads.unwrap_or(1),
+            ),
+            (
+                "data_plane_execution.precompute_threads",
+                self.precompute_threads,
+            ),
+            ("data_plane_execution.query_threads", self.query_threads),
+        ] {
+            if threads == 0 {
+                return Err(AnalyticalCostError::InvalidCalibration(name, 0.0));
+            }
+        }
+        let utilization = self.max_thread_utilization;
+        if !(utilization > 0.0 && utilization <= 1.0) {
+            return Err(AnalyticalCostError::InvalidCalibration(
+                "data_plane_execution.max_thread_utilization",
+                utilization,
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The deployment's choices for plan selection (Stage 3): the cost model,
@@ -248,6 +338,111 @@ pub struct CostInputs {
     /// candidate catalog before pricing, preserving the default calibration policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_calibration_factor: Option<f64>,
+    /// How the deployment's data plane runs work; default
+    /// [`DataPlaneExecution::default`].
+    #[serde(skip_serializing_if = "DataPlaneExecution::is_default")]
+    pub data_plane_execution: DataPlaneExecution,
+    /// Whether the times these inputs predict passed the deployment's
+    /// calibration gate; cost model 3's `lowest_mean_latency` selects by
+    /// latency only when they did, or when the deployment opts in to
+    /// uncalibrated times for testing. Default not checked.
+    #[serde(skip_serializing_if = "LatencyCalibration::is_not_checked")]
+    pub latency_calibration: LatencyCalibration,
+    /// How cost model 3's `lowest_mean_latency` solves: to a 1 % gap or
+    /// 10,000 nodes by default, or exactly.
+    #[serde(skip_serializing_if = "LatencySelection::is_default")]
+    pub latency_selection: LatencySelection,
+    /// The checking and measurement switches of `lowest_mean_latency`'s
+    /// selection: not part of a cost inputs file (never serialized); the
+    /// `asap_planner` tool and tests set them.
+    #[serde(skip)]
+    pub latency_selection_checks: LatencySelectionChecks,
+}
+
+/// How cost model 3's `lowest_mean_latency` solves
+/// (`docs/design_docs/proposals/stage3-lowest-mean-latency.md`, decision
+/// 27). In JSON an object with these fields; an omitted field takes its
+/// default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LatencySelection {
+    /// Solve the mean latency to optimality; default false: stop at a
+    /// relative gap of 1 % or after 10,000 branch-and-bound nodes,
+    /// whichever comes first, and report the gap and the lower bound
+    /// beside the plan.
+    pub exact_solve: bool,
+}
+
+impl LatencySelection {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Switches that check `lowest_mean_latency`'s exact speed-ups (turning
+/// one off must not change the optimum) and measure its solve (section
+/// 2.5). Not serialized: tools and tests set them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LatencySelectionChecks {
+    /// Leave out θ-families another family does as well as; default true.
+    pub theta_dominance: bool,
+    /// Leave out executions no plan with them beats a feasible plan with
+    /// (cost model 1's); default true.
+    pub feasible_plan_bound: bool,
+    /// Run the tie-break solves only to find a smaller plan within 500
+    /// nodes; default true (false: to optimality).
+    pub lazy_tie_breaks: bool,
+    /// Bound each query's reads from below along each path of its plan;
+    /// default true (false: only the per-edge and per-execution rows).
+    pub path_reads: bool,
+    /// Solve the LP relaxation too and report its mean latency
+    /// (`Selection::milp_root_lp_mean_latency_ms`); default false.
+    pub report_root_lp_bound: bool,
+    /// Print the solver's log and the model's size by family on standard
+    /// error; default false.
+    pub log_solver: bool,
+    /// The most branch-and-bound nodes the default stop rule explores
+    /// before it stops without a 1 % gap; default 10,000. A test lowers it
+    /// to reach the retry from cost model 1's plan.
+    pub node_limit: i32,
+}
+
+impl Default for LatencySelectionChecks {
+    fn default() -> Self {
+        Self {
+            theta_dominance: true,
+            feasible_plan_bound: true,
+            lazy_tie_breaks: true,
+            path_reads: true,
+            report_root_lp_bound: false,
+            log_solver: false,
+            node_limit: 10_000,
+        }
+    }
+}
+
+/// Whether a deployment's predicted times passed its calibration gate
+/// (`docs/design_docs/proposals/stage3-lowest-mean-latency.md`, section
+/// 2.4): every node's time per phase within 1.5× of measured at every
+/// series scale it runs. JSON: `"not_checked"`, `"passed_gate"` or
+/// `"uncalibrated_for_testing"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LatencyCalibration {
+    /// Not checked against measurements: `lowest_mean_latency` refuses it.
+    #[default]
+    NotChecked,
+    /// The calibration gate passed for these inputs.
+    PassedGate,
+    /// Uncalibrated, for testing: `lowest_mean_latency` selects with the
+    /// times as predicted, which may rank plans by prediction errors.
+    UncalibratedForTesting,
+}
+
+impl LatencyCalibration {
+    fn is_not_checked(&self) -> bool {
+        *self == Self::NotChecked
+    }
 }
 
 impl Default for CostInputs {
@@ -258,6 +453,10 @@ impl Default for CostInputs {
             non_repeating_query_horizon_seconds: DEFAULT_NON_REPEATING_QUERY_HORIZON_SECONDS,
             measured_operation_costs: MeasuredOperationCosts::default(),
             frozen_calibration_factor: None,
+            data_plane_execution: DataPlaneExecution::default(),
+            latency_calibration: LatencyCalibration::NotChecked,
+            latency_selection: LatencySelection::default(),
+            latency_selection_checks: LatencySelectionChecks::default(),
         }
     }
 }
@@ -272,6 +471,7 @@ impl CostInputs {
         if let Some(factor) = self.frozen_calibration_factor {
             CalibrationFit::from_factor(factor)?;
         }
+        self.data_plane_execution.validate()?;
         for (name, value) in [
             ("ms_per_cpu_op", self.resource_speed.ms_per_cpu_op),
             (

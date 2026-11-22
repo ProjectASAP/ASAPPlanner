@@ -1,0 +1,348 @@
+{
+  "cost_model": {
+    "cluster_capacity": {
+      "memory_bytes": 1000000000000,
+      "disk_bytes": 107374182400,
+      "cpu_cores": 16,
+      "objective": "lowest_mean_latency"
+    }
+  },
+  "data_plane_execution": {
+    "precompute_threads": 2,
+    "query_threads": 4,
+    "allowed_lateness_ms": 0,
+    "max_thread_utilization": 0.7
+  },
+  "measured_operation_costs": {
+    "operators": [
+      {
+        "operator": "Aggregate",
+        "phase": "query_time",
+        "measure": "avg",
+        "ns_per_unit": 2378.6391,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "Aggregate",
+        "phase": "query_time",
+        "measure": "avg",
+        "ns_per_unit": 3035.0544,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "Aggregate",
+        "phase": "query_time",
+        "measure": "max",
+        "ns_per_unit": 3191.5882
+      },
+      {
+        "operator": "Aggregate",
+        "phase": "query_time",
+        "measure": "sum",
+        "ns_per_unit": 389.0292,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "Aggregate",
+        "phase": "query_time",
+        "measure": "sum",
+        "ns_per_unit": 2339.6216,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "Aggregate",
+        "phase": "query_time",
+        "measure": "top_k",
+        "ns_per_unit": 2118.4362,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "Aggregate",
+        "phase": "query_time",
+        "measure": "top_k",
+        "ns_per_unit": 2218.9608,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "BinaryOp",
+        "phase": "query_time",
+        "ns_per_unit": 1.0001
+      },
+      {
+        "operator": "FinalizeExactAccumulator",
+        "phase": "query_time",
+        "exact": "Count",
+        "ns_per_unit": 2863.4901
+      },
+      {
+        "operator": "FinalizeExactAccumulator",
+        "phase": "query_time",
+        "exact": "Max",
+        "ns_per_unit": 2644.121,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "FinalizeExactAccumulator",
+        "phase": "query_time",
+        "exact": "Max",
+        "ns_per_unit": 3057.8513,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "FinalizeExactAccumulator",
+        "phase": "query_time",
+        "exact": "Sum",
+        "ns_per_unit": 2577.0055,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "FinalizeExactAccumulator",
+        "phase": "query_time",
+        "exact": "Sum",
+        "ns_per_unit": 3228.799,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "Project",
+        "phase": "query_time",
+        "ns_per_unit": 1.0,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "Project",
+        "phase": "query_time",
+        "ns_per_unit": 1.0,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "Scan",
+        "phase": "ingestion_time",
+        "ns_per_unit": 6.8485,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "Scan",
+        "phase": "ingestion_time",
+        "ns_per_unit": 7.0505,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "SummaryAgg",
+        "phase": "query_time",
+        "exact": "Sum",
+        "ns_per_unit": 198.1276,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "SummaryAgg",
+        "phase": "query_time",
+        "exact": "Sum",
+        "ns_per_unit": 199.8015,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "SummaryEstimate",
+        "phase": "query_time",
+        "sketch": {
+          "DDSketch": {
+            "alpha": 0.05
+          }
+        },
+        "ns_per_unit": 3001.9784,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "SummaryEstimate",
+        "phase": "query_time",
+        "sketch": {
+          "DDSketch": {
+            "alpha": 0.05
+          }
+        },
+        "ns_per_unit": 3317.4054,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "SummaryMerge",
+        "phase": "query_time",
+        "exact": "Count",
+        "ns_per_unit": 430.2736
+      },
+      {
+        "operator": "SummaryMerge",
+        "phase": "query_time",
+        "exact": "Max",
+        "ns_per_unit": 213.3645,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "SummaryMerge",
+        "phase": "query_time",
+        "exact": "Max",
+        "ns_per_unit": 309.6585,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "SummaryMerge",
+        "phase": "query_time",
+        "exact": "Sum",
+        "ns_per_unit": 242.7034,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "SummaryMerge",
+        "phase": "query_time",
+        "exact": "Sum",
+        "ns_per_unit": 488.5741,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "SummaryMerge",
+        "phase": "query_time",
+        "sketch": {
+          "DDSketch": {
+            "alpha": 0.05
+          }
+        },
+        "ns_per_unit": 919.3303,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "SummaryMerge",
+        "phase": "query_time",
+        "sketch": {
+          "DDSketch": {
+            "alpha": 0.05
+          }
+        },
+        "ns_per_unit": 1693.583,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "SummaryTumblingWindowChain",
+        "phase": "ingestion_time",
+        "exact": "Count",
+        "ns_per_unit": 127.2767,
+        "ns_per_state_emitted": 2173.0
+      },
+      {
+        "operator": "SummaryTumblingWindowChain",
+        "phase": "ingestion_time",
+        "exact": "Max",
+        "ns_per_unit": 71.3757,
+        "ns_per_state_emitted": 1437.0,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "SummaryTumblingWindowChain",
+        "phase": "ingestion_time",
+        "exact": "Max",
+        "ns_per_unit": 94.262,
+        "ns_per_state_emitted": 2173.0,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "SummaryTumblingWindowChain",
+        "phase": "ingestion_time",
+        "exact": "Sum",
+        "ns_per_unit": 175.638,
+        "ns_per_state_emitted": 1437.0,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "SummaryTumblingWindowChain",
+        "phase": "ingestion_time",
+        "exact": "Sum",
+        "ns_per_unit": 181.0062,
+        "ns_per_state_emitted": 2173.0,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "SummaryTumblingWindowChain",
+        "phase": "ingestion_time",
+        "sketch": {
+          "DDSketch": {
+            "alpha": 0.05
+          }
+        },
+        "ns_per_unit": 268.4133,
+        "ns_per_state_emitted": 813.0,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "SummaryTumblingWindowChain",
+        "phase": "ingestion_time",
+        "sketch": {
+          "DDSketch": {
+            "alpha": 0.05
+          }
+        },
+        "ns_per_unit": 340.292,
+        "ns_per_state_emitted": 1549.0,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "TimeRange",
+        "phase": "query_time",
+        "ns_per_unit": 1351.7201,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "TimeRange",
+        "phase": "query_time",
+        "ns_per_unit": 1845.1674,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "FinalizeExactAccumulator",
+        "phase": "query_time",
+        "exact": "Counter",
+        "ns_per_unit": 2448.527,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "FinalizeExactAccumulator",
+        "phase": "query_time",
+        "exact": "Counter",
+        "ns_per_unit": 2633.375,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "SummaryMerge",
+        "phase": "query_time",
+        "exact": "Counter",
+        "ns_per_unit": 340.0006,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "SummaryMerge",
+        "phase": "query_time",
+        "exact": "Counter",
+        "ns_per_unit": 550.5705,
+        "measured_series_count": 10000
+      },
+      {
+        "operator": "SummaryTumblingWindowChain",
+        "phase": "ingestion_time",
+        "exact": "Counter",
+        "ns_per_unit": 179.1058,
+        "ns_per_state_emitted": 1437.0,
+        "measured_series_count": 1000
+      },
+      {
+        "operator": "SummaryTumblingWindowChain",
+        "phase": "ingestion_time",
+        "exact": "Counter",
+        "ns_per_unit": 218.7804,
+        "ns_per_state_emitted": 2173.0,
+        "measured_series_count": 10000
+      }
+    ],
+    "ns_per_evaluation": 0.0,
+    "refresh_io_wait": {
+      "ns_per_refresh": 543468,
+      "ns_per_state_emitted": 8.7
+    }
+  },
+  "latency_calibration": "uncalibrated_for_testing"
+}

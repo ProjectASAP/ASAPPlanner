@@ -166,8 +166,16 @@ impl InputTimeAccess {
                 },
                 Some(_) => reads(InputRows::AllRows),
             },
-            Operator::NonASAP(NonASAPOp::TimeRange { .. }) => last_window(),
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => match timing {
+            // A cover reads each level's windows ending in its range, the
+            // whole range from the narrowest level at its edges.
+            Operator::NonASAP(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeRangeCover { .. }) => {
+                last_window()
+            }
+            // Wider windows merged from a narrower chain: at ingestion time
+            // the narrower windows inside its newest window.
+            Operator::ASAP(
+                ASAPOp::SummaryTumblingWindowChain { .. } | ASAPOp::SummaryMergeWindows { .. },
+            ) => match timing {
                 ExecutionTiming::IngestionTime => last_window(),
                 ExecutionTiming::QueryTime => reads(InputRows::WhatItsReadersRead),
             },

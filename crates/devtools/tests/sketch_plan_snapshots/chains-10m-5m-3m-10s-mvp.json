@@ -32,6 +32,24 @@
       "node_id": 10,
       "refresh": "at_ingestion",
       "retention_ms": 180000
+    },
+    {
+      "coverage": {
+        "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+        "selection": [
+          {
+            "columns": []
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": [
+          10
+        ]
+      },
+      "node_id": 11,
+      "refresh": "at_ingestion",
+      "retention_ms": 180000
     }
   ],
   "queries": [
@@ -64,25 +82,35 @@
       }
     ],
     "cost": {
-      "cost_per_second": 5.10868952144e-7,
-      "cpu_core_seconds_per_second": 0.0371869067333,
+      "cost_per_second": 4.71152376988e-7,
+      "cpu_core_seconds_per_second": 0.032109724586,
       "per_node": {
         "0": {
           "cost_per_second": 3.14989416e-11,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 2.8014e-6,
           "detail": "scan 667 samples; x 1.0000/s",
+          "ingest_cpu_core_seconds_per_second": 2.8014e-6,
           "multiplier": 1,
           "operator": "Scan",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 2.03377051643e-8,
+          "cost_per_second": 2.00616611532e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000262089333333,
-          "detail": "build Kll in tumbling windows of 300000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 33.3 states emitted; x 1.0000/s; keeps 15120000 bytes",
+          "detail": "build Kll in tumbling windows of 300000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 33.3 states emitted; x 1.0000/s; keeps 14880000 bytes",
+          "ingest_cpu_core_seconds_per_second": 0.000178756,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.0,
+          "refresh_cpu_ms_per_window": 25.0,
+          "refresh_wall_ms_per_window": 25.0,
           "timing": "ingestion_time"
         },
         "10": {
@@ -90,71 +118,125 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.002678756,
           "detail": "build Kll in tumbling windows of 10000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 1000.0 states emitted; x 1.0000/s; keeps 65360000 bytes",
+          "ingest_cpu_core_seconds_per_second": 0.000178756,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.0,
+          "refresh_cpu_ms_per_window": 25.0,
+          "refresh_wall_ms_per_window": 25.0,
           "timing": "ingestion_time"
         },
         "11": {
-          "cost_per_second": 2.22631207834e-9,
+          "cost_per_second": 2.82139885514e-8,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.000198,
-          "detail": "time range 180s: 18 tumbling windows of states; x 0.1000/s; holds 344 bytes for 1.980 ms",
+          "cpu_core_seconds_per_second": 0.000938026666667,
+          "detail": "merge tumbling windows of 10000 ms into 60000 ms for 10000 groups: 1000.0 states merged, 166.7 states emitted; x 1.0000/s; keeps 15360000 bytes",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
-          "operator": "TimeRange",
-          "timing": "query_time"
+          "operator": "SummaryMergeWindows",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.0,
+          "refresh_cpu_ms_per_window": 56.2816,
+          "refresh_wall_ms_per_window": 56.2816,
+          "timing": "ingestion_time"
         },
         "12": {
-          "cost_per_second": 3.40045117397e-7,
+          "cost_per_second": 8.8640615517e-10,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.03022752,
-          "detail": "merge 180000 states into 10000; x 0.1000/s; holds 4800000 bytes for 302.275 ms",
+          "cpu_core_seconds_per_second": 0.0000788337,
+          "detail": "time range cover 180s: 2.17 + 5.00 tumbling windows of states per level; x 0.1000/s; holds 357 bytes for 0.788 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
-          "operator": "SummaryMerge",
+          "operator": "TimeRangeCover",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.788337,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "13": {
-          "cost_per_second": 3.22387968e-8,
+          "cost_per_second": 2.7325875408e-7,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.0028672,
-          "detail": "estimate 10000 groups x 1; x 0.1000/s",
+          "cpu_core_seconds_per_second": 0.024289509486,
+          "detail": "merge 71667 states into 10000; x 0.1000/s; holds 5280000 bytes for 242.895 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
-          "operator": "SummaryEstimate",
+          "operator": "SummaryMerge",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 242.89509486,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "14": {
+          "cost_per_second": 3.27245376e-8,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 0.0029104,
+          "detail": "estimate 10000 groups x 1; x 0.1000/s",
+          "ingest_cpu_core_seconds_per_second": 0.0,
+          "multiplier": 1,
+          "operator": "SummaryEstimate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 29.104,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
+          "timing": "query_time"
+        },
+        "15": {
           "cost_per_second": 1.12440000368e-11,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1e-6,
           "detail": "operator: pass 10000 rows; x 0.1000/s; holds 32 bytes for 0.010 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Project",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.01,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 4.12280021255e-12,
+          "cost_per_second": 4.12280020918e-12,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 3.66666666667e-7,
-          "detail": "time range 300s: 1 tumbling windows of states; x 0.0033/s; holds 504 bytes for 0.110 ms",
+          "detail": "time range 300s: 1 tumbling windows of states; x 0.0033/s; holds 496 bytes for 0.110 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.11,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "3": {
-          "cost_per_second": 4.12492553889e-10,
+          "cost_per_second": 4.12489180017e-10,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000366666666667,
-          "detail": "merge 10000 states into 10000; x 0.0033/s; holds 5040000 bytes for 11.000 ms",
+          "detail": "merge 10000 states into 10000; x 0.0033/s; holds 4960000 bytes for 11.000 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 11.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "4": {
-          "cost_per_second": 1.08272224e-9,
+          "cost_per_second": 1.08002368e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.0000962933333333,
+          "cpu_core_seconds_per_second": 0.0000960533333333,
           "detail": "estimate 10000 groups x 1; x 0.0033/s",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryEstimate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 28.816,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "5": {
@@ -162,35 +244,55 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 3.33333333333e-8,
           "detail": "operator: pass 10000 rows; x 0.0033/s; holds 32 bytes for 0.010 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Project",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.01,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "6": {
-          "cost_per_second": 8.24560042511e-12,
+          "cost_per_second": 8.24560041836e-12,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 7.33333333333e-7,
-          "detail": "time range 600s: 2 tumbling windows of states; x 0.0033/s; holds 504 bytes for 0.220 ms",
+          "detail": "time range 600s: 2 tumbling windows of states; x 0.0033/s; holds 496 bytes for 0.220 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.22,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "7": {
-          "cost_per_second": 8.03463481021e-9,
+          "cost_per_second": 8.02874260739e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.00071408,
-          "detail": "merge 20000 states into 10000; x 0.0033/s; holds 6720000 bytes for 214.224 ms",
+          "cpu_core_seconds_per_second": 0.000713568,
+          "detail": "merge 20000 states into 10000; x 0.0033/s; holds 6560000 bytes for 214.070 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 214.0704,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "8": {
-          "cost_per_second": 1.139392e-9,
+          "cost_per_second": 1.13399488e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.000101333333333,
+          "cpu_core_seconds_per_second": 0.000100853333333,
           "detail": "estimate 10000 groups x 1; x 0.0033/s",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryEstimate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 30.256,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "9": {
@@ -198,18 +300,64 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 3.33333333333e-8,
           "detail": "operator: pass 10000 rows; x 0.0033/s; holds 32 bytes for 0.010 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Project",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.01,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         }
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 80630075.5823,
-        "cpu_ops_per_second": 37184772.3333,
+        "average_memory_bytes": 95733111.5116,
+        "cpu_ops_per_second": 32107590.186,
         "disk_bytes": 0,
+        "latency_per_query": [
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.00333333333333,
+            "latency_ms": 350.838,
+            "precompute_execution_ms": 25.0,
+            "precompute_queueing_ms": 81.2816,
+            "query_execution_ms": 244.5564
+          },
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.00333333333333,
+            "latency_ms": 146.2176,
+            "precompute_execution_ms": 25.0,
+            "precompute_queueing_ms": 81.2816,
+            "query_execution_ms": 39.936
+          },
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.1,
+            "latency_ms": 379.07903186,
+            "precompute_execution_ms": 25.0,
+            "precompute_queueing_ms": 81.2816,
+            "query_execution_ms": 272.79743186
+          }
+        ],
         "peak_cpu_cores": 4,
-        "peak_memory_bytes": 97041480,
+        "peak_memory_bytes": 112401477,
+        "precompute_load": 0.00352136,
+        "recommended_configuration": {
+          "ingest": {
+            "predicted_busy_thread_seconds_per_second": 0.0003603134,
+            "recommended_threads": 1
+          },
+          "precompute": {
+            "predicted_busy_thread_seconds_per_second": 0.00352136,
+            "recommended_threads": 1
+          },
+          "query": {
+            "predicted_busy_thread_seconds_per_second": 0.028228051186,
+            "recommended_threads": 1
+          }
+        },
         "scanned_bytes_per_second": 21344.0
       }
     },
@@ -703,7 +851,7 @@
           "consumer": 12,
           "data_state": {
             "primitive": "SummaryState",
-            "timing": "query_time"
+            "timing": "ingestion_time"
           },
           "grouping": "NotApplicable",
           "intermediate_schema": {
@@ -744,7 +892,95 @@
           "window": "NotApplicable"
         },
         {
+          "consumer": 12,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "window_end",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Sketch": "Kll"
+                },
+                "name": "state",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                0,
+                2
+              ]
+            ]
+          },
+          "producer": 10,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
           "consumer": 13,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "window_end",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Sketch": "Kll"
+                },
+                "name": "state",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                0,
+                2
+              ]
+            ]
+          },
+          "producer": 12,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 14,
           "data_state": {
             "primitive": "SummaryState",
             "timing": "query_time"
@@ -783,12 +1019,12 @@
               ]
             ]
           },
-          "producer": 12,
+          "producer": 13,
           "role": "Input",
           "window": "NotApplicable"
         },
         {
-          "consumer": 14,
+          "consumer": 15,
           "data_state": {
             "primitive": "Raw",
             "timing": "query_time"
@@ -827,7 +1063,7 @@
               ]
             ]
           },
-          "producer": 13,
+          "producer": 14,
           "role": "Input",
           "window": "NotApplicable"
         }
@@ -1511,7 +1747,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -1545,6 +1781,71 @@
         },
         {
           "id": 11,
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
+          },
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "window_end",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Sketch": "Kll"
+                },
+                "name": "state",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                0,
+                2
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "parameters": {
+            "Kll": {
+              "k": 1404
+            }
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryMergeWindows": {
+                "child": 10,
+                "tumbling_window_width_ms": 60000
+              }
+            }
+          },
+          "retention_ms": 180000,
+          "view_coverage": {
+            "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+            "selection": [
+              {
+                "columns": []
+              }
+            ]
+          }
+        },
+        {
+          "id": 12,
           "lifetime": "None",
           "output_schema": {
             "closed": true,
@@ -1585,14 +1886,16 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
             "NonASAP": {
-              "TimeRange": {
-                "child": 10,
-                "kind": "range",
+              "TimeRangeCover": {
+                "levels": [
+                  11,
+                  10
+                ],
                 "range": {
                   "nanos": 0,
                   "secs": 180
@@ -1602,7 +1905,7 @@
           }
         },
         {
-          "id": 12,
+          "id": 13,
           "lifetime": {
             "OneEvaluation": "Memory"
           },
@@ -1645,21 +1948,21 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
             "ASAP": {
               "SummaryMerge": {
                 "children": [
-                  11
+                  12
                 ]
               }
             }
           }
         },
         {
-          "id": 13,
+          "id": 14,
           "lifetime": "None",
           "output_schema": {
             "closed": true,
@@ -1706,13 +2009,13 @@
                     "q": 0.99
                   }
                 },
-                "summary_input": 12
+                "summary_input": 13
               }
             }
           }
         },
         {
-          "id": 14,
+          "id": 15,
           "lifetime": "None",
           "output_schema": {
             "closed": true,
@@ -1754,7 +2057,7 @@
           "payload": {
             "NonASAP": {
               "Project": {
-                "child": 13,
+                "child": 14,
                 "cols": [
                   {
                     "alias": "ts",
@@ -1783,7 +2086,7 @@
       "roots": [
         9,
         5,
-        14
+        15
       ],
       "scalar_roots": []
     }

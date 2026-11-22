@@ -65,8 +65,8 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload,
 };
 use asap_types::stages::{
-    queries_of_context, ExecutionContext, Lifetime, Memo, MemoGroupId, PhysicalASAPMemoCandidates,
-    PhysicalCandidateId, PhysicalEdgeId,
+    queries_of_context, EvaluationGrid, ExecutionContext, Lifetime, Memo, MemoGroupId,
+    PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId,
 };
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
@@ -86,6 +86,10 @@ pub(crate) struct ExecutionCosts {
     /// `SelectableExecutions::executions`; or why `asap-cost` could not
     /// cost it (the MILP leaves it out).
     pub(crate) per_execution: Vec<Result<f64, String>>,
+    /// Each execution's share at the largest retention its readers may
+    /// need (`per_execution` before $\pi_v h_v$ is taken off): what the
+    /// latency rows read, whose coefficients cannot depend on $h_v$.
+    pub(crate) per_execution_at_largest_retention: Vec<Result<f64, String>>,
     /// $\rho_\kappa c_{\kappa,u,c,i}$ of each edge, by position in
     /// `SelectableExecutions::edges`; `None` when it could not be costed
     /// (the MILP leaves it out).
@@ -160,6 +164,49 @@ pub(crate) fn execution_costs(
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     cost_inputs: &CostInputs,
+) -> ExecutionCosts {
+    execution_quantities(
+        physical,
+        selectable,
+        entries,
+        data,
+        cost_inputs,
+        Quantity::CostPerSecond,
+    )
+}
+
+/// What [`execution_quantities`] attributes to executions, edges and
+/// retention, by the rules cost model 1's cost follows: a candidate's
+/// `quantity` over its baseline inputs on its execution, the difference
+/// a producer makes on the edge, and its retention's share per retained
+/// second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Quantity {
+    /// Cost model 1's cost per second.
+    CostPerSecond,
+    /// Query-time work of one run, in ms (0 at ingestion time).
+    QueryMsPerRun,
+    /// Refresh wall time per window close, in ms (0 at query time).
+    RefreshWallMsPerWindow,
+    /// CPU core-seconds per second.
+    CpuCoreSecondsPerSecond,
+    /// Peak memory, in bytes.
+    PeakMemoryBytes,
+    /// Disk, in bytes, a query-time scan's raw data apart (per source).
+    DiskBytes,
+}
+
+/// [`execution_costs`] of `quantity` instead of cost model 1's cost
+/// ([`Quantity`]). `cost_inputs` must be cost model 1's, which every
+/// quantity is costed under (only [`Quantity::CostPerSecond`] reads its
+/// prices).
+pub(crate) fn execution_quantities(
+    physical: &PhysicalASAPMemoCandidates,
+    selectable: &SelectableExecutions,
+    entries: &[QueryWorkloadEntry],
+    data: &DataWorkload,
+    cost_inputs: &CostInputs,
+    quantity: Quantity,
 ) -> ExecutionCosts {
     let memo = &physical.logical_candidates.memo;
     let count = physical.physical_candidates.len();
@@ -298,11 +345,14 @@ pub(crate) fn execution_costs(
         .unwrap_or_else(|| (0..memo.groups().len() as u32).map(MemoGroupId).collect());
     // A candidate's (own, raw data on disk) cost per second as `node` over
     // `inputs`, a query-time `Scan` reading `scan_read_ms` per execution.
+    // `evaluation_grid`: the grid of the context it runs in, which a
+    // `TimeRangeCover`'s windows are averaged over.
     let cost_reading = |v: PhysicalCandidateId,
                         node: &PhysicalASAPDAGNode,
                         inputs: &[ProducerOutput<'_>],
                         per_second: f64,
-                        scan_read_ms: Option<u64>| {
+                        scan_read_ms: Option<u64>,
+                        evaluation_grid: Option<EvaluationGrid>| {
         cost_node(
             physical,
             v,
@@ -310,16 +360,23 @@ pub(crate) fn execution_costs(
             inputs,
             per_second,
             scan_read_ms,
+            evaluation_grid,
             data,
             cost_inputs,
         )
-        .and_then(|usage| cost_per_second(&usage, cost_inputs))
+        .and_then(|usage| quantity_of(quantity, &usage, node, cost_inputs))
+    };
+    // The evaluation grid of a context, which a cover's windows are
+    // averaged over; `None` for a context not on one evaluation grid.
+    let context_grid = |context| match selectable.context(context) {
+        ExecutionContext::Evaluation { grid } => Some(grid),
+        _ => None,
     };
     let cost = |v: PhysicalCandidateId,
                 node: &PhysicalASAPDAGNode,
                 inputs: &[ProducerOutput<'_>],
                 per_second: f64| {
-        cost_reading(v, node, inputs, per_second, baseline_scan_read_of(v))
+        cost_reading(v, node, inputs, per_second, baseline_scan_read_of(v), None)
     };
     // Each candidate's usage of one computation (what it outputs does not
     // depend on how often it runs) over its baseline inputs.
@@ -337,6 +394,7 @@ pub(crate) fn execution_costs(
                     inputs,
                     1.0,
                     baseline_scan_read_of(v),
+                    None,
                     data,
                     cost_inputs,
                 ),
@@ -344,8 +402,52 @@ pub(crate) fn execution_costs(
             });
         }
     }
+    // Producer `u`'s output at `evaluation_grid` when it is a
+    // `TimeRangeCover` (its windows, and so its rows, depend on the grid it
+    // runs on); `None` for any other producer, whose baseline output holds.
+    let cover_output_at = |u: PhysicalCandidateId, evaluation_grid: Option<EvaluationGrid>| {
+        if !matches!(
+            physical.operator(u),
+            asap_types::ir::Operator::NonASAP(asap_types::ir::NonASAPOp::TimeRangeCover { .. })
+        ) {
+            return None;
+        }
+        evaluation_grid?;
+        let usage = cost_node(
+            physical,
+            u,
+            &nodes[u.0],
+            baseline[u.0].as_ref()?,
+            1.0,
+            None,
+            evaluation_grid,
+            data,
+            cost_inputs,
+        )
+        .ok()?;
+        Some(usage.producer_output(&nodes[u.0].payload, &nodes[u.0].output_schema))
+    };
+    // `v`'s baseline inputs, each cover among them as it runs at
+    // `evaluation_grid` (the largest of its candidates', as the baseline).
+    let inputs_at = |v: PhysicalCandidateId, evaluation_grid: Option<EvaluationGrid>| {
+        let mut inputs = baseline[v.0].clone()?;
+        for (i, input) in inputs.iter_mut().enumerate() {
+            let at_grid: Vec<ProducerOutput<'_>> = physical
+                .admissible_edges_into(v, i)
+                .iter()
+                .filter_map(|&edge| {
+                    cover_output_at(physical.edge(edge).producer_candidate_id, evaluation_grid)
+                })
+                .collect();
+            if let Some(largest) = at_grid.into_iter().max_by_key(|output| output.output.bytes) {
+                *input = largest;
+            }
+        }
+        Some(inputs)
+    };
     // Each execution's (own, raw data on disk) cost per second at its
-    // rate, over its baseline inputs, and that rate.
+    // rate, over its baseline inputs (covers at its context's grid), and
+    // that rate.
     let at_rate: Vec<Result<(f64, f64, f64), String>> = executions
         .iter()
         .zip(&execution_read_ms)
@@ -361,10 +463,18 @@ pub(crate) fn execution_costs(
                 execution,
                 cost_inputs.non_repeating_query_horizon_seconds,
             )?;
-            let inputs = baseline[v.0]
-                .as_ref()
-                .ok_or("it reads a group on a cycle of candidates")?;
-            let (own, raw_data) = cost_reading(v, &nodes[v.0], inputs, per_second, read_ms)?;
+            // A context on one grid charges a cover its windows there.
+            let evaluation_grid = context_grid(execution.context);
+            let inputs =
+                inputs_at(v, evaluation_grid).ok_or("it reads a group on a cycle of candidates")?;
+            let (own, raw_data) = cost_reading(
+                v,
+                &nodes[v.0],
+                &inputs,
+                per_second,
+                read_ms,
+                evaluation_grid,
+            )?;
             Ok((own, raw_data, per_second))
         })
         .collect();
@@ -442,6 +552,20 @@ pub(crate) fn execution_costs(
             }
         }
     }
+    // Each execution's own share at its largest retention (no $\pi_v h_v$
+    // taken off): a time row's coefficient, an upper bound whatever $h_v$
+    // the plan selects, exact when retention does not change the time.
+    let per_execution_at_largest_retention: Vec<Result<f64, String>> = executions
+        .iter()
+        .zip(&at_rate)
+        .map(|(execution, at_rate)| {
+            let &(own, raw_data, _) = at_rate.as_ref().map_err(Clone::clone)?;
+            Ok(match query_time_scan[execution.candidate.0] {
+                true => own,
+                false => own + raw_data,
+            })
+        })
+        .collect();
     let per_execution: Vec<Result<f64, String>> = executions
         .iter()
         .zip(&at_rate)
@@ -477,12 +601,24 @@ pub(crate) fn execution_costs(
             per_execution[producer].as_ref().ok()?;
             let &(own, raw_data, per_second) = at_rate[consumer].as_ref().ok()?;
             let produced = usage[u.0].as_ref()?.as_ref().ok()?;
-            let mut inputs = baseline[c.0].clone()?;
+            // At the consumer's context grid, as its own cost (`at_rate`).
+            let evaluation_grid = context_grid(selectable.executions()[consumer].context);
+            let mut inputs = inputs_at(c, evaluation_grid)?;
             if !reads_one_batch_of(physical, &nodes, c, u) {
-                inputs[e.input_index_of_consumer] =
-                    produced.producer_output(&nodes[u.0].payload, &nodes[u.0].output_schema);
+                inputs[e.input_index_of_consumer] = cover_output_at(u, evaluation_grid)
+                    .unwrap_or_else(|| {
+                        produced.producer_output(&nodes[u.0].payload, &nodes[u.0].output_schema)
+                    });
             }
-            let (with_u_own, with_u_raw_data) = cost(c, &nodes[c.0], &inputs, per_second).ok()?;
+            let (with_u_own, with_u_raw_data) = cost_reading(
+                c,
+                &nodes[c.0],
+                &inputs,
+                per_second,
+                baseline_scan_read_of(c),
+                evaluation_grid,
+            )
+            .ok()?;
             // A scan that is not materialized reads, in its one consumer's
             // run, what that consumer reads: on this edge.
             let scan_read = match scan_read_ms {
@@ -494,6 +630,8 @@ pub(crate) fn execution_costs(
                         baseline[u.0].as_ref()?,
                         scan_per_second,
                         *read_ms,
+                        // A scan's cost does not depend on its readers' grid.
+                        None,
                     )
                     .ok()?;
                     reading_own - scan_own
@@ -505,6 +643,7 @@ pub(crate) fn execution_costs(
         .collect();
     let mut costs = ExecutionCosts {
         per_execution,
+        per_execution_at_largest_retention,
         per_edge,
         retention_cost_per_retained_second,
         retention_need_ms_per_edge,
@@ -659,6 +798,9 @@ fn logical_output<'a: 'b, 'b>(
             output = Some(usage.producer_output(payload, schema));
             continue;
         };
+        if known.raw_rows_per_ms != usage.raw_rows_per_ms {
+            known.raw_rows_per_ms = None;
+        }
         if usage.output.bytes > known.output.bytes {
             known.family = usage.family;
             known.state_input_rows = usage.state_input_rows;
@@ -686,6 +828,7 @@ fn cost_node<'a>(
     inputs: &[ProducerOutput<'a>],
     per_second: f64,
     scan_read_ms: Option<u64>,
+    evaluation_grid: Option<EvaluationGrid>,
     data: &DataWorkload,
     cost_inputs: &'a CostInputs,
 ) -> Result<NodeResourceUsageAndCost<'a>, String> {
@@ -693,8 +836,16 @@ fn cost_node<'a>(
         ExecutionTiming::QueryTime => scan_read_ms,
         ExecutionTiming::IngestionTime => ingestion_window_ms(physical, v),
     };
-    node_resource_usage_and_cost(node, inputs, (1, per_second), window_ms, data, cost_inputs)
-        .map_err(|error| error.to_string())
+    node_resource_usage_and_cost(
+        node,
+        inputs,
+        (1, per_second),
+        window_ms,
+        evaluation_grid,
+        data,
+        cost_inputs,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// The time between two outputs of ingestion-time candidate `v`: the
@@ -707,6 +858,62 @@ fn ingestion_window_ms(
     v: PhysicalCandidateId,
 ) -> Option<u64> {
     RefreshWindow::computed_from(physical, v).map(|window| window.width_ms)
+}
+
+/// A candidate's `quantity` from its usage: its own, and a query-time
+/// scan's raw data on disk apart ([`cost_per_second`]).
+fn quantity_of(
+    quantity: Quantity,
+    usage: &NodeResourceUsageAndCost<'_>,
+    node: &PhysicalASAPDAGNode,
+    cost_inputs: &CostInputs,
+) -> Result<(f64, f64), String> {
+    let query_time = usage.cost.timing == ExecutionTiming::QueryTime;
+    // The ingest threads building partial copies of its newest window, as
+    // `plan_cost` counts them: the deployment's `ingest_threads`, else one
+    // per core of its own ingestion work (`plan_cost` also counts its
+    // producers' work there, which the candidate alone does not know).
+    let copies = || -> f64 {
+        let own_cores = match query_time {
+            true => 0.0,
+            false => usage.work_ms_per_execution / 1_000.0,
+        };
+        (asap_cost::ingest_threads_building_copies(cost_inputs, own_cores) - 1) as f64
+    };
+    Ok(match quantity {
+        Quantity::CostPerSecond => return cost_per_second(usage, cost_inputs),
+        Quantity::QueryMsPerRun => (
+            if query_time {
+                usage.work_ms_per_execution
+            } else {
+                0.0
+            },
+            0.0,
+        ),
+        // With the merging of the partial copies of its newest window.
+        Quantity::RefreshWallMsPerWindow => {
+            let refresh = &usage.cost.phase_times;
+            let compaction = match refresh.refresh_window_width_ms {
+                Some(_) => {
+                    copies()
+                        * usage.output.rows as f64
+                        * asap_cost::partial_copy_merge_ms(node, usage, cost_inputs)
+                }
+                None => 0.0,
+            };
+            (refresh.refresh_wall_ms_per_window + compaction, 0.0)
+        }
+        Quantity::CpuCoreSecondsPerSecond => (usage.cost.cpu_core_seconds_per_second, 0.0),
+        // With the partial copies of an in-memory state's newest window.
+        Quantity::PeakMemoryBytes => (
+            usage.peak_memory_bytes as f64 + copies() * usage.maintained.unwrap_or(0) as f64,
+            0.0,
+        ),
+        Quantity::DiskBytes => (
+            usage.disk_bytes as f64,
+            usage.raw_scan.map_or(0.0, |(_, bytes)| bytes as f64),
+        ),
+    })
 }
 
 /// A candidate's cost per second from its usage under cost model 1: its

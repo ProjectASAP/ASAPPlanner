@@ -699,11 +699,8 @@ fn try_installed_answers(
     let views = plan.materialized_views().unwrap();
     for view in &views {
         let node = dag.nodes.iter().find(|n| n.id == view.node_id).unwrap();
-        let Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-            tumbling_window_width_ms,
-            ..
-        }) = node.payload
-        else {
+        // A chain, or a wider level merged from a narrower one.
+        let Some(tumbling_window_width_ms) = node.payload.chain_tumbling_window_width_ms() else {
             panic!("only tumbling-window chains are refreshed here: {node:?}");
         };
         let width_ms = tumbling_window_width_ms as i64;

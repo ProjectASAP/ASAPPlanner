@@ -29,6 +29,10 @@ pub(super) struct MaterializedViewSlot {
     /// chain, the windows the `TimeRange`s above it select; for any other
     /// view, the data its state summarizes.
     pub(super) read_window: TimeWindow,
+    /// A chain read only as a level of `TimeRangeCover`s, each read: a query
+    /// run reads only the union of the windows they take from it.
+    pub(super) cover_reads:
+        Option<Vec<planner_types::ir::operator::tumbling_window_chain::CoverLevel>>,
 }
 
 /// A `Scan` leaf, computed once at compile time: what [`CompiledPhysicalDAG::instantiate`]
@@ -195,6 +199,7 @@ impl CompiledPhysicalDAG {
                         slot.view.clone(),
                         slot.schema.clone(),
                         slot.read_window,
+                        slot.cover_reads.clone(),
                     );
                     dag.add(id, vec![], scan, lifetime)?;
                 }

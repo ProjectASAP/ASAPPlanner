@@ -727,10 +727,83 @@ function queryScheduleText(query) {
 function usageText(usage) {
   if (!usage || typeof usage !== 'object') return '';
   const n = (x) => (typeof x === 'number' ? Number(x.toPrecision(3)).toLocaleString('en-US') : '—');
-  const latency = (usage.latency_per_query || []).map((l, i) => `q${i + 1} ${n(l.compaction_ms + l.query_ms)} ms`).join(', ');
+  const latency = (usage.latency_per_query || []).map((l, i) => `q${i + 1} ${n(latencyMs(l))} ms`).join(', ');
   return [`CPU ${n(usage.cpu_ops_per_second)} ops/s`, `scans ${n(usage.scanned_bytes_per_second)} B/s`,
     `memory ${n(usage.average_memory_bytes)} B average, ${n(usage.peak_memory_bytes)} B peak`, `disk ${n(usage.disk_bytes)} B`,
     `${n(usage.peak_cpu_cores)} peak cores`].concat(latency ? [`latency ${latency}`] : []).join(' · ');
+}
+
+// One query's predicted latency per request in ms: the sum of its parts
+// (allowed lateness, precompute queueing, precompute execution, query
+// execution); documents written before the breakdown carry compaction and
+// query time.
+function latencyMs(latency) {
+  if (!latency || typeof latency !== 'object') return undefined;
+  if (typeof latency.latency_ms === 'number') return latency.latency_ms;
+  return (latency.compaction_ms || 0) + (latency.query_ms || 0);
+}
+
+// Each query's latency breakdown as one line, e.g. "q1 41.6 ms = lateness 0
+// + queueing 0 + precompute 40 + execution 1.6 ms, 0.1/s".
+function latencyBreakdownText(usage) {
+  const n = (x) => (typeof x === 'number' ? Number(x.toPrecision(3)).toLocaleString('en-US') : '—');
+  return ((usage && usage.latency_per_query) || [])
+    .filter((l) => typeof l.latency_ms === 'number')
+    .map((l, i) => `q${i + 1} ${n(l.latency_ms)} ms = lateness ${n(l.allowed_lateness_ms)} + queueing ${n(l.precompute_queueing_ms)}`
+      + ` + precompute ${n(l.precompute_execution_ms)} + execution ${n(l.query_execution_ms)} ms, ${n(l.evaluations_per_second)}/s`)
+    .join(' · ');
+}
+
+// The recommended threads per role and the precompute load, e.g. "ingest 1,
+// precompute 2, query 1 threads · precompute load 0.45".
+function threadsText(usage) {
+  if (!usage || !usage.recommended_configuration) return '';
+  const n = (x) => (typeof x === 'number' ? Number(x.toPrecision(3)).toLocaleString('en-US') : '—');
+  const roles = ['ingest', 'precompute', 'query'].map((role) => {
+    const r = usage.recommended_configuration[role] || {};
+    return `${role} ${n(r.recommended_threads)} (${n(r.predicted_busy_thread_seconds_per_second)} busy)`;
+  });
+  return `recommended threads: ${roles.join(', ')} · precompute load ${n(usage.precompute_load)}`;
+}
+
+// Under cost model 3, each cluster limit with what the plan uses of it and
+// whether it binds (used ≥ 99.9% of it): memory, disk, CPU cores, the
+// precompute load bound and each query's latency bound; [] otherwise. Each
+// row is [name, text].
+function clusterLimitRows(doc) {
+  const inputs = doc && doc.cost_inputs;
+  const cluster = inputs && inputs.cost_model && inputs.cost_model.cluster_capacity;
+  if (!cluster) return [];
+  const cost = (doc.stage3_plan_selection || {}).cost || {};
+  const usage = cost.usage || {};
+  const execution = inputs.data_plane_execution || {};
+  const n = (x) => (typeof x === 'number' ? Number(x.toPrecision(4)).toLocaleString('en-US') : '—');
+  const row = (name, used, limit, unit) => {
+    const binds = typeof used === 'number' && typeof limit === 'number' && used >= 0.999 * limit;
+    return [name, `${n(used)} of ${n(limit)}${unit}${binds ? ' (binds)' : ''}`];
+  };
+  const rows = [['objective', String(cluster.objective).replace(/_/g, ' ')],
+    row('memory', usage.peak_memory_bytes, cluster.memory_bytes, ' B peak'),
+    row('disk', usage.disk_bytes, cluster.disk_bytes, ' B')];
+  if (typeof cluster.cpu_cores === 'number') {
+    const ingest = ((usage.recommended_configuration || {}).ingest || {}).predicted_busy_thread_seconds_per_second || 0;
+    const nodes = (cost.cpu_core_seconds_per_second || 0);
+    const decode = Math.max(0, ingest - Object.values(cost.per_node || {})
+      .reduce((sum, node) => sum + (node.ingest_cpu_core_seconds_per_second || 0), 0));
+    rows.push(row('CPU cores (average)', nodes + decode, cluster.cpu_cores, ''));
+  }
+  const utilization = typeof execution.max_thread_utilization === 'number' ? execution.max_thread_utilization : 0.7;
+  rows.push(row('precompute load', usage.precompute_load, utilization, ''));
+  const queries = ((doc.workload || {}).queries) || [];
+  (usage.latency_per_query || []).forEach((l, i) => {
+    const bound = ((queries[i] || {}).requirements || {}).max_latency_ms;
+    if (typeof bound === 'number') rows.push(row(`q${i + 1} latency`, latencyMs(l), bound, ' ms'));
+  });
+  rows.push(['data plane', `threads: ingest ${execution.ingest_threads == null ? 'derived' : execution.ingest_threads}, `
+    + `precompute ${execution.precompute_threads == null ? 1 : execution.precompute_threads}, `
+    + `query ${execution.query_threads == null ? 1 : execution.query_threads} · `
+    + `allowed lateness ${execution.allowed_lateness_ms || 0} ms`]);
+  return rows;
 }
 
 // The planner's inputs besides the workload, as [name, value] rows: the
@@ -749,7 +822,7 @@ function settingsRows(doc) {
   if (limits) rows.push(['left out', limits]);
   rows.push(['accuracy guarantees', { ignored: 'ignored: every output accepted, candidates compared on cost alone', enforced: 'enforced' }[doc.accuracy_guarantees] || 'not recorded']);
   rows.push(['cost model', cost && cost.source ? cost.source : 'not recorded (no plan was costed)']);
-  return rows;
+  return rows.concat(clusterLimitRows(doc));
 }
 
 // The capabilities a deployment leaves out and the caller's exclusions, as
