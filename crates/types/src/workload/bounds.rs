@@ -483,6 +483,8 @@ pub fn unchanged_source_columns<'a>(
             | ASAPOp::SummaryEstimate { .. }
             | ASAPOp::FinalizeExactAccumulator { .. },
         ) => kept(),
+        // The source's own rows, decoded: every column as the source holds it.
+        Payload::ASAP(ASAPOp::DecodeSamplesInRange { .. }) => output_names().collect(),
         _ => BTreeSet::new(),
     }
 }

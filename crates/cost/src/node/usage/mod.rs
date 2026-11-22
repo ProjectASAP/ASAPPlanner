@@ -1959,6 +1959,12 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             }
             .max(rows as f64);
             decoded_samples = Some(decoded.round() as u64);
+            // Checked against what its sources hold, as the `TimeRange` it
+            // stands for is (`range_short_of_rows_held`).
+            read_raw_rows_short_of_range = Some(match kind {
+                TimeRangeKind::Range => range_short_of_rows_held(range_ms, rows),
+                TimeRangeKind::Instant => None,
+            });
             // The deployment's calibrated decode ns per sample, when declared.
             let decode_terms = match declared_column_fact(data, &sources, "value", |facts| {
                 &facts.column_compressed_sample_decode_ns
@@ -2457,7 +2463,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // A scan's rows arrive at its sources' rate; a time range and the
     // operators that keep each row's window pass on their input's. The
     // rate holds while its rows are that rate over their span.
-    let raw_rows_per_ms = if matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. })) {
+    // A decode of compressed samples outputs its source's rows, at the
+    // sources' rate.
+    let raw_rows_per_ms = if matches!(
+        node.payload,
+        Payload::NonASAP(NonASAPOp::Scan { .. })
+            | Payload::ASAP(ASAPOp::DecodeSamplesInRange { .. })
+    ) {
         rows_per_ms
     } else if matches!(node.payload, Payload::NonASAP(NonASAPOp::TimeRange { .. }))
         || node.payload.keeps_input_window()
