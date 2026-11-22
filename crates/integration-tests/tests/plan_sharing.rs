@@ -356,7 +356,8 @@ fn per_series_states_over_different_labels_keep_their_own_chains() {
 
 /// `sum by (region, service) (increase(c[30m]))` and `increase(c[6h])`
 /// scan `c` with different labels. Pass 2 adds no scan of both label sets
-/// and no chain both queries reach: the memo does not grow for them.
+/// and no summary chain both queries reach: the memo does not grow for
+/// them (beside the compressed-sample chains, keyed by series identity).
 #[test]
 fn per_series_states_over_different_labels_add_no_shared_chain() {
     let w = per_series_workload(&[
@@ -377,10 +378,27 @@ fn per_series_states_over_different_labels_add_no_shared_chain() {
     )
     .unwrap();
     let memo = run.run.logical_asap_candidates.unwrap().memo;
+    // Compressed-sample chains are keyed by the series identity and derive
+    // each reader's labels exactly, so their groups (the chains, shifts over
+    // them) and their input, the scan of time, value and identity only, are
+    // shared on purpose.
+    let compressed_samples_only = |group: &asap_types::stages::MemoGroup| {
+        let identity_scan = matches!(
+            &group.expression,
+            asap_types::ir::Operator::NonASAP(asap_types::ir::NonASAPOp::Scan { schema, .. })
+                if schema.fields.len() == 3
+                    && schema.fields[2].name == asap_types::ir::schema::PROMQL_SERIES_IDENTITY
+        );
+        identity_scan
+            || (!group.candidates.is_empty() && group.candidates.iter().all(|candidate| {
+                candidate.origin
+                    == asap_types::stages::OriginOfCandidateForMemoGroup::CompressedSampleWindows
+            }))
+    };
     let reached_by_both = memo
         .groups()
         .iter()
-        .filter(|group| group.reached_by_queries() == [0, 1])
+        .filter(|group| group.reached_by_queries() == [0, 1] && !compressed_samples_only(group))
         .count();
     assert_eq!(reached_by_both, 0, "no group both queries reach");
 }
