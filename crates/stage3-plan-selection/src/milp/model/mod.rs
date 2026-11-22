@@ -601,6 +601,8 @@ pub(crate) fn solve_selection(
             .logical_candidates
             .failure_probability_bound(query.0),
     };
+    // The MILP's optimum, unscaled, to check against the selection's cost.
+    let mut optimum_per_second = 0.0;
     let (selected, selected_edges, answering) = loop {
         let started = Instant::now();
         let solved = model
@@ -616,6 +618,7 @@ pub(crate) fn solve_selection(
             HighsModelStatus::Optimal
                 if solved.primal_solution_status() == HighsSolutionStatus::Feasible =>
             {
+                optimum_per_second = solved.objective_value() / scale;
                 solved.get_solution().columns().to_vec()
             }
             // At LEAST_HIGHS_FEASIBILITY_TOLERANCE no plan meets every
@@ -682,6 +685,14 @@ pub(crate) fn solve_selection(
     };
     let (cost_per_second_without_request_overhead, retention_ms) =
         selection_cost_per_second(inputs, &selected, &selected_edges, &answering);
+    // The objective charges a selection what `plan_cost` charges its plan
+    // (`selection_cost_per_second`), to the solver's tolerances.
+    debug_assert!(
+        (optimum_per_second - cost_per_second_without_request_overhead).abs()
+            <= 1e-6 * cost_per_second_without_request_overhead.abs().max(1e-9),
+        "the MILP's optimum {optimum_per_second}/s is not the selection's cost \
+         {cost_per_second_without_request_overhead}/s"
+    );
     Ok(SolvedSelection {
         executions: selected.iter().map(|&index| executions[index]).collect(),
         edges: selected_edges
