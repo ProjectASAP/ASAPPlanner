@@ -27,8 +27,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 7e-7,
           "detail": "scan 10000 samples; x 0.0167/s; holds 32 bytes for 0.042 ms; keeps 320000 bytes of raw data on disk",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Scan",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.042,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "1": {
@@ -36,8 +41,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.83333333333e-6,
           "detail": "time range 15s: keep 10000 of 10000 rows; x 0.0167/s; holds 32 bytes for 0.110 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.11,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "2": {
@@ -45,8 +55,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 2.33333333333e-6,
           "detail": "sort 10000 rows in 1 partitions; x 0.0167/s; holds 320000 bytes for 0.140 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Sort",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.14,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "3": {
@@ -54,8 +69,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.66666666667e-10,
           "detail": "limit to 10 rows; x 0.0167/s; holds 32 bytes for 0.000 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Limit",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.00001,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "4": {
@@ -63,8 +83,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 8.33333333333e-11,
           "detail": "limit to 5 rows; x 0.0167/s; holds 32 bytes for 0.000 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Limit",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 5e-6,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         }
       },
@@ -73,8 +98,41 @@
         "average_memory_bytes": 0.746747741333,
         "cpu_ops_per_second": 4333.58333333,
         "disk_bytes": 320000,
+        "latency_per_query": [
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.0166666666667,
+            "latency_ms": 0.292005,
+            "precompute_execution_ms": 0.0,
+            "precompute_queueing_ms": 0.0,
+            "query_execution_ms": 0.292005
+          },
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.0166666666667,
+            "latency_ms": 0.29201,
+            "precompute_execution_ms": 0.0,
+            "precompute_queueing_ms": 0.0,
+            "query_execution_ms": 0.29201
+          }
+        ],
         "peak_cpu_cores": 2,
         "peak_memory_bytes": 320128,
+        "precompute_load": -0.0,
+        "recommended_configuration": {
+          "ingest": {
+            "predicted_busy_thread_seconds_per_second": 0.0,
+            "recommended_threads": 1
+          },
+          "precompute": {
+            "predicted_busy_thread_seconds_per_second": -0.0,
+            "recommended_threads": 1
+          },
+          "query": {
+            "predicted_busy_thread_seconds_per_second": 4.86691666667e-6,
+            "recommended_threads": 1
+          }
+        },
         "scanned_bytes_per_second": 5333.33333333
       }
     },

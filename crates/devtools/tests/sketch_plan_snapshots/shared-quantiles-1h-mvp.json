@@ -48,8 +48,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0084,
           "detail": "scan 2000000 samples; x 1.0000/s",
+          "ingest_cpu_core_seconds_per_second": 0.0084,
           "multiplier": 1,
           "operator": "Scan",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "ingestion_time"
         },
         "1": {
@@ -57,8 +62,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.448586666667,
           "detail": "build DDSketch in tumbling windows of 60000 ms for 10000 groups: 2000000 rows x 210 ops, 1000 group visits, 166.7 states emitted; x 1.0000/s; keeps 1088640000 bytes",
+          "ingest_cpu_core_seconds_per_second": 0.44817,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.0,
+          "refresh_cpu_ms_per_window": 25.0,
+          "refresh_wall_ms_per_window": 25.0,
           "timing": "ingestion_time"
         },
         "2": {
@@ -66,8 +76,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00011,
           "detail": "time range 3600s: 60 tumbling windows of states; x 0.0167/s; holds 1768 bytes for 6.600 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 6.6,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "3": {
@@ -75,8 +90,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0251833333333,
           "detail": "merge 600000 states into 10000; x 0.0167/s; holds 28960000 bytes for 1511.000 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 1511.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "4": {
@@ -84,8 +104,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000583333333333,
           "detail": "estimate 10000 groups x 1; x 0.0167/s",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryEstimate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 35.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "5": {
@@ -93,8 +118,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.66666666667e-7,
           "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 0.010 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Project",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.01,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "6": {
@@ -102,8 +132,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000583333333333,
           "detail": "estimate 10000 groups x 1; x 0.0167/s",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryEstimate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 35.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "7": {
@@ -111,8 +146,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.66666666667e-7,
           "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 0.010 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Project",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.01,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         }
       },
@@ -121,8 +161,41 @@
         "average_memory_bytes": 1089369309.53,
         "cpu_ops_per_second": 477047000.0,
         "disk_bytes": 0,
+        "latency_per_query": [
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.0166666666667,
+            "latency_ms": 1577.61,
+            "precompute_execution_ms": 25.0,
+            "precompute_queueing_ms": 0.0,
+            "query_execution_ms": 1552.61
+          },
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.0166666666667,
+            "latency_ms": 1577.61,
+            "precompute_execution_ms": 25.0,
+            "precompute_queueing_ms": 0.0,
+            "query_execution_ms": 1552.61
+          }
+        ],
         "peak_cpu_cores": 3,
         "peak_memory_bytes": 1117601864,
+        "precompute_load": 0.000416666666667,
+        "recommended_configuration": {
+          "ingest": {
+            "predicted_busy_thread_seconds_per_second": 0.45657,
+            "recommended_threads": 1
+          },
+          "precompute": {
+            "predicted_busy_thread_seconds_per_second": 0.000416666666667,
+            "recommended_threads": 1
+          },
+          "query": {
+            "predicted_busy_thread_seconds_per_second": 0.0264603333333,
+            "recommended_threads": 1
+          }
+        },
         "scanned_bytes_per_second": 64000000.0
       }
     },
