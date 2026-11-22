@@ -509,20 +509,22 @@ fn standard_normal_quantile(p: f64) -> f64 {
 /// not under-charged at a few rows per state; per-series values narrower
 /// than their column (latencies of one service, levels of one series) are
 /// over-charged instead, which a measured table's bytes per state corrects.
+/// Buckets a ratio of `ratio` between the largest and smallest magnitude
+/// spans at relative accuracy `alpha`, from a bucket boundary: at least
+/// one.
+fn ddsketch_buckets_spanned(alpha: f64, ratio: f64) -> u64 {
+    let sketch = asap_sketchlib::DdSketch::new(alpha);
+    let ratio = ratio.max(1.0);
+    match (sketch.bucket_index_for(ratio), sketch.bucket_index_for(1.0)) {
+        (Some(high), Some(low)) => u64::try_from(i64::from(high) - i64::from(low) + 1)
+            .unwrap_or(1)
+            .max(1),
+        _ => 1,
+    }
+}
+
 fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
-    use asap_sketchlib::DdSketch;
-    let sketch = DdSketch::new(alpha);
-    // Buckets a ratio of `ratio` between the largest and smallest
-    // magnitude spans, at least one.
-    let buckets_spanned = |ratio: f64| -> u64 {
-        let ratio = ratio.max(1.0);
-        match (sketch.bucket_index_for(ratio), sketch.bucket_index_for(1.0)) {
-            (Some(high), Some(low)) => u64::try_from(i64::from(high) - i64::from(low) + 1)
-                .unwrap_or(1)
-                .max(1),
-            _ => 1,
-        }
-    };
+    let buckets_spanned = |ratio: f64| ddsketch_buckets_spanned(alpha, ratio);
     let stores = match (input_rows.non_negative, input_rows.rows_per_state) {
         (true, _) | (false, Some(0 | 1)) => 1,
         (false, _) => 2,
@@ -555,72 +557,86 @@ fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
 }
 
 /// The bytes a DDSketch of relative accuracy `alpha` takes stored after
-/// folding `input_rows`: a sealed window is kept in the sketch's view layout
-/// (`DdSketch::to_view_bytes`, which the executor's mapped state columns
-/// read in place), so its price is that layout's size:
+/// folding `input_rows`: the executor seals a DDSketch window into the
+/// sketch's view layout (`DdSketch::to_view_bytes`, one buffer per column,
+/// read in place), so its price is that layout's size, an upper bound on
+/// it whatever the values within the column's range:
 ///
 /// - an 88-byte header (scalars, count width, form, each store's offset and
-///   length);
-/// - per store (one when its values are proven non-negative or it folds one
-///   row, else two), its counts at the narrowest width holding every count
-///   (1, 2, 4 or 8 bytes; no count exceeds the state's rows, so the width
-///   follows from them; unknown rows take 8), either dense over the
-///   occupied range ([`ddsketch_span`] buckets) or sparse as a 4-byte index
-///   and a count per occupied bucket, whichever is smaller;
+///   length) and the state's 4-byte offset in its column;
+/// - its counts at the narrowest width holding every count (1, 2, 4 or 8
+///   bytes; no count exceeds the state's rows, so the width follows from
+///   them; unknown rows take 8);
+/// - the counts dense over the buckets the column's range spans (declared
+///   in `column_magnitudes`, or the assumed nine decades; plus one bucket
+///   for a range that does not start on a bucket boundary) per store (one
+///   when its values are proven non-negative or it folds one row, else
+///   two), or sparse as a 4-byte index and a count per occupied bucket, at
+///   most one bucket per row, whichever is smaller;
 /// - each array padded to 8 bytes.
 ///
-/// The occupied buckets are those `n` rows are expected to fill when spread
-/// evenly over the span `s`: `s (1 − (1 − 1/s)^n)`.
 /// [`ddsketch_open_state_bytes`] prices one still receiving values or
 /// merging (an owned sketch with 8-byte counts). A measured table's bytes
 /// per state (`memory_bytes_per_state`, fitted from a deployment's stored
 /// states) replace this estimate.
 ///
-/// How it compares with the view layout an `asap_sketchlib` sketch is
-/// stored in, at α = 0.01, the mean of 20 series of 10 to 36,000 values
-/// each (the bands `state_bytes::tests` pins):
+/// How it compares with what the executor holds for a sealed state, at
+/// α = 0.01, the mean of 20 series of 10 to 36,000 values each (the bands
+/// `state_bytes::tests` pins; a grid over α 0.001–0.1, 1–140,000 rows and
+/// 15 shapes checks it never falls below 0.99):
 ///
-/// | values | range declared | charged ÷ stored |
+/// | values | range declared | charged ÷ held |
 /// |---|---|---|
-/// | exponential (latency-like) | no | 1.0–3.1 |
+/// | exponential (latency-like) | no | 1.0–4.0 |
 /// | exponential (latency-like) | the generator's [2.7e-8, 1104] | 1.0–4.7 |
-/// | lognormal σ = 1 | no | 1.0–4.3 |
-/// | lognormal σ = 2 | no | 1.0–2.4 |
-/// | log-uniform over 7 decades | no | 0.99–2.4 |
-/// | log-uniform over 7 decades | [0.001, 1e4] | 0.99–1.9 |
-/// | Zipf(1.1) integers in [1, 1e6] | no | 1.03–2.1 |
+/// | lognormal σ = 1 | no | 1.0–5.4 |
+/// | lognormal σ = 2 | no | 1.0–3.0 |
+/// | log-uniform over 7 decades | no | 1.0–2.4 |
+/// | log-uniform over 7 decades | [0.001, 1e4] | 1.0–1.9 |
+/// | Zipf(1.1) integers in [1, 1e6] | no | 1.02–2.8 |
 /// | Zipf(1.1) integers in [1, 1e6] | [1, 1e6] | 1.0–1.9 |
-/// | narrow gauge 100 ± 10 | no | 1.4–19 |
-/// | narrow gauge 100 ± 10 | [90, 110] | 1.0–1.08 |
-/// | counter readings near 1e6 | no | 1.5–20 |
-/// | per-series levels ± 10%, levels over [1, 1e5] | no | 1.4–19 |
+/// | narrow gauge 100 ± 10 | no | 1.4–20 |
+/// | narrow gauge 100 ± 10 | [90, 110] | 1.0–1.07 |
+/// | counter readings near 1e6 | no | 1.5–22 |
+/// | per-series levels ± 10%, levels over [1, 1e5] | no | 1.4–20 |
 /// | per-series levels ± 10%, levels over [1, 1e5] | [1, 1e5] | 1.4–12 |
 ///
-/// Few rows per state are stored sparse and priced closely whatever the
-/// span. The count width follows the rows, a bound: from 256 to 65,535
-/// rows a state whose largest count fits a byte is charged 2 bytes per
-/// count, up to about 2x (4.7x for latency-like values in their declared
-/// range at 600 rows). Narrow values without a declared range are charged
-/// the wide-spread margin's span. Where this estimate is far from a
-/// deployment's states, its measured table's bytes per state, fitted from
-/// its stored states per family, replace it.
+/// Few rows per state are stored sparse and priced closely. Past them the
+/// price is the whole column range dense: values narrower than it (without
+/// a declared range, anything narrower than nine decades) are
+/// over-charged. The count width follows the rows: from 256 to 65,535 rows
+/// a state whose largest count fits a byte is charged 2 bytes per count.
+/// Values outside the assumed nine decades with no declared range can be
+/// under-charged. Where this estimate is far from a deployment's states,
+/// its measured table's bytes per state, fitted from its stored states per
+/// family, replace it.
 ///
-/// Example: at α = 0.01, a state of 10 values with no declared range spans
-/// 387 buckets (the spread 2.3e3): its 10 values sit in 10 buckets, stored
-/// sparse at 1-byte counts, 88 + 40 + 16 = 144 bytes; dense it would take
-/// 88 + 392. A gauge declared within [90, 110] spans 11 buckets: 600 rows
-/// fill them all, dense at 2-byte counts, 88 + 24 = 112 bytes.
+/// Example: at α = 0.01, a state of 10 values with no declared range is
+/// stored sparse in at most 10 buckets at 1-byte counts: 88 + 4 + 40 + 16 =
+/// 148 bytes. A gauge declared within [90, 110] spans 12 buckets: 600 rows,
+/// dense at 2-byte counts, 88 + 4 + 24 = 116 bytes.
 fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
+    // The view's header, and the state's 4-byte offset in its column.
     const HEADER_BYTES: u64 = 88;
+    const OFFSET_BYTES: u64 = 4;
     let padded = |bytes: u64| bytes.div_ceil(8) * 8;
-    let (span, stores) = ddsketch_span(alpha, input_rows);
-    let Some(rows) = input_rows.rows_per_state else {
-        return HEADER_BYTES + stores * padded(8 * span);
+    let (_, stores) = ddsketch_span(alpha, input_rows);
+    // The most buckets a store's values can occupy: the declared (or
+    // assumed) range's, plus one for a range that does not start on a
+    // bucket boundary.
+    let column_span = match input_rows.rows_per_state {
+        Some(0 | 1) => 1,
+        _ => {
+            let ratio = input_rows
+                .value_magnitude_range
+                .unwrap_or(DDSKETCH_ASSUMED_MAGNITUDE_RANGE)
+                .magnitude_ratio();
+            ddsketch_buckets_spanned(alpha, ratio) + 1
+        }
     };
-    let rows_per_store = rows.div_ceil(stores).max(1);
-    let occupied = (span as f64 * (1.0 - (1.0 - 1.0 / span as f64).powf(rows_per_store as f64)))
-        .ceil()
-        .clamp(1.0, span.min(rows_per_store) as f64) as u64;
+    let Some(rows) = input_rows.rows_per_state else {
+        return HEADER_BYTES + OFFSET_BYTES + stores * padded(8 * column_span);
+    };
     // No count exceeds the rows, so they bound the width.
     let count_bytes = match rows {
         0..=0xff => 1,
@@ -628,9 +644,12 @@ fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
         0x1_0000..=0xffff_ffff => 4,
         _ => 8,
     };
-    let dense = padded(count_bytes * span);
-    let sparse = padded(4 * occupied) + padded(count_bytes * occupied);
-    HEADER_BYTES + stores * dense.min(sparse)
+    let dense = stores * padded(count_bytes * column_span);
+    // At most one occupied bucket per row, however the rows split between
+    // the stores; each further store pads its two arrays.
+    let occupied = rows.max(1).min(stores * column_span);
+    let sparse = padded(4 * occupied) + padded(count_bytes * occupied) + (stores - 1) * 16;
+    HEADER_BYTES + OFFSET_BYTES + dense.min(sparse)
 }
 
 /// The bytes a DDSketch still receiving values holds (the current window

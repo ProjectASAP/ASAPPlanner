@@ -2094,10 +2094,10 @@ fn a_ddsketch_over_a_scan_is_costed_at_its_declared_value_magnitude_range() {
         state_bytes(&data(Some(latency)), BTreeSet::from(["ts"])),
         ddsketch_costed_bytes(false, None)
     );
-    // A declared range floors a state's spread at its rows' log-uniform
-    // spread over it: 600 rows within seven decades are charged nearly all
-    // of them, more than their undeclared wide-spread margin.
-    assert!(ddsketch_costed_bytes(false, Some(latency)) > ddsketch_costed_bytes(false, None));
+    // A stored state is charged at most the buckets its column's range
+    // spans: 600 rows within a declared seven decades are charged less
+    // than within the assumed nine.
+    assert!(ddsketch_costed_bytes(false, Some(latency)) < ddsketch_costed_bytes(false, None));
 }
 
 /// A DDSketch over a scan of `latency` whose `value` declares no
