@@ -1,6 +1,6 @@
 # Compressed sample windows
 
-**Status:** Accepted (design and test plan); tests written, implementation pending.
+**Status:** Accepted; implemented. The deployment's data plane provides the codec.
 
 **Audience:** Planner designers and implementers, and implementers of a
 deployment's data plane.
@@ -278,6 +278,10 @@ fields (name, type and nullability, so the decode's schema equals R's);
   more window. Their edges are exempt from
   `ChainWidthDoesNotDivideEvaluationGrid`, and Stage 3's delivery check treats
   the decode's read as reaching the open window.
+- **Ingestion time only.** Stage 2 offers a compressed-samples chain at
+  ingestion time only: built at query time it would re-read the raw rows its
+  decode stands for. Over data at rest (no ingestion pipeline) the state is
+  therefore never selected.
 - **Aligned widths (sealed reads).** The gcd closure of `gcd(g_q, W, o_1, …)`
   over R's readers, as `add_chain_groups` computes it; the grid rule applies to
   their edges as to any chain's. They exist so that a deployment without
