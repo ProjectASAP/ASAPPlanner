@@ -103,6 +103,7 @@ fn one_second_of_rows(scan: &PhysicalASAPDAGNode) -> ProducerOutput<'_> {
         raw_rows_short_of_range: None,
         state_data_span_ms: None,
         raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     }
 }
