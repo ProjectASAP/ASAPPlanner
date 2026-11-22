@@ -155,14 +155,17 @@ async fn c2_the_fixed_cost_per_step_is_charged_per_step() {
 
 /// The plan report for `workload` without raw data retained, on a
 /// deployment that runs neither wider tumbling-window levels nor covers:
-/// the merge reads the chain's 30 windows per group, the scale C3 prices.
+/// the merge reads the chain's 30 windows per group, the scale C3 prices
+/// (compressed samples, which would answer exactly without a merge, are
+/// excluded too).
 async fn plan_single_chain(workload: &PlanningWorkload, cost_inputs: &Value) -> Value {
     let cost_inputs: CostInputs = serde_json::from_value(cost_inputs.clone()).unwrap();
     let capabilities = asap_planner::DeploymentCapabilities {
         raw_data_retained: false,
         excluded_candidates: serde_json::from_value(json!([
             {"operator": "SummaryMergeWindows"},
-            {"operator": "TimeRangeCover"}
+            {"operator": "TimeRangeCover"},
+            {"summary_family": "compressed_samples"}
         ]))
         .unwrap(),
         ..Default::default()
