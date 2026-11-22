@@ -26,6 +26,9 @@ pub struct InMemoryDataStore {
     raw_data: Vec<RawTable>,
     /// Each view's appended rows, oldest first.
     materialized_views: BTreeMap<PhysicalASAPNodeId, Vec<AppendedRows>>,
+    /// Each compressed-samples chain's open window: its `(start, end so
+    /// far]` and its rows, as [`Self::set_open_window`] last gave them.
+    open_windows: BTreeMap<PhysicalASAPNodeId, AppendedRows>,
 }
 
 /// Rows appended for a view or a raw table bound for appending: the
@@ -185,6 +188,23 @@ impl InMemoryDataStore {
         });
         Ok(())
     }
+    /// The open window's snapshot `(start_ms, t_ms]` of the
+    /// compressed-samples chain `view`, replacing the previous one: the
+    /// chain's rows of each series' samples that arrived in the window so
+    /// far (the rows an ingestion run of the chain over `(start_ms, t_ms]`
+    /// builds; empty when none has). What a `DecodeSamplesInRange` that
+    /// reads unsealed windows receives after the sealed ones
+    /// ([`DataStore::read_open_window`]).
+    pub fn set_open_window(
+        &mut self,
+        view: &MaterializedView,
+        window_ms: (i64, i64),
+        batches: Vec<Batch>,
+    ) {
+        held_by_store(&batches);
+        self.open_windows.insert(view.node_id, (window_ms, batches));
+    }
+
     /// Append `batches` as the rows of `view` covering `time_range_ms`
     /// (`(start, end]`), then drop its rows ending `view.retention_ms()` or
     /// more before `end` (the newest rows are always kept). Bad input when
@@ -321,6 +341,18 @@ impl DataStore for InMemoryDataStore {
                 .flat_map(|(_, batches)| batches.iter().cloned().map(Ok)),
             context,
         ))
+    }
+    fn read_open_window(
+        &self,
+        view: &MaterializedView,
+        _: &SchemaRef,
+        context: RunContext,
+    ) -> Result<OutputStream<'_, Batch>, Error> {
+        let batches = self
+            .open_windows
+            .get(&view.node_id)
+            .map_or(&[][..], |(_, batches)| batches.as_slice());
+        Ok(stream_batches(batches.iter().cloned().map(Ok), context))
     }
 }
 

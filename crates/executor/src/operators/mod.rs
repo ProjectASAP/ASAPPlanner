@@ -20,6 +20,7 @@ use common::*;
 mod aggregate;
 mod bind_scalar_ref;
 mod current_series;
+pub(crate) mod decode_samples;
 mod filter;
 pub(crate) mod group_table;
 mod joins;
@@ -288,6 +289,8 @@ enum Kind {
         state: usize,
         query: SummaryEvaluation,
     },
+    /// A `DecodeSamplesInRange` ([`Operator::decode_samples`]).
+    DecodeSamples(Box<decode_samples::DecodeSpec>),
 }
 /// A bound operation has a fully checked input/output contract before execution.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -509,6 +512,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
                 | Kind::PerGroupKeyedSummaryBuild { .. }
                 | Kind::AllGroupsSummaryBuild { .. }
                 | Kind::SummaryMerge { .. }
+                | Kind::DecodeSamples(_)
                 | Kind::VectorToScalar { .. }
                 | Kind::Absent { .. }
                 | Kind::TimeRange {
@@ -576,6 +580,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             Kind::KeyedEvaluation { .. } => "SummaryEstimate",
             Kind::SummaryMerge { .. } => "SummaryMerge",
             Kind::Evaluation { .. } => "SummaryEvaluation",
+            Kind::DecodeSamples(_) => "DecodeSamplesInRange",
         }
     }
     fn validate_context(&self, context: &RunContext) -> Result<(), Error> {
@@ -639,6 +644,7 @@ impl PhysicalOperator<Batch, SchemaRef> for Operator {
             }
             Kind::Join { .. } | Kind::SemiJoin { .. } => joins::execute(self, inputs, context),
             Kind::SummaryMerge { .. } => summary::execute_merge(self, inputs, context),
+            Kind::DecodeSamples(_) => decode_samples::execute(self, inputs, context),
             Kind::PerGroupSummaryBuild { .. }
             | Kind::Evaluation { .. }
             | Kind::PerGroupKeyedSummaryBuild { .. }

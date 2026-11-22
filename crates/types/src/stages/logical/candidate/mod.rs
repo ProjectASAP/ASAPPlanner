@@ -107,6 +107,9 @@ pub enum OriginOfCandidateForMemoGroup {
     Rollup,
     /// A top-k read from another group's ranking.
     TopKReuse,
+    /// A compressed-samples chain, or a decode of one that stands for a
+    /// raw-range group.
+    CompressedSampleWindows,
 }
 
 /// $e_v = \operatorname{op}_v(G_{v,1}, \dots, G_{v,n})$: one operator, with

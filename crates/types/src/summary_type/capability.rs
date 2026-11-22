@@ -227,6 +227,9 @@ impl SummaryTypeCapability {
                     return stat_model_capability(kind, params)
                 }
                 FieldDataType::Plain(_) => (None, &[]),
+                // Read back as raw rows (`DecodeSamplesInRange`), never
+                // merged or estimated by a plan.
+                FieldDataType::CompressedSamples => (None, &[]),
             };
         Self {
             merge_inputs,

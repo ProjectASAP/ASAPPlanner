@@ -150,6 +150,10 @@ pub enum FieldDataType {
     Wavelet(WaveletKind, WaveletParams),
     /// Fitted statistical/parametric-model summary state.
     StatModel(StatModelKind, StatModelParams),
+    /// Every sample of one series in one window, compressed: a sealed byte
+    /// block of the deployment's sample codec. Exact, with no parameters;
+    /// read back as raw rows by `DecodeSamplesInRange`.
+    CompressedSamples,
 }
 
 impl FieldDataType {

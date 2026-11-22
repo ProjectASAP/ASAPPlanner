@@ -44,6 +44,7 @@ pub enum OperatorKind {
     #[serde(alias = "PaneChain")]
     SummaryTumblingWindowChain,
     SummaryMergeWindows,
+    DecodeSamplesInRange,
     SummarySubtract,
     SummaryDelete,
     SummaryJoin,
@@ -86,6 +87,7 @@ impl OperatorKind {
                 ASAPOp::SummaryMerge { .. } => Self::SummaryMerge,
                 ASAPOp::SummaryTumblingWindowChain { .. } => Self::SummaryTumblingWindowChain,
                 ASAPOp::SummaryMergeWindows { .. } => Self::SummaryMergeWindows,
+                ASAPOp::DecodeSamplesInRange { .. } => Self::DecodeSamplesInRange,
                 ASAPOp::SummarySubtract { .. } => Self::SummarySubtract,
                 ASAPOp::SummaryDelete { .. } => Self::SummaryDelete,
                 ASAPOp::SummaryJoin { .. } => Self::SummaryJoin,

@@ -3,6 +3,7 @@
 //! One file: `cargo test -p asap-types --test types <file>::`.
 
 mod column_lineage;
+mod compressed_sample_windows;
 mod memo_aggregate_coverage;
 mod memo_group_properties;
 mod multi_level_window_chains;

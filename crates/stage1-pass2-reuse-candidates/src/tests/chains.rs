@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use asap_types::accuracy::AccuracyTarget;
 use asap_types::ir::operator::arguments::{AtModifier, Reduction, TimeShift};
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::stages::{
     CandidateForMemoGroupId, Memo, MemoGroupId, OriginOfCandidateForMemoGroup, RootPruneReason,
@@ -87,7 +88,8 @@ fn no_chain_without_a_merge_an_anchor_or_a_grid() {
     }
     assert!(groups_where(&logical.memo, |e| matches!(
         e,
-        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { summary_type, .. })
+            if *summary_type != FieldDataType::CompressedSamples
     ))
     .is_empty());
 }
@@ -292,8 +294,9 @@ fn one_range_free_chain_group_serves_every_range_and_offset() {
             e,
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms: 60_000,
+                summary_type,
                 ..
-            })
+            }) if *summary_type != FieldDataType::CompressedSamples
         )
     });
     let [chain] = chains[..] else {

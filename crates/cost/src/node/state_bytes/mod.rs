@@ -36,7 +36,9 @@ pub(crate) fn state_row_bytes_beside_state(schema: &Schema) -> u64 {
         .fields
         .iter()
         .map(|field| match &field.dtype {
-            FieldDataType::Sketch(..) | FieldDataType::ExactAggregate(..) => 0,
+            FieldDataType::Sketch(..)
+            | FieldDataType::ExactAggregate(..)
+            | FieldDataType::CompressedSamples => 0,
             FieldDataType::Plain(DataType::Utf8) if field.name == PROMQL_SERIES_IDENTITY => {
                 SERIES_IDENTITY_BYTES
             }
@@ -59,6 +61,20 @@ pub(crate) fn state_bytes_per_row(edge: EdgeStatistics, schema: &Schema) -> u64 
 /// (about 55 bytes), and the column's 4-byte offset, rounded up. An
 /// assumption: the data workload declares no label lengths.
 const SERIES_IDENTITY_BYTES: u64 = 64;
+
+/// Bits per sample a compressed-samples window is costed at when the
+/// sources declare none (`column_compressed_bits_per_sample`): i.i.d.
+/// random doubles take 59 bits in the XOR codec, and jittered timestamps
+/// add up to 9 (design doc `compressed-sample-windows.md`, section 3.3).
+pub const ASSUMED_COMPRESSED_BITS_PER_SAMPLE: f64 = 72.0;
+
+/// Bytes of one sealed compressed-samples block of `samples` samples at
+/// `bits_per_sample`: the deployment's codec's sealed bytes per sample, as
+/// its calibration measures them (block overhead included), rounded up to
+/// whole bytes. Example: 300 samples at 58.2 bits, 2,183 bytes.
+pub fn compressed_samples_state_bytes(samples: u64, bits_per_sample: f64) -> u64 {
+    ((samples as f64 * bits_per_sample) / 8.0).ceil() as u64
+}
 
 /// Exact state that keeps every value or item of its group, so grows with
 /// the data; other exact accumulators are fixed-size.

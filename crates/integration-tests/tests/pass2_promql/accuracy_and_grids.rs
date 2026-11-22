@@ -65,22 +65,29 @@ fn a_function_of_the_value_keeps_the_readouts_below_it() {
     }
 }
 
-/// The groups whose expression is a tumbling-window chain built from the
-/// rows, with its width. A wider level (a chain group whose every
-/// candidate merges a narrower chain's windows, `SummaryMergeWindows`) is
-/// read only through a `TimeRangeCover` whose narrowest level is one of
-/// these, so it is left out: [`wider_levels_feed_only_covers`] checks it.
+/// The groups whose expression is a tumbling-window chain of a sketch or
+/// exact accumulator built from the rows, with its width. A wider level (a
+/// chain group whose every candidate merges a narrower chain's windows,
+/// `SummaryMergeWindows`) is read only through a `TimeRangeCover` whose
+/// narrowest level is one of these, so it is left out:
+/// [`wider_levels_feed_only_covers`] checks it. Compressed-sample chains
+/// are left out too: their decodes trim to the range, so their ladder
+/// widths need not divide a reader's grid (`compressed-sample-windows.md`,
+/// section 3.1).
 fn chain_widths(logical: &LogicalASAPMemoCandidates) -> Vec<u64> {
     logical
         .memo
         .groups()
         .iter()
         .filter(|group| !is_wider_level(group))
-        .filter_map(|group| match group.expression {
+        .filter_map(|group| match &group.expression {
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 tumbling_window_width_ms,
+                summary_type,
                 ..
-            }) => Some(tumbling_window_width_ms),
+            }) if *summary_type != FieldDataType::CompressedSamples => {
+                Some(*tumbling_window_width_ms)
+            }
             _ => None,
         })
         .collect()

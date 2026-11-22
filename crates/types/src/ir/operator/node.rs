@@ -136,6 +136,7 @@ impl<C> Operator<C> {
                 | ASAPOp::MaintainPopulation { .. }
                 | ASAPOp::EvaluatePopulation { .. }
                 | ASAPOp::SummaryMerge { .. }
+                | ASAPOp::DecodeSamplesInRange { .. }
                 | ASAPOp::SummarySubtract { .. }
                 | ASAPOp::SummaryDelete { .. }
                 | ASAPOp::SummaryJoin { .. }
@@ -173,6 +174,11 @@ impl<C> Operator<C> {
                     ..
                 },
             ) => Some(*tumbling_window_width_ms),
+            // A decode of compressed samples reads its range's samples, as
+            // the `TimeRange` it stands for does.
+            Operator::ASAP(ASAPOp::DecodeSamplesInRange { range, .. }) => {
+                Some(u64::try_from(range.as_millis()).unwrap_or(u64::MAX))
+            }
             Operator::NonASAP(
                 NonASAPOp::Scan { .. }
                 | NonASAPOp::Values { .. }
@@ -249,6 +255,7 @@ impl<C> Operator<C> {
                 | ASAPOp::MaintainPopulation { .. }
                 | ASAPOp::EvaluatePopulation { .. }
                 | ASAPOp::SummaryMerge { .. }
+                | ASAPOp::DecodeSamplesInRange { .. }
                 | ASAPOp::SummarySubtract { .. }
                 | ASAPOp::SummaryDelete { .. }
                 | ASAPOp::SummaryJoin { .. }
@@ -295,6 +302,7 @@ impl<C> Operator<C> {
                 | ASAPOp::MaintainPopulation { .. }
                 | ASAPOp::EvaluatePopulation { .. }
                 | ASAPOp::SummaryMerge { .. }
+                | ASAPOp::DecodeSamplesInRange { .. }
                 | ASAPOp::SummaryTumblingWindowChain { .. }
                 | ASAPOp::SummaryMergeWindows { .. }
                 | ASAPOp::SummarySubtract { .. }

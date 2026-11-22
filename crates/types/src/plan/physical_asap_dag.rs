@@ -623,6 +623,7 @@ fn edge_roles<C: Copy + PartialEq>(operator: &Operator<C>) -> Vec<(C, EdgeRole)>
             | ASAPOp::EvaluatePopulation { .. }
             | ASAPOp::SummaryTumblingWindowChain { .. }
             | ASAPOp::SummaryMergeWindows { .. }
+            | ASAPOp::DecodeSamplesInRange { .. }
             | ASAPOp::SummaryDelete { .. }
             | ASAPOp::Extension { .. } => vec![Input],
         },

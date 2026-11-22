@@ -119,6 +119,12 @@ pub struct DeploymentCapabilities {
     /// above imply; default none. E.g. `[{"timing": "query_time",
     /// "operator": "Scan"}]` leaves only plans that read stored state.
     pub excluded_candidates: Vec<CandidateExclusion>,
+    /// Whether the runtime answers a read of a compressed-samples chain
+    /// with its open window too (the runtime contract of a
+    /// `DecodeSamplesInRange` with `reads_unsealed_window`); default `true`.
+    /// `false` leaves the decodes that read sealed windows only, at the
+    /// widths that divide each reader's grid.
+    pub unsealed_window_reads: bool,
 }
 
 impl Default for DeploymentCapabilities {
@@ -131,6 +137,7 @@ impl Default for DeploymentCapabilities {
             counter_semantics: CounterSemanticsSupport::default(),
             state_not_mergeable_across_windows: Vec::new(),
             excluded_candidates: Vec::new(),
+            unsealed_window_reads: true,
         }
     }
 }
@@ -197,6 +204,8 @@ pub enum ExclusionSource {
     CounterNotExtrapolated,
     /// `state_not_mergeable_across_windows` lists the state's family.
     StateNotMergeableAcrossWindows,
+    /// `unsealed_window_reads` is false.
+    UnsealedWindowsNotReadable,
     /// The caller's `excluded_candidates[index]`.
     ExcludedCandidate { index: usize },
 }
@@ -221,6 +230,7 @@ impl fmt::Display for ExclusionSource {
             Self::CounterResetsNotHandled => "counter_resets_not_handled",
             Self::CounterNotExtrapolated => "counter_not_extrapolated",
             Self::StateNotMergeableAcrossWindows => "state_not_mergeable_across_windows",
+            Self::UnsealedWindowsNotReadable => "unsealed_windows_not_readable",
             Self::ExcludedCandidate { index } => {
                 return write!(f, "excluded_candidates[{index}]");
             }
@@ -389,6 +399,18 @@ impl DeploymentCapabilities {
                 CandidateExclusion {
                     summary_family: Some(family),
                     kept_across_evaluations: Some(true),
+                    ..Default::default()
+                },
+            );
+        }
+        // A runtime that does not read a compressed-samples chain's open
+        // window: only the decodes of sealed windows.
+        if !self.unsealed_window_reads {
+            exclude(
+                ExclusionSource::UnsealedWindowsNotReadable,
+                CandidateExclusion {
+                    operator: Some(OperatorKind::DecodeSamplesInRange),
+                    reads_unsealed_window: Some(true),
                     ..Default::default()
                 },
             );

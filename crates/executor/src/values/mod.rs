@@ -245,6 +245,9 @@ pub(super) fn validate_state(
         SummaryFamilyType::ExactAggregate(..) => state
             .downcast_ref::<ExactAccumulator>()
             .is_some_and(|s| s.family() == family && !s.is_keyed()),
+        SummaryFamilyType::CompressedSamples => {
+            state.is::<crate::summary_kernels::CompressedSamplesAccumulator>()
+        }
         SummaryFamilyType::Sketch(algorithm) => match algorithm {
             A::HydraCms => state.is::<HydraCmsGroup>(),
             A::CmsWithHeap => frequency(FrequencyAlgorithm::Cms),

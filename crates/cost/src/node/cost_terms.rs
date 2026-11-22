@@ -82,6 +82,8 @@ pub enum CostConstant {
     SketchChainEmitOperationsPerState,
     ExactChainEmitOperationsPerState,
     KllMergeOperationsPerOutputGroup,
+    CompressedSampleEncodeOperationsPerRow,
+    CompressedSampleDecodeOperationsPerSample,
 }
 
 impl CostConstant {
@@ -212,6 +214,12 @@ impl CostConstant {
             }
             CostConstant::SketchAllocationOperationsPerCounter => {
                 built_in::SKETCH_ALLOCATION_OPERATIONS_PER_COUNTER
+            }
+            CostConstant::CompressedSampleEncodeOperationsPerRow => {
+                built_in::COMPRESSED_SAMPLE_ENCODE_OPERATIONS_PER_ROW
+            }
+            CostConstant::CompressedSampleDecodeOperationsPerSample => {
+                built_in::COMPRESSED_SAMPLE_DECODE_OPERATIONS_PER_SAMPLE
             }
             CostConstant::CounterMatrixMergeOperationsPerState => {
                 built_in::COUNTER_MATRIX_MERGE_OPERATIONS_PER_STATE

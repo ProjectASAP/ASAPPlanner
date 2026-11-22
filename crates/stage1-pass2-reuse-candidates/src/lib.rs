@@ -38,7 +38,7 @@ use dead_candidates::eliminate_dead_candidates;
 use edges::candidate_edges;
 use evaluation_grids::{evaluation_grids, evaluation_period_ms_per_query};
 use readout_requirements::set_readout_requirements;
-use rules::{chains, rollup, topk};
+use rules::{chains, compressed_samples, rollup, topk};
 
 /// Why Pass 2 failed on a memo: a rule built an expression the node rules
 /// reject (a bug in the rule), or the memo's reads form a cycle.
@@ -109,6 +109,7 @@ pub fn generate_logical_asap_memo_candidates(
         &candidates_of(&before_chains),
         &edges_before_chains,
     )?;
+    compressed_samples::add_compressed_sample_chains(&mut memo, &evaluation_period_ms)?;
     let order = topological_order(&memo)?;
     let evaluation_grid_of_group =
         evaluation_grids(&evaluation_period_ms_per_query(&memo, entries));

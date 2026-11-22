@@ -14,6 +14,9 @@ use crate::ir::schema::FieldDataType;
 pub enum SummaryFamily {
     Sketch(SketchAlgorithm),
     Exact(ExactKind),
+    /// Compressed raw samples per window (`FieldDataType::CompressedSamples`),
+    /// JSON `"compressed_samples"`.
+    CompressedSamples,
 }
 
 impl SummaryFamily {
@@ -23,6 +26,7 @@ impl SummaryFamily {
         match summary_type {
             FieldDataType::Sketch(algorithm) => Some(Self::Sketch(*algorithm)),
             FieldDataType::ExactAggregate(kind, _) => Some(Self::Exact(*kind)),
+            FieldDataType::CompressedSamples => Some(Self::CompressedSamples),
             _ => None,
         }
     }

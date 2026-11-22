@@ -4,6 +4,7 @@
 use super::exact::ScalarState;
 use super::factory::{create_hydra_cms, create_planner_accumulator, AccumulatorUpdater};
 use super::hydra_cms::{hydra_group_name, hydra_item, hydra_weight, HydraCms, HydraCmsGroup};
+use super::sample_blocks::{OpenSampleBlock, PlainSampleBlockCodec, SampleBlockCodec};
 use super::weighted_frequency::WeightedFrequency;
 use crate::values::{StateColumn, Value};
 use crate::{AggregateCore, Error};
@@ -63,6 +64,12 @@ enum GroupStates {
         /// The states, by group.
         states: Vec<WeightedFrequency>,
     },
+    /// Every sample of each group, as an open block per group of `codec`
+    /// (the compressed-samples family), sealed by it.
+    Samples {
+        codec: Arc<dyn SampleBlockCodec>,
+        states: Vec<Box<dyn OpenSampleBlock>>,
+    },
     /// One HydraCms grid shared by every group (a Hydra family).
     Hydra {
         /// The grid all groups count into (boxed: much larger than the other
@@ -93,11 +100,17 @@ impl StateColumnUpdater {
                     names: Vec::new(),
                 }
             }
-            FieldDataType::ExactAggregate(..) if parameters.is_some() => {
+            FieldDataType::ExactAggregate(..) | FieldDataType::CompressedSamples
+                if parameters.is_some() =>
+            {
                 return Err(Error::Invalid(
                     "an exact summary has no parameters θ".into(),
                 ))
             }
+            FieldDataType::CompressedSamples => GroupStates::Samples {
+                codec: Arc::new(PlainSampleBlockCodec),
+                states: Vec::new(),
+            },
             FieldDataType::ExactAggregate(..) => GroupStates::Exact {
                 empty: ScalarState::empty(family).map_err(Error::Invalid)?,
                 states: Vec::new(),
@@ -168,6 +181,31 @@ impl StateColumnUpdater {
         self
     }
 
+    /// This updater building compressed-samples states with `codec`, the
+    /// deployment's sample-block codec (a run's
+    /// [`RunContext::sample_block_codec`](crate::runtime::RunContext::sample_block_codec));
+    /// [`PlainSampleBlockCodec`] without it. Any other family is returned
+    /// unchanged. Bad input once a group has been added: its open block is
+    /// another codec's.
+    pub fn with_sample_block_codec(
+        mut self,
+        codec: Arc<dyn SampleBlockCodec>,
+    ) -> Result<Self, Error> {
+        if let GroupStates::Samples {
+            codec: slot,
+            states,
+        } = &mut self.states
+        {
+            if !states.is_empty() {
+                return Err(Error::Invalid(
+                    "a sample-block codec is set before any group is added".into(),
+                ));
+            }
+            *slot = codec;
+        }
+        Ok(self)
+    }
+
     fn sketch_updater(
         family: &FieldDataType,
         parameters: Option<&SketchParams>,
@@ -185,6 +223,7 @@ impl StateColumnUpdater {
         match &self.states {
             GroupStates::Exact { states, .. } => states.len(),
             GroupStates::Sketches(states) => states.len(),
+            GroupStates::Samples { states, .. } => states.len(),
             GroupStates::Keyed { states, .. } => states.len(),
             GroupStates::Hydra { names, .. } => names.len(),
         }
@@ -284,6 +323,12 @@ impl StateColumnUpdater {
                 states.push(empty.as_ref().clone());
                 empty.approx_memory_bytes()
             }
+            GroupStates::Samples { codec, states } => {
+                let state = codec.new_block();
+                let bytes = state.memory_bytes();
+                states.push(state);
+                bytes
+            }
             GroupStates::Hydra { .. } => {
                 return Err(Error::Invalid(
                     "a HydraCms group is added with its key (add_group_with_key)".into(),
@@ -373,6 +418,15 @@ impl StateColumnUpdater {
                     .update_value(value, timestamp_ms)
                     .map_err(operator_error)?;
                 self.memory_bytes = self.memory_bytes - before + state.memory_usage_bytes();
+            }
+            GroupStates::Samples { states, .. } => {
+                let Value::Float64(value) = value else {
+                    return Err(operator_error("compressed samples take Float64 values"));
+                };
+                let state = &mut states[index];
+                let before = state.memory_bytes();
+                state.append(timestamp_ms, *value);
+                self.memory_bytes = self.memory_bytes - before + state.memory_bytes();
             }
             GroupStates::Keyed { .. } | GroupStates::Hydra { .. } => {
                 return Err(operator_error(
@@ -481,6 +535,21 @@ impl StateColumnUpdater {
                     self.memory_bytes = self.memory_bytes - before + state.memory_usage_bytes();
                 }
             }
+            (
+                GroupStates::Samples { states, .. },
+                GroupStates::Samples {
+                    codec: their_codec,
+                    states: theirs,
+                },
+            ) => {
+                for (state, theirs) in states.iter_mut().zip(&theirs) {
+                    let before = state.memory_bytes();
+                    for (t, value) in their_codec.decode(&theirs.seal()).map_err(operator_error)? {
+                        state.append(t, value);
+                    }
+                    self.memory_bytes = self.memory_bytes - before + state.memory_bytes();
+                }
+            }
             (GroupStates::Keyed { states, .. }, GroupStates::Keyed { states: theirs, .. }) => {
                 for (state, theirs) in states.iter_mut().zip(&theirs) {
                     let before = state.approx_memory_bytes();
@@ -533,6 +602,11 @@ impl StateColumnUpdater {
                     StateColumn::from_objects(self.family, sealed.collect())
                 }
             }
+            GroupStates::Samples { codec, states } => StateColumn::from_compressed_samples(
+                self.family,
+                codec,
+                states.iter().map(|state| state.seal()).collect(),
+            ),
             GroupStates::Keyed { states, .. } => StateColumn::from_objects(
                 self.family,
                 states

@@ -391,7 +391,8 @@ fn excluding_every_kll_size_selects_a_plan_without_kll() {
 
 /// An arm with no query-time scan: without query-time scans, per-series
 /// aggregates and query-time builds, the sum is read from an ingestion-time
-/// chain of exact sums; eight candidates are excluded.
+/// chain of exact sums; twelve candidates are excluded, four of them the
+/// query-time compressed-sample chains (60 s and 300 s windows).
 #[test]
 fn the_stored_arm_exclusions_select_an_ingestion_time_chain() {
     let workload = sum_workload();
@@ -427,7 +428,7 @@ fn the_stored_arm_exclusions_select_an_ingestion_time_chain() {
     let excluded: usize = (0..4)
         .map(|index| pruned_by(&stored, ExclusionSource::ExcludedCandidate { index }))
         .sum();
-    assert_eq!(excluded, 8);
+    assert_eq!(excluded, 12);
 }
 
 /// Data at rest has no ingestion pipeline, so only query-time scans can
