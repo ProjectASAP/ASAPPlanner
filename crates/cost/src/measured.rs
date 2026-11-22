@@ -154,10 +154,12 @@ pub struct OperatorCost {
     #[serde(default)]
     pub ns_per_invocation: f64,
     /// For a node that keeps summary state (`SummaryAgg`, `SummaryTumblingWindowChain`):
-    /// the bytes one SEALED state holds, as the executor keeps a stored
-    /// window: the kernel's own `memory_bytes()` after `shrink_to_fit`
-    /// (e.g. a data plane's stored window bytes divided by its states). It
-    /// replaces the estimate for the node's sealed and open states alike.
+    /// the bytes one STORED state takes, as the executor keeps a stored
+    /// window: a DDSketch's view layout (`DdSketch::to_view_bytes`, the
+    /// bytes its mapped state column reads), any other kernel's own
+    /// `memory_bytes()` after `shrink_to_fit` (e.g. a data plane's stored
+    /// window bytes divided by its states). It replaces the estimate for
+    /// the node's stored and open states alike.
     /// `None`: the bytes the formulas derive from the sketch's parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bytes_per_state: Option<f64>,

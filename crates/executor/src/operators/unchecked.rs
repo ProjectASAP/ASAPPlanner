@@ -275,14 +275,20 @@ impl TryFrom<UncheckedOperator> for Operator {
                 groups,
                 emit_empty_global,
                 parameters,
+                seal_output,
             } => {
                 if !emit_empty_global && parameters.is_some() {
                     return Err(invalid(
                         "only a merge that outputs an empty global state takes parameters θ",
                     ));
                 }
-                Operator::summary_merge(input(0)?, state, groups)?
-                    .with_emit_empty_global(emit_empty_global, parameters)?
+                let merge = Operator::summary_merge(input(0)?, state, groups)?
+                    .with_emit_empty_global(emit_empty_global, parameters)?;
+                if seal_output {
+                    merge.with_sealed_output()
+                } else {
+                    merge
+                }
             }
             Kind::Evaluation { state, query } => Operator::evaluation(input(0)?, state, query)?,
         }

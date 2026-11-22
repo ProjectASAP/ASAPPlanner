@@ -401,3 +401,62 @@ fn malformed_mapped_states_are_refused() {
     )
     .is_err());
 }
+
+/// A chain level merged from narrower windows (`SummaryMergeWindows`, a
+/// merge with a sealed output) seals its DDSketch windows into their view
+/// layout, as a chain seals its own: it holds the views, each padded to 8
+/// bytes, and an offset each plus one, and answers as the unsealed merge.
+#[test]
+fn a_level_merge_seals_its_ddsketch_windows_into_views() {
+    let family = FieldDataType::Sketch(SketchAlgorithm::DDSketch);
+    let params = SketchParams::DDSketch { alpha: 0.01 };
+    let windows: Vec<Batch> = (0..12)
+        .map(|w| window(&family, Some(&params), w, 50, 15))
+        .collect();
+    let unsealed = merge(windows.clone(), LIMIT).unwrap();
+    let schema = windows[0].schema().clone();
+    let mut dag = PhysicalDAG::default();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(schema.clone(), windows).unwrap(),
+        Lifetime::None,
+    )
+    .unwrap();
+    dag.add(
+        1,
+        vec![0],
+        Operator::summary_merge(schema, 1, vec![0])
+            .unwrap()
+            .with_sealed_output(),
+        Lifetime::None,
+    )
+    .unwrap();
+    let context = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: 0,
+        },
+        Limits { max_bytes: LIMIT },
+    )
+    .unwrap();
+    let sealed: Vec<Batch> = block_on(async {
+        let mut output = dag.execute(&[1], context).unwrap().remove(0);
+        let mut out = Vec::new();
+        while let Some(batch) = output.next().await {
+            out.push(Batch::clone(&batch.unwrap()));
+        }
+        out
+    });
+    assert_eq!(by_series(&sealed, false), by_series(&unsealed, false));
+    let [batch] = sealed.as_slice() else {
+        panic!("one output batch")
+    };
+    let states = batch.state_column(1).unwrap();
+    let views: Vec<Vec<u8>> = (0..states.len())
+        .map(|i| state_view_bytes(states.state(i).as_ref()).unwrap())
+        .collect();
+    let held = views.iter().map(|v| v.len().div_ceil(8) * 8).sum::<usize>() + 4 * (views.len() + 1);
+    assert_eq!(states.state_memory_bytes(), held);
+    let unsealed_bytes = unsealed[0].state_column(1).unwrap().state_memory_bytes();
+    assert!(held * 2 < unsealed_bytes, "{held} vs {unsealed_bytes}");
+}

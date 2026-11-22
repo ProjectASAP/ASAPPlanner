@@ -339,9 +339,11 @@ impl Batch {
             if 2 * indices.len() >= state_column.len() {
                 continue;
             }
-            // Mapped states cost the run nothing: indices into them are
-            // kept as they are.
-            if matches!(state_column.storage(), super::StateStorage::Mapped(_)) {
+            // Mapped states a deployment holds cost the run nothing:
+            // indices into them are kept as they are.
+            if matches!(state_column.storage(), super::StateStorage::Mapped(_))
+                && state_column.is_held_outside_run()
+            {
                 continue;
             }
             let mut moved = ahash::AHashMap::<u32, u32>::new();
@@ -365,20 +367,28 @@ impl Batch {
                     family,
                     used.iter().map(|&index| records.get(index)).collect(),
                 ),
-                // Shared by pointer: stored sketches are not charged again.
-                super::StateStorage::Objects(_) | super::StateStorage::Mapped(_) => {
-                    StateColumn::from_objects_of(
-                        family,
-                        used.iter()
-                            .map(|&index| {
-                                (
-                                    state_column.state(index),
-                                    state_column.state_held_outside_run(index),
-                                )
-                            })
-                            .collect(),
-                    )
+                // Sealed views the run holds: the used states copied into a
+                // buffer of their own, so this batch keeps none of the rest
+                // of the source buffer.
+                super::StateStorage::Mapped(mapped) => {
+                    let (copied, charged) = super::mapped_states::MappedSketches::copied(
+                        mapped.kernel(),
+                        used.iter().map(|&index| (mapped, index)),
+                    );
+                    StateColumn::stored_views(family, super::StateStorage::Mapped(copied), charged)
                 }
+                // Shared by pointer: stored sketches are not charged again.
+                super::StateStorage::Objects(_) => StateColumn::from_objects_of(
+                    family,
+                    used.iter()
+                        .map(|&index| {
+                            (
+                                state_column.state(index),
+                                state_column.state_held_outside_run(index),
+                            )
+                        })
+                        .collect(),
+                ),
             }));
             arrays[column] = Arc::new(remapped);
             changed = true;
@@ -477,8 +487,10 @@ impl Batch {
                 states.push(Some(first.clone()));
                 continue;
             }
-            // Mapped sketch columns stay mapped: the joined column points at
-            // their buffers, so no state is copied or charged.
+            // Mapped sketch columns stay mapped. Columns a deployment holds
+            // are pointed at, not copied, and charged nothing; when any is
+            // sealed views the run holds, the referenced states are copied
+            // into one buffer of their own, charged its bytes.
             if let Some(first_mapped) = columns.iter().try_fold(None, |kernel, column| match column
                 .map(|column| column.storage())
             {
@@ -492,12 +504,13 @@ impl Batch {
                 let kernel = first_mapped.expect("at least two columns");
                 let mut indices = Vec::with_capacity(rows);
                 let mut selected: Vec<(&super::mapped_states::MappedSketches, usize)> = Vec::new();
+                let mut any_run_held = false;
                 for (batch, state_column) in batches.iter().zip(&columns) {
-                    let super::StateStorage::Mapped(mapped) =
-                        state_column.expect("one schema").storage()
-                    else {
+                    let state_column = state_column.expect("one schema");
+                    let super::StateStorage::Mapped(mapped) = state_column.storage() else {
                         unreachable!("checked mapped")
                     };
+                    any_run_held |= !state_column.is_held_outside_run();
                     let local = batch
                         .column(column)
                         .as_any()
@@ -513,13 +526,20 @@ impl Batch {
                     }
                 }
                 arrays.push(Arc::new(UInt32Array::from(indices)) as ArrayRef);
-                states.push(Some(Arc::new(StateColumn::mapped_column(
-                    first.family().clone(),
-                    super::StateStorage::Mapped(super::mapped_states::MappedSketches::gather(
-                        kernel,
-                        selected.into_iter(),
-                    )),
-                ))));
+                let family = first.family().clone();
+                states.push(Some(Arc::new(if any_run_held {
+                    let (copied, charged) =
+                        super::mapped_states::MappedSketches::copied(kernel, selected.into_iter());
+                    StateColumn::stored_views(family, super::StateStorage::Mapped(copied), charged)
+                } else {
+                    StateColumn::mapped_column(
+                        family,
+                        super::StateStorage::Mapped(super::mapped_states::MappedSketches::gather(
+                            kernel,
+                            selected.into_iter(),
+                        )),
+                    )
+                })));
                 continue;
             }
             // Different state columns: one column of the states the rows

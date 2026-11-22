@@ -31,8 +31,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 5.6e-6,
           "detail": "scan 400000 samples; x 0.0033/s; holds 32 bytes for 1.680 ms; keeps 12800000 bytes of raw data on disk",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Scan",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 1.68,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "1": {
@@ -40,8 +45,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0004796,
           "detail": "build Kmv in tumbling windows of 300000 ms for 10000 groups: 400000 rows x 116.2 ops, 400000 group visits, 10000.0 states emitted; x 0.0033/s; holds 83040000 bytes for 143.880 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 143.88,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "2": {
@@ -49,8 +59,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 3.66666666667e-7,
           "detail": "time range 300s: 1 tumbling windows of states; x 0.0033/s; holds 8304 bytes for 0.110 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.11,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "3": {
@@ -58,8 +73,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000366666666667,
           "detail": "merge 10000 states into 10000; x 0.0033/s; holds 83040000 bytes for 11.000 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 11.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "4": {
@@ -67,8 +87,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000116666666667,
           "detail": "estimate 10000 groups x 1; x 0.0033/s",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryEstimate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 35.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "5": {
@@ -76,8 +101,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 3.33333333333e-8,
           "detail": "operator: pass 10000 rows; x 0.0033/s; holds 32 bytes for 0.010 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Project",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.01,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "6": {
@@ -85,8 +115,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 7.33333333333e-7,
           "detail": "time range 600s: 2 tumbling windows of states; x 0.0033/s; holds 8304 bytes for 0.220 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.22,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "7": {
@@ -94,8 +129,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000516,
           "detail": "merge 20000 states into 10000; x 0.0033/s; holds 83040000 bytes for 15.480 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 15.48,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "8": {
@@ -103,8 +143,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000116666666667,
           "detail": "estimate 10000 groups x 1; x 0.0033/s",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryEstimate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 35.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "9": {
@@ -112,8 +157,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 3.33333333333e-8,
           "detail": "operator: pass 10000 rows; x 0.0033/s; holds 32 bytes for 0.010 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Project",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.01,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         }
       },
@@ -122,8 +172,41 @@
         "average_memory_bytes": 47155.6573157,
         "cpu_ops_per_second": 803700.0,
         "disk_bytes": 12800000,
+        "latency_per_query": [
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.00333333333333,
+            "latency_ms": 196.27,
+            "precompute_execution_ms": 0.0,
+            "precompute_queueing_ms": 0.0,
+            "query_execution_ms": 196.27
+          },
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.00333333333333,
+            "latency_ms": 191.68,
+            "precompute_execution_ms": 0.0,
+            "precompute_queueing_ms": 0.0,
+            "query_execution_ms": 191.68
+          }
+        ],
         "peak_cpu_cores": 2,
         "peak_memory_bytes": 249136704,
+        "precompute_load": -0.0,
+        "recommended_configuration": {
+          "ingest": {
+            "predicted_busy_thread_seconds_per_second": 0.0,
+            "recommended_threads": 1
+          },
+          "precompute": {
+            "predicted_busy_thread_seconds_per_second": -0.0,
+            "recommended_threads": 1
+          },
+          "query": {
+            "predicted_busy_thread_seconds_per_second": 0.000807966666667,
+            "recommended_threads": 1
+          }
+        },
         "scanned_bytes_per_second": 42666.6666667
       }
     },

@@ -29,8 +29,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000014,
           "detail": "scan 200000 samples; x 0.0167/s; holds 32 bytes for 0.840 ms; keeps 6400000 bytes of raw data on disk",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Scan",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.84,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "1": {
@@ -38,8 +43,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000366666666667,
           "detail": "time range 300s: keep 200000 of 200000 rows; x 0.0167/s; holds 6400000 bytes for 2.200 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 2.2,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "2": {
@@ -47,8 +57,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000954,
           "detail": "build Kmv into 10000 states: 200000 rows x 116.2 ops, 200000 group visits; x 0.0167/s; holds 83040000 bytes for 57.240 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryAgg",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 57.24,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "3": {
@@ -56,8 +71,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000583333333333,
           "detail": "estimate 10000 groups x 1; x 0.0167/s",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryEstimate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 35.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "4": {
@@ -65,8 +85,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.66666666667e-7,
           "detail": "operator: pass 10000 rows; x 0.0167/s; holds 32 bytes for 0.010 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Project",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.01,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "5": {
@@ -74,8 +99,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00281,
           "detail": "hash aggregate 200000 rows into 10000 groups: 547 ops per row, 200000 group visits; x 0.0167/s; holds 1920000 bytes for 168.600 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Aggregate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 168.6,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         }
       },
@@ -84,8 +114,41 @@
         "average_memory_bytes": 84850.02712,
         "cpu_ops_per_second": 4387500.0,
         "disk_bytes": 6400000,
+        "latency_per_query": [
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.0166666666667,
+            "latency_ms": 171.64,
+            "precompute_execution_ms": 0.0,
+            "precompute_queueing_ms": 0.0,
+            "query_execution_ms": 171.64
+          },
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.0166666666667,
+            "latency_ms": 95.29,
+            "precompute_execution_ms": 0.0,
+            "precompute_queueing_ms": 0.0,
+            "query_execution_ms": 95.29
+          }
+        ],
         "peak_cpu_cores": 2,
         "peak_memory_bytes": 91360064,
+        "precompute_load": -0.0,
+        "recommended_configuration": {
+          "ingest": {
+            "predicted_busy_thread_seconds_per_second": 0.0,
+            "recommended_threads": 1
+          },
+          "precompute": {
+            "predicted_busy_thread_seconds_per_second": -0.0,
+            "recommended_threads": 1
+          },
+          "query": {
+            "predicted_busy_thread_seconds_per_second": 0.00439816666667,
+            "recommended_threads": 1
+          }
+        },
         "scanned_bytes_per_second": 106666.666667
       }
     },

@@ -645,7 +645,8 @@ fn compile_internal(
                     .filter(|&column| column != state && column != time)
                     .collect();
                 let merge = Operator::summary_merge(windowed.clone(), state, groups)?
-                    .with_emit_empty_global(false, node.parameters.clone())?;
+                    .with_emit_empty_global(false, node.parameters.clone())?
+                    .with_sealed_output();
                 let compact = merge.schema();
                 let window_end_in_compact = compact
                     .fields

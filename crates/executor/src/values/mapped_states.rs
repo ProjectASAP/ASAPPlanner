@@ -194,6 +194,37 @@ impl MappedSketches {
         }
     }
 
+    /// The column of `selected` states (column, index), their bytes copied
+    /// into one new buffer of exactly their size, and the bytes that
+    /// buffer and its offsets take: what a run holds for states it keeps
+    /// without the rest of their source buffers.
+    pub(crate) fn copied<'c>(
+        kernel: MappedSketchKernel,
+        selected: impl Iterator<Item = (&'c MappedSketches, usize)>,
+    ) -> (Self, usize) {
+        let selected: Vec<&[u8]> = selected
+            .map(|(column, index)| column.state_bytes(index))
+            .collect();
+        let words_len = selected
+            .iter()
+            .map(|bytes| bytes.len().div_ceil(8))
+            .sum::<usize>();
+        let (words, offsets) = pack_words(words_len, selected.iter().copied());
+        let charged = words.len() * 8 + offsets.len() * 4;
+        let part = MappedPart {
+            bytes: Buffer::from(words),
+            offsets: ScalarBuffer::from(offsets),
+        };
+        (
+            Self {
+                kernel,
+                parts: vec![Arc::new(part)],
+                states: None,
+            },
+            charged,
+        )
+    }
+
     /// Sketch state `index` as an owned kernel object, an accumulator to
     /// merge further states into; a KLL accumulator's compaction coin is
     /// seeded with `seed`, so a merge is reproducible.
@@ -216,6 +247,16 @@ impl MappedSketches {
                     .to_owned_sketch(),
             }),
         }
+    }
+
+    /// The interpolated quantile `q` of DDSketch state `index`, read on its
+    /// view (as `DDSketchAccumulator::estimate` answers it); `None` for an
+    /// empty state.
+    pub(crate) fn ddsketch_quantile(&self, index: usize, q: f64) -> Result<Option<f64>, String> {
+        debug_assert_eq!(self.kernel, MappedSketchKernel::DDSketch);
+        DdSketchView::from_bytes(self.state_bytes(index))
+            .expect("checked at construction")
+            .quantile_interpolated(q)
     }
 
     /// The bytes state `index`'s view reads, an upper bound on what
@@ -253,6 +294,27 @@ impl MappedSketches {
         };
         merged.map_err(|e| Error::Operator(e.to_string()))
     }
+}
+
+/// `states` packed into exactly `words_len` 8-byte words, each starting at
+/// a word boundary, and their byte offsets (one per state, plus one).
+pub(crate) fn pack_words<'a>(
+    words_len: usize,
+    states: impl ExactSizeIterator<Item = &'a [u8]>,
+) -> (Vec<u64>, Vec<u32>) {
+    let mut words = Vec::with_capacity(words_len);
+    let mut offsets = Vec::with_capacity(states.len() + 1);
+    offsets.push(0u32);
+    for state in states {
+        for chunk in state.chunks(8) {
+            let mut bytes = [0u8; 8];
+            bytes[..chunk.len()].copy_from_slice(chunk);
+            words.push(u64::from_le_bytes(bytes));
+        }
+        offsets.push(u32::try_from(words.len() * 8).expect("a column under 4 GiB"));
+    }
+    debug_assert_eq!(words.len(), words_len);
+    (words, offsets)
 }
 
 /// Mapped exact records of one kind, fixed size each.
@@ -501,6 +563,95 @@ mod tests {
             }],
         )
         .unwrap()
+    }
+
+    /// A sealed DDSketch window of `states` series, held by the run in the
+    /// view layout, every row referencing its own state.
+    fn sealed_window(states: u32, window: u32) -> Batch {
+        let family = FieldDataType::Sketch(SketchAlgorithm::DDSketch);
+        let schema = Arc::new(Schema {
+            fields: vec![Field {
+                name: "state".into(),
+                dtype: family.clone(),
+                nullable: false,
+            }],
+            time_index: None,
+            unique_keys: vec![],
+            closed: false,
+        });
+        let mut updater =
+            StateColumnUpdater::new(&family, Some(&SketchParams::DDSketch { alpha: 0.01 }))
+                .unwrap();
+        updater.ensure_groups(states as usize).unwrap();
+        for group in 0..states {
+            for sample in 0..15 {
+                updater
+                    .update(group, f64::from(group * 31 + window * 7 + sample) + 1.0, 0)
+                    .unwrap();
+            }
+        }
+        Batch::try_from_columns(
+            schema,
+            vec![BatchColumn::States {
+                indices: UInt32Array::from_iter_values(0..states),
+                states: Arc::new(updater.seal()),
+            }],
+        )
+        .unwrap()
+    }
+
+    /// The bytes a run holds for `views`: each padded to 8, and an offset
+    /// each plus one.
+    fn held_for(views: &[Vec<u8>]) -> usize {
+        views.iter().map(|v| v.len().div_ceil(8) * 8).sum::<usize>() + 4 * (views.len() + 1)
+    }
+
+    fn views_of(batch: &Batch) -> Vec<Vec<u8>> {
+        batch
+            .to_rows()
+            .iter()
+            .map(|row| match &row[0] {
+                crate::values::Value::Summary { state, .. } => {
+                    state_view_bytes(state.as_ref()).unwrap()
+                }
+                _ => unreachable!(),
+            })
+            .collect()
+    }
+
+    /// A filter keeping one row of a sealed 10,000-state window copies that
+    /// state into a buffer of its own: the batch holds and is charged that
+    /// state's view, not the window's buffer.
+    #[test]
+    fn compacting_sealed_views_keeps_only_the_states_used() {
+        let window = sealed_window(10_000, 0);
+        let whole = window.state_column(0).unwrap().state_memory_bytes();
+        let mut keep = vec![false; 10_000];
+        keep[4_321] = true;
+        let one = window
+            .filter(&arrow::array::BooleanArray::from(keep))
+            .unwrap();
+        let states = one.state_column(0).unwrap();
+        assert_eq!(states.len(), 1);
+        assert!(matches!(states.storage(), StateStorage::Mapped(_)));
+        assert_eq!(states.state_memory_bytes(), held_for(&views_of(&one)));
+        assert!(states.state_memory_bytes() * 1_000 < whole);
+        assert_eq!(views_of(&one), vec![views_of(&window).swap_remove(4_321)]);
+    }
+
+    /// Concatenating sealed view windows copies the states the rows use
+    /// into one buffer, charged exactly what it holds, with the same states.
+    #[test]
+    fn concat_of_sealed_views_holds_and_charges_the_states_used() {
+        let (a, b) = (sealed_window(500, 1), sealed_window(500, 2));
+        let joined = Batch::concat(a.schema(), &[a.clone(), b.clone()]).unwrap();
+        let states = joined.state_column(0).unwrap();
+        assert!(matches!(states.storage(), StateStorage::Mapped(_)));
+        assert!(!states.is_held_outside_run());
+        let mut expected = views_of(&a);
+        expected.extend(views_of(&b));
+        assert_eq!(views_of(&joined), expected);
+        assert_eq!(states.state_memory_bytes(), held_for(&expected));
     }
 
     #[test]

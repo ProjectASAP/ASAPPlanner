@@ -54,7 +54,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 0.0000309671181772,
+      "cost_per_second": 0.0000302540044739,
       "cpu_core_seconds_per_second": 2.65234166667,
       "per_node": {
         "0": {
@@ -62,17 +62,27 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00058,
           "detail": "scan 100000 samples; x 1.0000/s",
+          "ingest_cpu_core_seconds_per_second": 0.00058,
           "multiplier": 1,
           "operator": "Scan",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 1.58256828585e-6,
+          "cost_per_second": 8.69454590464e-7,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.05127,
-          "detail": "build DDSketch in tumbling windows of 1000 ms for 10000 groups: 100000 rows x 247 ops, 1000 group visits, 10000.0 states emitted; x 1.0000/s; keeps 874720000 bytes",
+          "detail": "build DDSketch in tumbling windows of 1000 ms for 10000 groups: 100000 rows x 247 ops, 1000 group visits, 10000.0 states emitted; x 1.0000/s; keeps 254720000 bytes",
+          "ingest_cpu_core_seconds_per_second": 0.02627,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.0,
+          "refresh_cpu_ms_per_window": 25.0,
+          "refresh_wall_ms_per_window": 25.0,
           "timing": "ingestion_time"
         },
         "10": {
@@ -80,8 +90,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00503333333333,
           "detail": "merge 400000 states into 10000; x 0.0333/s; holds 1370000 bytes for 151.000 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 151.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "11": {
@@ -89,8 +104,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000833333333333,
           "detail": "finalize 10000 accumulators; x 0.0333/s",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "FinalizeExactAccumulator",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 25.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "12": {
@@ -98,17 +118,27 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000918333333333,
           "detail": "hash aggregate 10000 rows into 10000 groups: 85 ops per row, 10000 group visits; x 0.0333/s; holds 400000 bytes for 27.550 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Aggregate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 27.55,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 1.2368401083e-7,
+          "cost_per_second": 1.23684002986e-7,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.011,
-          "detail": "time range 100s: 100 tumbling windows of states; x 1.0000/s; holds 856 bytes for 11.000 ms",
+          "detail": "time range 100s: 100 tumbling windows of states; x 1.0000/s; holds 236 bytes for 11.000 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 11.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "3": {
@@ -116,8 +146,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 2.511,
           "detail": "merge 1000000 states into 10000; x 1.0000/s; holds 25440000 bytes for 2511.000 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 2511.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "4": {
@@ -125,8 +160,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.035,
           "detail": "estimate 10000 groups x 1; x 1.0000/s",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryEstimate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 35.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "5": {
@@ -134,8 +174,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00001,
           "detail": "operator: pass 10000 rows; x 1.0000/s; holds 48 bytes for 0.010 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Project",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.01,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "6": {
@@ -143,8 +188,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0269,
           "detail": "hash aggregate 10000 rows into 10000 groups: 20 ops per row, 10000 group visits; x 1.0000/s; holds 400000 bytes for 26.900 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Aggregate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 26.9,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "7": {
@@ -152,8 +202,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00058,
           "detail": "scan 100000 samples; x 1.0000/s",
+          "ingest_cpu_core_seconds_per_second": 0.00058,
           "multiplier": 1,
           "operator": "Scan",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "ingestion_time"
         },
         "8": {
@@ -161,8 +216,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00907,
           "detail": "build exact Counter accumulator in tumbling windows of 30000 ms for 10000 groups: 100000 rows x 70 ops, 1000 group visits, 333.3 states emitted; x 1.0000/s; keeps 56170000 bytes",
+          "ingest_cpu_core_seconds_per_second": 0.00857,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.0,
+          "refresh_cpu_ms_per_window": 15.0,
+          "refresh_wall_ms_per_window": 15.0,
           "timing": "ingestion_time"
         },
         "9": {
@@ -170,18 +230,56 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000146666666667,
           "detail": "time range 1200s: 40 tumbling windows of states; x 0.0333/s; holds 137 bytes for 4.400 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 4.4,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         }
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 994787872.437,
+        "average_memory_bytes": 374787865.617,
         "cpu_ops_per_second": 2651381666.67,
         "disk_bytes": 0,
+        "latency_per_query": [
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 1.0,
+            "latency_ms": 2623.91,
+            "precompute_execution_ms": 25.0,
+            "precompute_queueing_ms": 15.0,
+            "query_execution_ms": 2583.91
+          },
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.0333333333333,
+            "latency_ms": 247.95,
+            "precompute_execution_ms": 15.0,
+            "precompute_queueing_ms": 25.0,
+            "query_execution_ms": 207.95
+          }
+        ],
         "peak_cpu_cores": 4,
-        "peak_memory_bytes": 958501137,
+        "peak_memory_bytes": 338500517,
+        "precompute_load": 0.0255,
+        "recommended_configuration": {
+          "ingest": {
+            "predicted_busy_thread_seconds_per_second": 0.036,
+            "recommended_threads": 1
+          },
+          "precompute": {
+            "predicted_busy_thread_seconds_per_second": 0.0255,
+            "recommended_threads": 1
+          },
+          "query": {
+            "predicted_busy_thread_seconds_per_second": 2.59084166667,
+            "recommended_threads": 4
+          }
+        },
         "scanned_bytes_per_second": 9600000.0
       }
     },

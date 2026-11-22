@@ -27,8 +27,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000028,
           "detail": "scan 400000 samples; x 0.0167/s; holds 12800000 bytes for 1.680 ms; keeps 12800000 bytes of raw data on disk",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Scan",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 1.68,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "1": {
@@ -36,8 +41,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000733333333333,
           "detail": "time range 600s: keep 400000 of 400000 rows; x 0.0167/s; holds 32 bytes for 4.400 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 4.4,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "2": {
@@ -45,8 +55,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00168333333333,
           "detail": "hash aggregate 400000 rows into 10000 groups: 20 ops per row, 400000 group visits; x 0.0167/s; holds 400000 bytes for 101.000 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Aggregate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 101.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "3": {
@@ -54,8 +69,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000366666666667,
           "detail": "time range 300s: keep 200000 of 400000 rows; x 0.0167/s; holds 32 bytes for 2.200 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 2.2,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "4": {
@@ -63,8 +83,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00105,
           "detail": "hash aggregate 200000 rows into 10000 groups: 20 ops per row, 200000 group visits; x 0.0167/s; holds 400000 bytes for 63.000 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Aggregate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 63.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         }
       },
@@ -73,8 +98,41 @@
         "average_memory_bytes": 1451.73685333,
         "cpu_ops_per_second": 2850000.0,
         "disk_bytes": 12800000,
+        "latency_per_query": [
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.0166666666667,
+            "latency_ms": 66.88,
+            "precompute_execution_ms": 0.0,
+            "precompute_queueing_ms": 0.0,
+            "query_execution_ms": 66.88
+          },
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.0166666666667,
+            "latency_ms": 107.08,
+            "precompute_execution_ms": 0.0,
+            "precompute_queueing_ms": 0.0,
+            "query_execution_ms": 107.08
+          }
+        ],
         "peak_cpu_cores": 2,
         "peak_memory_bytes": 13600064,
+        "precompute_load": -0.0,
+        "recommended_configuration": {
+          "ingest": {
+            "predicted_busy_thread_seconds_per_second": 0.0,
+            "recommended_threads": 1
+          },
+          "precompute": {
+            "predicted_busy_thread_seconds_per_second": -0.0,
+            "recommended_threads": 1
+          },
+          "query": {
+            "predicted_busy_thread_seconds_per_second": 0.00287133333333,
+            "recommended_threads": 1
+          }
+        },
         "scanned_bytes_per_second": 213333.333333
       }
     },

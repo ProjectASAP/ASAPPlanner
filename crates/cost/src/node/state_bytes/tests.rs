@@ -116,15 +116,22 @@ fn labels(i: u32) -> [String; 3] {
     ]
 }
 
-/// The bytes `asap_sketchlib`'s DDSketch holds after adding `values`,
-/// sealed as the executor keeps a stored window (`shrink_to_fit`).
-fn library_ddsketch_bytes(alpha: f64, values: &[f64]) -> u64 {
-    let mut sketch = asap_sketchlib::sketches::DdSketch::new(alpha);
-    for value in values {
-        sketch.add(value);
+/// The bytes the executor holds per sealed DDSketch state of relative
+/// accuracy `alpha`, one state per entry of `series`: a column of them
+/// sealed (in the view layout), less the column's one offset beyond one
+/// per state, over the states.
+fn sealed_ddsketch_bytes(alpha: f64, series: &[Vec<f64>]) -> f64 {
+    let family = FieldDataType::Sketch(SketchAlgorithm::DDSketch);
+    let mut column =
+        asap_executor::StateColumnUpdater::new(&family, Some(&SketchParams::DDSketch { alpha }))
+            .unwrap();
+    column.ensure_groups(series.len()).unwrap();
+    for (group, values) in series.iter().enumerate() {
+        for &value in values {
+            column.update(group as u32, value, 0).unwrap();
+        }
     }
-    sketch.shrink_to_fit();
-    sketch.memory_bytes() as u64
+    (column.seal().state_memory_bytes() - 4) as f64 / series.len() as f64
 }
 
 /// A uniform draw in [0, 1) from a fixed hash of `x`.
@@ -182,19 +189,17 @@ fn library_ddsketch_mean_bytes(
     n: u32,
     signed: bool,
     values: fn(u64, u32) -> Vec<f64>,
-) -> u64 {
-    let series = 20;
-    (0..series)
+) -> f64 {
+    let series: Vec<Vec<f64>> = (0..20)
         .map(|s| {
-            let values: Vec<f64> = values(s, n)
+            values(s, n)
                 .into_iter()
                 .enumerate()
                 .map(|(i, v)| if signed && i % 2 == 0 { -v } else { v })
-                .collect();
-            library_ddsketch_bytes(alpha, &values)
+                .collect()
         })
-        .sum::<u64>()
-        / series
+        .collect();
+    sealed_ddsketch_bytes(alpha, &series)
 }
 
 /// The range a DDSketch is costed for when its values declare none is the
@@ -340,9 +345,10 @@ fn state_bytes_bound_the_executors_charge() {
         /// At least, and at most [`BYTES_AGREEMENT_FACTOR`] times once the
         /// state is full.
         Bound,
-        /// At least the charge, at most 3.5 times it: a DDSketch with no
-        /// declared range is priced for a wide spread of values
-        /// (`wide_spread_values_magnitude_ratio`), here latency-like.
+        /// At least the stored bytes, at most 4.2 times them: a DDSketch
+        /// with no declared range is priced over the assumed nine decades
+        /// (here latency-like values), its count width bounded by the
+        /// rows.
         WideMargin,
     }
     // (family, parameters, rows fed, how it is priced, the
@@ -470,6 +476,7 @@ fn state_bytes_bound_the_executors_charge() {
             let mut updater =
                 create_planner_accumulator(&family, Some(params), &rows.update()).unwrap();
             let latency = latency_like(0, n);
+            let mut fed = Vec::new();
             for i in 0..n {
                 match rows {
                     // Distinct magnitudes over the assumed range, in a
@@ -478,11 +485,13 @@ fn state_bytes_bound_the_executors_charge() {
                         let at = f64::from(i * 7_919 % n) / f64::from(n);
                         let magnitude = DDSKETCH_ASSUMED_MAGNITUDE_RANGE.max_abs.powf(at);
                         let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                        fed.push(sign * magnitude);
                         updater.update_single(sign * magnitude, 0).unwrap();
                     }
                     Rows::LatencyLike => {
                         let magnitude = latency[i as usize];
                         let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+                        fed.push(sign * magnitude);
                         updater.update_single(sign * magnitude, 0).unwrap();
                     }
                     Rows::Labels => updater
@@ -491,10 +500,16 @@ fn state_bytes_bound_the_executors_charge() {
                     Rows::Keyed => updater.update_keyed(&labels(i), 1.0, 0).unwrap(),
                 }
             }
-            // As the executor seals a window.
+            // As the executor seals a window: a DDSketch into its view
+            // layout, any other sketch shrunk.
             updater.shrink_to_fit();
             let state = updater.into_accumulator();
-            let charged = state.approx_memory_bytes();
+            let charged = match params {
+                SketchParams::DDSketch { alpha } => {
+                    sealed_ddsketch_bytes(*alpha, &[fed]).round() as usize
+                }
+                _ => state.approx_memory_bytes(),
+            };
             let priced = fields
                 + sketch_state_bytes(
                     params,
@@ -514,7 +529,7 @@ fn state_bytes_bound_the_executors_charge() {
                 // One value can be a zero, which no store holds.
                 Priced::WideMargin if n == 1 => assert!(charged <= priced, "{context}"),
                 Priced::WideMargin => assert!(
-                    (1.0..=3.5).contains(&(priced as f64 / charged as f64)),
+                    (1.0..=4.2).contains(&(priced as f64 / charged as f64)),
                     "{context}, {charged} charged"
                 ),
                 Priced::Bound => {
@@ -765,13 +780,14 @@ fn priced_bytes_agree_with_the_executor() {
         let priced = summary_state_bytes(&family, params.as_ref(), input_rows(rows_fed)).unwrap();
         measured.push((family, priced, charged, known_gap));
     }
-    // DDSketch, with no declared range, is priced for a wide spread
-    // (`wide_spread_values_magnitude_ratio`): fed latency-like rows (an
-    // exponential spread) or the log-uniform three decades of
-    // `Rows::Values`, a sealed sketch holds less, within these bands.
+    // DDSketch, with no declared range, is priced dense over the assumed
+    // nine decades at the count width its rows bound (2 bytes for 10,000):
+    // fed latency-like rows (an exponential spread) or the log-uniform
+    // three decades of `Rows::Values`, whose counts fit a byte, the sealed
+    // column holds less, within these bands.
     for (rows, band) in [
-        (Rows::LatencyLike, 1.713..=1.893),
-        (Rows::Values, 2.550..=2.818),
+        (Rows::LatencyLike, 3.328..=3.678),
+        (Rows::Values, 4.647..=5.137),
     ] {
         let family = sketch(A::DDSketch);
         let params = SketchParams::DDSketch { alpha: 0.01 };
@@ -779,15 +795,18 @@ fn priced_bytes_agree_with_the_executor() {
             create_planner_accumulator(&family, Some(&params), &rows.update()).unwrap();
         let mut seed = 0x5EED_u64;
         let latency = latency_like(0, rows.fed());
+        let mut fed = Vec::new();
         for i in 0..rows.fed() {
             let value = match rows {
                 Rows::LatencyLike => latency[i as usize],
                 _ => 1_000f64.powf(next_uniform(&mut seed)),
             };
+            fed.push(value);
             updater.update_single(value, i64::from(i) * 1_000).unwrap();
         }
-        updater.shrink_to_fit();
-        let charged = updater.into_accumulator().approx_memory_bytes() as f64;
+        drop(updater);
+        // What the executor holds for the sealed window.
+        let charged = sealed_ddsketch_bytes(0.01, &[fed]);
         let priced =
             summary_state_bytes(&family, Some(&params), input_rows(rows.fed())).unwrap() as f64;
         assert!(
@@ -917,19 +936,17 @@ fn counter_near_a_million(series: u64, n: u32) -> Vec<f64> {
         .collect()
 }
 
-/// A DDSketch state is charged, against what a sealed `asap_sketchlib`
-/// sketch holds (the mean of 20 series), within these bands at α = 0.01
-/// and 10 to 36,000 values per state, the table in `ddsketch_state_bytes`'
-/// documentation: with no declared range the wide-spread margin charges a
-/// lognormal of σ = 2 1.2–1.3x and latency-like values at most 2.2x, and
-/// under-charges the widest spreads only at few rows per state (Zipf
-/// integers 0.7x, seven decades log-uniform 0.6x at 10 rows); a declared
-/// range caps that spread (a narrow gauge's within 1.1x) and floors it at
-/// the rows' log-uniform spread over the range, so values that fill a
-/// declared range are charged 0.95–1.1x at any number of rows, at the cost
-/// of over-charging values narrower than their column (latency-like values
-/// in the generator's range up to 5.4x at 10 rows, per-series levels
-/// within a column range 16–22x).
+/// A stored DDSketch state is charged, against the view layout an
+/// `asap_sketchlib` sketch is stored in (the mean of 20 series), within
+/// these bands at α = 0.01 and 10 to 36,000 values per state, the table in
+/// `ddsketch_state_bytes`' documentation. No shape is under-charged by
+/// more than the rounding of the occupied-bucket estimate (few rows are
+/// stored sparse, priced closely); the count width is bounded by the rows,
+/// which over-charges 256 to 65,535 rows whose largest count fits a byte
+/// up to about 2x (latency-like values in the generator's declared range
+/// 4.7x at 600 rows); narrow values without a declared range (a gauge, a
+/// counter's readings, per-series levels) are over-charged by the
+/// wide-spread margin's span, up to 20x at 36,000 rows.
 #[test]
 fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
     let alpha = 0.01;
@@ -941,53 +958,48 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
         Option<ValueMagnitudeRange>,
         std::ops::RangeInclusive<f64>,
     ); 13] = [
-        ("exponential", latency_like, None, 1.4..=2.2),
+        ("exponential", latency_like, None, 0.95..=4.3),
         (
             "exponential, the generator's range declared",
             latency_like,
             range(2.687e-8, 1_104.2),
-            1.6..=5.4,
+            0.95..=5.0,
         ),
-        ("lognormal sigma 1", lognormal, None, 2.1..=2.7),
-        ("lognormal sigma 2", lognormal_sigma_2, None, 1.1..=1.4),
+        ("lognormal sigma 1", lognormal, None, 0.95..=5.65),
+        ("lognormal sigma 2", lognormal_sigma_2, None, 0.95..=3.2),
         (
             "log-uniform 7 decades",
             log_uniform_over_seven_decades,
             None,
-            0.55..=1.4,
+            0.95..=2.55,
         ),
         (
             "log-uniform 7 decades, declared",
             log_uniform_over_seven_decades,
             range(0.001, 1e4),
-            0.95..=1.1,
+            0.95..=2.0,
         ),
-        ("Zipf(1.1) integers", zipf_integers, None, 0.65..=1.6),
+        ("Zipf(1.1) integers", zipf_integers, None, 0.97..=2.95),
         (
             "Zipf(1.1) integers, declared",
             zipf_integers,
             range(1.0, 1e6),
-            0.95..=1.1,
+            0.95..=2.0,
         ),
-        ("narrow gauge", narrow_gauge, None, 12.0..=40.0),
+        ("narrow gauge", narrow_gauge, None, 1.3..=21.2),
         (
             "narrow gauge, declared",
             narrow_gauge,
             range(90.0, 110.0),
-            0.95..=1.1,
+            0.95..=1.15,
         ),
-        (
-            "counter near 1e6",
-            counter_near_a_million,
-            None,
-            18.0..=50.0,
-        ),
-        ("per-series levels", per_series_levels, None, 12.0..=40.0),
+        ("counter near 1e6", counter_near_a_million, None, 1.4..=22.9),
+        ("per-series levels", per_series_levels, None, 1.3..=21.2),
         (
             "per-series levels, column range declared",
             per_series_levels,
             range(1.0, 1e5),
-            16.0..=22.0,
+            1.3..=12.2,
         ),
     ];
     for (name, values, value_magnitude_range, band) in shapes {
@@ -1002,7 +1014,7 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
                 },
             );
             let held = library_ddsketch_mean_bytes(alpha, n, false, values);
-            let ratio = charged as f64 / held as f64;
+            let ratio = charged as f64 / held;
             assert!(
                 band.contains(&ratio),
                 "{name}, {n} values: charged {charged}, held {held} ({ratio:.2}x), band {band:?}"
@@ -1011,13 +1023,14 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
     }
 }
 
-/// The span a DDSketch is charged: one bucket for one row; the wide-spread
-/// margin of its rows, which grows with them, capped by a declared range
-/// (a gauge within [90, 110]: 11 buckets, 232 bytes, at any number of
-/// rows) or by the assumed nine decades, the span of unknown rows; two
-/// stores for signed values.
+/// A stored DDSketch is priced at its view layout and its offset in the
+/// column (88 + 4 bytes), then the occupied buckets dense over the
+/// column's range (declared, or the assumed nine decades; plus one bucket
+/// for an unaligned start) or sparse at one bucket per row (4-byte index
+/// and count each), whichever is smaller, at the narrowest count width the
+/// rows allow; each array padded to 8 bytes; two stores for signed values.
 #[test]
-fn ddsketch_state_bytes_follow_the_declared_range_or_the_wide_spread_margin() {
+fn stored_ddsketch_states_are_priced_at_their_view_layout() {
     let alpha = 0.01;
     let priced = |rows_per_state: Option<u64>, non_negative, value_magnitude_range| {
         sketch_state_bytes(
@@ -1030,32 +1043,38 @@ fn ddsketch_state_bytes_follow_the_declared_range_or_the_wide_spread_margin() {
             },
         )
     };
-    let struct_bytes = std::mem::size_of::<asap_sketchlib::DdSketch>() as u64;
     let gauge = Some(ValueMagnitudeRange {
         min_abs: 90.0,
         max_abs: 110.0,
     });
-    assert_eq!(priced(Some(1), true, None), struct_bytes + 8);
-    for rows in [10, 600, 36_000] {
-        assert_eq!(priced(Some(rows), true, gauge), struct_bytes + 8 * 11);
-    }
-    assert_eq!(priced(Some(10), true, None), 3_240);
+    // One row: one bucket, a 1-byte count dense (padded to 8).
+    assert_eq!(priced(Some(1), true, None), 92 + 8);
+    // 10 rows over the assumed nine decades: sparse, 10 buckets at most.
+    assert_eq!(priced(Some(10), true, None), 92 + 40 + 16);
+    // A gauge's 12 buckets, dense: 1, 2 and 2 bytes per count.
+    assert_eq!(priced(Some(10), true, gauge), 92 + 16);
+    assert_eq!(priced(Some(600), true, gauge), 92 + 24);
+    assert_eq!(priced(Some(36_000), true, gauge), 92 + 24);
+    // 4 bytes up to u32::MAX rows, then 8.
+    assert_eq!(priced(Some(u64::from(u32::MAX)), true, gauge), 92 + 48);
+    assert_eq!(priced(Some(1 << 32), true, gauge), 92 + 96);
     assert!(priced(Some(10), true, None) < priced(Some(100), true, None));
+    // Unknown rows: the assumed range, dense at 8 bytes.
+    let unknown = priced(None, true, None);
+    assert_eq!((unknown - 92) % 8, 0);
+    assert!(unknown > priced(Some(1_000_000), true, None));
+    // Signed values fill two stores.
     assert_eq!(
-        priced(Some(1_000_000), true, None),
-        priced(None, true, None)
-    );
-    assert_eq!(
-        priced(Some(20_000), false, None) - struct_bytes,
-        2 * (priced(Some(10_000), true, None) - struct_bytes)
+        priced(Some(20_000), false, None) - 92,
+        2 * (priced(Some(10_000), true, None) - 92)
     );
 }
 
 /// A DDSketch still receiving values (a chain's current window, a
-/// query-time build, a merge target) is priced open: per store one
-/// 128-slot first block (1 KiB) beyond the sealed size, less the bucket it
-/// covers, so 1,016 bytes more per store; every other family is priced the
-/// same open or sealed.
+/// query-time build, a merge target) is priced open, as the owned sketch
+/// it is: its struct, and per store one 128-slot first block (1 KiB) plus
+/// an 8-byte count per bucket beyond the first, above the stored layout;
+/// every other family is priced the same open or stored.
 #[test]
 fn open_ddsketch_states_hold_their_first_blocks() {
     let rows = |non_negative| StateInputRows {
@@ -1065,12 +1084,11 @@ fn open_ddsketch_states_hold_their_first_blocks() {
         distinct_values: None,
     };
     let ddsketch = SketchParams::DDSketch { alpha: 0.01 };
-    for (non_negative, stores) in [(true, 1), (false, 2)] {
-        assert_eq!(
-            open_sketch_state_bytes(&ddsketch, rows(non_negative))
-                - sketch_state_bytes(&ddsketch, rows(non_negative)),
-            stores * 1_016
-        );
+    let struct_bytes = std::mem::size_of::<asap_sketchlib::DdSketch>() as u64;
+    for non_negative in [true, false] {
+        let open = open_sketch_state_bytes(&ddsketch, rows(non_negative));
+        assert!(open > sketch_state_bytes(&ddsketch, rows(non_negative)));
+        assert_eq!((open - struct_bytes) % 8, 0);
     }
     let kll = SketchParams::Kll { k: 200 };
     assert_eq!(
@@ -1086,4 +1104,154 @@ fn per_series_levels(series: u64, n: u32) -> Vec<f64> {
     (0..u64::from(n))
         .map(|i| level * (0.9 + 0.2 * uniform((series << 32) ^ i)))
         .collect()
+}
+
+/// A constant: every value 42.
+fn constant(_series: u64, n: u32) -> Vec<f64> {
+    vec![42.0; n as usize]
+}
+
+/// Pareto values of shape 1.1 and scale 1 (a heavy tail), capped at 1e12.
+fn pareto(series: u64, n: u32) -> Vec<f64> {
+    (0..u64::from(n))
+        .map(|i| {
+            (1.0 - uniform((series << 32) ^ i))
+                .powf(-1.0 / 1.1)
+                .min(1e12)
+        })
+        .collect()
+}
+
+/// Uniform in [0, 1000).
+fn uniform_to_a_thousand(series: u64, n: u32) -> Vec<f64> {
+    (0..u64::from(n))
+        .map(|i| 1_000.0 * uniform((series << 32) ^ i))
+        .collect()
+}
+
+/// Two modes: 1 ms and 1 s, each ± 5%.
+fn bimodal(series: u64, n: u32) -> Vec<f64> {
+    (0..u64::from(n))
+        .map(|i| {
+            let u = uniform((series << 32) ^ i);
+            let mode = if u < 0.5 { 0.001 } else { 1.0 };
+            mode * (0.95 + 0.2 * (u - if u < 0.5 { 0.0 } else { 0.5 }))
+        })
+        .collect()
+}
+
+/// Small integer counts 0..=5, zeros included.
+fn small_counts(series: u64, n: u32) -> Vec<f64> {
+    (0..u64::from(n))
+        .map(|i| (6.0 * uniform((series << 32) ^ i)).floor())
+        .collect()
+}
+
+/// Lognormal values of median 1e-6 and σ = 1 (sub-microsecond scale).
+fn tiny_lognormal(series: u64, n: u32) -> Vec<f64> {
+    lognormal(series, n).into_iter().map(|v| v * 1e-7).collect()
+}
+
+/// Log-uniform over fifteen decades, [1e-6, 1e9].
+fn log_uniform_over_fifteen_decades(series: u64, n: u32) -> Vec<f64> {
+    (0..u64::from(n))
+        .map(|i| 1e-6 * 10f64.powf(15.0 * uniform((series << 32) ^ i)))
+        .collect()
+}
+
+/// A stored DDSketch state is never priced below 0.99 of what the
+/// executor holds for it sealed (its view layout and offset), over α from
+/// 0.001 to 0.1, 1 to 140,000 rows (both sides of the 1- and 2-byte count
+/// widths), unsigned and signed values, 15 value shapes, each with no
+/// declared range and, where the shape has a natural one, declared.
+#[test]
+fn stored_ddsketch_prices_never_fall_below_what_the_executor_holds() {
+    type Shape = fn(u64, u32) -> Vec<f64>;
+    let range = |min_abs, max_abs| Some(ValueMagnitudeRange { min_abs, max_abs });
+    // The last field: whether the values fit the range assumed when none
+    // is declared (nine decades); a shape that does not is tested declared
+    // only.
+    let shapes: [(&str, Shape, Option<ValueMagnitudeRange>, bool); 15] = [
+        ("exponential", latency_like, range(2.687e-8, 1_104.2), true),
+        ("lognormal sigma 1", lognormal, None, true),
+        ("lognormal sigma 2", lognormal_sigma_2, None, true),
+        ("narrow gauge", narrow_gauge, range(90.0, 110.0), true),
+        (
+            "log-uniform 7 decades",
+            log_uniform_over_seven_decades,
+            range(0.001, 1e4),
+            true,
+        ),
+        ("Zipf(1.1) integers", zipf_integers, range(1.0, 1e6), true),
+        ("counter near 1e6", counter_near_a_million, None, true),
+        (
+            "per-series levels",
+            per_series_levels,
+            range(1.0, 1e5),
+            true,
+        ),
+        ("constant", constant, range(42.0, 42.0), true),
+        ("Pareto(1.1)", pareto, range(1.0, 1e12), true),
+        (
+            "uniform to 1000",
+            uniform_to_a_thousand,
+            range(1e-6, 1_000.0),
+            true,
+        ),
+        ("bimodal 1 ms / 1 s", bimodal, range(9e-4, 1.1), true),
+        ("small counts", small_counts, range(1.0, 5.0), true),
+        ("tiny lognormal", tiny_lognormal, None, true),
+        (
+            "log-uniform 15 decades",
+            log_uniform_over_fifteen_decades,
+            range(1e-6, 1e9),
+            false,
+        ),
+    ];
+    let rows = [
+        1_u32, 2, 10, 100, 255, 256, 1_000, 10_000, 65_535, 65_536, 140_000,
+    ];
+    let mut lowest = (f64::INFINITY, String::new());
+    for alpha in [0.001, 0.01, 0.1] {
+        for (name, values, declared, within_assumed) in shapes {
+            for n in rows {
+                for signed in [false, true] {
+                    let series: Vec<Vec<f64>> = (0..if n >= 10_000 { 2 } else { 4 })
+                        .map(|s| {
+                            values(s, n)
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, v)| if signed && i % 2 == 0 { -v } else { v })
+                                .collect()
+                        })
+                        .collect();
+                    let held = sealed_ddsketch_bytes(alpha, &series);
+                    for value_magnitude_range in [None, declared] {
+                        if value_magnitude_range.is_none() && !within_assumed {
+                            continue;
+                        }
+                        let priced = sketch_state_bytes(
+                            &SketchParams::DDSketch { alpha },
+                            StateInputRows {
+                                rows_per_state: Some(u64::from(n)),
+                                non_negative: !signed,
+                                value_magnitude_range,
+                                distinct_values: None,
+                            },
+                        ) as f64;
+                        let ratio = priced / held;
+                        if ratio < lowest.0 {
+                            lowest = (
+                                ratio,
+                                format!(
+                                    "{name}, alpha {alpha}, {n} rows, signed {signed}, declared {value_magnitude_range:?}: priced {priced}, held {held}"
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(lowest.0 >= 0.99, "lowest {:.3}: {}", lowest.0, lowest.1);
 }
