@@ -344,6 +344,7 @@ fn a_project_or_filter_over_states_passes_their_family_on() {
             std::slice::from_ref(&states_output),
             (1, 1.0),
             None,
+            None,
             &data,
             &settings,
         )
@@ -2383,6 +2384,7 @@ fn ddsketch_assumed_facts_over_sources(
         raw_rows_short_of_range: None,
         state_data_span_ms: None,
         raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
     };
     let settings = CostInputs::default();
     node_resource_usage_and_cost(
@@ -2977,7 +2979,8 @@ fn kll_estimate_us_per_group(producer: Payload, rows_per_state: u64, state_bytes
         raw_rows_short_of_range: None,
         state_data_span_ms: None,
         raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
+        // A merge leaves its states merged.
+        states_last_merged: matches!(states.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. })),
         state_input_rows: Some(StateInputRows {
             folded_rows_per_state: Some((rows_per_state) as f64),
             non_negative: true,
@@ -3967,6 +3970,7 @@ fn rows_of<'a>(producer: &'a PhysicalASAPDAGNode, rows: u64) -> ProducerOutput<'
         raw_rows_short_of_range: None,
         state_data_span_ms: None,
         raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
     }
 }
 
@@ -4483,6 +4487,7 @@ fn a_ddsketch_build_holds_open_states_and_keeps_sealed_ones() {
         raw_rows_short_of_range: None,
         state_data_span_ms: None,
         raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
     };
     let rows = StateInputRows {
         folded_rows_per_state: Some((600) as f64),
@@ -4558,6 +4563,7 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
         raw_rows_short_of_range: None,
         state_data_span_ms: None,
         raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
     };
     let build = PhysicalASAPDAGNode {
         parameters: Some(params.clone()),
