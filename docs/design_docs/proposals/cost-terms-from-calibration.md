@@ -181,3 +181,108 @@ WindowRead, times: ReadTimes }` with `retained_windows(width_ms)`;
 | `the_objective_is_the_plan_cost_with_a_window_cache` (integration) | the MILP's optimum is `plan_cost` with the cache: an offset and a recent reader of one chain, a 1 h quantile, a 1 h range |
 | `a3_under_a_window_cache_the_memory_limit_counts_resident_windows` (integration) | cost model 3's memory row is the plan's peak: a limit at it keeps the chain, one byte below selects the raw read |
 
+## 2. Kept query results
+
+### Example
+
+`seed-862` workload 01 at 10,000 series: nine queries, four of them every
+1 s (`avg by (region, service, job) (quantile_over_time(0.99, data[100s]))`
+and others). The measured data plane held 0.81 GB of query-time results
+(the outputs of query-time nodes computed once per evaluation time and
+shared by the queries at that time, kept 60 s after it) and 79 MB of
+answers (each query's final answer per evaluation time, kept so a range
+request computes only its new steps). The planner charged a query-time
+result only while it is computed: the plan was predicted at 2,563 MiB
+against a 5,122 MiB working set.
+
+`demo.dashboard-heavy` at 10,000 series with each query as a 1 h range
+at 15 s steps (241 steps) every 15 s: the data plane answers each
+request's 240 older steps from the answers it kept and computes only the
+newest. The planner computed all 241 steps of every request, and read
+the whole 2 h of windows (section 1).
+
+### Components
+
+- **Kept query-time results**
+  (`DataPlaneExecution::kept_query_time_results`): `retention_ms` after its
+  evaluation time a result is kept, `max_bytes` optional. A query-time
+  `OneEvaluation` node's output is kept for every evaluation time on its
+  grid within the retention.
+- **Answer cache** (`DataPlaneExecution::answer_cache`): answers are kept
+  as far back as the plan's evaluations read (its longest retention) plus
+  `retention_margin_ms`; `max_bytes` optional. Each query keeps an answer
+  per evaluation time on its grid within that horizon, and a range request
+  computes only the steps the request before it did not.
+
+### Algorithm
+
+- Kept results: per evaluation time within `kept` ms on a grid of
+  `period`, `kept / period + 1` of them (`kept_per_grid`). A query-time
+  `OneEvaluation` node keeps that many of its output, at its readers'
+  grid; a query keeps that many answers, each its root's output, over the
+  plan's longest retention plus the margin, at its evaluation grid. Each
+  pool past its `max_bytes` is scaled down to it. Memory, average and
+  peak; under cost model 1, at the memory unit cost.
+- Steps computed: a range request of `steps` steps every `interval`
+  computes `interval / step` of them, at least 1 and at most `steps`
+  (`steps_computed_per_request`). With an answer cache, `plan_cost` costs
+  each query as a range of that many steps (`as_computed`): its per-step
+  work, its latency's step rounds and the windows its steps read. Its
+  retention and evaluation grid are unchanged.
+
+Examples: answers of a query every 15 s kept 1 h 1 min: 245. A 1 h range
+at 15 s steps every 15 s computes 1 step, every 5 min 20, every 2 h all
+241.
+
+On the memory gate with sections 1 and 2 (idle 60 s; results kept 60 s,
+at most 1 GiB; answers kept 60 s beyond the retention, at most 256 MiB, as
+the measured data plane defaults): 16 of 22 rows within 1.5x, from 0 on
+`main`. `seed-862` 01 at 10,000 series 2,563 → 3,799 MiB (working set
+5,122), the dashboard's range case 4,227 → 677 MiB (595).
+
+**Limits.** As in section 1, Stage 3's selection does not see these pools
+or the steps saved; `plan_cost` and the report do. The answer bytes are a
+query's output edge bytes, not the data plane's encoding of an answer.
+
+### Code interface
+
+`crates/cost/src/model.rs`:
+
+```rust
+pub struct DataPlaneExecution {
+    pub ingest_threads: Option<u32>,
+    pub precompute_threads: u32,
+    pub query_threads: u32,
+    pub allowed_lateness_ms: u64,
+    pub max_thread_utilization: f64,
+    pub ingest_work_at_refresh: bool,
+    pub view_window_cache: Option<ViewWindowCache>,
+    /// Query-time `OneEvaluation` outputs kept after their evaluation time;
+    /// `None` (default): only while computed.
+    pub kept_query_time_results: Option<KeptQueryTimeResults>,
+    /// Each query's answer per evaluation time; `None` (default): none
+    /// kept, every step computed.
+    pub answer_cache: Option<AnswerCache>,
+}
+
+pub struct KeptQueryTimeResults {
+    pub retention_ms: u64,
+    pub max_bytes: Option<u64>,
+}
+
+pub struct AnswerCache {
+    pub retention_margin_ms: u64,
+    pub max_bytes: Option<u64>,
+}
+```
+
+`crates/cost/src/plan/kept_results.rs`: `kept_per_grid`,
+`steps_computed_per_request`, `as_computed`; `plan_cost` adds the pools.
+
+### Tests
+
+| Test | Checks |
+| --- | --- |
+| `kept_results` unit tests (`asap-cost`) | the counts above |
+| `c12_an_answer_cache_keeps_an_answer_per_evaluation_time` (integration) | 37 answers at 60 s of margin over 300 s of retention every 10 s, the bytes of six more for another minute |
+| `c13_a_range_request_computes_only_its_new_steps_with_an_answer_cache` (integration) | a 241-step range every 15 s costs a 241st of its query work |

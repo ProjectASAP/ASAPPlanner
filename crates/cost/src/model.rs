@@ -268,6 +268,43 @@ pub struct DataPlaneExecution {
     /// time. `None` (default): every retained window is memory, and none is
     /// disk.
     pub view_window_cache: Option<ViewWindowCache>,
+    /// Whether the data plane keeps each query-time `OneEvaluation` node's
+    /// output, computed once per evaluation time and shared by the queries
+    /// at that time, for a while after it; `None` (default): only while it
+    /// is computed.
+    pub kept_query_time_results: Option<KeptQueryTimeResults>,
+    /// Whether the data plane keeps each query's answer per evaluation time,
+    /// so a range request computes only the steps it has not answered;
+    /// `None` (default): no answer is kept and every step is computed.
+    pub answer_cache: Option<AnswerCache>,
+}
+
+/// Query-time results kept after their evaluation time
+/// (`docs/design_docs/proposals/cost-terms-from-calibration.md`, section
+/// 2). In JSON `{"retention_ms": 60000}`, with `max_bytes` optional.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeptQueryTimeResults {
+    /// How long after its evaluation time a result is kept, in ms.
+    pub retention_ms: u64,
+    /// The most bytes of results kept; `None` (default): no bound.
+    #[serde(default)]
+    pub max_bytes: Option<u64>,
+}
+
+/// Answers kept per query and evaluation time
+/// (`docs/design_docs/proposals/cost-terms-from-calibration.md`, section
+/// 2). In JSON `{"retention_margin_ms": 60000}`, with `max_bytes` optional.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerCache {
+    /// How far beyond the plan's longest retention an answer is kept, in
+    /// ms: answers are kept as far back as the plan's evaluations read,
+    /// plus this.
+    pub retention_margin_ms: u64,
+    /// The most bytes of answers kept; `None` (default): no bound.
+    #[serde(default)]
+    pub max_bytes: Option<u64>,
 }
 
 /// A cache of decoded view windows
@@ -291,6 +328,8 @@ impl Default for DataPlaneExecution {
             max_thread_utilization: 0.7,
             ingest_work_at_refresh: false,
             view_window_cache: None,
+            kept_query_time_results: None,
+            answer_cache: None,
         }
     }
 }
