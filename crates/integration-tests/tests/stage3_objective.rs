@@ -3,7 +3,7 @@
 //! `asap_cost::plan_cost` of the selected plan, under the default unit
 //! costs and under unit costs that charge per-request overhead and disk.
 
-use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
+use asap_cost::{CostInputs, CostModel, ResourceUnitCost, ViewWindowCache};
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_planner::{DeploymentCapabilities, PlanningModels};
 use asap_types::ir::properties::ExecutionTiming;
@@ -879,4 +879,60 @@ fn cached_final_query_results_retain_a_range_panel_for_its_refresh_interval() {
         cached_cost.1 < uncached_cost.1,
         "{cached_cost:?} vs {uncached_cost:?}"
     );
+}
+
+/// The default cost inputs with the data plane's window cache, idle 60 s:
+/// a view's windows on disk, the recently written or read ones also in
+/// memory.
+fn with_window_cache() -> CostInputs {
+    let mut settings = CostInputs::default();
+    settings.data_plane_execution.view_window_cache = Some(ViewWindowCache { idle_ms: 60_000 });
+    settings
+}
+
+/// Under a window cache of 60 s idle time, without raw data: a 15 s chain
+/// read by `max_over_time(m[5m] offset 1h)` and by `max_over_time(m[5m])`
+/// every 15 s keeps resident the windows of the reader that keeps the most
+/// (24 of 261), in the MILP ($r_v$, (W)) and in `plan_cost` alike, and
+/// costs less than with every retained window in memory; so do a 1 h
+/// quantile (wider levels, a cover, where cheaper) and a 1 h range at 15 s
+/// steps of a 5 min max.
+#[test]
+fn the_objective_is_the_plan_cost_with_a_window_cache() {
+    let offset_and_recent = over_m(vec![
+        requested("max_over_time(m[5m] offset 1h)", 15_000, None),
+        requested("max_over_time(m[5m])", 15_000, None),
+    ]);
+    let (objective, plan_cost) =
+        objective_and_plan_cost(&offset_and_recent, &with_window_cache(), false);
+    assert_equal("offset and recent readers", (objective, plan_cost));
+    let (_, without_cache) =
+        objective_and_plan_cost(&offset_and_recent, &CostInputs::default(), false);
+    assert!(
+        plan_cost < without_cache,
+        "with the cache {plan_cost} is not below {without_cache}"
+    );
+    for (name, entries) in [
+        (
+            "1 h quantile within 1 %",
+            vec![{
+                let mut quantile = requested("quantile_over_time(0.99, m[1h])", 15_000, None);
+                quantile["requirements"] = serde_json::json!({"accuracy": {"max_error": 0.01, "failure_probability": 0.01}});
+                quantile
+            }],
+        ),
+        (
+            "1 h range of a 5 min max",
+            vec![requested(
+                "max_over_time(m[5m])",
+                15_000,
+                Some((15_000, 3_600_000)),
+            )],
+        ),
+    ] {
+        assert_equal(
+            name,
+            objective_and_plan_cost(&over_m(entries), &with_window_cache(), false),
+        );
+    }
 }

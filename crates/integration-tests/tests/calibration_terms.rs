@@ -513,8 +513,9 @@ async fn c9_each_node_reports_its_time_by_phase() {
 /// C11. With a window cache of 60 s idle time, a chain read only an hour
 /// back (`max_over_time(m[5m] offset 1h)` every 15 s) keeps resident the
 /// windows its last minute of evaluations read and the newest it wrote,
-/// not the 1 h 5 min it retains: its memory falls and the windows it no
-/// longer holds in memory are charged as disk, byte for byte. Without the
+/// not the 1 h 5 min it retains: its memory falls below a fifth, and every
+/// retained window is charged as disk (more than the memory it no longer
+/// holds, by the resident windows; less than all it held). Without the
 /// cache (the default), every retained window is memory, as before.
 #[tokio::test]
 async fn c11_a_window_cache_keeps_only_recently_read_windows_in_memory() {
@@ -549,9 +550,9 @@ async fn c11_a_window_cache_keeps_only_recently_read_windows_in_memory() {
         memory_with < memory_without / 5.0,
         "resident {memory_with} bytes against {memory_without} retained"
     );
-    assert_close(
-        "memory moved to disk",
-        disk_with - disk_without,
-        memory_without - memory_with,
+    let disk_added = disk_with - disk_without;
+    assert!(
+        memory_without - memory_with < disk_added && disk_added < memory_without,
+        "disk added {disk_added} bytes for memory {memory_without} -> {memory_with}"
     );
 }
