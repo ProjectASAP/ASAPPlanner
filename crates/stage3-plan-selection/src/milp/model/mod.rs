@@ -11,7 +11,8 @@
 //!
 //! The strongly connected components (E) needs are in [`super::graph`]; the
 //! executions left out before scaling, those dearer than a feasible plan
-//! and those their `OneEvaluation` twin dominates, in
+//! and those their lifetime twin dominates (`None` by `OneEvaluation`, or
+//! a `OneEvaluation` read at most once by `None`), in
 //! [`super::upper_bound`] and [`super::dominance`].
 
 use std::collections::{BTreeMap, HashMap};
@@ -435,8 +436,8 @@ const LARGEST_SCALED_OBJECTIVE_COEFFICIENT: f64 = 1e6;
 /// query-time scan is in $r_s$) under (A)–(F), [`use_constraints`],
 /// [`raw_data_disk_rows`], (R), (X) and (K), with HiGHS at gap 0 on one
 /// thread. The executions dearer than a feasible plan
-/// ([`dearer_than_a_feasible_plan`]) or dominated by their `OneEvaluation`
-/// twin ([`dominated_by_one_evaluation_twin`]) are left out first (and a
+/// ([`dearer_than_a_feasible_plan`]) or dominated by their lifetime twin
+/// ([`dominated_by_one_evaluation_twin`]) are left out first (and a
 /// copy of an equivalent context shares its original's variables,
 /// [`copies_in_equivalent_contexts`]), with
 /// the $h_v$ of a candidate whose

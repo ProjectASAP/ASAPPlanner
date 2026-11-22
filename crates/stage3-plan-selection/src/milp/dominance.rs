@@ -48,7 +48,8 @@ pub(crate) fn dominated_by_one_evaluation_twin(inputs: &SelectionInputs<'_>) -> 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pairing {
     /// An execution with $\ell$ = None and its `OneEvaluation` twin (the
-    /// same logical candidate, context and timing).
+    /// same logical candidate, context and timing), each of which may
+    /// dominate the other.
     OneEvaluationTwin,
 }
 
@@ -59,10 +60,12 @@ pub(crate) enum Pairing {
 /// every query output it answers and may be read by every query that may
 /// read it (exact-only reads, (X)). A plan selecting it selects $b$ in its
 /// place at no more of any quantity and stays feasible (module doc of
-/// [`dominated_by_one_evaluation_twin`]). Among executions equal in every
-/// quantity, the one first in execution order dominates the others, so
-/// every dominated execution has an undominated dominator (the relation is
-/// a strict order). A candidate with $h_v$ or raw data on disk is never
+/// [`dominated_by_one_evaluation_twin`]). A `OneEvaluation` execution is
+/// left out only when its None twin is not itself left out for it (when
+/// each is no worse than the other, the None one is left out), so the
+/// twins of a class are never all left out, and "no worse" being
+/// transitive, every execution left out has a kept one no worse than it.
+/// A candidate with $h_v$ or raw data on disk is never
 /// left out, its retention depending on its own readers.
 pub(crate) fn dominated_in_every_quantity(
     inputs: &SelectionInputs<'_>,
