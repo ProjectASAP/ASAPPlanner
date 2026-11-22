@@ -1072,7 +1072,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             (Some(bytes), _) => bytes,
             // The block and its 8-byte offset in the state column.
             (None, Some((bits, _))) => {
-                compressed_samples_state_bytes(rows_per_state.unwrap_or(1), *bits) + 8
+                compressed_samples_state_bytes(input_rows.rows_per_state().unwrap_or(1), *bits) + 8
             }
             (None, None) => summary_state_bytes(family, node.parameters.as_ref(), input_rows)?,
         };
