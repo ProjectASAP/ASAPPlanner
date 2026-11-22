@@ -159,10 +159,23 @@ fn compressed_samples_plan_snapshot() {
 
     let (cost, _) = plan_cost(plan, &entries, &data, &settings).unwrap();
     let text = planning_stages_text(&stages, Some(&cost), None, false);
+    // The selection's wall-clock times, objective bound and gap depend on
+    // the machine and the solver's time limit: only its model size is kept.
     let stage3 = text
         .find("Stage 3 output")
-        .map(|start| text[start..].to_owned())
-        .expect("a Stage 3 section");
+        .map(|start| &text[start..])
+        .expect("a Stage 3 section")
+        .lines()
+        .map(|line| match line.strip_prefix("selection MILP: ") {
+            Some(rest) => format!(
+                "selection MILP: {}",
+                rest.split(", ").take(2).collect::<Vec<_>>().join(", ")
+            ),
+            None => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
     let path = snapshot_path();
     if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
