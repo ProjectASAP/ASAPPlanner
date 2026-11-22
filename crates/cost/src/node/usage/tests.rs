@@ -318,6 +318,10 @@ fn a_project_or_filter_over_states_passes_their_family_on() {
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
         raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
         states_last_merged: true,
         state_input_rows: None,
     };
