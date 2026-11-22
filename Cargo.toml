@@ -38,7 +38,7 @@ ahash = { version = "0.8", default-features = false, features = ["std", "runtime
 # vocabulary since). Moves to a release once #267 and #270 are in one.
 # Plus the zero-copy sketch views of #271 (branch `feat/zero-copy-views`,
 # on that branch), which the executor's mapped state columns read.
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "93d56eff7a549ae411b90859b000cbecda5cf587" }
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "e77a536a545c6f817bbb014d9278c52b028ce152" }
 
 [profile.dev]
 # Backtraces and profilers keep file:line; full variable info is opt-in via

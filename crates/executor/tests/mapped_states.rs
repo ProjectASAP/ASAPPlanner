@@ -46,6 +46,9 @@ fn window(
     series: u32,
     samples: u32,
 ) -> Batch {
+    if *family == FieldDataType::Sketch(SketchAlgorithm::Cms) {
+        return count_min_window(window, series, samples);
+    }
     let mut updater = StateColumnUpdater::new(family, params).unwrap();
     updater.ensure_groups(series as usize).unwrap();
     for s in 0..series {
@@ -68,6 +71,31 @@ fn window(
         ],
     )
     .unwrap()
+}
+
+/// A window of Count-Min states (3 x 64), one per series, counting
+/// `samples` keys each (Count-Min counts keys, so it is built from states,
+/// not from sample values).
+fn count_min_window(window: u32, series: u32, samples: u32) -> Batch {
+    use asap_executor::summary_kernels::CountMinSketchAccumulator;
+    use asap_executor::values::Value;
+    let family = FieldDataType::Sketch(SketchAlgorithm::Cms);
+    let rows = (0..series)
+        .map(|s| {
+            let mut state = CountMinSketchAccumulator::new(3, 64).unwrap();
+            for sample in 0..samples {
+                state.update(&format!("k{}", (s + window + sample) % 17), 1.5);
+            }
+            vec![
+                Value::Utf8(format!("s{s}").into()),
+                Value::Summary {
+                    family: family.clone(),
+                    state: Arc::new(state),
+                },
+            ]
+        })
+        .collect();
+    Batch::try_new(schema(&family), rows).unwrap()
 }
 
 /// `batch` with its states written in their mapped layout and read back in
