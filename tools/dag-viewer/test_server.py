@@ -122,10 +122,10 @@ class WorkloadArgsTests(unittest.TestCase):
                 self.assertEqual(args[-3:], ["--ignore-accuracy-guarantees", "--out", "out.json"])
 
     def test_every_cost_model_has_its_cost_inputs(self):
-        """The cost models a request may name are the three files in
+        """The cost models a request may name are the four files in
         cost-inputs/."""
         self.assertEqual(server.COST_MODELS, ("aws-fargate-us-east-1", "cluster-lowest-mean-latency",
-                                              "usage-over-time"))
+                                              "cluster-lowest-mean-latency-measured", "usage-over-time"))
 
     def test_sql_tables_become_catalog_table_flags(self):
         """A SQL workload's tables, which a PlanningWorkload does not

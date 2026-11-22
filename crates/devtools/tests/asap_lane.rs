@@ -408,12 +408,36 @@ fn answers_json(answers: &AnswersOverTime) -> serde_json::Value {
 /// from `run_installed` over `counter_workload("both", ...)`.
 const COUNTER_ANSWERS_BEFORE_SHARING: &str = "asap_lane_fixtures/rate_and_increase_two_chains.json";
 
+/// How far, in units in the last place, an answer may be from the one in
+/// `COUNTER_ANSWERS_BEFORE_SHARING`. Those answers come from a plan that
+/// merged the thirty 10 s windows of each 5 min range one after another.
+/// Since multi-level chains, the plan also keeps 60 s windows merged from
+/// the 10 s ones and covers the range with both, so a counter state's
+/// `total_increase` adds the same window increases in a different order:
+/// the floating-point sum can differ in its last bits, while the merge is
+/// the same. Two plans of today (shared chain, chain alone) still agree bit
+/// for bit.
+const MAX_ULPS_FROM_BEFORE_SHARING: u64 = 4;
+
+/// How many representable `f64`s apart `a` and `b` are; `u64::MAX` when
+/// their signs differ (and they are not both zero).
+fn ulps_apart(a: f64, b: f64) -> u64 {
+    if a == b {
+        return 0;
+    }
+    if a.is_sign_negative() != b.is_sign_negative() {
+        return u64::MAX;
+    }
+    a.to_bits().abs_diff(b.to_bits())
+}
+
 /// `rate(c[5m])` and `increase(c[5m])` planned together read one chain of
 /// counter states, which the executor finalizes as `rate` and as
-/// `increase`. Their answers are bit-identical to those of the two chains
-/// the same workload planned before (`COUNTER_ANSWERS_BEFORE_SHARING`) and
-/// to each query's planned alone (one chain each), and the shared
-/// chain's stored views take at most half the bytes of the two.
+/// `increase`. Their answers are within `MAX_ULPS_FROM_BEFORE_SHARING` of
+/// those of the two chains the same workload planned before
+/// (`COUNTER_ANSWERS_BEFORE_SHARING`), bit-identical to each query's
+/// planned alone (one chain each), and the shared chain's stored views take
+/// at most half the bytes of the two.
 #[test]
 fn rate_and_increase_of_one_counter_share_one_chain_and_answer_as_apart() {
     const RATE: &str = "rate(c[5m])";
@@ -438,7 +462,23 @@ fn rate_and_increase_of_one_counter_share_one_chain_and_answer_as_apart() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(answers_json(&answers), before);
+    let before = before.as_array().unwrap();
+    let now = answers_json(&answers);
+    let now = now.as_array().unwrap();
+    assert_eq!(now.len(), before.len());
+    let bits = |entry: &serde_json::Value| {
+        let hex = entry["bits"].as_str().unwrap().trim_start_matches("0x");
+        f64::from_bits(u64::from_str_radix(hex, 16).unwrap())
+    };
+    for (now, then) in now.iter().zip(before) {
+        for key in ["at_ms", "query", "series"] {
+            assert_eq!(now[key], then[key], "{now} vs {then}");
+        }
+        assert!(
+            ulps_apart(bits(now), bits(then)) <= MAX_ULPS_FROM_BEFORE_SHARING,
+            "{now} vs {then}"
+        );
+    }
 
     let mut apart_bytes = 0;
     for (id, query) in [("rate", RATE), ("increase", INCREASE)] {

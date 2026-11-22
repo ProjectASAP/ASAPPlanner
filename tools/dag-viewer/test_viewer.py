@@ -642,7 +642,7 @@ class WorkloadSetTests(unittest.TestCase):
                 self.assertNotIn("document", entry)
         self.assertEqual(files, {path for path in WORKLOADS.glob("*/*.json")
                                  if path.name != server.TABLES_FILE and path.parent.name != "planner-layering"})
-        self.assertEqual(len(files), 30)
+        self.assertEqual(len(files), 31)
 
 
 class PageTests(unittest.TestCase):
