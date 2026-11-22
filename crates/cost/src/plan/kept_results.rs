@@ -8,19 +8,28 @@
 use asap_types::workload::{QueryWorkloadEntry, RangeEvaluation};
 
 /// Evaluation times on a grid of `period_ms` within `kept_ms` behind the
-/// newest (both ends included): the results kept of one node or query.
-pub(crate) fn kept_per_grid(kept_ms: u64, period_ms: u64) -> u64 {
-    kept_ms / period_ms.max(1) + 1
+/// newest (both ends included), on average over where the newest falls:
+/// the results kept of one node or query, `kept / period + 1`. Linear in
+/// `kept_ms`, so Stage 3's selection can charge it over a retention it
+/// chooses.
+pub fn kept_per_grid(kept_ms: u64, period_ms: u64) -> f64 {
+    kept_ms as f64 / period_ms.max(1) as f64 + 1.0
+}
+
+/// A pool of kept bytes, `total`, under a cache bound `max_bytes`: what it
+/// holds, at most the bound (a bounded cache drops what it cannot hold).
+pub fn held_by_bounded_cache(total: f64, max_bytes: Option<u64>) -> f64 {
+    match max_bytes {
+        Some(max_bytes) => total.min(max_bytes as f64),
+        None => total,
+    }
 }
 
 /// Steps one request of a query every `interval_ms` evaluating `range`
 /// computes when the answers of its earlier steps are kept: those not
 /// answered by the request before it, `interval / step`, at least 1 and at
 /// most its steps. Without a range, 1.
-pub(crate) fn steps_computed_per_request(
-    range: Option<RangeEvaluation>,
-    interval_ms: Option<u64>,
-) -> u64 {
+pub fn steps_computed_per_request(range: Option<RangeEvaluation>, interval_ms: Option<u64>) -> u64 {
     let Some(range) = range else {
         return 1;
     };
@@ -34,7 +43,7 @@ pub(crate) fn steps_computed_per_request(
 /// `entry` as a data plane keeping its answers computes it: a range
 /// request evaluates only its [`steps_computed_per_request`] newest steps,
 /// as a range of that many. Its other fields are unchanged.
-pub(crate) fn as_computed(entry: &QueryWorkloadEntry) -> QueryWorkloadEntry {
+pub fn as_computed(entry: &QueryWorkloadEntry) -> QueryWorkloadEntry {
     let mut computed = entry.clone();
     if let Some(range) = entry.range_evaluation {
         let steps = steps_computed_per_request(Some(range), entry.recurrence.fixed_interval_ms());
@@ -51,11 +60,13 @@ mod tests {
     use super::*;
 
     /// A query every 15 s whose answers are kept 1 h 1 min behind the newest
-    /// keeps 245 of them; a node every 10 s kept 60 s keeps 7.
+    /// keeps 245 of them; a node every 10 s kept 60 s keeps 7, kept 65 s 7.5
+    /// on average.
     #[test]
     fn kept_results_count_every_evaluation_time_within_the_horizon() {
-        assert_eq!(kept_per_grid(3_660_000, 15_000), 245);
-        assert_eq!(kept_per_grid(60_000, 10_000), 7);
+        assert_eq!(kept_per_grid(3_660_000, 15_000), 245.0);
+        assert_eq!(kept_per_grid(60_000, 10_000), 7.0);
+        assert_eq!(kept_per_grid(65_000, 10_000), 7.5);
     }
 
     /// A 1 h range at 15 s steps (241 steps) requested every 15 s computes

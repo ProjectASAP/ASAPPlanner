@@ -58,6 +58,25 @@ pub(crate) fn dearer_than_a_feasible_plan(
             _ => 0.0,
         }
     };
+    // Under a bound on the kept query-time results, what an execution
+    // keeps may be dropped (`super::kept_results`): its own cost less them
+    // is what it surely pays.
+    let bounded_kept_results_cost = |index: usize| {
+        let bounded = costs
+            .kept_query_time_results
+            .is_some_and(|results| results.max_bytes.is_some());
+        match (bounded, costs.per_kept_byte) {
+            (true, Some(per_byte)) => {
+                per_byte
+                    * costs
+                        .kept_result_bytes_per_execution
+                        .get(index)
+                        .copied()
+                        .unwrap_or(0.0)
+            }
+            _ => 0.0,
+        }
+    };
     // Looser than `COST_RELATIVE_TOLERANCE` on purpose: the bound and each
     // execution's least cost are sums over many executions, and leaving
     // out an execution the optimum needs cannot be undone, so an execution
@@ -69,7 +88,7 @@ pub(crate) fn dearer_than_a_feasible_plan(
             let Ok(own) = &costs.per_execution[index] else {
                 return false;
             };
-            let least = own
+            let least = own - bounded_kept_results_cost(index)
                 + least_retention_cost(index)
                 + (0..selectable.input_count(index))
                     .map(|i| {

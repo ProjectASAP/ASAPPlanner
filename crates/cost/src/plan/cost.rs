@@ -14,7 +14,7 @@ use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_state_bytes, state_bytes_per_row, StateInputRows};
 use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
-use crate::plan::kept_results::{as_computed, kept_per_grid};
+use crate::plan::kept_results::{as_computed, held_by_bounded_cache, kept_per_grid};
 use crate::plan::resident_windows::{view_resident_windows, ChainReader, ReadTimes, WindowRead};
 use crate::{lookup_at_scale, StateFamily};
 use crate::{node_resource_usage_and_cost, NodeResourceUsageAndCost, ProducerOutput};
@@ -31,7 +31,7 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPOperatorPayload as Payload,
 };
 use asap_types::plan::time_window::{read_back_ms, windows_readers_need};
-use asap_types::stages::{Lifetime, StorageMedium};
+use asap_types::stages::Lifetime;
 use asap_types::summary_type::SketchParams;
 use asap_types::workload::{
     greatest_common_divisor, AssumedDataFact, DataWorkload, QueryWorkloadEntry,
@@ -424,27 +424,33 @@ pub fn plan_cost(
             &mut per_node,
         );
     }
-    // Results the data plane keeps between requests: each query-time
-    // `OneEvaluation` node's output per evaluation time within its
-    // retention, and each query's answer per evaluation time as far back as
-    // the plan's evaluations read, plus a margin.
-    let mut kept: Vec<(PhysicalASAPNodeId, f64, Option<u64>)> = Vec::new();
+    // Query-time results the data plane keeps between requests: each node
+    // charged its own (`NodeResourceUsageAndCost::kept_result_bytes`); past
+    // the cache's bound they are not held, each node's share dropped.
     if let Some(results) = settings.data_plane_execution.kept_query_time_results {
-        let mut pool = Vec::new();
-        for node in &dag.nodes {
-            let one_evaluation_in_memory = node.output_state.timing == ExecutionTiming::QueryTime
-                && node.lifetime == Lifetime::OneEvaluation(StorageMedium::Memory);
-            if let (true, Some(grid)) = (one_evaluation_in_memory, evaluation_grid_of(node.id)) {
-                let count = kept_per_grid(results.retention_ms, grid.period_ms);
-                pool.push((node.id, output[&node.id].bytes as f64 * count as f64));
+        let total: f64 = costed.values().map(|node| node.kept_result_bytes).sum();
+        let dropped = total - held_by_bounded_cache(total, results.max_bytes);
+        if dropped > 0.0 {
+            for node in &dag.nodes {
+                let kept = costed[&node.id].kept_result_bytes;
+                if kept <= 0.0 {
+                    continue;
+                }
+                let share = kept / total * dropped;
+                usage.average_memory_bytes -= share;
+                usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_sub(share as u64);
+                let node_cost = per_node.get_mut(&node.id).expect("every node is measured");
+                node_cost.detail += &format!("; {share:.0} of them past the cache's bound");
+                if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs)
+                {
+                    *cost -= unit_cost.cost_per_memory_byte_second * share;
+                }
             }
         }
-        kept.extend(
-            bounded(pool, results.max_bytes)
-                .into_iter()
-                .map(|(id, bytes)| (id, bytes, None)),
-        );
     }
+    // Each query's answer per evaluation time, as far back as the plan's
+    // evaluations read (its longest retention) plus a margin, charged to its
+    // root; past the cache's bound, each query's share dropped.
     if let Some(answers) = settings.data_plane_execution.answer_cache {
         let horizon_ms = dag
             .nodes
@@ -453,29 +459,30 @@ pub fn plan_cost(
             .max()
             .unwrap_or(0)
             .saturating_add(answers.retention_margin_ms);
-        let mut pool = Vec::new();
-        for (query, &root) in dag.roots.iter().enumerate() {
-            if let Some(entry) = entries.get(query) {
+        let pool: Vec<(PhysicalASAPNodeId, f64)> = dag
+            .roots
+            .iter()
+            .zip(entries)
+            .map(|(&root, entry)| {
                 let count = kept_per_grid(horizon_ms, entry.evaluation_grid().period_ms);
-                pool.push((root, output[&root].bytes as f64 * count as f64));
+                (root, output[&root].bytes as f64 * count)
+            })
+            .collect();
+        let total: f64 = pool.iter().map(|(_, bytes)| bytes).sum();
+        let held = held_by_bounded_cache(total, answers.max_bytes);
+        for (root, bytes) in pool {
+            let bytes = if total > 0.0 {
+                bytes * held / total
+            } else {
+                0.0
+            };
+            usage.average_memory_bytes += bytes;
+            usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_add(bytes as u64);
+            let node_cost = per_node.get_mut(&root).expect("every node is measured");
+            node_cost.detail += &format!("; keeps {bytes:.0} bytes of answers ({horizon_ms} ms)");
+            if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs) {
+                *cost += unit_cost.cost_per_memory_byte_second * bytes;
             }
-        }
-        kept.extend(
-            bounded(pool, answers.max_bytes)
-                .into_iter()
-                .map(|(id, bytes)| (id, bytes, Some(horizon_ms))),
-        );
-    }
-    for (id, bytes, horizon_ms) in kept {
-        usage.average_memory_bytes += bytes;
-        usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_add(bytes as u64);
-        let node_cost = per_node.get_mut(&id).expect("every node is measured");
-        node_cost.detail += &match horizon_ms {
-            Some(horizon_ms) => format!("; keeps {bytes:.0} bytes of answers ({horizon_ms} ms)"),
-            None => format!("; keeps {bytes:.0} bytes of results after its evaluations"),
-        };
-        if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs) {
-            *cost += unit_cost.cost_per_memory_byte_second * bytes;
         }
     }
     let merge_ms =
@@ -568,22 +575,6 @@ pub fn plan_cost(
         },
         fit,
     ))
-}
-
-/// `pool`'s bytes per node, scaled down together to at most `max_bytes`
-/// when they hold more: a bounded cache drops results it cannot hold.
-fn bounded(
-    pool: Vec<(PhysicalASAPNodeId, f64)>,
-    max_bytes: Option<u64>,
-) -> Vec<(PhysicalASAPNodeId, f64)> {
-    let total: f64 = pool.iter().map(|(_, bytes)| bytes).sum();
-    let scale = match max_bytes {
-        Some(max_bytes) if total > max_bytes as f64 => max_bytes as f64 / total,
-        _ => 1.0,
-    };
-    pool.into_iter()
-        .map(|(id, bytes)| (id, bytes * scale))
-        .collect()
 }
 
 /// Charges each in-memory ingestion-time view under `cache`

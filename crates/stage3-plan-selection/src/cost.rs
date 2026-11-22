@@ -56,8 +56,9 @@ use asap_cost::plan::execution_demand::{
     context_executions_per_second, executions_per_second as rate_of_materialized,
 };
 use asap_cost::{
-    node_resource_usage_and_cost, output_interval_ms, raw_data_disk_cost_per_second,
-    CachedViewWindows, CostInputs, NodeResourceUsageAndCost, ProducerOutput, RawRowsShortOfRange,
+    node_resource_usage_and_cost, output_interval_ms, raw_data_disk_cost_per_second, AnswerCache,
+    CachedViewWindows, CostInputs, KeptQueryTimeResults, NodeResourceUsageAndCost, ProducerOutput,
+    RawRowsShortOfRange,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
@@ -144,6 +145,23 @@ pub(crate) struct ExecutionCosts {
     /// Whether the quantity charges each read's most resident windows (peak
     /// memory), not its mean.
     pub(crate) resident_at_most: bool,
+    /// The bytes of results each execution keeps after its evaluation times
+    /// (`DataPlaneExecution::kept_query_time_results`; in its
+    /// `per_execution` already), by position in
+    /// `SelectableExecutions::executions`; empty without them.
+    pub(crate) kept_result_bytes_per_execution: Vec<f64>,
+    /// The bytes of each execution's output, its answer to a query output
+    /// it answers (`DataPlaneExecution::answer_cache`), by position; empty
+    /// without an answer cache.
+    pub(crate) answer_bytes_per_execution: Vec<f64>,
+    /// The quantity of one byte kept in the data plane's result and answer
+    /// caches: the memory cost per byte-second (cost model 1), 1 (peak
+    /// memory); `None` for the other quantities.
+    pub(crate) per_kept_byte: Option<f64>,
+    /// The data plane's result cache and answer cache, from the cost
+    /// inputs.
+    pub(crate) kept_query_time_results: Option<KeptQueryTimeResults>,
+    pub(crate) answer_cache: Option<AnswerCache>,
 }
 
 impl ExecutionCosts {
@@ -696,7 +714,53 @@ pub(crate) fn execution_quantities(
         resident_reads: Vec::new(),
         per_resident_window: HashMap::new(),
         resident_at_most: quantity == Quantity::PeakMemoryBytes,
+        kept_result_bytes_per_execution: Vec::new(),
+        answer_bytes_per_execution: Vec::new(),
+        per_kept_byte: match quantity {
+            Quantity::CostPerSecond => cost_inputs
+                .cost_model
+                .per_node_unit_costs()
+                .map(|unit_cost| unit_cost.cost_per_memory_byte_second),
+            Quantity::PeakMemoryBytes => Some(1.0),
+            _ => None,
+        },
+        kept_query_time_results: cost_inputs.data_plane_execution.kept_query_time_results,
+        answer_cache: cost_inputs.data_plane_execution.answer_cache,
     };
+    // With the data plane's result or answer cache, each execution's kept
+    // results and output at its rate and grid, as `at_rate` costs it.
+    let execution = &cost_inputs.data_plane_execution;
+    if execution.kept_query_time_results.is_some() || execution.answer_cache.is_some() {
+        (
+            costs.kept_result_bytes_per_execution,
+            costs.answer_bytes_per_execution,
+        ) = executions
+            .iter()
+            .zip(&execution_read_ms)
+            .zip(&at_rate)
+            .map(|((&execution, &read_ms), at_rate)| {
+                let v = execution.candidate;
+                let evaluation_grid = context_grid(execution.context);
+                let usage = at_rate.as_ref().ok().and_then(|&(_, _, per_second)| {
+                    let inputs = inputs_at(v, evaluation_grid)?;
+                    cost_node(
+                        physical,
+                        v,
+                        &nodes[v.0],
+                        &inputs,
+                        per_second,
+                        read_ms,
+                        evaluation_grid,
+                        data,
+                        cost_inputs,
+                    )
+                    .ok()
+                    .map(|usage| (usage.kept_result_bytes, usage.output.bytes as f64))
+                });
+                usage.unwrap_or((0.0, 0.0))
+            })
+            .unzip();
+    }
     costs.least_retention_ms_per_execution = least_retention_ms_per_execution(selectable, &costs);
     // Under a window cache, each cached view's resident windows, per read.
     let per_window = |bytes: u64| match quantity {

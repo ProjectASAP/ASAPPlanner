@@ -32,6 +32,7 @@ mod resident_windows;
 mod retention;
 mod selectable;
 
+use asap_cost::plan::kept_results::as_computed;
 use asap_cost::{
     request_overhead_cost_per_second, ClusterLimits, ClusterObjective, CostInputs, CostModel,
     LatencyCalibration, ResourceUnitCost,
@@ -155,16 +156,30 @@ pub fn select_plan(
         .collect();
     let mut selectable =
         SelectableExecutions::new(physical, entries, &outputs, final_results_cache);
-    let request_overhead_cost_per_second = request_overhead_cost_per_second(entries, cost_inputs)
-        .map_err(|error| ErrorSelectingPlan::Cost {
-        candidate: "every plan (the request overhead)".into(),
-        node: 0,
-        error,
-    })?;
+    // A data plane keeping its answers computes only the steps of a range
+    // request it has not answered before: its rates and steps are costed
+    // so, as `plan_cost` costs them; its retention and grid are the
+    // query's (`selectable`).
+    let computed_entries: Vec<QueryWorkloadEntry>;
+    let entries_as_computed = match cost_inputs.data_plane_execution.answer_cache {
+        Some(_) => {
+            computed_entries = entries.iter().map(as_computed).collect();
+            &computed_entries[..]
+        }
+        None => entries,
+    };
+    let request_overhead_cost_per_second =
+        request_overhead_cost_per_second(entries_as_computed, cost_inputs).map_err(|error| {
+            ErrorSelectingPlan::Cost {
+                candidate: "every plan (the request overhead)".into(),
+                node: 0,
+                error,
+            }
+        })?;
     let mut costs = execution_costs(
         physical,
         &selectable,
-        entries,
+        entries_as_computed,
         data,
         cost_inputs_for_structure,
     );
@@ -205,7 +220,7 @@ pub fn select_plan(
     }
     let selection_inputs = SelectionInputs {
         physical,
-        entries,
+        entries: entries_as_computed,
         selectable: &selectable,
         costs: &costs,
     };
@@ -244,7 +259,7 @@ pub fn select_plan(
                 execution_quantities(
                     physical,
                     &selectable,
-                    entries,
+                    entries_as_computed,
                     data,
                     cost_inputs_for_structure,
                     quantity,
