@@ -14,7 +14,9 @@ use asap_planner::{
     plan_installable, CostInputs, DeploymentCapabilities, ExecutionTiming, FrontendInput,
     InstallablePlan, OperatorKind, PlanningModels, PlanningWorkload, SelectedPlanReport, UserInput,
 };
+use asap_types::deployment_capabilities::CandidateExclusion;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
+use asap_types::summary_type::SummaryFamily;
 
 use time_series::{
     answers, assert_answers_near, labels, query_roots, run, sample, time_series_tables, try_run,
@@ -1142,6 +1144,11 @@ async fn the_report_names_a_ddsketch_s_assumed_magnitude_range() {
     };
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
+        // Sketch-specific: compressed samples would answer exactly.
+        excluded_candidates: vec![CandidateExclusion {
+            summary_family: Some(SummaryFamily::CompressedSamples),
+            ..Default::default()
+        }],
         ..DeploymentCapabilities::default()
     };
     let (plan, report) = plan_with_report_for(workload(""), &capabilities).await;

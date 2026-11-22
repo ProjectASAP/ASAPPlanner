@@ -41,7 +41,16 @@ pub use model::{
     COST_SOURCE, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 pub use node::cost_terms::{node_cost_terms, CostConstant, NodeCostTerms};
+/// The built-in ns (operations at the default speed) to append one sample
+/// to a compressed-samples window and re-encode it at seal, until a
+/// deployment's calibration measures it.
+pub const ANALYTICAL_ENCODE_NS_PER_COMPRESSED_SAMPLE: f64 =
+    node::operations_per_unit::COMPRESSED_SAMPLE_ENCODE_OPERATIONS_PER_ROW;
+/// The built-in ns to decode one compressed sample, until calibrated.
+pub const ANALYTICAL_DECODE_NS_PER_COMPRESSED_SAMPLE: f64 =
+    node::operations_per_unit::COMPRESSED_SAMPLE_DECODE_OPERATIONS_PER_SAMPLE;
 pub use node::operator_statistics::EdgeStatistics;
+pub use node::state_bytes::{compressed_samples_state_bytes, ASSUMED_COMPRESSED_BITS_PER_SAMPLE};
 pub use node::usage::{
     node_resource_usage_and_cost, output_interval_ms, query_time_computation_short_of_source_rows,
     reads_one_batch_of, summary_type_name, NodeCost, NodeResourceUsageAndCost, PhaseTimes,

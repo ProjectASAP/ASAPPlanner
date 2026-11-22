@@ -50,7 +50,7 @@ fn every_per_unit_constant_has_a_cost_constant() {
         .iter()
         .map(|constant| format!("{constant:?}"))
         .collect();
-    assert_eq!(defined.len(), 51, "{defined:?}");
+    assert_eq!(defined.len(), 53, "{defined:?}");
     assert_eq!(
         defined.difference(&variants).collect::<Vec<_>>(),
         Vec::<&String>::new(),
@@ -103,7 +103,7 @@ fn cost_constant_json_names_are_the_full_snake_case_list() {
 }
 
 /// Every constant's JSON name, in declaration order.
-const JSON_NAMES: [&str; 51] = [
+const JSON_NAMES: [&str; 53] = [
     "time_range_operations_per_row",
     "operations_per_group_per_raw_batch",
     "chain_operations_per_arriving_row",
@@ -155,6 +155,8 @@ const JSON_NAMES: [&str; 51] = [
     "sketch_chain_emit_operations_per_state",
     "exact_chain_emit_operations_per_state",
     "kll_merge_operations_per_output_group",
+    "compressed_sample_encode_operations_per_row",
+    "compressed_sample_decode_operations_per_sample",
 ];
 
 /// Every constant, parsed from [`JSON_NAMES`]: with the count of the

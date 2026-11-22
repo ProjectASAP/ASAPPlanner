@@ -12,13 +12,14 @@
 //! per window.
 
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
-use asap_planner::{CostInputs, DeploymentCapabilities, PlanningModels};
+use asap_planner::{CostInputs, PlanningModels};
 use asap_types::ir::NonASAPOp;
 use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
 use serde_json::{json, Value};
 
 use crate::lowest_mean_latency_common::{
-    cluster, cost_inputs, data_plane, every, max_min_table, over_m, plan, planned, usage_over_time,
+    cluster, cost_inputs, data_plane, deployment_capabilities, every, max_min_table, over_m, plan,
+    planned, usage_over_time,
 };
 
 /// `max_over_time(m[5m])` every 10 s.
@@ -287,10 +288,7 @@ async fn a9_the_report_breaks_latency_down() {
     );
     // The MILP's mean latency, from the stages run directly.
     let settings: CostInputs = serde_json::from_value(settings).unwrap();
-    let capabilities = DeploymentCapabilities {
-        raw_data_retained: true,
-        ..Default::default()
-    };
+    let capabilities = deployment_capabilities(true);
     let models = PlanningModels::builtin()
         .with_cost_inputs(&settings)
         .with_deployment_capabilities(&capabilities);
@@ -634,10 +632,7 @@ async fn a18_a_candidate_over_every_readers_bound_is_pruned_before_the_milp() {
         json!({}),
     ))
     .unwrap();
-    let capabilities = DeploymentCapabilities {
-        raw_data_retained: true,
-        ..Default::default()
-    };
+    let capabilities = deployment_capabilities(true);
     let models = PlanningModels::builtin()
         .with_cost_inputs(&settings)
         .with_deployment_capabilities(&capabilities);
@@ -664,10 +659,7 @@ async fn a18_a_candidate_over_every_readers_bound_is_pruned_before_the_milp() {
 /// the stages run directly (`Selection`).
 fn milp_latencies(workload: &asap_planner::PlanningWorkload, settings: &Value) -> (Vec<f64>, f64) {
     let settings: CostInputs = serde_json::from_value(settings.clone()).unwrap();
-    let capabilities = DeploymentCapabilities {
-        raw_data_retained: true,
-        ..Default::default()
-    };
+    let capabilities = deployment_capabilities(true);
     let models = PlanningModels::builtin()
         .with_cost_inputs(&settings)
         .with_deployment_capabilities(&capabilities);

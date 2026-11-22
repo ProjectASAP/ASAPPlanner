@@ -33,6 +33,7 @@ const KIND_CATEGORY_JSON = `{
   "SummaryMerge": "summary",
   "SummaryTumblingWindowChain": "summary",
   "SummaryMergeWindows": "summary",
+  "DecodeSamplesInRange": "window",
   "FinalizeExactAccumulator": "summary",
   "MaintainPopulation": "summary",
   "EvaluatePopulation": "summary",

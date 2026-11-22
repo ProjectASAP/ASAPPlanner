@@ -115,16 +115,20 @@ fn run_until_prints_exactly_the_stages_up_to_it() {
 
 /// Pass 2 adds chain groups at the greatest common divisor of the ranges
 /// and evaluation steps: a 5 m quantile within 1% every 60 s at phase 0
-/// gets its mergeable summary's chain of 60 s tumbling windows only.
+/// gets its mergeable summary's chain of 60 s tumbling windows only
+/// (beside the compressed-samples chains every raw range gets).
 #[test]
 fn pass2_holds_tumbling_windows_at_the_gcd_of_ranges_and_steps() {
     let mut quantile = workload("quantile_over_time(0.5, data[5m])", 60_000, 0.01, "data");
     quantile["query_workload"]["repeating_queries"][0]["demand"] =
         json!({"fixed_interval_at": {"interval": 60_000, "evaluation_phase": 0}});
     let text = stdout(planner(&quantile, &["--run-until", "stage1_pass2"]));
+    // The summary's chains; compressed-samples chains (at the ladder's and
+    // the grid's widths) are another state's.
     let widths: BTreeSet<u64> = text
-        .split("tumbling_window_width_ms=")
-        .skip(1)
+        .lines()
+        .filter(|line| !line.contains("CompressedSamples"))
+        .flat_map(|line| line.split("tumbling_window_width_ms=").skip(1))
         .map(|rest| {
             let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
             digits.parse().unwrap()

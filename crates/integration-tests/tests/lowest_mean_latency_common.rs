@@ -11,6 +11,8 @@ use asap_planner::{
     plan_installable, CostInputs, DeploymentCapabilities, FrontendInput, InstallablePlan,
     MaterializedViewRefresh, PlanningModels, PlanningWorkload, UserInput,
 };
+use asap_types::deployment_capabilities::CandidateExclusion;
+use asap_types::summary_type::SummaryFamily;
 use serde_json::{json, Value};
 
 /// One repeating PromQL query: `query` every `interval_ms` at phase 0, with
@@ -216,6 +218,20 @@ pub(crate) fn number(value: &Value, name: &str) -> f64 {
         .unwrap_or_else(|| panic!("report field {name} missing in {value}"))
 }
 
+/// A deployment that keeps raw data or not, without compressed-sample
+/// chains: these tests pin chain and raw-read plans of exact accumulators.
+pub(crate) fn deployment_capabilities(raw_data_retained: bool) -> DeploymentCapabilities {
+    DeploymentCapabilities {
+        raw_data_retained,
+        // Accumulator-specific: compressed samples would answer exactly.
+        excluded_candidates: vec![CandidateExclusion {
+            summary_family: Some(SummaryFamily::CompressedSamples),
+            ..Default::default()
+        }],
+        ..DeploymentCapabilities::default()
+    }
+}
+
 /// Plan `workload` (PromQL) under `cost_inputs` (JSON) on a deployment that
 /// keeps raw data or not. Err: the cost inputs do not load (a field the
 /// design adds) or planning fails, as text.
@@ -226,10 +242,7 @@ pub(crate) async fn planned(
 ) -> Result<Planned, String> {
     let cost_inputs: CostInputs = serde_json::from_value(cost_inputs.clone())
         .map_err(|error| format!("cost inputs do not load: {error}"))?;
-    let capabilities = DeploymentCapabilities {
-        raw_data_retained,
-        ..DeploymentCapabilities::default()
-    };
+    let capabilities = deployment_capabilities(raw_data_retained);
     let models = PlanningModels::builtin()
         .with_cost_inputs(&cost_inputs)
         .with_deployment_capabilities(&capabilities);

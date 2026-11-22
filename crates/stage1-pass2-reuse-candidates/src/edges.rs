@@ -5,11 +5,13 @@
 use std::collections::BTreeMap;
 
 use asap_accuracy::{AccuracyEvidence, ErrorMetricsOfMemo};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::stages::{
     CandidateForMemoGroupId, EvaluationGrid, Memo, MemoGroupId, RootPruneReason,
 };
 
 use crate::evaluation_grids::chain_off_the_evaluation_grid;
+use crate::rules::compressed_samples::is_compressed_samples_chain;
 
 /// One possible $(u, c, i)$: `producer` is a candidate of the group input
 /// `input` of `consumer` reads, and whether it satisfies that input's
@@ -52,19 +54,40 @@ pub(crate) fn candidate_edges(
                 .into_iter()
                 .enumerate()
             {
-                // A wider level read on purpose off the grid
-                // (`Operator::reads_input_off_the_grid`).
-                let read_off_the_grid = candidate
-                    .expression
-                    .operator
-                    .reads_input_off_the_grid(input);
-                let chain_off_the_grid = chain_off_the_evaluation_grid(
-                    memo,
-                    evaluation_grid_of_group,
-                    group,
-                    input_group,
-                )
-                .filter(|_| !read_off_the_grid);
+                let chain_off_the_grid = match &candidate.expression.operator {
+                    // A decode that reads the open window trims both edges
+                    // of its range, so any width serves any grid.
+                    Operator::ASAP(ASAPOp::DecodeSamplesInRange {
+                        reads_unsealed_window: true,
+                        ..
+                    }) => None,
+                    // A sealed read: its range's grid against the chain it
+                    // reads through its shifts.
+                    Operator::ASAP(ASAPOp::DecodeSamplesInRange {
+                        reads_unsealed_window: false,
+                        ..
+                    }) => chain_off_the_evaluation_grid(
+                        memo,
+                        evaluation_grid_of_group,
+                        group,
+                        below_shifts(memo, input_group),
+                    ),
+                    // A shift over a compressed chain: its decode checks.
+                    Operator::NonASAP(NonASAPOp::TimeShift { .. })
+                        if is_compressed_samples_chain(memo, input_group) =>
+                    {
+                        None
+                    }
+                    // A wider level read on purpose off the grid
+                    // (`Operator::reads_input_off_the_grid`).
+                    operator => chain_off_the_evaluation_grid(
+                        memo,
+                        evaluation_grid_of_group,
+                        group,
+                        input_group,
+                    )
+                    .filter(|_| !operator.reads_input_off_the_grid(input)),
+                };
                 for producer in memo.producers(consumer, input) {
                     edges.push(CandidateEdge {
                         producer,
@@ -95,4 +118,14 @@ pub(crate) fn candidate_edges(
         }
     }
     edges
+}
+
+/// The group `group` reads through `TimeShift` groups.
+fn below_shifts(memo: &Memo, mut group: MemoGroupId) -> MemoGroupId {
+    while let Operator::NonASAP(NonASAPOp::TimeShift { child, .. }) =
+        &memo.groups()[group.0 as usize].expression
+    {
+        group = *child;
+    }
+    group
 }

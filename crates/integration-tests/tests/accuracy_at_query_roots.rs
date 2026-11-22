@@ -5,9 +5,11 @@
 
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_planner::{DeploymentCapabilities, PlanningModels, PlanningRun};
+use asap_types::deployment_capabilities::CandidateExclusion;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::summary_type::SketchParams;
+use asap_types::summary_type::SummaryFamily;
 use asap_types::workload::PlanningWorkload;
 
 /// The series of `latency` in the module's example.
@@ -80,6 +82,11 @@ fn planning_run(workload: PlanningWorkload, ignore_accuracy: bool) -> PlanningRu
     let data = workload.data_workload.clone().unwrap();
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
+        // Sketch-specific: compressed samples would answer exactly.
+        excluded_candidates: vec![CandidateExclusion {
+            summary_family: Some(SummaryFamily::CompressedSamples),
+            ..Default::default()
+        }],
         ..Default::default()
     };
     let models = PlanningModels::builtin()

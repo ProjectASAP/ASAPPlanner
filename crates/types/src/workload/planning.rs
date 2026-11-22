@@ -206,6 +206,9 @@ mod tests {
                                 max_abs: 1e12,
                             },
                         )]),
+                        column_compressed_bits_per_sample: BTreeMap::new(),
+                        column_compressed_sample_encode_ns: BTreeMap::new(),
+                        column_compressed_sample_decode_ns: BTreeMap::new(),
                         sample_interval: Some(DurationMs(15_000)),
                         stream_norms: Some(StreamNorms {
                             l1: Some(1e9),

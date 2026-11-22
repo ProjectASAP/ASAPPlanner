@@ -220,6 +220,13 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
             child: (),
             tumbling_window_width_ms: 300_000,
         },
+        ASAPOp::DecodeSamplesInRange {
+            child: (),
+            range: std::time::Duration::from_secs(300),
+            kind: TimeRangeKind::Range,
+            labels: vec![],
+            reads_unsealed_window: true,
+        },
         ASAPOp::SummarySubtract {
             left: (),
             right: (),
@@ -249,6 +256,7 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
             | ASAPOp::SummaryMerge { .. }
             | ASAPOp::SummaryTumblingWindowChain { .. }
             | ASAPOp::SummaryMergeWindows { .. }
+            | ASAPOp::DecodeSamplesInRange { .. }
             | ASAPOp::SummarySubtract { .. }
             | ASAPOp::SummaryDelete { .. }
             | ASAPOp::SummaryJoin { .. }

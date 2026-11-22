@@ -50,6 +50,14 @@ pub enum DataFactAssumption {
     /// order, a counter at 100 after 120 looks like a reset and adds 100
     /// to an `increase`), or ingestion may reject the sample and fail.
     InOrderArrival,
+    /// The sources declare no `column_compressed_bits_per_sample` for
+    /// `column`, so its compressed-samples windows are costed at
+    /// `assumed_bits_per_sample` bits per sample. Cost only: the windows
+    /// hold every sample whatever they take.
+    CompressedBitsPerSample {
+        column: String,
+        assumed_bits_per_sample: f64,
+    },
 }
 
 impl AssumedDataFact {
@@ -60,6 +68,7 @@ impl AssumedDataFact {
         match self.assumption {
             DataFactAssumption::DDSketchValueMagnitudeRange { .. } => false,
             DataFactAssumption::InOrderArrival => true,
+            DataFactAssumption::CompressedBitsPerSample { .. } => false,
         }
     }
 }
@@ -104,6 +113,14 @@ impl fmt::Display for AssumedDataFact {
                 "the data arrival declares no max_out_of_order_ms, so the samples of {sources} \
                  that an ingestion-time rate, increase or irate state reads are taken to arrive \
                  in timestamp order"
+            )?,
+            DataFactAssumption::CompressedBitsPerSample {
+                column,
+                assumed_bits_per_sample,
+            } => write!(
+                f,
+                "{sources} declares no column_compressed_bits_per_sample for {column}, so its \
+                 compressed-samples windows are costed at {assumed_bits_per_sample} bits per sample"
             )?,
         }
         if self.accuracy_target_depends_on_it() {

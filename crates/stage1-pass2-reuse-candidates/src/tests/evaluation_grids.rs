@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::operator::AggIntent;
+use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::stages::{Memo, MemoGroupId};
 use asap_types::summary_type::ExactKind;
@@ -111,7 +112,8 @@ fn below_a_subquery_without_a_resolution_there_is_no_grid() {
     assert_eq!(logical.evaluation_grid_of_group[state.0 as usize], None);
     assert!(groups_where(&logical.memo, |e| matches!(
         e,
-        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { summary_type, .. })
+            if *summary_type != FieldDataType::CompressedSamples
     ))
     .is_empty());
 }

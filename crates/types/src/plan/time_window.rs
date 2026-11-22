@@ -148,7 +148,7 @@ impl InputTimeAccess {
             reads(InputRows::LastWindow {
                 length_ms: operator
                     .covered_window_ms()
-                    .expect("a TimeRange or a tumbling-window chain covers a window"),
+                    .expect("a TimeRange, a decode or a tumbling-window chain covers a window"),
             })
         };
         // Every operator is listed, so a new one fails to build here until
@@ -171,6 +171,8 @@ impl InputTimeAccess {
             Operator::NonASAP(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeRangeCover { .. }) => {
                 last_window()
             }
+            // Reads the windows of its chain that its range overlaps.
+            Operator::ASAP(ASAPOp::DecodeSamplesInRange { .. }) => last_window(),
             // Wider windows merged from a narrower chain: at ingestion time
             // the narrower windows inside its newest window.
             Operator::ASAP(

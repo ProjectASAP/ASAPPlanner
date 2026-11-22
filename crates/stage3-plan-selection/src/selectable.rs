@@ -35,7 +35,10 @@ use asap_types::deployment_capabilities::FinalResultsCache;
 
 use asap_types::ir::operator::AtModifier;
 use asap_types::ir::properties::ExecutionTiming;
+use asap_types::ir::schema::FieldDataType;
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::plan::materialized_view::RefreshWindow;
+use asap_types::plan::time_window::TimeIndexedPlan;
 use asap_types::stages::{
     anchor_is_evaluation_time, producer_satisfies_physical_requirements, queries_of_context,
     query_reads, EvaluationGrid, ExecutionContext, ExecutionContextId, MemoGroupId,
@@ -187,7 +190,13 @@ impl SelectableExecutions {
                     continue;
                 }
                 if let Some(execution) =
-                    selectable.execution_reading(physical, context, PhysicalCandidateId(v), false)
+                    selectable.execution_reading(
+                        physical,
+                        context,
+                        PhysicalCandidateId(v),
+                        false,
+                        false,
+                    )
                 {
                     executions.push(execution);
                     if reached.insert(execution) {
@@ -201,12 +210,18 @@ impl SelectableExecutions {
         while let Some(consumer) = pending.pop() {
             let c = consumer.candidate;
             let context = selectable.input_context(physical, entries, consumer);
+            let reads_open_window = reads_open_windows(physical, c);
             for input in 0..physical.input_count(c) {
                 for &edge in physical.admissible_edges_into(c, input) {
                     let u = physical.edge(edge).producer_candidate_id;
                     let off_the_grid = physical.operator(c).reads_input_off_the_grid(input);
-                    if let Some(producer) =
-                        selectable.execution_reading(physical, context, u, off_the_grid)
+                    if let Some(producer) = selectable.execution_reading(
+                        physical,
+                        context,
+                        u,
+                        off_the_grid,
+                        reads_open_window,
+                    )
                     {
                         edges.insert((consumer, edge, producer));
                         if reached.insert(producer) {
@@ -273,15 +288,20 @@ impl SelectableExecutions {
     /// time): its own for an
     /// `AcrossEvaluations` producer, the one ingestion context
     /// `ExecutionContext::EVERY_ARRIVING_ROW` for another ingestion-time producer, otherwise
-    /// its run in `context`.
+    /// its run in `context`. A compressed-samples chain read for decodes of
+    /// its open window (`reads_open_window`) delivers on every context:
+    /// the decode reads its sealed windows and the open one, and trims.
     fn execution_reading(
         &mut self,
         physical: &PhysicalASAPMemoCandidates,
         context: ExecutionContextId,
         u: PhysicalCandidateId,
         read_off_the_grid: bool,
+        reads_open_window: bool,
     ) -> Option<Execution> {
         let producer = &physical.physical_candidates[u.0];
+        let open_window_read =
+            reads_open_window && is_compressed_samples_chain(physical.operator(u));
         // Read off the grid on purpose (`Operator::reads_input_off_the_grid`):
         // only windows stored at ingestion time, anchored at the epoch; a
         // chain built at query time ends its windows at the evaluation
@@ -293,7 +313,7 @@ impl SelectableExecutions {
             if !epoch_anchored {
                 return None;
             }
-        } else if !physical.delivers_on(u, &self.contexts[context.0]) {
+        } else if !open_window_read && !physical.delivers_on(u, &self.contexts[context.0]) {
             return None;
         }
         let properties = producer.physical_properties;
@@ -532,4 +552,36 @@ fn reads_of_groups(
         |_| false,
         entries,
     )
+}
+
+/// Whether `operator` builds a compressed-samples chain.
+fn is_compressed_samples_chain(operator: &Operator<MemoGroupId>) -> bool {
+    matches!(
+        operator,
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            summary_type: FieldDataType::CompressedSamples,
+            ..
+        })
+    )
+}
+
+/// Whether candidate `c` reads a compressed-samples chain only for decodes
+/// of its open window: such a decode itself, or a `TimeShift` every
+/// admissible reader of which does. A shift a sealed decode also reads
+/// keeps the chain's delivery check.
+fn reads_open_windows(physical: &PhysicalASAPMemoCandidates, c: PhysicalCandidateId) -> bool {
+    match physical.operator(c) {
+        Operator::ASAP(ASAPOp::DecodeSamplesInRange {
+            reads_unsealed_window,
+            ..
+        }) => *reads_unsealed_window,
+        Operator::NonASAP(NonASAPOp::TimeShift { .. }) => {
+            let readers = physical.readers_of(c);
+            !readers.is_empty()
+                && readers
+                    .into_iter()
+                    .all(|reader| reads_open_windows(physical, reader))
+        }
+        _ => false,
+    }
 }

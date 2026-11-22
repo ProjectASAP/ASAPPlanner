@@ -1,14 +1,17 @@
 //! Workloads whose queries share computation, planned through the production
 //! stages: adding a query that can read an existing result must not cost
 //! more than planning the first query alone.
-use crate::planning_common::{cost, cost_with, fuzz_workload, selected_plan, with_queries};
+use crate::planning_common::{
+    cost, cost_with, fuzz_workload, selected_plan, selected_plan_on, with_queries,
+};
 use asap_cost::CostInputs;
 use asap_devtools::planner_fuzz::{FuzzQuery, FuzzWorkload};
+use asap_types::deployment_capabilities::CandidateExclusion;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
-use asap_types::summary_type::{CounterReadout, ExactKind};
+use asap_types::summary_type::{CounterReadout, ExactKind, SummaryFamily};
 use serde_json::json;
 
 /// Deriving the coarse sum costs only a sum over the 150 fine groups.
@@ -75,7 +78,13 @@ fn nested_exact_sum_reuses_newest_tumbling_windows() {
 fn rate_and_increase_of_one_counter_share_one_chain() {
     let mut related = fuzz_workload("rate_and_increase_same_counter", false);
     related.raw_data_retained = false;
-    let plan = selected_plan(&related, &CostInputs::default());
+    let mut deployment = related.deployment();
+    // Accumulator-specific: compressed samples would answer exactly.
+    deployment.excluded_candidates.push(CandidateExclusion {
+        summary_family: Some(SummaryFamily::CompressedSamples),
+        ..Default::default()
+    });
+    let plan = selected_plan_on(&related, &CostInputs::default(), &deployment);
     let chains: Vec<_> = plan
         .nodes
         .iter()

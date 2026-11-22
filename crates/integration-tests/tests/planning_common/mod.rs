@@ -6,7 +6,7 @@ use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Pl
 use asap_devtools::planning_stages::{
     lower_promql_roots, lower_sql_roots, run_search_over, run_stages_until, sql_catalog, RunUntil,
 };
-use asap_planner::{PlanSearchSettings, PlanningModels};
+use asap_planner::{DeploymentCapabilities, PlanSearchSettings, PlanningModels};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::LogicalASAPMemoCandidates;
 use asap_types::workload::PlanningWorkload;
@@ -65,13 +65,22 @@ pub fn cost_with(w: &FuzzWorkload, settings: &CostInputs) -> f64 {
 
 /// The plan the production stages select for `w` under `settings`.
 pub fn selected_plan(w: &FuzzWorkload, settings: &CostInputs) -> PhysicalASAPDAG {
+    selected_plan_on(w, settings, &w.deployment())
+}
+
+/// [`selected_plan`] on a deployment with `deployment`'s capabilities in
+/// place of `w`'s.
+pub fn selected_plan_on(
+    w: &FuzzWorkload,
+    settings: &CostInputs,
+    deployment: &DeploymentCapabilities,
+) -> PhysicalASAPDAG {
     let roots = Planner::new(FuzzSettings::default()).lower(w).unwrap();
     let planning = w.planning_workload();
     let entries: Vec<_> = planning.query_workload.entries().collect();
-    let deployment = w.deployment();
     let models = PlanningModels::builtin()
         .with_cost_inputs(settings)
-        .with_deployment_capabilities(&deployment);
+        .with_deployment_capabilities(deployment);
     let run = run_search_over(
         roots,
         &entries,

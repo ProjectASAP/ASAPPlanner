@@ -2,6 +2,8 @@
 use super::mapped_states::{mapped, Mapped, MappedRecords, MappedSketches};
 use crate::summary_kernels::exact::{ExactAccumulator, ScalarState};
 use crate::summary_kernels::increase::IncreaseAccumulator;
+use crate::summary_kernels::sample_blocks::SampleBlockCodec;
+use crate::summary_kernels::CompressedSamplesAccumulator;
 use crate::AggregateCore;
 use arrow::buffer::BooleanBuffer;
 use planner_types::ir::schema::FieldDataType;
@@ -45,6 +47,63 @@ pub(crate) enum StateStorage {
     /// nothing), or sealed DDSketch windows the run holds in that layout
     /// ([`StateColumn::from_sealed_views`]).
     Mapped(MappedSketches),
+    /// One compressed-samples block per state, as its portable bytes in
+    /// one buffer, no allocation per state.
+    CompressedSamples(SampleBlocks),
+}
+
+/// The compressed-samples blocks of one column: each sealed block's bytes
+/// one after another in `bytes`, where each starts, and the codec that
+/// wrote them. A state takes its block's bytes and its 8-byte offset, what
+/// the cost model prices it at.
+pub(crate) struct SampleBlocks {
+    bytes: Box<[u8]>,
+    starts: Box<[u64]>,
+    codec: Arc<dyn SampleBlockCodec>,
+}
+
+impl SampleBlocks {
+    fn of(codec: Arc<dyn SampleBlockCodec>, blocks: Vec<Vec<u8>>) -> Self {
+        let mut bytes = Vec::with_capacity(blocks.iter().map(Vec::len).sum());
+        let mut starts = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            starts.push(bytes.len() as u64);
+            bytes.extend(block);
+        }
+        Self {
+            bytes: bytes.into_boxed_slice(),
+            starts: starts.into_boxed_slice(),
+            codec,
+        }
+    }
+
+    /// The bytes of block `index`.
+    pub(crate) fn block(&self, index: usize) -> &[u8] {
+        let start = self.starts[index] as usize;
+        let end = self
+            .starts
+            .get(index + 1)
+            .map_or(self.bytes.len(), |end| *end as usize);
+        &self.bytes[start..end]
+    }
+
+    /// The codec that wrote the blocks.
+    pub(crate) fn codec(&self) -> &Arc<dyn SampleBlockCodec> {
+        &self.codec
+    }
+
+    /// State `index`.
+    fn get(&self, index: usize) -> CompressedSamplesAccumulator {
+        CompressedSamplesAccumulator::new(self.block(index).into(), self.codec.clone())
+    }
+
+    fn len(&self) -> usize {
+        self.starts.len()
+    }
+
+    fn memory_bytes(&self) -> usize {
+        self.bytes.len() + std::mem::size_of_val(&*self.starts)
+    }
 }
 
 /// The exact records of one column, each stored in the size its family
@@ -358,6 +417,23 @@ impl StateColumn {
             objects_held_outside_run: None,
         }
     }
+    /// The column of compressed-samples `blocks`, each a block `codec`
+    /// sealed.
+    pub(crate) fn from_compressed_samples(
+        family: FieldDataType,
+        codec: Arc<dyn SampleBlockCodec>,
+        blocks: Vec<Vec<u8>>,
+    ) -> Self {
+        let blocks = SampleBlocks::of(codec, blocks);
+        let state_memory_bytes = blocks.memory_bytes();
+        Self {
+            family,
+            storage: StateStorage::CompressedSamples(blocks),
+            state_memory_bytes,
+            held_outside_run: AtomicBool::new(false),
+            objects_held_outside_run: None,
+        }
+    }
 
     /// The family and parameters of every state.
     pub(crate) fn family(&self) -> &FieldDataType {
@@ -375,6 +451,7 @@ impl StateColumn {
             StateStorage::Objects(states) => states.len(),
             StateStorage::Exact(states) => states.len(),
             StateStorage::Mapped(states) => states.len(),
+            StateStorage::CompressedSamples(blocks) => blocks.len(),
         }
     }
 
@@ -393,6 +470,7 @@ impl StateColumn {
                 states.get(index),
             )),
             StateStorage::Mapped(states) => states.accumulator(index, 0),
+            StateStorage::CompressedSamples(blocks) => Arc::new(blocks.get(index)),
         }
     }
 

@@ -291,6 +291,9 @@ impl TryFrom<UncheckedOperator> for Operator {
                 }
             }
             Kind::Evaluation { state, query } => Operator::evaluation(input(0)?, state, query)?,
+            Kind::DecodeSamples(spec) => {
+                Operator::decode_samples(input(0)?, output.clone(), *spec)?
+            }
         }
         .with_output_schema(output)?;
         if serde_json::to_value(&op.kind).map_err(|error| invalid(&error.to_string()))?
