@@ -490,6 +490,13 @@ pub struct NodeResourceUsageAndCost<'a> {
     pub disk_bytes: u64,
     /// An in-memory ingestion-time state's bytes per window.
     pub maintained: Option<u64>,
+    /// An in-memory ingestion-time view's windows under the data plane's
+    /// window cache (`DataPlaneExecution::view_window_cache`): every
+    /// retained window is on disk (its `disk_bytes`), only the window being
+    /// built is in its memory, and the caller charges the resident windows
+    /// as memory (`plan_cost` per its readers, Stage 3's selection per
+    /// selected reader). `None` without the cache.
+    pub cached_windows: Option<CachedViewWindows>,
     /// A query-time scan's source and the raw bytes it reads.
     pub raw_scan: Option<(&'a Source, u64)>,
     /// Its calibration fit.
@@ -544,6 +551,20 @@ pub fn reads_one_batch_of<C>(
 ) -> bool {
     consumer.output_state.timing == ExecutionTiming::IngestionTime
         && producer.keeps_raw_rows_at_ingestion(producer_input)
+}
+
+/// An in-memory ingestion-time view's windows under a window cache
+/// ([`NodeResourceUsageAndCost::cached_windows`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachedViewWindows {
+    /// The bytes of one window.
+    pub bytes_per_window: u64,
+    /// The width of its windows, the time between two outputs
+    /// ([`output_interval_ms`]).
+    pub width_ms: u64,
+    /// The windows it retains (its `retention_ms` over `width_ms`, at least
+    /// one), all on disk.
+    pub retained: u64,
 }
 
 /// The time between two outputs of a node running `payload` that keeps
@@ -2161,7 +2182,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // build holds while it runs, and the newest window an ingestion-time
     // view keeps besides its sealed ones.
     let open_state = open_output_bytes.map_or(state, |open| state.max(open));
-    let (materialized_bytes, medium) = match (ingestion, node.lifetime, &node.payload) {
+    let (mut materialized_bytes, medium) = match (ingestion, node.lifetime, &node.payload) {
         (_, Lifetime::None, _) => {
             // A summary build holds its states open while it runs.
             let working_memory_bytes = match open_output_bytes {
@@ -2234,6 +2255,35 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     };
     if ingestion && node.lifetime == Lifetime::AcrossEvaluations(StorageMedium::Memory) {
         maintained = Some(state);
+    }
+    // Under a window cache, an in-memory view's retained windows are in its
+    // files, and only the one being built in memory here: the caller adds
+    // the resident ones.
+    let mut cached_windows = None;
+    if let (true, Some(_), Lifetime::AcrossEvaluations(StorageMedium::Memory), false) = (
+        ingestion,
+        settings.data_plane_execution.view_window_cache,
+        node.lifetime,
+        raw_rows_materialized_at_ingestion,
+    ) {
+        if materialized_bytes > 0 {
+            let retained_bytes = state
+                .checked_mul(retained_output_count)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            disk_bytes = retained_bytes;
+            average_memory_bytes = open_state as f64;
+            peak_memory_bytes = open_state;
+            detail += &format!(
+                "; keeps {retained_output_count} windows of {state} bytes on disk, \
+                 {open_state} bytes building in memory"
+            );
+            cached_windows = Some(CachedViewWindows {
+                bytes_per_window: state,
+                width_ms: output_interval_ms,
+                retained: retained_output_count,
+            });
+            materialized_bytes = 0;
+        }
     }
     if materialized_bytes > 0 {
         match medium {
@@ -2449,6 +2499,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         peak_memory_bytes,
         disk_bytes,
         maintained,
+        cached_windows,
         raw_scan,
         fit,
         series,

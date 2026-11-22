@@ -39,7 +39,7 @@ use super::super::dominance::{dominated_in_every_quantity, dominated_theta_famil
 use super::super::equivalent_contexts::copies_in_equivalent_contexts;
 use super::super::exact_only::exact_only_constraints;
 use super::super::graph::Components;
-use super::super::retention::retention_constraints;
+use super::super::retention::{resident_window_terms, retention_constraints};
 use super::{
     acyclicity_constraints, input_satisfaction_constraints, producer_selection_constraints,
     query_coverage_constraints, selection_cost_per_second, selection_variables, use_constraints,

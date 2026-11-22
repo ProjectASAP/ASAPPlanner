@@ -3,4 +3,4 @@
 
 pub(crate) mod cost;
 pub mod execution_demand;
-pub(crate) mod resident_windows;
+pub mod resident_windows;

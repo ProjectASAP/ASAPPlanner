@@ -28,6 +28,7 @@ mod cost;
 mod milp;
 mod plan;
 mod report;
+mod resident_windows;
 mod retention;
 mod selectable;
 

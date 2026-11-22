@@ -6,6 +6,7 @@
 //! |---|---|---|
 //! | baseline (section 3) over execution contexts (section 5) | $x_{\kappa,v}$ (with $x^{\mathrm{mat}}_v = x_{\mathrm{Materialized}(v),v}$), $y_{\kappa,u,c,i}$, $z_{q,v}$, $t$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) and one consumer per context of a query-time result that is not materialized [`use_constraints`], each source's raw data on disk once [`raw_data_disk_rows`]; (G), (H): $y$ exists only on admissible edges where the producer delivers on the consumer's context |
 //! | retention (section 5) | $h_v$ | (R) [`super::retention::retention_constraints`] |
+//! | resident windows under a window cache (`cost-terms-from-calibration.md`, section 1) | $r_v$ | (W) [`super::retention::resident_window_terms`] |
 //! | exact-only reads per query | $a_{q,e}$ | (X) [`super::exact_only::exact_only_constraints`] |
 //! | accuracy (`accuracy-models.md`, constraint (K)), per execution | $E_{\kappa,c,m}$, $D_{\kappa,c}$ ([`AccuracyVariables`]); $F_{\kappa,c,i,m}$, $H_{\kappa,c,i}$ | (K) [`accuracy_constraints`], over [`ErrorModel`] |
 //!
@@ -33,7 +34,10 @@ use super::dominance::dominated_by_lifetime_twin;
 use super::equivalent_contexts::{copies_in_equivalent_contexts, SharedVariables};
 use super::exact_only::{exact_only_constraints, exact_only_variables};
 use super::graph::Components;
-use super::retention::{least_retention_ms, retention_constraints, retention_variables};
+use super::retention::{
+    least_retention_ms, resident_window_terms, resident_windows_quantity, retention_constraints,
+    retention_variables,
+};
 use super::upper_bound::dearer_than_a_feasible_plan;
 use crate::cost::ExecutionCosts;
 use crate::selectable::{Execution, QueryId, SelectableExecutions};
@@ -482,6 +486,16 @@ pub(crate) fn solve_selection(
             )
         })
         .unwrap_or_default();
+    // The windows cached views keep resident in memory, $r_v$ and (W).
+    let mut resident_rows = Vec::new();
+    let resident_terms = resident_window_terms(
+        costs,
+        inputs.selectable,
+        &variables.y,
+        &variables.z,
+        &mut problem,
+        &mut resident_rows,
+    );
     // The objective's terms per second, unscaled: (cost, variable). A
     // query-time scan's retention is in its source's r_s.
     let terms: Vec<(f64, Variable)> = costs
@@ -504,6 +518,7 @@ pub(crate) fn solve_selection(
                 .filter(|(v, _)| !costs.raw_data_source.contains_key(v))
                 .map(|(v, &h)| (costs.retention_cost_per_retained_second[v], h)),
         )
+        .chain(resident_terms)
         .collect();
     // Scaled by the largest coefficient kept, the raw-data rows' included.
     let raw_data_rows = raw_data_disk_rows(inputs, &variables, &kept);
@@ -536,6 +551,7 @@ pub(crate) fn solve_selection(
             &variables.z,
         ),
         exact_only_constraints(inputs, &variables.read_by_query, &variables.y, &variables.z),
+        resident_rows,
         accuracy_rows,
     ]
     .into_iter()
@@ -740,7 +756,8 @@ pub(crate) fn selection_cost_per_second(
             .filter_map(|&position| costs.per_edge[position])
             .sum::<f64>()
         + retention_cost_per_second
-        + raw_data_on_disk.values().sum::<f64>();
+        + raw_data_on_disk.values().sum::<f64>()
+        + resident_windows_quantity(costs, inputs.selectable, edges, answering);
     (cost, retention_ms)
 }
 
