@@ -997,7 +997,7 @@ fn a_none_execution_its_one_evaluation_twin_dominates_is_left_out() {
         let candidates: Vec<usize> = selectable
             .executions()
             .iter()
-            .zip(dominated_by_one_evaluation_twin(&inputs))
+            .zip(dominated_by_lifetime_twin(&inputs))
             .filter(|(_, dominated)| *dominated)
             .map(|(execution, _)| execution.candidate.0)
             .collect();
@@ -1047,7 +1047,7 @@ fn a_one_evaluation_execution_read_at_most_once_is_left_out_for_its_cheaper_none
         let left_out: Vec<usize> = selectable
             .executions()
             .iter()
-            .zip(dominated_by_one_evaluation_twin(&inputs))
+            .zip(dominated_by_lifetime_twin(&inputs))
             .filter(|(_, dominated)| *dominated)
             .map(|(execution, _)| execution.candidate.0)
             .collect();

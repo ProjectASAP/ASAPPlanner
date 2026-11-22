@@ -567,9 +567,9 @@ still differ.
 - **Over a limit alone.** An execution whose memory or disk, with every
   producer share at its most favourable, is over the cluster's limit is in
   no plan.
-- The `OneEvaluation` twin dominance holds in every quantity at once, by
-  one twin.
-- `dominated_by_one_evaluation_twin` is applied with its condition restated
+- The lifetime twin dominance (`None` and `OneEvaluation`, either way)
+  holds in every quantity at once, by one twin.
+- `dominated_by_lifetime_twin` is applied with its condition restated
   over the cluster quantities: the twin is no slower ($d$, $p$), uses no
   more peak memory, disk and CPU, and answers the same outputs.
 - **Latency bounds as exclusions (decided).** Before the MILP, each
@@ -892,7 +892,7 @@ bound, over a limit alone), `path_reads.rs` (the path-read rows) and
 | 26 | Checking and measurement switches in `CostInputs::latency_selection_checks` (`theta_dominance`, `feasible_plan_bound`, `lazy_tie_breaks`, `path_reads`, on by default; `report_root_lp_bound`, `log_solver`, off; `node_limit`, 10,000), a field of `CostInputs` that is never serialized (`#[serde(skip)]`): a cost inputs file cannot set them; tools and tests do. Turning a speed-up off must not change the optimum, which the exactness tests check. The planning crates read no environment; the `asap_planner` tool maps `ASAP_STAGE3_THETA_DOMINANCE=off`, `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`, `ASAP_STAGE3_PATH_READS=off`, `ASAP_STAGE3_ROOT_LP=1`, `ASAP_STAGE3_SOLVER_LOG=1` and `ASAP_STAGE3_NODE_LIMIT=<n>` onto them. The one serialized setting is `CostInputs::latency_selection.exact_solve` (`ASAP_STAGE3_EXACT=1`). The earlier McCormick read rows and the MIP start from cost model 1's plan were measured, not kept (the start remains only for a solve that finds no plan within its node limit). | By this document |
 | 27 | The mean latency solve stops at a relative MIP gap of 1 % or after 10,000 branch-and-bound nodes, whichever comes first (nodes, not seconds, so the result does not depend on the host; on the measured workloads the solve stops within 1 node, 3 when exact), and returns its plan with the gap and the solver's lower bound (`Selection::optimality_gap`, the plan report's `optimality_gap`, the text output's mean latency line). `LatencySelection::exact_solve` (`ASAP_STAGE3_EXACT=1`) solves to optimality; the exactness tests compare in exact mode, and in the default mode check that the gap is at most 1 % and that the plan is within its gap of the exact optimum. With no plan within the nodes, the solve runs once more from cost model 1's plan (pinned and completed by HiGHS, on the model with that plan's executions put back) under the same limit; with none still, the selection fails. When cost model 1 selected no plan, or its plan breaks a limit, there is no start: the error says so and names each limit whose removal alone would let the plan fit. A solve stopped before HiGHS proves any bound reports a lower bound of 0. | Decided |
 | 28 | A range request's steps split over the query threads in latency: per-step work counts $\lceil s / T_{query} \rceil$ times; CPU still counts every step. | Decided |
-| 14 | Under cost model 3 the greedy cost upper bound is not applied; the `OneEvaluation` twin dominance is restated over time, memory, disk and CPU. | By this document |
+| 14 | Under cost model 3 the greedy cost upper bound is not applied; the lifetime twin dominance is restated over time, memory, disk and CPU. | By this document |
 | 15 | Calibration passes when every node's predicted time per phase is within 1.5× of measured, at every series scale run (1k passes; 10k after term (3)). | Decided |
 | 16 | Ingest and query CPU are not hard constraints against thread counts; the report gives per role (ingest, precompute, query) the predicted CPU core-seconds per second and the recommended threads, $\lceil$cores$/\rho_{\max}\rceil$; `precompute_threads` stays an input for $\rho$, and a deployment may set it from the recommendation and replan. | Decided |
 | 17 | One utilisation parameter, `max_thread_utilization`, is both $\rho_{\max}$ and the recommendation target. | By this document |
