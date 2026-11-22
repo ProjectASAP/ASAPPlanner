@@ -544,8 +544,7 @@ async fn c11_a_window_cache_keeps_only_recently_read_windows_in_memory() {
         }
     };
     let (memory_without, disk_without) = usage(json!({})).await;
-    let (memory_with, disk_with) =
-        usage(json!({"view_window_cache": {"idle_ms": 60_000}})).await;
+    let (memory_with, disk_with) = usage(json!({"view_window_cache": {"idle_ms": 60_000}})).await;
     assert!(
         memory_with < memory_without / 5.0,
         "resident {memory_with} bytes against {memory_without} retained"

@@ -14,11 +14,12 @@ use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_state_bytes, state_bytes_per_row, StateInputRows};
 use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
+use crate::plan::resident_windows::{resident_windows, ChainReader, ReadTimes, WindowRead};
 use crate::{lookup_at_scale, StateFamily};
 use crate::{node_resource_usage_and_cost, NodeResourceUsageAndCost, ProducerOutput};
 use crate::{
-    CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind, ResourceUsage,
-    MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
+    CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind,
+    ResourceUnitCost, ResourceUsage, ViewWindowCache, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
@@ -28,7 +29,7 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload,
 };
-use asap_types::plan::time_window::read_back_ms;
+use asap_types::plan::time_window::{read_back_ms, windows_readers_need};
 use asap_types::stages::Lifetime;
 use asap_types::summary_type::SketchParams;
 use asap_types::workload::{
@@ -385,7 +386,7 @@ pub fn plan_cost(
     // With k ingest workers, each of the k − 1 beyond the first builds its
     // own partial copy of an in-memory ingestion-time state's newest window
     // (merged at query time, [`query_latencies`]), held at the peak too.
-    for (id, window) in maintained {
+    for &(id, window) in &maintained {
         let copies = ingest_workers(dag, &work_ms, id, settings) - 1;
         if copies == 0 {
             continue;
@@ -395,6 +396,21 @@ pub fn plan_cost(
         usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_add(bytes);
         measured.detail +=
             &format!("; {copies} partial copies of its newest window, {bytes} bytes");
+    }
+    // With a window cache, a stored view keeps in memory only the windows
+    // written or read within its idle time; the others are disk.
+    if let Some(cache) = settings.data_plane_execution.view_window_cache {
+        resident_view_windows(
+            dag,
+            nodes,
+            &maintained,
+            &producers_of,
+            entries,
+            cache,
+            unit_costs,
+            &mut usage,
+            &mut per_node,
+        );
     }
     let merge_ms =
         |id: PhysicalASAPNodeId| partial_copy_merge_ms(nodes[&id], &costed[&id], settings);
@@ -486,6 +502,143 @@ pub fn plan_cost(
         },
         fit,
     ))
+}
+
+/// Moves each in-memory ingestion-time view's windows that are not
+/// resident under `cache` (neither written nor read within its idle time,
+/// [`resident_windows`]) from memory to disk, in `usage` and in the view's
+/// node cost: `maintained` holds each such view's bytes per window. Then,
+/// with `cache.max_bytes`, the resident windows past that bound are disk
+/// too.
+#[allow(clippy::too_many_arguments)]
+fn resident_view_windows(
+    dag: &PhysicalASAPDAG,
+    nodes: &NodeMap<'_>,
+    maintained: &[(PhysicalASAPNodeId, u64)],
+    producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
+    entries: &[QueryWorkloadEntry],
+    cache: ViewWindowCache,
+    unit_costs: Option<&ResourceUnitCost>,
+    usage: &mut ResourceUsage,
+    per_node: &mut BTreeMap<PhysicalASAPNodeId, NodeCost>,
+) {
+    // The queries whose roots reach each node.
+    let mut queries_of: HashMap<PhysicalASAPNodeId, Vec<usize>> = HashMap::new();
+    for (query, &root) in dag.roots.iter().enumerate() {
+        let mut seen = HashSet::new();
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if seen.insert(id) {
+                queries_of.entry(id).or_default().push(query);
+                pending.extend(producers_of.get(&id).into_iter().flatten().copied());
+            }
+        }
+    }
+    let width_of = |id: PhysicalASAPNodeId| dag.refresh_window(id).map(|window| window.width_ms);
+    let mut resident_bytes_total = 0.0;
+    let mut moved: Vec<(PhysicalASAPNodeId, f64, u64)> = Vec::new();
+    for &(id, window_bytes) in maintained {
+        let node = nodes[&id];
+        let (Some(width_ms), Some(retention_ms)) = (width_of(id), node.retention_ms) else {
+            continue;
+        };
+        let retained = retention_ms.div_ceil(width_ms.max(1));
+        let readers: Vec<ChainReader> = match windows_readers_need(dag, id) {
+            None => vec![ChainReader {
+                read: WindowRead::Every,
+                times: ReadTimes::Refresh { width_ms },
+            }],
+            Some(windows) => windows
+                .into_iter()
+                .flat_map(|(reader, window)| {
+                    let reader_node = nodes[&reader];
+                    let read = match &reader_node.payload {
+                        Payload::NonASAP(NonASAPOp::TimeRangeCover { .. }) => {
+                            let levels = &producers_of[&reader];
+                            match (
+                                levels.iter().position(|&level| level == id),
+                                levels.iter().map(|&level| width_of(level)).collect(),
+                            ) {
+                                (Some(level), Some(level_widths_ms)) => WindowRead::Cover {
+                                    range_ms: window.length_ms,
+                                    level_widths_ms,
+                                    level,
+                                },
+                                _ => WindowRead::Every,
+                            }
+                        }
+                        _ => WindowRead::Range {
+                            range_ms: window.length_ms,
+                            offset_ms: window.ends_before_evaluation_ms,
+                        },
+                    };
+                    let times: Vec<ReadTimes> = match reader_node.output_state.timing {
+                        ExecutionTiming::IngestionTime => vec![ReadTimes::Refresh {
+                            width_ms: width_of(reader).unwrap_or(width_ms),
+                        }],
+                        ExecutionTiming::QueryTime => queries_of
+                            .get(&reader)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|&query| entries.get(query))
+                            .map(|entry| {
+                                let grid = entry.evaluation_grid();
+                                let range = entry.range_evaluation;
+                                ReadTimes::Query {
+                                    period_ms: grid.period_ms,
+                                    phase_ms: grid.phase_ms,
+                                    steps: range.map_or(1, |range| range.evaluations_per_request()),
+                                    step_ms: range.map_or(width_ms, |range| range.step_ms),
+                                }
+                            })
+                            .collect(),
+                    };
+                    times.into_iter().map(move |times| ChainReader {
+                        read: read.clone(),
+                        times,
+                    })
+                })
+                .collect(),
+        };
+        let (mean, most) = resident_windows(width_ms, retained, cache.idle_ms, &readers);
+        let mean = mean.min(retained as f64);
+        let most = most.min(retained);
+        let cold_bytes = window_bytes as f64 * (retained as f64 - mean);
+        usage.average_memory_bytes -= cold_bytes;
+        usage.peak_memory_bytes = usage
+            .peak_memory_bytes
+            .saturating_sub(window_bytes.saturating_mul(retained - most));
+        resident_bytes_total += window_bytes as f64 * mean;
+        moved.push((id, cold_bytes, window_bytes));
+        let node_cost = per_node.get_mut(&id).expect("every node is measured");
+        node_cost.detail += &format!(
+            "; {mean:.1} of {retained} windows resident (window cache, idle {} ms)",
+            cache.idle_ms
+        );
+    }
+    // A bound on the cache: what is past it is disk too.
+    let over_bound = cache.max_bytes.map_or(0.0, |max_bytes| {
+        (resident_bytes_total - max_bytes as f64).max(0.0)
+    });
+    if over_bound > 0.0 {
+        usage.average_memory_bytes -= over_bound;
+        usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_sub(over_bound as u64);
+    }
+    for (index, (id, cold_bytes, _)) in moved.iter().enumerate() {
+        // The bound's excess is charged to the first view.
+        let disk = cold_bytes + if index == 0 { over_bound } else { 0.0 };
+        usage.disk_bytes = usage.disk_bytes.saturating_add(disk as u64);
+        if let (Some(cost), Some(unit_cost)) = (
+            &mut per_node
+                .get_mut(id)
+                .expect("every node is measured")
+                .cost_per_second,
+            unit_costs,
+        ) {
+            *cost += (unit_cost.cost_per_disk_byte_second - unit_cost.cost_per_memory_byte_second)
+                * disk;
+        }
+    }
 }
 
 /// The runtime's fixed overhead of query `entry`'s requests: its requests
