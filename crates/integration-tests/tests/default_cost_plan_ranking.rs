@@ -89,12 +89,24 @@ fn workload(query: Query, setting: Setting) -> PlanningWorkload {
     .unwrap()
 }
 
+/// The exclusions of a deployment that runs neither wider tumbling-window
+/// levels nor covers over them: both operators, as a runtime lacking them
+/// declares.
+fn without_wider_levels() -> Vec<asap_planner::CandidateExclusion> {
+    serde_json::from_str(r#"[{"operator": "SummaryMergeWindows"}, {"operator": "TimeRangeCover"}]"#)
+        .unwrap()
+}
+
 /// The planning stages' run over `workload` under the default cost inputs,
 /// with raw data kept or not.
 fn planning_run(workload: &PlanningWorkload, raw_data_retained: bool) -> PlanningStagesRun {
     let settings = CostInputs::default();
+    // The stored plans were measured with one tumbling-window chain per
+    // range, before wider levels and covers: a deployment without both
+    // operators plans those.
     let capabilities = DeploymentCapabilities {
         raw_data_retained,
+        excluded_candidates: without_wider_levels(),
         ..Default::default()
     };
     let models = PlanningModels::builtin()

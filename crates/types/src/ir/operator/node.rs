@@ -74,15 +74,38 @@ impl<C> Operator<C> {
         }
     }
 
+    /// Whether it reads its input `input` off its own evaluation grid on
+    /// purpose: a `SummaryMergeWindows`'s narrower chain (merged into wider
+    /// windows), or a `TimeRangeCover`'s wider levels (it takes only their
+    /// whole windows inside its range; its narrowest level, last, is on its
+    /// grid). Such a read is exact only when that input's windows are
+    /// anchored at the epoch: stored at ingestion time, which Stage 3
+    /// requires. Pass 2's grid check and Stage 3's delivery check both
+    /// exempt exactly these reads. Example: a cover over 5 min and 15 s
+    /// levels read every 15 s reads input 0 off the grid, not input 1.
+    pub fn reads_input_off_the_grid(&self, input: usize) -> bool {
+        match self {
+            Operator::ASAP(ASAPOp::SummaryMergeWindows { .. }) => input == 0,
+            Operator::NonASAP(NonASAPOp::TimeRangeCover { levels, .. }) => input + 1 < levels.len(),
+            Operator::NonASAP(_) | Operator::ASAP(_) => false,
+        }
+    }
+
     /// Its tumbling-window width when it is a `SummaryTumblingWindowChain`,
     /// in ms; `None` for every other operator. E.g. a chain of 1-minute
     /// windows: `Some(60_000)`; `TimeRange(5m)`: `None`.
     pub fn chain_tumbling_window_width_ms(&self) -> Option<u64> {
         match self {
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }) => Some(*tumbling_window_width_ms),
+            Operator::ASAP(
+                ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
+                    ..
+                }
+                | ASAPOp::SummaryMergeWindows {
+                    tumbling_window_width_ms,
+                    ..
+                },
+            ) => Some(*tumbling_window_width_ms),
             Operator::NonASAP(
                 NonASAPOp::Scan { .. }
                 | NonASAPOp::Values { .. }
@@ -99,6 +122,7 @@ impl<C> Operator<C> {
                 | NonASAPOp::SQLWindowFunc { .. }
                 | NonASAPOp::TimeRange { .. }
                 | NonASAPOp::TimeShift { .. }
+                | NonASAPOp::TimeRangeCover { .. }
                 | NonASAPOp::PromqlVectorFromScalar(..)
                 | NonASAPOp::PromqlRelabel { .. }
                 | NonASAPOp::PromqlInfoEnrich { .. }
@@ -136,13 +160,19 @@ impl<C> Operator<C> {
     pub fn covered_window_ms(&self) -> Option<u64> {
         match self {
             // Saturates, so `Some` means exactly "a window", whatever its length.
-            Operator::NonASAP(NonASAPOp::TimeRange { range, .. }) => {
-                Some(u64::try_from(range.as_millis()).unwrap_or(u64::MAX))
-            }
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }) => Some(*tumbling_window_width_ms),
+            Operator::NonASAP(
+                NonASAPOp::TimeRange { range, .. } | NonASAPOp::TimeRangeCover { range, .. },
+            ) => Some(u64::try_from(range.as_millis()).unwrap_or(u64::MAX)),
+            Operator::ASAP(
+                ASAPOp::SummaryTumblingWindowChain {
+                    tumbling_window_width_ms,
+                    ..
+                }
+                | ASAPOp::SummaryMergeWindows {
+                    tumbling_window_width_ms,
+                    ..
+                },
+            ) => Some(*tumbling_window_width_ms),
             Operator::NonASAP(
                 NonASAPOp::Scan { .. }
                 | NonASAPOp::Values { .. }
@@ -203,6 +233,7 @@ impl<C> Operator<C> {
                 | NonASAPOp::BinaryOp { .. }
                 | NonASAPOp::SQLWindowFunc { .. }
                 | NonASAPOp::TimeRange { .. }
+                | NonASAPOp::TimeRangeCover { .. }
                 | NonASAPOp::PromqlVectorFromScalar(..)
                 | NonASAPOp::PromqlRelabel { .. }
                 | NonASAPOp::PromqlInfoEnrich { .. }
@@ -211,6 +242,7 @@ impl<C> Operator<C> {
             )
             | Operator::ASAP(
                 ASAPOp::SummaryTumblingWindowChain { .. }
+                | ASAPOp::SummaryMergeWindows { .. }
                 | ASAPOp::SummaryAgg { .. }
                 | ASAPOp::SummaryEstimate { .. }
                 | ASAPOp::FinalizeExactAccumulator { .. }
@@ -249,6 +281,7 @@ impl<C> Operator<C> {
                 | NonASAPOp::BinaryOp { .. }
                 | NonASAPOp::SQLWindowFunc { .. }
                 | NonASAPOp::TimeRange { .. }
+                | NonASAPOp::TimeRangeCover { .. }
                 | NonASAPOp::PromqlVectorFromScalar(..)
                 | NonASAPOp::PromqlRelabel { .. }
                 | NonASAPOp::PromqlInfoEnrich { .. }
@@ -263,6 +296,7 @@ impl<C> Operator<C> {
                 | ASAPOp::EvaluatePopulation { .. }
                 | ASAPOp::SummaryMerge { .. }
                 | ASAPOp::SummaryTumblingWindowChain { .. }
+                | ASAPOp::SummaryMergeWindows { .. }
                 | ASAPOp::SummarySubtract { .. }
                 | ASAPOp::SummaryDelete { .. }
                 | ASAPOp::SummaryJoin { .. }

@@ -18,7 +18,7 @@ use asap_types::summary_type::{ExactKind, SummaryInputExpr};
 /// `metric`: an edge from an input whose error is in `metric` then fails
 /// (the metric rule). No factor is guessed; every contract keeps the metric
 /// (concepts doc, section 4, "Local propagation"):
-/// - value-preserving (`Sort`, `TimeRange`, `TimeShift`, `Concat`, a
+/// - value-preserving (`Sort`, `TimeRange`, `TimeShift`, `TimeRangeCover`, `Concat`, a
 ///   readout, a finalize, a `SummaryMerge`): $\beta = 1$ in any metric;
 /// - PromQL `and`, `unless` and `or`, which copy values and choose series
 ///   by labels only, and `label_replace` / `label_join` of labels
@@ -69,6 +69,7 @@ pub(crate) fn error_contract(
             | NonASAPOp::Sort { .. }
             | NonASAPOp::TimeRange { .. }
             | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::TimeRangeCover { .. }
             | NonASAPOp::Concat { .. } => Some(uniform(1.0)),
             NonASAPOp::Project { cols, child } => cols
                 .iter()
@@ -165,7 +166,8 @@ pub(crate) fn error_contract(
             ASAPOp::SummaryEstimate { .. }
             | ASAPOp::EvaluatePopulation { .. }
             | ASAPOp::FinalizeExactAccumulator { .. }
-            | ASAPOp::SummaryMerge { .. } => Some(uniform(1.0)),
+            | ASAPOp::SummaryMerge { .. }
+            | ASAPOp::SummaryMergeWindows { .. } => Some(uniform(1.0)),
             ASAPOp::SummaryAgg {
                 summary_type: FieldDataType::ExactAggregate(kind, _),
                 input,

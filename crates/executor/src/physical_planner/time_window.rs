@@ -112,10 +112,16 @@ pub(super) fn time_window_operator(
     };
     let chain_width_ms = match &nodes[&below].payload {
         Payload::NonASAP(NonASAPOp::Scan { .. }) => None,
-        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
-            tumbling_window_width_ms,
-            ..
-        }) => Some(
+        Payload::ASAP(
+            ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms,
+                ..
+            }
+            | ASAPOp::SummaryMergeWindows {
+                tumbling_window_width_ms,
+                ..
+            },
+        ) => Some(
             i64::try_from(*tumbling_window_width_ms)
                 .map_err(|_| invalid("tumbling-window width exceeds Int64"))?,
         ),
@@ -313,6 +319,13 @@ pub(super) fn counter_window(
     let mut windows = BTreeSet::new();
     while let Some(ancestor) = pending.pop() {
         if !visited.insert(ancestor) {
+            continue;
+        }
+        // A cover reads its range from levels of one chain, without
+        // shifts below it.
+        if let Payload::NonASAP(NonASAPOp::TimeRangeCover { range, .. }) = &nodes[&ancestor].payload
+        {
+            windows.insert((0, millis(range.as_millis())?));
             continue;
         }
         if let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) = &nodes[&ancestor].payload {

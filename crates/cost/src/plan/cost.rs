@@ -203,6 +203,35 @@ pub fn plan_cost(
             (node.id, one_batch)
         })
         .collect();
+    // Each node's readers' evaluation grid: the gcd of the grids of the
+    // queries whose roots reach it, each its evaluation context's grid
+    // (`QueryWorkloadEntry::evaluation_grid`, the grid Stage 3's context
+    // of the query has; a cover is charged its windows over it).
+    let mut grid_of: HashMap<PhysicalASAPNodeId, u64> = HashMap::new();
+    for (query, &root) in dag.roots.iter().enumerate() {
+        let Some(entry) = entries.get(query) else {
+            continue;
+        };
+        let period_ms = entry.evaluation_grid().period_ms;
+        let mut seen = std::collections::HashSet::new();
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if seen.insert(id) {
+                let known = grid_of.entry(id).or_insert(0);
+                *known = asap_types::workload::greatest_common_divisor(*known, period_ms);
+                pending.extend(producers_of.get(&id).into_iter().flatten().copied());
+            }
+        }
+    }
+    let evaluation_grid_of = |id: PhysicalASAPNodeId| {
+        grid_of
+            .get(&id)
+            .filter(|&&period_ms| period_ms > 0)
+            .map(|&period_ms| asap_types::stages::EvaluationGrid {
+                period_ms,
+                phase_ms: 0,
+            })
+    };
     let mut costed: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'_>> = HashMap::new();
     let mut one_batch: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'_>> = HashMap::new();
     for node in &dag.nodes {
@@ -227,6 +256,7 @@ pub fn plan_cost(
             &views,
             multipliers[&node.id],
             window_ms,
+            evaluation_grid_of(node.id),
             data,
             settings,
         )
@@ -237,6 +267,7 @@ pub fn plan_cost(
                 &views,
                 multipliers[&node.id],
                 window_ms,
+                evaluation_grid_of(node.id),
                 data,
                 settings,
             )

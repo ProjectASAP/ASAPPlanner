@@ -153,6 +153,29 @@ async fn c2_the_fixed_cost_per_step_is_charged_per_step() {
     assert_close("range", range_with - range, 1.0 + 61.0 * 3.4);
 }
 
+/// The plan report for `workload` without raw data retained, on a
+/// deployment that runs neither wider tumbling-window levels nor covers:
+/// the merge reads the chain's 30 windows per group, the scale C3 prices.
+async fn plan_single_chain(workload: &PlanningWorkload, cost_inputs: &Value) -> Value {
+    let cost_inputs: CostInputs = serde_json::from_value(cost_inputs.clone()).unwrap();
+    let capabilities = asap_planner::DeploymentCapabilities {
+        raw_data_retained: false,
+        excluded_candidates: serde_json::from_value(json!([
+            {"operator": "SummaryMergeWindows"},
+            {"operator": "TimeRangeCover"}
+        ]))
+        .unwrap(),
+        ..Default::default()
+    };
+    let models = PlanningModels::builtin()
+        .with_cost_inputs(&cost_inputs)
+        .with_deployment_capabilities(&capabilities);
+    let (_, report) = plan_installable(UserInput::new(workload, FrontendInput::Promql, models))
+        .await
+        .unwrap();
+    serde_json::to_value(report).unwrap()
+}
+
 /// C3. `SummaryMerge` entries measured at 1,000 groups (100 ns per state)
 /// and 10,000 groups (1,000 ns): a merge over 1,000, 3,162 and 10,000
 /// groups is priced at 100, about 316 and 1,000 ns per state (log-log
@@ -178,7 +201,7 @@ async fn c3_prices_follow_the_series_scale() {
         (10_000, 1_000.0, false),
         (20_000, 1_000.0, true),
     ] {
-        let planned = plan(
+        let planned = plan_single_chain(
             &max_chain_workload(series),
             &cost_inputs(
                 usage_over_time(),
@@ -186,10 +209,9 @@ async fn c3_prices_follow_the_series_scale() {
                 json!({}),
                 json!({}),
             ),
-            false,
         )
         .await;
-        let merge = node(&planned.report, "SummaryMerge");
+        let merge = node(&planned, "SummaryMerge");
         assert_close(
             &format!("{series} series"),
             number(merge, "query_ms_per_step"),

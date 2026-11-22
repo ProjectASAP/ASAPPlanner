@@ -52,12 +52,19 @@ pub(crate) fn candidate_edges(
                 .into_iter()
                 .enumerate()
             {
+                // A wider level read on purpose off the grid
+                // (`Operator::reads_input_off_the_grid`).
+                let read_off_the_grid = candidate
+                    .expression
+                    .operator
+                    .reads_input_off_the_grid(input);
                 let chain_off_the_grid = chain_off_the_evaluation_grid(
                     memo,
                     evaluation_grid_of_group,
                     group,
                     input_group,
-                );
+                )
+                .filter(|_| !read_off_the_grid);
                 for producer in memo.producers(consumer, input) {
                     edges.push(CandidateEdge {
                         producer,
