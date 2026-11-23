@@ -27,6 +27,8 @@ const SECOND_MS: i64 = 1_000;
 const NARROW_MS: i64 = 15 * SECOND_MS;
 const WIDE_MS: i64 = 300 * SECOND_MS;
 const HOUR_MS: i64 = 3_600 * SECOND_MS;
+/// A cover's offset: 30 min, a multiple of both levels' widths.
+const OFFSET_MS: i64 = 1_800 * SECOND_MS;
 
 fn samples_schema() -> Schema {
     Schema::with_time_index(
@@ -191,6 +193,8 @@ struct Plan {
     wide: PhysicalASAPNodeId,
     direct_wide: PhysicalASAPNodeId,
     cover: PhysicalASAPNodeId,
+    /// The same cover half an hour back (`offset_ms`), `(T - 90m, T - 30m]`.
+    offset_cover: PhysicalASAPNodeId,
     flat: PhysicalASAPNodeId,
     /// The newest 5 min window's sums, of `wide` and of `direct_wide`.
     newest_wide: [PhysicalASAPNodeId; 2],
@@ -206,6 +210,12 @@ fn plan(built: Built) -> Plan {
     }));
     let direct_wide = chain(WIDE_MS, built);
     let cover = finalized_merge(node(Operator::NonASAP(NonASAPOp::TimeRangeCover {
+        offset_ms: 0,
+        range: Duration::from_millis(HOUR_MS as u64),
+        levels: vec![wide.clone(), narrow.clone()],
+    })));
+    let offset_cover = finalized_merge(node(Operator::NonASAP(NonASAPOp::TimeRangeCover {
+        offset_ms: OFFSET_MS as u64,
         range: Duration::from_millis(HOUR_MS as u64),
         levels: vec![wide.clone(), narrow.clone()],
     })));
@@ -230,6 +240,7 @@ fn plan(built: Built) -> Plan {
     let (mut dag, nodes) =
         planner_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&[
             QueryRoot::Operator(cover.clone()),
+            QueryRoot::Operator(offset_cover.clone()),
             QueryRoot::Operator(flat.clone()),
             QueryRoot::Operator(direct),
             QueryRoot::Operator(newest_wide[0].clone()),
@@ -254,6 +265,7 @@ fn plan(built: Built) -> Plan {
         wide: ids[1],
         direct_wide: ids[2],
         cover: id_of(&nodes, &cover),
+        offset_cover: id_of(&nodes, &offset_cover),
         flat: id_of(&nodes, &flat),
         newest_wide: [
             id_of(&nodes, &newest_wide[0]),
@@ -423,6 +435,48 @@ fn cover_answers_equal_flat_answers() {
     }
 }
 
+/// A cover under an offset (PromQL `[1h] offset 30m`) reads the levels'
+/// windows half an hour back: its sums equal those computed directly over
+/// `(T - 90m, T - 30m]`, at evaluation times on the 5 min grid and off it
+/// (every 15 s over 5 minutes). Both levels retain 2 h, the range and the
+/// offset.
+#[test]
+fn a_cover_under_an_offset_reads_the_levels_that_much_earlier() {
+    let plan = plan(Built::Sum);
+    let mut store = Arc::new(store_with_samples());
+    let view = |node| {
+        plan.views
+            .iter()
+            .find(|view| view.node_id == node)
+            .unwrap()
+            .clone()
+    };
+    refresh_all(&plan, &mut store, 3 * HOUR_MS);
+    let views = [view(plan.narrow), view(plan.wide)];
+    let query = compile(&plan.dag, &views, &[plan.offset_cover as u64]).unwrap();
+    let mut t = 3 * HOUR_MS - WIDE_MS;
+    while t <= 3 * HOUR_MS {
+        let context = RunContext::new(
+            Scope::Query {
+                evaluation_time_ms: t,
+            },
+            Limits::default(),
+        )
+        .unwrap();
+        let answers = {
+            let query = query.instantiate(store.clone()).unwrap();
+            run(&query, &[plan.offset_cover as u64], context)
+        };
+        let end = t - OFFSET_MS;
+        assert_eq!(
+            sums_of(answers[0].clone()),
+            direct_sums(end - HOUR_MS, end),
+            "offset cover at {t}"
+        );
+        t += NARROW_MS;
+    }
+}
+
 /// T10, sketches. Over DDSketch states (merges are exact: the merged state
 /// is the state built over the union), the p99 the cover reads equals the
 /// p99 the 15 s chain reads, bit for bit, at every 15 s over 5 minutes.
@@ -486,6 +540,7 @@ fn levels_plan(built: Built, level_widths_ms: &[i64]) -> Levels {
         })));
     }
     let cover = finalized_merge(node(Operator::NonASAP(NonASAPOp::TimeRangeCover {
+        offset_ms: 0,
         range: Duration::from_millis(HOUR_MS as u64),
         levels: nodes_narrowest_first.iter().rev().cloned().collect(),
     })));
@@ -705,7 +760,7 @@ fn a_cover_off_its_grid_is_refused() {
 /// One cover's answer at one step: `(T, range in ms, answered, expected)`.
 type CoverAnswer = (i64, i64, BTreeMap<String, f64>, BTreeMap<String, f64>);
 
-fn covers_only(ranges_ms: &[i64]) -> Vec<CoverAnswer> {
+fn covers_only(ranges_ms: &[(i64, i64)]) -> Vec<CoverAnswer> {
     let narrow = chain(NARROW_MS, Built::Sum);
     let wide = node(Operator::ASAP(ASAPOp::SummaryMergeWindows {
         child: narrow.clone(),
@@ -713,9 +768,10 @@ fn covers_only(ranges_ms: &[i64]) -> Vec<CoverAnswer> {
     }));
     let covers: Vec<Rc<OperatorNode>> = ranges_ms
         .iter()
-        .map(|&range_ms| {
+        .map(|&(range_ms, offset_ms)| {
             finalized_merge(
                 node(Operator::NonASAP(NonASAPOp::TimeRangeCover {
+                    offset_ms: offset_ms as u64,
                     range: Duration::from_millis(range_ms as u64),
                     levels: vec![wide.clone(), narrow.clone()],
                 })),
@@ -770,12 +826,12 @@ fn covers_only(ranges_ms: &[i64]) -> Vec<CoverAnswer> {
             let query = query.instantiate(store.clone()).unwrap();
             run(&query, &cover_ids, context)
         };
-        for (cover, &range_ms) in ranges_ms.iter().enumerate() {
+        for (cover, &(range_ms, offset_ms)) in ranges_ms.iter().enumerate() {
             answers.push((
                 t,
                 range_ms,
                 sums_of(rows[cover].clone()),
-                direct_sums(t - range_ms, t),
+                direct_sums(t - offset_ms - range_ms, t - offset_ms),
             ));
         }
         t += NARROW_MS;
@@ -787,7 +843,7 @@ fn covers_only(ranges_ms: &[i64]) -> Vec<CoverAnswer> {
 /// windows from the store and answers the sums over the raw samples.
 #[test]
 fn a_cover_as_its_levels_only_reader_answers_exactly() {
-    for (t, range_ms, answered, expected) in covers_only(&[HOUR_MS]) {
+    for (t, range_ms, answered, expected) in covers_only(&[(HOUR_MS, 0)]) {
         assert_eq!(answered, expected, "{range_ms} ms at {t}");
     }
 }
@@ -797,7 +853,18 @@ fn a_cover_as_its_levels_only_reader_answers_exactly() {
 /// windows both take, so each answers its own range's sums, at every step.
 #[test]
 fn covers_of_different_ranges_over_shared_levels_answer_exactly() {
-    for (t, range_ms, answered, expected) in covers_only(&[HOUR_MS, 70 * 60 * SECOND_MS]) {
+    for (t, range_ms, answered, expected) in covers_only(&[(HOUR_MS, 0), (70 * 60 * SECOND_MS, 0)])
+    {
+        assert_eq!(answered, expected, "{range_ms} ms at {t}");
+    }
+}
+
+/// A cover an hour back and one without an offset, the levels' only
+/// readers: each level is read for the union of the windows both take
+/// (`CoverLevel::offset_ms`), so each answers its own window's sums.
+#[test]
+fn covers_with_and_without_an_offset_over_shared_levels_answer_exactly() {
+    for (t, range_ms, answered, expected) in covers_only(&[(HOUR_MS, 0), (HOUR_MS, HOUR_MS)]) {
         assert_eq!(answered, expected, "{range_ms} ms at {t}");
     }
 }
