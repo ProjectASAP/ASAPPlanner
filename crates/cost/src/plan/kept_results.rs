@@ -99,20 +99,21 @@ mod tests {
         assert_eq!(steps_computed_per_request(range, None), 241.0);
     }
 
-    /// Every 20 s at 15 s steps, a request computes 1 new step, then 2, then
-    /// 1: 4/3 on average, not 1. As computed, the request is a range of
-    /// 4/3 steps on average (a 5 s span at 15 s steps); without an answer
-    /// cache, its range.
+    /// A request at `t` evaluates its steps back from its end, `t − j · step`,
+    /// and an answer is kept by its evaluation time, so it reuses only the
+    /// steps of the request a whole number of steps earlier: the one
+    /// `lcm(interval, step)` before. Every 20 s at 15 s steps that is the
+    /// request 60 s before: 4 new steps per request (not 4/3); every 10 s,
+    /// the one 30 s before: 2 (not 2/3, not 1); every 2 h, all 241.
     #[test]
-    fn a_range_request_computes_its_new_steps_on_average() {
+    fn a_range_request_reuses_the_steps_of_the_request_a_whole_number_of_steps_before() {
         let range = RangeEvaluation {
             step_ms: 15_000,
             span_ms: 3_600_000,
         };
-        assert_eq!(
-            steps_computed_per_request(Some(range), Some(20_000)),
-            4.0 / 3.0
-        );
+        assert_eq!(steps_computed_per_request(Some(range), Some(20_000)), 4.0);
+        assert_eq!(steps_computed_per_request(Some(range), Some(10_000)), 2.0);
+        assert_eq!(steps_computed_per_request(Some(range), Some(7_200_000)), 241.0);
         let workload: asap_types::workload::PlanningWorkload =
             serde_json::from_value(serde_json::json!({
                 "query_workload": {"language": "promql", "repeating_queries": [{
@@ -130,7 +131,7 @@ mod tests {
             max_bytes: None,
         });
         let computed = computed_range(&entry, answers).expect("a range");
-        assert_eq!(computed.mean_evaluations_per_request(), 4.0 / 3.0);
+        assert_eq!(computed.mean_evaluations_per_request(), 4.0);
         assert_eq!(computed_range(&entry, None), entry.range_evaluation);
     }
 }

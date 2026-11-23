@@ -522,3 +522,38 @@ fn an_ingestion_time_reader_of_raw_rows_kept_at_ingestion_reads_one_batch() {
     );
     close(over_kept_rows, over_arriving_rows);
 }
+
+/// A query-time node computed once per evaluation (not kept across
+/// evaluations) read by a 1 h range at 15 s steps every 20 s runs at every
+/// step of every request, 241 per 20 s; with an answer cache, at the steps
+/// a request computes, 4 per 20 s, as `context_executions_per_second`
+/// counts them (`computed_range`). A node kept across evaluations runs once
+/// per request either way.
+#[test]
+fn a_query_time_node_runs_at_the_steps_a_request_computes() {
+    let range = RangeEvaluation {
+        step_ms: 15_000,
+        span_ms: 3_600_000,
+    };
+    let entries = entries(&[fixed(20_000, 0)], Some(range));
+    let answers = Some(crate::AnswerCache {
+        retention_margin_ms: 60_000,
+        max_bytes: None,
+    });
+    let one_evaluation = Lifetime::OneEvaluation(asap_types::stages::StorageMedium::Memory);
+    let across = Lifetime::AcrossEvaluations(asap_types::stages::StorageMedium::Memory);
+    let rate = |lifetime, answer_cache| {
+        executions_per_second(
+            ExecutionTiming::QueryTime,
+            lifetime,
+            &entries,
+            answer_cache,
+            3600.0,
+        )
+        .unwrap()
+    };
+    close(rate(one_evaluation, None), 241.0 / 20.0);
+    close(rate(one_evaluation, answers), 4.0 / 20.0);
+    close(rate(across, None), 1.0 / 20.0);
+    close(rate(across, answers), 1.0 / 20.0);
+}
