@@ -44,7 +44,7 @@ The executor stays until the new crate compiles the same plans. Then `plan_insta
 - **Cutting:** the DAG is cut at every `OneEvaluation` and `AcrossEvaluations` node. Each piece is a tree and becomes one DataFusion plan.
 - **Refusal:** a plan with a query-time `Lifetime::None` node that has two consumers is refused.
 - **Running a batch:**
-  - A tree starts only after every tree it reads has finished. Trees that don't depend on each other run concurrently on tokio, up to a cap.
+  - Trees run one at a time, in dependency order: a tree starts only after every tree it reads has finished. Running independent trees concurrently is a later optimization.
   - A kept output is collected fully into a per-batch scratch store, re-packed into normal-sized batches.
   - Root results are streamed to the caller.
   - A failed tree fails only the queries that depend on it.
@@ -89,15 +89,15 @@ The executor stays until the new crate compiles the same plans. Then `plan_insta
   - per-group sort and limit partition by `eval_time`.
 
   An instant query is the case with one T.
-- **`TimeRange` (with any `TimeShift`) is fused with its consumer.** The consumer is a range function, an aggregate, or a `SummaryMerge` over panes. The fused operator reads each series' time-sorted rows once and emits `(eval_time, keys, value)`.
+- **`TimeRange` copies rows by default.** It copies each row once for every evaluation time T whose window covers the row, tagging each copy with `eval_time`. The consumer is then an ordinary aggregate, or a `SummaryMerge`, grouped by `(eval_time, keys)`. For sketch panes, each copy is an 8-byte handle.
+- **Range functions are the exception.** `rate`, `increase`, `*_over_time` and similar need each series' time-ordered samples (`rate` handles counter resets and extrapolates to the window edges), so they need a custom operator anyway. That operator is fused with its `TimeRange`: it reads each series' sorted samples once and emits `(eval_time, keys, value)`.
   - Running `TimeRange` alone would copy each row into every T whose window covers it. A 5-minute raw window evaluated every 15 s would copy each sample 20 times.
-- **Fallback:** a `TimeRange` whose consumer can't be fused uses the copying version and logs a warning.
-- **Pane merges:** at first, each T merges the panes in `(T−w, T]`. Sketches can't be subtracted, so a sliding merge (two stacks) is a later optimization.
+- **Later optimizations:** fusing `TimeRange` with other consumers, and a sliding merge of panes (two stacks, since sketches can't be subtracted).
 
-### D8. One partition per tree, unless the raw input is large
+### D8. One partition per tree
 
-- **Default: each tree runs as a single partition.** Most trees are small (an instant query over sketch panes reads a few thousand handle rows), so repartitioning would cost more than it saves. Sidra found the same for its stored results. Parallelism comes from running independent trees (D3) and separate batches concurrently.
-- **Large raw inputs are split by series.** When a raw leaf reports an input above a configurable threshold, it emits N partitions by series hash. The fused windowed operators (D7) work per series, so only the final aggregate merges partitions.
+- **Each tree runs as a single partition.** Most trees are small (an instant query over sketch panes reads a few thousand handle rows), so repartitioning would cost more than it saves. Sidra found the same for its stored results. Parallelism comes from running separate batches concurrently.
+- **Later optimization:** split large raw inputs into N partitions by series hash. The range-function operators (D7) work per series, so only the final aggregate would merge partitions.
 - **DataFusion's repartitioning rule (`EnforceDistribution`) stays off.** Our compiler decides partitioning.
 
 ### D9. Saving `OnFirstRead` views: only finished windows, and the first save wins
