@@ -1150,3 +1150,38 @@ fn the_objective_is_the_plan_cost_when_a_query_reaches_a_group_it_reads_another_
         objective_and_plan_cost(&workload, &settings, true),
     );
 }
+
+/// `(sum by (job) (increase(http_errors_total[1h])) / on(job) group_left()
+/// sum by (job) (increase(http_requests_total[1h]))) > 0.01` every 15 s over
+/// two counters of 6 series sampled every 10 s (0.6 rows per second each),
+/// raw data retained. Each side keeps its counter's raw rows at ingestion
+/// for 15 s and reads them through a chain. The MILP charged each raw-row
+/// store at a slope taken over one more second of retention at its longest
+/// (1 h), where the rounded row count steps by a whole row: 1 row per
+/// second, not 0.6. Its optimum was 0.0595/s against `plan_cost`'s
+/// 0.0767/s. Retained raw rows are charged by their exact rate, so the
+/// cost is linear in the retention and the optimum is the plan's cost (the
+/// debug check in `select_plan`).
+#[test]
+fn the_objective_is_the_plan_cost_on_a_group_left_join_of_two_hour_increases() {
+    let counter =
+        serde_json::json!({"series_count": 6, "sample_interval": 10000, "metric_type": "counter"});
+    let w: PlanningWorkload = serde_json::from_value(serde_json::json!({
+        "query_workload": {"language": "promql", "repeating_queries": [{
+            "query": "(sum by (job) (increase(http_errors_total[1h])) / on(job) group_left() \
+                      sum by (job) (increase(http_requests_total[1h]))) > 0.01",
+            "demand": {"fixed_interval_at": {"interval": 15000, "evaluation_phase": 0}},
+            "requirements": {},
+            "predictability": {"predictable": {"known_at": null}},
+        }]},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 1.2}},
+            "sources": {"http_errors_total": counter, "http_requests_total": counter},
+        },
+    }))
+    .unwrap();
+    assert_equal(
+        "group_left join of two 1 h increases",
+        objective_and_plan_cost(&w, &CostInputs::default(), true),
+    );
+}

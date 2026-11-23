@@ -1890,7 +1890,7 @@ fn a_query_time_scan_reads_what_its_consumers_read_and_keeps_its_retention() {
         .unwrap();
     assert_eq!(usage.output.rows, 1_000);
     let (_, kept_bytes) = usage.raw_scan.expect("a query-time scan keeps raw data");
-    assert_eq!(kept_bytes, usage.output.bytes * 3_601);
+    assert_eq!(kept_bytes, (usage.output.bytes * 3_601) as f64);
 }
 
 /// Raw rows materialized at ingestion time behind an offset (a

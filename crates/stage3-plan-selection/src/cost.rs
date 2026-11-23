@@ -1112,7 +1112,7 @@ fn quantity_of(
         ),
         Quantity::DiskBytes => (
             usage.disk_bytes as f64,
-            usage.raw_scan.map_or(0.0, |(_, bytes)| bytes as f64),
+            usage.raw_scan.map_or(0.0, |(_, bytes)| bytes),
         ),
     })
 }
