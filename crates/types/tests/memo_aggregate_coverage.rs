@@ -675,7 +675,10 @@ fn a_cover_under_an_offset_covers_its_range_that_much_earlier() {
     };
     let an_hour_back = memo.find_or_add_group(cover(HOUR_MS)).unwrap();
     let now = memo.find_or_add_group(cover(0)).unwrap();
-    assert_eq!(time_of(&memo, an_hour_back), relative(-3_900_000, -3_600_000));
+    assert_eq!(
+        time_of(&memo, an_hour_back),
+        relative(-3_900_000, -3_600_000)
+    );
     assert_eq!(time_of(&memo, now), relative(-5 * MINUTE_MS, 0));
     let direct = kll_over_last_5m_of(&mut memo, shift(HOUR_MS, None, g1));
     assert_eq!(coverage(&memo, an_hour_back), coverage(&memo, direct));
