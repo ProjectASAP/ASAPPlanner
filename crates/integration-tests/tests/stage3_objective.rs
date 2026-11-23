@@ -1134,15 +1134,17 @@ fn the_objective_is_the_plan_cost_when_a_query_reaches_a_group_it_reads_another_
         },
     }))
     .unwrap();
-    let mut settings = CostInputs::default();
-    settings.measured_operation_costs = serde_json::from_value(serde_json::json!({
+    let settings = CostInputs {
+        measured_operation_costs: serde_json::from_value(serde_json::json!({
         "operators": [
             {"operator": "Aggregate", "phase": "query_time", "measure": "quantile", "ns_per_unit": 1e4},
             {"operator": "SummaryAgg", "phase": "query_time", "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 1e4},
             {"operator": "SummaryAgg", "phase": "query_time", "sketch": {"DDSketch": {"alpha": 0.01}}, "ns_per_unit": 1e4},
         ],
     }))
-    .unwrap();
+    .unwrap(),
+        ..Default::default()
+    };
     assert_equal(
         "an approximate and an exact quantile on one grid",
         objective_and_plan_cost(&workload, &settings, true),
