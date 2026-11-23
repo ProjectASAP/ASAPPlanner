@@ -25,11 +25,12 @@ pub(crate) fn is_time_indexed_state<I: OperatorInput>(state: &I) -> bool {
     }
 }
 
-/// One level of a `TimeRangeCover`: the cover's range, its levels' widths,
-/// widest first, and which of them this is. A reader of level `level`
-/// keeps the windows the cover takes from it ([`cover_windows`] over
-/// `(T - range_ms, T]`); two covers of different ranges over the same
-/// levels take different windows from one level.
+/// One level of a `TimeRangeCover`: the cover's range and offset, its
+/// levels' widths, widest first, and which of them this is. A reader of
+/// level `level` keeps the windows the cover takes from it
+/// ([`cover_windows`] over `(T - offset_ms - range_ms, T - offset_ms]`); two
+/// covers of different ranges or offsets over the same levels take
+/// different windows from one level.
 ///
 /// Example: `CoverLevel { range_ms: 3_600_000, level_widths_ms: vec![300_000,
 /// 15_000], level: 1 }` is the 15 s level of a 1 h cover over 5 min and
@@ -38,6 +39,10 @@ pub(crate) fn is_time_indexed_state<I: OperatorInput>(state: &I) -> bool {
 pub struct CoverLevel {
     /// The cover's range, in ms.
     pub range_ms: u64,
+    /// How far before the evaluation time the cover's range ends, in ms
+    /// (`TimeRangeCover::offset_ms`); 0 (default) without an offset.
+    #[serde(default)]
+    pub offset_ms: u64,
     /// The cover's level widths, widest first, each a multiple of the next.
     pub level_widths_ms: Vec<u64>,
     /// The index of this level in `level_widths_ms`.

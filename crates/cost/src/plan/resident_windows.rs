@@ -22,9 +22,11 @@ pub enum WindowRead {
     /// by `t − offset`.
     Range { range_ms: u64, offset_ms: u64 },
     /// The windows of level `level` that a cover of `range` over
-    /// `level_widths_ms` (widest first) takes at `t` ([`cover_windows`]).
+    /// `level_widths_ms` (widest first) takes at `t`, `offset` before it
+    /// (`(t − offset − range, t − offset]`, [`cover_windows`]).
     Cover {
         range_ms: u64,
+        offset_ms: u64,
         level_widths_ms: Vec<u64>,
         level: usize,
     },
@@ -93,7 +95,11 @@ impl ChainReader {
                 range_ms,
                 offset_ms,
             } => offset_ms + range_ms,
-            WindowRead::Cover { range_ms, .. } => *range_ms,
+            WindowRead::Cover {
+                range_ms,
+                offset_ms,
+                ..
+            } => offset_ms + range_ms,
             WindowRead::Every => return None,
         };
         Some(window_ms + span_ms)
@@ -175,12 +181,15 @@ fn resident_window_count(
                     }
                     WindowRead::Cover {
                         range_ms,
+                        offset_ms,
                         level_widths_ms,
                         level,
                     } => {
                         // A time off the narrowest level's grid reads no
                         // cover (the executor refuses it).
-                        if let Ok(windows) = cover_windows(t - *range_ms as i64, t, level_widths_ms)
+                        let end = t - *offset_ms as i64;
+                        if let Ok(windows) =
+                            cover_windows(end - *range_ms as i64, end, level_widths_ms)
                         {
                             for (at, end) in windows {
                                 if at == *level {
@@ -402,6 +411,7 @@ mod tests {
         let reader = ChainReader {
             read: WindowRead::Cover {
                 range_ms: HOUR,
+                offset_ms: 0,
                 level_widths_ms: vec![5 * MIN, S15],
                 level: 1,
             },

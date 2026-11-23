@@ -83,9 +83,9 @@ What exists and why it does not help:
    ingestion time, so its windows are on the epoch grid; that rules out a
    from-rows chain of the same width built at query time (whose windows end
    at the evaluation time).
-3. **Cover.** A new node `TimeRangeCover(W)` over the levels (each under the
-   same `TimeShift`s), widest first, selects at each evaluation time `T` the
-   windows that tile `(T − W, T]` exactly: the widest whole windows inside the
+3. **Cover.** A new node `TimeRangeCover(W)` over the levels, widest first,
+   selects at each evaluation time `T` the windows that tile `(T − W, T]`
+   exactly (under `offset o`, `(T − o − W, T − o]`, below): the widest whole windows inside the
    range, then, in each uncovered edge, the next level's whole windows, down to
    the narrowest level. The state group `SummaryAgg(TimeRange(W, X))` gets
    `SummaryMerge` over each of two covers as candidates: over the first
@@ -109,6 +109,19 @@ What exists and why it does not help:
 
 **Cover at time `T`.** Levels `c_1 > c_2 > … > c_L`, each dividing the next
 wider, `c_L` dividing the evaluation grid, the range `W`, and the offsets.
+
+**Under an offset.** A range under `TimeShift`s without `@` adding up to
+`o ≥ 0` (PromQL `[W] offset o`) gets levels too, each a width that divides
+`o`, so `T − o` is on every level's grid whenever `T` is on the narrowest's.
+The cover carries `o` itself (`TimeRangeCover::offset_ms`) and reads the
+levels directly, not through the shifts: its readers walk sees
+`shifts_back_ms = o` with its `LastWindow(W)` read, so every level it reads
+retains `o + W` and Stage 3's (R) and the window cache count the window
+`o` back. The windows counted per step are those of `(T − W, T]` (`o`
+moves every level's grid by whole windows). Example:
+`max_over_time(m[1h] offset 1h)` every 15 s over a 15 s chain: levels 1 min,
+5 min and 15 min, covers an hour back, each level retaining 2 h; with
+`offset 90s` no level (90 s is no multiple of 1 min). Under `@` none.
 
 ```
 cover(a, b, level i):              # windows tiling (a, b]
@@ -227,8 +240,9 @@ snapshot workloads is in the PR body (before and after the caps).
  pub enum NonASAPOp<C> {
      TimeShift { shift: TimeShift, child: C },
 +    /// The windows of `levels` (chains, widest first, each width a multiple of
-+    /// the next) that tile `(T − range, T]`: widest whole windows, narrower edges.
-+    TimeRangeCover { range: Duration, levels: Vec<C> },
++    /// the next) that tile `(T − offset − range, T − offset]`: widest whole
++    /// windows, narrower edges.
++    TimeRangeCover { range: Duration, offset_ms: u64, levels: Vec<C> },
  }
 
  // crates/types/src/ir/operator/node.rs
@@ -339,8 +353,13 @@ not enough: a cover may still read a coarser chain built from the rows
 7. **A wider level is built only from the next narrower level.** A from-rows
    build adds one row update per level (100,000 per second here) against
    about 870 merges per second; it is not offered.
-8. **No `TimeShift` in v1.** A range under an offset keeps its single 15 s
-   chain; a cover would need the shifts above each level.
+8. **Offsets on the levels' grid.** A range under an offset that every
+   level width divides reads a cover that carries the offset
+   (`offset_ms`), over unshifted levels; an offset off a wider level's grid
+   keeps the levels that divide it (none: the single chain). Measured
+   before: `max by (job) (max_over_time(queue_depth[1h] offset 1h))` read
+   240 windows per series through a plain `TimeRange` (66 ms per evaluation
+   at 1,000 series) while its unshifted twin read a cover (7.5 ms).
 
 ## 6. Cost model notes
 

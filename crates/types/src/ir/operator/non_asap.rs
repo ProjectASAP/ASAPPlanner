@@ -156,14 +156,25 @@ pub enum NonASAPOp<C = Rc<OperatorNode>> {
     /// PromQL `offset` / `@`: moves when `child` is evaluated.
     TimeShift { shift: TimeShift, child: C },
     /// The windows of `levels` (tumbling-window chains, widest first, each
-    /// width a multiple of the next) that tile `(T - range, T]` at
-    /// evaluation time `T`: the widest whole windows inside it, then, in each
-    /// edge left over, the next level's whole windows, down to the narrowest
-    /// level ([`cover_windows`](crate::ir::operator::tumbling_window_chain::cover_windows)).
+    /// width a multiple of the next) that tile `(T - offset - range,
+    /// T - offset]` at evaluation time `T`: the widest whole windows inside
+    /// it, then, in each edge left over, the next level's whole windows, down
+    /// to the narrowest level
+    /// ([`cover_windows`](crate::ir::operator::tumbling_window_chain::cover_windows)).
     /// Output: the selected windows' rows, a time-indexed state with the
     /// levels' schema. Example: `range` 1 h over chains of 5 min and 15 s at
-    /// `T` = 100 h + 105 s selects 11 windows of 5 min and 20 of 15 s.
-    TimeRangeCover { range: Duration, levels: Vec<C> },
+    /// `T` = 100 h + 105 s selects 11 windows of 5 min and 20 of 15 s; with
+    /// `offset_ms` 1 h (PromQL `[1h] offset 1h`), the same windows an hour
+    /// earlier.
+    TimeRangeCover {
+        range: Duration,
+        /// How far before the evaluation time the range ends, in ms: a
+        /// PromQL `offset` the cover reads under, a multiple of every level's
+        /// width; 0 (default) without one.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        offset_ms: u64,
+        levels: Vec<C>,
+    },
     /// PromQL `vector(s)`: a label-less instant vector carrying a scalar.
     PromqlVectorFromScalar(ScalarExpr<C>),
     /// ρ — PromQL `label_replace` / `label_join`.
@@ -508,8 +519,13 @@ impl<C> NonASAPOp<C> {
                 shift: *shift,
                 child: f(child),
             },
-            TimeRangeCover { range, levels } => TimeRangeCover {
+            TimeRangeCover {
+                range,
+                offset_ms,
+                levels,
+            } => TimeRangeCover {
                 range: *range,
+                offset_ms: *offset_ms,
                 levels: levels.iter().map(&mut *f).collect(),
             },
             PromqlRelabel { dst, value, child } => {
@@ -1182,7 +1198,7 @@ impl<I: OperatorInput> NonASAPOp<I> {
                     no_state(child, "Concat")?;
                 }
             }
-            TimeRangeCover { range, levels } => {
+            TimeRangeCover { range, levels, .. } => {
                 let range_ms = u64::try_from(range.as_millis()).unwrap_or(u64::MAX);
                 let widths: Vec<u64> = levels
                     .iter()
@@ -1487,6 +1503,12 @@ fn default_proj_name<I: OperatorInput>(
 /// Whether any aggregate measure has its own input predicate.
 pub fn any_measure_filtered<C>(filters: &[Option<Predicate<C>>]) -> bool {
     filters.iter().any(Option::is_some)
+}
+
+/// Whether `value` is 0, for `skip_serializing_if`: a cover without an offset
+/// serializes as before the field existed.
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[cfg(test)]
