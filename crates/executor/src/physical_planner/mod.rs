@@ -663,7 +663,12 @@ fn compile_internal(
             }
             // A cover's levels: from each, the windows the cover takes from
             // it at this run's evaluation time, then their union.
-            if let Payload::NonASAP(NonASAPOp::TimeRangeCover { range, levels }) = &node.payload {
+            if let Payload::NonASAP(NonASAPOp::TimeRangeCover {
+                range,
+                offset_ms,
+                levels,
+            }) = &node.payload
+            {
                 // Each level by its id, widest first, as the payload lists
                 // them (the inputs may come in another order).
                 let levels = levels
@@ -680,6 +685,15 @@ fn compile_internal(
                 let widths: Vec<u64> = levels.iter().map(|(_, width, _)| *width).collect();
                 let range_ms = i64::try_from(range.as_millis())
                     .map_err(|_| invalid("a time-range cover overflows Int64"))?;
+                // Under an offset the range ends that much earlier, on every
+                // level's grid.
+                let end_offset_ms = i64::try_from(*offset_ms)
+                    .map_err(|_| invalid("a time-range cover's offset overflows Int64"))?;
+                if widths.iter().any(|&width| *offset_ms % width != 0) {
+                    return Err(invalid(
+                        "a time-range cover's offset is whole windows of every level",
+                    ));
+                }
                 let mut selected = Vec::with_capacity(levels.len());
                 for (index, (level, _, schema)) in levels.iter().enumerate() {
                     let time = schema
@@ -689,12 +703,20 @@ fn compile_internal(
                     physical_dag.add(
                         helper,
                         vec![*level],
-                        Operator::time_range(schema.clone(), time, 0, range_ms, None, None)?
-                            .with_cover_level(CoverLevel {
-                                range_ms: range_ms as u64,
-                                level_widths_ms: widths.clone(),
-                                level: index,
-                            })?,
+                        Operator::time_range(
+                            schema.clone(),
+                            time,
+                            end_offset_ms,
+                            range_ms,
+                            None,
+                            None,
+                        )?
+                        .with_cover_level(CoverLevel {
+                            range_ms: range_ms as u64,
+                            offset_ms: *offset_ms,
+                            level_widths_ms: widths.clone(),
+                            level: index,
+                        })?,
                     )?;
                     selected.push(helper);
                 }
@@ -2114,8 +2136,11 @@ fn cover_reads_of(id: NodeId, graph: &CompileGraph<'_>) -> Option<Vec<CoverLevel
     let readers = graph.consumers.get(&id)?;
     let mut reads: Vec<CoverLevel> = Vec::new();
     for reader in readers {
-        let Payload::NonASAP(NonASAPOp::TimeRangeCover { range, levels }) =
-            &graph.nodes.get(reader)?.payload
+        let Payload::NonASAP(NonASAPOp::TimeRangeCover {
+            range,
+            offset_ms,
+            levels,
+        }) = &graph.nodes.get(reader)?.payload
         else {
             return None;
         };
@@ -2130,6 +2155,7 @@ fn cover_reads_of(id: NodeId, graph: &CompileGraph<'_>) -> Option<Vec<CoverLevel
             .collect::<Option<Vec<u64>>>()?;
         let read = CoverLevel {
             range_ms: u64::try_from(range.as_millis()).ok()?,
+            offset_ms: *offset_ms,
             level_widths_ms,
             level: levels.iter().position(|&level| level as NodeId == id)?,
         };

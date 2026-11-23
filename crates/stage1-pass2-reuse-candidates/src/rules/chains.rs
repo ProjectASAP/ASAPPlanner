@@ -311,11 +311,15 @@ fn state_evaluation_grid_ms(periods_ms: &BTreeMap<usize, Option<u64>>) -> Option
 /// reader accepts). At most [`MOST_WIDER_LEVELS`] levels;
 /// only over a chain $G_w$ whose width divides the state's evaluation grid
 /// `state_grid_ms` (a cover over any other would fail Pass 2's grid check:
-/// its edges are read from $G_w$); only for a range with no `TimeShift`.
+/// its edges are read from $G_w$). Under `TimeShift`s without `@` adding up
+/// to an offset $o \ge 0$, the covers read the levels $o$ earlier
+/// (`TimeRangeCover::offset_ms`), and only the widths that divide $o$, so the
+/// shifted range ends on every level's grid; under `@` none.
 /// Example: `quantile_over_time(0.99, m[1h])` every 15 s: levels 1 min,
 /// 5 min and 15 min over the 15 s chain (not 1 h: 2 h > 1 h), and covers
 /// over (1 min, 15 s) and over the four; read every 15 s and every 60 s, none over the 60 s
-/// chain.
+/// chain. `max_over_time(m[1h] offset 1h)`: the same levels (1 h is a
+/// multiple of each), the covers at offset 1 h; `offset 90s`: none.
 fn add_wider_levels(
     memo: &mut Memo,
     state: MemoGroupId,
@@ -324,9 +328,20 @@ fn add_wider_levels(
     state_grid_ms: Option<u64>,
     level_parameters: &[Option<SketchParams>],
 ) -> Result<(), Pass2RuleError> {
-    if !path.shifts.is_empty() || path.anchored_at_ms.is_some() {
+    // Under `offset`s (no `@`), the covers read the levels that much
+    // earlier: only levels whose width divides the offset, so the shifted
+    // range still ends on each level's grid.
+    if path.anchored_at_ms.is_some() || path.shifts.iter().any(|shift| shift.at.is_some()) {
         return Ok(());
     }
+    let Ok(offset_ms) = u64::try_from(
+        path.shifts
+            .iter()
+            .try_fold(0_i64, |total, shift| total.checked_add(shift.offset_ms))
+            .unwrap_or(-1),
+    ) else {
+        return Ok(());
+    };
     let Some(state_grid_ms) = state_grid_ms else {
         return Ok(());
     };
@@ -346,6 +361,7 @@ fn add_wider_levels(
                 width > narrowest_width_ms
                     && width.is_multiple_of(narrowest_width_ms)
                     && width.saturating_mul(2) <= path.window_ms
+                    && offset_ms.is_multiple_of(width)
             })
             .collect();
         if widths.len() > MOST_WIDER_LEVELS {
@@ -387,6 +403,7 @@ fn add_wider_levels(
             }
             let cover_expression = Operator::NonASAP(NonASAPOp::TimeRangeCover {
                 range: std::time::Duration::from_millis(path.window_ms),
+                offset_ms,
                 levels: levels.iter().rev().copied().collect(),
             });
             let cover = memo.find_or_add_group(cover_expression.clone())?;

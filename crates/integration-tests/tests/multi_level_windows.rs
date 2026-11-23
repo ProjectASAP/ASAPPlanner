@@ -352,3 +352,105 @@ async fn a_cover_is_charged_on_its_readers_grid() {
         "{plan_cost_per_second} vs {objective}"
     );
 }
+
+/// `max by (job) (max_over_time(queue_depth[1h])) > max by (job)
+/// (max_over_time(queue_depth[1h] offset 1h))` every 15 s over 1,000
+/// series sampled every 15 s, raw data not retained. The left side reads a
+/// cover over wider
+/// levels; the `offset 1h` side read a plain `TimeRange(1h)` over the 15 s
+/// chain through its `TimeShift`, 240 windows per series per evaluation.
+/// A 1 h offset is a multiple of every level width, so the offset side
+/// reads a cover too, an hour back (`TimeRangeCover::offset_ms`), and no
+/// `TimeRange` reads a chain through a `TimeShift`. Every level that cover
+/// reads retains its range and offset, 2 h; Stage 3's objective is the
+/// plan's cost (the debug check in `select_plan`).
+#[tokio::test]
+async fn an_offset_range_reads_wider_levels_under_its_offset() {
+    let workload: PlanningWorkload = serde_json::from_value(serde_json::json!({
+        "query_workload": {"language": "promql", "query_batch": null, "repeating_queries": [{
+            "query": "max by (job) (max_over_time(queue_depth[1h])) \
+                      > max by (job) (max_over_time(queue_depth[1h] offset 1h))",
+            "demand": {"fixed_interval_at": {"interval": 15000, "evaluation_phase": 0}},
+            "requirements": {"accuracy": {"max_error": 0.01, "failure_probability": 0.01},
+                             "max_latency_ms": null},
+            "predictability": {"predictable": {"known_at": null}},
+        }]},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 66.67}},
+            "sources": {"queue_depth": {"series_count": 1000, "metric_type": "gauge",
+                                        "sample_interval": 15000,
+                                        "column_signs": {"value": "non_negative"}}},
+        },
+    }))
+    .unwrap();
+    // Raw data not retained, as the measured data plane: windows of states.
+    let capabilities = asap_planner::DeploymentCapabilities {
+        raw_data_retained: false,
+        ..Default::default()
+    };
+    let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
+    let (plan, _) = plan_installable(UserInput::new(&workload, FrontendInput::Promql, models))
+        .await
+        .unwrap();
+    let node = |id: usize| plan.dag.nodes.iter().find(|node| node.id == id).unwrap();
+    let is_shift = |id: usize| {
+        matches!(
+            node(id).payload,
+            Operator::NonASAP(NonASAPOp::TimeShift { .. })
+        )
+    };
+    let offset_covers: Vec<(usize, &Vec<usize>)> = plan
+        .dag
+        .nodes
+        .iter()
+        .filter_map(|candidate| match &candidate.payload {
+            Operator::NonASAP(NonASAPOp::TimeRangeCover {
+                offset_ms: 3_600_000,
+                levels,
+                ..
+            }) => Some((candidate.id, levels)),
+            _ => None,
+        })
+        .collect();
+    let summary: Vec<String> = plan
+        .dag
+        .nodes
+        .iter()
+        .map(|node| {
+            let inputs: Vec<usize> = plan
+                .dag
+                .edges
+                .iter()
+                .filter(|edge| edge.consumer == node.id)
+                .map(|edge| edge.producer)
+                .collect();
+            format!(
+                "{} {} {:?} {:?}",
+                node.id,
+                node.payload.kind_name(),
+                inputs,
+                node.retention_ms
+            )
+        })
+        .collect();
+    assert_eq!(
+        offset_covers.len(),
+        1,
+        "one cover an hour back: {summary:#?}"
+    );
+    let range_over_shift = nodes_where(
+        &plan,
+        |operator| matches!(operator, Operator::NonASAP(NonASAPOp::TimeRange { child, .. }) if is_shift(*child)),
+    );
+    assert!(range_over_shift.is_empty(), "{range_over_shift:?}");
+    // Each level the offset cover reads retains its range and the offset.
+    for &level in offset_covers[0].1 {
+        let level = node(level);
+        assert!(
+            level.retention_ms >= Some(2 * 3_600_000),
+            "level {} retains {:?}",
+            level.id,
+            level.retention_ms
+        );
+    }
+}

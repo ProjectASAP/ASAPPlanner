@@ -216,10 +216,12 @@ impl Scan {
                     })?;
                     let range = i64::try_from(read.range_ms)
                         .map_err(|_| Error::Invalid("a cover's range exceeds Int64".into()))?;
+                    let offset = i64::try_from(read.offset_ms)
+                        .map_err(|_| Error::Invalid("a cover's offset exceeds Int64".into()))?;
                     let windows =
                         planner_types::ir::operator::tumbling_window_chain::cover_windows(
-                            evaluation_time_ms - range,
-                            *evaluation_time_ms,
+                            evaluation_time_ms - offset - range,
+                            evaluation_time_ms - offset,
                             &read.level_widths_ms,
                         )
                         .map_err(|error| Error::Invalid(error.to_string()))?;

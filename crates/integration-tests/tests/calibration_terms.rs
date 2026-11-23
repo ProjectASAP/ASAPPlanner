@@ -516,7 +516,8 @@ async fn c9_each_node_reports_its_time_by_phase() {
 /// not the 1 h 5 min it retains: its memory falls below a fifth, and every
 /// retained window is charged as disk (more than the memory it no longer
 /// holds, by the resident windows; less than all it held). Without the
-/// cache (the default), every retained window is memory, as before.
+/// cache (the default), every retained window is memory, as before. Planned
+/// without wider levels (`plan_single_chain`): one chain, as measured.
 #[tokio::test]
 async fn c11_a_window_cache_keeps_only_recently_read_windows_in_memory() {
     let workload = over_m(
@@ -526,7 +527,8 @@ async fn c11_a_window_cache_keeps_only_recently_read_windows_in_memory() {
     let usage = |data_plane_execution: Value| {
         let workload = workload.clone();
         async move {
-            let report = plan(
+            // One chain, no wider levels: what the cache keeps of it.
+            let report = plan_single_chain(
                 &workload,
                 &cost_inputs(
                     usage_over_time(),
@@ -534,10 +536,8 @@ async fn c11_a_window_cache_keeps_only_recently_read_windows_in_memory() {
                     json!({}),
                     data_plane_execution,
                 ),
-                false,
             )
-            .await
-            .report;
+            .await;
             (
                 number(&report["predicted_usage"], "average_memory_bytes"),
                 number(&report["predicted_usage"], "disk_bytes"),

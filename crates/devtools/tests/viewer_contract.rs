@@ -110,6 +110,7 @@ fn non_asap_samples() -> Vec<NonASAPOp<()>> {
             child: (),
         },
         NonASAPOp::TimeRangeCover {
+            offset_ms: 0,
             range: Duration::from_secs(3_600),
             levels: vec![(), ()],
         },

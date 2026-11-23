@@ -657,6 +657,7 @@ fn resident_view_windows(
                             ) {
                                 (Some(level), Some(level_widths_ms)) => WindowRead::Cover {
                                     range_ms: window.length_ms,
+                                    offset_ms: window.ends_before_evaluation_ms,
                                     level_widths_ms,
                                     level,
                                 },

@@ -178,7 +178,7 @@ pub(super) fn aggregate_coverage<'m>(
         }
         // The windows tiling the range, from levels of one build: what the
         // same range over its narrowest level selects.
-        Operator::NonASAP(NonASAPOp::TimeRangeCover { range, levels }) => {
+        Operator::NonASAP(NonASAPOp::TimeRangeCover { range, levels, .. }) => {
             let narrowest = *levels.last().ok_or(CoverageError::NoCoverage)?;
             of_window_selection(&Operator::NonASAP(NonASAPOp::TimeRange {
                 range: *range,
