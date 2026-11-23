@@ -112,11 +112,18 @@ The executor stays until the new crate compiles the same plans. Then `plan_insta
   - Making the second batch wait for the first is a later optimization, if measurements show it matters.
 - **Retention:** the store drops windows older than the view's `retention_ms`, measured from the newest finished window.
 
+### D10. ASAPQuery sends batches through a new endpoint, and matches queries by parsed form
+
+- **New endpoint:** `POST /api/v1/query_batch` takes a list of `{query, time}` or `{query, start, end, step}`. It returns one Prometheus-format result per entry, in order, each marked as answered by the plan, answered by the fallback, or failed.
+- **The existing endpoints stay.** `/api/v1/query` and `/query_range` become batches of one, for Grafana and other clients. Sharing across queries happens only through the batch endpoint.
+- **Matching a query to a root:** at install, each of `query_texts[i]` is parsed with ASAPPlanner's frontend and printed back in a fixed canonical form, mapping to `roots[i]`. Incoming queries are canonicalized the same way and looked up. Matching by what a query can be answered from, rather than its text, is a separate later feature.
+- **Fallback per entry:** a query with no matching root, or one that gets `NotReady`, is sent to the fallback (Prometheus or ClickHouse) on its own, and its answer fills that query's slot.
+- **SQL** follows the same path with the SQL frontend, after PromQL works.
+
 ## Open questions
 
 These are not yet discussed:
 
-- The shape of ASAPQuery's batch query endpoint, and how incoming queries are matched to plan roots.
 - How each operator maps to a DataFusion `*Exec`, a function, or a custom operator. The `docs/datafusion-operator-mapping` §9 table is the starting point.
 - Testing: comparing answers with Prometheus over the same raw data, and with the executor during the switch-over.
 - Order of implementation.
