@@ -111,6 +111,23 @@ pub(super) fn memory_and_disk_limits_over(
     broken
 }
 
+/// Whether a tie-break's plan replaces the plan so far: it is at least a
+/// byte smaller in the quantity minimized (`found` against `current`), and
+/// its `memory_bytes` and `disk_bytes` are within the limits. A tie-break
+/// solved without the memory and disk rows (#1460) holds only the weighted
+/// latency (and, for disk, the memory so far), so its plan may be over a
+/// limit; kept, the final pinned solve under every limit would fail.
+pub(super) fn tie_break_improves(
+    limits: &ClusterLimits,
+    current: f64,
+    found: f64,
+    memory_bytes: f64,
+    disk_bytes: f64,
+) -> bool {
+    found < current - 0.5
+        && memory_and_disk_limits_over(limits, memory_bytes, disk_bytes).is_empty()
+}
+
 /// Per refresh group, its big-M: the most $f_G$ can exceed the allowed
 /// lateness ($F_q$'s own lower bound), from each group's largest refresh
 /// time `refresh_bound`: its own, the groups it reads in full, and the

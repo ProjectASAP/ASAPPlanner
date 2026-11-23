@@ -532,7 +532,13 @@ pub(crate) fn solve_cluster_selection(
                 Objective::Memory => better.memory_bytes,
                 _ => better.disk_bytes,
             };
-            if found < current - 0.5 {
+            if tie_break_improves(
+                inputs.limits,
+                current,
+                found,
+                better.memory_bytes,
+                better.disk_bytes,
+            ) {
                 last = better;
             }
         }
