@@ -754,6 +754,37 @@ mod tests {
         RefreshWindow { width_ms, phase_ms }
     }
 
+    /// #1460: a selection solved without memory and disk rows needs the
+    /// rows of exactly the limits its plan is over: none at or under both
+    /// limits (to 1e-9 relative, the solver's tolerance), memory or disk or
+    /// both when over them. A wrong rule adds rows no plan reaches, whose
+    /// bound of 10^15 bytes can keep HiGHS at the root node, or leaves out a
+    /// row a plan breaks.
+    #[test]
+    fn memory_and_disk_rows_only_for_the_limits_a_plan_is_over() {
+        use asap_cost::ClusterObjective;
+        let limits = ClusterLimits {
+            memory_bytes: 1_000,
+            disk_bytes: 1_000_000_000_000_000,
+            cpu_cores: Some(16),
+            objective: ClusterObjective::LowestMeanLatency,
+        };
+        assert!(memory_and_disk_limits_over(&limits, 1_000.0, 0.0).is_empty());
+        assert!(memory_and_disk_limits_over(&limits, 1_000.000_000_5, 5e14).is_empty());
+        assert_eq!(
+            memory_and_disk_limits_over(&limits, 1_001.0, 0.0),
+            [ClusterLimit::MemoryBytes]
+        );
+        assert_eq!(
+            memory_and_disk_limits_over(&limits, 2_000.0, 2e15),
+            [ClusterLimit::MemoryBytes, ClusterLimit::DiskBytes]
+        );
+        assert_eq!(
+            memory_and_disk_limits_over(&limits, 0.0, 2e15),
+            [ClusterLimit::DiskBytes]
+        );
+    }
+
     /// §6.4: windows of 60 s and 300 s at phase 0 close together (every
     /// 300 s); two 60 s windows at phases 0 and 30 s never do; 20 s at 5 s
     /// and 30 s at 15 s do (both close at 45 s).

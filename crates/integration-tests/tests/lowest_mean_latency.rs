@@ -689,6 +689,61 @@ async fn a18_a_candidate_over_every_readers_bound_is_pruned_before_the_milp() {
         || !node.is_view()));
 }
 
+/// A19 (#1460). Memory and disk rows enter the selection MILP only when a
+/// solve without them selects a plan over a limit: a bound of 10^15 bytes
+/// (the unlimited cluster) beside coefficients of 5e-6 to 1e7 can keep
+/// HiGHS at the root node, where neither a node limit nor a time limit
+/// stops it. `max_over_time(m[5m])` every 10 s: unlimited, the selection
+/// solves once and its plan stands; with memory one byte below that plan's
+/// peak (A3), the plan without the rows is over the limit, so the
+/// selection is solved once more with them and keeps within the limit.
+/// On main every solve holds both rows, so both selections solve as often.
+#[tokio::test]
+async fn a19_memory_and_disk_rows_enter_only_when_a_limit_binds() {
+    let workload = over_m(vec![max_every_10s(None)], 1000);
+    let settings = |memory: Option<u64>| {
+        cost_inputs(
+            cluster("lowest_mean_latency", memory, None, None),
+            max_min_table(100.0, 10_000.0, 0.0),
+            json!({}),
+            json!({}),
+        )
+    };
+    // How many times the selection MILP was solved under `settings`, from
+    // the stages run directly (`Selection`).
+    let solve_count = |settings: &Value| {
+        let settings: CostInputs = serde_json::from_value(settings.clone()).unwrap();
+        let capabilities = DeploymentCapabilities {
+            raw_data_retained: true,
+            ..Default::default()
+        };
+        let models = PlanningModels::builtin()
+            .with_cost_inputs(&settings)
+            .with_deployment_capabilities(&capabilities);
+        let entries: Vec<_> = workload.query_workload.entries().collect();
+        let data = workload.data_workload.clone().unwrap();
+        let run = run_planning_stages_over(
+            lower_promql_roots(&workload).unwrap(),
+            &entries,
+            &data,
+            models,
+        )
+        .unwrap();
+        let (_, selection) = run.run.selection.as_ref().expect("a plan is selected");
+        selection.milp_solve_count
+    };
+    let peak = plan(&workload, &settings(None), true)
+        .await
+        .usage("peak_memory_bytes") as u64;
+    let limited = plan(&workload, &settings(Some(peak - 1)), true).await;
+    assert!(limited.usage("peak_memory_bytes") <= (peak - 1) as f64);
+    assert_eq!(
+        solve_count(&settings(Some(peak - 1))),
+        solve_count(&settings(None)) + 1,
+        "the memory row is added by one more solve, only where the limit binds"
+    );
+}
+
 /// The MILP's latency per query and mean for `settings` on `workload`, from
 /// the stages run directly (`Selection`).
 fn milp_latencies(workload: &asap_planner::PlanningWorkload, settings: &Value) -> (Vec<f64>, f64) {
