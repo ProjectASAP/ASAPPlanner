@@ -89,6 +89,28 @@ pub(super) struct Solution {
     pub(super) solve_ms: u64,
 }
 
+/// The memory and disk limits a plan of `memory_bytes` and `disk_bytes` is
+/// over, by more than the solver's relative tolerance (1e-9): the rows a
+/// selection solved without them needs (#1460). Those rows enter the MILP
+/// only then, because a bound no plan reaches (10^15 bytes for "no limit")
+/// beside the model's small coefficients can keep HiGHS at the root node,
+/// where neither the node limit nor a time limit stops it.
+pub(super) fn memory_and_disk_limits_over(
+    limits: &ClusterLimits,
+    memory_bytes: f64,
+    disk_bytes: f64,
+) -> Vec<ClusterLimit> {
+    let over = |used: f64, limit: u64| used > limit as f64 * (1.0 + 1e-9);
+    let mut broken = Vec::new();
+    if over(memory_bytes, limits.memory_bytes) {
+        broken.push(ClusterLimit::MemoryBytes);
+    }
+    if over(disk_bytes, limits.disk_bytes) {
+        broken.push(ClusterLimit::DiskBytes);
+    }
+    broken
+}
+
 /// Per refresh group, its big-M: the most $f_G$ can exceed the allowed
 /// lateness ($F_q$'s own lower bound), from each group's largest refresh
 /// time `refresh_bound`: its own, the groups it reads in full, and the
