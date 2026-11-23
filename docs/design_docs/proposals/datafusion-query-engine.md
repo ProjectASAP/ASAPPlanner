@@ -92,11 +92,16 @@ The executor stays until the new crate compiles the same plans. Then `plan_insta
 - **Fallback:** a `TimeRange` whose consumer can't be fused uses the copying version and logs a warning.
 - **Pane merges:** at first, each T merges the panes in `(T−w, T]`. Sketches can't be subtracted, so a sliding merge (two stacks) is a later optimization.
 
+### D8. One partition per tree, unless the raw input is large
+
+- **Default: each tree runs as a single partition.** Most trees are small (an instant query over sketch panes reads a few thousand handle rows), so repartitioning would cost more than it saves. Sidra found the same for its stored results. Parallelism comes from running independent trees (D3) and separate batches concurrently.
+- **Large raw inputs are split by series.** When a raw leaf reports an input above a configurable threshold, it emits N partitions by series hash. The fused windowed operators (D7) work per series, so only the final aggregate merges partitions.
+- **DataFusion's repartitioning rule (`EnforceDistribution`) stays off.** Our compiler decides partitioning.
+
 ## Open questions
 
 These are not yet discussed:
 
-- Parallelism within one tree: how many partitions, and whether to run the repartitioning rules.
 - The shape of ASAPQuery's batch query endpoint, and how incoming queries are matched to plan roots.
 - `OnFirstRead`: who writes the view when two batches need the same missing window at once.
 - How each operator maps to a DataFusion `*Exec`, a function, or a custom operator. The `docs/datafusion-operator-mapping` §9 table is the starting point.
