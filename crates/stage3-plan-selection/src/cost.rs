@@ -866,6 +866,7 @@ pub(crate) fn executions_per_second(
                 properties.timing(),
                 properties.lifetime(),
                 entries_of(reaching(m).collect()),
+                answer_cache,
                 non_repeating_query_horizon_seconds,
             )
         }

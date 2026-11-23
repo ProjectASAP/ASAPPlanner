@@ -339,21 +339,38 @@ pub fn select_plan(
     let plan = plan_of(physical, &solved, &outputs).map_err(|error| {
         ErrorSelectingPlan::Solver(format!("the selected plan is invalid: {error}"))
     })?;
-    // Selection = `plan_cost`: under cost model 1 the MILP's optimum is
-    // what `plan_cost` charges the plan it selected, to the solver's
-    // tolerances. A term charged on one side only fails every test that
-    // selects a plan.
+    // Selection = `plan_cost`: the MILP's optimum is what `plan_cost`
+    // charges the plan it selected, to the solver's tolerances: under cost
+    // model 1 its cost per second, under cost model 3 its mean query
+    // latency weighted by each query's evaluations per second. A term
+    // charged on one side only fails every test that selects a plan.
     #[cfg(debug_assertions)]
-    if let (Some(optimum), Ok((cost, _))) = (
-        solved.milp_optimum_per_second,
-        asap_cost::plan_cost(&plan, entries, data, cost_inputs),
-    ) {
-        let optimum = optimum + request_overhead_cost_per_second;
-        let plan_cost = cost.cost_per_second.unwrap_or(f64::NAN);
-        assert!(
-            (optimum - plan_cost).abs() <= 1e-6 * plan_cost.abs().max(1e-9),
-            "the MILP's optimum {optimum}/s is not plan_cost {plan_cost}/s of the selected plan"
-        );
+    if let Ok((cost, _)) = asap_cost::plan_cost(&plan, entries, data, cost_inputs) {
+        if let Some(optimum) = solved.milp_optimum_per_second {
+            let optimum = optimum + request_overhead_cost_per_second;
+            let plan_cost = cost.cost_per_second.unwrap_or(f64::NAN);
+            assert!(
+                (optimum - plan_cost).abs() <= 1e-6 * plan_cost.abs().max(1e-9),
+                "the MILP's optimum {optimum}/s is not plan_cost {plan_cost}/s of the selected plan"
+            );
+        }
+        if let Some(milp_mean_ms) = mean_latency_ms {
+            let latencies = &cost.usage.latency_per_query;
+            let weights: f64 = latencies
+                .iter()
+                .map(|query| query.evaluations_per_second)
+                .sum();
+            let plan_cost_mean_ms = latencies
+                .iter()
+                .map(|query| query.latency_ms() * query.evaluations_per_second)
+                .sum::<f64>()
+                / weights.max(f64::MIN_POSITIVE);
+            assert!(
+                (milp_mean_ms - plan_cost_mean_ms).abs() <= 1e-6 * plan_cost_mean_ms.abs().max(1.0),
+                "the MILP's mean latency {milp_mean_ms} ms is not plan_cost's \
+                 {plan_cost_mean_ms} ms of the selected plan"
+            );
+        }
     }
     // A candidate none of whose executions could be costed.
     let mut costed = vec![None; physical.physical_candidates.len()];
