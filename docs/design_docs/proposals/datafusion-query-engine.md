@@ -117,7 +117,7 @@ The executor stays until the new crate compiles the same plans. Then `plan_insta
 
 - **New endpoint:** `POST /api/v1/query_batch` takes a list of `{query, time}` or `{query, start, end, step}`. It returns one Prometheus-format result per entry, in order, each marked as answered by the plan, answered by the fallback, or failed.
 - **The existing endpoints stay.** `/api/v1/query` and `/query_range` become batches of one, for Grafana and other clients. Sharing across queries happens only through the batch endpoint.
-- **Matching a query to a root:** at install, each of `query_texts[i]` is parsed with ASAPPlanner's frontend and printed back in a fixed canonical form, mapping to `roots[i]`. Incoming queries are canonicalized the same way and looked up. Matching by what a query can be answered from, rather than its text, is a separate later feature.
+- **Matching a query to a root:** at install, each of `query_texts[i]` is parsed with ASAPPlanner's frontend and printed back in a fixed canonical form, mapping to query i's root from `PhysicalASAPDAG::root_nodes_per_query()`. Incoming queries are canonicalized the same way and looked up. Matching by what a query can be answered from, rather than its text, is a separate later feature.
 - **Fallback per entry:** a query with no matching root, or one that gets `NotReady`, is sent to the fallback (Prometheus or ClickHouse) on its own, and its answer fills that query's slot.
 - **SQL** follows the same path with the SQL frontend, after PromQL works.
 
@@ -198,6 +198,13 @@ Each step is a short stack of PRs; each PR compiles and passes tests. Progress i
 - **Only two cases go to the fallback:** a query with no matching root (D10), and `NotReady` (D2). Each one is marked as fallback in the response and counted.
 - **Every other error is returned to the caller with no fallback,** so engine bugs stay visible. That covers a failed compile, a kernel error, a type mismatch and an internal error. This is ASAPQuery's existing rule.
 - **At install, a plan the engine cannot compile is refused as a whole,** never installed in part. Until S8, the planner's `check_compiles` still uses the old executor, so a plan can pass the planner and still be refused here.
+
+### D17. Standalone scalar queries are out of scope for now
+
+A plan's `scalar_roots` answer queries whose result is one unlabelled number built from other nodes, such as `scalar(sum(rate(errors_total[5m]))) / scalar(sum(rate(requests_total[5m])))`. The final arithmetic (`n2 / n3`) is an expression outside the DAG. The old executor does not answer these queries either.
+
+- **The plan is still installed.** Scalar roots are not compiled, and their queries are not entered in the matching table (D10), so they go to the fallback as unmatched queries. This is the one exception to "refuse a plan that cannot be compiled" (D16).
+- **Later:** compute the referenced nodes as kept outputs, then evaluate the expression in one small tree joined on `eval_time`.
 
 ## Open questions
 
