@@ -9,6 +9,7 @@ extensions. A design document is not a promise of downstream runtime support.
 - [UnivMon frequency summary](univmon-frequency-summary.md)
 - [ASAP-aware mapping proposals](asap-aware-mapping/README.md)
 - [Operator sharing](operator-sharing.md)
+- [Testing infrastructure](testing-infrastructure/README.md)
 - [Decoupling operators from scalar expressions](decoupling_op_and_expr.md)
 - [ASAPPlanner layering](planner-layering.md)
 - [Memo-based joint optimization with MILP](joint-planning-search.md)
