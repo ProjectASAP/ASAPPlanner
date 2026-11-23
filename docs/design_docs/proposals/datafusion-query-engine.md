@@ -186,6 +186,12 @@ Each step is a short stack of PRs; each PR compiles and passes tests. Progress i
 
 **Why S4 comes before sketches:** a plan with no views should match Prometheus exactly, apart from D13's known differences. So the existing differential suites strictly check S1–S3's time handling and PromQL semantics, where the executor's bugs were, before sketch error makes every comparison approximate.
 
+### D15. DataFusion version, patches and features
+
+- **The same DataFusion as `crates/frontend-sql`:** 54, which resolves to 54.1.0, with Arrow 58.4. It is pinned exactly in the workspace `Cargo.toml`, and both crates upgrade together.
+- **Sidra's patches are not taken up front.** Sidra patches memory accounting for sliced batches in joins and sorts, and the cross join that emits one batch per left row (`sidra/patches/`). A patch is applied through `[patch]` only when a test or benchmark hits its problem. The cross join is the most likely, through `TimeRange` (D13).
+- **Features:** default features minus file formats we don't read, such as parquet, avro and compression.
+
 ## Open questions
 
 These are not yet discussed:
