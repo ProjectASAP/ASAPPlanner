@@ -341,8 +341,10 @@ pub(crate) fn solve_cluster_selection(
             )),
         }
     };
-    // One solve over the executions `model` keeps.
+    // One solve over the executions `model` keeps, under the `active`
+    // limits' rows.
     let solve = |model: &[bool],
+                 active: &[ClusterLimit],
                  objective: Objective,
                  fixed: Fixed,
                  start: Option<&[f64]>,
@@ -356,7 +358,7 @@ pub(crate) fn solve_cluster_selection(
             Solve {
                 objective,
                 fixed,
-                active: &limits,
+                active,
                 start,
                 improve_below,
                 pinned: None,
@@ -372,6 +374,7 @@ pub(crate) fn solve_cluster_selection(
         .then(|| {
             solve(
                 &kept,
+                &limits,
                 Objective::Relaxation,
                 Fixed::default(),
                 None,
@@ -382,60 +385,93 @@ pub(crate) fn solve_cluster_selection(
         })
         .flatten()
         .map(|relaxed| relaxed.objective / weights.max(f64::MIN_POSITIVE));
-    let mut solve_count = 1;
+    let mut solve_count = 0;
     // The model the selection is solved over: the executions kept, or,
     // after a retry from the feasible plan, those with the plan's own.
     let mut model: &[bool] = &kept;
     let mut start_ms = 0;
-    let first = match inputs.cost_inputs.latency_selection.exact_solve {
-        true => solve(
-            model,
-            Objective::MeanLatency,
-            Fixed::default(),
-            None,
-            None,
-            Stop::Exact,
-        ),
-        // No plan within the node limit: once more from the feasible plan,
-        // under the same limit, so the second phase is bounded too.
-        false => match solve(
-            model,
-            Objective::MeanLatency,
-            Fixed::default(),
-            None,
-            None,
-            Stop::GapOrNodes,
-        ) {
-            Err(SelectionMilpError::Solver(reason)) if reason == NO_PLAN_IN_NODES => {
-                match pinned_start() {
-                    Ok((columns, ms)) => {
-                        start_ms = ms;
-                        solve_count += 1;
-                        model = &kept_with_plan;
-                        solve(
-                            model,
-                            Objective::MeanLatency,
-                            Fixed::default(),
-                            Some(&columns),
-                            None,
-                            Stop::GapOrNodes,
-                        )
-                        .map_err(|error| match error {
-                            SelectionMilpError::Solver(again) if again == NO_PLAN_IN_NODES => {
-                                SelectionMilpError::Solver(format!(
-                                    "{NO_PLAN_IN_NODES}, nor from cost model 1's plan as a start"
-                                ))
-                            }
-                            error => error,
-                        })
+    // The limits whose rows the solves hold: at first all but memory and
+    // disk, whose rows enter only when the plan selected without them is
+    // over one (#1460): a bound no plan reaches can keep HiGHS at the root
+    // node. A plan within them is optimal with them too (their rows only
+    // shrink the feasible set), and every later solve keeps memory and disk
+    // at or below this plan's.
+    let without_memory_and_disk: Vec<ClusterLimit> = limits
+        .iter()
+        .copied()
+        .filter(|limit| !matches!(limit, ClusterLimit::MemoryBytes | ClusterLimit::DiskBytes))
+        .collect();
+    let mut active: &[ClusterLimit] = &without_memory_and_disk;
+    let first = loop {
+        solve_count += 1;
+        let first = match inputs.cost_inputs.latency_selection.exact_solve {
+            true => solve(
+                model,
+                active,
+                Objective::MeanLatency,
+                Fixed::default(),
+                None,
+                None,
+                Stop::Exact,
+            ),
+            // No plan within the node limit: once more from the feasible
+            // plan, under the same limit, so the second phase is bounded too.
+            false => match solve(
+                model,
+                active,
+                Objective::MeanLatency,
+                Fixed::default(),
+                None,
+                None,
+                Stop::GapOrNodes,
+            ) {
+                Err(SelectionMilpError::Solver(reason)) if reason == NO_PLAN_IN_NODES => {
+                    match pinned_start() {
+                        Ok((columns, ms)) => {
+                            start_ms += ms;
+                            solve_count += 1;
+                            model = &kept_with_plan;
+                            solve(
+                                model,
+                                active,
+                                Objective::MeanLatency,
+                                Fixed::default(),
+                                Some(&columns),
+                                None,
+                                Stop::GapOrNodes,
+                            )
+                            .map_err(|error| match error {
+                                SelectionMilpError::Solver(again) if again == NO_PLAN_IN_NODES => {
+                                    SelectionMilpError::Solver(format!(
+                                        "{NO_PLAN_IN_NODES}, nor from cost model 1's plan as a start"
+                                    ))
+                                }
+                                error => error,
+                            })
+                        }
+                        Err(why) => Err(SelectionMilpError::Solver(format!(
+                            "{NO_PLAN_IN_NODES}; {why}"
+                        ))),
                     }
-                    Err(why) => Err(SelectionMilpError::Solver(format!(
-                        "{NO_PLAN_IN_NODES}; {why}"
-                    ))),
                 }
+                solved => solved,
+            },
+        };
+        match &first {
+            Ok(selected)
+                if active.len() < limits.len()
+                    && !memory_and_disk_limits_over(
+                        inputs.limits,
+                        selected.memory_bytes,
+                        selected.disk_bytes,
+                    )
+                    .is_empty() =>
+            {
+                start_ms += selected.solve_ms;
+                active = &limits;
             }
-            solved => solved,
-        },
+            _ => break first,
+        }
     };
     let first = match first {
         Ok(first) => first,
@@ -482,6 +518,7 @@ pub(crate) fn solve_cluster_selection(
         };
         let tried = solve(
             model,
+            active,
             objective,
             fixed,
             Some(&last.columns),
@@ -495,7 +532,13 @@ pub(crate) fn solve_cluster_selection(
                 Objective::Memory => better.memory_bytes,
                 _ => better.disk_bytes,
             };
-            if found < current - 0.5 {
+            if tie_break_improves(
+                inputs.limits,
+                current,
+                found,
+                better.memory_bytes,
+                better.disk_bytes,
+            ) {
                 last = better;
             }
         }

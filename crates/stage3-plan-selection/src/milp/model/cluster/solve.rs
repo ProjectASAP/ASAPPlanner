@@ -89,6 +89,45 @@ pub(super) struct Solution {
     pub(super) solve_ms: u64,
 }
 
+/// The memory and disk limits a plan of `memory_bytes` and `disk_bytes` is
+/// over, by more than the solver's relative tolerance (1e-9): the rows a
+/// selection solved without them needs (#1460). Those rows enter the MILP
+/// only then, because a bound no plan reaches (10^15 bytes for "no limit")
+/// beside the model's small coefficients can keep HiGHS at the root node,
+/// where neither the node limit nor a time limit stops it.
+pub(super) fn memory_and_disk_limits_over(
+    limits: &ClusterLimits,
+    memory_bytes: f64,
+    disk_bytes: f64,
+) -> Vec<ClusterLimit> {
+    let over = |used: f64, limit: u64| used > limit as f64 * (1.0 + 1e-9);
+    let mut broken = Vec::new();
+    if over(memory_bytes, limits.memory_bytes) {
+        broken.push(ClusterLimit::MemoryBytes);
+    }
+    if over(disk_bytes, limits.disk_bytes) {
+        broken.push(ClusterLimit::DiskBytes);
+    }
+    broken
+}
+
+/// Whether a tie-break's plan replaces the plan so far: it is at least a
+/// byte smaller in the quantity minimized (`found` against `current`), and
+/// its `memory_bytes` and `disk_bytes` are within the limits. A tie-break
+/// solved without the memory and disk rows (#1460) holds only the weighted
+/// latency (and, for disk, the memory so far), so its plan may be over a
+/// limit; kept, the final pinned solve under every limit would fail.
+pub(super) fn tie_break_improves(
+    limits: &ClusterLimits,
+    current: f64,
+    found: f64,
+    memory_bytes: f64,
+    disk_bytes: f64,
+) -> bool {
+    found < current - 0.5
+        && memory_and_disk_limits_over(limits, memory_bytes, disk_bytes).is_empty()
+}
+
 /// Per refresh group, its big-M: the most $f_G$ can exceed the allowed
 /// lateness ($F_q$'s own lower bound), from each group's largest refresh
 /// time `refresh_bound`: its own, the groups it reads in full, and the
@@ -752,6 +791,83 @@ mod tests {
 
     fn window(width_ms: u64, phase_ms: u64) -> RefreshWindow {
         RefreshWindow { width_ms, phase_ms }
+    }
+
+    /// #1460 review: a tie-break's plan replaces the plan so far only when
+    /// it is at least a byte smaller in the quantity minimized and within
+    /// the memory and disk limits. Solved without those rows (the plan so far
+    /// was within them), a memory tie-break holds only the weighted latency,
+    /// so it can return a plan with less memory and more disk than the limit:
+    /// kept, the final pinned solve under every limit is infeasible. A rule
+    /// that checks only the improvement fails here.
+    #[test]
+    fn a_tie_break_is_kept_only_within_the_memory_and_disk_limits() {
+        use asap_cost::ClusterObjective;
+        let limits = ClusterLimits {
+            memory_bytes: 20_000_000,
+            disk_bytes: 14_400_000,
+            cpu_cores: None,
+            objective: ClusterObjective::LowestMeanLatency,
+        };
+        // Less memory, disk within the limit: kept.
+        assert!(tie_break_improves(
+            &limits,
+            19_280_064.0,
+            80_128.0,
+            80_128.0,
+            9_600_000.0
+        ));
+        // Less memory, disk over the limit: not kept.
+        assert!(!tie_break_improves(
+            &limits,
+            19_280_064.0,
+            80_128.0,
+            80_128.0,
+            19_200_000.0
+        ));
+        // Not a byte smaller: not kept.
+        assert!(!tie_break_improves(
+            &limits, 80_128.0, 80_127.8, 80_127.8, 0.0
+        ));
+        // A disk tie-break's plan over the memory limit: not kept.
+        assert!(!tie_break_improves(
+            &limits,
+            9_600_000.0,
+            0.0,
+            30_000_000.0,
+            0.0
+        ));
+    }
+
+    /// #1460: a selection solved without memory and disk rows needs the
+    /// rows of exactly the limits its plan is over: none at or under both
+    /// limits (to 1e-9 relative, the solver's tolerance), memory or disk or
+    /// both when over them. A wrong rule adds rows no plan reaches, whose
+    /// bound of 10^15 bytes can keep HiGHS at the root node, or leaves out a
+    /// row a plan breaks.
+    #[test]
+    fn memory_and_disk_rows_only_for_the_limits_a_plan_is_over() {
+        use asap_cost::ClusterObjective;
+        let limits = ClusterLimits {
+            memory_bytes: 1_000,
+            disk_bytes: 1_000_000_000_000_000,
+            cpu_cores: Some(16),
+            objective: ClusterObjective::LowestMeanLatency,
+        };
+        assert!(memory_and_disk_limits_over(&limits, 1_000.0, 0.0).is_empty());
+        assert!(memory_and_disk_limits_over(&limits, 1_000.000_000_5, 5e14).is_empty());
+        assert_eq!(
+            memory_and_disk_limits_over(&limits, 1_001.0, 0.0),
+            [ClusterLimit::MemoryBytes]
+        );
+        assert_eq!(
+            memory_and_disk_limits_over(&limits, 2_000.0, 2e15),
+            [ClusterLimit::MemoryBytes, ClusterLimit::DiskBytes]
+        );
+        assert_eq!(
+            memory_and_disk_limits_over(&limits, 0.0, 2e15),
+            [ClusterLimit::DiskBytes]
+        );
     }
 
     /// §6.4: windows of 60 s and 300 s at phase 0 close together (every
