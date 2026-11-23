@@ -22,6 +22,8 @@ ASAPPlanner emits an `InstallablePlan`: a physical DAG (`PhysicalASAPDAG`) plus 
 
 ## Decisions
 
+**Principle:** build the simplest correct version first. Performance work, such as dictionary encoding, interned ids, a fan-out operator and sliding pane merges, comes later and is driven by measurements.
+
 ### D1. A new crate next to `crates/executor`
 
 The executor stays until the new crate compiles the same plans. Then `plan_installable`'s compile check (`check_compiles`) switches to the new crate, and the executor is deleted.
@@ -119,6 +121,13 @@ The executor stays until the new crate compiles the same plans. Then `plan_insta
 - **Matching a query to a root:** at install, each of `query_texts[i]` is parsed with ASAPPlanner's frontend and printed back in a fixed canonical form, mapping to `roots[i]`. Incoming queries are canonicalized the same way and looked up. Matching by what a query can be answered from, rather than its text, is a separate later feature.
 - **Fallback per entry:** a query with no matching root, or one that gets `NotReady`, is sent to the fallback (Prometheus or ClickHouse) on its own, and its answer fills that query's slot.
 - **SQL** follows the same path with the SQL frontend, after PromQL works.
+
+### D11. Labels are plain string columns
+
+The planner's schemas already fix the logical shape: one column per label the query uses, plus `$promql_series_identity`, which holds the series' complete label set as canonical JSON (`crates/types/src/ir/schema/mod.rs:278`). Both are plain Arrow string columns.
+
+- **Computing an identity is a function over strings:** parse the JSON, change the labels, and serialize again. `without` grouping, relabeling and binary operations that drop `__name__` use it.
+- **Later optimizations:** dictionary encoding, sharing bytes between repeated `Utf8View` values, or interned `u64` series ids.
 
 ## Open questions
 
