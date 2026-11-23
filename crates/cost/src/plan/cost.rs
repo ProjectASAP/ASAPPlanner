@@ -329,7 +329,7 @@ pub fn plan_cost(
     let mut work_ms: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
     // The raw data query-time scans read, retained on disk: per source, the
     // largest scan's (bytes, node).
-    let mut raw_data: HashMap<&Source, (u64, PhysicalASAPNodeId)> = HashMap::new();
+    let mut raw_data: HashMap<&Source, (f64, PhysicalASAPNodeId)> = HashMap::new();
     // Each in-memory ingestion-time state's bytes per window (what it keeps
     // for one window, its output or an exact aggregate's values).
     let mut maintained: Vec<(PhysicalASAPNodeId, u64)> = Vec::new();
@@ -419,8 +419,8 @@ pub fn plan_cost(
     }
     for (bytes, id) in raw_data.into_values() {
         let node = per_node.get_mut(&id).expect("every node is measured");
-        usage.disk_bytes = usage.disk_bytes.saturating_add(bytes);
-        node.detail += &format!("; keeps {bytes} bytes of raw data on disk");
+        usage.disk_bytes = usage.disk_bytes.saturating_add(bytes.round() as u64);
+        node.detail += &format!("; keeps {bytes:.0} bytes of raw data on disk");
         if let (Some(cost), Some(disk_cost)) = (
             &mut node.cost_per_second,
             raw_data_disk_cost_per_second(bytes, settings),
@@ -759,11 +759,11 @@ pub fn request_overhead_cost_per_second(
 /// Cost model 1's cost per second of keeping `bytes` of raw data on disk;
 /// `None` under cost models 2 and 3. A plan keeps each source once, for its
 /// scan that keeps the most ([`plan_cost`]).
-pub fn raw_data_disk_cost_per_second(bytes: u64, settings: &CostInputs) -> Option<f64> {
+pub fn raw_data_disk_cost_per_second(bytes: f64, settings: &CostInputs) -> Option<f64> {
     settings
         .cost_model
         .per_node_unit_costs()
-        .map(|unit_cost| unit_cost.cost_per_disk_byte_second * bytes as f64)
+        .map(|unit_cost| unit_cost.cost_per_disk_byte_second * bytes)
 }
 
 /// The window a query-time `Scan` `node` of `dag` reads per execution: the

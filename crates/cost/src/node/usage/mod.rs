@@ -502,8 +502,9 @@ pub struct NodeResourceUsageAndCost<'a> {
     /// times (`DataPlaneExecution::kept_query_time_results`), in its
     /// average and peak memory and its cost; 0 for any other node.
     pub kept_result_bytes: f64,
-    /// A query-time scan's source and the raw bytes it reads.
-    pub raw_scan: Option<(&'a Source, u64)>,
+    /// A query-time scan's source and the raw bytes it keeps, by their exact
+    /// rate (fractional rows; linear in its retention).
+    pub raw_scan: Option<(&'a Source, f64)>,
     /// Its calibration fit.
     pub fit: CalibrationFit,
     /// The series its sources declare, when they all do: the scale its
@@ -778,6 +779,24 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             (by_rate, rows_held) => by_rate.or(rows_held),
         }
         .map(|rows| rows.max(1))
+    };
+    // [`raw_rows_back`]'s rows by their exact rate, not rounded to whole
+    // rows: what a store of raw rows keeps on average over time, linear in
+    // `lookback_ms` (Stage 3 charges a retention at one slope per retained
+    // second, `π_v`, so the plan's cost must be linear in it too).
+    let raw_rows_back_exact = |lookback_ms: Option<u64>| -> Option<f64> {
+        let by_rate = rows_per_ms
+            .zip(lookback_ms)
+            .map(|(rows_per_ms, lookback_ms)| rows_per_ms * lookback_ms as f64);
+        let rows_held: Option<u64> = sources
+            .iter()
+            .map(|source| data.sources.get(*source).and_then(|facts| facts.rows_held))
+            .sum();
+        match (by_rate, rows_held.map(|rows| rows as f64)) {
+            (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
+            (by_rate, rows_held) => by_rate.or(rows_held),
+        }
+        .map(|rows| rows.max(1.0))
     };
     // The shortfall of the raw rows held back `lookback_ms`: the rows held
     // when fewer than arrive over it, while rows keep arriving. Data at
@@ -2234,7 +2253,8 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             }
             (0, medium)
         }
-        // Raw rows materialized at ingestion time: the rows it retains.
+        // Raw rows materialized at ingestion time: the rows it retains,
+        // charged by their exact rate (`retained_raw_bytes`).
         (_, Lifetime::AcrossEvaluations(medium), _) if raw_rows_materialized_at_ingestion => {
             (edge(raw_retained_rows.unwrap_or(out.rows))?.bytes, medium)
         }
@@ -2290,21 +2310,36 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             materialized_bytes = 0;
         }
     }
+    // The raw rows a store retains back its `retention_ms`, in bytes, by
+    // their exact rate: what its average memory and its cost charge, so both
+    // are linear in the retention; its peak and disk bytes are whole rows.
+    let retained_raw_bytes = |rows: Option<u64>| -> Option<f64> {
+        rows.and(raw_rows_back_exact(node.retention_ms))
+            .map(|rows| rows * width as f64)
+    };
+    let mut disk_bytes_charged: Option<f64> = None;
     if materialized_bytes > 0 {
+        let exact_bytes = match raw_rows_materialized_at_ingestion {
+            true => retained_raw_bytes(raw_retained_rows),
+            false => None,
+        };
         match medium {
             StorageMedium::Memory => {
-                average_memory_bytes = materialized_bytes as f64;
+                average_memory_bytes = exact_bytes.unwrap_or(materialized_bytes as f64);
                 peak_memory_bytes = materialized_bytes;
             }
-            StorageMedium::Disk => disk_bytes = materialized_bytes,
+            StorageMedium::Disk => {
+                disk_bytes = materialized_bytes;
+                disk_bytes_charged = exact_bytes;
+            }
         }
         detail += &format!("; keeps {materialized_bytes} bytes");
     }
     if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {
         if !ingestion {
-            let retained = match raw_retained_rows {
-                Some(rows) => edge(rows)?.bytes,
-                None => out.bytes,
+            let retained = match retained_raw_bytes(raw_retained_rows) {
+                Some(bytes) => bytes,
+                None => out.bytes as f64,
             };
             raw_scan = Some((source, retained));
         }
@@ -2346,7 +2381,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             + estimate.scan_bytes() as f64 * unit_cost.cost_per_scanned_byte)
             * per_second
             + unit_cost.cost_per_memory_byte_second * average_memory_bytes
-            + unit_cost.cost_per_disk_byte_second * disk_bytes as f64
+            + unit_cost.cost_per_disk_byte_second * disk_bytes_charged.unwrap_or(disk_bytes as f64)
     });
     if cost.is_some_and(|cost| !cost.is_finite()) {
         return Err(AnalyticalCostError::Overflow);
