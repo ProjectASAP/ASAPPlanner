@@ -14,6 +14,7 @@ use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_state_bytes, state_bytes_per_row, StateInputRows};
 use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
+use crate::plan::kept_results::{as_computed, held_by_bounded_cache, kept_per_grid};
 use crate::plan::resident_windows::{view_resident_windows, ChainReader, ReadTimes, WindowRead};
 use crate::{lookup_at_scale, StateFamily};
 use crate::{node_resource_usage_and_cost, NodeResourceUsageAndCost, ProducerOutput};
@@ -168,6 +169,16 @@ pub fn plan_cost(
     data: &DataWorkload,
     settings: &CostInputs,
 ) -> Result<(PlanCost, CalibrationFit), (PhysicalASAPNodeId, AnalyticalCostError)> {
+    // A data plane keeping its answers computes only the steps of a range
+    // request it has not answered before.
+    let computed_entries: Vec<QueryWorkloadEntry>;
+    let entries = match settings.data_plane_execution.answer_cache {
+        Some(_) => {
+            computed_entries = entries.iter().map(as_computed).collect();
+            &computed_entries[..]
+        }
+        None => entries,
+    };
     let nodes = &node_map(dag);
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
     let table = &settings.measured_operation_costs;
@@ -412,6 +423,67 @@ pub fn plan_cost(
             &mut usage,
             &mut per_node,
         );
+    }
+    // Query-time results the data plane keeps between requests: each node
+    // charged its own (`NodeResourceUsageAndCost::kept_result_bytes`); past
+    // the cache's bound they are not held, each node's share dropped.
+    if let Some(results) = settings.data_plane_execution.kept_query_time_results {
+        let total: f64 = costed.values().map(|node| node.kept_result_bytes).sum();
+        let dropped = total - held_by_bounded_cache(total, results.max_bytes);
+        if dropped > 0.0 {
+            for node in &dag.nodes {
+                let kept = costed[&node.id].kept_result_bytes;
+                if kept <= 0.0 {
+                    continue;
+                }
+                let share = kept / total * dropped;
+                usage.average_memory_bytes -= share;
+                usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_sub(share as u64);
+                let node_cost = per_node.get_mut(&node.id).expect("every node is measured");
+                node_cost.detail += &format!("; {share:.0} of them past the cache's bound");
+                if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs)
+                {
+                    *cost -= unit_cost.cost_per_memory_byte_second * share;
+                }
+            }
+        }
+    }
+    // Each query's answer per evaluation time, as far back as the plan's
+    // evaluations read (its longest retention) plus a margin, charged to its
+    // root; past the cache's bound, each query's share dropped.
+    if let Some(answers) = settings.data_plane_execution.answer_cache {
+        let horizon_ms = dag
+            .nodes
+            .iter()
+            .filter_map(|node| node.retention_ms)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(answers.retention_margin_ms);
+        let pool: Vec<(PhysicalASAPNodeId, f64)> = dag
+            .roots
+            .iter()
+            .zip(entries)
+            .map(|(&root, entry)| {
+                let count = kept_per_grid(horizon_ms, entry.evaluation_grid().period_ms);
+                (root, output[&root].bytes as f64 * count)
+            })
+            .collect();
+        let total: f64 = pool.iter().map(|(_, bytes)| bytes).sum();
+        let held = held_by_bounded_cache(total, answers.max_bytes);
+        for (root, bytes) in pool {
+            let bytes = if total > 0.0 {
+                bytes * held / total
+            } else {
+                0.0
+            };
+            usage.average_memory_bytes += bytes;
+            usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_add(bytes as u64);
+            let node_cost = per_node.get_mut(&root).expect("every node is measured");
+            node_cost.detail += &format!("; keeps {bytes:.0} bytes of answers ({horizon_ms} ms)");
+            if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs) {
+                *cost += unit_cost.cost_per_memory_byte_second * bytes;
+            }
+        }
     }
     let merge_ms =
         |id: PhysicalASAPNodeId| partial_copy_merge_ms(nodes[&id], &costed[&id], settings);

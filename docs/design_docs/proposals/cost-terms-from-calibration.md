@@ -1,15 +1,18 @@
 # Cost Terms From Calibration
 
-**Status:** Section 1 implemented, in `plan_cost` and Stage 3's
-selection. Sections for the result cache's memory, the fixed CPU per
-refresh run and the per-step query cost follow, one per change.
+**Status:** Sections 1 and 2 implemented, in `plan_cost` and Stage 3's
+selection. The other two costs, a fixed CPU per refresh run and a
+per-request time left after the priced work, were regressed first against
+the states each refresh writes and each request reads from views: neither
+tracks them (R² 0.04 and 0.02 over the calibration's groups and queries),
+so no term is added for them.
 
 **Audience:** Implementers of the cost model (`asap-cost`) and of
 deployment calibration (`tools/calibration_gate/`).
 
 A calibration of a data plane against the planner's predictions (the C10
-gate of `stage3-lowest-mean-latency.md`, section 6.2) found four costs
-the cost inputs cannot express. This document adds them, one section
+gate of `stage3-lowest-mean-latency.md`, section 6.2) found costs the
+cost inputs cannot express. This document adds them, one section
 each: the components (what is measured and what it means), the algorithm
 (how the cost model charges it) and the code interface.
 
@@ -181,3 +184,147 @@ WindowRead, times: ReadTimes }` with `retained_windows(width_ms)`;
 | `the_objective_is_the_plan_cost_with_a_window_cache` (integration) | the MILP's optimum is `plan_cost` with the cache: an offset and a recent reader of one chain, a 1 h quantile, a 1 h range |
 | `a3_under_a_window_cache_the_memory_limit_counts_resident_windows` (integration) | cost model 3's memory row is the plan's peak: a limit at it keeps the chain, one byte below selects the raw read |
 
+## 2. Kept query results
+
+### Example
+
+`seed-862` workload 01 at 10,000 series: nine queries, four of them every
+1 s (`avg by (region, service, job) (quantile_over_time(0.99, data[100s]))`
+and others). The measured data plane held 0.81 GB of query-time results
+(the outputs of query-time nodes computed once per evaluation time and
+shared by the queries at that time, kept 60 s after it) and 79 MB of
+answers (each query's final answer per evaluation time, kept so a range
+request computes only its new steps). The planner charged a query-time
+result only while it is computed: the plan was predicted at 2,563 MiB
+against a 5,122 MiB working set.
+
+`demo.dashboard-heavy` at 10,000 series with each query as a 1 h range
+at 15 s steps (241 steps) every 15 s: the data plane answers each
+request's 240 older steps from the answers it kept and computes only the
+newest. The planner computed all 241 steps of every request, and read
+the whole 2 h of windows (section 1).
+
+### Components
+
+- **Kept query-time results**
+  (`DataPlaneExecution::kept_query_time_results`): `retention_ms` after its
+  evaluation time a result is kept, `max_bytes` optional. A query-time
+  `OneEvaluation` node's output is kept for every evaluation time on its
+  grid within the retention.
+- **Answer cache** (`DataPlaneExecution::answer_cache`): answers are kept
+  as far back as the plan's evaluations read (its longest retention) plus
+  `retention_margin_ms`; `max_bytes` optional. Each query keeps an answer
+  per evaluation time on its grid within that horizon, and a range request
+  computes only the steps the request before it did not.
+
+### Algorithm
+
+- Kept results: per evaluation time within `kept` ms on a grid of
+  `period`, `kept / period + 1` of them on average (`kept_per_grid`). A
+  query-time `OneEvaluation` node keeps that many of its output, at its
+  readers' grid, in its own memory and cost (the node's cost function,
+  `NodeResourceUsageAndCost::kept_result_bytes`); a query keeps that many
+  answers, each its root's output, over the plan's longest retention plus
+  the margin, at its evaluation grid. A pool past its `max_bytes` holds
+  `max_bytes` (`held_by_bounded_cache`), each node's or query's share
+  dropped. Memory, average and peak; under cost model 1, at the memory
+  unit cost.
+- Steps computed: a range request of `steps` steps every `interval`
+  computes `interval / step` of them, at least 1 and at most `steps`
+  (`steps_computed_per_request`). With an answer cache, `plan_cost` and
+  Stage 3 cost each query as a range of that many steps (`as_computed`):
+  its rate, its per-step work, its latency's step rounds and the windows
+  its steps read. Its retention and evaluation grid are unchanged.
+
+**Selection.** Stage 3 charges the same:
+
+- each execution's kept results are in its own cost, from the node's cost
+  function at its context's grid. Under a bound $B$ the pool holds
+  $\min(S, B)$ of $S = \sum_e k_e x_e$: a variable $t \ge S - M b$, $t \ge
+  B b$ ($b$ binary, $M$ the largest $S$) is charged in place of $S$;
+- each query output's answers are on the execution answering it
+  ($z_{q,e}$): $a_e ((H + m)/p_q + 1)$ bytes, $a_e$ its output bytes, $p_q$
+  the query's period, $m$ the margin and $H$ the plan's longest retention,
+  a variable with $H \ge h_v$ for every $h_v$. $H z_{q,e}$ is $w_{q,e} \ge H
+  - \bar H (1 - z_{q,e})$, $w \ge 0$, $\bar H$ the largest retention any
+  read needs. Under a bound, $\min$ as above;
+- the queries' rates and steps are `as_computed`'s; their retention
+  needs the queries' own spans.
+
+Each of $t$, $w$ and $H$ costs more the larger it is, so at the optimum
+$t$ is the pool's $\min$, $w_{q,e} = H z_{q,e}$ and $H$ the longest selected
+retention: the optimum is `plan_cost` of the selected plan (checked after
+each solve in debug builds). Cost model 3's memory row has the same
+terms in bytes.
+
+Examples: answers of a query every 15 s kept 1 h 1 min: 245. A 1 h range
+at 15 s steps every 15 s computes 1 step, every 5 min 20, every 2 h all
+241.
+
+On the memory gate with sections 1 and 2 (idle 60 s; results kept 60 s,
+at most 1 GiB; answers kept 60 s beyond the retention, at most 256 MiB, as
+the measured data plane defaults): 16 of 22 rows within 1.5x, from 0 on
+`main`. `seed-862` 01 at 10,000 series 2,563 → 3,798 MiB (working set
+5,122), the dashboard's range case 4,227 → 656 MiB (595).
+
+**Limits.** The answer bytes are a query's output edge bytes, not the
+data plane's encoding of an answer; Stage 3 takes the answering
+execution's output over its baseline inputs, `plan_cost` the plan's.
+Kept results of a `OneEvaluation` node not on one evaluation grid (the
+inputs of a `TimeShift` anchored with `@`) are charged by `plan_cost` at
+its readers' grid and not by Stage 3. Under a bound on the kept results,
+an execution keeping some is not left out for its lifetime twin, and
+the greedy bound counts it without them.
+
+### Code interface
+
+`crates/cost/src/model.rs`:
+
+```rust
+pub struct DataPlaneExecution {
+    pub ingest_threads: Option<u32>,
+    pub precompute_threads: u32,
+    pub query_threads: u32,
+    pub allowed_lateness_ms: u64,
+    pub max_thread_utilization: f64,
+    pub ingest_work_at_refresh: bool,
+    pub view_window_cache: Option<ViewWindowCache>,
+    /// Query-time `OneEvaluation` outputs kept after their evaluation time;
+    /// `None` (default): only while computed.
+    pub kept_query_time_results: Option<KeptQueryTimeResults>,
+    /// Each query's answer per evaluation time; `None` (default): none
+    /// kept, every step computed.
+    pub answer_cache: Option<AnswerCache>,
+}
+
+pub struct KeptQueryTimeResults {
+    pub retention_ms: u64,
+    pub max_bytes: Option<u64>,
+}
+
+pub struct AnswerCache {
+    pub retention_margin_ms: u64,
+    pub max_bytes: Option<u64>,
+}
+```
+
+`crates/cost/src/plan/kept_results.rs`: `kept_per_grid` (an `f64`),
+`held_by_bounded_cache`, `steps_computed_per_request`, `as_computed`.
+`crates/cost/src/node/usage/mod.rs`: `NodeResourceUsageAndCost::kept_result_bytes`,
+a query-time `OneEvaluation` node's kept results, in its memory and cost.
+`plan_cost` bounds that pool and adds the answers.
+
+`crates/stage3-plan-selection/src/milp/kept_results.rs`:
+`kept_result_terms` ($t$, $b$, $H$, $w_{q,e}$ and their rows, in both
+MILPs) and `kept_results_quantity` (a selection's, in
+`selection_cost_per_second`), over `ExecutionCosts::{kept_result_bytes_per_execution,
+answer_bytes_per_execution, per_kept_byte}`.
+
+### Tests
+
+| Test | Checks |
+| --- | --- |
+| `kept_results` unit tests (`asap-cost`) | the counts above |
+| `c12_an_answer_cache_keeps_an_answer_per_evaluation_time` (integration) | 37 answers at 60 s of margin over 300 s of retention every 10 s, the bytes of six more for another minute |
+| `c13_a_range_request_computes_only_its_new_steps_with_an_answer_cache` (integration) | a 241-step range every 15 s costs a 241st of its query work |
+| `the_objective_is_the_plan_cost_with_result_and_answer_caches` (integration) | the MILP's optimum is `plan_cost` with the caches, unbounded and bounded below what they keep: a shared query-time scan, a 1 h range every 15 s, an offset 1 h range |

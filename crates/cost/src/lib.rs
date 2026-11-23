@@ -36,9 +36,10 @@ pub use measured::{
     RefreshIoWait, StateFamily,
 };
 pub use model::{
-    CalibrationFit, ClusterLimits, ClusterObjective, CostInputs, CostModel, DataPlaneExecution,
-    LatencyCalibration, LatencySelection, LatencySelectionChecks, ResourceSpeed, ResourceUnitCost,
-    ViewWindowCache, COST_SOURCE, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
+    AnswerCache, CalibrationFit, ClusterLimits, ClusterObjective, CostInputs, CostModel,
+    DataPlaneExecution, KeptQueryTimeResults, LatencyCalibration, LatencySelection,
+    LatencySelectionChecks, ResourceSpeed, ResourceUnitCost, ViewWindowCache, COST_SOURCE,
+    MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 pub use node::cost_terms::{node_cost_terms, CostConstant, NodeCostTerms};
 pub use node::operator_statistics::EdgeStatistics;

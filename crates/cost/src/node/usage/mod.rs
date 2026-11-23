@@ -36,6 +36,7 @@ use crate::node::state_bytes::{
     row_bytes, sketch_state_bytes, state_bytes_per_row, state_row_bytes_beside_state,
     summary_state_bytes, StateInputRows,
 };
+use crate::plan::kept_results::kept_per_grid;
 use crate::{aggregate_lookup, lookup_at_scale, StateFamily};
 use crate::{
     CalibrationFit, CostInputs, NodeCostSource, OperatorKind, COST_SOURCE, MEASURED_COST_SOURCE,
@@ -497,6 +498,10 @@ pub struct NodeResourceUsageAndCost<'a> {
     /// as memory (`plan_cost` per its readers, Stage 3's selection per
     /// selected reader). `None` without the cache.
     pub cached_windows: Option<CachedViewWindows>,
+    /// The bytes of its outputs the data plane keeps after their evaluation
+    /// times (`DataPlaneExecution::kept_query_time_results`), in its
+    /// average and peak memory and its cost; 0 for any other node.
+    pub kept_result_bytes: f64,
     /// A query-time scan's source and the raw bytes it reads.
     pub raw_scan: Option<(&'a Source, u64)>,
     /// Its calibration fit.
@@ -2313,6 +2318,27 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         average_memory_bytes += bytes as f64 * node_ms / 1_000.0 * per_second;
         detail += &format!("; holds {bytes} bytes for {node_ms:.3} ms");
     }
+    // A query-time `OneEvaluation` output the data plane keeps after its
+    // evaluation time (`DataPlaneExecution::kept_query_time_results`): one
+    // per evaluation time of its readers' grid within the retention
+    // (`docs/design_docs/proposals/cost-terms-from-calibration.md`, section
+    // 2). A bound on them all is the plan's
+    // (`crate::plan::kept_results::held_by_bounded_cache`).
+    let mut kept_result_bytes = 0.0;
+    if let (Some(results), Some(grid), false, Lifetime::OneEvaluation(StorageMedium::Memory)) = (
+        settings.data_plane_execution.kept_query_time_results,
+        evaluation_grid,
+        ingestion,
+        node.lifetime,
+    ) {
+        kept_result_bytes = out.bytes as f64 * kept_per_grid(results.retention_ms, grid.period_ms);
+        average_memory_bytes += kept_result_bytes;
+        peak_memory_bytes = peak_memory_bytes.saturating_add(kept_result_bytes as u64);
+        detail += &format!(
+            "; keeps {kept_result_bytes:.0} bytes of results after its evaluations ({} ms)",
+            results.retention_ms
+        );
+    }
     // One computation's CPU and scan cost times its rate, then the
     // materialized state's.
     let cost = unit_costs.map(|unit_cost| {
@@ -2500,6 +2526,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         disk_bytes,
         maintained,
         cached_windows,
+        kept_result_bytes,
         raw_scan,
         fit,
         series,

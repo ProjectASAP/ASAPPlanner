@@ -6,6 +6,7 @@
 //! |---|---|---|
 //! | baseline (section 3) over execution contexts (section 5) | $x_{\kappa,v}$ (with $x^{\mathrm{mat}}_v = x_{\mathrm{Materialized}(v),v}$), $y_{\kappa,u,c,i}$, $z_{q,v}$, $t$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) and one consumer per context of a query-time result that is not materialized [`use_constraints`], each source's raw data on disk once [`raw_data_disk_rows`]; (G), (H): $y$ exists only on admissible edges where the producer delivers on the consumer's context |
 //! | retention (section 5) | $h_v$ | (R) [`super::retention::retention_constraints`] |
+//! | result and answer caches (`cost-terms-from-calibration.md`, section 2) | $t$, $b$, $H$, $w_{q,e}$ | [`super::kept_results::kept_result_terms`] |
 //! | resident windows under a window cache (`cost-terms-from-calibration.md`, section 1) | $r_v$ | (W) [`super::retention::resident_window_terms`] |
 //! | exact-only reads per query | $a_{q,e}$ | (X) [`super::exact_only::exact_only_constraints`] |
 //! | accuracy (`accuracy-models.md`, constraint (K)), per execution | $E_{\kappa,c,m}$, $D_{\kappa,c}$ ([`AccuracyVariables`]); $F_{\kappa,c,i,m}$, $H_{\kappa,c,i}$ | (K) [`accuracy_constraints`], over [`ErrorModel`] |
@@ -34,6 +35,7 @@ use super::dominance::dominated_by_lifetime_twin;
 use super::equivalent_contexts::{copies_in_equivalent_contexts, SharedVariables};
 use super::exact_only::{exact_only_constraints, exact_only_variables};
 use super::graph::Components;
+use super::kept_results::{kept_result_terms, kept_results_quantity, KeptResultVariables};
 use super::retention::{
     least_retention_ms, resident_window_terms, resident_windows_quantity, retention_constraints,
     retention_variables,
@@ -65,7 +67,7 @@ pub(crate) struct SelectionInputs<'a> {
 /// `SelectableExecutions::edges`.
 pub(crate) struct SelectionVariables {
     /// $x_{\kappa,v}$, by execution.
-    x: Vec<Variable>,
+    pub(super) x: Vec<Variable>,
     /// $y_{\kappa,u,c,i}$, by edge, on the edges costed between executions
     /// kept, in edge order.
     pub(super) y: BTreeMap<usize, Variable>,
@@ -76,7 +78,7 @@ pub(crate) struct SelectionVariables {
     t: Vec<Option<Variable>>,
     /// $h_v$ in seconds retained, for a candidate with a retention cost and
     /// an execution kept ([`retention_variables`]).
-    h: BTreeMap<PhysicalCandidateId, Variable>,
+    pub(super) h: BTreeMap<PhysicalCandidateId, Variable>,
     /// Per raw-data source a query-time scan keeps on disk at a cost: the
     /// cost per second of keeping it, at least each selected scan's,
     /// scaled by the objective's scale ([`raw_data_disk_rows`]).
@@ -496,6 +498,19 @@ pub(crate) fn solve_selection(
         &mut problem,
         &mut resident_rows,
     );
+    // The data plane's result and answer caches.
+    let kept_terms = kept_result_terms(
+        inputs,
+        costs,
+        &KeptResultVariables {
+            x: &variables.x,
+            z: &variables.z,
+            h: &variables.h,
+        },
+        &kept,
+        &mut problem,
+        &mut resident_rows,
+    );
     // The objective's terms per second, unscaled: (cost, variable). A
     // query-time scan's retention is in its source's r_s.
     let terms: Vec<(f64, Variable)> = costs
@@ -519,6 +534,7 @@ pub(crate) fn solve_selection(
                 .map(|(v, &h)| (costs.retention_cost_per_retained_second[v], h)),
         )
         .chain(resident_terms)
+        .chain(kept_terms)
         .collect();
     // Scaled by the largest coefficient kept, the raw-data rows' included.
     let raw_data_rows = raw_data_disk_rows(inputs, &variables, &kept);
@@ -768,7 +784,8 @@ pub(crate) fn selection_cost_per_second(
             .sum::<f64>()
         + retention_cost_per_second
         + raw_data_on_disk.values().sum::<f64>()
-        + resident_windows_quantity(costs, inputs.selectable, edges, answering);
+        + resident_windows_quantity(costs, inputs.selectable, edges, answering)
+        + kept_results_quantity(inputs, costs, selected, answering, &retention_ms);
     (cost, retention_ms)
 }
 

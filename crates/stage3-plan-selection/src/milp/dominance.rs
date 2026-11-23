@@ -97,8 +97,18 @@ pub(crate) fn dominated_in_every_quantity(
         let v = execution.candidate;
         let candidate = &physical.physical_candidates[v.0];
         let properties = candidate.physical_properties;
+        // Under a bound on the kept query-time results, what one keeps is
+        // charged with the others' (`super::kept_results`), not alone.
+        let kept_results_bounded = costs
+            .kept_query_time_results
+            .is_some_and(|results| results.max_bytes.is_some())
+            && costs
+                .kept_result_bytes_per_execution
+                .get(index)
+                .is_some_and(|&bytes| bytes > 0.0);
         if costs.retention_cost_per_retained_second.contains_key(&v)
             || costs.raw_data_source.contains_key(&v)
+            || kept_results_bounded
             || quantities
                 .iter()
                 .any(|quantity| quantity.per_execution[index].is_err())
