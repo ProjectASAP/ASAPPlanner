@@ -169,8 +169,23 @@ The Prometheus comparison (D12) uses a float tolerance and leaves inputs contain
 
 **Risk:** sidra found that DataFusion's cross join emits one batch per left row, and patched it. If the `TimeRange` join hits this, take sidra's patch or write a small custom operator.
 
+### D14. Order of implementation
+
+Each step is a short stack of PRs; each PR compiles and passes tests. Progress is measured by how much of the planner's query corpus compiles and gives correct answers.
+
+| Step | Contents | Ends with |
+|---|---|---|
+| S1. Skeleton | Crate; cutting and running trees (D3); batch API (D2); store traits with in-memory implementations (D4); `Filter`, `Project`, `Values`, `Concat`, `Sort`, `Limit` over raw reads | hand-built plans running end to end |
+| S2. Time | `eval_time`; the `TimeRange` join and instant lookback; `TimeShift`; range functions | `rate(m[5m])`, instant and range, from planner output |
+| S3. Exact PromQL | Aggregates (D13); per-group top-k; `BinaryOp`; the remaining PromQL operators; label functions (D11) | the corpus's exact-only PromQL plans |
+| S4. ASAPQuery, raw data only | `RawDataStore` over Prometheus; batch endpoint, query matching and fallback (D10); a mode of ASAPQuery's `promql-compliance` harness that plans with ASAPPlanner and runs the new engine | the existing suites comparing against Prometheus |
+| S5. Sketches | `Sketch` trait and handle registry (D5); sketch functions; view-read leaf; the test switch that treats every view as `OnFirstRead`; saving `OnFirstRead` views (D9) | sketch plans from the corpus |
+| S6. Views from precompute | ASAPQuery's `ViewStore` over the precompute engine's output | depends on the precompute work |
+| S7. SQL | joins, set operations, window functions, SQL matching | SQL corpus plans |
+| S8. Switch-over | `check_compiles` moves to the new crate; `crates/executor` and the old ASAPQuery query engine are deleted | — |
+
+**Why S4 comes before sketches:** a plan with no views should match Prometheus exactly, apart from D13's known differences. So the existing differential suites strictly check S1–S3's time handling and PromQL semantics, where the executor's bugs were, before sketch error makes every comparison approximate.
+
 ## Open questions
 
 These are not yet discussed:
-
-- Order of implementation.
