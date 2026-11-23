@@ -136,9 +136,41 @@ The planner's schemas already fix the logical shape: one column per label the qu
 4. **Prometheus is the final reference**, end to end in ASAPQuery, over the same data. Exact plans must match up to float tolerance; sketch plans must be within their accuracy guarantee. This is the gate before switching any traffic.
 5. **The old executor is not used as a reference.** Its answers are known to be wrong in places, so a disagreement says nothing about which engine is wrong.
 
+### D13. Operator mapping
+
+Each plan operator becomes a DataFusion `*Exec` with DataFusion's own functions wherever one exists. Our own functions and operators fill only the gaps.
+
+| Plan operator | Becomes |
+|---|---|
+| `Filter`, `Project`, `Concat`, `Values` | `FilterExec`, `ProjectionExec`, `UnionExec`, an in-memory leaf |
+| `Sort`, `Limit` (no grouping) | `SortExec` (with fetch), `GlobalLimitExec` |
+| `Sort`, `Limit` per group (e.g. `topk`) | `row_number() OVER (PARTITION BY eval_time, keys ORDER BY …)` in a window operator, then `FilterExec` on `rn <= k` |
+| `Join`, `SetOp`, `Dedup` | `HashJoinExec` (semi and anti joins for set operations) and `AggregateExec` for distinct, as DataFusion plans `INTERSECT`/`EXCEPT` |
+| `SQLWindowFunc` | DataFusion's window operator |
+| `Aggregate` (SQL and PromQL) | `AggregateExec` with DataFusion's functions. PromQL: `sum`, `count`, `avg`, `min`, `max`; `stddev`/`stdvar` → `stddev_pop`/`var_pop`; `quantile` → `percentile_cont`; `count_values` → group by the value, then count; `group` → a constant 1 |
+| `SummaryAgg` | `AggregateExec` with a sketch-build aggregate function per family, emitting handles |
+| `SummaryMerge` | `UnionExec` of its children, then `AggregateExec` with a merge aggregate function |
+| `SummaryEstimate`, `FinalizeExactAccumulator` | `ProjectionExec` with scalar functions |
+| `SummaryTumblingWindowChain` (query time) | `window_end = date_bin(w, t − 1 ms, 0) + w` (windows are `(k·w, (k+1)·w]`), then `AggregateExec` grouped by it |
+| `TimeRange` | a join of the rows with a table of the batch's evaluation times, keeping a row for T when `T−s−w < t ≤ T−s`. An instant lookback then keeps the latest row per (series, T). |
+| `TimeShift` | `ProjectionExec` that shifts the times |
+| Range functions (`rate`, `increase`, `*_over_time`, …) | custom operator (D7) |
+| `BinaryOp` (vector matching) | custom operator, ported from the executor's `vector_binary.rs`, because PromQL's matching rules (one-to-one, `group_left`/`group_right`, the many-to-many error, dropping `__name__`) are simpler to port than to build out of joins |
+| Relabel, info-enrich, series sample, subquery, vector-from-scalar | custom operators or functions |
+| `MaintainPopulation`, `EvaluatePopulation`, Hydra's build shared across all groups | custom operators |
+| Raw, view and scratch reads | custom leaf operators |
+
+**Known differences from Prometheus**, accepted for now:
+- `min`/`max` return NaN if any input is NaN; Prometheus skips NaN unless every input is NaN.
+- `topk` ranks NaN first; Prometheus ranks it last.
+- `sum`/`avg` do not use compensated (Kahan) summation, so the last digits can differ.
+
+The Prometheus comparison (D12) uses a float tolerance and leaves inputs containing NaN out until these are addressed.
+
+**Risk:** sidra found that DataFusion's cross join emits one batch per left row, and patched it. If the `TimeRange` join hits this, take sidra's patch or write a small custom operator.
+
 ## Open questions
 
 These are not yet discussed:
 
-- How each operator maps to a DataFusion `*Exec`, a function, or a custom operator. The `docs/datafusion-operator-mapping` §9 table is the starting point.
 - Order of implementation.
