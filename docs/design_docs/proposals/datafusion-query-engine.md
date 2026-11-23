@@ -98,12 +98,25 @@ The executor stays until the new crate compiles the same plans. Then `plan_insta
 - **Large raw inputs are split by series.** When a raw leaf reports an input above a configurable threshold, it emits N partitions by series hash. The fused windowed operators (D7) work per series, so only the final aggregate merges partitions.
 - **DataFusion's repartitioning rule (`EnforceDistribution`) stays off.** Our compiler decides partitioning.
 
+### D9. Saving `OnFirstRead` views: only finished windows, and the first save wins
+
+`OnFirstRead` is ASAPPlanner's term (`MaterializedViewRefresh::OnFirstRead`). It marks a view that is kept across evaluations but not built at ingestion: the first batch that needs one of its tumbling windows computes that window from its inputs, uses it, and saves it, and later batches read the saved copy. Because the query engine computes these windows, the query engine also writes them.
+
+- **Only finished windows are saved.** `RawDataStore` exposes a *watermark*: the time up to which raw data is complete, after allowing for samples that arrive late.
+  - A window that ends at or before the watermark is saved.
+  - A newer window is computed for this batch only and not saved, so a later batch recomputes it.
+  - Saved windows never change (D4), so saving a window that is still missing samples would make the answer wrong for as long as it is kept.
+  - ASAPQuery-backend used the same rule.
+  - ASAPQuery's Prometheus-backed raw store needs a watermark; the simplest is "now minus a configured lag".
+- **If two batches compute the same window concurrently, the first save wins.** The store ignores the second write. That is safe because the contents of a finished window are fixed. The cost is one duplicate computation.
+  - Making the second batch wait for the first is a later optimization, if measurements show it matters.
+- **Retention:** the store drops windows older than the view's `retention_ms`, measured from the newest finished window.
+
 ## Open questions
 
 These are not yet discussed:
 
 - The shape of ASAPQuery's batch query endpoint, and how incoming queries are matched to plan roots.
-- `OnFirstRead`: who writes the view when two batches need the same missing window at once.
 - How each operator maps to a DataFusion `*Exec`, a function, or a custom operator. The `docs/datafusion-operator-mapping` §9 table is the starting point.
 - Testing: comparing answers with Prometheus over the same raw data, and with the executor during the switch-over.
 - Order of implementation.
