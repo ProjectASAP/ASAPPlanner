@@ -256,9 +256,10 @@ pub fn query_starts(dag: &PhysicalASAPDAG) -> Vec<Vec<PhysicalASAPNodeId>> {
 /// How many times per second a node computed once for the queries
 /// `reaching` it runs, at `timing` with `lifetime`: at ingestion time once
 /// per second (each arriving row once); at query time at their combined
-/// rate ([`evaluation_rate`]), a range query's steps each an evaluation,
-/// except a node materialized across evaluations, which is computed once
-/// per request (its newest window). Shared by [`computations`] and
+/// rate ([`evaluation_rate`]), a range query's steps each an evaluation
+/// (with an `answer_cache`, the steps a request computes,
+/// [`computed_range`]), except a node materialized across evaluations,
+/// which is computed once per request (its newest window). Shared by [`computations`] and
 /// Stage 3, which costs each candidate at the queries reaching its group.
 ///
 /// Example: two queries every 60 s at phase 0 reaching a query-time
@@ -267,6 +268,7 @@ pub fn executions_per_second<'e>(
     timing: ExecutionTiming,
     lifetime: Lifetime,
     reaching: impl IntoIterator<Item = &'e QueryWorkloadEntry>,
+    answer_cache: Option<AnswerCache>,
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<f64, AnalyticalCostError> {
     if timing == ExecutionTiming::IngestionTime {
@@ -277,7 +279,9 @@ pub fn executions_per_second<'e>(
         reaching.into_iter().map(|entry| {
             (
                 &entry.recurrence,
-                (!per_request).then_some(entry.range_evaluation).flatten(),
+                (!per_request)
+                    .then(|| computed_range(entry, answer_cache))
+                    .flatten(),
             )
         }),
         non_repeating_query_horizon_seconds,
@@ -497,6 +501,7 @@ pub fn computations(
             timing,
             lifetime,
             reaching,
+            answer_cache,
             non_repeating_query_horizon_seconds,
         )?;
         rate_of_materialized.insert(id, rate);

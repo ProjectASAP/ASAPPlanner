@@ -1100,3 +1100,53 @@ fn the_objective_is_the_plan_cost_on_shared_readers_and_anchored_results_with_ca
         }
     }
 }
+
+/// A query that reaches a memo group the selected plan answers it another
+/// way. `quantile_over_time(0.9, m[5m])` within 1 % every 15 s reads a KLL
+/// chain through a cover and a merge. The median of the same window exactly,
+/// as a 1 h range on the same grid, is answered from raw rows (an exact
+/// quantile priced high, so the approximate one does not share them; 1,000
+/// series every 100 ms). Both quantiles reach the merge's memo group, so
+/// Stage 3 runs the merge at both queries' evaluations (241 steps every
+/// 15 s and one), while in the plan only the approximate query reads it,
+/// once every 15 s: the MILP charges 1,256/s more than `plan_cost`
+/// (485,519 against 484,263). Ignored: a known gap, which the debug check
+/// in `select_plan` reports; closing it needs a query's own reads in the
+/// selection's rates (`cost-terms-from-calibration.md`, section 1).
+#[test]
+#[ignore = "known gap: a query reaching a group it is answered another way counts in its rates"]
+fn the_objective_is_the_plan_cost_when_a_query_reaches_a_group_it_reads_another_way() {
+    let mut approximate = requested("quantile_over_time(0.9, m[5m])", 15_000, None);
+    approximate["requirements"] =
+        serde_json::json!({"accuracy": {"max_error": 0.01, "failure_probability": 0.01}});
+    let mut exact = requested(
+        "quantile_over_time(0.5, m[5m])",
+        15_000,
+        Some((15_000, 3_600_000)),
+    );
+    exact["requirements"] =
+        serde_json::json!({"accuracy": {"max_error": 0.0, "failure_probability": 0.0}});
+    let workload: PlanningWorkload = serde_json::from_value(serde_json::json!({
+        "query_workload": {"language": "promql", "repeating_queries": [approximate, exact]},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 10000.0}},
+            "sources": {"m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 100}},
+        },
+    }))
+    .unwrap();
+    let settings = CostInputs {
+        measured_operation_costs: serde_json::from_value(serde_json::json!({
+        "operators": [
+            {"operator": "Aggregate", "phase": "query_time", "measure": "quantile", "ns_per_unit": 1e4},
+            {"operator": "SummaryAgg", "phase": "query_time", "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 1e4},
+            {"operator": "SummaryAgg", "phase": "query_time", "sketch": {"DDSketch": {"alpha": 0.01}}, "ns_per_unit": 1e4},
+        ],
+    }))
+    .unwrap(),
+        ..Default::default()
+    };
+    assert_equal(
+        "an approximate and an exact quantile on one grid",
+        objective_and_plan_cost(&workload, &settings, true),
+    );
+}

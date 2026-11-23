@@ -626,11 +626,12 @@ async fn c13_a_range_request_computes_only_its_new_steps_with_an_answer_cache() 
 }
 
 /// C14. The same 1 h range at 15 s steps requested every 20 s: with an
-/// answer cache a request computes 1, 2, then 1 new steps, 4/3 on average,
-/// so its query-time work per request is 4/3 of a step's: 241 ÷ 4/3 =
-/// 180.75 times less than without.
+/// answer cache kept by evaluation time, a request's steps (back from its
+/// end) are on the step grid of the request 60 s before it, not of the
+/// one before, so it computes 4 new steps: 241 ÷ 4 = 60.25 times less
+/// query work than without.
 #[tokio::test]
-async fn c14_a_range_request_computes_its_new_steps_on_average() {
+async fn c14_a_range_request_reuses_the_steps_of_the_request_a_whole_number_of_steps_before() {
     let mut range = every("max_over_time(m[5m])", 20_000, None);
     range["range_evaluation"] = json!({"step_ms": 15_000, "span_ms": 3_600_000});
     let workload = over_m(vec![range], 1000);
@@ -657,5 +658,5 @@ async fn c14_a_range_request_computes_its_new_steps_on_average() {
     };
     let without = query_ms(json!({})).await;
     let with = query_ms(json!({"answer_cache": {"retention_margin_ms": 60_000}})).await;
-    assert_close("241 steps to 4/3", without / with, 241.0 * 3.0 / 4.0);
+    assert_close("241 steps to 4", without / with, 241.0 / 4.0);
 }
