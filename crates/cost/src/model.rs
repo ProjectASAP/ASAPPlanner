@@ -262,6 +262,23 @@ pub struct DataPlaneExecution {
     /// and the precompute load). Default false: rows are inserted as they
     /// arrive, on the ingest threads.
     pub ingest_work_at_refresh: bool,
+    /// The data plane's cache of decoded view windows, when it keeps every
+    /// window of an in-memory ingestion-time view in a file: a window is
+    /// also in memory while it was written or read within the cache's idle
+    /// time. `None` (default): every retained window is memory, and none is
+    /// disk.
+    pub view_window_cache: Option<ViewWindowCache>,
+}
+
+/// A cache of decoded view windows
+/// (`docs/design_docs/proposals/cost-terms-from-calibration.md`, section
+/// 1). In JSON `{"idle_ms": 60000}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewWindowCache {
+    /// Milliseconds after its last write or read at which a window leaves
+    /// memory (stays in its file).
+    pub idle_ms: u64,
 }
 
 impl Default for DataPlaneExecution {
@@ -273,6 +290,7 @@ impl Default for DataPlaneExecution {
             allowed_lateness_ms: 0,
             max_thread_utilization: 0.7,
             ingest_work_at_refresh: false,
+            view_window_cache: None,
         }
     }
 }

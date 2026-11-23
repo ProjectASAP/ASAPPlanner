@@ -101,6 +101,7 @@ work. They are deployment parameters, passed in, never inferred:
 | `query_threads` | threads | 1 | threads running query requests; one request runs on one thread |
 | `allowed_lateness_ms` | ms | 0 | how long the data plane waits after a window's end before closing it |
 | `ingest_work_at_refresh` | bool | false | the data plane buffers a window's rows and inserts them at the window close, so all ingest work is refresh work (the measured data plane does) |
+| `view_window_cache` | `{idle_ms}` | none | a cache of decoded view windows when the data plane keeps every window of a stored view in a file: every retained window is disk, and only those written or read within `idle_ms` are also memory (`cost-terms-from-calibration.md`, section 1) |
 | `max_thread_utilization` ($\rho_{\max}$) | fraction | 0.7 | the largest precompute load a valid plan may have (hard); also the target utilisation of the recommended thread counts (section 2.6) |
 
 **Where they live: `CostInputs::data_plane_execution`**, a new struct beside

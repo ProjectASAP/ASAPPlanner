@@ -114,6 +114,35 @@ async fn a3_a_tighter_memory_limit_switches_to_a_smaller_state_plan() {
     assert!(selected.usage("peak_memory_bytes") <= (peak - 1) as f64);
 }
 
+/// A3 under a window cache of 60 s idle time, for
+/// `max_over_time(m[5m] offset 1h)`: the chain's peak memory is the most
+/// windows its reader keeps resident and the one being built, in the
+/// MILP's memory row as in `plan_cost`: a memory limit at that peak keeps
+/// the chain, one byte below it selects the raw read.
+#[tokio::test]
+async fn a3_under_a_window_cache_the_memory_limit_counts_resident_windows() {
+    let workload = over_m(
+        vec![every("max_over_time(m[5m] offset 1h)", 10_000, None)],
+        1000,
+    );
+    let settings = |memory| {
+        cost_inputs(
+            cluster("lowest_mean_latency", memory, None, None),
+            max_min_table(100.0, 10_000.0, 0.0),
+            json!({}),
+            data_plane(json!({"view_window_cache": {"idle_ms": 60_000}})),
+        )
+    };
+    let unlimited = plan(&workload, &settings(None), true).await;
+    assert!(unlimited.has_ingestion_views());
+    let peak = unlimited.usage("peak_memory_bytes") as u64;
+    let at_peak = plan(&workload, &settings(Some(peak)), true).await;
+    assert!(at_peak.has_ingestion_views(), "the chain fits at its peak");
+    let selected = plan(&workload, &settings(Some(peak - 1)), true).await;
+    assert!(!selected.has_ingestion_views(), "the raw read");
+    assert!(selected.usage("peak_memory_bytes") <= (peak - 1) as f64);
+}
+
 /// The A4 and A5 table: each chain refreshes at 2 s per window; each scan
 /// takes 3 s, a `min` 1 s more (`min_ns_per_row`).
 fn conflicting(min_ns_per_row: f64) -> Value {

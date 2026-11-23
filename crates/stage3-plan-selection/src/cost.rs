@@ -56,8 +56,8 @@ use asap_cost::plan::execution_demand::{
     context_executions_per_second, executions_per_second as rate_of_materialized,
 };
 use asap_cost::{
-    node_resource_usage_and_cost, output_interval_ms, raw_data_disk_cost_per_second, CostInputs,
-    NodeResourceUsageAndCost, ProducerOutput, RawRowsShortOfRange,
+    node_resource_usage_and_cost, output_interval_ms, raw_data_disk_cost_per_second,
+    CachedViewWindows, CostInputs, NodeResourceUsageAndCost, ProducerOutput, RawRowsShortOfRange,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
@@ -72,6 +72,7 @@ use asap_types::stages::{
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::plan::candidate_node;
+use crate::resident_windows::{resident_reads, ResidentRead};
 use crate::retention::{
     edge_retention_need_ms, edge_scan_read_ms, least_retention_ms_per_execution, ms_to_seconds,
 };
@@ -130,6 +131,19 @@ pub(crate) struct ExecutionCosts {
     /// ([`asap_cost::query_time_computation_short_of_source_rows`]), with that
     /// shortfall: reported as `PruneReason::ReadsFewerSourceRowsThanItsRange`.
     pub(crate) short_of_source_rows: HashMap<PhysicalCandidateId, RawRowsShortOfRange>,
+    /// Under the data plane's window cache, each read of an in-memory
+    /// ingestion-time view's execution with the windows it keeps resident
+    /// in memory ([`resident_reads`]); empty without the cache.
+    pub(crate) resident_reads: Vec<ResidentRead>,
+    /// Per such view, the quantity of one window resident in memory: the
+    /// memory cost per second of its bytes (cost model 1, over each read's
+    /// mean resident windows), or its bytes (peak memory, over each read's
+    /// most); absent for the other quantities. The view's execution and
+    /// $\pi_v$ charge its retained windows as disk.
+    pub(crate) per_resident_window: HashMap<PhysicalCandidateId, f64>,
+    /// Whether the quantity charges each read's most resident windows (peak
+    /// memory), not its mean.
+    pub(crate) resident_at_most: bool,
 }
 
 impl ExecutionCosts {
@@ -679,8 +693,46 @@ pub(crate) fn execution_quantities(
         raw_data_source,
         unbounded_raw_data_on_disk_cost_per_second,
         short_of_source_rows,
+        resident_reads: Vec::new(),
+        per_resident_window: HashMap::new(),
+        resident_at_most: quantity == Quantity::PeakMemoryBytes,
     };
     costs.least_retention_ms_per_execution = least_retention_ms_per_execution(selectable, &costs);
+    // Under a window cache, each cached view's resident windows, per read.
+    let per_window = |bytes: u64| match quantity {
+        Quantity::CostPerSecond => cost_inputs
+            .cost_model
+            .per_node_unit_costs()
+            .map(|unit_cost| unit_cost.cost_per_memory_byte_second * bytes as f64),
+        Quantity::PeakMemoryBytes => Some(bytes as f64),
+        _ => None,
+    };
+    if let Some(cache) = cost_inputs.data_plane_execution.view_window_cache {
+        let cached: HashMap<PhysicalCandidateId, CachedViewWindows> = usage
+            .iter()
+            .enumerate()
+            .filter_map(|(v, usage)| {
+                let windows = usage.as_ref()?.as_ref().ok()?.cached_windows?;
+                Some((PhysicalCandidateId(v), windows))
+            })
+            .collect();
+        costs.per_resident_window = cached
+            .iter()
+            .filter_map(|(&v, windows)| Some((v, per_window(windows.bytes_per_window)?)))
+            .collect();
+        if !costs.per_resident_window.is_empty() {
+            let reads = resident_reads(
+                physical,
+                selectable,
+                entries,
+                &cached,
+                cache.idle_ms,
+                &costs.retention_need_ms_per_edge,
+                |v, need_ms| costs.retention_ms_for_need(v, need_ms),
+            );
+            costs.resident_reads = reads;
+        }
+    }
     costs
 }
 

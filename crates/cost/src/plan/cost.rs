@@ -14,11 +14,12 @@ use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_state_bytes, state_bytes_per_row, StateInputRows};
 use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
+use crate::plan::resident_windows::{view_resident_windows, ChainReader, ReadTimes, WindowRead};
 use crate::{lookup_at_scale, StateFamily};
 use crate::{node_resource_usage_and_cost, NodeResourceUsageAndCost, ProducerOutput};
 use crate::{
-    CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind, ResourceUsage,
-    MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
+    CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind,
+    ResourceUnitCost, ResourceUsage, ViewWindowCache, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
@@ -28,7 +29,7 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload,
 };
-use asap_types::plan::time_window::read_back_ms;
+use asap_types::plan::time_window::{read_back_ms, windows_readers_need};
 use asap_types::stages::Lifetime;
 use asap_types::summary_type::SketchParams;
 use asap_types::workload::{
@@ -396,6 +397,22 @@ pub fn plan_cost(
         measured.detail +=
             &format!("; {copies} partial copies of its newest window, {bytes} bytes");
     }
+    // With a window cache, a stored view's windows are on disk (charged by
+    // its node) and the windows written or read within the cache's idle
+    // time also in memory.
+    if let Some(cache) = settings.data_plane_execution.view_window_cache {
+        resident_view_windows(
+            dag,
+            nodes,
+            &costed,
+            &producers_of,
+            entries,
+            cache,
+            unit_costs,
+            &mut usage,
+            &mut per_node,
+        );
+    }
     let merge_ms =
         |id: PhysicalASAPNodeId| partial_copy_merge_ms(nodes[&id], &costed[&id], settings);
     let groups = refresh_groups(
@@ -486,6 +503,108 @@ pub fn plan_cost(
         },
         fit,
     ))
+}
+
+/// Charges each in-memory ingestion-time view under `cache`
+/// (`NodeResourceUsageAndCost::cached_windows`) its resident windows as
+/// memory, in `usage` and in the view's node cost: the most any one of its
+/// readers keeps resident ([`view_resident_windows`]), mean for the
+/// average and the cost, most for the peak.
+#[allow(clippy::too_many_arguments)]
+fn resident_view_windows(
+    dag: &PhysicalASAPDAG,
+    nodes: &NodeMap<'_>,
+    costed: &HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'_>>,
+    producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
+    entries: &[QueryWorkloadEntry],
+    cache: ViewWindowCache,
+    unit_costs: Option<&ResourceUnitCost>,
+    usage: &mut ResourceUsage,
+    per_node: &mut BTreeMap<PhysicalASAPNodeId, NodeCost>,
+) {
+    // The queries whose roots reach each node.
+    let mut queries_of: HashMap<PhysicalASAPNodeId, Vec<usize>> = HashMap::new();
+    for (query, &root) in dag.roots.iter().enumerate() {
+        let mut seen = HashSet::new();
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if seen.insert(id) {
+                queries_of.entry(id).or_default().push(query);
+                pending.extend(producers_of.get(&id).into_iter().flatten().copied());
+            }
+        }
+    }
+    let width_of = |id: PhysicalASAPNodeId| dag.refresh_window(id).map(|window| window.width_ms);
+    for node in &dag.nodes {
+        let Some(windows) = costed[&node.id].cached_windows else {
+            continue;
+        };
+        let readers: Vec<ChainReader> = match windows_readers_need(dag, node.id) {
+            None => vec![ChainReader {
+                read: WindowRead::Every,
+                times: ReadTimes::Refresh {
+                    width_ms: windows.width_ms,
+                },
+            }],
+            Some(reads) => reads
+                .into_iter()
+                .flat_map(|(reader, window)| {
+                    let reader_node = nodes[&reader];
+                    let read = match &reader_node.payload {
+                        Payload::NonASAP(NonASAPOp::TimeRangeCover { .. }) => {
+                            let levels = &producers_of[&reader];
+                            match (
+                                levels.iter().position(|&level| level == node.id),
+                                levels.iter().map(|&level| width_of(level)).collect(),
+                            ) {
+                                (Some(level), Some(level_widths_ms)) => WindowRead::Cover {
+                                    range_ms: window.length_ms,
+                                    level_widths_ms,
+                                    level,
+                                },
+                                _ => WindowRead::Every,
+                            }
+                        }
+                        _ => WindowRead::Range {
+                            range_ms: window.length_ms,
+                            offset_ms: window.ends_before_evaluation_ms,
+                        },
+                    };
+                    let times: Vec<ReadTimes> = match reader_node.output_state.timing {
+                        ExecutionTiming::IngestionTime => vec![ReadTimes::Refresh {
+                            width_ms: width_of(reader).unwrap_or(windows.width_ms),
+                        }],
+                        ExecutionTiming::QueryTime => queries_of
+                            .get(&reader)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|&query| entries.get(query))
+                            .map(ReadTimes::of_query)
+                            .collect(),
+                    };
+                    times.into_iter().map(move |times| ChainReader {
+                        read: read.clone(),
+                        times,
+                    })
+                })
+                .collect(),
+        };
+        let (mean, most) =
+            view_resident_windows(windows.width_ms, windows.retained, cache.idle_ms, &readers);
+        let bytes = windows.bytes_per_window as f64;
+        usage.average_memory_bytes += bytes * mean;
+        usage.peak_memory_bytes = usage
+            .peak_memory_bytes
+            .saturating_add(windows.bytes_per_window.saturating_mul(most));
+        let node_cost = per_node.get_mut(&node.id).expect("every node is measured");
+        node_cost.detail += &format!(
+            "; {mean:.1} of {} windows resident in memory (most {most}; window cache, idle {} ms)",
+            windows.retained, cache.idle_ms
+        );
+        if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs) {
+            *cost += unit_cost.cost_per_memory_byte_second * bytes * mean;
+        }
+    }
 }
 
 /// The runtime's fixed overhead of query `entry`'s requests: its requests

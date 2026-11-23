@@ -183,6 +183,11 @@ pub(super) fn quantity_expression(
     for r in most_of_source.into_values() {
         expression += r;
     }
+    for (per_window, r) in
+        resident_window_terms(costs, selectable, &variables.y, &variables.z, problem, rows)
+    {
+        expression += per_window * r;
+    }
     expression
 }
 
