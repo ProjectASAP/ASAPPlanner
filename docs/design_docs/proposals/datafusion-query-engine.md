@@ -68,7 +68,7 @@ The executor stays until the new crate compiles the same plans. Then `plan_insta
 - **Inside a batch:** a sketch column is a `UInt64` column of ids into a per-batch, append-only registry of `Arc<dyn Sketch>`.
   - The column's Arrow field metadata records the sketch family and parameters.
   - The compiler checks that merge and estimate inputs have the same family and parameters.
-  - The registry reserves memory from DataFusion's memory pool, counting a shared Hydra grid once.
+  - Later: the registry reserves memory from DataFusion's memory pool, counting a shared Hydra grid once. Not needed while batches have no memory limit (D16).
 - **Serialization happens only at the store's disk boundary.** In-memory views hand out `Arc`s.
 - **Exact states are ordinary Arrow columns**, not handles: sum, count, min, max, increase, rate, and `{sum, count}` for `avg`. DataFusion's own aggregates handle them.
 - **Rejected alternative:** serialized bytes everywhere, which would deserialize every input of every merge.
@@ -191,6 +191,13 @@ Each step is a short stack of PRs; each PR compiles and passes tests. Progress i
 - **The same DataFusion as `crates/frontend-sql`:** 54, which resolves to 54.1.0, with Arrow 58.4. It is pinned exactly in the workspace `Cargo.toml`, and both crates upgrade together.
 - **Sidra's patches are not taken up front.** Sidra patches memory accounting for sliced batches in joins and sorts, and the cross join that emits one batch per left row (`sidra/patches/`). A patch is applied through `[patch]` only when a test or benchmark hits its problem. The cross join is the most likely, through `TimeRange` (D13).
 - **Features:** default features minus file formats we don't read, such as parquet, avro and compression.
+
+### D16. No resource limits yet; which failures go to the fallback
+
+- **No memory limit, timeout or spilling for now.** A runaway batch can take down the process; that is acceptable while only we run it. Per-batch memory pools and timeouts come later.
+- **Only two cases go to the fallback:** a query with no matching root (D10), and `NotReady` (D2). Each one is marked as fallback in the response and counted.
+- **Every other error is returned to the caller with no fallback,** so engine bugs stay visible. That covers a failed compile, a kernel error, a type mismatch and an internal error. This is ASAPQuery's existing rule.
+- **At install, a plan the engine cannot compile is refused as a whole,** never installed in part. Until S8, the planner's `check_compiles` still uses the old executor, so a plan can pass the planner and still be refused here.
 
 ## Open questions
 
