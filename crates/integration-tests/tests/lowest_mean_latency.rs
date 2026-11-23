@@ -254,11 +254,7 @@ async fn a8_ties_go_to_the_least_memory_then_the_least_disk() {
         let free: Vec<Value> = max_min_table(0.0, 0.0, 0.0)
             .into_iter()
             .map(|mut entry| {
-                // A query-time scan of the raw store a hair slower than reading
-                // raw rows kept at ingestion: within the tie-break's slack.
-                let scan_at_query_time =
-                    entry["operator"] == "Scan" && entry["phase"] == "query_time";
-                entry["ns_per_unit"] = json!(if scan_at_query_time { 1e-9 } else { 0.0 });
+                entry["ns_per_unit"] = json!(0.0);
                 entry
             })
             .collect();
