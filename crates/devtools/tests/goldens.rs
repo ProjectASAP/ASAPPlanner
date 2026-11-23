@@ -5,7 +5,7 @@
 //! workload files, optional `cost_inputs.json`, `deployment_capabilities.json`
 //! and `tables/*.json`, and `expected.json`, the `asap_planner --format json`
 //! output. The runner plans the case with the `asap_planner` binary and
-//! compares its output with `expected.json`: numbers within a relative
+//! compares its output with `expected.json`: floats within a relative
 //! tolerance of [`RELATIVE_TOLERANCE`], everything else exactly. A failure
 //! prints a line diff and the command that reproduces it.
 //!
@@ -24,7 +24,7 @@ use libtest_mimic::{Arguments, Failed, Trial};
 use serde::Deserialize;
 use serde_json::Value;
 
-/// Numbers in the output match `expected.json` within this relative
+/// Floats in the output match `expected.json` within this relative
 /// difference: about one unit in the 5th significant digit, the printer's
 /// precision (D2), so a value near a rounding boundary does not flip.
 const RELATIVE_TOLERANCE: f64 = 1e-4;
@@ -155,7 +155,7 @@ fn run_case(name: &str, dir: &Path, update: bool) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "output differs from expected.json (numbers within relative {RELATIVE_TOLERANCE}):\n{}\n{reproduce}",
+        "output differs from expected.json (floats within relative {RELATIVE_TOLERANCE}):\n{}\n{reproduce}",
         line_diff(&expected_text, &actual_text)
     ))
 }
@@ -166,9 +166,9 @@ fn planner_command(case: &Case, dir: &Path, scratch: &Path) -> Result<Vec<String
     let mut command = vec![env!("CARGO_BIN_EXE_asap_planner").to_owned()];
     command.extend(case.args.iter().cloned());
     command.extend(["--format".into(), "json".into()]);
-    for file in &case.workloads {
+    for (index, file) in case.workloads.iter().enumerate() {
         command.push("--workload".into());
-        command.push(workload_path(&dir.join(file), scratch)?);
+        command.push(workload_path(index, &dir.join(file), scratch)?);
     }
     for (file, flag) in [
         ("cost_inputs.json", "--cost-inputs"),
@@ -201,15 +201,17 @@ fn planner_command(case: &Case, dir: &Path, scratch: &Path) -> Result<Vec<String
 }
 
 /// `path`, or, when its workload has no `data_workload`, a copy in
-/// `scratch` with `defaults/data_workload.json`. The copy outlives the
-/// test, so the printed command reproduces the failure.
-fn workload_path(path: &Path, scratch: &Path) -> Result<String, String> {
+/// `scratch` with `defaults/data_workload.json`, prefixed by its `index`
+/// in `workloads` so files of the same name do not collide. The copy
+/// outlives the test, so the printed command reproduces the failure.
+fn workload_path(index: usize, path: &Path, scratch: &Path) -> Result<String, String> {
     let mut workload: Value = read_json(path)?;
     if !workload["data_workload"].is_null() {
         return Ok(path.display().to_string());
     }
     workload["data_workload"] = read_json(&defaults_dir().join("data_workload.json"))?;
-    let copy = scratch.join(path.file_name().unwrap());
+    let name = path.file_name().unwrap().to_string_lossy();
+    let copy = scratch.join(format!("{index}-{name}"));
     std::fs::write(&copy, serde_json::to_string_pretty(&workload).unwrap())
         .map_err(|e| e.to_string())?;
     Ok(copy.display().to_string())
@@ -222,7 +224,8 @@ fn read_json(path: &Path) -> Result<Value, String> {
 
 /// Runs `command` with `--out out` and returns the document it wrote. A
 /// run that failed after writing its document (a planning error the
-/// document records) still returns it; a run that wrote none fails.
+/// document records) still returns it; a run that wrote none, or whose
+/// exit status disagrees with the document ([`exit_status_agrees`]), fails.
 fn run_planner(command: &[String], out: &Path) -> Result<Value, String> {
     let _ = std::fs::remove_file(out);
     let result = Command::new(&command[0])
@@ -231,12 +234,40 @@ fn run_planner(command: &[String], out: &Path) -> Result<Value, String> {
         .arg(out)
         .output()
         .map_err(|e| format!("{}: {e}", command[0]))?;
-    match std::fs::read_to_string(out) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", out.display())),
-        Err(_) => Err(format!(
-            "asap_planner wrote no output ({}):\n{}",
-            result.status,
-            String::from_utf8_lossy(&result.stderr)
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let text = std::fs::read_to_string(out).map_err(|_| {
+        format!(
+            "asap_planner wrote no output ({}):\n{stderr}",
+            result.status
+        )
+    })?;
+    let document: Value =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", out.display()))?;
+    exit_status_agrees(result.status.code(), &document).map_err(|e| format!("{e}\n{stderr}"))?;
+    Ok(document)
+}
+
+/// Whether `asap_planner`'s exit status `code` agrees with its document:
+/// 1 exactly when a stage section records an `error` (a planning error the
+/// golden records), 0 otherwise. Any other status, or a disagreement, is a
+/// failure no golden may record, even under `UPDATE_SNAPSHOTS=1`.
+fn exit_status_agrees(code: Option<i32>, document: &Value) -> Result<(), String> {
+    let recorded_error = [
+        "stage1_logical_asap_optimization",
+        "stage2_physical_asap_optimization",
+        "stage3_plan_selection",
+    ]
+    .iter()
+    .any(|stage| document[stage]["error"].is_string());
+    match (code, recorded_error) {
+        (Some(0), false) | (Some(1), true) => Ok(()),
+        (code, recorded_error) => Err(format!(
+            "asap_planner exited with {code:?}, but its document {} a stage error",
+            if recorded_error {
+                "records"
+            } else {
+                "records no"
+            }
         )),
     }
 }
@@ -281,22 +312,32 @@ fn root_group(document: &Value, query: &str) -> Result<u64, String> {
         .as_array()
         .and_then(|steps| steps.iter().find(|step| step["step"] == "stage0"))
         .ok_or("the output has no stage0 memo step")?;
-    stage0["groups"]
+    let roots: Vec<&Value> = stage0["groups"]
         .as_array()
         .into_iter()
         .flatten()
-        .find(|group| {
+        .filter(|group| {
             group["roots_of"]
                 .as_array()
                 .is_some_and(|roots| roots.iter().any(|root| root.as_u64() == Some(index as u64)))
         })
-        .and_then(|group| group["id"].as_u64())
-        .ok_or_else(|| format!("no stage0 group is the root of {query}"))
+        .collect();
+    match roots[..] {
+        [group] => group["id"]
+            .as_u64()
+            .ok_or_else(|| format!("the root group of {query} has no id")),
+        _ => Err(format!(
+            "{query} is the root of {} stage0 groups, not one",
+            roots.len()
+        )),
+    }
 }
 
-/// Whether `actual` equals `expected`, numbers within [`RELATIVE_TOLERANCE`].
+/// Whether `actual` equals `expected`: floats within [`RELATIVE_TOLERANCE`],
+/// integers (ids, intervals, counts) and everything else exactly.
 fn json_matches(expected: &Value, actual: &Value) -> bool {
     match (expected, actual) {
+        (Value::Number(e), Value::Number(a)) if !e.is_f64() && !a.is_f64() => e == a,
         (Value::Number(e), Value::Number(a)) => {
             let (e, a) = (e.as_f64().unwrap(), a.as_f64().unwrap());
             e == a || (e - a).abs() <= RELATIVE_TOLERANCE * e.abs().max(a.abs())
@@ -348,8 +389,8 @@ fn shell_line(command: &[String]) -> String {
 /// Checks of the runner itself, listed under `runner/`.
 fn runner_checks() -> Vec<Trial> {
     vec![
-        // Numbers match within one unit in the 5th significant digit; other
-        // values match exactly.
+        // Floats match within one unit in the 5th significant digit;
+        // integers and other values match exactly.
         Trial::test("runner/numbers_match_within_tolerance", || {
             let matches = |e: &str, a: &str| {
                 json_matches(
@@ -360,6 +401,7 @@ fn runner_checks() -> Vec<Trial> {
             let ok = matches("[1.0, 0.0085]", "[1.00001, 0.00850003]")
                 && !matches("1.0", "1.001")
                 && !matches("0", "1e-9")
+                && !matches("60000", "60005")
                 && !matches(r#"{"a": "x"}"#, r#"{"a": "y"}"#)
                 && !matches(r#"{"a": 1}"#, r#"{"a": 1, "b": 1}"#);
             ok.then_some(())
@@ -417,6 +459,59 @@ fn runner_checks() -> Vec<Trial> {
                 Ok(())
             } else {
                 Err(format!("unreadable failure:\n{error}").into())
+            }
+        }),
+        // Two workload files with the same name, both without
+        // `data_workload`, are planned as two distinct merged copies.
+        Trial::test("runner/merged_workload_copies_do_not_collide", || {
+            let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("goldens-same-name");
+            let source = goldens_dir().join("stage0/promql_quantile_over_time/workload.json");
+            for sub in ["a", "b"] {
+                std::fs::create_dir_all(dir.join(sub))?;
+                std::fs::copy(&source, dir.join(sub).join("workload.json"))?;
+            }
+            let case = parse_case("why = 'x'\nworkloads = ['a/workload.json', 'b/workload.json']")?;
+            std::fs::create_dir_all(dir.join("scratch"))?;
+            let command = planner_command(&case, &dir, &dir.join("scratch"))?;
+            let workloads: Vec<&String> = command
+                .windows(2)
+                .filter(|pair| pair[0] == "--workload")
+                .map(|pair| &pair[1])
+                .collect();
+            if workloads.len() == 2 && workloads[0] != workloads[1] {
+                Ok(())
+            } else {
+                Err(format!("workload paths collide: {workloads:?}").into())
+            }
+        }),
+        // The exit status must agree with the document: 1 exactly when a
+        // stage records an error.
+        Trial::test("runner/exit_status_agrees_with_document", || {
+            let ok = serde_json::json!({"stage3_plan_selection": {"plan": {}}});
+            let failed = serde_json::json!({"stage3_plan_selection": {"error": "infeasible"}});
+            let agrees = |code, document| exit_status_agrees(code, document).is_ok();
+            let all = agrees(Some(0), &ok)
+                && agrees(Some(1), &failed)
+                && !agrees(Some(1), &ok)
+                && !agrees(Some(0), &failed)
+                && !agrees(Some(2), &failed)
+                && !agrees(None, &ok);
+            all.then_some(())
+                .ok_or_else(|| "exit status check failed".into())
+        }),
+        // A query listed as the root of two Stage 0 groups is an error, not
+        // the first group found.
+        Trial::test("runner/query_with_two_root_groups_is_an_error", || {
+            let document = serde_json::json!({
+                "workload": {"queries": [{"id": "q1"}]},
+                "memo": {"steps": [{"step": "stage0", "groups": [
+                    {"id": 0, "roots_of": [0]},
+                    {"id": 1, "roots_of": [0]},
+                ]}]},
+            });
+            match root_group(&document, "q1") {
+                Err(error) if error.contains("2 stage0 groups") => Ok(()),
+                other => Err(format!("expected an error, got {other:?}").into()),
             }
         }),
     ]
