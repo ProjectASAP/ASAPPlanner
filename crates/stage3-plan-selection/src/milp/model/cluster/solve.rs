@@ -776,6 +776,52 @@ mod tests {
         RefreshWindow { width_ms, phase_ms }
     }
 
+    /// #1460 review: a tie-break's plan replaces the plan so far only when
+    /// it is at least a byte smaller in the quantity minimized and within
+    /// the memory and disk limits. Solved without those rows (the plan so far
+    /// was within them), a memory tie-break holds only the weighted latency,
+    /// so it can return a plan with less memory and more disk than the limit:
+    /// kept, the final pinned solve under every limit is infeasible. A rule
+    /// that checks only the improvement fails here.
+    #[test]
+    fn a_tie_break_is_kept_only_within_the_memory_and_disk_limits() {
+        use asap_cost::ClusterObjective;
+        let limits = ClusterLimits {
+            memory_bytes: 20_000_000,
+            disk_bytes: 14_400_000,
+            cpu_cores: None,
+            objective: ClusterObjective::LowestMeanLatency,
+        };
+        // Less memory, disk within the limit: kept.
+        assert!(tie_break_improves(
+            &limits,
+            19_280_064.0,
+            80_128.0,
+            80_128.0,
+            9_600_000.0
+        ));
+        // Less memory, disk over the limit: not kept.
+        assert!(!tie_break_improves(
+            &limits,
+            19_280_064.0,
+            80_128.0,
+            80_128.0,
+            19_200_000.0
+        ));
+        // Not a byte smaller: not kept.
+        assert!(!tie_break_improves(
+            &limits, 80_128.0, 80_127.8, 80_127.8, 0.0
+        ));
+        // A disk tie-break's plan over the memory limit: not kept.
+        assert!(!tie_break_improves(
+            &limits,
+            9_600_000.0,
+            0.0,
+            30_000_000.0,
+            0.0
+        ));
+    }
+
     /// #1460: a selection solved without memory and disk rows needs the
     /// rows of exactly the limits its plan is over: none at or under both
     /// limits (to 1e-9 relative, the solver's tolerance), memory or disk or

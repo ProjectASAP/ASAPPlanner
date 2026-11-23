@@ -254,7 +254,11 @@ async fn a8_ties_go_to_the_least_memory_then_the_least_disk() {
         let free: Vec<Value> = max_min_table(0.0, 0.0, 0.0)
             .into_iter()
             .map(|mut entry| {
-                entry["ns_per_unit"] = json!(0.0);
+                // A query-time scan of the raw store a hair slower than reading
+                // raw rows kept at ingestion: within the tie-break's slack.
+                let scan_at_query_time =
+                    entry["operator"] == "Scan" && entry["phase"] == "query_time";
+                entry["ns_per_unit"] = json!(if scan_at_query_time { 1e-9 } else { 0.0 });
                 entry
             })
             .collect();
@@ -698,20 +702,23 @@ async fn a18_a_candidate_over_every_readers_bound_is_pruned_before_the_milp() {
 /// peak (A3), the plan without the rows is over the limit, so the
 /// selection is solved once more with them and keeps within the limit.
 /// On main every solve holds both rows, so both selections solve as often.
+/// A large finite limit no plan reaches (10^12 bytes of memory and of disk)
+/// builds the same model as the unlimited cluster: same rows, same solves.
 #[tokio::test]
 async fn a19_memory_and_disk_rows_enter_only_when_a_limit_binds() {
     let workload = over_m(vec![max_every_10s(None)], 1000);
-    let settings = |memory: Option<u64>| {
+    let settings_with = |memory: Option<u64>, disk: Option<u64>| {
         cost_inputs(
-            cluster("lowest_mean_latency", memory, None, None),
+            cluster("lowest_mean_latency", memory, disk, None),
             max_min_table(100.0, 10_000.0, 0.0),
             json!({}),
             json!({}),
         )
     };
-    // How many times the selection MILP was solved under `settings`, from
-    // the stages run directly (`Selection`).
-    let solve_count = |settings: &Value| {
+    let settings = |memory: Option<u64>| settings_with(memory, None);
+    // How many times the selection MILP was solved under `settings`, and its
+    // final model's rows, from the stages run directly (`Selection`).
+    let solved = |settings: &Value| {
         let settings: CostInputs = serde_json::from_value(settings.clone()).unwrap();
         let capabilities = DeploymentCapabilities {
             raw_data_retained: true,
@@ -730,8 +737,17 @@ async fn a19_memory_and_disk_rows_enter_only_when_a_limit_binds() {
         )
         .unwrap();
         let (_, selection) = run.run.selection.as_ref().expect("a plan is selected");
-        selection.milp_solve_count
+        (selection.milp_solve_count, selection.milp_constraint_count)
     };
+    let solve_count = |settings: &Value| solved(settings).0;
+    assert_eq!(
+        solved(&settings_with(
+            Some(1_000_000_000_000),
+            Some(1_000_000_000_000)
+        )),
+        solved(&settings(None)),
+        "a finite limit no plan reaches builds the unlimited model"
+    );
     let peak = plan(&workload, &settings(None), true)
         .await
         .usage("peak_memory_bytes") as u64;
@@ -742,6 +758,65 @@ async fn a19_memory_and_disk_rows_enter_only_when_a_limit_binds() {
         solve_count(&settings(None)) + 1,
         "the memory row is added by one more solve, only where the limit binds"
     );
+}
+
+/// A20 (#1460). Under a disk limit, the plan and its tie-breaks keep within
+/// it. `max_over_time(m[5m])` and `max_over_time(n[5m])` every 10 s, 1,000
+/// series each, raw data retained, every price 0 except a query-time scan
+/// of the raw store, a hair (1e-9 ns per row) slower than raw rows kept in
+/// memory at ingestion: the memory tie-break trades each in-memory copy
+/// (9.6 MB of memory) for a scan of the store (9.6 MB of disk) when it may.
+/// Unlimited it trades both; with disk limited to 14.4 MB (either scan fits
+/// alone, both do not) the selected plan is within the limit. Which
+/// near-tied plan the first solve returns is the solver's choice, so the
+/// tie-break's own limit check is unit-tested
+/// (`a_tie_break_is_kept_only_within_the_memory_and_disk_limits`).
+#[tokio::test]
+async fn a20_a_tie_break_keeps_within_the_disk_limit() {
+    let workload: asap_planner::PlanningWorkload = serde_json::from_value(json!({
+        "query_workload": {"language": "promql", "repeating_queries": [
+            every("max_over_time(m[5m])", 10_000, None),
+            every("max_over_time(n[5m])", 10_000, None),
+        ]},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 2000.0}},
+            "sources": {
+                "m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000},
+                "n": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000},
+            },
+        },
+    }))
+    .unwrap();
+    let prices: Vec<Value> = max_min_table(0.0, 0.0, 0.0)
+        .into_iter()
+        .map(|mut entry| {
+            let scan_at_query_time = entry["operator"] == "Scan" && entry["phase"] == "query_time";
+            entry["ns_per_unit"] = json!(if scan_at_query_time { 1e-9 } else { 0.0 });
+            if entry.get("ns_per_state_emitted").is_some() {
+                entry["ns_per_state_emitted"] = json!(0.0);
+            }
+            entry
+        })
+        .collect();
+    let settings = |disk: Option<u64>| {
+        let mut settings = cost_inputs(
+            cluster("lowest_mean_latency", None, disk, None),
+            prices.clone(),
+            json!({}),
+            json!({}),
+        );
+        // Solved exactly, so the first solve takes the strictly faster
+        // copies in memory.
+        settings["latency_selection"] = json!({"exact_solve": true});
+        settings
+    };
+    // Unlimited, the memory tie-break trades both copies for scans.
+    let unlimited = plan(&workload, &settings(None), true).await;
+    assert!(unlimited.usage("disk_bytes") > 14_400_000.0);
+    let selected = planned(&workload, &settings(Some(14_400_000)), true)
+        .await
+        .unwrap_or_else(|error| panic!("a plan within the limits: {error}"));
+    assert!(selected.usage("disk_bytes") <= 14_400_000.0);
 }
 
 /// The MILP's latency per query and mean for `settings` on `workload`, from
