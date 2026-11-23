@@ -67,7 +67,12 @@ rule-firing coverage (which rules no test exercises) and mutation testing
 - **Decided: goldens store `asap_planner --format json` stage output.**
   Tests the JSON cannot express (equivalence assertions, "must change",
   invariants, relations) use other harnesses.
-- **Deferred: execution-based oracles.**
+- **Deferred: execution-based oracles,** until there is an execution
+  runtime for these plans. First candidate when it exists: each Stage 0–2
+  candidate is equivalent to its group's exact expression (frontend AST or
+  DataFusion logical plan vs. memo group; a candidate's ASAP rewrite vs.
+  the exact form), checked by executing both on small generated data
+  (suggested in #1353).
 
 ## Tests to add (tracking)
 
@@ -130,12 +135,13 @@ exercises them.
   - Today: none.
   - Blocked by: none (#1207 PRs 5–6 have landed).
 - **T5 Memo consistency**
-  - Tests: expressions in a group agree on schema and properties; no
-    duplicate expressions; re-inserting the memo reproduces the same group
+  - Tests: expressions in a group agree on schema and properties
+    (including `aggregate_coverage`); no two groups with the same
+    expression; no duplicate candidates in a group; re-inserting the memo reproduces the same group
     ids; no orphan groups or candidates left by a failed or rejected
     attempt (ledger bugs `1232-18`, `1232-F1`, `1234-F4`).
-  - Input → output: a finished memo → pass / error.
-  - Oracle: debug-build invariant.
+  - Input → output: the memo after each stage → pass / error.
+  - Oracle: always-on invariant (D12).
   - Today: none.
 
 ### `asap_planner --run-until stage1_pass1`
