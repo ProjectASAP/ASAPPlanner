@@ -26,6 +26,9 @@ ASAPPlanner emits an `InstallablePlan`: a physical DAG (`PhysicalASAPDAG`) plus 
 
 ### D1. A new crate next to `crates/executor`
 
+The crate is `crates/query-time-batch-engine`, package `asap-query-time-batch-engine`.
+
+
 The executor stays until the new crate compiles the same plans. Then `plan_installable`'s compile check (`check_compiles`) switches to the new crate, and the executor is deleted.
 
 - **Kept from the executor:** the sketch kernels, the PromQL semantics code, and the test cases.
