@@ -390,10 +390,11 @@ fn per_series_states_over_different_labels_add_no_shared_chain() {
                     && schema.fields[2].name == asap_types::ir::schema::PROMQL_SERIES_IDENTITY
         );
         identity_scan
-            || (!group.candidates.is_empty() && group.candidates.iter().all(|candidate| {
-                candidate.origin
+            || (!group.candidates.is_empty()
+                && group.candidates.iter().all(|candidate| {
+                    candidate.origin
                     == asap_types::stages::OriginOfCandidateForMemoGroup::CompressedSampleWindows
-            }))
+                }))
     };
     let reached_by_both = memo
         .groups()
