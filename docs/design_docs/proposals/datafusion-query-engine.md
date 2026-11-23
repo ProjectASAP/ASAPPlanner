@@ -211,4 +211,4 @@ A plan's `scalar_roots` answer queries whose result is one unlabelled number bui
 
 ## Open questions
 
-These are not yet discussed:
+None yet: list new ones here as review raises them.
