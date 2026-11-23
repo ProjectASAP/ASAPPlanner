@@ -14,8 +14,10 @@
 //! gets `defaults/data_workload.json`.
 //!
 //! Run a subset by name: `cargo test --release -p asap-devtools --test
-//! goldens stage0/`. Regenerate `expected.json` with `UPDATE_SNAPSHOTS=1`;
-//! the case's assertions still run, so a wrong output is not written.
+//! goldens stage0/`. Regenerate `expected.json` with `UPDATE_SNAPSHOTS=1`:
+//! a case's file is rewritten only when the output no longer matches it,
+//! and the case's assertions still run, so a wrong output is not written.
+//! `tests/goldens/runner/` is reserved for the runner's own checks.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -84,40 +86,66 @@ fn defaults_dir() -> PathBuf {
     goldens_dir().join("defaults")
 }
 
-/// Every case directory under `dir` (one holding a `case.toml`), with its
-/// name relative to `tests/goldens/`, sorted.
-fn case_dirs(dir: &Path, found: &mut Vec<(String, PathBuf)>) {
-    if dir.join("case.toml").is_file() {
-        let name = dir.strip_prefix(goldens_dir()).unwrap();
-        found.push((name.to_string_lossy().replace('\\', "/"), dir.to_owned()));
-        return;
+/// This process's scratch directory: merged workloads, planner outputs
+/// and the runner checks' cases. Per process, so concurrent runs (e.g.
+/// debug and release, which share `CARGO_TARGET_TMPDIR`) do not overwrite
+/// each other's files; removed when every trial passes.
+fn scratch_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("goldens-{}", std::process::id()))
+}
+
+/// Every case directory under `root` (one holding a `case.toml`), with its
+/// name relative to `root`, sorted. `root/defaults/` holds no cases;
+/// `root/runner/` is refused, since the runner's checks use those names.
+fn case_dirs(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    if root.join("runner").exists() {
+        return Err(format!(
+            "{}: reserved for the runner's own checks; move these cases",
+            root.join("runner").display()
+        ));
     }
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.is_dir() && *path != defaults_dir())
-        .collect();
-    entries.sort();
-    for entry in entries {
-        case_dirs(&entry, found);
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_owned()];
+    while let Some(dir) = pending.pop() {
+        if dir.join("case.toml").is_file() {
+            let name = dir.strip_prefix(root).unwrap();
+            found.push((name.to_string_lossy().replace('\\', "/"), dir));
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.is_dir() && path != root.join("defaults") {
+                pending.push(path);
+            }
+        }
     }
+    found.sort();
+    Ok(found)
 }
 
 fn main() {
     let arguments = Arguments::from_args();
     let update = std::env::var_os("UPDATE_SNAPSHOTS").is_some_and(|value| value == "1");
-    let mut cases = Vec::new();
-    case_dirs(&goldens_dir(), &mut cases);
-    let mut trials: Vec<Trial> = cases
-        .into_iter()
-        .map(|(name, dir)| {
-            Trial::test(name.clone(), move || {
-                run_case(&name, &dir, update).map_err(Failed::from)
+    let mut trials: Vec<Trial> = match case_dirs(&goldens_dir()) {
+        Ok(cases) => cases
+            .into_iter()
+            .map(|(name, dir)| {
+                Trial::test(name.clone(), move || {
+                    run_case(&name, &dir, update).map_err(Failed::from)
+                })
             })
-        })
-        .collect();
+            .collect(),
+        Err(error) => vec![Trial::test("runner/case_discovery", move || {
+            Err(error.into())
+        })],
+    };
     trials.extend(runner_checks());
-    libtest_mimic::run(&arguments, trials).exit();
+    let conclusion = libtest_mimic::run(&arguments, trials);
+    // A failure's files stay, so its printed command still reproduces it.
+    if !conclusion.has_failed() {
+        let _ = std::fs::remove_dir_all(scratch_root());
+    }
+    conclusion.exit();
 }
 
 /// Plans the case in `dir` and checks its assertions, then compares the
@@ -125,9 +153,7 @@ fn main() {
 fn run_case(name: &str, dir: &Path, update: bool) -> Result<(), String> {
     let text = std::fs::read_to_string(dir.join("case.toml")).map_err(|e| e.to_string())?;
     let case = parse_case(&text).map_err(|e| format!("{name}/case.toml: {e}"))?;
-    let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join("goldens")
-        .join(name);
+    let scratch = scratch_root().join("cases").join(name);
     std::fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
     let command = planner_command(&case, dir, &scratch)?;
     let reproduce = format!(
@@ -141,6 +167,13 @@ fn run_case(name: &str, dir: &Path, update: bool) -> Result<(), String> {
     let actual_text = serde_json::to_string_pretty(&actual).unwrap() + "\n";
     let expected_path = dir.join("expected.json");
     if update {
+        // Rewriting a file the output still matches would turn
+        // sub-tolerance float noise into diffs.
+        let matches =
+            read_json(&expected_path).is_ok_and(|expected| json_matches(&expected, &actual));
+        if matches {
+            return Ok(());
+        }
         return std::fs::write(&expected_path, actual_text).map_err(|e| e.to_string());
     }
     let expected_text = std::fs::read_to_string(&expected_path).map_err(|e| {
@@ -435,7 +468,7 @@ fn runner_checks() -> Vec<Trial> {
         // the same case with the right expected.json passes.
         Trial::test("runner/wrong_expected_fails_with_diff", || {
             let source = goldens_dir().join("stage0/promql_quantile_over_time");
-            let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("goldens-wrong-expected");
+            let dir = scratch_root().join("checks/wrong_expected");
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir)?;
             for file in ["case.toml", "workload.json"] {
@@ -461,10 +494,54 @@ fn runner_checks() -> Vec<Trial> {
                 Err(format!("unreadable failure:\n{error}").into())
             }
         }),
+        // `UPDATE_SNAPSHOTS=1` leaves an expected.json that already matches
+        // untouched, so regeneration adds no diff to unchanged cases.
+        Trial::test("runner/update_keeps_matching_expected", || {
+            let source = goldens_dir().join("stage0/promql_quantile_over_time");
+            let dir = scratch_root().join("checks/keep_matching");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir)?;
+            for file in ["case.toml", "workload.json"] {
+                std::fs::copy(source.join(file), dir.join(file))?;
+            }
+            run_case("runner/keep_matching", &dir, true)?;
+            // The same document in other text: it matches, but a rewrite
+            // would change the file.
+            let compact = read_json(&dir.join("expected.json"))?.to_string();
+            std::fs::write(dir.join("expected.json"), &compact)?;
+            run_case("runner/keep_matching", &dir, true)?;
+            if std::fs::read_to_string(dir.join("expected.json"))? == compact {
+                Ok(())
+            } else {
+                Err("a matching expected.json was rewritten".into())
+            }
+        }),
+        // A `runner/` directory of cases is refused, since its names would
+        // collide with the runner's checks; `defaults/` holds no cases.
+        Trial::test("runner/reserved_directories", || {
+            let root = scratch_root().join("checks/reserved");
+            let _ = std::fs::remove_dir_all(&root);
+            for dir in ["defaults/x", "area/case"] {
+                std::fs::create_dir_all(root.join(dir))?;
+                std::fs::write(root.join(dir).join("case.toml"), "why = 'x'")?;
+            }
+            let names: Vec<String> = case_dirs(&root)?
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            if names != ["area/case"] {
+                return Err(format!("expected only area/case, found {names:?}").into());
+            }
+            std::fs::create_dir_all(root.join("runner/wrong_expected"))?;
+            match case_dirs(&root) {
+                Err(error) if error.contains("reserved") => Ok(()),
+                other => Err(format!("a runner/ directory was accepted: {other:?}").into()),
+            }
+        }),
         // Two workload files with the same name, both without
         // `data_workload`, are planned as two distinct merged copies.
         Trial::test("runner/merged_workload_copies_do_not_collide", || {
-            let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("goldens-same-name");
+            let dir = scratch_root().join("checks/same_name");
             let source = goldens_dir().join("stage0/promql_quantile_over_time/workload.json");
             for sub in ["a", "b"] {
                 std::fs::create_dir_all(dir.join(sub))?;
