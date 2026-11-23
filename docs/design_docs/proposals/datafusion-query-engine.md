@@ -30,7 +30,6 @@ The executor stays until the new crate compiles the same plans. Then `plan_insta
 
 - **Kept from the executor:** the sketch kernels, the PromQL semantics code, and the test cases.
 - **Why not rewrite in place:** the executor's core abstractions are exactly what this replaces: `Batch` with its state columns, `PhysicalOperator::start`, and its single-threaded streams.
-- **The executor remains useful** as an untrusted second answer to compare against during the switch-over.
 
 ### D2. The query interface takes a batch of queries
 
@@ -129,10 +128,17 @@ The planner's schemas already fix the logical shape: one column per label the qu
 - **Computing an identity is a function over strings:** parse the JSON, change the labels, and serialize again. `without` grouping, relabeling and binary operations that drop `__name__` use it.
 - **Later optimizations:** dictionary encoding, sharing bytes between repeated `Utf8View` values, or interned `u64` series ids.
 
+### D12. Testing
+
+1. **Operator tests** inside the crate, with hand-written inputs and expected outputs. The executor's test cases for the same operators are ported.
+2. **Whole-plan tests** inside the crate, over in-memory raw and view stores. A test-only switch treats every `AtIngestion` view as `OnFirstRead`, so the engine builds the views from raw data itself (D9), and any plan from the planner runs in `cargo test` without the precompute engine.
+3. **The exact plan is the reference for sketches.** For each query, the planner also produces a plan with only exact states, and the sketch plan's answer must be within the plan's accuracy guarantee of it. This checks the sketch operators only, because both plans run on this engine.
+4. **Prometheus is the final reference**, end to end in ASAPQuery, over the same data. Exact plans must match up to float tolerance; sketch plans must be within their accuracy guarantee. This is the gate before switching any traffic.
+5. **The old executor is not used as a reference.** Its answers are known to be wrong in places, so a disagreement says nothing about which engine is wrong.
+
 ## Open questions
 
 These are not yet discussed:
 
 - How each operator maps to a DataFusion `*Exec`, a function, or a custom operator. The `docs/datafusion-operator-mapping` §9 table is the starting point.
-- Testing: comparing answers with Prometheus over the same raw data, and with the executor during the switch-over.
 - Order of implementation.
