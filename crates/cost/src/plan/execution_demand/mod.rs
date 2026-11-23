@@ -8,6 +8,8 @@
 //! to cost once per request, as `computations` does.
 
 use crate::node::analytical::AnalyticalCostError;
+use crate::plan::kept_results::computed_range;
+use crate::AnswerCache;
 use asap_types::ir::operator::AtModifier;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::Operator;
@@ -72,10 +74,12 @@ pub fn schedule_groups<'r>(
     // per request is the interval with span 0.
     let mut by_schedule: BTreeMap<(u32, u64), FixedSchedule> = BTreeMap::new();
     let mut estimated = Vec::new();
-    let mut invocations = 0u64;
+    let mut invocations = 0.0_f64;
     let mut non_repeating = Vec::new();
     for (query, (recurrence, range_evaluation)) in queries.into_iter().enumerate() {
-        let steps = range_evaluation.map_or(1, |range| range.evaluations_per_request());
+        // Steps per request, on average (a range as computed may have a
+        // fractional mean, `RangeEvaluation::mean_evaluations_per_request`).
+        let steps = range_evaluation.map_or(1.0, |range| range.mean_evaluations_per_request());
         match recurrence {
             QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
                 interval,
@@ -86,7 +90,7 @@ pub fn schedule_groups<'r>(
                 }
                 let phase_ms = evaluation_phase.0 % u64::from(interval.0);
                 let (step_ms, span_ms) = range_evaluation
-                    .filter(|_| steps > 1)
+                    .filter(|range| range.span_ms > 0)
                     .map_or((u64::from(interval.0), 0), |range| {
                         (range.step_ms, range.span_ms)
                     });
@@ -103,18 +107,18 @@ pub fn schedule_groups<'r>(
                 }
                 estimated.push(ScheduleGroup {
                     queries: vec![query],
-                    evaluations_per_second: rate * steps as f64,
+                    evaluations_per_second: rate * steps,
                     schedule: Schedule::EstimatedRate,
                 });
             }
             QueryRecurrence::Repeated(RepeatedDemand::Scheduled(times)) => {
-                invocations = invocations.max(times.len() as u64 * steps);
+                invocations = invocations.max(times.len() as f64 * steps);
                 non_repeating.push(query);
             }
             QueryRecurrence::OneTime {
                 invocations: count, ..
             } => {
-                invocations = invocations.max(*count * steps);
+                invocations = invocations.max(*count as f64 * steps);
                 non_repeating.push(query);
             }
             QueryRecurrence::Unknown => {
@@ -129,7 +133,7 @@ pub fn schedule_groups<'r>(
             |((interval_ms, _), (longest_span_ms_by_step_ms, queries))| ScheduleGroup {
                 queries,
                 evaluations_per_second: 1_000.0 / f64::from(interval_ms)
-                    * distinct_instants_per_request(&longest_span_ms_by_step_ms) as f64,
+                    * distinct_instants_per_request(&longest_span_ms_by_step_ms),
                 schedule: Schedule::FixedInterval,
             },
         )
@@ -138,7 +142,7 @@ pub fn schedule_groups<'r>(
     if !non_repeating.is_empty() {
         groups.push(ScheduleGroup {
             queries: non_repeating,
-            evaluations_per_second: invocations as f64 / non_repeating_query_horizon_seconds,
+            evaluations_per_second: invocations / non_repeating_query_horizon_seconds,
             schedule: Schedule::NonRepeating,
         });
     }
@@ -191,11 +195,14 @@ pub fn offset_intersection_count(geometries: &[(u64, u64)]) -> i128 {
 /// The distinct instants one request evaluates at, for steps in ms each with
 /// the longest span in ms at that step: the union of the offsets
 /// `k · step_ms ≤ span_ms` back from the request's end. One step needs no
-/// union: `span_ms / step_ms + 1`.
-fn distinct_instants_per_request(longest_span_ms_by_step_ms: &BTreeMap<u64, u64>) -> u64 {
+/// union: `span_ms / step_ms + 1`, in reals (a range as a data plane
+/// keeping its answers computes it may average a fractional number of
+/// steps). Several steps count whole offsets: a fractional span among them
+/// counts its whole steps only.
+fn distinct_instants_per_request(longest_span_ms_by_step_ms: &BTreeMap<u64, u64>) -> f64 {
     if longest_span_ms_by_step_ms.len() == 1 {
         let (&step_ms, &span_ms) = longest_span_ms_by_step_ms.iter().next().expect("one step");
-        return span_ms / step_ms.max(1) + 1;
+        return RangeEvaluation { step_ms, span_ms }.mean_evaluations_per_request();
     }
     // Inclusion-exclusion is bounded by 4095 intersections for up to twelve
     // distinct steps, regardless of the number of evaluations in each range.
@@ -219,13 +226,13 @@ fn distinct_instants_per_request(longest_span_ms_by_step_ms: &BTreeMap<u64, u64>
                 total -= count;
             }
         }
-        return u64::try_from(total).expect("distinct evaluation offset count fits u64");
+        return total as f64;
     }
     let mut offsets_ms = BTreeSet::new();
     for (&step_ms, &span_ms) in longest_span_ms_by_step_ms {
         offsets_ms.extend((0..=span_ms / step_ms.max(1)).map(|k| k * step_ms));
     }
-    offsets_ms.len() as u64
+    offsets_ms.len() as f64
 }
 
 /// The nodes each query reads first, in query order: query `i` is the scalar
@@ -379,9 +386,13 @@ pub fn consumers(
 /// spans 1 h and 2 m: below `@ start()` 2/60 per second (one run per
 /// request of each); below `@ end()` both end at `k · 60 s`, 1/60 per
 /// second.
+///
+/// With an `answer_cache`, a range request's steps are those it computes
+/// ([`computed_range`]).
 pub fn context_executions_per_second<'e>(
     anchor: Option<AtModifier>,
     queries: impl IntoIterator<Item = &'e QueryWorkloadEntry>,
+    answer_cache: Option<AnswerCache>,
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<f64, AnalyticalCostError> {
     let queries = queries.into_iter();
@@ -414,7 +425,7 @@ pub fn context_executions_per_second<'e>(
             non_repeating_query_horizon_seconds,
         ),
         None => evaluation_rate(
-            queries.map(|entry| (&entry.recurrence, entry.range_evaluation)),
+            queries.map(|entry| (&entry.recurrence, computed_range(entry, answer_cache))),
             non_repeating_query_horizon_seconds,
         ),
     }
@@ -440,10 +451,12 @@ pub fn context_executions_per_second<'e>(
 /// `multiplier` is that number of contexts. A node computed at ingestion
 /// time, materialized or not, computes each arriving row once: once per
 /// second, `(1, 1.0)`, however many ingestion-time views of however many
-/// refresh windows read it.
+/// refresh windows read it. With an `answer_cache`, a range request's steps
+/// are those it computes ([`computed_range`]).
 pub fn computations(
     dag: &PhysicalASAPDAG,
     entries: &[QueryWorkloadEntry],
+    answer_cache: Option<AnswerCache>,
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<HashMap<PhysicalASAPNodeId, (u64, f64)>, AnalyticalCostError> {
     // Each node materialized across evaluations: its timing and lifetime.
@@ -521,6 +534,7 @@ pub fn computations(
                 entry.1 += context_executions_per_second(
                     anchor,
                     queries.iter().filter_map(|&query| entries.get(query)),
+                    answer_cache,
                     non_repeating_query_horizon_seconds,
                 )?;
             }

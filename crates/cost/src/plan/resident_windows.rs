@@ -8,6 +8,8 @@
 //! retained. `plan_cost` takes the most over a plan's readers, and Stage 3's
 //! selection the most over its selected readers, from the same counts.
 
+use crate::plan::kept_results::computed_range;
+use crate::AnswerCache;
 use asap_types::ir::operator::tumbling_window_chain::cover_windows;
 use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
 
@@ -50,15 +52,18 @@ pub enum ReadTimes {
 
 impl ReadTimes {
     /// When a query-time reader reached by `entry`'s requests reads: on the
-    /// query's evaluation grid, at each request its range's steps (one for
-    /// an instant query).
-    pub fn of_query(entry: &QueryWorkloadEntry) -> Self {
+    /// query's evaluation grid, at each request the steps it computes (its
+    /// range's, or with an `answer_cache` only its new ones, a fractional
+    /// mean rounded up: `computed_range`), one for an instant query.
+    pub fn of_query(entry: &QueryWorkloadEntry, answer_cache: Option<AnswerCache>) -> Self {
         let grid = entry.evaluation_grid();
-        let range = entry.range_evaluation;
+        let range = computed_range(entry, answer_cache);
         ReadTimes::Query {
             period_ms: grid.period_ms,
             phase_ms: grid.phase_ms,
-            steps: range.map_or(1, |range| range.evaluations_per_request()),
+            steps: range.map_or(1, |range| {
+                range.mean_evaluations_per_request().ceil() as u64
+            }),
             step_ms: range.map_or(0, |range| range.step_ms),
         }
     }

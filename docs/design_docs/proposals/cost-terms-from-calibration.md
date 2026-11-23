@@ -123,7 +123,14 @@ plus its span; a plan retaining less (a data plane caching final results)
 is then charged more resident windows than it retains. Above a
 pass-through reader (a `TimeShift`), Stage 3 takes
 each candidate that may read there, as (R) does, and charges their most;
-the plan's own readers there may keep fewer. Cold windows
+the plan's own readers there may keep fewer. Stage 3 also takes a
+query-time reader's queries from those reaching its memo group on the
+edge consumer's grid, `plan_cost` from those reaching its node in the
+plan: they differ only when a query on that grid reaches the group
+through another of its candidates. Neither difference is closed by
+construction; the debug check below fails a test that selects a plan
+where they diverge (`the_objective_is_the_plan_cost_on_shared_readers_and_anchored_results_with_caches`
+checks an instant and a range reading one chain on one grid). Cold windows
 read back are not charged their decode CPU: at steady state a periodic
 reader reads only resident windows.
 
@@ -230,36 +237,42 @@ the whole 2 h of windows (section 1).
   dropped. Memory, average and peak; under cost model 1, at the memory
   unit cost.
 - Steps computed: a range request of `steps` steps every `interval`
-  computes `interval / step` of them, at least 1 and at most `steps`
-  (`steps_computed_per_request`). With an answer cache, `plan_cost` and
-  Stage 3 cost each query as a range of that many steps (`as_computed`):
-  its rate, its per-step work, its latency's step rounds and the windows
-  its steps read. Its retention and evaluation grid are unchanged.
+  computes `interval / step` of them on average, in reals, at least 1 and
+  at most `steps` (`steps_computed_per_request`): every 20 s at 15 s
+  steps, 1, 2, then 1, 4/3. With an answer cache, `plan_cost` and Stage 3
+  count each query's steps on the range it computes (`computed_range`, a
+  span of that many steps less one, fractional when the mean is): its
+  rate, its per-step fees, its latency's step rounds (requests of ⌊mean⌋
+  and ⌈mean⌉ steps mixed to the mean, `step_rounds`) and the windows its
+  steps read (the mean rounded up). The entry itself is not rewritten:
+  its retention, evaluation grid and request times are the user's.
 
 **Selection.** Stage 3 charges the same:
 
 - each execution's kept results are in its own cost, from the node's cost
   function at its context's grid. Under a bound $B$ the pool holds
   $\min(S, B)$ of $S = \sum_e k_e x_e$: a variable $t \ge S - M b$, $t \ge
-  B b$ ($b$ binary, $M$ the largest $S$) is charged in place of $S$;
+  B b$ ($b$ binary, $M$ the largest $S$ less $B$) is charged in place of $S$;
 - each query output's answers are on the execution answering it
   ($z_{q,e}$): $a_e ((H + m)/p_q + 1)$ bytes, $a_e$ its output bytes, $p_q$
   the query's period, $m$ the margin and $H$ the plan's longest retention,
   a variable with $H \ge h_v$ for every $h_v$. $H z_{q,e}$ is $w_{q,e} \ge H
   - \bar H (1 - z_{q,e})$, $w \ge 0$, $\bar H$ the largest retention any
   read needs. Under a bound, $\min$ as above;
-- the queries' rates and steps are `as_computed`'s; their retention
-  needs the queries' own spans.
+- the queries' rates and steps are on `computed_range`; their contexts,
+  grids and retention needs are the queries' own.
 
 Each of $t$, $w$ and $H$ costs more the larger it is, so at the optimum
 $t$ is the pool's $\min$, $w_{q,e} = H z_{q,e}$ and $H$ the longest selected
-retention: the optimum is `plan_cost` of the selected plan (checked after
-each solve in debug builds). Cost model 3's memory row has the same
+retention: the optimum is `plan_cost` of the selected plan. In debug
+builds `select_plan` checks it after each cost model 1 solve: the MILP's
+optimum plus the request overhead against `plan_cost` of the plan it
+built, within 1e-6. Cost model 3's memory row has the same
 terms in bytes.
 
 Examples: answers of a query every 15 s kept 1 h 1 min: 245. A 1 h range
-at 15 s steps every 15 s computes 1 step, every 5 min 20, every 2 h all
-241.
+at 15 s steps every 15 s computes 1 step, every 20 s 4/3, every 5 min 20,
+every 2 h all 241.
 
 On the memory gate with sections 1 and 2 (idle 60 s; results kept 60 s,
 at most 1 GiB; answers kept 60 s beyond the retention, at most 256 MiB, as
@@ -270,9 +283,13 @@ the measured data plane defaults): 16 of 22 rows within 1.5x, from 0 on
 **Limits.** The answer bytes are a query's output edge bytes, not the
 data plane's encoding of an answer; Stage 3 takes the answering
 execution's output over its baseline inputs, `plan_cost` the plan's.
-Kept results of a `OneEvaluation` node not on one evaluation grid (the
-inputs of a `TimeShift` anchored with `@`) are charged by `plan_cost` at
-its readers' grid and not by Stage 3. Under a bound on the kept results,
+Below a `TimeShift` anchored with `@ end()` or `@ start()` that is not
+at an evaluation time, `plan_cost` takes a node's grid as Stage 3's
+anchored context has it, the gcd of the anchoring queries' request
+times, so a kept result there (and a cover's windows) count the same on
+both sides. Several steps on one schedule count whole offsets (a
+fractional mean among them counts its whole steps), on both sides alike.
+Under a bound on the kept results,
 an execution keeping some is not left out for its lifetime twin, and
 the greedy bound counts it without them.
 
@@ -309,7 +326,11 @@ pub struct AnswerCache {
 ```
 
 `crates/cost/src/plan/kept_results.rs`: `kept_per_grid` (an `f64`),
-`held_by_bounded_cache`, `steps_computed_per_request`, `as_computed`.
+`held_by_bounded_cache`, `steps_computed_per_request` (an `f64`),
+`computed_range(entry, answer_cache)`. `asap_types`:
+`RangeEvaluation::mean_evaluations_per_request`. `asap_cost`:
+`step_rounds(steps: f64, query_threads) -> f64`; `computations` and
+`context_executions_per_second` take the answer cache.
 `crates/cost/src/node/usage/mod.rs`: `NodeResourceUsageAndCost::kept_result_bytes`,
 a query-time `OneEvaluation` node's kept results, in its memory and cost.
 `plan_cost` bounds that pool and adds the answers.
@@ -327,4 +348,7 @@ answer_bytes_per_execution, per_kept_byte}`.
 | `kept_results` unit tests (`asap-cost`) | the counts above |
 | `c12_an_answer_cache_keeps_an_answer_per_evaluation_time` (integration) | 37 answers at 60 s of margin over 300 s of retention every 10 s, the bytes of six more for another minute |
 | `c13_a_range_request_computes_only_its_new_steps_with_an_answer_cache` (integration) | a 241-step range every 15 s costs a 241st of its query work |
+| `c14_a_range_request_computes_its_new_steps_on_average` (integration) | every 20 s, 4/3 steps: 180.75 times less query work |
+| `the_objective_is_the_plan_cost_when_a_range_computes_fractional_steps` (integration) | the optimum is `plan_cost` every 20 s, every 10 s (1 step on a 5 s grid), and below `@ end()` |
+| `the_objective_is_the_plan_cost_on_shared_readers_and_anchored_results_with_caches` (integration) | an instant and a range reading one chain; shared `@ end()` and `@ start()` subtrees |
 | `the_objective_is_the_plan_cost_with_result_and_answer_caches` (integration) | the MILP's optimum is `plan_cost` with the caches, unbounded and bounded below what they keep: a shared query-time scan, a 1 h range every 15 s, an offset 1 h range |

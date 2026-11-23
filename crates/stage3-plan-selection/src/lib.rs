@@ -32,7 +32,6 @@ mod resident_windows;
 mod retention;
 mod selectable;
 
-use asap_cost::plan::kept_results::as_computed;
 use asap_cost::{
     request_overhead_cost_per_second, ClusterLimits, ClusterObjective, CostInputs, CostModel,
     LatencyCalibration, ResourceUnitCost,
@@ -156,30 +155,16 @@ pub fn select_plan(
         .collect();
     let mut selectable =
         SelectableExecutions::new(physical, entries, &outputs, final_results_cache);
-    // A data plane keeping its answers computes only the steps of a range
-    // request it has not answered before: its rates and steps are costed
-    // so, as `plan_cost` costs them; its retention and grid are the
-    // query's (`selectable`).
-    let computed_entries: Vec<QueryWorkloadEntry>;
-    let entries_as_computed = match cost_inputs.data_plane_execution.answer_cache {
-        Some(_) => {
-            computed_entries = entries.iter().map(as_computed).collect();
-            &computed_entries[..]
-        }
-        None => entries,
-    };
-    let request_overhead_cost_per_second =
-        request_overhead_cost_per_second(entries_as_computed, cost_inputs).map_err(|error| {
-            ErrorSelectingPlan::Cost {
-                candidate: "every plan (the request overhead)".into(),
-                node: 0,
-                error,
-            }
-        })?;
+    let request_overhead_cost_per_second = request_overhead_cost_per_second(entries, cost_inputs)
+        .map_err(|error| ErrorSelectingPlan::Cost {
+        candidate: "every plan (the request overhead)".into(),
+        node: 0,
+        error,
+    })?;
     let mut costs = execution_costs(
         physical,
         &selectable,
-        entries_as_computed,
+        entries,
         data,
         cost_inputs_for_structure,
     );
@@ -220,7 +205,7 @@ pub fn select_plan(
     }
     let selection_inputs = SelectionInputs {
         physical,
-        entries: entries_as_computed,
+        entries,
         selectable: &selectable,
         costs: &costs,
     };
@@ -259,7 +244,7 @@ pub fn select_plan(
                 execution_quantities(
                     physical,
                     &selectable,
-                    entries_as_computed,
+                    entries,
                     data,
                     cost_inputs_for_structure,
                     quantity,
@@ -354,6 +339,22 @@ pub fn select_plan(
     let plan = plan_of(physical, &solved, &outputs).map_err(|error| {
         ErrorSelectingPlan::Solver(format!("the selected plan is invalid: {error}"))
     })?;
+    // Selection = `plan_cost`: under cost model 1 the MILP's optimum is
+    // what `plan_cost` charges the plan it selected, to the solver's
+    // tolerances. A term charged on one side only fails every test that
+    // selects a plan.
+    #[cfg(debug_assertions)]
+    if let (Some(optimum), Ok((cost, _))) = (
+        solved.milp_optimum_per_second,
+        asap_cost::plan_cost(&plan, entries, data, cost_inputs),
+    ) {
+        let optimum = optimum + request_overhead_cost_per_second;
+        let plan_cost = cost.cost_per_second.unwrap_or(f64::NAN);
+        assert!(
+            (optimum - plan_cost).abs() <= 1e-6 * plan_cost.abs().max(1e-9),
+            "the MILP's optimum {optimum}/s is not plan_cost {plan_cost}/s of the selected plan"
+        );
+    }
     // A candidate none of whose executions could be costed.
     let mut costed = vec![None; physical.physical_candidates.len()];
     for (execution, cost) in selectable.executions().iter().zip(&costs.per_execution) {
