@@ -2,7 +2,7 @@ Stage 3 output: PhysicalASAPDAG and Selection ====================
 legend: n<k> = plan node k
         C<n> = the physical candidate it runs
         <- = the nodes it reads
-selection MILP: 4399 variables, 7947 constraints
+selection MILP: 4399 variables, 7947 constraints, objective mean latency 1680.843575 ms (gap 0.991 %, no plan below 1664.191296 ms)
 n0:   C111 = G26[0] (IngestionTime, None)                        Scan
 n1:   C375 = G108[0] (IngestionTime, AcrossEvaluations(Memory))  SummaryTumblingWindowChain ExactAggregate(Max) tumbling_window_width_ms=30000                          <- n0
 n2:   C467 = G161[0] (QueryTime, None)                           TimeRange 3600s                                                                                        <- n1

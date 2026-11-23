@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use asap_cost::{
     plan_cost, ClusterLimits, ClusterObjective, CostInputs, CostModel, LatencyCalibration,
+    LatencySelectionChecks,
 };
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_devtools::planning_stages_text::planning_stages_text;
@@ -84,17 +85,26 @@ fn typical_dashboard() -> PlanningWorkload {
     workload
 }
 
+/// The branch-and-bound nodes D1's selection explores at most before it
+/// stops without a 1 % gap: the default rule's limit, fixed in the test so
+/// the snapshot does not move with the default.
+const SELECTION_NODE_LIMIT: i32 = 10_000;
+
 fn snapshot_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/compressed_samples_snapshot/typical_dashboard.txt")
 }
 
-/// D1. The typical dashboard under a 0.7 GB limit (cost model 3, least
-/// memory) and no raw data: both quantile panels read through
+/// D1. The typical dashboard under a 0.85 GB limit (cost model 3, lowest
+/// mean latency) and no raw data: both quantile panels read through
 /// `DecodeSamplesInRange`, and Stage 3's plan text equals the reviewed
-/// snapshot. It fails on main (no compressed samples, so no plan fits),
-/// and afterwards on any change to the selected plan, its sizes or its
-/// cost, which then needs a reviewed snapshot update.
+/// snapshot, the selection's objective and gap included. The solve stops
+/// by a deterministic rule, a 1 % gap or a fixed number of
+/// branch-and-bound nodes on one solver thread, never by wall-clock time,
+/// so the same inputs select the same plan on any machine. It fails on
+/// main (no compressed samples, so no plan fits), and afterwards on any
+/// change to the selected plan, its sizes or its cost, which then needs a
+/// reviewed snapshot update.
 #[test]
 fn compressed_samples_plan_snapshot() {
     let workload = typical_dashboard();
@@ -106,6 +116,11 @@ fn compressed_samples_plan_snapshot() {
             objective: ClusterObjective::LowestMeanLatency,
         }),
         latency_calibration: LatencyCalibration::UncalibratedForTesting,
+        // The default stop rule, pinned here: 1 % gap or this many nodes.
+        latency_selection_checks: LatencySelectionChecks {
+            node_limit: SELECTION_NODE_LIMIT,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let capabilities = DeploymentCapabilities {
@@ -159,8 +174,8 @@ fn compressed_samples_plan_snapshot() {
 
     let (cost, _) = plan_cost(plan, &entries, &data, &settings).unwrap();
     let text = planning_stages_text(&stages, Some(&cost), None, false);
-    // The selection's wall-clock times, objective bound and gap depend on
-    // the machine and the solver's time limit: only its model size is kept.
+    // Only the selection's wall-clock times (`N ms building, N ms solving`)
+    // depend on the machine; its model size, objective and gap are kept.
     let stage3 = text
         .find("Stage 3 output")
         .map(|start| &text[start..])
@@ -169,7 +184,10 @@ fn compressed_samples_plan_snapshot() {
         .map(|line| match line.strip_prefix("selection MILP: ") {
             Some(rest) => format!(
                 "selection MILP: {}",
-                rest.split(", ").take(2).collect::<Vec<_>>().join(", ")
+                rest.split(", ")
+                    .filter(|part| !part.contains(" ms building") && !part.contains(" ms solving"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             None => line.to_owned(),
         })
