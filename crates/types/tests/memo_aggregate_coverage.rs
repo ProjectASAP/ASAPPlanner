@@ -643,3 +643,40 @@ fn a_group_without_aggregate_coverage_has_no_view_coverage() {
     let (scan, _) = kll_of_last_minute_of(&mut memo, "latency");
     assert_eq!(view_coverage(&memo, scan), None);
 }
+
+/// A cover selects the windows of `(t − offset − range, t − offset]`, as the
+/// range over its narrowest level shifted by its offset does: over a 1 min
+/// KLL chain and a 5 min level merged from it, a 5 min cover an hour back
+/// (`m[5m] offset 1h`) covers `(t − 65m, t − 60m]`, what the direct build
+/// over `TimeRange[5m](TimeShift(1h)(G1))` covers; without the offset,
+/// `(t − 5m, t]`.
+///
+/// ```text
+/// G1 Scan latency;  G2 Chain[KLL, 1m](G1);  G3 MergeWindows[5m](G2)
+/// G4 Cover[5m, offset 1h](G3, G2);  G5 Cover[5m](G3, G2)
+/// ```
+#[test]
+fn a_cover_under_an_offset_covers_its_range_that_much_earlier() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let g1 = memo.find_or_add_group(latency(vec![])).unwrap();
+    let g2 = memo.find_or_add_group(kll_chain(MINUTE_MS, g1)).unwrap();
+    let g3 = memo
+        .find_or_add_group(Operator::ASAP(ASAPOp::SummaryMergeWindows {
+            child: g2,
+            tumbling_window_width_ms: 5 * MINUTE_MS as u64,
+        }))
+        .unwrap();
+    let cover = |offset_ms: i64| {
+        Operator::NonASAP(NonASAPOp::TimeRangeCover {
+            range: std::time::Duration::from_millis(5 * MINUTE_MS as u64),
+            offset_ms: offset_ms as u64,
+            levels: vec![g3, g2],
+        })
+    };
+    let an_hour_back = memo.find_or_add_group(cover(HOUR_MS)).unwrap();
+    let now = memo.find_or_add_group(cover(0)).unwrap();
+    assert_eq!(time_of(&memo, an_hour_back), relative(-3_900_000, -3_600_000));
+    assert_eq!(time_of(&memo, now), relative(-5 * MINUTE_MS, 0));
+    let direct = kll_over_last_5m_of(&mut memo, shift(HOUR_MS, None, g1));
+    assert_eq!(coverage(&memo, an_hour_back), coverage(&memo, direct));
+}

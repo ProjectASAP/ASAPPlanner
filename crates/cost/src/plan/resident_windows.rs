@@ -421,6 +421,30 @@ mod tests {
         assert_eq!(resident_window_count(S15, 245, MIN, now, Some(&reader)), 23);
     }
 
+    /// The same cover an hour back (`[1h] offset 1h`), at the same `now`: it
+    /// alone needs 2 h retained, 480 windows, ending in
+    /// `(98 h + 105 s, now]`. The evaluations at now − 45 … now read the 15 s
+    /// windows at the right edge of `(t − 2 h, t − 1 h]`, ending in
+    /// `(99 h, t − 1 h]` (at most 7), and at its left edge, ending in
+    /// `(t − 2 h, 98 h + 300 s]`, of which the 13 ending after 98 h + 105 s
+    /// are still retained. The four written in the last minute are an hour
+    /// newer than any of them: 7 + 13 + 4 = 24 resident.
+    #[test]
+    fn a_cover_under_an_offset_keeps_the_edges_an_hour_back_and_the_newest_resident() {
+        let reader = ChainReader {
+            read: WindowRead::Cover {
+                range_ms: HOUR,
+                offset_ms: HOUR,
+                level_widths_ms: vec![5 * MIN, S15],
+                level: 1,
+            },
+            times: every_15s(),
+        };
+        assert_eq!(reader.retained_windows(S15), Some(480));
+        let now = (100 * HOUR + 105_000) as i64;
+        assert_eq!(resident_window_count(S15, 480, MIN, now, Some(&reader)), 24);
+    }
+
     /// A 5 min level built from a 15 s chain at each 5 min close reads the
     /// 20 windows of the closing 5 min, all it needs retained; within 60 s
     /// of a close they are resident, then only the four newest: over the 20
