@@ -367,7 +367,7 @@ pub(super) fn build_and_solve(
         // once per round of the request's steps over the query threads.
         let runs = |index: usize| match once_per_request(inputs, index) {
             true => 1.0,
-            false => shape.step_rounds as f64,
+            false => shape.step_rounds,
         };
         let fresh = problem.add(variable().min(lateness));
         let latency = problem.add(variable().min(0));

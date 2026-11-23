@@ -14,12 +14,12 @@ use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_state_bytes, state_bytes_per_row, StateInputRows};
 use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
-use crate::plan::kept_results::{as_computed, held_by_bounded_cache, kept_per_grid};
+use crate::plan::kept_results::{computed_range, held_by_bounded_cache, kept_per_grid};
 use crate::plan::resident_windows::{view_resident_windows, ChainReader, ReadTimes, WindowRead};
 use crate::{lookup_at_scale, StateFamily};
 use crate::{node_resource_usage_and_cost, NodeResourceUsageAndCost, ProducerOutput};
 use crate::{
-    CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind,
+    AnswerCache, CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind,
     ResourceUnitCost, ResourceUsage, ViewWindowCache, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 use asap_types::ir::operator::Source;
@@ -31,7 +31,7 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPOperatorPayload as Payload,
 };
 use asap_types::plan::time_window::{read_back_ms, windows_readers_need};
-use asap_types::stages::Lifetime;
+use asap_types::stages::{anchor_is_evaluation_time, Lifetime};
 use asap_types::summary_type::SketchParams;
 use asap_types::workload::{
     greatest_common_divisor, AssumedDataFact, DataWorkload, QueryWorkloadEntry,
@@ -169,16 +169,6 @@ pub fn plan_cost(
     data: &DataWorkload,
     settings: &CostInputs,
 ) -> Result<(PlanCost, CalibrationFit), (PhysicalASAPNodeId, AnalyticalCostError)> {
-    // A data plane keeping its answers computes only the steps of a range
-    // request it has not answered before.
-    let computed_entries: Vec<QueryWorkloadEntry>;
-    let entries = match settings.data_plane_execution.answer_cache {
-        Some(_) => {
-            computed_entries = entries.iter().map(as_computed).collect();
-            &computed_entries[..]
-        }
-        None => entries,
-    };
     let nodes = &node_map(dag);
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
     let table = &settings.measured_operation_costs;
@@ -187,8 +177,14 @@ pub fn plan_cost(
     let unit_costs = settings.cost_model.per_node_unit_costs();
     // Each node's `(multiplier, per_second)` ([`computations`]), then its
     // usage and cost ([`node_resource_usage_and_cost`]), children first.
-    let multipliers = computations(dag, entries, settings.non_repeating_query_horizon_seconds)
-        .map_err(|error| (first, error))?;
+    let answer_cache = settings.data_plane_execution.answer_cache;
+    let multipliers = computations(
+        dag,
+        entries,
+        answer_cache,
+        settings.non_repeating_query_horizon_seconds,
+    )
+    .map_err(|error| (first, error))?;
     // Each node's producers in its payload's input order, whatever order
     // the DAG lists its edges in (`PhysicalASAPDAGNode::producers`): its
     // first producer is its child.
@@ -215,24 +211,59 @@ pub fn plan_cost(
             (node.id, one_batch)
         })
         .collect();
-    // Each node's readers' evaluation grid: the gcd of the grids of the
-    // queries whose roots reach it, each its evaluation context's grid
-    // (`QueryWorkloadEntry::evaluation_grid`, the grid Stage 3's context
-    // of the query has; a cover is charged its windows over it).
+    // The queries whose roots reach each node.
+    let mut queries_of: HashMap<PhysicalASAPNodeId, BTreeSet<usize>> = HashMap::new();
+    for (query, &root) in dag.roots.iter().enumerate() {
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if queries_of.entry(id).or_default().insert(query) {
+                pending.extend(producers_of.get(&id).into_iter().flatten().copied());
+            }
+        }
+    }
+    // Each node's readers' evaluation grid, as Stage 3's context of it has
+    // it: the gcd of the grids of the queries whose roots reach it, each its
+    // evaluation context's grid (`QueryWorkloadEntry::evaluation_grid`);
+    // below a `TimeShift` anchored with `@ end()` or `@ start()` that is not
+    // at an evaluation time, the gcd of those queries' request times
+    // (`QueryWorkloadEntry::request_time_grid_ms`), as Stage 3 runs its
+    // inputs. A cover is charged its windows over it, and a kept result is
+    // kept per its evaluation times.
     let mut grid_of: HashMap<PhysicalASAPNodeId, u64> = HashMap::new();
     for (query, &root) in dag.roots.iter().enumerate() {
         let Some(entry) = entries.get(query) else {
             continue;
         };
-        let period_ms = entry.evaluation_grid().period_ms;
-        let mut seen = std::collections::HashSet::new();
-        let mut pending = vec![root];
-        while let Some(id) = pending.pop() {
-            if seen.insert(id) {
-                let known = grid_of.entry(id).or_insert(0);
-                *known = asap_types::workload::greatest_common_divisor(*known, period_ms);
-                pending.extend(producers_of.get(&id).into_iter().flatten().copied());
+        let mut seen = HashSet::new();
+        let mut pending = vec![(root, entry.evaluation_grid().period_ms)];
+        while let Some((id, period_ms)) = pending.pop() {
+            if !seen.insert((id, period_ms)) {
+                continue;
             }
+            let known = grid_of.entry(id).or_insert(0);
+            *known = greatest_common_divisor(*known, period_ms);
+            let inputs_period_ms = match nodes[&id].payload.request_anchor() {
+                Some(at) => {
+                    let queries: Vec<&QueryWorkloadEntry> = queries_of[&id]
+                        .iter()
+                        .filter_map(|&query| entries.get(query))
+                        .collect();
+                    match anchor_is_evaluation_time(at, queries.iter().copied()) {
+                        true => period_ms,
+                        false => queries.iter().fold(0, |grid_ms, entry| {
+                            greatest_common_divisor(grid_ms, entry.request_time_grid_ms(at))
+                        }),
+                    }
+                }
+                None => period_ms,
+            };
+            pending.extend(
+                producers_of
+                    .get(&id)
+                    .into_iter()
+                    .flatten()
+                    .map(|&producer| (producer, inputs_period_ms)),
+            );
         }
     }
     let evaluation_grid_of = |id: PhysicalASAPNodeId| {
@@ -351,9 +382,12 @@ pub fn plan_cost(
         evaluation_ms_per_query[query] = evaluation_ms
             + step_ms
                 * step_rounds(
-                    steps_per_request(entries.get(query)),
+                    steps_per_request(
+                        entries.get(query),
+                        settings.data_plane_execution.answer_cache,
+                    ),
                     settings.data_plane_execution.query_threads,
-                ) as f64;
+                );
         let Some(&first_read) = start.first() else {
             has_unattached_request_overhead = true;
             if let Some(unit_cost) = unit_costs {
@@ -417,7 +451,9 @@ pub fn plan_cost(
             nodes,
             &costed,
             &producers_of,
+            &queries_of,
             entries,
+            answer_cache,
             cache,
             unit_costs,
             &mut usage,
@@ -588,24 +624,14 @@ fn resident_view_windows(
     nodes: &NodeMap<'_>,
     costed: &HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'_>>,
     producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
+    queries_of: &HashMap<PhysicalASAPNodeId, BTreeSet<usize>>,
     entries: &[QueryWorkloadEntry],
+    answer_cache: Option<AnswerCache>,
     cache: ViewWindowCache,
     unit_costs: Option<&ResourceUnitCost>,
     usage: &mut ResourceUsage,
     per_node: &mut BTreeMap<PhysicalASAPNodeId, NodeCost>,
 ) {
-    // The queries whose roots reach each node.
-    let mut queries_of: HashMap<PhysicalASAPNodeId, Vec<usize>> = HashMap::new();
-    for (query, &root) in dag.roots.iter().enumerate() {
-        let mut seen = HashSet::new();
-        let mut pending = vec![root];
-        while let Some(id) = pending.pop() {
-            if seen.insert(id) {
-                queries_of.entry(id).or_default().push(query);
-                pending.extend(producers_of.get(&id).into_iter().flatten().copied());
-            }
-        }
-    }
     let width_of = |id: PhysicalASAPNodeId| dag.refresh_window(id).map(|window| window.width_ms);
     for node in &dag.nodes {
         let Some(windows) = costed[&node.id].cached_windows else {
@@ -651,7 +677,7 @@ fn resident_view_windows(
                             .into_iter()
                             .flatten()
                             .filter_map(|&query| entries.get(query))
-                            .map(ReadTimes::of_query)
+                            .map(|entry| ReadTimes::of_query(entry, answer_cache))
                             .collect(),
                     };
                     times.into_iter().map(move |times| ChainReader {
@@ -695,7 +721,8 @@ fn request_overhead(
     let table = &settings.measured_operation_costs;
     // The fixed cost per request and per step of it.
     let evaluation_ms = (table.ns_per_evaluation
-        + table.ns_per_evaluation_step * steps_per_request(entry) as f64)
+        + table.ns_per_evaluation_step
+            * steps_per_request(entry, settings.data_plane_execution.answer_cache))
         * 1e-6;
     Ok((
         requests_per_second,
@@ -838,16 +865,29 @@ pub fn ingest_threads_building_copies(settings: &CostInputs, ingest_cores: f64) 
 /// Steps one request of `entry` evaluates: its range evaluation's, 1
 /// without one (or without an entry).
 /// The rounds a request's `steps` take when they split over
-/// `query_threads` query threads: ⌈steps ÷ threads⌉, the latency's
-/// multiplier of per-step work (its CPU stays `steps` times).
-pub fn step_rounds(steps: u64, query_threads: u32) -> u64 {
-    steps.div_ceil(u64::from(query_threads.max(1)))
+/// `query_threads` query threads, on average: ⌈steps ÷ threads⌉ for whole
+/// steps, the latency's multiplier of per-step work (its CPU stays `steps`
+/// times). A fractional mean (a range as a data plane keeping its answers
+/// computes it) is requests of ⌊steps⌋ and ⌈steps⌉ steps mixed to that
+/// mean, and their rounds mixed alike.
+///
+/// Example: 4/3 steps on one thread: 4/3 rounds; on two threads, 1.
+pub fn step_rounds(steps: f64, query_threads: u32) -> f64 {
+    let threads = u64::from(query_threads.max(1));
+    let (fewer, more) = (steps.floor(), steps.ceil());
+    let rounds = |steps: f64| (steps as u64).div_ceil(threads) as f64;
+    let share_of_more = steps - fewer;
+    (1.0 - share_of_more) * rounds(fewer) + share_of_more * rounds(more)
 }
 
-fn steps_per_request(entry: Option<&QueryWorkloadEntry>) -> u64 {
+/// Steps one request of `entry` evaluates on average: its range as the
+/// data plane computes it ([`computed_range`] under `answer_cache`;
+/// `RangeEvaluation::mean_evaluations_per_request`), 1 without one (or
+/// without an entry).
+fn steps_per_request(entry: Option<&QueryWorkloadEntry>, answer_cache: Option<AnswerCache>) -> f64 {
     entry
-        .and_then(|entry| entry.range_evaluation)
-        .map_or(1, |range| range.evaluations_per_request())
+        .and_then(|entry| computed_range(entry, answer_cache))
+        .map_or(1.0, |range| range.mean_evaluations_per_request())
 }
 
 /// Core-seconds per second of the decode and append of arriving samples
@@ -1011,9 +1051,12 @@ fn query_latencies(
             let mut latency = QueryLatency {
                 allowed_lateness_ms: execution.allowed_lateness_ms as f64,
                 evaluations_per_second: evaluation_rate(
-                    entries
-                        .get(query)
-                        .map(|entry| (&entry.recurrence, entry.range_evaluation)),
+                    entries.get(query).map(|entry| {
+                        (
+                            &entry.recurrence,
+                            computed_range(entry, execution.answer_cache),
+                        )
+                    }),
                     settings.non_repeating_query_horizon_seconds,
                 )?,
                 ..QueryLatency::default()
@@ -1039,13 +1082,16 @@ fn query_latencies(
                 // Computed once per step of the request, once per request
                 // when kept across evaluations (as `computations` counts it).
                 let per_request = match nodes[&id].lifetime {
-                    Lifetime::AcrossEvaluations(_) => 1,
+                    Lifetime::AcrossEvaluations(_) => 1.0,
                     Lifetime::None | Lifetime::OneEvaluation(_) => step_rounds(
-                        steps_per_request(entries.get(query)),
+                        steps_per_request(
+                            entries.get(query),
+                            settings.data_plane_execution.answer_cache,
+                        ),
                         settings.data_plane_execution.query_threads,
                     ),
                 };
-                latency.query_execution_ms += work_ms[&id] * per_request as f64;
+                latency.query_execution_ms += work_ms[&id] * per_request;
                 stack.extend(inputs(id));
             }
             Ok(latency)

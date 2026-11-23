@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use asap_cost::plan::resident_windows::{
     reader_resident_windows, written_resident_windows, ChainReader, ReadTimes, WindowRead,
 };
-use asap_cost::CachedViewWindows;
+use asap_cost::{AnswerCache, CachedViewWindows, ViewWindowCache};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::plan::materialized_view::RefreshWindow;
@@ -35,7 +35,8 @@ pub(crate) struct ResidentRead {
 }
 
 /// Each read of an execution of a view in `cached` (by candidate) under a
-/// cache of `idle_ms`, with the windows it keeps resident: the windows
+/// window `cache` (a query's steps as `answer_cache` has the data plane
+/// compute them), with the windows it keeps resident: the windows
 /// written within the idle time of those the read needs retained
 /// (`retained_ms_of_read`, its need as $h_v$ retains it), and for an edge,
 /// the most any reader above it keeps
@@ -47,11 +48,12 @@ pub(crate) fn resident_reads(
     physical: &PhysicalASAPMemoCandidates,
     selectable: &SelectableExecutions,
     entries: &[QueryWorkloadEntry],
+    (cache, answer_cache): (ViewWindowCache, Option<AnswerCache>),
     cached: &HashMap<PhysicalCandidateId, CachedViewWindows>,
-    idle_ms: u64,
     need_ms_per_edge: &[Option<u64>],
     retained_ms_of_read: impl Fn(PhysicalCandidateId, u64) -> u64,
 ) -> Vec<ResidentRead> {
+    let idle_ms = cache.idle_ms;
     let executions = selectable.executions();
     let memo = &physical.logical_candidates.memo;
     let width_of = |v: PhysicalCandidateId| RefreshWindow::computed_from(physical, v);
@@ -129,7 +131,7 @@ pub(crate) fn resident_reads(
                                     .filter(|entry| {
                                         grid.is_none_or(|grid| entry.evaluation_grid() == grid)
                                     })
-                                    .map(ReadTimes::of_query)
+                                    .map(|entry| ReadTimes::of_query(entry, answer_cache))
                                     .collect()
                             }
                         };

@@ -624,3 +624,38 @@ async fn c13_a_range_request_computes_only_its_new_steps_with_an_answer_cache() 
     let with = query_ms(json!({"answer_cache": {"retention_margin_ms": 60_000}})).await;
     assert_close("241 steps to 1", without / with, 241.0);
 }
+
+/// C14. The same 1 h range at 15 s steps requested every 20 s: with an
+/// answer cache a request computes 1, 2, then 1 new steps, 4/3 on average,
+/// so its query-time work per request is 4/3 of a step's: 241 ÷ 4/3 =
+/// 180.75 times less than without.
+#[tokio::test]
+async fn c14_a_range_request_computes_its_new_steps_on_average() {
+    let mut range = every("max_over_time(m[5m])", 20_000, None);
+    range["range_evaluation"] = json!({"step_ms": 15_000, "span_ms": 3_600_000});
+    let workload = over_m(vec![range], 1000);
+    let query_ms = |data_plane_execution: Value| {
+        let workload = workload.clone();
+        async move {
+            let report = plan(
+                &workload,
+                &cost_inputs(
+                    usage_over_time(),
+                    chain_table(json!({}), vec![]),
+                    json!({}),
+                    data_plane_execution,
+                ),
+                false,
+            )
+            .await
+            .report;
+            number(
+                &report["predicted_usage"]["per_query"][0],
+                "query_execution_ms",
+            )
+        }
+    };
+    let without = query_ms(json!({})).await;
+    let with = query_ms(json!({"answer_cache": {"retention_margin_ms": 60_000}})).await;
+    assert_close("241 steps to 4/3", without / with, 241.0 * 3.0 / 4.0);
+}

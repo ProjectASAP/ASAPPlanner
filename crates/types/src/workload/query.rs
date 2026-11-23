@@ -304,6 +304,15 @@ impl RangeEvaluation {
     pub fn evaluations_per_request(&self) -> u64 {
         self.span_ms / self.step_ms.max(1) + 1
     }
+
+    /// Steps one request evaluates on average, `span_ms / step_ms + 1` in
+    /// reals: [`Self::evaluations_per_request`] for a span that is a
+    /// multiple of the step (every workload entry's); for a range as a data
+    /// plane keeping its answers computes it, the mean of the new steps per
+    /// request. Example: a 5 s span at 15 s steps is 4/3 steps.
+    pub fn mean_evaluations_per_request(&self) -> f64 {
+        self.span_ms as f64 / self.step_ms.max(1) as f64 + 1.0
+    }
 }
 
 /// The greatest common divisor of `a` and `b` (`a` when `b` is 0): the

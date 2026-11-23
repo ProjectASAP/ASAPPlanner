@@ -1004,3 +1004,99 @@ fn the_objective_is_the_plan_cost_with_result_and_answer_caches() {
         "bounded {bounded} is not below unbounded {unbounded}"
     );
 }
+
+/// With an answer cache, a 1 h range at 15 s steps requested every 20 s
+/// computes 4/3 steps per request on average, in the MILP and in
+/// `plan_cost` alike (the debug check in `select_plan` compares the MILP's
+/// optimum with `plan_cost`). So does one every 10 s, computing 1 step per
+/// request on its 5 s evaluation grid (the query's, not its requests'), and
+/// one below `@ end()` every 15 s (raw data retained).
+#[test]
+fn the_objective_is_the_plan_cost_when_a_range_computes_fractional_steps() {
+    for (name, query, interval_ms, raw_data_retained) in [
+        ("every 20 s", "max_over_time(m[5m])", 20_000, false),
+        ("every 10 s", "max_over_time(m[5m])", 10_000, false),
+        (
+            "@ end() every 15 s",
+            "sum_over_time(m[5m] @ end())",
+            15_000,
+            true,
+        ),
+    ] {
+        let range = over_m(vec![requested(
+            query,
+            interval_ms,
+            Some((15_000, 3_600_000)),
+        )]);
+        assert_equal(
+            &format!("1 h range at 15 s steps {name}"),
+            objective_and_plan_cost(&range, &with_result_caches(None), raw_data_retained),
+        );
+    }
+}
+
+/// The two equality gaps the selection side's construction leaves open,
+/// checked with the result and answer caches and the window cache on:
+/// - Stage 3 takes a query-time reader's read times from the queries
+///   reaching its memo group on its grid, `plan_cost` from the queries
+///   reaching its node in the plan: an instant and a 1 h range of one
+///   5 min max on one grid, reading one chain;
+/// - kept results of a `OneEvaluation` node in a context anchored by `@`,
+///   whose grid is the requests', not the queries' evaluation grid: two
+///   range queries sharing a `@ end()` subtree, and two of different spans
+///   below `@ start()`.
+#[test]
+fn the_objective_is_the_plan_cost_on_shared_readers_and_anchored_results_with_caches() {
+    let instant_and_range = over_m(vec![
+        requested("max_over_time(m[5m])", 15_000, None),
+        requested("max_over_time(m[5m])", 15_000, Some((15_000, 3_600_000))),
+    ]);
+    let shared_at_end = over_m(vec![
+        requested(
+            "sum_over_time(m[5m] @ end())",
+            300_000,
+            Some((30_000, 600_000)),
+        ),
+        requested(
+            "max_over_time(m[5m] @ end())",
+            300_000,
+            Some((30_000, 600_000)),
+        ),
+    ]);
+    let at_start_of_two_spans = over_m(vec![
+        requested(
+            "sum_over_time(m[1m] @ start())",
+            60_000,
+            Some((30_000, 3_600_000)),
+        ),
+        requested(
+            "max_over_time(m[1m] @ start())",
+            60_000,
+            Some((30_000, 90_000)),
+        ),
+    ]);
+    for (name, workload, raw_data_retained) in [
+        (
+            "an instant and a range on one grid",
+            &instant_and_range,
+            false,
+        ),
+        ("a shared @ end() subtree", &shared_at_end, true),
+        (
+            "@ start() subtrees of two spans",
+            &at_start_of_two_spans,
+            true,
+        ),
+    ] {
+        for max_bytes in [None, Some(64 * 1024)] {
+            assert_equal(
+                &format!("{name}, caches bounded at {max_bytes:?}"),
+                objective_and_plan_cost(
+                    workload,
+                    &with_result_caches(max_bytes),
+                    raw_data_retained,
+                ),
+            );
+        }
+    }
+}

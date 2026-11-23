@@ -520,6 +520,7 @@ pub(crate) fn execution_quantities(
                 entries,
                 selectable,
                 execution,
+                cost_inputs.data_plane_execution.answer_cache,
                 cost_inputs.non_repeating_query_horizon_seconds,
             )?;
             // A context on one grid charges a cover its windows there.
@@ -789,8 +790,8 @@ pub(crate) fn execution_quantities(
                 physical,
                 selectable,
                 entries,
+                (cache, cost_inputs.data_plane_execution.answer_cache),
                 &cached,
-                cache.idle_ms,
                 &costs.retention_need_ms_per_edge,
                 |v, need_ms| costs.retention_ms_for_need(v, need_ms),
             );
@@ -821,6 +822,7 @@ pub(crate) fn executions_per_second(
     entries: &[QueryWorkloadEntry],
     selectable: &SelectableExecutions,
     execution: Execution,
+    answer_cache: Option<AnswerCache>,
     non_repeating_query_horizon_seconds: f64,
 ) -> Result<f64, String> {
     let memo = &physical.logical_candidates.memo;
@@ -844,6 +846,7 @@ pub(crate) fn executions_per_second(
             Some((at, queries)) => context_executions_per_second(
                 Some(at),
                 entries_of(queries.iter().map(|query| query.0).collect()),
+                answer_cache,
                 non_repeating_query_horizon_seconds,
             ),
             None => context_executions_per_second(
@@ -853,6 +856,7 @@ pub(crate) fn executions_per_second(
                     selectable.readers_of(group_of(execution.candidate), |anchor| anchor.is_none()),
                     entries,
                 )),
+                answer_cache,
                 non_repeating_query_horizon_seconds,
             ),
         },

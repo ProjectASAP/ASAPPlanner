@@ -28,6 +28,7 @@ use good_lp::{
 };
 
 use asap_cost::plan::execution_demand::evaluation_rate;
+use asap_cost::plan::kept_results::computed_range;
 use asap_cost::{close_together, ClusterLimits, CostInputs};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::plan::materialized_view::RefreshWindow;
@@ -139,8 +140,9 @@ struct QueryShape {
     request_ms: f64,
     /// Rounds of steps per request, the steps split over the query
     /// threads (`asap_cost::step_rounds`): a query-time execution not kept
-    /// across evaluations adds its work once per round to the latency.
-    step_rounds: u64,
+    /// across evaluations adds its work once per round to the latency; a
+    /// mean over its requests when they compute a fractional mean of steps.
+    step_rounds: f64,
     /// The request's fixed CPU, ms: every step's, wherever it runs.
     request_cpu_ms: f64,
     max_latency_ms: Option<f64>,
@@ -581,6 +583,7 @@ pub(crate) fn solve_cluster_selection(
             .collect(),
         retention_ms,
         cost_per_second_without_request_overhead: 0.0,
+        milp_optimum_per_second: None,
         variable_count: last.variable_count,
         constraint_count: last.constraint_count,
         construction_ms: (started.elapsed().as_millis() as u64).saturating_sub(solve_ms),
@@ -697,23 +700,23 @@ fn query_shapes(inputs: &ClusterInputs<'_>) -> Result<Vec<QueryShape>, Selection
         .into_iter()
         .map(|(query, answering)| {
             let entry = selection.entries.get(query.0);
-            let weight = evaluation_rate(
-                entry.map(|entry| (&entry.recurrence, entry.range_evaluation)),
-                horizon,
-            )
-            .map_err(|error| SelectionMilpError::Solver(format!("query {}: {error}", query.0)))?;
-            let steps = entry
-                .and_then(|entry| entry.range_evaluation)
-                .map_or(1, |range| range.evaluations_per_request());
+            // Its range as the data plane computes it (with an answer cache,
+            // only its new steps, as `plan_cost` counts them).
+            let answer_cache = inputs.cost_inputs.data_plane_execution.answer_cache;
+            let range = entry.and_then(|entry| computed_range(entry, answer_cache));
+            let weight = evaluation_rate(entry.map(|entry| (&entry.recurrence, range)), horizon)
+                .map_err(|error| {
+                    SelectionMilpError::Solver(format!("query {}: {error}", query.0))
+                })?;
+            let steps = range.map_or(1.0, |range| range.mean_evaluations_per_request());
             let step_rounds = asap_cost::step_rounds(
                 steps,
                 inputs.cost_inputs.data_plane_execution.query_threads,
             );
-            let request_ms = (table.ns_per_evaluation
-                + table.ns_per_evaluation_step * step_rounds as f64)
-                * 1e-6;
+            let request_ms =
+                (table.ns_per_evaluation + table.ns_per_evaluation_step * step_rounds) * 1e-6;
             let request_cpu_ms =
-                (table.ns_per_evaluation + table.ns_per_evaluation_step * steps as f64) * 1e-6;
+                (table.ns_per_evaluation + table.ns_per_evaluation_step * steps) * 1e-6;
             let mut reach = BTreeSet::new();
             let mut edges = Vec::new();
             let mut stack = answering.clone();
