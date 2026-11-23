@@ -6,7 +6,7 @@
 //!   (`ExecutionCosts::kept_result_bytes_per_execution`). Under a bound
 //!   $B$ the cache holds $\min(S, B)$ of their sum $S = \sum k_e x_e$; the
 //!   selection charges $t \ge S - M b$, $t \ge B b$ ($b$ binary, $M$ the
-//!   largest $S$) in place of $S$: $t = \min(S, B)$ at the optimum, as its
+//!   largest $S$ less $B$) in place of $S$: $t = \min(S, B)$ at the optimum, as its
 //!   quantity per byte is positive.
 //! - **Answers.** Query $q$ keeps one answer per evaluation time within the
 //!   plan's longest retention $H$ (in seconds) plus the margin $m$:
@@ -132,7 +132,8 @@ pub(crate) fn kept_result_terms(
 
 /// $t = \min(\text{pool}, \text{bound})$ at the optimum for a positive
 /// quantity on $t$: $t \ge \text{pool} - M b$, $t \ge \text{bound}\, b$,
-/// $b$ binary, $M$ = `largest`, the largest the pool can be.
+/// $b$ binary, $M$ = `largest` − `bound` (`largest` the largest the pool can
+/// be): with $b = 1$, $t \ge$ the bound and the first row is no tighter.
 fn bounded_pool(
     pool: Expression,
     largest: f64,
@@ -142,7 +143,7 @@ fn bounded_pool(
 ) -> Variable {
     let held = problem.add(variable().min(0));
     let over = problem.add(variable().binary());
-    rows.push(constraint!(held >= pool - largest * over));
+    rows.push(constraint!(held >= pool - (largest - bound) * over));
     rows.push(constraint!(held >= bound * over));
     held
 }
