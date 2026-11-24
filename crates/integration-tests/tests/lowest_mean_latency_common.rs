@@ -261,3 +261,70 @@ pub(crate) fn data_plane(fields: Value) -> Value {
     }
     execution
 }
+
+/// Assert `actual` is within 1% of `expected`.
+pub(crate) fn assert_close(name: &str, actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() <= 0.01 * expected.abs().max(1e-9),
+        "{name}: {actual} is not close to {expected}"
+    );
+}
+
+/// The chain plan's table: every class at 1 ns per unit, the chain with
+/// `chain_fields` merged in, the merge's entries `merge_entries`.
+pub(crate) fn chain_table(chain_fields: Value, merge_entries: Vec<Value>) -> Vec<Value> {
+    let mut chain = json!({"exact": "Max", "ns_per_unit": 1.0});
+    for (key, value) in chain_fields.as_object().unwrap() {
+        chain[key] = value.clone();
+    }
+    let mut entries = vec![
+        entry("Scan", "ingestion_time", json!({"ns_per_unit": 1.0})),
+        entry("SummaryTumblingWindowChain", "ingestion_time", chain),
+        entry("TimeRange", "query_time", json!({"ns_per_unit": 1.0})),
+        entry(
+            "FinalizeExactAccumulator",
+            "query_time",
+            json!({"exact": "Max", "ns_per_unit": 1.0}),
+        ),
+    ];
+    entries.extend(if merge_entries.is_empty() {
+        vec![entry(
+            "SummaryMerge",
+            "query_time",
+            json!({"exact": "Max", "ns_per_unit": 1.0}),
+        )]
+    } else {
+        merge_entries
+    });
+    entries
+}
+
+/// The plan (as JSON) and its report for `workload` under `cost_inputs`,
+/// one chain and no wider levels or covers; Err when the cost inputs do
+/// not load or planning fails, as text.
+pub(crate) async fn single_chain_plan(
+    workload: &PlanningWorkload,
+    cost_inputs: &Value,
+) -> Result<(Value, Value), String> {
+    let cost_inputs: CostInputs = serde_json::from_value(cost_inputs.clone())
+        .map_err(|error| format!("cost inputs do not load: {error}"))?;
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        excluded_candidates: serde_json::from_value(json!([
+            {"operator": "SummaryMergeWindows"},
+            {"operator": "TimeRangeCover"}
+        ]))
+        .unwrap(),
+        ..Default::default()
+    };
+    let models = PlanningModels::builtin()
+        .with_cost_inputs(&cost_inputs)
+        .with_deployment_capabilities(&capabilities);
+    let (plan, report) = plan_installable(UserInput::new(workload, FrontendInput::Promql, models))
+        .await
+        .map_err(|error| format!("planning failed: {error}"))?;
+    Ok((
+        serde_json::to_value(plan).unwrap(),
+        serde_json::to_value(report).unwrap(),
+    ))
+}

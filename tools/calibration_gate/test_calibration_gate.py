@@ -34,7 +34,7 @@ COST_INPUTS = {"data_plane_execution": {"view_window_cache": {
 
 # Chain: 440 KB per window, 1,140 windows at the peak (180 s + 60 s + 900 s).
 STORAGE = {"average_memory_bytes": 31_000_000.0, "peak_memory_bytes": 31_000_000,
-           "bytes_per_window": 440_000, "peak_disk_bytes": 501_600_000,
+           "bytes_per_window": 440_000, "disk_bytes": 501_600_000,
            "disk_written_bytes_per_second": 440_000.0, "disk_read_bytes_per_second": 5_000_000.0}
 
 
@@ -53,7 +53,7 @@ REPORT = {"predicted_usage": {
     "per_node": [node(3, "ingestion_time", STORAGE),
                  node(4, "query_time", {
                      "average_memory_bytes": 1_000_000.0, "peak_memory_bytes": 1_000_000,
-                     "bytes_per_window": 0, "peak_disk_bytes": 0,
+                     "bytes_per_window": 0, "disk_bytes": 0,
                      "disk_written_bytes_per_second": 0.0,
                      "disk_read_bytes_per_second": 0.0})],
     "per_query": [],
@@ -133,14 +133,15 @@ class ResourceRows(unittest.TestCase):
         self.assertIn("not at steady state", line(lines, "view 3 disk peak B"))
 
     def test_gate_noise_floor(self):
-        """K6. A view row below 1% of the plan's total is printed, not gated;
-        at or above 1% it is gated. Here a second, small chain writes 3x
-        off: at 0.5% of the plan's writes it passes, at 2% it fails."""
-        for share, expect_pass in [(0.005, True), (0.02, False)]:
+        """K6. A view row whose predicted and measured values are both below
+        1% of the plan's totals is printed, not gated; otherwise it is
+        gated. Here a second, small chain writes 3x off: predicted at 0.2%
+        of the plan's writes (measured 0.6%) it passes, at 2% it fails."""
+        for share, expect_pass in [(0.002, True), (0.02, False)]:
             small = share * 440_000.0 / (1 - share)
             report = copy.deepcopy(REPORT)
             report["predicted_usage"]["per_node"].append(node(5, "ingestion_time", {
-                **STORAGE, "bytes_per_window": int(small), "peak_disk_bytes": int(small * 1140),
+                **STORAGE, "bytes_per_window": int(small), "disk_bytes": int(small * 1140),
                 "disk_written_bytes_per_second": small, "disk_read_bytes_per_second": 0.0,
                 "average_memory_bytes": 0.0, "peak_memory_bytes": 0}))
             report["predicted_usage"]["disk_written_bytes_per_second"] += small
@@ -158,6 +159,25 @@ class ResourceRows(unittest.TestCase):
             lines = out.getvalue().splitlines()
             self.assertEqual(passed, expect_pass, (share, lines))
             self.assertIn("view 5 disk written B/s", "\n".join(lines))
+
+    def test_a_view_not_in_the_report_is_not_checked(self):
+        """K8. A measured view that is no operator node of the report is
+        printed as not checked, not an error."""
+        measured = copy.deepcopy(MEASURED)
+        measured["views"].append({"node_id": 99, "bytes_per_window": 1})
+        passed, lines = run(measured)
+        self.assertTrue(passed, lines)
+        self.assertIn("not checked", line(lines, "view 99"))
+
+    def test_disk_without_elapsed_time_is_not_checked(self):
+        """K9. Without `elapsed_ms` the gate cannot tell steady state, so
+        disk at the peak is printed, not gated."""
+        measured = copy.deepcopy(MEASURED)
+        del measured["elapsed_ms"]
+        measured["views"][0]["disk_bytes"] = 1
+        passed, lines = run(measured)
+        self.assertTrue(passed, lines)
+        self.assertIn("not checked", line(lines, "view 3 disk peak B"))
 
     def test_missing_sections_are_not_checked(self):
         """K7 (guard). A measured file without `views` and `plan` checks only

@@ -106,31 +106,33 @@ pub struct NodeCost {
     /// series count, its own being outside them
     /// ([`lookup_at_scale`](crate::lookup_at_scale)).
     pub priced_outside_measured_scale: bool,
-    /// Its memory, disk and disk traffic ([`NodeStorageUsage`]).
-    pub storage: NodeStorageUsage,
+    /// Its memory, disk and disk traffic ([`NodeMemoryAndDisk`]).
+    pub memory_and_disk: NodeMemoryAndDisk,
 }
 
 /// One node's memory, disk and disk traffic, per second of wall time
 /// unless the name says otherwise: what a data plane measures per view.
 /// [`plan_cost`](crate::plan_cost) adds what is charged once the whole
 /// plan is known (resident cached windows, partial copies, kept results
-/// and answers, raw data on disk), so the nodes' figures add up to the
-/// plan's [`ResourceUsage`](crate::ResourceUsage).
+/// and answers, raw data on disk), and the plan's
+/// [`ResourceUsage`](crate::ResourceUsage) memory, disk and disk traffic
+/// are the sums over its nodes. `bytes_per_window` is a size, not summed.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct NodeStorageUsage {
+pub struct NodeMemoryAndDisk {
     /// Memory it holds, averaged over time.
     pub average_memory_bytes: f64,
     /// The most memory it holds at once.
     pub peak_memory_bytes: u64,
-    /// An in-memory ingestion-time view's bytes per window (one output);
-    /// 0 for any other node.
+    /// An ingestion-time view's bytes per window (one output); 0 for any
+    /// other node.
     pub bytes_per_window: u64,
     /// Bytes it keeps on disk at the peak.
-    pub peak_disk_bytes: u64,
+    pub disk_bytes: u64,
     /// Bytes it writes to disk per second: a view under the data plane's
     /// window cache writes each window to its file when the window closes.
     pub disk_written_bytes_per_second: f64,
-    /// Bytes it reads back from disk per second.
+    /// Bytes it reads back from disk per second; 0 until reads of windows
+    /// not in the window cache are costed (#1469).
     pub disk_read_bytes_per_second: f64,
 }
 
@@ -2307,6 +2309,12 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     if ingestion && node.lifetime == Lifetime::AcrossEvaluations(StorageMedium::Memory) {
         maintained = Some(state);
     }
+    // A view's bytes per window: one output of an ingestion-time view kept
+    // across evaluations; raw rows kept at ingestion are not windows.
+    let view_bytes_per_window = match (ingestion, node.lifetime) {
+        (true, Lifetime::AcrossEvaluations(_)) if !raw_rows_materialized_at_ingestion => state,
+        _ => 0,
+    };
     // Under a window cache, an in-memory view's retained windows are in its
     // files, and only the one being built in memory here: the caller adds
     // the resident ones.
@@ -2603,14 +2611,20 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             phase_times,
             priced_outside_measured_scale: measured_unit_cost
                 .is_some_and(|unit| unit.outside_measured_scale),
-            storage: NodeStorageUsage {
+            memory_and_disk: NodeMemoryAndDisk {
                 average_memory_bytes,
                 peak_memory_bytes,
-                bytes_per_window: maintained.unwrap_or(0),
-                peak_disk_bytes: disk_bytes,
-                disk_written_bytes_per_second: cached_windows.map_or(0.0, |windows| {
-                    windows.bytes_per_window as f64 * 1_000.0 / windows.width_ms as f64
-                }),
+                bytes_per_window: view_bytes_per_window,
+                disk_bytes,
+                // Each window is written to disk when it closes: a view on
+                // disk, or one under the window cache, which keeps every
+                // window in its file.
+                disk_written_bytes_per_second: match cached_windows.is_some()
+                    || node.lifetime == Lifetime::AcrossEvaluations(StorageMedium::Disk)
+                {
+                    true => view_bytes_per_window as f64 * 1_000.0 / output_interval_ms as f64,
+                    false => 0.0,
+                },
                 disk_read_bytes_per_second: 0.0,
             },
         },

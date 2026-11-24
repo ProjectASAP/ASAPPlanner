@@ -53,9 +53,11 @@ the peak must be within the bytes ratio (default 1.25x); reads, memory and
 CPU within the acceptance ratio. Disk at the peak is checked only once the
 run is past each view's retention plus the window cache's retention margin
 and file span (from the cost inputs); before, it is printed as not at
-steady state. A view row the planner predicts below 1% of the plan's total
-for that resource is printed but not gated; the plan rows are always
-gated.
+steady state (without `elapsed_ms`, it is not checked). A view row whose
+predicted and measured values are both below 1% of the plan's totals for
+that resource is printed but not gated; bytes per window and the plan rows
+are always gated. The measured `memory_bytes` is compared with the
+predicted average memory.
 
 Usage:
 
@@ -107,11 +109,16 @@ def within(measured, predicted_value, ratio):
     return 1 / ratio <= measured / predicted_value <= ratio
 
 
-# A view row below this share of the plan's predicted total is not gated.
-NOISE_FLOOR = 0.01
+# A view row whose predicted and measured values are both below this share
+# of the plan's totals is printed, not gated.
+MIN_GATED_SHARE = 0.01
+
+# The acceptance ratio of bytes per window, disk writes and disk at the
+# peak, which follow from the plan's rows and bytes alone.
+BYTES_RATIO = 1.25
 
 
-def check(report, plan, measured, ratio, label, cost_inputs=None, bytes_ratio=1.25):
+def check(report, plan, measured, ratio, label, cost_inputs=None, bytes_ratio=BYTES_RATIO):
     """One line per row; True when every gated row is within its ratio:
     `bytes_ratio` for bytes per window, disk writes and disk at the peak,
     `ratio` for the others."""
@@ -149,70 +156,93 @@ def check(report, plan, measured, ratio, label, cost_inputs=None, bytes_ratio=1.
         measured_ms = query.get("wall_ms_per_request", query["cpu_ms_per_request"])
         row(f"query {query['query']} ms/request", measured_ms,
             per_query[query["query"]]["query_execution_ms"])
-    resource_rows(row, usage, per_node, plan, measured, cost_inputs or {}, ratio, bytes_ratio)
+    resource_rows(row, usage, per_node, plan, measured, cost_inputs or {},
+                  {"bytes": bytes_ratio, "time": ratio})
     return ok
 
 
-# (row name, measured field, predicted field, uses the bytes ratio)
+# (row name, measured field, predicted field, which ratio: "bytes" or
+# "time"); a view row of bytes per window is a size, gated whatever its
+# share of the plan.
 VIEW_ROWS = [
-    ("bytes/window", "bytes_per_window", "bytes_per_window", True),
-    ("disk written B/s", "disk_written_bytes_per_second", "disk_written_bytes_per_second", True),
-    ("disk peak B", "disk_bytes", "peak_disk_bytes", True),
-    ("disk read B/s", "disk_read_bytes_per_second", "disk_read_bytes_per_second", False),
-    ("memory B", "memory_bytes", "average_memory_bytes", False),
+    ("bytes/window", "bytes_per_window", "bytes_per_window", "bytes"),
+    ("disk written B/s", "disk_written_bytes_per_second", "disk_written_bytes_per_second", "bytes"),
+    ("disk peak B", "disk_bytes", "disk_bytes", "bytes"),
+    ("disk read B/s", "disk_read_bytes_per_second", "disk_read_bytes_per_second", "time"),
+    ("memory B", "memory_bytes", "average_memory_bytes", "time"),
 ]
 
 
-def resource_rows(row, usage, per_node, plan, measured, cost_inputs, ratio, bytes_ratio):
-    """The `views` and `plan` rows of the measured file (module doc)."""
+def resource_rows(row, usage, per_node, plan, measured, cost_inputs, ratios):
+    """The `views` and `plan` rows of the measured file (module doc);
+    `ratios` maps "bytes" and "time" to their acceptance ratios."""
     cache = cost_inputs.get("data_plane_execution", {}).get("view_window_cache") or {}
-    slack_ms = cache.get("retention_margin_ms", 0) + cache.get("file_span_ms", 0)
-    retention = {node["id"]: node.get("retention_ms") or 0 for node in plan["dag"]["nodes"]}
+    disk_slack_ms = cache.get("retention_margin_ms", 0) + cache.get("file_span_ms", 0)
+    retention_ms_by_node = {node["id"]: node.get("retention_ms") or 0
+                            for node in plan["dag"]["nodes"]}
     elapsed_ms = measured.get("elapsed_ms")
 
-    def at_steady_state(node_id):
-        return elapsed_ms is None or elapsed_ms >= retention.get(node_id, 0) + slack_ms
+    def disk_not_checked(node_ids):
+        """Why disk is not checked yet for views `node_ids`, or None."""
+        if elapsed_ms is None:
+            return "no elapsed_ms, not checked"
+        if any(elapsed_ms < retention_ms_by_node.get(node_id, 0) + disk_slack_ms
+               for node_id in node_ids):
+            return "not at steady state"
+        return None
 
-    totals = {field: sum(node.get(field, 0) for node in per_node.values())
-              for _, _, field, _ in VIEW_ROWS}
+    predicted_totals = {field: sum(node.get(field, 0) for node in per_node.values())
+                        for _, _, field, _ in VIEW_ROWS}
+    measured_totals = {field: sum(view.get(field, 0) for view in measured.get("views", []))
+                       for _, field, _, _ in VIEW_ROWS}
+    measured_plan = measured.get("plan", {})
+    for _, field, _, _ in VIEW_ROWS:
+        measured_totals[field] = max(measured_totals[field], measured_plan.get(field, 0))
     for view in measured.get("views", []):
         node_id = view["node_id"]
-        node = per_node[node_id]
-        for name, measured_field, predicted_field, uses_bytes_ratio in VIEW_ROWS:
+        node = per_node.get(node_id)
+        if node is None:
+            print(f"view {node_id}: not an operator node of the report, not checked")
+            continue
+        for name, measured_field, predicted_field, which in VIEW_ROWS:
             if measured_field not in view:
                 continue
             predicted_value = node.get(predicted_field, 0)
             note = None
-            if predicted_field == "peak_disk_bytes" and not at_steady_state(node_id):
-                note = "not at steady state"
-            elif predicted_value < NOISE_FLOOR * totals[predicted_field]:
+            if predicted_field == "disk_bytes":
+                note = disk_not_checked([node_id])
+            if note is None and predicted_field != "bytes_per_window" and (
+                    predicted_value < MIN_GATED_SHARE * predicted_totals[predicted_field]
+                    and view[measured_field] < MIN_GATED_SHARE * measured_totals[measured_field]):
                 note = "below 1% of the plan, not gated"
             row(f"view {node_id} {name}", view[measured_field], predicted_value,
-                bytes_ratio if uses_bytes_ratio else ratio, note)
-    measured_plan = measured.get("plan", {})
-    roles = usage.get("recommended_configuration", {})
+                ratios[which], note)
+    recommended_configuration = usage.get("recommended_configuration", {})
+
+    def role_cpu(role):
+        # Busy thread-seconds per second of a role is its CPU core-seconds
+        # per second: one busy thread occupies one core.
+        return recommended_configuration.get(role, {}).get(
+            "predicted_busy_thread_seconds_per_second", 0)
+
     plan_rows = [
-        ("memory B", "memory_bytes", usage.get("average_memory_bytes", 0), ratio),
-        ("peak memory B", "peak_memory_bytes", usage.get("peak_memory_bytes", 0), ratio),
-        ("disk peak B", "disk_bytes", usage.get("disk_bytes", 0), bytes_ratio),
+        ("memory B", "memory_bytes", usage.get("average_memory_bytes", 0), "time"),
+        ("peak memory B", "peak_memory_bytes", usage.get("peak_memory_bytes", 0), "time"),
+        ("disk peak B", "disk_bytes", usage.get("disk_bytes", 0), "bytes"),
         ("disk written B/s", "disk_written_bytes_per_second",
-         usage.get("disk_written_bytes_per_second", 0), bytes_ratio),
+         usage.get("disk_written_bytes_per_second", 0), "bytes"),
         ("disk read B/s", "disk_read_bytes_per_second",
-         usage.get("disk_read_bytes_per_second", 0), ratio),
-        ("ingest cpu", "ingest_cpu_core_seconds_per_second",
-         roles.get("ingest", {}).get("predicted_busy_thread_seconds_per_second", 0), ratio),
-        ("query cpu", "query_cpu_core_seconds_per_second",
-         roles.get("query", {}).get("predicted_busy_thread_seconds_per_second", 0), ratio),
+         usage.get("disk_read_bytes_per_second", 0), "time"),
+        ("ingest cpu", "ingest_cpu_core_seconds_per_second", role_cpu("ingest"), "time"),
+        ("query cpu", "query_cpu_core_seconds_per_second", role_cpu("query"), "time"),
     ]
-    stored_views = [node_id for node_id, node in per_node.items()
-                    if node.get("peak_disk_bytes", 0) > 0]
-    for name, field, predicted_value, row_ratio in plan_rows:
+    views_with_disk = [node_id for node_id, node in per_node.items()
+                       if node.get("disk_bytes", 0) > 0]
+    for name, field, predicted_value, which in plan_rows:
         if field not in measured_plan:
             continue
-        note = None
-        if field == "disk_bytes" and not all(map(at_steady_state, stored_views)):
-            note = "not at steady state"
-        row(f"plan {name}", measured_plan[field], predicted_value, row_ratio, note)
+        note = disk_not_checked(views_with_disk) if field == "disk_bytes" else None
+        row(f"plan {name}", measured_plan[field], predicted_value, ratios[which], note)
 
 
 def main():
@@ -220,7 +250,7 @@ def main():
     parser.add_argument("--planner", required=True)
     parser.add_argument("--cost-inputs", required=True)
     parser.add_argument("--ratio", type=float, default=1.5)
-    parser.add_argument("--bytes-ratio", type=float, default=1.25)
+    parser.add_argument("--bytes-ratio", type=float, default=BYTES_RATIO)
     parser.add_argument("--case", nargs=3, action="append", required=True,
                         metavar=("WORKLOAD", "PLAN", "MEASURED"))
     args = parser.parse_args()

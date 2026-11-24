@@ -9,80 +9,21 @@
 //! today's types: a field the design adds is refused when the JSON is
 //! loaded, or is missing from the report.
 
-use asap_planner::{
-    plan_installable, CostInputs, DeploymentCapabilities, FrontendInput, PlanningModels,
-    PlanningWorkload, UserInput,
-};
 use serde_json::{json, Value};
 
 use crate::lowest_mean_latency_common::{
-    cost_inputs, entry, every, number, over_m, usage_over_time,
+    assert_close, chain_table, cost_inputs, every, number, over_m, single_chain_plan,
+    usage_over_time,
 };
-
-/// Assert `actual` is within 1% of `expected`.
-fn assert_close(name: &str, actual: f64, expected: f64) {
-    assert!(
-        (actual - expected).abs() <= 0.01 * expected.abs().max(1e-9),
-        "{name}: {actual} is not close to {expected}"
-    );
-}
-
-/// The plan (as JSON) and its report for `workload` under `cost_inputs`,
-/// one chain and no wider levels or covers; Err when the cost inputs do
-/// not load or planning fails, as text.
-pub(crate) async fn single_chain_plan(
-    workload: &PlanningWorkload,
-    cost_inputs: &Value,
-) -> Result<(Value, Value), String> {
-    let cost_inputs: CostInputs = serde_json::from_value(cost_inputs.clone())
-        .map_err(|error| format!("cost inputs do not load: {error}"))?;
-    let capabilities = DeploymentCapabilities {
-        raw_data_retained: false,
-        excluded_candidates: serde_json::from_value(json!([
-            {"operator": "SummaryMergeWindows"},
-            {"operator": "TimeRangeCover"}
-        ]))
-        .unwrap(),
-        ..Default::default()
-    };
-    let models = PlanningModels::builtin()
-        .with_cost_inputs(&cost_inputs)
-        .with_deployment_capabilities(&capabilities);
-    let (plan, report) = plan_installable(UserInput::new(workload, FrontendInput::Promql, models))
-        .await
-        .map_err(|error| format!("planning failed: {error}"))?;
-    Ok((
-        serde_json::to_value(plan).unwrap(),
-        serde_json::to_value(report).unwrap(),
-    ))
-}
 
 /// The measured table: every node at 1 ns per unit, the chain and the
 /// merge of exact Max states.
-pub(crate) fn max_table() -> Vec<Value> {
-    vec![
-        entry("Scan", "ingestion_time", json!({"ns_per_unit": 1.0})),
-        entry(
-            "SummaryTumblingWindowChain",
-            "ingestion_time",
-            json!({"exact": "Max", "ns_per_unit": 1.0}),
-        ),
-        entry("TimeRange", "query_time", json!({"ns_per_unit": 1.0})),
-        entry(
-            "SummaryMerge",
-            "query_time",
-            json!({"exact": "Max", "ns_per_unit": 1.0}),
-        ),
-        entry(
-            "FinalizeExactAccumulator",
-            "query_time",
-            json!({"exact": "Max", "ns_per_unit": 1.0}),
-        ),
-    ]
+fn max_table() -> Vec<Value> {
+    chain_table(json!({}), vec![])
 }
 
 /// The plan's one chain node: its id, width and retention in ms.
-pub(crate) fn chain(plan: &Value) -> (u64, u64, u64) {
+fn chain(plan: &Value) -> (u64, u64, u64) {
     let node = plan["dag"]["nodes"]
         .as_array()
         .unwrap()
@@ -102,7 +43,7 @@ pub(crate) fn chain(plan: &Value) -> (u64, u64, u64) {
 }
 
 /// The report's entry for node `id`.
-pub(crate) fn report_node(report: &Value, id: u64) -> &Value {
+fn report_node(report: &Value, id: u64) -> &Value {
     report["predicted_usage"]["per_node"]
         .as_array()
         .unwrap()
@@ -112,7 +53,7 @@ pub(crate) fn report_node(report: &Value, id: u64) -> &Value {
 }
 
 /// Σ over the report's nodes of field `name`; panics when a node lacks it.
-pub(crate) fn sum_over_nodes(report: &Value, name: &str) -> f64 {
+fn sum_over_nodes(report: &Value, name: &str) -> f64 {
     report["predicted_usage"]["per_node"]
         .as_array()
         .unwrap()
@@ -145,7 +86,7 @@ async fn k1_the_report_lists_each_nodes_storage() {
     assert!(bytes_per_window > 0.0, "{node}");
     assert_close(
         "chain peak disk",
-        number(node, "peak_disk_bytes"),
+        number(node, "disk_bytes"),
         bytes_per_window * retention_ms.div_ceil(width_ms) as f64,
     );
     assert_close(
@@ -158,7 +99,7 @@ async fn k1_the_report_lists_each_nodes_storage() {
     let usage = &report["predicted_usage"];
     assert_close(
         "disk",
-        sum_over_nodes(&report, "peak_disk_bytes"),
+        sum_over_nodes(&report, "disk_bytes"),
         number(usage, "disk_bytes"),
     );
     assert_close(
@@ -189,7 +130,7 @@ async fn k2_a_report_without_storage_fields_still_loads() {
         "average_memory_bytes",
         "peak_memory_bytes",
         "bytes_per_window",
-        "peak_disk_bytes",
+        "disk_bytes",
         "disk_written_bytes_per_second",
         "disk_read_bytes_per_second",
     ];
