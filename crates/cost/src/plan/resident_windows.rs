@@ -11,9 +11,8 @@
 use crate::plan::kept_results::computed_range;
 use crate::AnswerCache;
 use asap_types::ir::operator::tumbling_window_chain::cover_windows;
-use std::collections::HashSet;
-
 use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
+use std::collections::HashSet;
 
 /// Which windows of a chain one read takes, at the time it reads.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -55,6 +54,16 @@ pub enum ReadTimes {
 }
 
 impl ReadTimes {
+    /// Requests per second: one per period of a query's grid, one per
+    /// window close of a refresh.
+    pub fn requests_per_second(&self) -> f64 {
+        let period_ms = match *self {
+            ReadTimes::Query { period_ms, .. } => period_ms,
+            ReadTimes::Refresh { width_ms } => width_ms,
+        };
+        1_000.0 / period_ms.max(1) as f64
+    }
+
     /// When a query-time reader reached by `entry`'s requests reads: on the
     /// query's evaluation grid, at each request the steps it computes (its
     /// range's, or with an `answer_cache` only its new ones, a fractional
@@ -387,16 +396,17 @@ pub fn reader_window_reads_per_second(
             .flat_map(|(first, last)| first..=last)
             .collect()
     };
-    const MOST_REQUESTS: u64 = 2_048;
+    const MAX_SAMPLED_REQUESTS: u64 = 2_048;
     let requests = (period / request_period_ms).max(1);
-    let stride = requests.div_ceil(MOST_REQUESTS);
-    // A time far from the epoch, so every read stays at positive times.
-    let base = (1_000 * period.max(reader.reads_back_ms().unwrap_or(0) + width as u64)) as i64
-        + phase_ms as i64;
-    let (mut read, mut cold, mut sampled) = (0u64, 0u64, 0u64);
-    let mut position = 0;
-    while position < requests {
-        let request = base + (position * request_period_ms) as i64;
+    let stride = requests.div_ceil(MAX_SAMPLED_REQUESTS);
+    // A request time far from the epoch, on the reader's grid, so every
+    // read stays at positive times.
+    let far_ms = 1_000 * period.max(reader.reads_back_ms().unwrap_or(0) + width as u64);
+    let start_ms = (far_ms.div_ceil(period) * period + phase_ms) as i64;
+    let (mut read, mut from_disk, mut sampled) = (0u64, 0u64, 0u64);
+    let mut request_index = 0;
+    while request_index < requests {
+        let request = start_ms + (request_index * request_period_ms) as i64;
         let idle_start = request - idle_ms as i64;
         let windows = request_windows(request);
         // Read by an earlier request within the idle time.
@@ -409,18 +419,18 @@ pub fn reader_window_reads_per_second(
         // Written within the idle time: ending in `(idle_start, request]`.
         let written = (idle_start.div_euclid(width) + 1)..=request.div_euclid(width);
         read += windows.len() as u64;
-        cold += windows
+        from_disk += windows
             .iter()
             .filter(|index| !written.contains(index) && !earlier.contains(index))
             .count() as u64;
         sampled += 1;
-        position += stride;
+        request_index += stride;
     }
-    let requests_per_second = 1_000.0 / request_period_ms as f64;
+    let requests_per_second = reader.times.requests_per_second();
     let per_request = |count: u64| count as f64 / sampled.max(1) as f64;
     Some(WindowReadsPerSecond {
-        windows_read: per_request(read) * requests_per_second,
-        windows_read_from_disk: per_request(cold) * requests_per_second,
+        windows_read_per_second: per_request(read) * requests_per_second,
+        windows_read_from_disk_per_second: per_request(from_disk) * requests_per_second,
     })
 }
 
@@ -429,9 +439,9 @@ pub fn reader_window_reads_per_second(
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowReadsPerSecond {
     /// Windows read per second, each request's once.
-    pub windows_read: f64,
+    pub windows_read_per_second: f64,
     /// Of them, read from disk: not in the cache when read.
-    pub windows_read_from_disk: f64,
+    pub windows_read_from_disk_per_second: f64,
 }
 
 /// The resident windows, mean and most, of a chain of `width_ms` windows

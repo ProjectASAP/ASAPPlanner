@@ -7,11 +7,11 @@
 //! output it answers) carries the windows its readers keep, so the most
 //! over the selected reads is what `plan_cost` charges the plan.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use asap_cost::plan::resident_windows::{
     reader_resident_windows, reader_window_reads_per_second, written_resident_windows, ChainReader,
-    ReadTimes, WindowRead,
+    ReadTimes, WindowRead, WindowReadsPerSecond,
 };
 use asap_cost::{AnswerCache, CachedViewWindows, ViewWindowCache};
 use asap_types::ir::properties::ExecutionTiming;
@@ -23,8 +23,8 @@ use asap_types::workload::QueryWorkloadEntry;
 use crate::retention::edge_readers_need;
 use crate::selectable::{Reader, SelectableExecutions};
 
-/// One read of a cached view's execution and the windows it keeps
-/// resident, mean and most.
+/// One read of a cached view's execution: the windows it keeps resident,
+/// mean and most, and what its readers read from disk.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ResidentRead {
     /// The execution read, by position in
@@ -36,9 +36,9 @@ pub(crate) struct ResidentRead {
     /// Bytes its readers read from disk per second: each reader's windows
     /// read while not in the cache, summed, as `plan_cost` charges them.
     pub(crate) bytes_read_from_disk_per_second: f64,
-    /// The most bytes one of its readers' requests reads from disk, per
-    /// run of the reading execution (a request's steps each one run).
-    pub(crate) bytes_read_from_disk_per_run: f64,
+    /// The most bytes one of its readers reads from disk per run of the
+    /// reading execution (a request's steps each one run).
+    pub(crate) most_bytes_read_from_disk_per_run: f64,
 }
 
 /// Each read of an execution of a view in `cached` (by candidate) under a
@@ -64,7 +64,12 @@ pub(crate) fn resident_reads(
     let executions = selectable.executions();
     let memo = &physical.logical_candidates.memo;
     let width_of = |v: PhysicalCandidateId| RefreshWindow::computed_from(physical, v);
-    let mut of_reader: HashMap<(u64, ChainReader), Option<(f64, u64)>> = HashMap::new();
+    // Per (width, reader): its resident windows and its reads per second.
+    #[allow(clippy::type_complexity)]
+    let mut of_reader: HashMap<
+        (u64, ChainReader),
+        (Option<(f64, u64)>, Option<WindowReadsPerSecond>),
+    > = HashMap::new();
     let mut reads = Vec::new();
     for (index, reader, need_ms) in selectable.reads_back(need_ms_per_edge) {
         let v = executions[index].candidate;
@@ -75,7 +80,8 @@ pub(crate) fn resident_reads(
         let retained = retained_ms_of_read(v, need_ms).div_ceil(width_ms).max(1);
         let (mut mean, mut most) = written_resident_windows(width_ms, retained, idle_ms);
         let bytes_per_window = windows.bytes_per_window as f64;
-        let (mut bytes_read_from_disk_per_second, mut bytes_read_from_disk_per_run) = (0.0, 0.0);
+        let (mut bytes_read_from_disk_per_second, mut most_bytes_read_from_disk_per_run) =
+            (0.0, 0.0);
         if let Reader::Edge(position) = reader {
             let edge = selectable.edges()[position];
             let physical_edge = physical.edge(edge.edge);
@@ -153,36 +159,37 @@ pub(crate) fn resident_reads(
                     .collect(),
             };
             // A reader read through several operators above the edge (a
-            // `TimeShift` and its `TimeRange`) reads its windows once.
-            let mut distinct_readers: Vec<ChainReader> = Vec::new();
+            // `TimeShift` and its `TimeRange`), or by several queries at the
+            // same times, reads its windows once.
+            let mut seen: HashSet<ChainReader> = HashSet::new();
             for chain_reader in chain_readers {
-                if !distinct_readers.contains(&chain_reader) {
-                    distinct_readers.push(chain_reader);
+                if !seen.insert(chain_reader.clone()) {
+                    continue;
                 }
-            }
-            for chain_reader in distinct_readers {
-                let resident = *of_reader
+                let (resident, window_reads) = *of_reader
                     .entry((width_ms, chain_reader.clone()))
                     .or_insert_with_key(|(width_ms, chain_reader)| {
-                        reader_resident_windows(*width_ms, idle_ms, chain_reader)
+                        (
+                            reader_resident_windows(*width_ms, idle_ms, chain_reader),
+                            reader_window_reads_per_second(*width_ms, idle_ms, chain_reader),
+                        )
                     });
                 let (reader_mean, reader_most) = resident.unwrap_or((retained as f64, retained));
                 mean = mean.max(reader_mean);
                 most = most.max(reader_most);
-                if let Some(reads) =
-                    reader_window_reads_per_second(width_ms, idle_ms, &chain_reader)
-                {
-                    let (requests_per_second, runs_per_request) = match chain_reader.times {
-                        ReadTimes::Query {
-                            period_ms, steps, ..
-                        } => (1_000.0 / period_ms.max(1) as f64, steps.max(1) as f64),
-                        ReadTimes::Refresh { width_ms } => (1_000.0 / width_ms.max(1) as f64, 1.0),
+                if let Some(reads) = window_reads {
+                    let runs_per_request = match chain_reader.times {
+                        ReadTimes::Query { steps, .. } => steps.max(1) as f64,
+                        ReadTimes::Refresh { .. } => 1.0,
                     };
-                    let bytes_per_second = reads.windows_read_from_disk * bytes_per_window;
+                    let bytes_per_second =
+                        reads.windows_read_from_disk_per_second * bytes_per_window;
                     bytes_read_from_disk_per_second += bytes_per_second;
-                    bytes_read_from_disk_per_run = f64::max(
-                        bytes_read_from_disk_per_run,
-                        bytes_per_second / requests_per_second / runs_per_request,
+                    most_bytes_read_from_disk_per_run = f64::max(
+                        most_bytes_read_from_disk_per_run,
+                        bytes_per_second
+                            / chain_reader.times.requests_per_second()
+                            / runs_per_request,
                     );
                 }
             }
@@ -193,7 +200,7 @@ pub(crate) fn resident_reads(
             mean_windows: mean,
             most_windows: most,
             bytes_read_from_disk_per_second,
-            bytes_read_from_disk_per_run,
+            most_bytes_read_from_disk_per_run,
         });
     }
     reads
