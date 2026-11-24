@@ -17,7 +17,7 @@
 //! a `OneEvaluation` read at most once by `None`), in
 //! [`super::upper_bound`] and [`super::dominance`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use good_lp::solvers::highs::highs;
@@ -802,10 +802,12 @@ pub(crate) fn selection_cost_per_second(
             *kept = kept.max(cost);
         }
     }
+    let selected_edges: HashSet<usize> = edges.iter().copied().collect();
+    let selected_outputs: HashSet<(QueryId, usize)> = answering.iter().copied().collect();
     for read in &costs.raw_data_reads {
         let selected = match read.reader {
-            Reader::Edge(position) => edges.contains(&position),
-            Reader::Output(query) => answering.contains(&(query, read.execution)),
+            Reader::Edge(position) => selected_edges.contains(&position),
+            Reader::Output(query) => selected_outputs.contains(&(query, read.execution)),
         };
         if selected {
             let kept = raw_data_on_disk.entry(&read.source).or_default();

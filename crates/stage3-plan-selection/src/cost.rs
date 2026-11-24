@@ -652,6 +652,9 @@ pub(crate) fn execution_quantities(
         .map(|(_, raw_data)| raw_data)
     };
     let mut not_linear: HashSet<PhysicalCandidateId> = HashSet::new();
+    // A not-linear scan's raw data at its largest retention: what a read
+    // is charged when costing it at its own need fails.
+    let mut raw_data_at_most_read: HashMap<PhysicalCandidateId, f64> = HashMap::new();
     for (&v, per_retained_second) in retention_cost_per_retained_second.iter_mut() {
         if !raw_data_source.contains_key(&v) {
             continue;
@@ -659,15 +662,26 @@ pub(crate) fn execution_quantities(
         let Some(Some(most_read_ms)) = most_read_ms.get(&v).copied() else {
             continue;
         };
-        let linear =
-            raw_data_at(v, most_read_ms, baseline_scan_read_of(v)).is_some_and(|raw_data| {
-                let charged = *per_retained_second * ms_to_seconds(most_read_ms);
-                *per_retained_second > 0.0
-                    && (raw_data - charged).abs() <= 1e-9 * raw_data.abs().max(charged.abs())
-            });
+        // The raw data's own slope at the largest retention (a scan kept
+        // across evaluations also holds its rows in memory, in `π_v` too):
+        // linear when it is that slope times the retention.
+        let delta_ms = newest_output_retention_ms[&v];
+        let scan_read_ms = baseline_scan_read_of(v);
+        // Left as costed when its raw data cannot be costed here.
+        let (Some(at_most), Some(longer)) = (
+            raw_data_at(v, most_read_ms, scan_read_ms),
+            raw_data_at(v, most_read_ms + delta_ms, scan_read_ms),
+        ) else {
+            continue;
+        };
+        let raw_data_per_retained_second = (longer - at_most) / ms_to_seconds(delta_ms);
+        let charged = raw_data_per_retained_second * ms_to_seconds(most_read_ms);
+        let linear = raw_data_per_retained_second > 0.0
+            && (at_most - charged).abs() <= 1e-9 * at_most.abs().max(charged.abs());
         if !linear {
-            *per_retained_second = 0.0;
+            *per_retained_second = (*per_retained_second - raw_data_per_retained_second).max(0.0);
             not_linear.insert(v);
+            raw_data_at_most_read.insert(v, at_most);
         }
     }
     let mut raw_data_reads = Vec::new();
@@ -676,12 +690,17 @@ pub(crate) fn execution_quantities(
         let (true, Some(need_ms)) = (not_linear.contains(&v), need_ms) else {
             continue;
         };
+        // What the reader reads in one run: an edge's consumer what it
+        // reads back; a query output reads the scan's own rows, nothing
+        // back (`read_back_ms` of a root).
         let scan_read_ms = match reader {
             Reader::Edge(position) => scan_read_ms_per_edge[position].flatten(),
-            Reader::Output(_) => baseline_scan_read_of(v),
+            Reader::Output(_) => Some(0),
         };
         let retention_ms = need_ms.max(newest_output_retention_ms[&v]);
-        if let Some(raw_data_kept) = raw_data_at(v, retention_ms, scan_read_ms) {
+        if let Some(raw_data_kept) =
+            raw_data_at(v, retention_ms, scan_read_ms).or(raw_data_at_most_read.get(&v).copied())
+        {
             raw_data_reads.push(RawDataRead {
                 execution,
                 reader,
