@@ -861,7 +861,11 @@ pub fn partial_copy_merge_ms(
     .map_or_else(
         || {
             // A partial copy merges into a state of the same window.
-            let state_bytes = state_bytes_per_row(usage.output, &node.output_schema);
+            let state_bytes = state_bytes_per_row(
+                usage.output,
+                &node.output_schema,
+                settings.data_plane_execution.stored_row_bytes_beside_state,
+            );
             merge_terms_per_state(family, state_bytes, state_bytes, None, 1).operations()
                 * settings.resource_speed.ms_per_cpu_op
                 * settings.frozen_calibration_factor.unwrap_or(1.0)

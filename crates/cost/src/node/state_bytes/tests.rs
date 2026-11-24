@@ -868,10 +868,10 @@ fn priced_bytes_agree_with_the_executor() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A summary state's row holds its labels, its window's time and its
-/// series identity beside the state; the state's own bytes, which a merge
-/// is costed by, leave them out. A stored per-series Sum carrying `job`:
-/// 144 bytes per row, 56 of them its state.
+/// A per-series state's row holds its window's time and its series key
+/// beside the state (72 bytes by default), and no label text; the state's
+/// own bytes, which a merge is costed by, leave them out. A stored
+/// per-series Sum carrying `job`: 128 bytes per row, 56 of them its state.
 #[test]
 fn state_bytes_per_row_leave_out_what_the_row_holds_beside_its_state() {
     use asap_types::ir::schema::{Field, PROMQL_SERIES_IDENTITY};
@@ -890,12 +890,12 @@ fn state_bytes_per_row_leave_out_what_the_row_holds_beside_its_state() {
             false,
         ),
     ]);
-    assert_eq!(state_row_bytes_beside_state(&schema), 88);
+    assert_eq!(state_row_bytes_beside_state(&schema, 72), 72);
     let edge = EdgeStatistics {
         rows: 1_000,
-        bytes: 144_000,
+        bytes: 128_000,
     };
-    assert_eq!(state_bytes_per_row(edge, &schema), 56);
+    assert_eq!(state_bytes_per_row(edge, &schema, 72), 56);
 }
 
 /// `n` values of series `series` with a wide floor: a lognormal of median
@@ -1255,4 +1255,22 @@ fn stored_ddsketch_prices_never_fall_below_what_the_executor_holds() {
         }
     }
     assert!(lowest.0 >= 0.99, "lowest {:.3}: {}", lowest.0, lowest.1);
+}
+
+/// A grouped state's row (no series identity) keeps its window's time and
+/// its group keys beside the state, whatever a per-series row holds: a Sum
+/// grouped by `job` holds 8 + 16 = 24 bytes beside its state.
+#[test]
+fn a_grouped_state_row_keeps_its_group_keys() {
+    use asap_types::summary_type::{ExactKind, ExactParams};
+    let schema = Schema::new(vec![
+        Field::new("ts", FieldDataType::Plain(DataType::Int64), false),
+        Field::new(
+            "state",
+            FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            false,
+        ),
+        Field::new("job", FieldDataType::Plain(DataType::Utf8), false),
+    ]);
+    assert_eq!(state_row_bytes_beside_state(&schema, 4), 24);
 }
