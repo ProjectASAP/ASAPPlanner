@@ -337,3 +337,106 @@ async fn f2_lowest_mean_latency_counts_file_slack_in_the_disk_limit() {
         bytes_per_window * (retention_ms + 60_000 + 900_000).div_ceil(width_ms) as f64,
     );
 }
+
+/// The plan (as JSON) and report of `query` every `interval_ms` over
+/// `series` series of `m`, one chain, cost model 1, with
+/// `data_plane_execution`.
+async fn one_chain(query: &str, interval_ms: u32, series: u64, data_plane: Value) -> (Value, Value) {
+    let workload = over_m(vec![every(query, interval_ms, None)], series);
+    let inputs = cost_inputs(usage_over_time(), max_table(), json!({}), data_plane);
+    single_chain_plan(&workload, &inputs)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// D1. A window read while not in the cache is read from disk: its bytes
+/// are scanned bytes, charged at the scanned-byte cost, and they add their
+/// read time (`ms_per_scanned_byte`, 1e-7 by default) to the query.
+/// `max_over_time(m[1h])` every 5 min reads its 12 windows of 5 min; with
+/// a 60 s idle time none of them is in the cache at the next read, so every
+/// read takes 12 windows from disk: 12 × bytes per window every 300 s.
+#[tokio::test]
+async fn d1_cold_reads_are_scanned_bytes_and_query_time() {
+    let query = "max_over_time(m[1h])";
+    let (_, uncached) = one_chain(query, 300_000, 1000, json!({})).await;
+    let (plan, cached) = one_chain(
+        query,
+        300_000,
+        1000,
+        json!({"view_window_cache": {"idle_ms": 60_000}}),
+    )
+    .await;
+    let (_, width_ms, retention_ms) = chain(&plan);
+    assert_eq!(width_ms, 300_000);
+    let bytes_per_window =
+        number(&cached["predicted_usage"], "disk_bytes") / retention_ms.div_ceil(width_ms) as f64;
+    let cold_bytes_per_read = 12.0 * bytes_per_window;
+    assert_close(
+        "scanned bytes per second",
+        number(&cached["predicted_usage"], "scanned_bytes_per_second")
+            - number(&uncached["predicted_usage"], "scanned_bytes_per_second"),
+        cold_bytes_per_read / 300.0,
+    );
+    let query_ms = |report: &Value| number(&report["predicted_usage"]["per_query"][0], "query_execution_ms");
+    assert_close(
+        "query time",
+        query_ms(&cached) - query_ms(&uncached),
+        cold_bytes_per_read * 1e-7,
+    );
+}
+
+/// D2 (guard). A range read every width it slides by reads only windows it
+/// read or wrote within the idle time: `max_over_time(m[3m])` every 10 s
+/// under a 60 s idle time reads nothing from disk at steady state.
+#[tokio::test]
+async fn d2_a_range_read_every_window_reads_nothing_cold() {
+    let query = "max_over_time(m[3m])";
+    let (_, uncached) = one_chain(query, 10_000, 1000, json!({})).await;
+    let (_, cached) = one_chain(
+        query,
+        10_000,
+        1000,
+        json!({"view_window_cache": {"idle_ms": 60_000}}),
+    )
+    .await;
+    assert_eq!(
+        number(&cached["predicted_usage"], "scanned_bytes_per_second"),
+        number(&uncached["predicted_usage"], "scanned_bytes_per_second")
+    );
+}
+
+/// D3. A cache bounded below the windows its readers keep resident holds
+/// only its bound, and the reads it can no longer serve are cold reads.
+/// The chain of `max_over_time(m[5m] offset 1h)` every 15 s keeps its
+/// last minute's reads and its newest windows resident (C11); a bound of
+/// half of that memory lowers the plan's average memory and adds scanned
+/// bytes.
+#[tokio::test]
+async fn d3_a_bounded_cache_holds_its_bound_and_reads_the_rest_cold() {
+    let query = "max_over_time(m[5m] offset 1h)";
+    let (_, unbounded) = one_chain(
+        query,
+        15_000,
+        1000,
+        json!({"view_window_cache": {"idle_ms": 60_000}}),
+    )
+    .await;
+    let resident = number(&unbounded["predicted_usage"], "average_memory_bytes");
+    let bound = (resident / 2.0) as u64;
+    let (_, bounded) = one_chain(
+        query,
+        15_000,
+        1000,
+        json!({"view_window_cache": {"idle_ms": 60_000, "max_bytes": bound}}),
+    )
+    .await;
+    assert!(
+        number(&bounded["predicted_usage"], "average_memory_bytes") < resident,
+        "bounded memory {bounded} against {resident}"
+    );
+    assert!(
+        number(&bounded["predicted_usage"], "scanned_bytes_per_second")
+            > number(&unbounded["predicted_usage"], "scanned_bytes_per_second"),
+        "no cold reads past the bound"
+    );
+}
