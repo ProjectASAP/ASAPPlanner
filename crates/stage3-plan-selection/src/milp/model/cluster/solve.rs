@@ -213,10 +213,25 @@ pub(super) fn quantity_expression(
                 .copied()
                 .unwrap_or(0.0);
             rows.push(constraint!(r >= share * h));
-        } else if let Some(&kept_bytes) = costs.unbounded_raw_data_on_disk_cost_per_second.get(v) {
+        }
+        if let Some(&kept_bytes) = costs.unbounded_raw_data_on_disk_cost_per_second.get(v) {
             for &index in executions_of.get(v).into_iter().flatten() {
                 rows.push(constraint!(r >= kept_bytes * variables.x[index]));
             }
+        }
+    }
+    for (&position, &y) in &variables.y {
+        if let Some(kept_bytes) = costs
+            .raw_data_on_disk_cost_per_second_per_edge
+            .get(position)
+            .copied()
+            .flatten()
+        {
+            let scan = selectable.executions()[selectable.edges()[position].producer].candidate;
+            let r = *most_of_source
+                .entry(format!("{:?}", costs.raw_data_source[&scan]))
+                .or_insert_with(|| problem.add(variable().min(0)));
+            rows.push(constraint!(r >= kept_bytes * y));
         }
     }
     for r in most_of_source.into_values() {

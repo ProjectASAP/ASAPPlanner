@@ -755,8 +755,9 @@ fn the_cost_model_chooses_how_candidates_are_compared() {
 /// dollars per second: the selected plan's cost is its usage at the page's
 /// prices, $1.1244e-5 per vCPU-second (1.1244e-14 per CPU operation of
 /// 1 ns, 1.1244e-15 per scanned byte) and $1.235e-6 per GiB-second of
-/// memory. E.g. 1.17e8 CPU operations, 1.07e7 scanned bytes and 2.17e7
-/// average bytes held per second cost $1.3525e-6/s.
+/// memory, $3.08e-8 per GiB-second of disk. E.g. 1.17e8 CPU operations,
+/// 1.07e7 scanned bytes and 2.17e7 average bytes held per second cost
+/// $1.3525e-6/s, plus the raw data kept on disk.
 #[test]
 fn aws_fargate_prices_example_4_in_dollars() {
     let fargate = cost_inputs(&aws_fargate());
@@ -775,7 +776,8 @@ fn aws_fargate_prices_example_4_in_dollars() {
     let usage = |field: &str| cost["usage"][field].as_f64().unwrap();
     let at_page_prices = usage("cpu_ops_per_second") * 1.1244e-14
         + usage("scanned_bytes_per_second") * 1.1244e-15
-        + usage("average_memory_bytes") * 1.235e-6 / (1u64 << 30) as f64;
+        + usage("average_memory_bytes") * 1.235e-6 / (1u64 << 30) as f64
+        + usage("disk_bytes") * 3.08e-8 / (1u64 << 30) as f64;
     assert!(cost_per_second > 0.0, "{cost}");
     // 1e-9: the document's numbers are rounded to 12 significant digits.
     assert!(

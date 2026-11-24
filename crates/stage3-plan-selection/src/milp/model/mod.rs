@@ -305,8 +305,11 @@ fn use_constraints(
 /// The raw data of each source is kept on disk once, for the selected scan
 /// that keeps the most: $r_s \ge \pi_v h_v$ for each query-time `Scan` $v$
 /// of source $s$ with $h_v$, and $r_s \ge d_v x_{\kappa,v}$ for each kept
-/// execution of one without, $d_v$ its cost per second of the raw data it
-/// keeps retaining everything: each row as ($r_s$, its coefficient, the
+/// execution of one whose raw data does not grow with retention (no
+/// $h_v$, or a materialized one with $\pi_v = 0$), $d_v$ its cost per
+/// second of the raw data it keeps whatever its retention, and $r_s \ge
+/// d_e y_e$ for each edge out of one with $\pi_v = 0$ that is not
+/// materialized, $d_e$ the raw data its one reader reads: each row as ($r_s$, its coefficient, the
 /// variable it multiplies), unscaled.
 fn raw_data_disk_rows(
     inputs: &SelectionInputs<'_>,
@@ -330,10 +333,27 @@ fn raw_data_disk_rows(
         let r = variables.raw_data_on_disk[source];
         if let Some(&h) = variables.h.get(v) {
             rows.push((r, costs.retention_cost_per_retained_second[v], h));
-        } else if let Some(&d) = costs.unbounded_raw_data_on_disk_cost_per_second.get(v) {
+        }
+        if let Some(&d) = costs.unbounded_raw_data_on_disk_cost_per_second.get(v) {
             for &index in executions_of.get(v).into_iter().flatten() {
                 rows.push((r, d, variables.x[index]));
             }
+        }
+    }
+    for (&position, &y) in &variables.y {
+        if let Some(d) = costs
+            .raw_data_on_disk_cost_per_second_per_edge
+            .get(position)
+            .copied()
+            .flatten()
+        {
+            let scan = inputs.selectable.executions()[inputs.selectable.edges()[position].producer]
+                .candidate;
+            rows.push((
+                variables.raw_data_on_disk[&costs.raw_data_source[&scan]],
+                d,
+                y,
+            ));
         }
     }
     rows
@@ -769,6 +789,21 @@ pub(crate) fn selection_cost_per_second(
             costs.unbounded_raw_data_on_disk_cost_per_second.get(&v),
         ) {
             let kept = raw_data_on_disk.entry(source).or_default();
+            *kept = kept.max(cost);
+        }
+    }
+    for &position in edges {
+        if let Some(cost) = costs
+            .raw_data_on_disk_cost_per_second_per_edge
+            .get(position)
+            .copied()
+            .flatten()
+        {
+            let scan = inputs.selectable.executions()[inputs.selectable.edges()[position].producer]
+                .candidate;
+            let kept = raw_data_on_disk
+                .entry(&costs.raw_data_source[&scan])
+                .or_default();
             *kept = kept.max(cost);
         }
     }

@@ -344,7 +344,7 @@ fn a_kll_k_range_moves_the_quantile_to_a_larger_k() {
             1404,
             0.057933,
         ),
-        (Some(kll_at_most(2862)), KLL_PLAN.as_slice(), 2863, 0.062491),
+        (Some(kll_at_most(2862)), KLL_PLAN.as_slice(), 2863, 0.066091),
     ];
     for (exclusion, plan_operators, k, cost) in cases {
         let run = planned(&workload, &excluding(exclusion.iter().cloned().collect()));
@@ -384,7 +384,7 @@ fn excluding_every_kll_size_selects_a_plan_without_kll() {
                 if measures == &[AggIntent::Quantile { col: None, q: 0.99 }]
         ));
         assert_eq!(builds(plan), vec![]);
-        assert_cost(selection, 0.072584);
+        assert_cost(selection, 0.076184);
         assert!(!some_node_matches(plan, &exclusion));
     }
 }
@@ -405,7 +405,7 @@ fn the_stored_arm_exclusions_select_an_ingestion_time_chain() {
             (OperatorKind::Aggregate, QueryTime),
         ]
     );
-    assert_cost(selection, 0.060534);
+    assert_cost(selection, 0.090534);
 
     let stored = planned(&workload, &excluding(stored_arm()));
     let (plan, selection) = selected(&stored);
@@ -446,7 +446,7 @@ fn an_excluded_candidate_is_never_selected_even_when_it_is_the_only_feasible_one
     let unrestricted = planned(&workload, &DeploymentCapabilities::default());
     let (plan, selection) = selected(&unrestricted);
     assert_eq!(operators(plan)[0], (OperatorKind::Scan, QueryTime));
-    assert_cost(selection, 0.060534);
+    assert_cost(selection, 0.090534);
 
     let no_scan = planned(
         &workload,
@@ -550,8 +550,8 @@ fn a_target_without_mergeable_rate_state_builds_rate_within_one_evaluation() {
         ]
     };
     let cases = [
-        ("rate", "5m", ExactKind::Counter, 0.274034, 0.367670),
-        ("increase", "1h", ExactKind::Counter, 1.374738, 3.953712),
+        ("rate", "5m", ExactKind::Counter, 0.274034, 0.397670),
+        ("increase", "1h", ExactKind::Counter, 1.374738, 4.313712),
     ];
     for (function, range, kind, unrestricted_cost, restricted_cost) in cases {
         let workload = counter_workload(function, range);
@@ -632,7 +632,7 @@ fn excluding_rate_state_alone_rebuilds_it_as_an_aggregate_unless_its_measure_is_
         Operator::NonASAP(NonASAPOp::Aggregate { reduction: Reduction::PerEntity, measures, .. })
             if measures == &[AggIntent::Rate]
     ));
-    assert_cost(selection, 0.447669);
+    assert_cost(selection, 0.477669);
     assert_eq!(
         pruned_by(&state_only, ExclusionSource::ExcludedCandidate { index: 0 }),
         5
@@ -685,7 +685,7 @@ fn counter_semantics_a_target_lacks_rule_out_the_functions_that_need_them() {
         builds(plan),
         vec![(FieldDataType::exact(ExactKind::IRate), None)]
     );
-    assert_cost(selection, 0.367670);
+    assert_cost(selection, 0.397670);
     assert_eq!(
         pruned_by(
             &irate_without_extrapolation,
