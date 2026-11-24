@@ -785,7 +785,7 @@ asap-executor --test executor`.
 | E6 | `decode_holds_one_series_per_thread` (executor) | Peak held rows during a 1 h read of 1,000 series ≤ one series' rows × query threads | As E1 |
 | E7 | `sealed_window_bytes_are_the_portable_format` (executor) | With a codec injected through `RunContext::with_sample_block_codec`, a sealed state's persisted bytes equal that codec's sealed bytes and restore to the same samples | As E4 |
 | I1 | `installable_plan_round_trips_compressed_samples` (planner) | An `InstallablePlan` with the chain and both decode modes round-trips JSON and compiles on the executor | No operator |
-| D1 | `compressed_samples_plan_snapshot` (devtools) | The typical-dashboard-shaped Stage 3 plan text under the S1 limit matches a reviewed snapshot; both quantiles answered from decoded samples | No candidate; snapshot written with the implementation |
+| D1 | `compressed_samples_plan_snapshot` (devtools) | The typical-dashboard-shaped workload under the S1 limit selects a plan whose quantiles are answered from decoded samples, and the selection MILP's size (variables and constraints) matches a reviewed snapshot; the plan text is not compared, since the solve stops anywhere within its 1 % gap | No candidate; snapshot written with the implementation |
 
 E1 and E2 compare against the raw-row plan on the same data, and K2's bytes
 come from a separate reference implementation, so no expected value is computed
