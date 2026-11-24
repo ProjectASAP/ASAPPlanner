@@ -230,8 +230,9 @@ pub enum ClusterObjective {
 }
 
 /// How the deployment's data plane runs work: its threads, the lateness it
-/// allows before closing a window, and the utilisation its threads may
-/// run at. Latency, the precompute load and the recommended thread counts
+/// allows before closing a window, the utilisation its threads may run
+/// at, and how it stores views (its window cache and files, the bytes a
+/// per-series state's row holds beside its state). Latency, the precompute load and the recommended thread counts
 /// read it, under every cost model; only cost model 3's
 /// `lowest_mean_latency` selects with it. In JSON an object with these
 /// fields; an omitted field takes its default.
@@ -279,7 +280,18 @@ pub struct DataPlaneExecution {
     /// so a range request computes only the steps it has not answered;
     /// `None` (default): no answer is kept and every step is computed.
     pub answer_cache: Option<AnswerCache>,
+    /// Bytes a stored per-series state's row holds beside its state: its
+    /// window's time and its series key, no label text (a series' labels
+    /// are derived from its identity). Default 72: an 8-byte window time
+    /// and a 64-byte series key (a serialized label set, e.g.
+    /// `{"instance":"host-17:9100","job":"api","region":"r1"}`, about 55
+    /// bytes, and a 4-byte offset, rounded up; the data workload declares
+    /// no label lengths).
+    pub stored_row_bytes_beside_state: u64,
 }
+
+/// The default [`DataPlaneExecution::stored_row_bytes_beside_state`].
+const DEFAULT_STORED_ROW_BYTES_BESIDE_STATE: u64 = 72;
 
 /// Query-time results kept after their evaluation time
 /// (`docs/design_docs/proposals/cost-terms-from-calibration.md`, section
@@ -350,6 +362,7 @@ impl Default for DataPlaneExecution {
             view_window_cache: None,
             kept_query_time_results: None,
             answer_cache: None,
+            stored_row_bytes_beside_state: DEFAULT_STORED_ROW_BYTES_BESIDE_STATE,
         }
     }
 }

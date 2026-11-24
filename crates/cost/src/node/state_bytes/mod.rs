@@ -25,40 +25,58 @@ fn column_bytes(field: &Field) -> u64 {
     }
 }
 
-/// Bytes a summary state's output row holds beside its state: its labels
-/// and its window's time, each at [`column_bytes`] except the series
-/// identity, which a state's row holds its own copy of, at
-/// `SERIES_IDENTITY_BYTES`. Example: a stored per-series Sum carrying
-/// `job` holds its window time, `job` and the series identity: 8 + 16 + 64
-/// = 88 bytes beside its 24-byte sealed state, 112 in all.
-pub(crate) fn state_row_bytes_beside_state(schema: &Schema) -> u64 {
-    schema
-        .fields
-        .iter()
-        .map(|field| match &field.dtype {
-            FieldDataType::Sketch(..) | FieldDataType::ExactAggregate(..) => 0,
-            FieldDataType::Plain(DataType::Utf8) if field.name == PROMQL_SERIES_IDENTITY => {
-                SERIES_IDENTITY_BYTES
-            }
-            _ => column_bytes(field),
+/// Bytes a summary state's output row holds beside its state. A
+/// per-series row (one with the series identity) holds
+/// [`DataPlaneExecution::stored_row_bytes_beside_state`](crate::DataPlaneExecution)
+/// (its window's time and its series key) and no label text, its labels
+/// being derived from the identity; a plain column beside them other than
+/// the 8-byte window time (a value) is counted at [`column_bytes`]. Any
+/// other row holds its window's time and its group keys, each at
+/// [`column_bytes`]. Example: a per-series Sum carrying `job` holds 72
+/// bytes beside its 24-byte sealed state (at the default), 96 in all; a
+/// Sum grouped by `job` holds 8 + 16 = 24.
+pub(crate) fn state_row_bytes_beside_state(
+    schema: &Schema,
+    stored_row_bytes_beside_state: u64,
+) -> u64 {
+    let not_state = || {
+        schema.fields.iter().filter(|field| {
+            !matches!(
+                field.dtype,
+                FieldDataType::Sketch(..) | FieldDataType::ExactAggregate(..)
+            )
         })
-        .sum()
+    };
+    if !not_state().any(|field| field.name == PROMQL_SERIES_IDENTITY) {
+        return not_state().map(column_bytes).sum();
+    }
+    // Text columns are the identity and labels derived from it; the
+    // window time is in `stored_row_bytes_beside_state`.
+    let other_plain_bytes: u64 = not_state()
+        .filter(|field| field.dtype != FieldDataType::Plain(DataType::Utf8))
+        .map(column_bytes)
+        .sum();
+    stored_row_bytes_beside_state + other_plain_bytes.saturating_sub(WINDOW_TIME_BYTES)
 }
+
+/// Bytes of a state row's window time, a timestamp at [`column_bytes`].
+const WINDOW_TIME_BYTES: u64 = 8;
 
 /// Bytes of the state one row of `edge` holds: its bytes per row without
 /// what the row holds beside its state ([`state_row_bytes_beside_state`] of
 /// the producer's `schema`). Example: 1,000 rows of stored per-series Sums
-/// carrying `job`, 112,000 bytes, hold 112 − 88 = 24 bytes of state each.
-pub(crate) fn state_bytes_per_row(edge: EdgeStatistics, schema: &Schema) -> u64 {
+/// carrying `job`, 96,000 bytes, hold 96 − 72 = 24 bytes of state each.
+pub(crate) fn state_bytes_per_row(
+    edge: EdgeStatistics,
+    schema: &Schema,
+    stored_row_bytes_beside_state: u64,
+) -> u64 {
     edge.bytes_per_row()
-        .saturating_sub(state_row_bytes_beside_state(schema))
+        .saturating_sub(state_row_bytes_beside_state(
+            schema,
+            stored_row_bytes_beside_state,
+        ))
 }
-
-/// Bytes of one series identity in a state's row: its serialized label
-/// set, e.g. `{"instance":"host-17:9100","job":"api","region":"r1"}`
-/// (about 55 bytes), and the column's 4-byte offset, rounded up. An
-/// assumption: the data workload declares no label lengths.
-const SERIES_IDENTITY_BYTES: u64 = 64;
 
 /// Exact state that keeps every value or item of its group, so grows with
 /// the data; other exact accumulators are fixed-size.

@@ -180,3 +180,64 @@ async fn p1_the_demo_inputs_plan_under_lowest_mean_latency() {
         .unwrap_or_else(|error| panic!("{error}"));
     assert!(number(&report["predicted_usage"], "disk_bytes") <= 101_456_000_000.0);
 }
+
+/// The plan's disk bytes and its chain (id, width, retention) for
+/// `query` every 10 s over 1,000 series of `m`, one chain under a window
+/// cache (so its retained windows are its disk), with
+/// `data_plane_execution` fields beside the cache.
+async fn chain_disk(
+    query: &str,
+    extra_data_plane: Value,
+) -> Result<(f64, (u64, u64, u64)), String> {
+    let workload = over_m(vec![every(query, 10_000, None)], 1000);
+    let mut data_plane = json!({"view_window_cache": {"idle_ms": 60_000}});
+    for (key, value) in extra_data_plane.as_object().unwrap() {
+        data_plane[key] = value.clone();
+    }
+    let inputs = cost_inputs(usage_over_time(), max_table(), json!({}), data_plane);
+    let (plan, report) = single_chain_plan(&workload, &inputs).await?;
+    Ok((
+        number(&report["predicted_usage"], "disk_bytes"),
+        chain(&plan),
+    ))
+}
+
+/// R1. A stored per-series row holds its series key and its state, not the
+/// text of the labels its readers read: the labels are derived from the
+/// series identity. `topk by (job) (5, max_over_time(m[5m]))` keeps a
+/// per-series chain carrying `job`; `topk(5, max_over_time(m[5m]))` one
+/// carrying no label. Both keep the same bytes on disk.
+#[tokio::test]
+async fn r1_a_stored_per_series_row_holds_no_label_text() {
+    let (without_label, chain_without) = chain_disk("topk(5, max_over_time(m[5m]))", json!({}))
+        .await
+        .unwrap();
+    let (with_label, chain_with) = chain_disk("topk by (job) (5, max_over_time(m[5m]))", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        (chain_without.1, chain_without.2),
+        (chain_with.1, chain_with.2),
+        "the same width and retention"
+    );
+    assert_close("disk with a carried label", with_label, without_label);
+}
+
+/// R2. The bytes a stored row holds beside its state are a deployment
+/// input, `stored_row_bytes_beside_state` (default 72: an 8-byte window
+/// time and a 64-byte series key). At 4 bytes, each of the chain's 1,000
+/// rows per retained window holds 68 bytes less.
+#[tokio::test]
+async fn r2_stored_row_bytes_beside_state_is_a_deployment_input() {
+    let query = "topk(5, max_over_time(m[5m]))";
+    let (default_disk, (_, width_ms, retention_ms)) = chain_disk(query, json!({})).await.unwrap();
+    let (four_bytes_disk, _) = chain_disk(query, json!({"stored_row_bytes_beside_state": 4}))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let retained_windows = retention_ms.div_ceil(width_ms) as f64;
+    assert_close(
+        "disk at 4 bytes beside each state",
+        four_bytes_disk,
+        default_disk - 68.0 * 1000.0 * retained_windows,
+    );
+}

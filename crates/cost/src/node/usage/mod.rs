@@ -664,6 +664,8 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     data: &DataWorkload,
     settings: &'a CostInputs,
 ) -> Result<(NodeResourceUsageAndCost<'a>, NodeCostTerms), AnalyticalCostError> {
+    // What a per-series state's row holds beside its state.
+    let series_row_bytes_beside_state = settings.data_plane_execution.stored_row_bytes_beside_state;
     // A query-time computation over raw rows short of their range is not
     // offered.
     if let Some(short) = query_time_computation_short_of_source_rows(node, producers) {
@@ -1001,7 +1003,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // The bytes of each summary state its first input holds.
     let input_state_bytes = || {
         producers.first().map_or(0, |producer| {
-            state_bytes_per_row(producer.output, producer.output_schema)
+            state_bytes_per_row(
+                producer.output,
+                producer.output_schema,
+                series_row_bytes_beside_state,
+            )
         })
     };
     // The magnitude range a summary built here over `input_rows` of
@@ -1666,14 +1672,21 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                     (NonASAPOp::Filter { .. } | NonASAPOp::Project { .. }, Some(producer))
                         if outputs_states(&node.output_schema) =>
                     {
-                        let state_bytes =
-                            state_bytes_per_row(producer.output, producer.output_schema);
+                        let state_bytes = state_bytes_per_row(
+                            producer.output,
+                            producer.output_schema,
+                            series_row_bytes_beside_state,
+                        );
                         EdgeStatistics {
                             rows: input.rows,
                             bytes: input
                                 .rows
                                 .checked_mul(
-                                    state_bytes + state_row_bytes_beside_state(&node.output_schema),
+                                    state_bytes
+                                        + state_row_bytes_beside_state(
+                                            &node.output_schema,
+                                            series_row_bytes_beside_state,
+                                        ),
                                 )
                                 .ok_or(AnalyticalCostError::Overflow)?,
                         }
@@ -1735,7 +1748,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             open_output_bytes = Some(
                 group_count
                     .checked_mul(
-                        open_state_bytes + state_row_bytes_beside_state(&node.output_schema),
+                        open_state_bytes
+                            + state_row_bytes_beside_state(
+                                &node.output_schema,
+                                series_row_bytes_beside_state,
+                            ),
                     )
                     .ok_or(AnalyticalCostError::Overflow)?,
             );
@@ -1744,7 +1761,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
-                    .checked_mul(state_bytes + state_row_bytes_beside_state(&node.output_schema))
+                    .checked_mul(
+                        state_bytes
+                            + state_row_bytes_beside_state(
+                                &node.output_schema,
+                                series_row_bytes_beside_state,
+                            ),
+                    )
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             let group_visits = visits(group_count);
@@ -1812,7 +1835,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             open_output_bytes = Some(
                 group_count
                     .checked_mul(
-                        open_state_bytes + state_row_bytes_beside_state(&node.output_schema),
+                        open_state_bytes
+                            + state_row_bytes_beside_state(
+                                &node.output_schema,
+                                series_row_bytes_beside_state,
+                            ),
                     )
                     .ok_or(AnalyticalCostError::Overflow)?,
             );
@@ -1848,7 +1875,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
-                    .checked_mul(state_bytes + state_row_bytes_beside_state(&node.output_schema))
+                    .checked_mul(
+                        state_bytes
+                            + state_row_bytes_beside_state(
+                                &node.output_schema,
+                                series_row_bytes_beside_state,
+                            ),
+                    )
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             (
@@ -1908,7 +1941,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 rows
             });
             built_state_input_rows = merged_input_rows;
-            let input_state_bytes = state_bytes_per_row(narrower.output, narrower.output_schema);
+            let input_state_bytes = state_bytes_per_row(
+                narrower.output,
+                narrower.output_schema,
+                series_row_bytes_beside_state,
+            );
             let merged_state_bytes = match (family, merged_input_rows) {
                 (StateFamily::Sketch(params), Some(rows)) => sketch_state_bytes(params, rows),
                 _ => input_state_bytes,
@@ -1932,7 +1969,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 rows: group_count,
                 bytes: group_count
                     .checked_mul(
-                        merged_state_bytes + state_row_bytes_beside_state(&node.output_schema),
+                        merged_state_bytes
+                            + state_row_bytes_beside_state(
+                                &node.output_schema,
+                                series_row_bytes_beside_state,
+                            ),
                     )
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
@@ -1975,7 +2016,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             // read through an operator that does not keep each row's
             // window.
             let input_state_bytes = |producer: &ProducerOutput<'_>| {
-                state_bytes_per_row(producer.output, producer.output_schema)
+                state_bytes_per_row(
+                    producer.output,
+                    producer.output_schema,
+                    series_row_bytes_beside_state,
+                )
             };
             // Each input's states per group, every one folding its rows.
             let merged_input_rows = StateInputRows::merged(producers.iter().map(|producer| {
@@ -2024,9 +2069,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             };
             let out = EdgeStatistics {
                 rows: group_count,
-                bytes: (merged_state_bytes + state_row_bytes_beside_state(&node.output_schema))
-                    .checked_mul(group_count)
-                    .ok_or(AnalyticalCostError::Overflow)?,
+                bytes: (merged_state_bytes
+                    + state_row_bytes_beside_state(
+                        &node.output_schema,
+                        series_row_bytes_beside_state,
+                    ))
+                .checked_mul(group_count)
+                .ok_or(AnalyticalCostError::Overflow)?,
             };
             (
                 out,
