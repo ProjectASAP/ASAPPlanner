@@ -1816,9 +1816,9 @@ fn query_time_memory_is_held_only_while_the_node_computes() {
     assert!(held > 0);
     let expected = held as f64 * usage.work_ms_per_execution / 1_000.0 * 0.1;
     assert!(
-        (usage.average_memory_bytes - expected).abs() <= 1e-9 * expected,
+        (usage.cost.memory_and_disk.average_memory_bytes - expected).abs() <= 1e-9 * expected,
         "{} vs {expected}",
-        usage.average_memory_bytes
+        usage.cost.memory_and_disk.average_memory_bytes
     );
 }
 
@@ -1962,6 +1962,8 @@ fn an_ingestion_time_view_of_raw_rows_keeps_the_rows_its_retention_covers() {
             &settings,
         )
         .unwrap()
+        .cost
+        .memory_and_disk
         .peak_memory_bytes
     };
     let row_width_bytes = row_bytes(&row_schema);
@@ -2096,7 +2098,7 @@ fn a_view_over_an_ingestion_time_chain_keeps_one_output_per_chain_window() {
         &settings,
     )
     .unwrap();
-    assert_eq!(usage.peak_memory_bytes, 16_000 * 66);
+    assert_eq!(usage.cost.memory_and_disk.peak_memory_bytes, 16_000 * 66);
 }
 
 /// The bytes of a DDSketch state at α = 0.01 built over `column` of the
@@ -4526,7 +4528,11 @@ fn a_ddsketch_build_holds_open_states_and_keeps_sealed_ones() {
     )
     .unwrap();
     assert_eq!(usage.output.bytes, sealed, "{}", usage.cost.detail);
-    assert_eq!(usage.peak_memory_bytes, open, "{}", usage.cost.detail);
+    assert_eq!(
+        usage.cost.memory_and_disk.peak_memory_bytes, open,
+        "{}",
+        usage.cost.detail
+    );
 }
 
 /// A measured table's bytes per state replace the DDSketch estimate: a
@@ -4622,7 +4628,11 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
     .unwrap();
     assert_ne!(estimated.output.bytes, 900, "{}", estimated.cost.detail);
     assert_eq!(usage.output.bytes, 900, "{}", usage.cost.detail);
-    assert_eq!(usage.peak_memory_bytes, 900, "{}", usage.cost.detail);
+    assert_eq!(
+        usage.cost.memory_and_disk.peak_memory_bytes, 900,
+        "{}",
+        usage.cost.detail
+    );
 }
 
 /// A chain folds the same rows per window whether it is built at

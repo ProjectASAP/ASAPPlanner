@@ -157,25 +157,25 @@ def check(report, plan, measured, ratio, label, cost_inputs=None, bytes_ratio=BY
         row(f"query {query['query']} ms/request", measured_ms,
             per_query[query["query"]]["query_execution_ms"])
     resource_rows(row, usage, per_node, plan, measured, cost_inputs or {},
-                  {"bytes": bytes_ratio, "time": ratio})
+                  {"bytes": bytes_ratio, "acceptance": ratio})
     return ok
 
 
 # (row name, measured field, predicted field, which ratio: "bytes" or
-# "time"); a view row of bytes per window is a size, gated whatever its
+# "acceptance"); a view row of bytes per window is a size, gated whatever its
 # share of the plan.
 VIEW_ROWS = [
     ("bytes/window", "bytes_per_window", "bytes_per_window", "bytes"),
     ("disk written B/s", "disk_written_bytes_per_second", "disk_written_bytes_per_second", "bytes"),
     ("disk peak B", "disk_bytes", "disk_bytes", "bytes"),
-    ("disk read B/s", "disk_read_bytes_per_second", "disk_read_bytes_per_second", "time"),
-    ("memory B", "memory_bytes", "average_memory_bytes", "time"),
+    ("disk read B/s", "disk_read_bytes_per_second", "disk_read_bytes_per_second", "acceptance"),
+    ("memory B", "memory_bytes", "average_memory_bytes", "acceptance"),
 ]
 
 
 def resource_rows(row, usage, per_node, plan, measured, cost_inputs, ratios):
     """The `views` and `plan` rows of the measured file (module doc);
-    `ratios` maps "bytes" and "time" to their acceptance ratios."""
+    `ratios` maps "bytes" and "acceptance" to their acceptance ratios."""
     cache = cost_inputs.get("data_plane_execution", {}).get("view_window_cache") or {}
     disk_slack_ms = cache.get("retention_margin_ms", 0) + cache.get("file_span_ms", 0)
     retention_ms_by_node = {node["id"]: node.get("retention_ms") or 0
@@ -226,15 +226,15 @@ def resource_rows(row, usage, per_node, plan, measured, cost_inputs, ratios):
             "predicted_busy_thread_seconds_per_second", 0)
 
     plan_rows = [
-        ("memory B", "memory_bytes", usage.get("average_memory_bytes", 0), "time"),
-        ("peak memory B", "peak_memory_bytes", usage.get("peak_memory_bytes", 0), "time"),
+        ("memory B", "memory_bytes", usage.get("average_memory_bytes", 0), "acceptance"),
+        ("peak memory B", "peak_memory_bytes", usage.get("peak_memory_bytes", 0), "acceptance"),
         ("disk peak B", "disk_bytes", usage.get("disk_bytes", 0), "bytes"),
         ("disk written B/s", "disk_written_bytes_per_second",
          usage.get("disk_written_bytes_per_second", 0), "bytes"),
         ("disk read B/s", "disk_read_bytes_per_second",
-         usage.get("disk_read_bytes_per_second", 0), "time"),
-        ("ingest cpu", "ingest_cpu_core_seconds_per_second", role_cpu("ingest"), "time"),
-        ("query cpu", "query_cpu_core_seconds_per_second", role_cpu("query"), "time"),
+         usage.get("disk_read_bytes_per_second", 0), "acceptance"),
+        ("ingest cpu", "ingest_cpu_core_seconds_per_second", role_cpu("ingest"), "acceptance"),
+        ("query cpu", "query_cpu_core_seconds_per_second", role_cpu("query"), "acceptance"),
     ]
     views_with_disk = [node_id for node_id, node in per_node.items()
                        if node.get("disk_bytes", 0) > 0]

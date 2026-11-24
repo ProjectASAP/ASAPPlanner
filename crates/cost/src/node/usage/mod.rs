@@ -510,18 +510,11 @@ pub struct NodeResourceUsageAndCost<'a> {
     pub cpu_ops_per_second: f64,
     /// Bytes scanned per second.
     pub scanned_bytes_per_second: f64,
-    /// Average memory, including memory a query-time node holds while it
-    /// computes.
-    pub average_memory_bytes: f64,
-    /// Peak memory.
-    pub peak_memory_bytes: u64,
-    /// Disk bytes.
-    pub disk_bytes: u64,
     /// An in-memory ingestion-time state's bytes per window.
     pub maintained: Option<u64>,
     /// An in-memory ingestion-time view's windows under the data plane's
     /// window cache (`DataPlaneExecution::view_window_cache`): every
-    /// retained window is on disk (its `disk_bytes`), only the window being
+    /// retained window is on disk (its `cost.memory_and_disk.disk_bytes`), only the window being
     /// built is in its memory, and the caller charges the resident windows
     /// as memory (`plan_cost` per its readers, Stage 3's selection per
     /// selected reader). `None` without the cache.
@@ -2590,9 +2583,6 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         work_ms_per_execution: node_ms,
         cpu_ops_per_second: estimate.cpu_ops() * per_second,
         scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
-        average_memory_bytes,
-        peak_memory_bytes,
-        disk_bytes,
         maintained,
         cached_windows,
         kept_result_bytes,

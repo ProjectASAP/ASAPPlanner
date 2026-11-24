@@ -530,14 +530,14 @@ pub fn plan_cost(
     // The plan's memory, disk and disk traffic: its nodes' (each charged
     // above what the whole plan adds to it).
     for node_cost in per_node.values() {
-        let node = node_cost.memory_and_disk;
-        usage.average_memory_bytes += node.average_memory_bytes;
+        let memory_and_disk = node_cost.memory_and_disk;
+        usage.average_memory_bytes += memory_and_disk.average_memory_bytes;
         usage.peak_memory_bytes = usage
             .peak_memory_bytes
-            .saturating_add(node.peak_memory_bytes);
-        usage.disk_bytes = usage.disk_bytes.saturating_add(node.disk_bytes);
-        usage.disk_written_bytes_per_second += node.disk_written_bytes_per_second;
-        usage.disk_read_bytes_per_second += node.disk_read_bytes_per_second;
+            .saturating_add(memory_and_disk.peak_memory_bytes);
+        usage.disk_bytes = usage.disk_bytes.saturating_add(memory_and_disk.disk_bytes);
+        usage.disk_written_bytes_per_second += memory_and_disk.disk_written_bytes_per_second;
+        usage.disk_read_bytes_per_second += memory_and_disk.disk_read_bytes_per_second;
     }
     let merge_ms =
         |id: PhysicalASAPNodeId| partial_copy_merge_ms(nodes[&id], &costed[&id], settings);

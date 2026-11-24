@@ -224,15 +224,24 @@ pub(crate) async fn planned(
     cost_inputs: &Value,
     raw_data_retained: bool,
 ) -> Result<Planned, String> {
-    let cost_inputs: CostInputs = serde_json::from_value(cost_inputs.clone())
-        .map_err(|error| format!("cost inputs do not load: {error}"))?;
     let capabilities = DeploymentCapabilities {
         raw_data_retained,
         ..DeploymentCapabilities::default()
     };
+    planned_with(workload, cost_inputs, &capabilities).await
+}
+
+/// [`planned`] on a deployment with `capabilities`.
+pub(crate) async fn planned_with(
+    workload: &PlanningWorkload,
+    cost_inputs: &Value,
+    capabilities: &DeploymentCapabilities,
+) -> Result<Planned, String> {
+    let cost_inputs: CostInputs = serde_json::from_value(cost_inputs.clone())
+        .map_err(|error| format!("cost inputs do not load: {error}"))?;
     let models = PlanningModels::builtin()
         .with_cost_inputs(&cost_inputs)
-        .with_deployment_capabilities(&capabilities);
+        .with_deployment_capabilities(capabilities);
     let (plan, report) = plan_installable(UserInput::new(workload, FrontendInput::Promql, models))
         .await
         .map_err(|error| format!("planning failed: {error}"))?;
@@ -306,8 +315,6 @@ pub(crate) async fn single_chain_plan(
     workload: &PlanningWorkload,
     cost_inputs: &Value,
 ) -> Result<(Value, Value), String> {
-    let cost_inputs: CostInputs = serde_json::from_value(cost_inputs.clone())
-        .map_err(|error| format!("cost inputs do not load: {error}"))?;
     let capabilities = DeploymentCapabilities {
         raw_data_retained: false,
         excluded_candidates: serde_json::from_value(json!([
@@ -317,14 +324,6 @@ pub(crate) async fn single_chain_plan(
         .unwrap(),
         ..Default::default()
     };
-    let models = PlanningModels::builtin()
-        .with_cost_inputs(&cost_inputs)
-        .with_deployment_capabilities(&capabilities);
-    let (plan, report) = plan_installable(UserInput::new(workload, FrontendInput::Promql, models))
-        .await
-        .map_err(|error| format!("planning failed: {error}"))?;
-    Ok((
-        serde_json::to_value(plan).unwrap(),
-        serde_json::to_value(report).unwrap(),
-    ))
+    let planned = planned_with(workload, cost_inputs, &capabilities).await?;
+    Ok((serde_json::to_value(planned.plan).unwrap(), planned.report))
 }
