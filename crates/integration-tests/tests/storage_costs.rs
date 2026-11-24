@@ -268,7 +268,12 @@ async fn f1_file_slack_is_on_disk_and_costed_at_its_average() {
     let planned = |data_plane: Value| {
         let workload = workload.clone();
         async move {
-            let inputs = cost_inputs(usage_over_time_with_disk(), max_table(), json!({}), data_plane);
+            let inputs = cost_inputs(
+                usage_over_time_with_disk(),
+                max_table(),
+                json!({}),
+                data_plane,
+            );
             single_chain_plan(&workload, &inputs).await
         }
     };
