@@ -2361,22 +2361,40 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // files, and only the one being built in memory here: the caller adds
     // the resident ones.
     let mut cached_windows = None;
-    if let (true, Some(_), Lifetime::AcrossEvaluations(StorageMedium::Memory), false) = (
+    let mut disk_bytes_charged: Option<f64> = None;
+    if let (true, Some(cache), Lifetime::AcrossEvaluations(StorageMedium::Memory), false) = (
         ingestion,
         settings.data_plane_execution.view_window_cache,
         node.lifetime,
         raw_rows_materialized_at_ingestion,
     ) {
         if materialized_bytes > 0 {
-            let retained_bytes = state
-                .checked_mul(retained_output_count)
+            // Its files: a file of `file_span_ms` is deleted whole once its
+            // newest window is `retention_margin_ms` past retention, so at
+            // the peak the files hold the retention, the margin and a whole
+            // span of windows, half a span on average.
+            let retention_ms = node.retention_ms.unwrap_or(output_interval_ms);
+            let kept_ms = retention_ms
+                .saturating_add(cache.retention_margin_ms)
+                .saturating_add(cache.file_span_ms);
+            let windows_on_disk = kept_ms
+                .div_ceil(output_interval_ms)
+                .max(retained_output_count);
+            disk_bytes = state
+                .checked_mul(windows_on_disk)
                 .ok_or(AnalyticalCostError::Overflow)?;
-            disk_bytes = retained_bytes;
+            let average_ms = retention_ms as f64
+                + cache.retention_margin_ms as f64
+                + cache.file_span_ms as f64 / 2.0;
+            disk_bytes_charged = Some(
+                state as f64
+                    * (average_ms / output_interval_ms as f64).max(retained_output_count as f64),
+            );
             average_memory_bytes = open_state as f64;
             peak_memory_bytes = open_state;
             detail += &format!(
-                "; keeps {retained_output_count} windows of {state} bytes on disk, \
-                 {open_state} bytes building in memory"
+                "; keeps {windows_on_disk} windows of {state} bytes on disk \
+                 ({retained_output_count} retained), {open_state} bytes building in memory"
             );
             cached_windows = Some(CachedViewWindows {
                 bytes_per_window: state,
@@ -2393,7 +2411,6 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         rows.and(raw_rows_back_exact(node.retention_ms))
             .map(|rows| rows * width as f64)
     };
-    let mut disk_bytes_charged: Option<f64> = None;
     if materialized_bytes > 0 {
         let exact_bytes = match raw_rows_materialized_at_ingestion {
             true => retained_raw_bytes(raw_retained_rows),

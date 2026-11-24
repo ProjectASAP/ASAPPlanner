@@ -163,7 +163,7 @@ async fn k2_a_report_without_storage_fields_still_loads() {
 async fn p1_the_demo_inputs_plan_under_lowest_mean_latency() {
     let workload = over_m(vec![every("max_over_time(m[5m])", 10_000, None)], 1000);
     let inputs = cost_inputs(
-        crate::lowest_mean_latency_common::cluster(
+        cluster(
             "lowest_mean_latency",
             Some(103_079_215_104),
             Some(101_456_000_000),
