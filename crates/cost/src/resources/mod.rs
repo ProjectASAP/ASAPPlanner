@@ -33,6 +33,11 @@ pub struct ResourceUsage {
     /// Bytes retained on disk: state materialized on `StorageMedium::Disk`, plus the
     /// raw data query-time scans read (the longest window of each source).
     pub disk_bytes: u64,
+    /// Bytes written to disk per second: each view's windows written to its
+    /// files under the data plane's window cache.
+    pub disk_written_bytes_per_second: f64,
+    /// Bytes read back from disk per second.
+    pub disk_read_bytes_per_second: f64,
     /// CPU cores to provision for the peak: the ingestion work's cores plus
     /// one per query evaluating at once.
     pub peak_cpu_cores: u32,

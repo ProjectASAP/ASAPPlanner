@@ -46,7 +46,7 @@ pub use node::operator_statistics::EdgeStatistics;
 pub use node::usage::{
     node_resource_usage_and_cost, output_interval_ms, query_time_computation_short_of_source_rows,
     reads_one_batch_of, summary_type_name, CachedViewWindows, NodeCost, NodeResourceUsageAndCost,
-    PhaseTimes, ProducerOutput, RawRowsShortOfRange,
+    NodeStorageUsage, PhaseTimes, ProducerOutput, RawRowsShortOfRange,
 };
 pub use plan::cost::{
     close_together, ingest_decode_cpu_core_seconds_per_second, ingest_threads_building_copies,

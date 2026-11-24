@@ -31,10 +31,36 @@ Measured file (one per case), JSON:
 query's position in the workload. A missing `wall_ms_per_window` is not
 checked.
 
+Resource rows (issue #1472), from optional sections of the measured file:
+
+    {
+      "elapsed_ms": 1200000,
+      "views": [
+        {"node_id": 3, "bytes_per_window": 440000, "disk_bytes": 501600000,
+         "disk_written_bytes_per_second": 440000.0,
+         "disk_read_bytes_per_second": 5000000.0, "memory_bytes": 31000000.0}
+      ],
+      "plan": {"memory_bytes": 32000000.0, "peak_memory_bytes": 40000000,
+               "disk_bytes": 501600000, "disk_written_bytes_per_second": 440000.0,
+               "disk_read_bytes_per_second": 5000000.0,
+               "ingest_cpu_core_seconds_per_second": 0.1,
+               "query_cpu_core_seconds_per_second": 0.5}
+    }
+
+`elapsed_ms` is how long the data plane ran before measuring. A missing
+field or section is not checked. Bytes per window, disk writes and disk at
+the peak must be within the bytes ratio (default 1.25x); reads, memory and
+CPU within the acceptance ratio. Disk at the peak is checked only once the
+run is past each view's retention plus the window cache's retention margin
+and file span (from the cost inputs); before, it is printed as not at
+steady state. A view row the planner predicts below 1% of the plan's total
+for that resource is printed but not gated; the plan rows are always
+gated.
+
 Usage:
 
     calibration_gate.py --planner target/debug/asap_planner \\
-        --cost-inputs calibration.json [--ratio 1.5] \\
+        --cost-inputs calibration.json [--ratio 1.5] [--bytes-ratio 1.25] \\
         --case WORKLOAD.json PLAN.json MEASURED.json [--case ...]
 
 Exit status 0 when every case passes, 1 otherwise; one line per row.
@@ -81,19 +107,29 @@ def within(measured, predicted_value, ratio):
     return 1 / ratio <= measured / predicted_value <= ratio
 
 
-def check(report, plan, measured, ratio, label):
-    """One line per row; True when every row is within `ratio`."""
-    per_node = {node["node_id"]: node for node in report["predicted_usage"]["per_node"]}
-    per_query = report["predicted_usage"]["per_query"]
+# A view row below this share of the plan's predicted total is not gated.
+NOISE_FLOOR = 0.01
+
+
+def check(report, plan, measured, ratio, label, cost_inputs=None, bytes_ratio=1.25):
+    """One line per row; True when every gated row is within its ratio:
+    `bytes_ratio` for bytes per window, disk writes and disk at the peak,
+    `ratio` for the others."""
+    usage = report["predicted_usage"]
+    per_node = {node["node_id"]: node for node in usage["per_node"]}
+    per_query = usage["per_query"]
     ok = True
 
-    def row(name, measured_value, predicted_value):
+    def row(name, measured_value, predicted_value, row_ratio=ratio, note=None):
+        """Print one row; gate it unless `note` says why not."""
         nonlocal ok
-        passed = within(measured_value, predicted_value, ratio)
-        ok &= passed
+        passed = within(measured_value, predicted_value, row_ratio)
+        if note is None:
+            ok &= passed
         ratio_text = f"{measured_value / predicted_value:.2f}" if predicted_value else "nan"
+        verdict = note or ("ok" if passed else "FAIL")
         print(f"{label} {name}: measured {measured_value:.3f} predicted {predicted_value:.3f} "
-              f"ratio {ratio_text} {'ok' if passed else 'FAIL'}")
+              f"ratio {ratio_text} {verdict}")
 
     for group in measured.get("refresh_groups", []):
         nodes = [per_node[n] for n in ingestion_nodes_read(plan, group["views"]) if n in per_node]
@@ -113,7 +149,70 @@ def check(report, plan, measured, ratio, label):
         measured_ms = query.get("wall_ms_per_request", query["cpu_ms_per_request"])
         row(f"query {query['query']} ms/request", measured_ms,
             per_query[query["query"]]["query_execution_ms"])
+    resource_rows(row, usage, per_node, plan, measured, cost_inputs or {}, ratio, bytes_ratio)
     return ok
+
+
+# (row name, measured field, predicted field, uses the bytes ratio)
+VIEW_ROWS = [
+    ("bytes/window", "bytes_per_window", "bytes_per_window", True),
+    ("disk written B/s", "disk_written_bytes_per_second", "disk_written_bytes_per_second", True),
+    ("disk peak B", "disk_bytes", "peak_disk_bytes", True),
+    ("disk read B/s", "disk_read_bytes_per_second", "disk_read_bytes_per_second", False),
+    ("memory B", "memory_bytes", "average_memory_bytes", False),
+]
+
+
+def resource_rows(row, usage, per_node, plan, measured, cost_inputs, ratio, bytes_ratio):
+    """The `views` and `plan` rows of the measured file (module doc)."""
+    cache = cost_inputs.get("data_plane_execution", {}).get("view_window_cache") or {}
+    slack_ms = cache.get("retention_margin_ms", 0) + cache.get("file_span_ms", 0)
+    retention = {node["id"]: node.get("retention_ms") or 0 for node in plan["dag"]["nodes"]}
+    elapsed_ms = measured.get("elapsed_ms")
+
+    def at_steady_state(node_id):
+        return elapsed_ms is None or elapsed_ms >= retention.get(node_id, 0) + slack_ms
+
+    totals = {field: sum(node.get(field, 0) for node in per_node.values())
+              for _, _, field, _ in VIEW_ROWS}
+    for view in measured.get("views", []):
+        node_id = view["node_id"]
+        node = per_node[node_id]
+        for name, measured_field, predicted_field, uses_bytes_ratio in VIEW_ROWS:
+            if measured_field not in view:
+                continue
+            predicted_value = node.get(predicted_field, 0)
+            note = None
+            if predicted_field == "peak_disk_bytes" and not at_steady_state(node_id):
+                note = "not at steady state"
+            elif predicted_value < NOISE_FLOOR * totals[predicted_field]:
+                note = "below 1% of the plan, not gated"
+            row(f"view {node_id} {name}", view[measured_field], predicted_value,
+                bytes_ratio if uses_bytes_ratio else ratio, note)
+    measured_plan = measured.get("plan", {})
+    roles = usage.get("recommended_configuration", {})
+    plan_rows = [
+        ("memory B", "memory_bytes", usage.get("average_memory_bytes", 0), ratio),
+        ("peak memory B", "peak_memory_bytes", usage.get("peak_memory_bytes", 0), ratio),
+        ("disk peak B", "disk_bytes", usage.get("disk_bytes", 0), bytes_ratio),
+        ("disk written B/s", "disk_written_bytes_per_second",
+         usage.get("disk_written_bytes_per_second", 0), bytes_ratio),
+        ("disk read B/s", "disk_read_bytes_per_second",
+         usage.get("disk_read_bytes_per_second", 0), ratio),
+        ("ingest cpu", "ingest_cpu_core_seconds_per_second",
+         roles.get("ingest", {}).get("predicted_busy_thread_seconds_per_second", 0), ratio),
+        ("query cpu", "query_cpu_core_seconds_per_second",
+         roles.get("query", {}).get("predicted_busy_thread_seconds_per_second", 0), ratio),
+    ]
+    stored_views = [node_id for node_id, node in per_node.items()
+                    if node.get("peak_disk_bytes", 0) > 0]
+    for name, field, predicted_value, row_ratio in plan_rows:
+        if field not in measured_plan:
+            continue
+        note = None
+        if field == "disk_bytes" and not all(map(at_steady_state, stored_views)):
+            note = "not at steady state"
+        row(f"plan {name}", measured_plan[field], predicted_value, row_ratio, note)
 
 
 def main():
@@ -121,14 +220,17 @@ def main():
     parser.add_argument("--planner", required=True)
     parser.add_argument("--cost-inputs", required=True)
     parser.add_argument("--ratio", type=float, default=1.5)
+    parser.add_argument("--bytes-ratio", type=float, default=1.25)
     parser.add_argument("--case", nargs=3, action="append", required=True,
                         metavar=("WORKLOAD", "PLAN", "MEASURED"))
     args = parser.parse_args()
+    cost_inputs = json.loads(Path(args.cost_inputs).read_text())
     ok = True
     for workload, plan, measured in args.case:
         report = priced(args.planner, workload, plan, args.cost_inputs)
         ok &= check(report, json.loads(Path(plan).read_text()),
-                    json.loads(Path(measured).read_text()), args.ratio, Path(measured).stem)
+                    json.loads(Path(measured).read_text()), args.ratio, Path(measured).stem,
+                    cost_inputs=cost_inputs, bytes_ratio=args.bytes_ratio)
     print("PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)
 

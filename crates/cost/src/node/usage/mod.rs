@@ -106,6 +106,32 @@ pub struct NodeCost {
     /// series count, its own being outside them
     /// ([`lookup_at_scale`](crate::lookup_at_scale)).
     pub priced_outside_measured_scale: bool,
+    /// Its memory, disk and disk traffic ([`NodeStorageUsage`]).
+    pub storage: NodeStorageUsage,
+}
+
+/// One node's memory, disk and disk traffic, per second of wall time
+/// unless the name says otherwise: what a data plane measures per view.
+/// [`plan_cost`](crate::plan_cost) adds what is charged once the whole
+/// plan is known (resident cached windows, partial copies, kept results
+/// and answers, raw data on disk), so the nodes' figures add up to the
+/// plan's [`ResourceUsage`](crate::ResourceUsage).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct NodeStorageUsage {
+    /// Memory it holds, averaged over time.
+    pub average_memory_bytes: f64,
+    /// The most memory it holds at once.
+    pub peak_memory_bytes: u64,
+    /// An in-memory ingestion-time view's bytes per window (one output);
+    /// 0 for any other node.
+    pub bytes_per_window: u64,
+    /// Bytes it keeps on disk at the peak.
+    pub peak_disk_bytes: u64,
+    /// Bytes it writes to disk per second: a view under the data plane's
+    /// window cache writes each window to its file when the window closes.
+    pub disk_written_bytes_per_second: f64,
+    /// Bytes it reads back from disk per second.
+    pub disk_read_bytes_per_second: f64,
 }
 
 /// One node's time by phase, what a runtime measures per phase. An
@@ -2577,6 +2603,16 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             phase_times,
             priced_outside_measured_scale: measured_unit_cost
                 .is_some_and(|unit| unit.outside_measured_scale),
+            storage: NodeStorageUsage {
+                average_memory_bytes,
+                peak_memory_bytes,
+                bytes_per_window: maintained.unwrap_or(0),
+                peak_disk_bytes: disk_bytes,
+                disk_written_bytes_per_second: cached_windows.map_or(0.0, |windows| {
+                    windows.bytes_per_window as f64 * 1_000.0 / windows.width_ms as f64
+                }),
+                disk_read_bytes_per_second: 0.0,
+            },
         },
     };
     Ok((usage, terms))
