@@ -756,7 +756,8 @@ mod tests {
     /// fields, loads and writes back as it was.
     #[test]
     fn a_window_cache_of_an_idle_time_only_still_loads() {
-        let json = serde_json::json!({"data_plane_execution": {"view_window_cache": {"idle_ms": 60_000}}});
+        let json =
+            serde_json::json!({"data_plane_execution": {"view_window_cache": {"idle_ms": 60_000}}});
         let inputs: CostInputs = serde_json::from_value(json.clone()).expect("loads");
         assert_eq!(
             serde_json::to_value(&inputs).unwrap()["data_plane_execution"]["view_window_cache"],
