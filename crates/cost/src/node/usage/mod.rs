@@ -590,7 +590,8 @@ pub struct CachedViewWindows {
     /// ([`output_interval_ms`]).
     pub width_ms: u64,
     /// The windows it retains (its `retention_ms` over `width_ms`, at least
-    /// one), all on disk.
+    /// one), all on disk; its disk also holds the file slack
+    /// (`ViewWindowCache::file_span_ms`, `retention_margin_ms`).
     pub retained: u64,
 }
 
@@ -2383,12 +2384,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             disk_bytes = state
                 .checked_mul(windows_on_disk)
                 .ok_or(AnalyticalCostError::Overflow)?;
-            let average_ms = retention_ms as f64
+            let average_kept_ms = retention_ms as f64
                 + cache.retention_margin_ms as f64
                 + cache.file_span_ms as f64 / 2.0;
             disk_bytes_charged = Some(
                 state as f64
-                    * (average_ms / output_interval_ms as f64).max(retained_output_count as f64),
+                    * (average_kept_ms / output_interval_ms as f64)
+                        .max(retained_output_count as f64),
             );
             average_memory_bytes = open_state as f64;
             peak_memory_bytes = open_state;

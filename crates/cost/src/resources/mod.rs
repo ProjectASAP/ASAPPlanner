@@ -30,7 +30,8 @@ pub struct ResourceUsage {
     /// per consumer that recomputes it, with the consumers materialized at ingestion time
     /// of one refresh window counted once.
     pub peak_memory_bytes: u64,
-    /// Bytes retained on disk: state materialized on `StorageMedium::Disk`, plus the
+    /// Bytes on disk at the peak (the file slack of views under the window
+    /// cache included): state materialized on `StorageMedium::Disk`, plus the
     /// raw data query-time scans read (the longest window of each source).
     pub disk_bytes: u64,
     /// Bytes written to disk per second: each view's windows written to its
