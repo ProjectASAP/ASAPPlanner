@@ -42,6 +42,11 @@ tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 aqpbm-datagen = { git = "https://github.com/ProjectASAP/sketch-bench", rev = "7c0d121192beaf3b68b1b1ec36aab8aafc90d0ae" }
 asap-types = { path = "../types", features = ["test-support"] }
 asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
+# The golden runner (`tests/goldens.rs`): its own test harness, `case.toml`
+# parsing and the line diff it prints on failure.
+libtest-mimic = "0.8"
+toml = "0.9"
+similar = "2"
 
 
 [[test]]
@@ -57,3 +62,9 @@ path = "tests/asap_lane_conformance.rs"
 [[test]]
 name = "corpus_snapshots"
 path = "tests/corpus_snapshots.rs"
+
+# The golden runner: one trial per case directory under `tests/goldens/`.
+[[test]]
+name = "goldens"
+path = "tests/goldens.rs"
+harness = false

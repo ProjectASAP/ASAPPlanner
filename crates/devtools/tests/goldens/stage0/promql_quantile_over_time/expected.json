@@ -1,0 +1,530 @@
+{
+  "accuracy_guarantees": "enforced",
+  "cost_inputs": {
+    "cost_model": {
+      "usage_over_time": {
+        "cost_per_cpu_op": 1e-6,
+        "cost_per_disk_byte_second": 3.125e-9,
+        "cost_per_memory_byte_second": 1.25e-7,
+        "cost_per_provisioned_cpu_core_second": 1000.0,
+        "cost_per_provisioned_memory_byte_second": 1.25e-7,
+        "cost_per_scanned_byte": 1e-7
+      }
+    },
+    "measured_operation_costs": {
+      "ns_per_evaluation": 0.0,
+      "operators": []
+    },
+    "non_repeating_query_horizon_seconds": 3600.0,
+    "resource_speed": {
+      "ms_per_cpu_op": 1e-6,
+      "ms_per_scanned_byte": 1e-7,
+      "raw_batch_width_ms": 10000
+    }
+  },
+  "deployment_capabilities": {
+    "counter_semantics": {
+      "extrapolation": true,
+      "reset_handling": true
+    },
+    "excluded_candidates": [],
+    "query_time_results_retained": false,
+    "raw_data_retained": true,
+    "state_not_mergeable_across_windows": [],
+    "supported_summaries": [
+      {
+        "readouts": [
+          "Total"
+        ],
+        "summary_type": "Cms"
+      },
+      {
+        "readouts": [
+          "TopK"
+        ],
+        "summary_type": "CmsWithHeap"
+      },
+      {
+        "readouts": [
+          "TopK"
+        ],
+        "summary_type": "CountSketchWithHeap"
+      },
+      {
+        "readouts": [
+          "Distinct"
+        ],
+        "summary_type": "Hll"
+      },
+      {
+        "readouts": [
+          "Distinct"
+        ],
+        "summary_type": "Kmv"
+      },
+      {
+        "readouts": [
+          "Quantile"
+        ],
+        "summary_type": "Kll"
+      },
+      {
+        "readouts": [
+          "Quantile"
+        ],
+        "summary_type": "DDSketch"
+      },
+      {
+        "readouts": [
+          "Total",
+          "FrequencyL2",
+          "Distinct",
+          "FrequencyEntropy"
+        ],
+        "summary_type": "UnivMon"
+      }
+    ]
+  },
+  "format": "asap-stage-pipeline/v2",
+  "memo": {
+    "steps": [
+      {
+        "groups": [
+          {
+            "aggregate_coverage": "covers G2 through [Aggregate quantile(q=0.9)] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"request_latency_seconds\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
+            "candidate_count": 0,
+            "candidate_count_by_origin": {},
+            "candidates": [],
+            "children": [
+              1
+            ],
+            "column_lineage": [
+              "request_latency_seconds.ts",
+              "G0.1",
+              "request_latency_seconds.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": null,
+            "id": 0,
+            "label": "Aggregate quantile(q=0.9)",
+            "operator": {
+              "NonASAP": {
+                "Aggregate": {
+                  "child": 1,
+                  "filters": [],
+                  "having": null,
+                  "measures": [
+                    {
+                      "col": null,
+                      "kind": "quantile",
+                      "q": 0.9
+                    }
+                  ],
+                  "output_names": [
+                    ""
+                  ],
+                  "reduction": "PerEntity"
+                }
+              }
+            },
+            "parents": [],
+            "queries": [
+              0
+            ],
+            "result_kind": "instant_vector",
+            "roots_of": [
+              0
+            ],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "request_latency_seconds"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": null,
+            "candidate_count": 0,
+            "candidate_count_by_origin": {},
+            "candidates": [],
+            "children": [
+              2
+            ],
+            "column_lineage": [
+              "request_latency_seconds.ts",
+              "request_latency_seconds.value",
+              "request_latency_seconds.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": true,
+            "evaluation_grid": null,
+            "id": 1,
+            "label": "TimeRange 300s",
+            "operator": {
+              "NonASAP": {
+                "TimeRange": {
+                  "child": 2,
+                  "kind": "range",
+                  "range": {
+                    "nanos": 0,
+                    "secs": 300
+                  }
+                }
+              }
+            },
+            "parents": [
+              0
+            ],
+            "queries": [
+              0
+            ],
+            "result_kind": "range_vector",
+            "roots_of": [],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "request_latency_seconds"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          },
+          {
+            "aggregate_coverage": null,
+            "candidate_count": 0,
+            "candidate_count_by_origin": {},
+            "candidates": [],
+            "children": [],
+            "column_lineage": [
+              "request_latency_seconds.ts",
+              "request_latency_seconds.value",
+              "request_latency_seconds.$promql_series_identity"
+            ],
+            "column_signs": [
+              "unknown",
+              "unknown",
+              "unknown"
+            ],
+            "depends_on_evaluation_time": false,
+            "evaluation_grid": null,
+            "id": 2,
+            "label": "Scan",
+            "operator": {
+              "NonASAP": {
+                "Scan": {
+                  "predicates": [],
+                  "schema": {
+                    "closed": true,
+                    "fields": [
+                      {
+                        "dtype": {
+                          "Plain": "timestamp"
+                        },
+                        "name": "ts",
+                        "nullable": false
+                      },
+                      {
+                        "dtype": {
+                          "Plain": "float64"
+                        },
+                        "name": "value",
+                        "nullable": false
+                      },
+                      {
+                        "dtype": {
+                          "Plain": "utf8"
+                        },
+                        "name": "$promql_series_identity",
+                        "nullable": false
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": [
+                      [
+                        2,
+                        0
+                      ]
+                    ]
+                  },
+                  "source": {
+                    "TimeSeries": {
+                      "metric": "request_latency_seconds"
+                    }
+                  }
+                }
+              }
+            },
+            "parents": [
+              1
+            ],
+            "queries": [
+              0
+            ],
+            "result_kind": "instant_vector",
+            "roots_of": [],
+            "scanned_sources": [
+              {
+                "TimeSeries": {
+                  "metric": "request_latency_seconds"
+                }
+              }
+            ],
+            "shareable_when_equal": true
+          }
+        ],
+        "step": "stage0",
+        "title": "Stage 0, the frontends' DAG hash-consed"
+      }
+    ]
+  },
+  "run_until": "stage0",
+  "search": "candidate-connections",
+  "stage0_query_language_frontends": {
+    "dag": {
+      "nodes": [
+        {
+          "operator": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": false
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": false
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "$promql_series_identity",
+                      "nullable": false
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": [
+                    [
+                      2,
+                      0
+                    ]
+                  ]
+                },
+                "source": {
+                  "TimeSeries": {
+                    "metric": "request_latency_seconds"
+                  }
+                }
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          }
+        },
+        {
+          "operator": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 0,
+                "kind": "range",
+                "range": {
+                  "nanos": 0,
+                  "secs": 300
+                }
+              }
+            }
+          },
+          "result_kind": "range_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          }
+        },
+        {
+          "operator": {
+            "NonASAP": {
+              "Aggregate": {
+                "child": 1,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "col": null,
+                    "kind": "quantile",
+                    "q": 0.9
+                  }
+                ],
+                "output_names": [
+                  ""
+                ],
+                "reduction": "PerEntity"
+              }
+            }
+          },
+          "result_kind": "instant_vector",
+          "schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "$promql_series_identity",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                2,
+                0
+              ]
+            ]
+          }
+        }
+      ],
+      "roots": [
+        {
+          "Operator": 2
+        }
+      ]
+    }
+  },
+  "stage1_logical_asap_optimization": null,
+  "stage2_physical_asap_optimization": null,
+  "stage3_plan_selection": null,
+  "workload": {
+    "data_workload": {
+      "arrival": {
+        "ingesting": {
+          "rows_per_second": 1000.0
+        }
+      },
+      "sources": {}
+    },
+    "queries": [
+      {
+        "id": "q1",
+        "language": "promql",
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "recurrence": {
+          "repeated": {
+            "fixed_interval_at": {
+              "evaluation_phase": 0,
+              "interval": 60000
+            }
+          }
+        },
+        "requirements": {
+          "accuracy": {
+            "accuracy_scope": "whole_result",
+            "failure_probability": 0.0,
+            "max_error": 0.0
+          },
+          "repeat_interval_ms": 60000
+        },
+        "text": "quantile_over_time(0.9, request_latency_seconds[5m])"
+      }
+    ]
+  }
+}

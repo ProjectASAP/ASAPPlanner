@@ -1,0 +1,4 @@
+why = "queries from two workload files are numbered q1, q2 in file order, and a PromQL and a SQL query over different sources stay in different groups"
+args = ["--run-until", "stage0"]
+workloads = ["promql.json", "sql.json"]
+different_group = [["q1", "q2"]]

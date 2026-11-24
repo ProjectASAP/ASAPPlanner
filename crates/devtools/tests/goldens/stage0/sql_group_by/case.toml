@@ -1,0 +1,2 @@
+why = "a SQL GROUP BY over a catalog table lowers to a table scan, a time filter and an aggregate grouped by service"
+args = ["--run-until", "stage0"]
