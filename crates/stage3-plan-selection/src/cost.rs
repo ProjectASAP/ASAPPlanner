@@ -883,16 +883,41 @@ pub(crate) fn execution_quantities(
             .iter()
             .filter_map(|(&v, windows)| Some((v, per_window(windows.bytes_per_window)?)))
             .collect();
+        let reads = resident_reads(
+            physical,
+            selectable,
+            entries,
+            (cache, cost_inputs.data_plane_execution.answer_cache),
+            &cached,
+            &costs.retention_need_ms_per_edge,
+            |v, need_ms| costs.retention_ms_for_need(v, need_ms),
+        );
+        // A read's windows read from disk: scanned bytes on its edge, at
+        // their cost (cost model 1) and their time per run (latency).
+        for read in &reads {
+            let Reader::Edge(position) = read.reader else {
+                continue;
+            };
+            let added = match quantity {
+                Quantity::CostPerSecond => {
+                    cost_inputs
+                        .cost_model
+                        .per_node_unit_costs()
+                        .map(|unit_cost| {
+                            unit_cost.cost_per_scanned_byte * read.bytes_read_from_disk_per_second
+                        })
+                }
+                Quantity::QueryMsPerRun => Some(
+                    read.bytes_read_from_disk_per_run
+                        * cost_inputs.resource_speed.ms_per_scanned_byte,
+                ),
+                _ => None,
+            };
+            if let (Some(added), Some(edge)) = (added, costs.per_edge[position].as_mut()) {
+                *edge += added;
+            }
+        }
         if !costs.per_resident_window.is_empty() {
-            let reads = resident_reads(
-                physical,
-                selectable,
-                entries,
-                (cache, cost_inputs.data_plane_execution.answer_cache),
-                &cached,
-                &costs.retention_need_ms_per_edge,
-                |v, need_ms| costs.retention_ms_for_need(v, need_ms),
-            );
             costs.resident_reads = reads;
         }
     }

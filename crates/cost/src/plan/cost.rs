@@ -15,12 +15,15 @@ use crate::node::state_bytes::{sketch_state_bytes, state_bytes_per_row, StateInp
 use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
 use crate::plan::kept_results::{computed_range, held_by_bounded_cache, kept_per_grid};
-use crate::plan::resident_windows::{view_resident_windows, ChainReader, ReadTimes, WindowRead};
+use crate::plan::resident_windows::{
+    reader_window_reads_per_second, view_resident_windows, ChainReader, ReadTimes, WindowRead,
+    WindowReadsPerSecond,
+};
 use crate::{lookup_at_scale, StateFamily};
 use crate::{node_resource_usage_and_cost, NodeResourceUsageAndCost, ProducerOutput};
 use crate::{
     AnswerCache, CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind,
-    ResourceUnitCost, ResourceUsage, ViewWindowCache, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
+    ResourceUsage, ViewWindowCache, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
@@ -446,8 +449,8 @@ pub fn plan_cost(
     // With a window cache, a stored view's windows are on disk (charged by
     // its node) and the windows written or read within the cache's idle
     // time also in memory.
-    if let Some(cache) = settings.data_plane_execution.view_window_cache {
-        resident_view_windows(
+    let reads_from_disk = match settings.data_plane_execution.view_window_cache {
+        Some(cache) => resident_view_windows(
             dag,
             nodes,
             &costed,
@@ -456,10 +459,12 @@ pub fn plan_cost(
             entries,
             answer_cache,
             cache,
-            unit_costs,
+            settings,
             &mut per_node,
-        );
-    }
+        ),
+        None => ReadsFromDisk::default(),
+    };
+    usage.scanned_bytes_per_second += reads_from_disk.bytes_per_second;
     // Query-time results the data plane keeps between requests: each node
     // charged its own (`NodeResourceUsageAndCost::kept_result_bytes`); past
     // the cache's bound they are not held, each node's share dropped.
@@ -555,6 +560,11 @@ pub fn plan_cost(
     for (latency, evaluation_ms) in latency.iter_mut().zip(evaluation_ms_per_query) {
         latency.query_execution_ms += evaluation_ms;
     }
+    for &(query, ms) in &reads_from_disk.ms_per_request_by_query {
+        if let Some(latency) = latency.get_mut(query) {
+            latency.query_execution_ms += ms;
+        }
+    }
     let execution = &settings.data_plane_execution;
     let refresh_cores: f64 = groups
         .iter()
@@ -633,9 +643,15 @@ pub fn plan_cost(
 
 /// Charges each in-memory ingestion-time view under `cache`
 /// (`NodeResourceUsageAndCost::cached_windows`) its resident windows as
-/// memory, in the view's node cost: the most any one of its
-/// readers keeps resident ([`view_resident_windows`]), mean for the
-/// average and the cost, most for the peak.
+/// memory and its reads from disk, in the view's node cost: the most any
+/// one of its readers keeps resident ([`view_resident_windows`]), mean for
+/// the average and the cost, most for the peak; and each reader's windows
+/// read while not in the cache ([`reader_window_reads_per_second`]), as
+/// scanned bytes. With `cache.max_bytes` below the plan's mean resident
+/// bytes, the resident memory is cut to the bound and the reads it served
+/// in that proportion are read from disk. Returns the scanned bytes per
+/// second added, and per query the ms its requests spend reading from disk
+/// (`ms_per_scanned_byte` per byte).
 #[allow(clippy::too_many_arguments)]
 fn resident_view_windows(
     dag: &PhysicalASAPDAG,
@@ -646,21 +662,29 @@ fn resident_view_windows(
     entries: &[QueryWorkloadEntry],
     answer_cache: Option<AnswerCache>,
     cache: ViewWindowCache,
-    unit_costs: Option<&ResourceUnitCost>,
+    settings: &CostInputs,
     per_node: &mut BTreeMap<PhysicalASAPNodeId, NodeCost>,
-) {
+) -> ReadsFromDisk {
+    let unit_costs = settings.cost_model.per_node_unit_costs();
     let width_of = |id: PhysicalASAPNodeId| dag.refresh_window(id).map(|window| window.width_ms);
+    // Per cached view: its node, bytes per window, resident windows (mean,
+    // most) and its readers with the query each serves (`None` for an
+    // ingestion-time reader) and what it reads per second.
+    let mut views = Vec::new();
     for node in &dag.nodes {
         let Some(windows) = costed[&node.id].cached_windows else {
             continue;
         };
-        let readers: Vec<ChainReader> = match windows_readers_need(dag, node.id) {
-            None => vec![ChainReader {
-                read: WindowRead::Every,
-                times: ReadTimes::Refresh {
-                    width_ms: windows.width_ms,
+        let readers: Vec<(ChainReader, Option<usize>)> = match windows_readers_need(dag, node.id) {
+            None => vec![(
+                ChainReader {
+                    read: WindowRead::Every,
+                    times: ReadTimes::Refresh {
+                        width_ms: windows.width_ms,
+                    },
                 },
-            }],
+                None,
+            )],
             Some(reads) => reads
                 .into_iter()
                 .flat_map(|(reader, window)| {
@@ -686,42 +710,121 @@ fn resident_view_windows(
                             offset_ms: window.ends_before_evaluation_ms,
                         },
                     };
-                    let times: Vec<ReadTimes> = match reader_node.output_state.timing {
-                        ExecutionTiming::IngestionTime => vec![ReadTimes::Refresh {
-                            width_ms: width_of(reader).unwrap_or(windows.width_ms),
-                        }],
-                        ExecutionTiming::QueryTime => queries_of
-                            .get(&reader)
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|&query| entries.get(query))
-                            .map(|entry| ReadTimes::of_query(entry, answer_cache))
-                            .collect(),
-                    };
-                    times.into_iter().map(move |times| ChainReader {
-                        read: read.clone(),
-                        times,
+                    let times: Vec<(ReadTimes, Option<usize>)> =
+                        match reader_node.output_state.timing {
+                            ExecutionTiming::IngestionTime => vec![(
+                                ReadTimes::Refresh {
+                                    width_ms: width_of(reader).unwrap_or(windows.width_ms),
+                                },
+                                None,
+                            )],
+                            ExecutionTiming::QueryTime => queries_of
+                                .get(&reader)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|&query| {
+                                    entries.get(query).map(|entry| {
+                                        (ReadTimes::of_query(entry, answer_cache), Some(query))
+                                    })
+                                })
+                                .collect(),
+                        };
+                    times.into_iter().map(move |(times, query)| {
+                        (
+                            ChainReader {
+                                read: read.clone(),
+                                times,
+                            },
+                            query,
+                        )
                     })
                 })
                 .collect(),
         };
-        let (mean, most) =
-            view_resident_windows(windows.width_ms, windows.retained, cache.idle_ms, &readers);
+        let chain_readers: Vec<ChainReader> =
+            readers.iter().map(|(reader, _)| reader.clone()).collect();
+        let resident = view_resident_windows(
+            windows.width_ms,
+            windows.retained,
+            cache.idle_ms,
+            &chain_readers,
+        );
+        let reads: Vec<(Option<usize>, f64, WindowReadsPerSecond)> = readers
+            .iter()
+            .filter_map(|(reader, query)| {
+                let requests_per_second = match reader.times {
+                    ReadTimes::Query { period_ms, .. } => 1_000.0 / period_ms.max(1) as f64,
+                    ReadTimes::Refresh { width_ms } => 1_000.0 / width_ms.max(1) as f64,
+                };
+                reader_window_reads_per_second(windows.width_ms, cache.idle_ms, reader)
+                    .map(|reads| (*query, requests_per_second, reads))
+            })
+            .collect();
+        views.push((node.id, windows, resident, reads));
+    }
+    // The share of resident bytes the cache holds: all of them within its
+    // bound; past it, the bound's share, the other reads served from disk.
+    let resident_bytes = |most: bool| -> f64 {
+        views
+            .iter()
+            .map(|(_, windows, (mean, peak), _)| {
+                windows.bytes_per_window as f64 * if most { *peak as f64 } else { *mean }
+            })
+            .sum()
+    };
+    let held_share = |most: bool| match cache.max_bytes {
+        Some(bound) if resident_bytes(most) > bound as f64 => bound as f64 / resident_bytes(most),
+        _ => 1.0,
+    };
+    let (mean_held, most_held) = (held_share(false), held_share(true));
+    let mut reads_from_disk = ReadsFromDisk::default();
+    for (id, windows, (mean, most), reads) in views {
         let bytes = windows.bytes_per_window as f64;
-        let node_cost = per_node.get_mut(&node.id).expect("every node is measured");
-        node_cost.memory_and_disk.average_memory_bytes += bytes * mean;
+        let node_cost = per_node.get_mut(&id).expect("every node is measured");
+        let mean_resident = mean * mean_held;
+        let most_resident = (most as f64 * most_held).floor() as u64;
+        node_cost.memory_and_disk.average_memory_bytes += bytes * mean_resident;
         node_cost.memory_and_disk.peak_memory_bytes = node_cost
             .memory_and_disk
             .peak_memory_bytes
-            .saturating_add(windows.bytes_per_window.saturating_mul(most));
+            .saturating_add(windows.bytes_per_window.saturating_mul(most_resident));
+        let mut read_bytes_per_second = 0.0;
+        for (query, requests_per_second, read) in reads {
+            let from_disk = read.windows_read_from_disk
+                + (1.0 - mean_held) * (read.windows_read - read.windows_read_from_disk);
+            read_bytes_per_second += from_disk * bytes;
+            if let Some(query) = query {
+                let bytes_per_request = from_disk * bytes / requests_per_second;
+                reads_from_disk.ms_per_request_by_query.push((
+                    query,
+                    bytes_per_request * settings.resource_speed.ms_per_scanned_byte,
+                ));
+            }
+        }
+        node_cost.memory_and_disk.disk_read_bytes_per_second += read_bytes_per_second;
+        reads_from_disk.bytes_per_second += read_bytes_per_second;
         node_cost.detail += &format!(
-            "; {mean:.1} of {} windows resident in memory (most {most}; window cache, idle {} ms)",
+            "; {mean_resident:.1} of {} windows resident in memory (most {most_resident}; \
+             window cache, idle {} ms); reads {read_bytes_per_second:.0} bytes/s from disk",
             windows.retained, cache.idle_ms
         );
         if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs) {
-            *cost += unit_cost.cost_per_memory_byte_second * bytes * mean;
+            *cost += unit_cost.cost_per_memory_byte_second * bytes * mean_resident
+                + unit_cost.cost_per_scanned_byte * read_bytes_per_second;
         }
     }
+    reads_from_disk
+}
+
+/// What the views under the window cache read from disk
+/// ([`resident_view_windows`]).
+#[derive(Debug, Default)]
+struct ReadsFromDisk {
+    /// Bytes read from disk per second, all views.
+    bytes_per_second: f64,
+    /// Per query (by workload position), the ms one of its requests spends
+    /// reading windows from disk, once per view it reads.
+    ms_per_request_by_query: Vec<(usize, f64)>,
 }
 
 /// The runtime's fixed overhead of query `entry`'s requests: its requests

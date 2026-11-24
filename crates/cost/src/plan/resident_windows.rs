@@ -11,6 +11,8 @@
 use crate::plan::kept_results::computed_range;
 use crate::AnswerCache;
 use asap_types::ir::operator::tumbling_window_chain::cover_windows;
+use std::collections::HashSet;
+
 use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
 
 /// Which windows of a chain one read takes, at the time it reads.
@@ -162,44 +164,8 @@ fn resident_window_count(
             add(oldest, newest);
         } else {
             for t in read_times(reader.times, idle_start, now_ms) {
-                match &reader.read {
-                    WindowRead::Range {
-                        range_ms: 0,
-                        offset_ms,
-                    } => {
-                        // The newest window ended by `t − offset`.
-                        let index = (t - *offset_ms as i64).div_euclid(width);
-                        add(index, index);
-                    }
-                    WindowRead::Range {
-                        range_ms,
-                        offset_ms,
-                    } => {
-                        let end = t - *offset_ms as i64;
-                        let (first, last) = interval(end - *range_ms as i64, end);
-                        add(first, last);
-                    }
-                    WindowRead::Cover {
-                        range_ms,
-                        offset_ms,
-                        level_widths_ms,
-                        level,
-                    } => {
-                        // A time off the narrowest level's grid reads no
-                        // cover (the executor refuses it).
-                        let end = t - *offset_ms as i64;
-                        if let Ok(windows) =
-                            cover_windows(end - *range_ms as i64, end, level_widths_ms)
-                        {
-                            for (at, end) in windows {
-                                if at == *level {
-                                    let index = end.div_euclid(width);
-                                    add(index, index);
-                                }
-                            }
-                        }
-                    }
-                    WindowRead::Every => unreachable!("handled above"),
+                for (first, last) in windows_read_at(&reader.read, t, width) {
+                    add(first, last);
                 }
             }
         }
@@ -215,6 +181,54 @@ fn resident_window_count(
         covered_to = covered_to.max(last);
     }
     count
+}
+
+/// The windows, by index (a window ending at `k · width` has index `k`), as
+/// inclusive ranges, that `read` takes at time `t`; none for
+/// [`WindowRead::Every`].
+fn windows_read_at(read: &WindowRead, t: i64, width: i64) -> Vec<(i64, i64)> {
+    // Every window ending in `(start, end]`.
+    let interval = |start: i64, end: i64| (start.div_euclid(width) + 1, end.div_euclid(width));
+    match read {
+        WindowRead::Range {
+            range_ms: 0,
+            offset_ms,
+        } => {
+            // The newest window ended by `t − offset`.
+            let index = (t - *offset_ms as i64).div_euclid(width);
+            vec![(index, index)]
+        }
+        WindowRead::Range {
+            range_ms,
+            offset_ms,
+        } => {
+            let end = t - *offset_ms as i64;
+            vec![interval(end - *range_ms as i64, end)]
+        }
+        WindowRead::Cover {
+            range_ms,
+            offset_ms,
+            level_widths_ms,
+            level,
+        } => {
+            // A time off the narrowest level's grid reads no cover (the
+            // executor refuses it).
+            let end = t - *offset_ms as i64;
+            cover_windows(end - *range_ms as i64, end, level_widths_ms)
+                .map(|windows| {
+                    windows
+                        .into_iter()
+                        .filter(|(at, _)| at == level)
+                        .map(|(_, end)| {
+                            let index = end.div_euclid(width);
+                            (index, index)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        WindowRead::Every => Vec::new(),
+    }
 }
 
 /// The times in `(idle_start, now]` at which a reader of `times` reads.
@@ -318,6 +332,106 @@ pub fn reader_resident_windows(
 /// the windows written within the idle time.
 pub fn written_resident_windows(width_ms: u64, retained: u64, idle_ms: u64) -> (f64, u64) {
     resident_windows_over_time(width_ms, retained, idle_ms, None)
+}
+
+/// What `reader` reads of a chain of `width_ms` windows under a cache of
+/// `idle_ms`, per second: the windows each request reads (its steps'
+/// windows, each decoded once), and of them those read from disk: neither
+/// written within the idle time before the request nor read by one of the
+/// reader's requests within it. Averaged over the requests of one period
+/// of the reader (the least common multiple of its period, the chain's
+/// width and its cover's widths; at most 2,048 requests). `None` for
+/// [`WindowRead::Every`], whose reads the model does not follow.
+///
+/// Example: `max_over_time(m[1h])` every 5 min over 5 min windows, idle
+/// 60 s: each request reads 12 windows, all from disk: 12 ÷ 300 s each.
+pub fn reader_window_reads_per_second(
+    width_ms: u64,
+    idle_ms: u64,
+    reader: &ChainReader,
+) -> Option<WindowReadsPerSecond> {
+    if reader.read == WindowRead::Every {
+        return None;
+    }
+    let width = width_ms.max(1);
+    let (request_period_ms, steps, step_ms) = match reader.times {
+        ReadTimes::Query {
+            period_ms,
+            steps,
+            step_ms,
+            ..
+        } => (period_ms.max(1), steps.max(1), step_ms),
+        ReadTimes::Refresh { width_ms } => (width_ms.max(1), 1, 0),
+    };
+    let phase_ms = match reader.times {
+        ReadTimes::Query { phase_ms, .. } => phase_ms % request_period_ms,
+        ReadTimes::Refresh { .. } => 0,
+    };
+    let mut period = request_period_ms / greatest_common_divisor(request_period_ms, width) * width;
+    if let WindowRead::Cover {
+        level_widths_ms, ..
+    } = &reader.read
+    {
+        for &length in level_widths_ms {
+            let length = length.max(1);
+            period = period / greatest_common_divisor(period, length) * length;
+        }
+    }
+    let width = width as i64;
+    // The windows one request at `request` reads.
+    let request_windows = |request: i64| -> HashSet<i64> {
+        (0..steps)
+            .flat_map(|step| {
+                windows_read_at(&reader.read, request - (step * step_ms) as i64, width)
+            })
+            .flat_map(|(first, last)| first..=last)
+            .collect()
+    };
+    const MOST_REQUESTS: u64 = 2_048;
+    let requests = (period / request_period_ms).max(1);
+    let stride = requests.div_ceil(MOST_REQUESTS);
+    // A time far from the epoch, so every read stays at positive times.
+    let base = (1_000 * period.max(reader.reads_back_ms().unwrap_or(0) + width as u64)) as i64
+        + phase_ms as i64;
+    let (mut read, mut cold, mut sampled) = (0u64, 0u64, 0u64);
+    let mut position = 0;
+    while position < requests {
+        let request = base + (position * request_period_ms) as i64;
+        let idle_start = request - idle_ms as i64;
+        let windows = request_windows(request);
+        // Read by an earlier request within the idle time.
+        let mut earlier: HashSet<i64> = HashSet::new();
+        let mut before = request - request_period_ms as i64;
+        while before > idle_start {
+            earlier.extend(request_windows(before));
+            before -= request_period_ms as i64;
+        }
+        // Written within the idle time: ending in `(idle_start, request]`.
+        let written = (idle_start.div_euclid(width) + 1)..=request.div_euclid(width);
+        read += windows.len() as u64;
+        cold += windows
+            .iter()
+            .filter(|index| !written.contains(index) && !earlier.contains(index))
+            .count() as u64;
+        sampled += 1;
+        position += stride;
+    }
+    let requests_per_second = 1_000.0 / request_period_ms as f64;
+    let per_request = |count: u64| count as f64 / sampled.max(1) as f64;
+    Some(WindowReadsPerSecond {
+        windows_read: per_request(read) * requests_per_second,
+        windows_read_from_disk: per_request(cold) * requests_per_second,
+    })
+}
+
+/// What one reader reads of a chain per second
+/// ([`reader_window_reads_per_second`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowReadsPerSecond {
+    /// Windows read per second, each request's once.
+    pub windows_read: f64,
+    /// Of them, read from disk: not in the cache when read.
+    pub windows_read_from_disk: f64,
 }
 
 /// The resident windows, mean and most, of a chain of `width_ms` windows

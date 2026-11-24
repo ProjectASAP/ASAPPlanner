@@ -358,8 +358,9 @@ async fn one_chain(
 /// are scanned bytes, charged at the scanned-byte cost, and they add their
 /// read time (`ms_per_scanned_byte`, 1e-7 by default) to the query.
 /// `max_over_time(m[1h])` every 5 min reads its 12 windows of 5 min; with
-/// a 60 s idle time none of them is in the cache at the next read, so every
-/// read takes 12 windows from disk: 12 × bytes per window every 300 s.
+/// a 60 s idle time only the newest, written as the request runs, is still
+/// in the cache, so every read takes the other 11 from disk: 11 × bytes per
+/// window every 300 s.
 #[tokio::test]
 async fn d1_cold_reads_are_scanned_bytes_and_query_time() {
     let query = "max_over_time(m[1h])";
@@ -375,7 +376,7 @@ async fn d1_cold_reads_are_scanned_bytes_and_query_time() {
     assert_eq!(width_ms, 300_000);
     let bytes_per_window =
         number(&cached["predicted_usage"], "disk_bytes") / retention_ms.div_ceil(width_ms) as f64;
-    let cold_bytes_per_read = 12.0 * bytes_per_window;
+    let cold_bytes_per_read = 11.0 * bytes_per_window;
     assert_close(
         "scanned bytes per second",
         number(&cached["predicted_usage"], "scanned_bytes_per_second")
