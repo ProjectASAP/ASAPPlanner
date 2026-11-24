@@ -247,8 +247,9 @@ async fn main() {
     // bgp_analytics: ClickHouse dialect, mostly-rejected corpus (documented in
     // its own test) — still worth walking whatever *does* lower.
     {
-        let corpus =
-            include_str!("../../../frontend-sql/tests/lowering_corpora/bgp_analytics/data/bgp_analytics.sql");
+        let corpus = include_str!(
+            "../../../frontend-sql/tests/lowering_corpora/bgp_analytics/data/bgp_analytics.sql"
+        );
         let catalog = bgp_catalog();
         let mut variants = Variants::default();
         let mut lowered = 0;
