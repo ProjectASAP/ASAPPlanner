@@ -64,6 +64,21 @@ fn default_workloads() -> Vec<String> {
     vec!["workload.json".into()]
 }
 
+/// `asap_planner` flags a case's `args` may not give: the runner passes
+/// the inputs and output itself, and a file the planner writes elsewhere
+/// would land outside the scratch directory and can make it exit 1 with
+/// no stage error recorded.
+const RUNNER_FLAGS: &[&str] = &[
+    "--workload",
+    "--sql-catalog-table",
+    "--cost-inputs",
+    "--deployment-capabilities",
+    "--format",
+    "--out",
+    "--plan-file",
+    "--report-file",
+];
+
 fn parse_case(text: &str) -> Result<Case, String> {
     let table: toml::Table = toml::from_str(text).map_err(|e| e.to_string())?;
     for (field, until) in NOT_YET_SUPPORTED {
@@ -74,6 +89,16 @@ fn parse_case(text: &str) -> Result<Case, String> {
     let case: Case = toml::from_str(text).map_err(|e| e.to_string())?;
     if case.why.trim().is_empty() {
         return Err("`why` is empty".into());
+    }
+    if let Some(flag) = case
+        .args
+        .iter()
+        .find(|arg| RUNNER_FLAGS.contains(&arg.as_str()))
+    {
+        return Err(format!(
+            "`args` may not give {flag}: the runner passes inputs from the case \
+             directory and writes the output itself"
+        ));
     }
     Ok(case)
 }
@@ -86,12 +111,17 @@ fn defaults_dir() -> PathBuf {
     goldens_dir().join("defaults")
 }
 
-/// This process's scratch directory: merged workloads, planner outputs
-/// and the runner checks' cases. Per process, so concurrent runs (e.g.
-/// debug and release, which share `CARGO_TARGET_TMPDIR`) do not overwrite
-/// each other's files; removed when every trial passes.
+/// The scratch directory: merged workloads, planner outputs and the
+/// runner checks' cases. One per build profile, so a debug and a release
+/// run (which share `CARGO_TARGET_TMPDIR`) do not overwrite each other's
+/// files; emptied when a run starts and removed when every trial passes.
 fn scratch_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("goldens-{}", std::process::id()))
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("goldens-{profile}"))
 }
 
 /// Every case directory under `root` (one holding a `case.toml`), with its
@@ -125,6 +155,8 @@ fn case_dirs(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
 
 fn main() {
     let arguments = Arguments::from_args();
+    // The previous run's files, kept if it failed.
+    let _ = std::fs::remove_dir_all(scratch_root());
     let update = std::env::var_os("UPDATE_SNAPSHOTS").is_some_and(|value| value == "1");
     let mut trials: Vec<Trial> = match case_dirs(&goldens_dir()) {
         Ok(cases) => cases
@@ -218,8 +250,11 @@ fn planner_command(case: &Case, dir: &Path, scratch: &Path) -> Result<Vec<String
     let tables = dir.join("tables");
     if tables.is_dir() {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&tables)
-            .map_err(|e| e.to_string())?
-            .map(|entry| entry.unwrap().path())
+            .map_err(|e| format!("{}: {e}", tables.display()))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("{}: {e}", tables.display()))?
+            .into_iter()
             .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
             .collect();
         paths.sort();
@@ -239,6 +274,12 @@ fn planner_command(case: &Case, dir: &Path, scratch: &Path) -> Result<Vec<String
 /// outlives the test, so the printed command reproduces the failure.
 fn workload_path(index: usize, path: &Path, scratch: &Path) -> Result<String, String> {
     let mut workload: Value = read_json(path)?;
+    if !workload.is_object() {
+        return Err(format!(
+            "{}: a workload must be a JSON object",
+            path.display()
+        ));
+    }
     if !workload["data_workload"].is_null() {
         return Ok(path.display().to_string());
     }
@@ -366,11 +407,12 @@ fn root_group(document: &Value, query: &str) -> Result<u64, String> {
     }
 }
 
-/// Whether `actual` equals `expected`: floats within [`RELATIVE_TOLERANCE`],
-/// integers (ids, intervals, counts) and everything else exactly.
+/// Whether `actual` equals `expected`: two floats within
+/// [`RELATIVE_TOLERANCE`]; integers (ids, intervals, counts), an integer
+/// against a float, and everything else exactly.
 fn json_matches(expected: &Value, actual: &Value) -> bool {
     match (expected, actual) {
-        (Value::Number(e), Value::Number(a)) if !e.is_f64() && !a.is_f64() => e == a,
+        (Value::Number(e), Value::Number(a)) if !e.is_f64() || !a.is_f64() => e == a,
         (Value::Number(e), Value::Number(a)) => {
             let (e, a) = (e.as_f64().unwrap(), a.as_f64().unwrap());
             e == a || (e - a).abs() <= RELATIVE_TOLERANCE * e.abs().max(a.abs())
@@ -435,6 +477,8 @@ fn runner_checks() -> Vec<Trial> {
                 && !matches("1.0", "1.001")
                 && !matches("0", "1e-9")
                 && !matches("60000", "60005")
+                && !matches("60000", "60000.5")
+                && !matches("60000.5", "60000")
                 && !matches(r#"{"a": "x"}"#, r#"{"a": "y"}"#)
                 && !matches(r#"{"a": 1}"#, r#"{"a": 1, "b": 1}"#);
             ok.then_some(())
@@ -450,6 +494,13 @@ fn runner_checks() -> Vec<Trial> {
                 ("why = 'x'\nrule_fires = ['rollup']", "PR 5"),
                 ("why = 'x'\nmutations = []", "PR 6"),
                 ("why = 'x'\ntier = 'nightly'", "tier"),
+                ("why = 'x'\nargs = ['--plan-file', 'p.json']", "--plan-file"),
+                (
+                    "why = 'x'\nargs = ['--report-file', 'r.json']",
+                    "--report-file",
+                ),
+                ("why = 'x'\nargs = ['--out', 'o.json']", "--out"),
+                ("why = 'x'\nargs = ['--workload', 'w.json']", "--workload"),
             ] {
                 match parse_case(text) {
                     Err(error) if error.contains(expected) => {}
@@ -575,6 +626,21 @@ fn runner_checks() -> Vec<Trial> {
                 && !agrees(None, &ok);
             all.then_some(())
                 .ok_or_else(|| "exit status check failed".into())
+        }),
+        // A workload file that is not a JSON object is an error naming the
+        // file, not a panic.
+        Trial::test("runner/malformed_workload_is_an_error", || {
+            let dir = scratch_root().join("checks/malformed_workload");
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(dir.join("workload.json"), "[]")?;
+            let case = parse_case("why = 'x'")?;
+            match std::panic::catch_unwind(|| planner_command(&case, &dir, &dir)) {
+                Ok(Err(error)) if error.contains("workload.json") => Ok(()),
+                Ok(other) => {
+                    Err(format!("expected an error naming workload.json, got {other:?}").into())
+                }
+                Err(_) => Err("planner_command panicked".into()),
+            }
         }),
         // A query listed as the root of two Stage 0 groups is an error, not
         // the first group found.
