@@ -100,18 +100,28 @@ fn without_wider_levels() -> Vec<asap_planner::CandidateExclusion> {
 /// The planning stages' run over `workload` under the default cost inputs,
 /// with raw data kept or not.
 fn planning_run(workload: &PlanningWorkload, raw_data_retained: bool) -> PlanningStagesRun {
+    planning_run_on(
+        workload,
+        // The stored plans were measured with one tumbling-window chain per
+        // range, before wider levels and covers: a deployment without both
+        // operators plans those.
+        &DeploymentCapabilities {
+            raw_data_retained,
+            excluded_candidates: without_wider_levels(),
+            ..Default::default()
+        },
+    )
+}
+
+/// [`planning_run`] on a deployment with `capabilities`.
+fn planning_run_on(
+    workload: &PlanningWorkload,
+    capabilities: &DeploymentCapabilities,
+) -> PlanningStagesRun {
     let settings = CostInputs::default();
-    // The stored plans were measured with one tumbling-window chain per
-    // range, before wider levels and covers: a deployment without both
-    // operators plans those.
-    let capabilities = DeploymentCapabilities {
-        raw_data_retained,
-        excluded_candidates: without_wider_levels(),
-        ..Default::default()
-    };
     let models = PlanningModels::builtin()
         .with_cost_inputs(&settings)
-        .with_deployment_capabilities(&capabilities);
+        .with_deployment_capabilities(capabilities);
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap();
     let roots = lower_promql_roots(workload).unwrap();
@@ -427,10 +437,23 @@ fn with_kll_k(plan: &PhysicalASAPDAG, k: u32) -> PhysicalASAPDAG {
 /// more (not measured).
 #[test]
 fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
-    use asap_types::summary_type::SketchParams;
+    use asap_types::deployment_capabilities::CandidateExclusion;
+    use asap_types::summary_type::{SketchParams, SummaryFamily};
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        // Sketch-specific: compressed samples would answer exactly.
+        excluded_candidates: without_wider_levels()
+            .into_iter()
+            .chain([CandidateExclusion {
+                summary_family: Some(SummaryFamily::CompressedSamples),
+                ..Default::default()
+            }])
+            .collect(),
+        ..Default::default()
+    };
     for setting in [ONE_HZ_EVERY_10_S, ONE_HZ_EVERY_60_S] {
         let w = workload(QUANTILE_RANK, setting);
-        let run = planning_run(&w, false);
+        let run = planning_run_on(&w, &capabilities);
         // The `k`s of the stored KLL windows (tumbling-window chains)
         // Stage 1 offers, smallest first.
         let offered_kll_ks: Vec<u32> = run

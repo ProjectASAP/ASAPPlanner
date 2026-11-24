@@ -33,6 +33,9 @@ pub(super) struct MaterializedViewSlot {
     /// run reads only the union of the windows they take from it.
     pub(super) cover_reads:
         Option<Vec<planner_types::ir::operator::tumbling_window_chain::CoverLevel>>,
+    /// For a compressed-samples chain read by decodes, how its windows are
+    /// selected; `None` for every other view.
+    pub(super) sample_windows: Option<crate::sources::SampleWindowsRead>,
 }
 
 /// A `Scan` leaf, computed once at compile time: what [`CompiledPhysicalDAG::instantiate`]
@@ -200,6 +203,7 @@ impl CompiledPhysicalDAG {
                         slot.schema.clone(),
                         slot.read_window,
                         slot.cover_reads.clone(),
+                        slot.sample_windows,
                     );
                     dag.add(id, vec![], scan, lifetime)?;
                 }

@@ -213,6 +213,7 @@ fn compile_internal(
                 None => window_below(id, &graph),
             }
             .ok_or_else(|| invalid(format!("materialized view {id} is read unbounded")))?;
+            let sample_windows = sample_windows_read(id, &graph, &seen)?;
             physical_dag.add_materialized_view(
                 id,
                 compiled::MaterializedViewSlot {
@@ -220,6 +221,7 @@ fn compile_internal(
                     schema: output,
                     read_window,
                     cover_reads: cover_reads_of(id, &graph),
+                    sample_windows,
                 },
             )?;
         } else if let Payload::NonASAP(NonASAPOp::Scan {
@@ -265,6 +267,17 @@ fn compile_internal(
                 .iter()
                 .map(|id| Arc::new(nodes[id].output_schema.clone()))
                 .collect::<Vec<_>>();
+            if let Payload::ASAP(ASAPOp::DecodeSamplesInRange { .. }) = &node.payload {
+                let [input] = schemas.as_slice() else {
+                    return Err(invalid(format!(
+                        "node {id}: a decode of compressed samples reads one input"
+                    )));
+                };
+                let operator = decode_samples_operator(id, node, input, &output, &graph)
+                    .map_err(|error| invalid(format!("node {id}: {error}")))?;
+                physical_dag.add(id, inputs, operator)?;
+                continue;
+            }
             if lowering::lower_to_several_operators(
                 id,
                 node,
@@ -1116,6 +1129,144 @@ fn compile_internal(
 /// vector it has none (`count(sum by (job) (m >= 1000))` is empty when no
 /// value reaches 1000), whether or not its input still has a series
 /// identity column.
+/// The compressed-samples chain under `id`, through the `TimeShift`s below
+/// it: its node and tumbling-window width.
+fn compressed_samples_chain_below(
+    id: NodeId,
+    graph: &CompileGraph<'_>,
+) -> Result<(NodeId, i64), Error> {
+    let chain = node_below_shifts(
+        first_input(id, graph.dependencies),
+        graph.nodes,
+        graph.dependencies,
+    )
+    .ok_or_else(|| invalid("a decode reads a chain through time shifts without `@`"))?;
+    match &graph.nodes[&chain].payload {
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            summary_type: FieldDataType::CompressedSamples,
+            tumbling_window_width_ms,
+            ..
+        }) => Ok((
+            chain,
+            i64::try_from(*tumbling_window_width_ms)
+                .map_err(|_| invalid("tumbling-window width exceeds Int64"))?,
+        )),
+        _ => Err(invalid("a decode reads a compressed-samples chain")),
+    }
+}
+
+/// How the view `id` is read when it is a compressed-samples chain read by
+/// the compiled decodes above it (`compiled`): its width, and whether one
+/// of them reads its open window; `None` for any other view.
+fn sample_windows_read(
+    id: NodeId,
+    graph: &CompileGraph<'_>,
+    compiled: &BTreeSet<NodeId>,
+) -> Result<Option<crate::sources::SampleWindowsRead>, Error> {
+    if !matches!(
+        graph.nodes[&id].payload,
+        Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            summary_type: FieldDataType::CompressedSamples,
+            ..
+        })
+    ) {
+        return Ok(None);
+    }
+    let mut width_ms = None;
+    let mut open_window = false;
+    for &decode in compiled {
+        let Payload::ASAP(ASAPOp::DecodeSamplesInRange {
+            reads_unsealed_window,
+            ..
+        }) = &graph.nodes[&decode].payload
+        else {
+            continue;
+        };
+        let (chain, width) = compressed_samples_chain_below(decode, graph)?;
+        if chain == id {
+            width_ms = Some(width);
+            open_window |= *reads_unsealed_window;
+        }
+    }
+    Ok(width_ms.map(|width_ms| crate::sources::SampleWindowsRead {
+        width_ms,
+        open_window,
+    }))
+}
+
+/// The native decode of the `DecodeSamplesInRange` `id` (`node`) over its
+/// chain rows `input` into `output`, the raw sample rows of `TimeRange ←
+/// Scan`: each output column is a chain key of that name, the time, the
+/// value, or a label read from the series identity.
+fn decode_samples_operator(
+    id: NodeId,
+    node: &PhysicalASAPDAGNode,
+    input: &SchemaRef,
+    output: &SchemaRef,
+    graph: &CompileGraph<'_>,
+) -> Result<Operator, Error> {
+    use crate::operators::decode_samples::{DecodeSpec, DecodedColumn};
+    let Payload::ASAP(ASAPOp::DecodeSamplesInRange {
+        range,
+        kind,
+        reads_unsealed_window,
+        ..
+    }) = &node.payload
+    else {
+        unreachable!("a decode node")
+    };
+    let (_, width_ms) = compressed_samples_chain_below(id, graph)?;
+    let millis =
+        |ms: u128| i64::try_from(ms).map_err(|_| invalid("a decode's range overflows Int64"));
+    let offset_ms = planner_types::plan::time_window::shift_back_ms_below(graph, id)
+        .ok_or_else(|| invalid("a decode reads through time shifts without `@`"))?;
+    let window_end = input
+        .time_index
+        .ok_or_else(|| invalid("a chain's rows have a window end"))?;
+    let state = input
+        .fields
+        .iter()
+        .position(|field| field.dtype == FieldDataType::CompressedSamples)
+        .ok_or_else(|| invalid("a chain's rows hold compressed samples"))?;
+    let time = output
+        .time_index
+        .ok_or_else(|| invalid("decoded samples have a time column"))?;
+    let value = named_column(output, &ColumnRef::SampleValue)?;
+    let columns = output
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(column, field)| {
+            if column == time {
+                DecodedColumn::Time
+            } else if column == value {
+                DecodedColumn::Value
+            } else if let Some(key) = input.fields.iter().enumerate().position(|(index, key)| {
+                index != window_end && index != state && key.name == field.name
+            }) {
+                DecodedColumn::Key(key)
+            } else {
+                DecodedColumn::Label(field.name.clone())
+            }
+        })
+        .collect();
+    Operator::decode_samples(
+        input.clone(),
+        output.clone(),
+        DecodeSpec {
+            window_end,
+            state,
+            width_ms,
+            range_ms: millis(range.as_millis())?,
+            offset_ms: i64::try_from(offset_ms)
+                .map_err(|_| invalid("a decode's offset overflows Int64"))?,
+            instant: *kind == TimeRangeKind::Instant,
+            reads_unsealed_window: *reads_unsealed_window,
+            columns,
+        },
+    )
+}
+
 fn input_rows_kind(node: &OperatorNode) -> OperatorResultKind {
     node.operator
         .children()

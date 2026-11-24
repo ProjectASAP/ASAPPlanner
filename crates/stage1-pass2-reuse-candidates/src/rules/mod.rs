@@ -4,5 +4,6 @@
 //! consumer, so every consumer of a group sees what a rule adds to it.
 pub(crate) mod candidates;
 pub(crate) mod chains;
+pub(crate) mod compressed_samples;
 pub(crate) mod rollup;
 pub(crate) mod topk;

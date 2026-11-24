@@ -693,6 +693,19 @@ pub(crate) const KLL_MERGE_OPERATIONS_PER_OUTPUT_GROUP: f64 = 19_000.0;
 /// of a column taking `distinct_values` values (`None`: every row's
 /// differs). Only a KMV's ([`kmv_compared_hashes_per_row`]) and a heap
 /// sketch's ([`heap_residents_per_update`]) depend on them.
+/// Operations to append one sample to a compressed-samples window and,
+/// once per sample, to re-encode it when the window seals: 100, until a
+/// deployment's calibration measures it. A reference codec measured 13–31
+/// ns per sample to append (XOR) and 33–103 ns to encode with decimal
+/// mantissas and zstd (design doc `compressed-sample-windows.md`, section
+/// 3.3); one sample pays both at most.
+pub(crate) const COMPRESSED_SAMPLE_ENCODE_OPERATIONS_PER_ROW: f64 = 100.0;
+
+/// Operations to decode one compressed sample: 20, until a deployment's
+/// calibration measures it. The reference codec measured 8–15 ns per sample
+/// (XOR) and 12–22 ns (decimal mantissas and zstd).
+pub(crate) const COMPRESSED_SAMPLE_DECODE_OPERATIONS_PER_SAMPLE: f64 = 20.0;
+
 pub(crate) fn update_terms_per_row(
     summary_type: &FieldDataType,
     parameters: Option<&SketchParams>,
@@ -700,6 +713,9 @@ pub(crate) fn update_terms_per_row(
     distinct_values: Option<u64>,
 ) -> NodeCostTerms {
     match (summary_type, parameters) {
+        (FieldDataType::CompressedSamples, _) => {
+            NodeCostTerms::of(CostConstant::CompressedSampleEncodeOperationsPerRow, 1.0)
+        }
         (FieldDataType::ExactAggregate(kind, _), _) if kind.tracks_counter_increase() => {
             NodeCostTerms::of(CostConstant::CounterUpdateOperationsPerRow, 1.0)
         }
@@ -1093,7 +1109,9 @@ pub(crate) fn pass_through_merge_terms(output_groups: u64) -> NodeCostTerms {
 /// accumulator, 2,500 for a sketch or any other summary.
 pub(crate) fn chain_emit_terms_per_state(summary_type: &FieldDataType) -> NodeCostTerms {
     match summary_type {
-        FieldDataType::ExactAggregate(..) => {
+        // A compressed window seals as an exact state's does; its
+        // re-encode is charged per sample (`update_terms_per_row`).
+        FieldDataType::ExactAggregate(..) | FieldDataType::CompressedSamples => {
             NodeCostTerms::of(CostConstant::ExactChainEmitOperationsPerState, 1.0)
         }
         FieldDataType::SummarySample(kind, params) => {

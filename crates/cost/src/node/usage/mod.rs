@@ -32,9 +32,10 @@ use crate::node::operator_statistics::{
     EdgeStatistics, OperatorStatistics, PartitionStatistics, UnaryEdgeStatistics,
 };
 use crate::node::state_bytes::{
-    assumed_magnitude_range, keeps_every_value, open_sketch_state_bytes, open_summary_state_bytes,
-    row_bytes, sketch_state_bytes, state_bytes_per_row, state_row_bytes_beside_state,
-    summary_state_bytes, StateInputRows,
+    assumed_magnitude_range, compressed_samples_state_bytes, keeps_every_value,
+    open_sketch_state_bytes, open_summary_state_bytes, row_bytes, sketch_state_bytes,
+    state_bytes_per_row, state_row_bytes_beside_state, summary_state_bytes, StateInputRows,
+    ASSUMED_COMPRESSED_BITS_PER_SAMPLE,
 };
 use crate::plan::kept_results::kept_per_grid;
 use crate::{aggregate_lookup, lookup_at_scale, StateFamily};
@@ -174,7 +175,7 @@ fn state_family<'a>(
             FieldDataType::StatModel(kind, params) => {
                 stat_model_state_family(kind, params).unwrap_or(StateFamily::None)
             }
-            FieldDataType::Plain(_) => StateFamily::None,
+            FieldDataType::Plain(_) | FieldDataType::CompressedSamples => StateFamily::None,
         },
         // A merge over a time range of a chain's windows reads states whose
         // producer (the time range) has no family: they are its own θ's, or
@@ -220,6 +221,7 @@ fn state_family<'a>(
         | Payload::ASAP(
             ASAPOp::MaintainPopulation { .. }
             | ASAPOp::EvaluatePopulation { .. }
+            | ASAPOp::DecodeSamplesInRange { .. }
             | ASAPOp::SummarySubtract { .. }
             | ASAPOp::SummaryDelete { .. }
             | ASAPOp::SummaryJoin { .. }
@@ -244,7 +246,9 @@ fn merged_state_family(
             FieldDataType::SummarySample(kind, params) => sampling_state_family(kind, params),
             FieldDataType::Wavelet(kind, params) => wavelet_state_family(kind, params),
             FieldDataType::StatModel(kind, params) => stat_model_state_family(kind, params),
-            FieldDataType::Plain(_) | FieldDataType::Sketch(..) => None,
+            FieldDataType::Plain(_)
+            | FieldDataType::Sketch(..)
+            | FieldDataType::CompressedSamples => None,
         })
         .unwrap_or(StateFamily::None)
 }
@@ -662,6 +666,8 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let table = &settings.measured_operation_costs;
     let speed = settings.resource_speed;
     let unit_costs = settings.cost_model.per_node_unit_costs();
+    // The ns one formula operation takes at this speed (1 at the default).
+    let ns_per_operation = speed.ms_per_cpu_op * 1e6;
     let sketch_size =
         |params: &SketchParams| sketch_state_bytes(params, StateInputRows::UNKNOWN) as f64;
     let mut fit = CalibrationFit::default();
@@ -690,6 +696,8 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // The time its raw output rows span, when it reads or narrows raw rows
     // (else passed on below).
     let mut read_raw_rows_span_ms: Option<u64> = None;
+    // The compressed samples a decode reads.
+    let mut decoded_samples: Option<u64> = None;
     let ingestion = node.output_state.timing == ExecutionTiming::IngestionTime;
     // The outputs a node retains: its `retention_ms` over the time between
     // two outputs, at least one. A chain's outputs are its tumbling
@@ -869,6 +877,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             | ASAPOp::SummaryMerge { .. }
             | ASAPOp::SummaryTumblingWindowChain { .. }
             | ASAPOp::SummaryMergeWindows { .. }
+            | ASAPOp::DecodeSamplesInRange { .. }
             | ASAPOp::SummarySubtract { .. }
             | ASAPOp::SummaryDelete { .. }
             | ASAPOp::SummaryJoin { .. }
@@ -1036,29 +1045,69 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             value_magnitude_range,
             distinct_values: folded_distinct_values(update),
         };
-        let state_bytes = measured_state_bytes.unwrap_or(summary_state_bytes(
-            family,
-            node.parameters.as_ref(),
-            input_rows,
-        )?);
-        let open_state_bytes = measured_state_bytes.unwrap_or(open_summary_state_bytes(
-            family,
-            node.parameters.as_ref(),
-            input_rows,
-        )?);
-        let update_terms_per_row = update_terms_per_row(
-            family,
-            node.parameters.as_ref(),
-            input_rows.rows_per_state(),
-            input_rows.distinct_values,
-        )
+        // A compressed-samples window: the column's calibrated bits per
+        // sample (the most any source declares), else the assumed 72.
+        let compressed_bits = matches!(family, FieldDataType::CompressedSamples).then(|| {
+            // A source column passed on unchanged, else a PromQL sample's
+            // value column.
+            let column = column.unwrap_or("value");
+            let declared = declared_column_fact(data, &sources, column, |facts| {
+                &facts.column_compressed_bits_per_sample
+            });
+            match declared {
+                Some(bits) => (bits, None),
+                None => (
+                    ASSUMED_COMPRESSED_BITS_PER_SAMPLE,
+                    Some(AssumedDataFact {
+                        sources: sources.iter().map(|source| source.to_string()).collect(),
+                        assumption: DataFactAssumption::CompressedBitsPerSample {
+                            column: column.to_string(),
+                            assumed_bits_per_sample: ASSUMED_COMPRESSED_BITS_PER_SAMPLE,
+                        },
+                    }),
+                ),
+            }
+        });
+        let state_bytes = match (measured_state_bytes, &compressed_bits) {
+            (Some(bytes), _) => bytes,
+            // The block and its 8-byte offset in the state column.
+            (None, Some((bits, _))) => {
+                compressed_samples_state_bytes(input_rows.rows_per_state().unwrap_or(1), *bits) + 8
+            }
+            (None, None) => summary_state_bytes(family, node.parameters.as_ref(), input_rows)?,
+        };
+        // An open compressed window holds its samples as the sealed one does.
+        let open_state_bytes = match (measured_state_bytes, &compressed_bits) {
+            (Some(bytes), _) => bytes,
+            (None, Some(_)) => state_bytes,
+            (None, None) => open_summary_state_bytes(family, node.parameters.as_ref(), input_rows)?,
+        };
+        // A compressed window's append and seal at the deployment's
+        // calibrated ns per sample, when declared.
+        let declared_encode_ns = compressed_bits.as_ref().and_then(|_| {
+            declared_column_fact(data, &sources, column.unwrap_or("value"), |facts| {
+                &facts.column_compressed_sample_encode_ns
+            })
+        });
+        let update_terms_per_row = match declared_encode_ns {
+            Some(ns) => NodeCostTerms::without_constant(ns / ns_per_operation),
+            None => update_terms_per_row(
+                family,
+                node.parameters.as_ref(),
+                input_rows.rows_per_state(),
+                input_rows.distinct_values,
+            ),
+        }
         .plus_terms(&carried_label_terms_per_row(&node.output_schema, reduction));
         Ok(SummaryStateBuild {
             input_rows,
             state_bytes,
             open_state_bytes,
             update_terms_per_row,
-            magnitude_range_fact: assumed_magnitude_range_fact(column, input_rows),
+            magnitude_range_fact: match compressed_bits {
+                Some((_, assumed)) => assumed,
+                None => assumed_magnitude_range_fact(column, input_rows),
+            },
         })
     };
     let unary = |output| UnaryEdgeStatistics {
@@ -1924,6 +1973,61 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 ),
             )
         }
+        Payload::ASAP(ASAPOp::DecodeSamplesInRange {
+            range,
+            kind,
+            reads_unsealed_window,
+            ..
+        }) => {
+            // The samples of its range, as the `TimeRange` over raw rows it
+            // stands for keeps (an instant read: one per series), and the
+            // samples it decodes for them: a read of the open window starts
+            // half a window early on average (the first window it overlaps),
+            // an instant read decodes half its newest window.
+            let rows_per_ms = rows_per_ms.unwrap_or(0.0);
+            let range_ms = u64::try_from(range.as_millis()).unwrap_or(u64::MAX);
+            let width_ms = chain_tumbling_window_width_ms(producers).unwrap_or(0);
+            let series_count = series.unwrap_or(input.rows).max(1);
+            let rows = match kind {
+                TimeRangeKind::Range => (rows_per_ms * range_ms as f64).round() as u64,
+                TimeRangeKind::Instant => series_count,
+            }
+            .max(1);
+            let decoded = match (kind, reads_unsealed_window) {
+                (TimeRangeKind::Range, true) => {
+                    rows_per_ms * (range_ms as f64 + width_ms as f64 / 2.0)
+                }
+                (TimeRangeKind::Range, false) => rows_per_ms * range_ms as f64,
+                (TimeRangeKind::Instant, _) => rows_per_ms * width_ms as f64 / 2.0,
+            }
+            .max(rows as f64);
+            decoded_samples = Some(decoded.round() as u64);
+            // Checked against what its sources hold, as the `TimeRange` it
+            // stands for is (`range_short_of_rows_held`).
+            read_raw_rows_short_of_range = Some(match kind {
+                TimeRangeKind::Range => range_short_of_rows_held(range_ms, rows),
+                TimeRangeKind::Instant => None,
+            });
+            // The deployment's calibrated decode ns per sample, when declared.
+            let decode_terms = match declared_column_fact(data, &sources, "value", |facts| {
+                &facts.column_compressed_sample_decode_ns
+            }) {
+                Some(ns) => NodeCostTerms::without_constant(decoded * ns / ns_per_operation),
+                None => NodeCostTerms::of(
+                    CostConstant::CompressedSampleDecodeOperationsPerSample,
+                    decoded,
+                ),
+            };
+            read_raw_rows_span_ms = Some(range_ms);
+            let out = edge(rows)?;
+            // It holds one series' decoded rows at a time.
+            let held = out.bytes.div_ceil(series_count);
+            (
+                out,
+                Ok(charged(decode_terms, held, 0)),
+                format!("decode {decoded:.0} compressed samples into {rows} rows"),
+            )
+        }
         Payload::ASAP(ASAPOp::SummaryMerge { group_by, .. }) => {
             // Each input state read is merged into its group's (by the
             // states' family, `merge_ops` below); one state per group
@@ -2091,6 +2195,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // reads, otherwise the rows of its (first) input.
     let units = match &node.payload {
         Payload::NonASAP(NonASAPOp::Scan { .. }) => out.rows,
+        Payload::ASAP(ASAPOp::DecodeSamplesInRange { .. }) => decoded_samples.unwrap_or(out.rows),
         Payload::ASAP(ASAPOp::SummaryMerge { .. }) => merged_states(producers)?,
         // The narrower states it merges in one execution (one second at
         // ingestion time).
@@ -2467,7 +2572,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // A scan's rows arrive at its sources' rate; a time range and the
     // operators that keep each row's window pass on their input's. The
     // rate holds while its rows are that rate over their span.
-    let raw_rows_per_ms = if matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. })) {
+    // A decode of compressed samples outputs its source's rows, at the
+    // sources' rate.
+    let raw_rows_per_ms = if matches!(
+        node.payload,
+        Payload::NonASAP(NonASAPOp::Scan { .. })
+            | Payload::ASAP(ASAPOp::DecodeSamplesInRange { .. })
+    ) {
         rows_per_ms
     } else if matches!(node.payload, Payload::NonASAP(NonASAPOp::TimeRange { .. }))
         || node.payload.keeps_input_window()
@@ -2923,4 +3034,20 @@ fn split(input: EdgeStatistics, partitions: u64) -> PartitionStatistics {
 }
 
 #[cfg(test)]
+mod compressed_samples_tests;
+#[cfg(test)]
 mod tests;
+
+/// What the sources `sources` declare for `column` in the fact map `facts`
+/// picks (the largest when several do); `None` when none does.
+fn declared_column_fact(
+    data: &DataWorkload,
+    sources: &BTreeSet<&str>,
+    column: &str,
+    facts: impl Fn(&asap_types::workload::SourceFacts) -> &BTreeMap<String, f64>,
+) -> Option<f64> {
+    sources
+        .iter()
+        .filter_map(|source| facts(data.sources.get(*source)?).get(column).copied())
+        .reduce(f64::max)
+}

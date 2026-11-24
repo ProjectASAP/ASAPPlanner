@@ -203,10 +203,12 @@ pub(super) fn time_window_operator(
 
 /// The window the `TimeRange` `id` reads, its range over the `TimeShift`s
 /// right below it ([`shift_back_ms_below`]): `(T - s - w, T - s]`
-/// at evaluation time `T`. `None` when `id` is not a `TimeRange`, or a
+/// at evaluation time `T`. A `DecodeSamplesInRange` reads the same window
+/// as the `TimeRange` it stands for. `None` when `id` is neither, or a
 /// shift below it has an `@` anchor or the offsets are negative.
 pub(super) fn time_range_window(id: NodeId, graph: &CompileGraph<'_>) -> Option<TimeWindow> {
-    let Payload::NonASAP(NonASAPOp::TimeRange { range, .. }) = &graph.nodes.get(&id)?.payload
+    let (Payload::NonASAP(NonASAPOp::TimeRange { range, .. })
+    | Payload::ASAP(ASAPOp::DecodeSamplesInRange { range, .. })) = &graph.nodes.get(&id)?.payload
     else {
         return None;
     };

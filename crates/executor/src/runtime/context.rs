@@ -1,7 +1,9 @@
+use crate::summary_kernels::sample_blocks::{PlainSampleBlockCodec, SampleBlockCodec};
 use crate::Error;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
+    sync::Arc,
     task::Waker,
 };
 /// Scope is part of an execution instance, never mutable state in a reusable plan.
@@ -41,6 +43,9 @@ pub struct RunContext {
     /// later row of its series, in ms (`DataArrival`'s
     /// `max_out_of_order_ms`); `None` when undeclared.
     max_out_of_order_ms: Option<u64>,
+    /// The codec compressed-samples states are built with: the
+    /// deployment's, else the uncompressed reference.
+    sample_block_codec: Arc<dyn SampleBlockCodec>,
     pub(super) control: Rc<Control>,
 }
 impl RunContext {
@@ -56,6 +61,7 @@ impl RunContext {
             scope,
             query_range: None,
             max_out_of_order_ms: None,
+            sample_block_codec: Arc::new(PlainSampleBlockCodec),
             control: Rc::new(Control {
                 cancelled: Cell::new(false),
                 bytes: Cell::new(0),
@@ -97,6 +103,21 @@ impl RunContext {
     }
     pub(crate) fn max_out_of_order_ms(&self) -> Option<u64> {
         self.max_out_of_order_ms
+    }
+    /// Build this run's compressed-samples states with `codec`, the
+    /// deployment's sample-block encoding: each window's open block is
+    /// `codec.new_block()`, and its sealed bytes are what the run's view
+    /// rows hold and the deployment stores. Without it a run uses
+    /// [`PlainSampleBlockCodec`], the uncompressed reference. A state read
+    /// back keeps the codec that wrote it.
+    pub fn with_sample_block_codec(mut self, codec: Arc<dyn SampleBlockCodec>) -> Self {
+        self.sample_block_codec = codec;
+        self
+    }
+    /// The codec this run builds compressed-samples states with
+    /// ([`Self::with_sample_block_codec`]).
+    pub fn sample_block_codec(&self) -> &Arc<dyn SampleBlockCodec> {
+        &self.sample_block_codec
     }
     /// This run's context, evaluated at `evaluation_time_ms` instead: the
     /// same limits, cancellation, query range and `max_out_of_order_ms`.

@@ -42,6 +42,12 @@ pub fn validate_summary_kernel(
             }
             input.item.is_some()
         }
+        SummaryFamilyType::CompressedSamples => {
+            if parameters.is_some() {
+                return Err("a compressed-samples state has no parameters θ".into());
+            }
+            false
+        }
         SummaryFamilyType::Sketch(algorithm) => {
             let Some(parameters) = parameters else {
                 return Err(format!("a {algorithm:?} summary needs its parameters θ"));
@@ -248,6 +254,8 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     use planner_types::summary_type::SketchAlgorithm as A;
     let native = match family {
         SummaryFamilyType::ExactAggregate(..) => exact_kernel(family),
+        // Built per series from its samples, read by `DecodeSamplesInRange`.
+        SummaryFamilyType::CompressedSamples => true,
         // HydraCms is built by the all-groups summary build. Plain Count-Min
         // is native as stored state only: it merges and reads its bare
         // count, but the DAG does not build it from rows.

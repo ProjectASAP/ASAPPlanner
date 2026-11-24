@@ -5,6 +5,7 @@
 mod common;
 
 mod blocking_resources;
+mod compressed_sample_windows;
 mod current_series_heap;
 mod current_timestamp;
 mod deployment;

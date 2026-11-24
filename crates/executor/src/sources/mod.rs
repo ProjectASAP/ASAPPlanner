@@ -37,6 +37,20 @@ pub(crate) fn compile_scan_predicate(
     Ok(predicate)
 }
 
+/// How a compressed-samples chain's view is read by the
+/// `DecodeSamplesInRange`s above it: the sealed windows overlapping the
+/// window they read, aligned to the chain's grid (the store holds whole
+/// windows), and, when one of them reads unsealed windows, the open window
+/// after them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(any(test, feature = "test-support"), derive(serde::Serialize))]
+pub(crate) struct SampleWindowsRead {
+    /// The chain's tumbling-window width.
+    pub(crate) width_ms: i64,
+    /// Whether the open window is read too.
+    pub(crate) open_window: bool,
+}
+
 /// What a `Scan` reads, and how.
 enum ScanInput {
     /// A raw data slot: re-applies its time range and predicates.
@@ -53,6 +67,9 @@ enum ScanInput {
     /// A materialized view slot: exact, never re-filtered; its states are
     /// the store's.
     MaterializedView {
+        /// For a compressed-samples chain read by decodes, how its windows
+        /// are selected; `None` for every other view.
+        sample_windows: Option<SampleWindowsRead>,
         view: MaterializedView,
         /// The rows a read selects, back from the evaluation time.
         read_window: TimeWindow,
@@ -95,18 +112,22 @@ impl Scan {
     }
     /// A materialized view slot reading the rows of `view` that
     /// `read_window` selects; read only as `TimeRangeCover` levels
-    /// (`cover_reads`), only the union of the windows they take from it.
+    /// (`cover_reads`), only the union of the windows they take from it;
+    /// a compressed-samples chain read by decodes (`sample_windows`), its
+    /// sealed windows overlapping the window and maybe its open window.
     pub(crate) fn materialized_view(
         store: Arc<dyn DataStore>,
         view: MaterializedView,
         output: SchemaRef,
         read_window: TimeWindow,
         cover_reads: Option<Vec<CoverLevel>>,
+        sample_windows: Option<SampleWindowsRead>,
     ) -> Self {
         Self {
             store,
             output,
             input: ScanInput::MaterializedView {
+                sample_windows,
                 view,
                 read_window,
                 cover_reads,
@@ -178,11 +199,86 @@ impl PhysicalOperator<Batch, SchemaRef> for Scan {
                 view,
                 read_window,
                 cover_reads,
+                sample_windows: Some(read),
+            } if cover_reads.is_none() => {
+                self.start_sample_windows(view, *read_window, *read, context)
+            }
+            ScanInput::MaterializedView {
+                view,
+                read_window,
+                cover_reads,
+                ..
             } => self.start_materialized_view(view, *read_window, cover_reads.as_deref(), context),
         }
     }
 }
 impl Scan {
+    /// The windows of a compressed-samples chain that the decodes above it
+    /// read at evaluation time `T`: the sealed windows overlapping
+    /// `read_window`, from the grid point at or before its start to the
+    /// newest grid point at or before `T` (later windows are not sealed),
+    /// then, with `read.open_window`, the store's open window. The decodes
+    /// trim the samples to their own ranges.
+    fn start_sample_windows<'a>(
+        &'a self,
+        view: &'a MaterializedView,
+        read_window: TimeWindow,
+        read: SampleWindowsRead,
+        context: RunContext,
+    ) -> Result<OutputStream<'a, Batch>, Error> {
+        let Scope::Query { evaluation_time_ms } = context.scope else {
+            return Err(Error::Invalid(
+                "compressed-samples windows are decoded at query time only".into(),
+            ));
+        };
+        let (start_ms, _) = read_window.bounds_ms(evaluation_time_ms);
+        let sealed = (
+            start_ms.div_euclid(read.width_ms) * read.width_ms,
+            evaluation_time_ms.div_euclid(read.width_ms) * read.width_ms,
+        );
+        let opening = context.clone();
+        let stream = stream::once(async move {
+            if opening.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let sealed_windows = if sealed.0 < sealed.1 {
+                let request = MaterializedViewRequest {
+                    time_range_ms: sealed,
+                    schema: &self.output,
+                };
+                self.store
+                    .read_materialized_view(view, &request, opening.clone())?
+            } else {
+                stream::empty().boxed_local()
+            };
+            Ok(if read.open_window {
+                sealed_windows
+                    .chain(
+                        stream::once({
+                            let opening = opening.clone();
+                            async move { self.store.read_open_window(view, &self.output, opening) }
+                        })
+                        .try_flatten(),
+                    )
+                    .boxed_local()
+            } else {
+                sealed_windows
+            })
+        });
+        use futures::TryStreamExt;
+        Ok(stream
+            .try_flatten()
+            .map(move |batch| {
+                if context.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                let batch = self.to_output(batch?)?;
+                batch.mark_states_held_outside_run();
+                Ok(batch)
+            })
+            .boxed_local())
+    }
+
     fn start_materialized_view<'a>(
         &'a self,
         view: &'a MaterializedView,

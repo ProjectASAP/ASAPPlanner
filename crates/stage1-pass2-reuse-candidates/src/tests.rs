@@ -2,6 +2,7 @@
 //! readout requirements, dead-candidate elimination and the edges give for
 //! a memo built from `crate::test_fixtures`.
 mod chains;
+mod compressed_samples;
 mod dead_candidates;
 mod edges;
 mod evaluation_grids;

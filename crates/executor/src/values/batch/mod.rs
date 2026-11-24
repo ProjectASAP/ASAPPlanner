@@ -377,6 +377,15 @@ impl Batch {
                     );
                     StateColumn::stored_views(family, super::StateStorage::Mapped(copied), charged)
                 }
+                super::StateStorage::CompressedSamples(blocks) => {
+                    StateColumn::from_compressed_samples(
+                        family,
+                        blocks.codec().clone(),
+                        used.iter()
+                            .map(|&index| blocks.block(index).to_vec())
+                            .collect(),
+                    )
+                }
                 // Shared by pointer: stored sketches are not charged again.
                 super::StateStorage::Objects(_) => StateColumn::from_objects_of(
                     family,
@@ -575,7 +584,11 @@ impl Batch {
                                 state_column.state(index as usize),
                                 state_column.state_held_outside_run(index as usize),
                             )),
-                            super::StateStorage::Exact(_) | super::StateStorage::Mapped(_) => {
+                            // A record, a mapped state or a block becomes
+                            // a new object.
+                            super::StateStorage::Exact(_)
+                            | super::StateStorage::Mapped(_)
+                            | super::StateStorage::CompressedSamples(_) => {
                                 objects.push((state_column.state(index as usize), false))
                             }
                         }

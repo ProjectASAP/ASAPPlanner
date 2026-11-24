@@ -165,6 +165,29 @@ pub struct SourceFacts {
     /// Omitted from JSON when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub column_magnitudes: BTreeMap<String, ValueMagnitudeRange>,
+    /// The bits one sample of each column takes in a sealed
+    /// compressed-samples block, keyed by column name (default: none
+    /// declared), e.g. `{"value": 19.3}`: the deployment's codec's sealed
+    /// block bits (its overhead included) over samples, as the calibration
+    /// step measures them by sealing a sample of the data at the window
+    /// size. Cost only; an undeclared column is costed at an assumed 72
+    /// bits.
+    /// Omitted from JSON when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub column_compressed_bits_per_sample: BTreeMap<String, f64>,
+    /// The ns the deployment's codec takes to append one sample of each
+    /// column to a compressed-samples window and seal it, keyed by column
+    /// name (default: none declared, costed at the analytical 100 ns), as
+    /// the calibration step measures it. Cost only.
+    /// Omitted from JSON when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub column_compressed_sample_encode_ns: BTreeMap<String, f64>,
+    /// The ns the deployment's codec takes to decode one sample of each
+    /// column (default: none declared, costed at the analytical 20 ns), as
+    /// the calibration step measures it. Cost only.
+    /// Omitted from JSON when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub column_compressed_sample_decode_ns: BTreeMap<String, f64>,
     /// How often each series of the metric (or group of rows of a SQL
     /// table) receives a sample (default: unknown). A PromQL or MetricsQL
     /// bare instant selector over the metric reads the latest sample within it; lowering such a

@@ -10,7 +10,7 @@ pub mod capability;
 mod supported_summaries;
 pub use summary_kernels::factory;
 pub use summary_kernels::state_column_updater::StateColumnUpdater;
-pub use supported_summaries::supported_summary_families;
+pub use supported_summaries::{supported_summary_families, UNSEALED_WINDOW_READS};
 
 /// The exact Planner contract used by these kernels.
 pub use planner_types as planner;

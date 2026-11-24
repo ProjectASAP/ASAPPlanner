@@ -115,6 +115,22 @@ pub enum ASAPOp<C = Rc<OperatorNode>> {
         child: C,
         tumbling_window_width_ms: u64,
     },
+    /// The raw sample rows of `(T − range, T]` (for `Instant`, the newest
+    /// sample per series within `range`) decoded from the windows of the
+    /// compressed-samples chain under `child` (through any `TimeShift`s,
+    /// which carry an offset) that overlap the range; with
+    /// `reads_unsealed_window`, the chain's open window too, else only its
+    /// sealed windows. Its schema and rows are those of `TimeRange(range,
+    /// kind) ← Scan` over the chain's source with the label columns
+    /// `labels` (each derived from the series identity), placed between the
+    /// value and the identity (design doc `compressed-sample-windows.md`).
+    DecodeSamplesInRange {
+        child: C,
+        range: std::time::Duration,
+        kind: crate::ir::TimeRangeKind,
+        labels: Vec<Field>,
+        reads_unsealed_window: bool,
+    },
     // ── Reserved: migrated but unimplemented ──
     SummarySubtract {
         left: C,
@@ -151,6 +167,7 @@ impl<C> ASAPOp<C> {
             | MaintainPopulation { child, .. }
             | EvaluatePopulation { child, .. }
             | SummaryMergeWindows { child, .. }
+            | DecodeSamplesInRange { child, .. }
             | Extension { child, .. } => vec![child],
             SummaryEstimate { summary_input, .. } | SummaryDelete { summary_input, .. } => {
                 vec![summary_input]
@@ -231,6 +248,19 @@ impl<C> ASAPOp<C> {
                 children: children.iter().map(&mut f).collect(),
                 group_by: group_by.clone(),
             },
+            DecodeSamplesInRange {
+                child,
+                range,
+                kind,
+                labels,
+                reads_unsealed_window,
+            } => DecodeSamplesInRange {
+                child: f(child),
+                range: *range,
+                kind: *kind,
+                labels: labels.clone(),
+                reads_unsealed_window: *reads_unsealed_window,
+            },
             SummarySubtract { left, right } => SummarySubtract {
                 left: f(left),
                 right: f(right),
@@ -268,6 +298,7 @@ impl<C> ASAPOp<C> {
             SummaryMerge { .. } => "SummaryMerge",
             SummaryTumblingWindowChain { .. } => "SummaryTumblingWindowChain",
             SummaryMergeWindows { .. } => "SummaryMergeWindows",
+            DecodeSamplesInRange { .. } => "DecodeSamplesInRange",
             SummarySubtract { .. } => "SummarySubtract",
             SummaryDelete { .. } => "SummaryDelete",
             SummaryJoin { .. } => "SummaryJoin",
@@ -473,6 +504,10 @@ impl<I: OperatorInput> ASAPOp<I> {
                     (None, _) => input.clone(),
                 }
             }
+            DecodeSamplesInRange { child, labels, .. } => {
+                self.validate_inputs()?;
+                decoded_samples_schema(child, labels)?
+            }
             SummarySubtract { .. }
             | SummaryDelete { .. }
             | SummaryJoin { .. }
@@ -496,6 +531,10 @@ impl<I: OperatorInput> ASAPOp<I> {
             FinalizeExactAccumulator { child, .. } | EvaluatePopulation { child, .. } => {
                 source_kind(child)
             }
+            DecodeSamplesInRange { kind, .. } => match kind {
+                crate::ir::TimeRangeKind::Instant => OperatorResultKind::InstantVector,
+                crate::ir::TimeRangeKind::Range => OperatorResultKind::RangeVector,
+            },
         }
     }
 
@@ -678,6 +717,21 @@ impl<I: OperatorInput> ASAPOp<I> {
                     ))),
                 }
             }
+            DecodeSamplesInRange { child, range, .. } => {
+                if range.is_zero() {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
+                        "a decode of compressed samples needs a positive range".into(),
+                    ));
+                }
+                if compressed_samples_chain_under(child).is_none() {
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
+                        "a decode of compressed samples reads a compressed-samples chain, \
+                         through any time shifts"
+                            .into(),
+                    ));
+                }
+                Ok(())
+            }
             MaintainPopulation { child, population } => {
                 if !population.matches_node(child) {
                     return Err(SchemaDerivationError::InvalidScalarSignature(
@@ -747,6 +801,59 @@ impl<I: OperatorInput> ASAPOp<I> {
         }
         Ok(())
     }
+}
+
+/// The compressed-samples chain `input` is, or reads through `TimeShift`s:
+/// its `child`'s schema (the raw rows it is built over). `None` for any
+/// other input.
+pub(crate) fn compressed_samples_chain_under<I: OperatorInput>(input: &I) -> Option<Schema> {
+    match input.operator() {
+        Operator::NonASAP(NonASAPOp::TimeShift { child, .. }) => {
+            compressed_samples_chain_under(&child)
+        }
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child,
+            summary_type: FieldDataType::CompressedSamples,
+            ..
+        }) => Some(child.schema().clone()),
+        _ => None,
+    }
+}
+
+/// The schema of the raw rows a `DecodeSamplesInRange` over `chain`
+/// outputs: the chain's input rows (time, value, series identity) with
+/// `labels` inserted before the identity, keyed as the input is.
+fn decoded_samples_schema<I: OperatorInput>(
+    chain: &I,
+    labels: &[Field],
+) -> Result<Schema, SchemaDerivationError> {
+    let mut schema = compressed_samples_chain_under(chain).ok_or_else(|| {
+        SchemaDerivationError::InvalidScalarSignature(
+            "a decode of compressed samples reads a compressed-samples chain".into(),
+        )
+    })?;
+    let identity = schema
+        .fields
+        .iter()
+        .position(|field| field.name == crate::ir::schema::PROMQL_SERIES_IDENTITY)
+        .unwrap_or(schema.fields.len());
+    let shift = |column: ColumnId| {
+        if column >= identity {
+            column + labels.len()
+        } else {
+            column
+        }
+    };
+    schema.time_index = schema.time_index.map(shift);
+    for key in &mut schema.unique_keys {
+        for column in key.iter_mut() {
+            *column = shift(*column);
+        }
+    }
+    schema
+        .fields
+        .splice(identity..identity, labels.iter().cloned());
+    Ok(schema)
 }
 
 /// The build a rollup (a `SummaryMerge` with `group_by` of one input)

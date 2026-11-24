@@ -610,6 +610,7 @@ async fn build_per_group_summary(
     if let Some(max_out_of_order_ms) = context.max_out_of_order_ms() {
         updater = updater.with_max_out_of_order_ms(max_out_of_order_ms);
     }
+    updater = updater.with_sample_block_codec(context.sample_block_codec().clone())?;
     let mut work = Cooperative::new(context);
     let mut workspace = Workspace::new(context)?;
     // A global SQL aggregate has one row over no input rows; a PromQL
@@ -1468,6 +1469,7 @@ fn evaluate_states(
                 )
             }
             StateStorage::Mapped(_) => false,
+            StateStorage::CompressedSamples(_) => false,
         }
     };
     let mut keep = Vec::with_capacity(batch.num_rows());
@@ -1519,7 +1521,9 @@ fn evaluate_states(
             (SummaryEvaluation::Sketch(query), storage) => {
                 let summary = match storage {
                     StateStorage::Objects(objects) => objects[index].clone(),
-                    StateStorage::Exact(_) | StateStorage::Mapped(_) => states.state(index),
+                    StateStorage::Exact(_)
+                    | StateStorage::Mapped(_)
+                    | StateStorage::CompressedSamples(_) => states.state(index),
                 };
                 // A filtered or NULL-only group's quantile is SQL NULL.
                 if nullable && summary.is_empty() {

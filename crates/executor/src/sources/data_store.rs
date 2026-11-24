@@ -42,6 +42,29 @@ pub trait DataStore {
         request: &MaterializedViewRequest,
         context: RunContext,
     ) -> Result<OutputStream<'_, Batch>, Error>;
+
+    /// The open window of the compressed-samples chain `view`: a snapshot
+    /// of the window still being built, each series' samples that arrived
+    /// so far, in `schema` (the chain's `(window_end, keys, state)` rows; an
+    /// empty stream when the window has no sample yet). A
+    /// `DecodeSamplesInRange` that reads unsealed windows reads it after
+    /// the sealed windows; the runtime contract a deployment declares with
+    /// `DeploymentCapabilities::unsealed_window_reads`. The default refuses
+    /// the read: a store that keeps no open window declares that capability
+    /// false, so the Planner never plans such a read for it.
+    fn read_open_window(
+        &self,
+        view: &MaterializedView,
+        schema: &SchemaRef,
+        context: RunContext,
+    ) -> Result<OutputStream<'_, Batch>, Error> {
+        let _ = (schema, context);
+        Err(Error::Invalid(format!(
+            "materialized view {}: this store keeps no open window (unsealed-window reads \
+             are unsupported)",
+            view.node_id
+        )))
+    }
 }
 
 /// What a raw data slot (a `Scan`) reads in one run.

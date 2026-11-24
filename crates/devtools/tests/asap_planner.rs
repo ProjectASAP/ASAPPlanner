@@ -440,6 +440,12 @@ fn nine_queries_plan_without_cartesian_enumeration() {
 /// A deployment that keeps neither raw data nor query-time results.
 const NO_RAW: &str = r#"{"raw_data_retained": false, "query_time_results_retained": false}"#;
 
+/// [`NO_RAW`] without compressed-sample windows, for tests about the
+/// sketches or exact accumulators a plan without raw data selects
+/// (compressed samples would answer their queries exactly instead).
+const NO_RAW_NO_COMPRESSED: &str = r#"{"raw_data_retained": false, "query_time_results_retained": false,
+    "excluded_candidates": [{"summary_family": "compressed_samples"}]}"#;
+
 /// ASAPQuery's random workload (seed 862, workload-01): nine PromQL queries.
 const NINE_QUERY_WORKLOAD: &str =
     "../../tools/dag-viewer/workloads/random-mixed-seed-862/workload-01.json";
@@ -818,6 +824,7 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
             "counter_semantics": { "reset_handling": true, "extrapolation": true },
             "state_not_mergeable_across_windows": [],
             "excluded_candidates": [],
+            "unsealed_window_reads": true,
         })
     );
     let kll_kept = with_capabilities(
@@ -834,6 +841,7 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
             "counter_semantics": { "reset_handling": true, "extrapolation": true },
             "state_not_mergeable_across_windows": [],
             "excluded_candidates": [],
+            "unsealed_window_reads": true,
         })
     );
     let has_ddsketch = |document: &Value| {
@@ -1399,7 +1407,7 @@ const DDSKETCH_ASSUMED_RANGE_WARNING: &str = "assumed data fact: source m declar
 /// output, once. Declaring the range removes it.
 #[test]
 fn a_selected_ddsketch_over_undeclared_magnitudes_is_warned_about() {
-    let no_raw = TempFile::new(NO_RAW);
+    let no_raw = TempFile::new(NO_RAW_NO_COMPRESSED);
     let args = [
         "--run-until",
         "stage3",
@@ -1490,7 +1498,7 @@ const IN_ORDER_ARRIVAL_WARNING: &str = "assumed data fact: the data arrival decl
 /// removes the warning and leaves the plan as it was.
 #[test]
 fn an_ingestion_time_rate_over_undeclared_arrival_order_is_warned_about() {
-    let no_raw = TempFile::new(NO_RAW);
+    let no_raw = TempFile::new(NO_RAW_NO_COMPRESSED);
     let args = [
         "--run-until",
         "stage3",

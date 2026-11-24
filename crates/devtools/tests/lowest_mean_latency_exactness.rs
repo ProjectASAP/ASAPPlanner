@@ -224,7 +224,7 @@ fn the_measured_workloads_keep_their_optimum_in_a_bounded_model() {
             "tools/dag-viewer/workloads/random-mixed-seed-862/workload-01.json".to_string(),
             "mvp",
             false,
-            1990.46913043,
+            1457.15173913,
             SEED_VARIABLES,
             SEED_ROWS,
         ),
@@ -234,7 +234,7 @@ fn the_measured_workloads_keep_their_optimum_in_a_bounded_model() {
             TYPICAL_DASHBOARD.to_string(),
             "mvp",
             false,
-            847.206346,
+            825.602741972,
             TYPICAL_VARIABLES,
             TYPICAL_ROWS,
         ),
@@ -308,15 +308,16 @@ fn cost_inputs_of(workload: &str) -> &'static str {
     }
 }
 
-/// The model sizes measured with the speed-ups (variables, rows).
-const TOPK_VARIABLES: u64 = 1216;
-const TOPK_ROWS: u64 = 2408;
-const MIXED_VARIABLES: u64 = 580;
-const MIXED_ROWS: u64 = 933;
-const DISTINCT_VARIABLES: u64 = 425;
-const DISTINCT_ROWS: u64 = 747;
-const SEED_VARIABLES: u64 = 1550;
-const SEED_ROWS: u64 = 2763;
+/// The model sizes measured with the speed-ups (variables, rows), with the
+/// compressed-sample chains and decodes every raw range is offered.
+const TOPK_VARIABLES: u64 = 1244;
+const TOPK_ROWS: u64 = 2461;
+const MIXED_VARIABLES: u64 = 942;
+const MIXED_ROWS: u64 = 1589;
+const DISTINCT_VARIABLES: u64 = 550;
+const DISTINCT_ROWS: u64 = 990;
+const SEED_VARIABLES: u64 = 3766;
+const SEED_ROWS: u64 = 6871;
 /// Each query's latency in the MILP, and the frequency-weighted mean, are
 /// what `plan_cost` gives the selected plan (`--price-plan`), exactly and
 /// with the default stop rule, on the five measured workloads.
@@ -560,5 +561,5 @@ fn a_solve_without_a_plan_in_its_node_limit_retries_from_cost_model_1_s_plan() {
     std::fs::remove_file(&small_disk_path).ok();
 }
 
-const TYPICAL_VARIABLES: u64 = 2540;
-const TYPICAL_ROWS: u64 = 4585;
+const TYPICAL_VARIABLES: u64 = 4940;
+const TYPICAL_ROWS: u64 = 9031;

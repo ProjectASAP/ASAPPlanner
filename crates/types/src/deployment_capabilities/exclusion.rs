@@ -66,6 +66,11 @@ pub struct CandidateExclusion {
     /// this sketch algorithm.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readout: Option<SketchReadout>,
+    /// Matches a `DecodeSamplesInRange` by its read mode: `Some(true)` one
+    /// that reads the chain's open window, `Some(false)` one that reads
+    /// sealed windows only. Any other operator never matches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reads_unsealed_window: Option<bool>,
 }
 
 /// A statistic read from a sketch algorithm's state, e.g. a quantile from
@@ -143,6 +148,13 @@ impl CandidateExclusion {
                         && candidate.read_summary_type
                             == Some(&FieldDataType::Sketch(readout.summary_type))
                 }
+                _ => false,
+            }))
+            && passes(self.reads_unsealed_window.map(|unsealed| match operator {
+                Operator::ASAP(ASAPOp::DecodeSamplesInRange {
+                    reads_unsealed_window,
+                    ..
+                }) => *reads_unsealed_window == unsealed,
                 _ => false,
             }))
     }
@@ -259,6 +271,13 @@ impl CandidateExclusion {
             (
                 "readout",
                 set(self.readout.is_some(), &[OperatorKind::SummaryEstimate][..]),
+            ),
+            (
+                "reads_unsealed_window",
+                set(
+                    self.reads_unsealed_window.is_some(),
+                    &[OperatorKind::DecodeSamplesInRange][..],
+                ),
             ),
         ]
         .into_iter()

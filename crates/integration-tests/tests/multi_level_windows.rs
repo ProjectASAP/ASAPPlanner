@@ -384,8 +384,14 @@ async fn an_offset_range_reads_wider_levels_under_its_offset() {
     }))
     .unwrap();
     // Raw data not retained, as the measured data plane: windows of states.
+    // Without compressed-sample chains, which at one sample per 15 s would
+    // answer both sides exactly instead of the covers this test is about.
     let capabilities = asap_planner::DeploymentCapabilities {
         raw_data_retained: false,
+        excluded_candidates: vec![asap_types::deployment_capabilities::CandidateExclusion {
+            summary_family: Some(asap_types::summary_type::SummaryFamily::CompressedSamples),
+            ..Default::default()
+        }],
         ..Default::default()
     };
     let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);

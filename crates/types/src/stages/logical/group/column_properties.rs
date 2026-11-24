@@ -537,11 +537,14 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
             FieldDataType::SummarySample(kind, params) => sampling_finalized_sign(kind, params),
             FieldDataType::Wavelet(kind, params) => wavelet_finalized_sign(kind, params),
             FieldDataType::StatModel(kind, params) => stat_model_finalized_sign(kind, params),
-            FieldDataType::Plain(_) | FieldDataType::Sketch(_) => Unknown,
+            FieldDataType::Plain(_)
+            | FieldDataType::Sketch(_)
+            | FieldDataType::CompressedSamples => Unknown,
         }),
         MaintainPopulation { child, .. } => columns_of(child),
         EvaluatePopulation { child, .. } if output == child.schema() => columns_of(child),
         EvaluatePopulation { .. }
+        | DecodeSamplesInRange { .. }
         | SummarySubtract { .. }
         | SummaryDelete { .. }
         | SummaryJoin { .. }
