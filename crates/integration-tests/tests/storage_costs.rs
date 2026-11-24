@@ -341,7 +341,12 @@ async fn f2_lowest_mean_latency_counts_file_slack_in_the_disk_limit() {
 /// The plan (as JSON) and report of `query` every `interval_ms` over
 /// `series` series of `m`, one chain, cost model 1, with
 /// `data_plane_execution`.
-async fn one_chain(query: &str, interval_ms: u32, series: u64, data_plane: Value) -> (Value, Value) {
+async fn one_chain(
+    query: &str,
+    interval_ms: u32,
+    series: u64,
+    data_plane: Value,
+) -> (Value, Value) {
     let workload = over_m(vec![every(query, interval_ms, None)], series);
     let inputs = cost_inputs(usage_over_time(), max_table(), json!({}), data_plane);
     single_chain_plan(&workload, &inputs)
@@ -377,7 +382,12 @@ async fn d1_cold_reads_are_scanned_bytes_and_query_time() {
             - number(&uncached["predicted_usage"], "scanned_bytes_per_second"),
         cold_bytes_per_read / 300.0,
     );
-    let query_ms = |report: &Value| number(&report["predicted_usage"]["per_query"][0], "query_execution_ms");
+    let query_ms = |report: &Value| {
+        number(
+            &report["predicted_usage"]["per_query"][0],
+            "query_execution_ms",
+        )
+    };
     assert_close(
         "query time",
         query_ms(&cached) - query_ms(&uncached),
