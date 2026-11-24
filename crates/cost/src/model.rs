@@ -230,8 +230,9 @@ pub enum ClusterObjective {
 }
 
 /// How the deployment's data plane runs work: its threads, the lateness it
-/// allows before closing a window, and the utilisation its threads may
-/// run at. Latency, the precompute load and the recommended thread counts
+/// allows before closing a window, the utilisation its threads may run
+/// at, and how it stores views (its window cache and files, the bytes a
+/// per-series state's row holds beside its state). Latency, the precompute load and the recommended thread counts
 /// read it, under every cost model; only cost model 3's
 /// `lowest_mean_latency` selects with it. In JSON an object with these
 /// fields; an omitted field takes its default.

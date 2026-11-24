@@ -1258,8 +1258,9 @@ fn stored_ddsketch_prices_never_fall_below_what_the_executor_holds() {
 }
 
 /// A grouped state's row (no series identity) keeps its window's time and
-/// its group keys beside the state, whatever a per-series row holds: a Sum
-/// grouped by `job` holds 8 + 16 = 24 bytes beside its state.
+/// its group keys beside the state, whatever a per-series row holds (the
+/// input, 4 here, does not apply): a Sum grouped by `job` holds 8 + 16 =
+/// 24 bytes beside its state.
 #[test]
 fn a_grouped_state_row_keeps_its_group_keys() {
     use asap_types::summary_type::{ExactKind, ExactParams};
