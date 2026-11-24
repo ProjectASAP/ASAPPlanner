@@ -101,7 +101,8 @@ pub struct PredictedUsage {
     pub average_memory_bytes: f64,
     /// The most memory live at once.
     pub peak_memory_bytes: u64,
-    /// Bytes retained on disk, raw data query-time scans read included.
+    /// Bytes on disk at the peak, the file slack of views under the window
+    /// cache and the raw data query-time scans read included.
     pub disk_bytes: u64,
     /// Bytes written to disk per second: the sum of `per_node`'s; 0 in a
     /// report written without it.

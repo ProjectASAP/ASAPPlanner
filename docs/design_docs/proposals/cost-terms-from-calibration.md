@@ -72,7 +72,12 @@ Its resident windows are the mean count over one period of the reader
 
 A view retaining `N` windows keeps resident the most of its readers'
 counts, and at least the windows written within the idle time of its `N`.
-Every retained window is in its file: disk, `N` windows. Memory is its
+Every retained window is in its file. The files hold windows of
+`file_span_ms` each and are deleted whole once their newest window is
+`retention_margin_ms` past retention, so disk at the peak is
+`⌈(retention + margin + span) ÷ w⌉` windows, and cost model 1 charges the
+time average, `(retention + margin + span/2) ÷ w` (both at least `N`;
+`N` when the cache describes no files). Memory is its
 resident windows (the mean for the average and cost model 1, the most for
 the peak) and the window being built.
 
@@ -96,7 +101,8 @@ Examples (15 s windows, idle 60 s):
 | none | the 4 newest |
 
 **Selection.** Stage 3 charges the same. A cached view's execution and
-its $\pi_v$ charge its retained windows as disk, and a variable $r_v$
+its $\pi_v$ charge its windows on disk (the file slack a constant per
+selected view), and a variable $r_v$
 per cached view holds its resident windows, charged at its memory cost
 per window (in cost model 3's memory row, its bytes per window):
 
@@ -163,13 +169,23 @@ pub struct ViewWindowCache {
     /// Milliseconds after its last write or read at which a window leaves
     /// memory.
     pub idle_ms: u64,
+    /// The most bytes of decoded windows the cache holds; `None`: no bound.
+    pub max_bytes: Option<u64>,
+    /// The span of windows one file holds, deleted whole; 0: each window
+    /// on its own.
+    pub file_span_ms: u64,
+    /// How long past its retention a window is kept before its file may be
+    /// deleted.
+    pub retention_margin_ms: u64,
 }
 ```
 
-In JSON: `"data_plane_execution": {"view_window_cache": {"idle_ms": 60000}}`.
+In JSON: `"data_plane_execution": {"view_window_cache": {"idle_ms": 60000}}`,
+with `max_bytes`, `file_span_ms` and `retention_margin_ms` optional.
 
 `crates/cost/src/node/usage/mod.rs`: under the cache an in-memory
-ingestion-time view's node charges its retained windows as disk and its
+ingestion-time view's node charges its windows in files (retained, plus
+the file slack) as disk and its
 window being built as memory, and reports `cached_windows:
 Option<CachedViewWindows { bytes_per_window, width_ms, retained }>`.
 
