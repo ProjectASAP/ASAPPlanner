@@ -19,16 +19,9 @@ use asap_types::workload::ValueMagnitudeRange;
 use serde_json::{json, Value};
 
 use crate::lowest_mean_latency_common::{
-    cluster, cost_inputs, entry, every, number, over_m, plan, planned, usage_over_time,
+    assert_close, chain_table, cluster, cost_inputs, entry, every, number, over_m, plan, planned,
+    single_chain_plan, usage_over_time,
 };
-
-/// Assert `actual` is within 1% of `expected`.
-fn assert_close(name: &str, actual: f64, expected: f64) {
-    assert!(
-        (actual - expected).abs() <= 0.01 * expected.abs().max(1e-9),
-        "{name}: {actual} is not close to {expected}"
-    );
-}
 
 /// The report's node of `operator`, panicking when the plan has none.
 fn node<'a>(report: &'a Value, operator: &str) -> &'a Value {
@@ -38,35 +31,6 @@ fn node<'a>(report: &'a Value, operator: &str) -> &'a Value {
         .iter()
         .find(|node| node["operator"] == operator)
         .unwrap_or_else(|| panic!("no {operator} node in {report}"))
-}
-
-/// The chain plan's table: every class at 1 ns per unit, the chain with
-/// `chain_fields` merged in, the merge's entries `merge_entries`.
-fn chain_table(chain_fields: Value, merge_entries: Vec<Value>) -> Vec<Value> {
-    let mut chain = json!({"exact": "Max", "ns_per_unit": 1.0});
-    for (key, value) in chain_fields.as_object().unwrap() {
-        chain[key] = value.clone();
-    }
-    let mut entries = vec![
-        entry("Scan", "ingestion_time", json!({"ns_per_unit": 1.0})),
-        entry("SummaryTumblingWindowChain", "ingestion_time", chain),
-        entry("TimeRange", "query_time", json!({"ns_per_unit": 1.0})),
-        entry(
-            "FinalizeExactAccumulator",
-            "query_time",
-            json!({"exact": "Max", "ns_per_unit": 1.0}),
-        ),
-    ];
-    entries.extend(if merge_entries.is_empty() {
-        vec![entry(
-            "SummaryMerge",
-            "query_time",
-            json!({"exact": "Max", "ns_per_unit": 1.0}),
-        )]
-    } else {
-        merge_entries
-    });
-    entries
 }
 
 /// `max_over_time(m[5m])` every 10 s over `series` series.
@@ -153,29 +117,6 @@ async fn c2_the_fixed_cost_per_step_is_charged_per_step() {
     assert_close("range", range_with - range, 1.0 + 61.0 * 3.4);
 }
 
-/// The plan report for `workload` without raw data retained, on a
-/// deployment that runs neither wider tumbling-window levels nor covers:
-/// the merge reads the chain's 30 windows per group, the scale C3 prices.
-async fn plan_single_chain(workload: &PlanningWorkload, cost_inputs: &Value) -> Value {
-    let cost_inputs: CostInputs = serde_json::from_value(cost_inputs.clone()).unwrap();
-    let capabilities = asap_planner::DeploymentCapabilities {
-        raw_data_retained: false,
-        excluded_candidates: serde_json::from_value(json!([
-            {"operator": "SummaryMergeWindows"},
-            {"operator": "TimeRangeCover"}
-        ]))
-        .unwrap(),
-        ..Default::default()
-    };
-    let models = PlanningModels::builtin()
-        .with_cost_inputs(&cost_inputs)
-        .with_deployment_capabilities(&capabilities);
-    let (_, report) = plan_installable(UserInput::new(workload, FrontendInput::Promql, models))
-        .await
-        .unwrap();
-    serde_json::to_value(report).unwrap()
-}
-
 /// C3. `SummaryMerge` entries measured at 1,000 groups (100 ns per state)
 /// and 10,000 groups (1,000 ns): a merge over 1,000, 3,162 and 10,000
 /// groups is priced at 100, about 316 and 1,000 ns per state (log-log
@@ -201,7 +142,7 @@ async fn c3_prices_follow_the_series_scale() {
         (10_000, 1_000.0, false),
         (20_000, 1_000.0, true),
     ] {
-        let planned = plan_single_chain(
+        let planned = report_of_single_chain_plan(
             &max_chain_workload(series),
             &cost_inputs(
                 usage_over_time(),
@@ -528,7 +469,7 @@ async fn c11_a_window_cache_keeps_only_recently_read_windows_in_memory() {
         let workload = workload.clone();
         async move {
             // One chain, no wider levels: what the cache keeps of it.
-            let report = plan_single_chain(
+            let report = report_of_single_chain_plan(
                 &workload,
                 &cost_inputs(
                     usage_over_time(),
@@ -659,4 +600,12 @@ async fn c14_a_range_request_reuses_the_steps_of_the_request_a_whole_number_of_s
     let without = query_ms(json!({})).await;
     let with = query_ms(json!({"answer_cache": {"retention_margin_ms": 60_000}})).await;
     assert_close("241 steps to 4", without / with, 241.0 / 4.0);
+}
+
+/// The report of [`single_chain_plan`], panicking when it fails.
+async fn report_of_single_chain_plan(workload: &PlanningWorkload, cost_inputs: &Value) -> Value {
+    single_chain_plan(workload, cost_inputs)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+        .1
 }

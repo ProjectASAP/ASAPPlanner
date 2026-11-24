@@ -105,6 +105,10 @@ jobs:
         python3 -m pip install py-mini-racer==0.6.0
         python3 -m unittest -v test_viewer test_server
 
+    - name: Run the calibration gate's tests
+      working-directory: tools/calibration_gate
+      run: python3 -m unittest -v test_calibration_gate
+
     - name: Run the DAG viewer's Node tests
       run: node --test tools/dag-viewer/stages.test.mjs tools/dag-viewer/memo.test.mjs
 

@@ -103,6 +103,14 @@ pub struct PredictedUsage {
     pub peak_memory_bytes: u64,
     /// Bytes retained on disk, raw data query-time scans read included.
     pub disk_bytes: u64,
+    /// Bytes written to disk per second: the sum of `per_node`'s; 0 in a
+    /// report written without it.
+    #[serde(default)]
+    pub disk_written_bytes_per_second: f64,
+    /// Bytes read back from disk per second: the sum of `per_node`'s; 0 in
+    /// a report written without it.
+    #[serde(default)]
+    pub disk_read_bytes_per_second: f64,
     /// CPU cores to provision for the peak.
     pub peak_cpu_cores: u32,
     /// One per operator node of the plan Stage 3 costed, in node order.
@@ -155,6 +163,26 @@ pub struct PredictedNodeUsage {
     /// count, its own being outside them.
     #[serde(default)]
     pub priced_outside_measured_scale: bool,
+    /// Its memory, disk and disk traffic (`asap_cost::NodeMemoryAndDisk`),
+    /// what a deployment measures per view and compares; each 0 in a
+    /// report written without them. Memory held, averaged over time.
+    #[serde(default)]
+    pub average_memory_bytes: f64,
+    /// The most memory it holds at once.
+    #[serde(default)]
+    pub peak_memory_bytes: u64,
+    /// An ingestion-time view's bytes per window; 0 for any other node.
+    #[serde(default)]
+    pub bytes_per_window: u64,
+    /// Bytes it keeps on disk at the peak.
+    #[serde(default)]
+    pub disk_bytes: u64,
+    /// Bytes it writes to disk per second.
+    #[serde(default)]
+    pub disk_written_bytes_per_second: f64,
+    /// Bytes it reads back from disk per second.
+    #[serde(default)]
+    pub disk_read_bytes_per_second: f64,
 }
 
 /// One query's predicted latency per request: the freshness wait, then the
@@ -675,6 +703,8 @@ pub fn selected_plan_report(
             average_memory_bytes: cost.usage.average_memory_bytes,
             peak_memory_bytes: cost.usage.peak_memory_bytes,
             disk_bytes: cost.usage.disk_bytes,
+            disk_written_bytes_per_second: cost.usage.disk_written_bytes_per_second,
+            disk_read_bytes_per_second: cost.usage.disk_read_bytes_per_second,
             peak_cpu_cores: cost.usage.peak_cpu_cores,
             per_node: cost
                 .per_node
@@ -693,6 +723,14 @@ pub fn selected_plan_report(
                     refresh_wall_ms_per_window: node.phase_times.refresh_wall_ms_per_window,
                     query_ms_per_step: node.phase_times.query_ms_per_step,
                     priced_outside_measured_scale: node.priced_outside_measured_scale,
+                    average_memory_bytes: node.memory_and_disk.average_memory_bytes,
+                    peak_memory_bytes: node.memory_and_disk.peak_memory_bytes,
+                    bytes_per_window: node.memory_and_disk.bytes_per_window,
+                    disk_bytes: node.memory_and_disk.disk_bytes,
+                    disk_written_bytes_per_second: node
+                        .memory_and_disk
+                        .disk_written_bytes_per_second,
+                    disk_read_bytes_per_second: node.memory_and_disk.disk_read_bytes_per_second,
                 })
                 .collect(),
             per_query: cost

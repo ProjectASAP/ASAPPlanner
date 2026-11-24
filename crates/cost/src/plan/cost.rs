@@ -337,11 +337,6 @@ pub fn plan_cost(
         let node_costed = &costed[&node.id];
         usage.cpu_ops_per_second += node_costed.cpu_ops_per_second;
         usage.scanned_bytes_per_second += node_costed.scanned_bytes_per_second;
-        usage.average_memory_bytes += node_costed.average_memory_bytes;
-        usage.peak_memory_bytes = usage
-            .peak_memory_bytes
-            .saturating_add(node_costed.peak_memory_bytes);
-        usage.disk_bytes = usage.disk_bytes.saturating_add(node_costed.disk_bytes);
         fit.add(node_costed.fit);
         work_ms.insert(node.id, node_costed.work_ms_per_execution);
         output.insert(node.id, node_costed.output);
@@ -419,7 +414,10 @@ pub fn plan_cost(
     }
     for (bytes, id) in raw_data.into_values() {
         let node = per_node.get_mut(&id).expect("every node is measured");
-        usage.disk_bytes = usage.disk_bytes.saturating_add(bytes.round() as u64);
+        node.memory_and_disk.disk_bytes = node
+            .memory_and_disk
+            .disk_bytes
+            .saturating_add(bytes.round() as u64);
         node.detail += &format!("; keeps {bytes:.0} bytes of raw data on disk");
         if let (Some(cost), Some(disk_cost)) = (
             &mut node.cost_per_second,
@@ -437,9 +435,12 @@ pub fn plan_cost(
             continue;
         }
         let bytes = copies.saturating_mul(window);
-        let measured = per_node.get_mut(&id).expect("every node is measured");
-        usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_add(bytes);
-        measured.detail +=
+        let node_cost = per_node.get_mut(&id).expect("every node is measured");
+        node_cost.memory_and_disk.peak_memory_bytes = node_cost
+            .memory_and_disk
+            .peak_memory_bytes
+            .saturating_add(bytes);
+        node_cost.detail +=
             &format!("; {copies} partial copies of its newest window, {bytes} bytes");
     }
     // With a window cache, a stored view's windows are on disk (charged by
@@ -456,7 +457,6 @@ pub fn plan_cost(
             answer_cache,
             cache,
             unit_costs,
-            &mut usage,
             &mut per_node,
         );
     }
@@ -473,9 +473,12 @@ pub fn plan_cost(
                     continue;
                 }
                 let share = kept / total * dropped;
-                usage.average_memory_bytes -= share;
-                usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_sub(share as u64);
                 let node_cost = per_node.get_mut(&node.id).expect("every node is measured");
+                node_cost.memory_and_disk.average_memory_bytes -= share;
+                node_cost.memory_and_disk.peak_memory_bytes = node_cost
+                    .memory_and_disk
+                    .peak_memory_bytes
+                    .saturating_sub(share as u64);
                 node_cost.detail += &format!("; {share:.0} of them past the cache's bound");
                 if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs)
                 {
@@ -512,14 +515,29 @@ pub fn plan_cost(
             } else {
                 0.0
             };
-            usage.average_memory_bytes += bytes;
-            usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_add(bytes as u64);
             let node_cost = per_node.get_mut(&root).expect("every node is measured");
+            node_cost.memory_and_disk.average_memory_bytes += bytes;
+            node_cost.memory_and_disk.peak_memory_bytes = node_cost
+                .memory_and_disk
+                .peak_memory_bytes
+                .saturating_add(bytes as u64);
             node_cost.detail += &format!("; keeps {bytes:.0} bytes of answers ({horizon_ms} ms)");
             if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs) {
                 *cost += unit_cost.cost_per_memory_byte_second * bytes;
             }
         }
+    }
+    // The plan's memory, disk and disk traffic: its nodes' (each charged
+    // above what the whole plan adds to it).
+    for node_cost in per_node.values() {
+        let memory_and_disk = node_cost.memory_and_disk;
+        usage.average_memory_bytes += memory_and_disk.average_memory_bytes;
+        usage.peak_memory_bytes = usage
+            .peak_memory_bytes
+            .saturating_add(memory_and_disk.peak_memory_bytes);
+        usage.disk_bytes = usage.disk_bytes.saturating_add(memory_and_disk.disk_bytes);
+        usage.disk_written_bytes_per_second += memory_and_disk.disk_written_bytes_per_second;
+        usage.disk_read_bytes_per_second += memory_and_disk.disk_read_bytes_per_second;
     }
     let merge_ms =
         |id: PhysicalASAPNodeId| partial_copy_merge_ms(nodes[&id], &costed[&id], settings);
@@ -615,7 +633,7 @@ pub fn plan_cost(
 
 /// Charges each in-memory ingestion-time view under `cache`
 /// (`NodeResourceUsageAndCost::cached_windows`) its resident windows as
-/// memory, in `usage` and in the view's node cost: the most any one of its
+/// memory, in the view's node cost: the most any one of its
 /// readers keeps resident ([`view_resident_windows`]), mean for the
 /// average and the cost, most for the peak.
 #[allow(clippy::too_many_arguments)]
@@ -629,7 +647,6 @@ fn resident_view_windows(
     answer_cache: Option<AnswerCache>,
     cache: ViewWindowCache,
     unit_costs: Option<&ResourceUnitCost>,
-    usage: &mut ResourceUsage,
     per_node: &mut BTreeMap<PhysicalASAPNodeId, NodeCost>,
 ) {
     let width_of = |id: PhysicalASAPNodeId| dag.refresh_window(id).map(|window| window.width_ms);
@@ -691,11 +708,12 @@ fn resident_view_windows(
         let (mean, most) =
             view_resident_windows(windows.width_ms, windows.retained, cache.idle_ms, &readers);
         let bytes = windows.bytes_per_window as f64;
-        usage.average_memory_bytes += bytes * mean;
-        usage.peak_memory_bytes = usage
+        let node_cost = per_node.get_mut(&node.id).expect("every node is measured");
+        node_cost.memory_and_disk.average_memory_bytes += bytes * mean;
+        node_cost.memory_and_disk.peak_memory_bytes = node_cost
+            .memory_and_disk
             .peak_memory_bytes
             .saturating_add(windows.bytes_per_window.saturating_mul(most));
-        let node_cost = per_node.get_mut(&node.id).expect("every node is measured");
         node_cost.detail += &format!(
             "; {mean:.1} of {} windows resident in memory (most {most}; window cache, idle {} ms)",
             windows.retained, cache.idle_ms

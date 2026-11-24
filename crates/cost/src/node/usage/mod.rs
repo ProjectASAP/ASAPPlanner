@@ -106,6 +106,34 @@ pub struct NodeCost {
     /// series count, its own being outside them
     /// ([`lookup_at_scale`](crate::lookup_at_scale)).
     pub priced_outside_measured_scale: bool,
+    /// Its memory, disk and disk traffic ([`NodeMemoryAndDisk`]).
+    pub memory_and_disk: NodeMemoryAndDisk,
+}
+
+/// One node's memory, disk and disk traffic, per second of wall time
+/// unless the name says otherwise: what a data plane measures per view.
+/// [`plan_cost`](crate::plan_cost) adds what is charged once the whole
+/// plan is known (resident cached windows, partial copies, kept results
+/// and answers, raw data on disk), and the plan's
+/// [`ResourceUsage`](crate::ResourceUsage) memory, disk and disk traffic
+/// are the sums over its nodes. `bytes_per_window` is a size, not summed.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct NodeMemoryAndDisk {
+    /// Memory it holds, averaged over time.
+    pub average_memory_bytes: f64,
+    /// The most memory it holds at once.
+    pub peak_memory_bytes: u64,
+    /// An ingestion-time view's bytes per window (one output); 0 for any
+    /// other node.
+    pub bytes_per_window: u64,
+    /// Bytes it keeps on disk at the peak.
+    pub disk_bytes: u64,
+    /// Bytes it writes to disk per second: a view under the data plane's
+    /// window cache writes each window to its file when the window closes.
+    pub disk_written_bytes_per_second: f64,
+    /// Bytes it reads back from disk per second; 0 until reads of windows
+    /// not in the window cache are costed (#1469).
+    pub disk_read_bytes_per_second: f64,
 }
 
 /// One node's time by phase, what a runtime measures per phase. An
@@ -482,18 +510,11 @@ pub struct NodeResourceUsageAndCost<'a> {
     pub cpu_ops_per_second: f64,
     /// Bytes scanned per second.
     pub scanned_bytes_per_second: f64,
-    /// Average memory, including memory a query-time node holds while it
-    /// computes.
-    pub average_memory_bytes: f64,
-    /// Peak memory.
-    pub peak_memory_bytes: u64,
-    /// Disk bytes.
-    pub disk_bytes: u64,
     /// An in-memory ingestion-time state's bytes per window.
     pub maintained: Option<u64>,
     /// An in-memory ingestion-time view's windows under the data plane's
     /// window cache (`DataPlaneExecution::view_window_cache`): every
-    /// retained window is on disk (its `disk_bytes`), only the window being
+    /// retained window is on disk (its `cost.memory_and_disk.disk_bytes`), only the window being
     /// built is in its memory, and the caller charges the resident windows
     /// as memory (`plan_cost` per its readers, Stage 3's selection per
     /// selected reader). `None` without the cache.
@@ -2281,6 +2302,12 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     if ingestion && node.lifetime == Lifetime::AcrossEvaluations(StorageMedium::Memory) {
         maintained = Some(state);
     }
+    // A view's bytes per window: one output of an ingestion-time view kept
+    // across evaluations; raw rows kept at ingestion are not windows.
+    let view_bytes_per_window = match (ingestion, node.lifetime) {
+        (true, Lifetime::AcrossEvaluations(_)) if !raw_rows_materialized_at_ingestion => state,
+        _ => 0,
+    };
     // Under a window cache, an in-memory view's retained windows are in its
     // files, and only the one being built in memory here: the caller adds
     // the resident ones.
@@ -2556,9 +2583,6 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         work_ms_per_execution: node_ms,
         cpu_ops_per_second: estimate.cpu_ops() * per_second,
         scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
-        average_memory_bytes,
-        peak_memory_bytes,
-        disk_bytes,
         maintained,
         cached_windows,
         kept_result_bytes,
@@ -2577,6 +2601,22 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             phase_times,
             priced_outside_measured_scale: measured_unit_cost
                 .is_some_and(|unit| unit.outside_measured_scale),
+            memory_and_disk: NodeMemoryAndDisk {
+                average_memory_bytes,
+                peak_memory_bytes,
+                bytes_per_window: view_bytes_per_window,
+                disk_bytes,
+                // Each window is written to disk when it closes: a view on
+                // disk, or one under the window cache, which keeps every
+                // window in its file.
+                disk_written_bytes_per_second: match cached_windows.is_some()
+                    || node.lifetime == Lifetime::AcrossEvaluations(StorageMedium::Disk)
+                {
+                    true => view_bytes_per_window as f64 * 1_000.0 / output_interval_ms as f64,
+                    false => 0.0,
+                },
+                disk_read_bytes_per_second: 0.0,
+            },
         },
     };
     Ok((usage, terms))

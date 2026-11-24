@@ -1107,11 +1107,12 @@ fn quantity_of(
         Quantity::CpuCoreSecondsPerSecond => (usage.cost.cpu_core_seconds_per_second, 0.0),
         // With the partial copies of an in-memory state's newest window.
         Quantity::PeakMemoryBytes => (
-            usage.peak_memory_bytes as f64 + copies() * usage.maintained.unwrap_or(0) as f64,
+            usage.cost.memory_and_disk.peak_memory_bytes as f64
+                + copies() * usage.maintained.unwrap_or(0) as f64,
             0.0,
         ),
         Quantity::DiskBytes => (
-            usage.disk_bytes as f64,
+            usage.cost.memory_and_disk.disk_bytes as f64,
             usage.raw_scan.map_or(0.0, |(_, bytes)| bytes),
         ),
     })
