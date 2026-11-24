@@ -178,10 +178,6 @@ pub(crate) fn resident_reads(
                 mean = mean.max(reader_mean);
                 most = most.max(reader_most);
                 if let Some(reads) = window_reads {
-                    let runs_per_request = match chain_reader.times {
-                        ReadTimes::Query { steps, .. } => steps.max(1) as f64,
-                        ReadTimes::Refresh { .. } => 1.0,
-                    };
                     let bytes_per_second =
                         reads.windows_read_from_disk_per_second * bytes_per_window;
                     bytes_read_from_disk_per_second += bytes_per_second;
@@ -189,7 +185,7 @@ pub(crate) fn resident_reads(
                         most_bytes_read_from_disk_per_run,
                         bytes_per_second
                             / chain_reader.times.requests_per_second()
-                            / runs_per_request,
+                            / chain_reader.times.runs_per_request(),
                     );
                 }
             }

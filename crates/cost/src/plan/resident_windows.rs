@@ -54,6 +54,15 @@ pub enum ReadTimes {
 }
 
 impl ReadTimes {
+    /// Runs per request: a range request's steps, 1 for an instant query or
+    /// a refresh.
+    pub fn runs_per_request(&self) -> f64 {
+        match *self {
+            ReadTimes::Query { steps, .. } => steps.max(1) as f64,
+            ReadTimes::Refresh { .. } => 1.0,
+        }
+    }
+
     /// Requests per second: one per period of a query's grid, one per
     /// window close of a refresh.
     pub fn requests_per_second(&self) -> f64 {

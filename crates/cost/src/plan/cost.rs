@@ -467,13 +467,7 @@ pub fn plan_cost(
         None => ReadsFromDisk::default(),
     };
     usage.scanned_bytes_per_second += reads_from_disk.bytes_per_second;
-    // A query-time reader's time reading windows from disk, per run: in its
-    // work, which each query's latency counts per run of its steps.
-    for (&reader, &ms) in &reads_from_disk.ms_per_run_by_reader {
-        if let Some(work) = work_ms.get_mut(&reader) {
-            *work += ms;
-        }
-    }
+
     // Query-time results the data plane keeps between requests: each node
     // charged its own (`NodeResourceUsageAndCost::kept_result_bytes`); past
     // the cache's bound they are not held, each node's share dropped.
@@ -564,7 +558,15 @@ pub fn plan_cost(
         &mut per_node,
         settings,
     );
-    let mut latency = query_latencies(dag, nodes, &work_ms, &groups, entries, settings)
+    // A query-time reader's time reading windows from disk, per run: in the
+    // work each query's latency counts per run of its steps (not its CPU).
+    let mut latency_work_ms = work_ms.clone();
+    for (&reader, &ms) in &reads_from_disk.ms_per_run_by_reader {
+        if let Some(work) = latency_work_ms.get_mut(&reader) {
+            *work += ms;
+        }
+    }
+    let mut latency = query_latencies(dag, nodes, &latency_work_ms, &groups, entries, settings)
         .map_err(|error| (first, error))?;
     for (latency, evaluation_ms) in latency.iter_mut().zip(evaluation_ms_per_query) {
         latency.query_execution_ms += evaluation_ms;
@@ -678,7 +680,8 @@ fn window_cache_charges(
         let Some(windows) = costed[&node.id].cached_windows else {
             continue;
         };
-        // Each reader, with its node when it runs at query time.
+        // Each reader, with its node (none for a reader the model does not
+        // follow).
         let readers: Vec<(ChainReader, Option<PhysicalASAPNodeId>)> =
             match windows_readers_need(dag, node.id) {
                 None => vec![(
@@ -721,7 +724,7 @@ fn window_cache_charges(
                                     ReadTimes::Refresh {
                                         width_ms: width_of(reader).unwrap_or(windows.width_ms),
                                     },
-                                    None,
+                                    Some(reader),
                                 )],
                                 ExecutionTiming::QueryTime => queries_of
                                     .get(&reader)
@@ -807,29 +810,35 @@ fn window_cache_charges(
             .peak_memory_bytes
             .saturating_add(windows.bytes_per_window.saturating_mul(most_resident));
         let mut read_bytes_per_second = 0.0;
-        let mut counted: Vec<&ChainReader> = Vec::new();
+        // Each reader node's reads counted once per distinct read (queries
+        // reading the same windows at the same times through one node read
+        // them once), as Stage 3 counts each edge's.
+        let mut counted: Vec<(Option<PhysicalASAPNodeId>, &ChainReader)> = Vec::new();
+        // Per query-time reader node, its slowest read of this view per run.
+        let mut slowest_ms_per_run: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
         for (reader, reader_node, read) in &view.reads {
             let windows_from_disk_per_second = read.windows_read_from_disk_per_second
                 + (1.0 - mean_held_share)
                     * (read.windows_read_per_second - read.windows_read_from_disk_per_second);
-            if !counted.contains(&reader) {
-                counted.push(reader);
+            if !counted.contains(&(*reader_node, reader)) {
+                counted.push((*reader_node, reader));
                 read_bytes_per_second += windows_from_disk_per_second * bytes;
             }
-            if let Some(reader_node) = reader_node {
-                let runs_per_second = reader.times.requests_per_second()
-                    * match reader.times {
-                        ReadTimes::Query { steps, .. } => steps.max(1) as f64,
-                        ReadTimes::Refresh { .. } => 1.0,
-                    };
+            if let (Some(reader_node), ReadTimes::Query { .. }) = (reader_node, reader.times) {
+                let runs_per_second =
+                    reader.times.requests_per_second() * reader.times.runs_per_request();
                 let ms_per_run = windows_from_disk_per_second * bytes / runs_per_second
                     * settings.resource_speed.ms_per_scanned_byte;
-                let most = reads_from_disk
-                    .ms_per_run_by_reader
-                    .entry(*reader_node)
-                    .or_insert(0.0);
-                *most = most.max(ms_per_run);
+                let slowest = slowest_ms_per_run.entry(*reader_node).or_insert(0.0);
+                *slowest = slowest.max(ms_per_run);
             }
+        }
+        // A node reading several views (a cover's levels) reads each.
+        for (reader_node, ms) in slowest_ms_per_run {
+            *reads_from_disk
+                .ms_per_run_by_reader
+                .entry(reader_node)
+                .or_insert(0.0) += ms;
         }
         node_cost.memory_and_disk.disk_read_bytes_per_second += read_bytes_per_second;
         reads_from_disk.bytes_per_second += read_bytes_per_second;
@@ -853,7 +862,7 @@ struct CachedView {
     windows: CachedViewWindows,
     mean_resident_windows: f64,
     most_resident_windows: u64,
-    /// Each reader (its node when it runs at query time) and what it reads.
+    /// Each reader (its node, when known) and what it reads.
     reads: Vec<(
         ChainReader,
         Option<PhysicalASAPNodeId>,
@@ -867,8 +876,9 @@ struct CachedView {
 struct ReadsFromDisk {
     /// Bytes read from disk per second, all views.
     bytes_per_second: f64,
-    /// Per query-time reader node, the most ms one of its runs spends
-    /// reading windows from disk.
+    /// Per query-time reader node, the ms one of its runs spends reading
+    /// windows from disk: per view, its slowest reader's, summed over the
+    /// views it reads.
     ms_per_run_by_reader: HashMap<PhysicalASAPNodeId, f64>,
 }
 
