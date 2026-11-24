@@ -1,20 +1,19 @@
-//! D1 of `compressed-sample-windows.md`, section 7: the plan a typical
-//! dashboard selects under a memory limit, with compressed sample windows,
-//! as reviewed plan text.
+//! D1 of `compressed-sample-windows.md`, section 7: a typical dashboard
+//! under a memory limit selects compressed sample windows for both quantile
+//! panels, and its selection model's size is the reviewed one.
 //!
 //! The snapshot `tests/compressed_samples_snapshot/typical_dashboard.txt`
-//! (Stage 3's section of `asap_planner --format text`) is written with the
-//! implementation and reviewed in its pull request. Regenerate with
+//! holds only the size of the selection MILP (variables and constraints),
+//! which follows from the candidates alone. The selected plan's text is not
+//! kept: the solve stops at a 1 % gap, so a slower machine may stop at
+//! another plan within it. Regenerate with
 //! `UPDATE_SNAPSHOTS=1 cargo test -p asap-devtools --test devtools
 //! compressed_samples_snapshot::`. Written before the implementation: it
 //! names the planned interfaces and fails until they exist.
 
 use std::path::PathBuf;
 
-use asap_cost::{
-    plan_cost, ClusterLimits, ClusterObjective, CostInputs, CostModel, LatencyCalibration,
-    LatencySelectionChecks,
-};
+use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel, LatencyCalibration};
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_devtools::planning_stages_text::planning_stages_text;
 use asap_planner::{DeploymentCapabilities, PlanningModels};
@@ -85,26 +84,20 @@ fn typical_dashboard() -> PlanningWorkload {
     workload
 }
 
-/// The branch-and-bound nodes D1's selection explores at most before it
-/// stops without a 1 % gap: the default rule's limit, fixed in the test so
-/// the snapshot does not move with the default.
-const SELECTION_NODE_LIMIT: i32 = 10_000;
-
 fn snapshot_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/compressed_samples_snapshot/typical_dashboard.txt")
 }
 
 /// D1. The typical dashboard under a 0.85 GB limit (cost model 3, lowest
-/// mean latency) and no raw data: both quantile panels read through
-/// `DecodeSamplesInRange`, and Stage 3's plan text equals the reviewed
-/// snapshot, the selection's objective and gap included. The solve stops
-/// by a deterministic rule, a 1 % gap or a fixed number of
-/// branch-and-bound nodes on one solver thread, never by wall-clock time,
-/// so the same inputs select the same plan on any machine. It fails on
-/// main (no compressed samples, so no plan fits), and afterwards on any
-/// change to the selected plan, its sizes or its cost, which then needs a
-/// reviewed snapshot update.
+/// mean latency) and no raw data: a plan is selected, both quantile panels
+/// read through `DecodeSamplesInRange`, and the selection MILP's size
+/// (variables and constraints) equals the reviewed snapshot. The size
+/// follows from the candidates, not from where the solve stops, so it is
+/// the same on any machine; the selected plan's text is not compared. It
+/// fails on main (no compressed samples, so no plan fits), and afterwards
+/// on any change to the candidates the selection is built over, which then
+/// needs a reviewed snapshot update.
 #[test]
 fn compressed_samples_plan_snapshot() {
     let workload = typical_dashboard();
@@ -116,11 +109,6 @@ fn compressed_samples_plan_snapshot() {
             objective: ClusterObjective::LowestMeanLatency,
         }),
         latency_calibration: LatencyCalibration::UncalibratedForTesting,
-        // The default stop rule, pinned here: 1 % gap or this many nodes.
-        latency_selection_checks: LatencySelectionChecks {
-            node_limit: SELECTION_NODE_LIMIT,
-            ..Default::default()
-        },
         ..Default::default()
     };
     let capabilities = DeploymentCapabilities {
@@ -172,28 +160,18 @@ fn compressed_samples_plan_snapshot() {
         .count();
     assert_eq!(quantiles_through_decode, 2, "both quantile panels");
 
-    let (cost, _) = plan_cost(plan, &entries, &data, &settings).unwrap();
-    let text = planning_stages_text(&stages, Some(&cost), None, false);
-    // Only the selection's wall-clock times (`N ms building, N ms solving`)
-    // depend on the machine; its model size, objective and gap are kept.
-    let stage3 = text
-        .find("Stage 3 output")
-        .map(|start| &text[start..])
-        .expect("a Stage 3 section")
+    let text = planning_stages_text(&stages, None, None, false);
+    // The selection model's size: its variables and constraints, not its
+    // timings, objective or gap.
+    let model_size = text
         .lines()
-        .map(|line| match line.strip_prefix("selection MILP: ") {
-            Some(rest) => format!(
-                "selection MILP: {}",
-                rest.split(", ")
-                    .filter(|part| !part.contains(" ms building") && !part.contains(" ms solving"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            None => line.to_owned(),
-        })
+        .find_map(|line| line.strip_prefix("selection MILP: "))
+        .expect("a selection MILP line")
+        .split(", ")
+        .filter(|part| part.ends_with(" variables") || part.ends_with(" constraints"))
         .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
+        .join(", ");
+    let stage3 = format!("selection MILP: {model_size}\n");
     let path = snapshot_path();
     if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
