@@ -1,5 +1,27 @@
 {
   "accuracy_guarantees": "enforced",
+  "cost_inputs": {
+    "cost_model": {
+      "usage_over_time": {
+        "cost_per_cpu_op": 1e-6,
+        "cost_per_disk_byte_second": 3.125e-9,
+        "cost_per_memory_byte_second": 1.25e-7,
+        "cost_per_provisioned_cpu_core_second": 1000.0,
+        "cost_per_provisioned_memory_byte_second": 1.25e-7,
+        "cost_per_scanned_byte": 1e-7
+      }
+    },
+    "measured_operation_costs": {
+      "ns_per_evaluation": 0.0,
+      "operators": []
+    },
+    "non_repeating_query_horizon_seconds": 3600.0,
+    "resource_speed": {
+      "ms_per_cpu_op": 1e-6,
+      "ms_per_scanned_byte": 1e-7,
+      "raw_batch_width_ms": 10000
+    }
+  },
   "deployment_capabilities": {
     "counter_semantics": {
       "extrapolation": true,
