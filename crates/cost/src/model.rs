@@ -283,8 +283,8 @@ pub struct DataPlaneExecution {
     /// Bytes a stored per-series state's row holds for its state's offset
     /// in the view's state column. Default 4 (a `u32`).
     pub state_offset_bytes_per_row: u64,
-    /// Bytes a stored per-series state's row holds per label column (the
-    /// series identity is one): a dictionary key; the label text is kept
+    /// Bytes a stored per-series state's row holds per label column, each
+    /// text column (the series identity is one): a dictionary key; the label text is kept
     /// once per series per file, and the window time once per window, not
     /// per row. Default 4 (a `u32`). Example: a per-series Sum carrying
     /// `job`, `region` and `service` holds 4 + 4 × 4 = 20 bytes beside its
@@ -292,9 +292,11 @@ pub struct DataPlaneExecution {
     pub key_bytes_per_label_column: u64,
 }
 
-/// The default [`DataPlaneExecution::state_offset_bytes_per_row`] and
-/// [`DataPlaneExecution::key_bytes_per_label_column`]: a `u32` each.
-const DEFAULT_STORED_ROW_U32_BYTES: u64 = 4;
+/// The default [`DataPlaneExecution::state_offset_bytes_per_row`]: a `u32`.
+const DEFAULT_STATE_OFFSET_BYTES_PER_ROW: u64 = 4;
+
+/// The default [`DataPlaneExecution::key_bytes_per_label_column`]: a `u32`.
+const DEFAULT_KEY_BYTES_PER_LABEL_COLUMN: u64 = 4;
 
 /// Query-time results kept after their evaluation time
 /// (`docs/design_docs/proposals/cost-terms-from-calibration.md`, section
@@ -365,8 +367,8 @@ impl Default for DataPlaneExecution {
             view_window_cache: None,
             kept_query_time_results: None,
             answer_cache: None,
-            state_offset_bytes_per_row: DEFAULT_STORED_ROW_U32_BYTES,
-            key_bytes_per_label_column: DEFAULT_STORED_ROW_U32_BYTES,
+            state_offset_bytes_per_row: DEFAULT_STATE_OFFSET_BYTES_PER_ROW,
+            key_bytes_per_label_column: DEFAULT_KEY_BYTES_PER_LABEL_COLUMN,
         }
     }
 }

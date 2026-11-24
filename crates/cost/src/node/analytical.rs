@@ -1518,6 +1518,10 @@ pub enum AnalyticalCostError {
     /// exact accumulator and an aggregate measure.
     #[error("measured_operation_costs entry {0} names more than one family")]
     AmbiguousOperatorCost(String),
+    /// Bad input: a measured entry gives `stored_bytes_per_state` without a
+    /// sketch or an exact accumulator, so it names no state to size.
+    #[error("measured_operation_costs entry {0} gives stored_bytes_per_state but no sketch or exact state")]
+    StoredBytesWithoutState(String),
     /// Bad input: a non-empty measured table with `ms_per_cpu_op` not
     /// positive, so a measured time cannot be counted in CPU operations.
     #[error(

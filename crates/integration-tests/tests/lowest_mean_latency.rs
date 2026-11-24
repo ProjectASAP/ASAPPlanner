@@ -975,7 +975,7 @@ async fn milp_reads_are_the_reachable_sub_dag() {
 /// selected unbounded (30.301 ms) and the `Aggregate` selected under the
 /// bound (30.300 ms) are within the gap of each other.
 #[tokio::test]
-async fn a18_a_plan_exactly_at_its_bound_is_kept() {
+async fn a18_a_bound_at_the_selected_latency_keeps_a_plan_within_it() {
     for state_ns in [10_000.0, 40_000.0] {
         let settings = cost_inputs(
             lowest_mean_latency(),

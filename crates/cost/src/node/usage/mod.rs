@@ -886,9 +886,6 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let measured_state_bytes = measured_unit_cost
         .and_then(|p| p.memory_bytes_per_state)
         .map(|bytes| bytes.round() as u64);
-    // The measured bytes of one state's row in a stored view's files, when
-    // the table has them.
-    let measured_stored_bytes_per_state = measured_unit_cost.and_then(|p| p.stored_bytes_per_state);
     let mut cost_source = NodeCostSource::Analytical;
     // The undeclared data facts its cost assumed.
     let mut assumed_data_facts = Vec::new();
@@ -2271,19 +2268,22 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // view keeps besides its sealed ones.
     let open_state = open_output_bytes.map_or(state, |open| state.max(open));
     // One output's bytes in a stored view's files: its rows at the measured
-    // file bytes per state's row, else its decoded bytes (`state`). Raw rows
-    // kept at ingestion are not a view's states.
-    let stored_state = match measured_stored_bytes_per_state {
-        Some(bytes) if !raw_rows_materialized_at_ingestion => {
+    // file bytes per state's row, else its decoded bytes (`state`). Only an
+    // output of states has them; raw rows kept at ingestion do not.
+    let stored_output_bytes = match measured_unit_cost.and_then(|p| p.stored_bytes_per_state) {
+        Some(bytes)
+            if outputs_states(&node.output_schema) && !raw_rows_materialized_at_ingestion =>
+        {
             (out.rows as f64 * bytes).round() as u64
         }
         _ => state,
     };
-    // Decoded bytes kept on disk, as the bytes the files hold.
-    let stored = |decoded: u64| -> u64 {
+    // The bytes in files of `decoded` bytes kept on disk, at an output's
+    // stored-to-decoded ratio.
+    let decoded_to_stored_bytes = |decoded: u64| -> u64 {
         match state {
             0 => decoded,
-            _ => (decoded as f64 * stored_state as f64 / state as f64).round() as u64,
+            _ => (decoded as f64 * stored_output_bytes as f64 / state as f64).round() as u64,
         }
     };
     let (mut materialized_bytes, medium) = match (ingestion, node.lifetime, &node.payload) {
@@ -2318,9 +2318,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         .checked_add(open_state)
                         .ok_or(AnalyticalCostError::Overflow)?;
                 }
-                StorageMedium::Disk => disk_bytes = stored(between),
+                StorageMedium::Disk => {
+                    disk_bytes = stored_output_bytes
+                        .checked_mul(retained_output_count - 1)
+                        .ok_or(AnalyticalCostError::Overflow)?
+                }
             }
-            detail += &format!("; materializes {between} bytes across evaluations");
+            detail += &format!("; materializes {between} decoded bytes across evaluations");
             (0, medium)
         }
         (_, Lifetime::OneEvaluation(medium), _) => {
@@ -2329,7 +2333,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                     held_bytes = Some(open_state);
                     peak_memory_bytes = open_state;
                 }
-                StorageMedium::Disk => disk_bytes = stored_state,
+                StorageMedium::Disk => disk_bytes = stored_output_bytes,
             }
             (0, medium)
         }
@@ -2365,7 +2369,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // across evaluations; raw rows kept at ingestion are not windows.
     let (view_bytes_per_window, view_stored_bytes_per_window) = match (ingestion, node.lifetime) {
         (true, Lifetime::AcrossEvaluations(_)) if !raw_rows_materialized_at_ingestion => {
-            (state, stored_state)
+            (state, stored_output_bytes)
         }
         _ => (0, 0),
     };
@@ -2392,26 +2396,26 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let windows_on_disk = kept_ms
                 .div_ceil(output_interval_ms)
                 .max(retained_output_count);
-            disk_bytes = stored_state
+            disk_bytes = stored_output_bytes
                 .checked_mul(windows_on_disk)
                 .ok_or(AnalyticalCostError::Overflow)?;
             let average_kept_ms = retention_ms as f64
                 + cache.retention_margin_ms as f64
                 + cache.file_span_ms as f64 / 2.0;
             disk_bytes_charged = Some(
-                stored_state as f64
+                stored_output_bytes as f64
                     * (average_kept_ms / output_interval_ms as f64)
                         .max(retained_output_count as f64),
             );
             average_memory_bytes = open_state as f64;
             peak_memory_bytes = open_state;
             detail += &format!(
-                "; keeps {windows_on_disk} windows of {stored_state} bytes on disk \
+                "; keeps {windows_on_disk} windows of {stored_output_bytes} bytes on disk \
                  ({retained_output_count} retained), {open_state} bytes building in memory"
             );
             cached_windows = Some(CachedViewWindows {
                 bytes_per_window: state,
-                stored_bytes_per_window: stored_state,
+                stored_bytes_per_window: stored_output_bytes,
                 width_ms: output_interval_ms,
                 retained: retained_output_count,
             });
@@ -2436,11 +2440,19 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 peak_memory_bytes = materialized_bytes;
             }
             StorageMedium::Disk => {
-                disk_bytes = stored(materialized_bytes);
+                disk_bytes = decoded_to_stored_bytes(materialized_bytes);
                 disk_bytes_charged = exact_bytes;
             }
         }
-        detail += &format!("; keeps {materialized_bytes} bytes");
+        detail += &format!(
+            "; keeps {materialized_bytes} bytes{}",
+            match (medium, disk_bytes) {
+                (StorageMedium::Disk, stored) if stored != materialized_bytes => {
+                    format!(" decoded, {stored} in files")
+                }
+                _ => String::new(),
+            }
+        );
     }
     if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {
         if !ingestion {

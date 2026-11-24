@@ -166,7 +166,7 @@ pub struct OperatorCost {
     /// For a node that keeps summary state: the bytes one state's row takes
     /// in a stored view's files, as the executor writes them (compressed):
     /// its file bytes divided by its states, the row's keys and offset
-    /// included. It prices the view's disk, disk writes and cold reads; the
+    /// included. It sizes the view's disk, disk writes and cold reads; the
     /// decoded state in memory is `memory_bytes_per_state`. `None`: a
     /// window's stored bytes are its decoded bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -491,7 +491,8 @@ fn price_of(entry: &OperatorCost) -> UnitPrice {
 }
 
 /// Bad input: a time or size that is negative or not finite, an entry with
-/// more than one of `sketch`, `exact` and `measure`, two entries for one
+/// more than one of `sketch`, `exact` and `measure`, an entry giving
+/// `stored_bytes_per_state` without a `sketch` or `exact`, two entries for one
 /// operator, phase and family, or a non-empty table with `ms_per_cpu_op` 0
 /// (a measured time cannot then be counted in operations).
 pub(crate) fn validate(
@@ -573,6 +574,10 @@ pub(crate) fn validate(
         };
         if families.iter().filter(|set| **set).count() > 1 {
             return Err(AnalyticalCostError::AmbiguousOperatorCost(key()));
+        }
+        if entry.stored_bytes_per_state.is_some() && entry.sketch.is_none() && entry.exact.is_none()
+        {
+            return Err(AnalyticalCostError::StoredBytesWithoutState(key()));
         }
         if table.operators[..index].iter().any(|earlier| {
             earlier.operator == entry.operator

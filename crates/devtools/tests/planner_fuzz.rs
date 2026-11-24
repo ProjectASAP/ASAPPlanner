@@ -362,8 +362,9 @@ fn threshold_witness_costs_over_the_result() {
 /// An exact `sum by (labels) (sum_over_time(m_gauge[5m]))` every minute at
 /// phase 0 over 1,000 series sampled every second: reading a chain of
 /// tumbling windows is cheaper than scanning 5 minutes of raw data, so
-/// `W`'s plan reads one, through a `TimeRange` (over 30 minutes, stored
-/// windows are cheap enough that wider levels and a cover win, #1486).
+/// `W`'s plan reads one, through a `TimeRange`. (At 30 minutes, a plan of
+/// wider chain levels with a cover over them is cheaper, and the relation
+/// needs a `TimeRange` over one chain, so this uses 5 minutes.)
 fn summed_over_a_chain(labels: &[&str]) -> FuzzWorkload {
     use asap_devtools::planner_fuzz::generate::generated_workload;
     use asap_devtools::planner_fuzz::{FuzzQuery, Language};

@@ -30,8 +30,8 @@ fn column_bytes(field: &Field) -> u64 {
 /// per-series row (one with the series identity) is stored as the
 /// executor lays it out: its state's offset
 /// ([`DataPlaneExecution::state_offset_bytes_per_row`]) and a dictionary key
-/// per text column, the identity and each label derived from it
-/// ([`DataPlaneExecution::key_bytes_per_label_column`]); its label text is
+/// per label column, each text column: the identity and each label derived
+/// from it ([`DataPlaneExecution::key_bytes_per_label_column`]); its label text is
 /// kept once per series per file and its window time once per window, not
 /// per row. A plain column beside them other than the 8-byte window time
 /// (a value) is counted at [`column_bytes`]. Any other row holds its
