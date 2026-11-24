@@ -185,7 +185,10 @@ async fn p1_the_demo_inputs_plan_under_lowest_mean_latency() {
 /// `query` every 10 s over 1,000 series of `m`, one chain under a window
 /// cache (so its retained windows are its disk), with
 /// `data_plane_execution` fields beside the cache.
-async fn chain_disk(query: &str, extra_data_plane: Value) -> Result<(f64, (u64, u64, u64)), String> {
+async fn chain_disk(
+    query: &str,
+    extra_data_plane: Value,
+) -> Result<(f64, (u64, u64, u64)), String> {
     let workload = over_m(vec![every(query, 10_000, None)], 1000);
     let mut data_plane = json!({"view_window_cache": {"idle_ms": 60_000}});
     for (key, value) in extra_data_plane.as_object().unwrap() {
@@ -193,7 +196,10 @@ async fn chain_disk(query: &str, extra_data_plane: Value) -> Result<(f64, (u64, 
     }
     let inputs = cost_inputs(usage_over_time(), max_table(), json!({}), data_plane);
     let (plan, report) = single_chain_plan(&workload, &inputs).await?;
-    Ok((number(&report["predicted_usage"], "disk_bytes"), chain(&plan)))
+    Ok((
+        number(&report["predicted_usage"], "disk_bytes"),
+        chain(&plan),
+    ))
 }
 
 /// R1. A stored per-series row holds its series key and its state, not the
@@ -206,10 +212,9 @@ async fn r1_a_stored_per_series_row_holds_no_label_text() {
     let (without_label, chain_without) = chain_disk("topk(5, max_over_time(m[5m]))", json!({}))
         .await
         .unwrap();
-    let (with_label, chain_with) =
-        chain_disk("topk by (job) (5, max_over_time(m[5m]))", json!({}))
-            .await
-            .unwrap();
+    let (with_label, chain_with) = chain_disk("topk by (job) (5, max_over_time(m[5m]))", json!({}))
+        .await
+        .unwrap();
     assert_eq!(
         (chain_without.1, chain_without.2),
         (chain_with.1, chain_with.2),
