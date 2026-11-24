@@ -344,8 +344,19 @@ pub fn select_plan(
     // model 1 its cost per second, under cost model 3 its mean query
     // latency weighted by each query's evaluations per second. A term
     // charged on one side only fails every test that selects a plan.
+    // The selection does not model the window cache's byte bound
+    // (`ViewWindowCache::max_bytes`, which `plan_cost` and the report
+    // charge), so the check costs the plan without it.
     #[cfg(debug_assertions)]
-    if let Ok((cost, _)) = asap_cost::plan_cost(&plan, entries, data, cost_inputs) {
+    let unbounded_cache_inputs = {
+        let mut inputs = cost_inputs.clone();
+        if let Some(cache) = inputs.data_plane_execution.view_window_cache.as_mut() {
+            cache.max_bytes = None;
+        }
+        inputs
+    };
+    #[cfg(debug_assertions)]
+    if let Ok((cost, _)) = asap_cost::plan_cost(&plan, entries, data, &unbounded_cache_inputs) {
         if let Some(optimum) = solved.milp_optimum_per_second {
             let optimum = optimum + request_overhead_cost_per_second;
             let plan_cost = cost.cost_per_second.unwrap_or(f64::NAN);
