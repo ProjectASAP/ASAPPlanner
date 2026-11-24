@@ -154,3 +154,29 @@ async fn k2_a_report_without_storage_fields_still_loads() {
     let loaded: Result<asap_planner::SelectedPlanReport, _> = serde_json::from_value(report);
     assert!(loaded.is_ok(), "{loaded:?}");
 }
+
+/// P1. The demo deployment's inputs (#1469) plan a workload: cost model 3's
+/// lowest mean latency within 96 GiB, 101,456,000,000 bytes of disk and 20
+/// cores, view windows in files of 15 min kept 60 s past retention under a
+/// 2 GiB cache. The selected plan's disk is within the limit.
+#[tokio::test]
+async fn p1_the_demo_inputs_plan_under_lowest_mean_latency() {
+    let workload = over_m(vec![every("max_over_time(m[5m])", 10_000, None)], 1000);
+    let inputs = cost_inputs(
+        crate::lowest_mean_latency_common::cluster(
+            "lowest_mean_latency",
+            Some(103_079_215_104),
+            Some(101_456_000_000),
+            Some(20),
+        ),
+        max_table(),
+        json!({}),
+        json!({"view_window_cache": {
+            "idle_ms": 60_000, "max_bytes": 2_147_483_648u64,
+            "file_span_ms": 900_000, "retention_margin_ms": 60_000}}),
+    );
+    let (_, report) = single_chain_plan(&workload, &inputs)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(number(&report["predicted_usage"], "disk_bytes") <= 101_456_000_000.0);
+}

@@ -643,8 +643,9 @@ mod tests {
     /// The AWS Fargate preset holds the page's prices converted as its doc
     /// says at the given speed: per vCPU-second × seconds per operation or
     /// per scanned byte (1e-9 and 1e-10 at the illustrative speed; twice
-    /// that at half the speed), per GB-second ÷ 2^30; disk and the
-    /// provisioned prices 0. It validates under cost model 1 and is
+    /// that at half the speed), per GB-second ÷ 2^30, disk at the
+    /// ephemeral-storage price per GB-second ÷ 2^30; the provisioned
+    /// prices 0. It validates under cost model 1 and is
     /// refused under cost model 2, where every price it gives is 0.
     #[test]
     fn aws_fargate_us_east_1_converts_the_page_prices() {
@@ -661,7 +662,10 @@ mod tests {
             preset.cost_per_memory_byte_second,
             1.235e-6 / 1_073_741_824.0,
         );
-        assert_eq!(preset.cost_per_disk_byte_second, 0.0);
+        close(
+            preset.cost_per_disk_byte_second,
+            0.000_000_030_8 / 1_073_741_824.0,
+        );
         assert_eq!(preset.cost_per_provisioned_memory_byte_second, 0.0);
         assert_eq!(preset.cost_per_provisioned_cpu_core_second, 0.0);
         // A core twice as slow takes twice the vCPU-seconds per operation and per byte.
@@ -687,6 +691,76 @@ mod tests {
         assert_eq!(
             settings(CostModel::ProvisionedCapacity(preset)).validate(),
             Err(AnalyticalCostError::ZeroCalibration)
+        );
+    }
+
+    /// Both presets cost disk (#1469): the illustrative preset at a fortieth
+    /// of its memory cost per byte-second (block storage against memory);
+    /// the Fargate preset at the page's ephemeral-storage price,
+    /// $0.0000000308 per GB-second ÷ 2^30 bytes per GB, the free 20 GB per
+    /// task not expressed.
+    #[test]
+    fn presets_cost_disk() {
+        let illustrative = ResourceUnitCost::illustrative();
+        assert_eq!(
+            illustrative.cost_per_disk_byte_second,
+            illustrative.cost_per_memory_byte_second / 40.0
+        );
+        let fargate = ResourceUnitCost::aws_fargate_us_east_1(ResourceSpeed::illustrative());
+        let expected = 0.000_000_030_8 / (1u64 << 30) as f64;
+        assert!(
+            ((fargate.cost_per_disk_byte_second - expected) / expected).abs() < 1e-12,
+            "{} != {expected}",
+            fargate.cost_per_disk_byte_second
+        );
+    }
+
+    /// The demo deployment's inputs (#1469): cost model 3's lowest mean
+    /// latency within 96 GiB of memory, 101,456,000,000 bytes of disk and
+    /// 20 cores; view windows in files of 15 min, kept 60 s past their
+    /// retention, under a 2 GiB cache of decoded windows.
+    fn demo_inputs() -> serde_json::Value {
+        serde_json::json!({
+            "cost_model": {"cluster_capacity": {
+                "memory_bytes": 103_079_215_104u64,
+                "disk_bytes": 101_456_000_000u64,
+                "cpu_cores": 20,
+                "objective": "lowest_mean_latency"}},
+            "data_plane_execution": {"view_window_cache": {
+                "idle_ms": 60_000,
+                "max_bytes": 2_147_483_648u64,
+                "file_span_ms": 900_000,
+                "retention_margin_ms": 60_000}},
+            "latency_calibration": "uncalibrated_for_testing"
+        })
+    }
+
+    /// The demo deployment's inputs load and validate.
+    #[test]
+    fn the_demo_inputs_load_and_validate() {
+        let inputs: CostInputs =
+            serde_json::from_value(demo_inputs()).expect("the demo's cost inputs load");
+        assert_eq!(inputs.validate(), Ok(()));
+    }
+
+    /// A window cache that holds no bytes is refused.
+    #[test]
+    fn a_window_cache_of_zero_bytes_is_refused() {
+        let mut json = demo_inputs();
+        json["data_plane_execution"]["view_window_cache"]["max_bytes"] = serde_json::json!(0);
+        let inputs: CostInputs = serde_json::from_value(json).expect("loads");
+        assert!(inputs.validate().is_err());
+    }
+
+    /// Guard: a window cache of an idle time only, written before the new
+    /// fields, loads and writes back as it was.
+    #[test]
+    fn a_window_cache_of_an_idle_time_only_still_loads() {
+        let json = serde_json::json!({"data_plane_execution": {"view_window_cache": {"idle_ms": 60_000}}});
+        let inputs: CostInputs = serde_json::from_value(json.clone()).expect("loads");
+        assert_eq!(
+            serde_json::to_value(&inputs).unwrap()["data_plane_execution"]["view_window_cache"],
+            json["data_plane_execution"]["view_window_cache"]
         );
     }
 }
