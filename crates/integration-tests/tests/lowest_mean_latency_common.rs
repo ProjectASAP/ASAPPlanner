@@ -240,12 +240,34 @@ pub(crate) async fn planned(
     cost_inputs: &Value,
     raw_data_retained: bool,
 ) -> Result<Planned, String> {
+    planned_on(
+        workload,
+        cost_inputs,
+        &deployment_capabilities(raw_data_retained),
+    )
+    .await
+}
+
+/// A deployment that keeps raw data, with compressed-sample chains among
+/// the candidates (the default capabilities).
+pub(crate) fn with_compressed_samples() -> DeploymentCapabilities {
+    DeploymentCapabilities {
+        raw_data_retained: true,
+        ..DeploymentCapabilities::default()
+    }
+}
+
+/// [`planned`] on a deployment with `capabilities`.
+pub(crate) async fn planned_on(
+    workload: &PlanningWorkload,
+    cost_inputs: &Value,
+    capabilities: &DeploymentCapabilities,
+) -> Result<Planned, String> {
     let cost_inputs: CostInputs = serde_json::from_value(cost_inputs.clone())
         .map_err(|error| format!("cost inputs do not load: {error}"))?;
-    let capabilities = deployment_capabilities(raw_data_retained);
     let models = PlanningModels::builtin()
         .with_cost_inputs(&cost_inputs)
-        .with_deployment_capabilities(&capabilities);
+        .with_deployment_capabilities(capabilities);
     let (plan, report) = plan_installable(UserInput::new(workload, FrontendInput::Promql, models))
         .await
         .map_err(|error| format!("planning failed: {error}"))?;

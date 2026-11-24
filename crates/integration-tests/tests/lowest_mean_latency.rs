@@ -12,14 +12,14 @@
 //! per window.
 
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
-use asap_planner::{CostInputs, PlanningModels};
+use asap_planner::{CostInputs, DeploymentCapabilities, PlanningModels};
 use asap_types::ir::NonASAPOp;
 use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
 use serde_json::{json, Value};
 
 use crate::lowest_mean_latency_common::{
     cluster, cost_inputs, data_plane, deployment_capabilities, every, max_min_table, over_m, plan,
-    planned, usage_over_time,
+    planned, planned_on, usage_over_time, with_compressed_samples,
 };
 
 /// `max_over_time(m[5m])` every 10 s.
@@ -811,13 +811,17 @@ async fn a20_a_tie_break_keeps_within_the_disk_limit() {
 }
 
 /// The MILP's latency per query and mean for `settings` on `workload`, from
-/// the stages run directly (`Selection`).
-fn milp_latencies(workload: &asap_planner::PlanningWorkload, settings: &Value) -> (Vec<f64>, f64) {
+/// the stages run directly (`Selection`), on a deployment with
+/// `capabilities`.
+fn milp_latencies(
+    workload: &asap_planner::PlanningWorkload,
+    settings: &Value,
+    capabilities: &DeploymentCapabilities,
+) -> (Vec<f64>, f64) {
     let settings: CostInputs = serde_json::from_value(settings.clone()).unwrap();
-    let capabilities = deployment_capabilities(true);
     let models = PlanningModels::builtin()
         .with_cost_inputs(&settings)
-        .with_deployment_capabilities(&capabilities);
+        .with_deployment_capabilities(capabilities);
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap();
     let run = run_planning_stages_over(
@@ -844,7 +848,23 @@ fn assert_milp_latencies_are_the_reports(
     settings: &Value,
     planned: &crate::lowest_mean_latency_common::Planned,
 ) {
-    let (per_query, mean) = milp_latencies(workload, settings);
+    assert_milp_latencies_are_the_reports_on(
+        workload,
+        settings,
+        &deployment_capabilities(true),
+        planned,
+    );
+}
+
+/// [`assert_milp_latencies_are_the_reports`] on a deployment with
+/// `capabilities`.
+fn assert_milp_latencies_are_the_reports_on(
+    workload: &asap_planner::PlanningWorkload,
+    settings: &Value,
+    capabilities: &DeploymentCapabilities,
+    planned: &crate::lowest_mean_latency_common::Planned,
+) {
+    let (per_query, mean) = milp_latencies(workload, settings, capabilities);
     for (q, milp) in per_query.iter().enumerate() {
         assert_close(
             &format!("q{q} latency"),
@@ -935,6 +955,39 @@ async fn a9b_a_range_requests_steps_split_over_the_query_threads() {
         one.usage("cpu_core_seconds_per_second"),
     );
     assert_milp_latencies_are_the_reports(&workload, &settings(4), &four);
+}
+
+/// A9 with compressed-sample chains among the candidates: the 61-step
+/// range request's selection returns (it once stalled the solver at its
+/// root node for over 20 minutes, issue #1460), its plan decodes compressed
+/// samples instead of reading raw rows per step, and the MILP's latency is
+/// the report's.
+#[tokio::test]
+async fn a9c_a_range_request_plans_with_compressed_samples() {
+    let mut range = every("max_over_time(m[5m])", 300_000, None);
+    range["range_evaluation"] = json!({"step_ms": 60_000, "span_ms": 3_600_000});
+    let workload = over_m(vec![range], 1000);
+    let settings = cost_inputs(
+        lowest_mean_latency(),
+        max_min_table(100.0, 10_000_000.0, 0.0),
+        json!({}),
+        json!({}),
+    );
+    let capabilities = with_compressed_samples();
+    let started = std::time::Instant::now();
+    let selected = planned_on(&workload, &settings, &capabilities)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "planning took {:?}",
+        started.elapsed()
+    );
+    assert!(selected.plan.dag.nodes.iter().any(|node| matches!(
+        node.payload,
+        Payload::ASAP(asap_types::ir::ASAPOp::DecodeSamplesInRange { .. })
+    )));
+    assert_milp_latencies_are_the_reports_on(&workload, &settings, &capabilities, &selected);
 }
 
 /// §6.4: the MILP's reads of each query are the sub-DAG it reaches in the
