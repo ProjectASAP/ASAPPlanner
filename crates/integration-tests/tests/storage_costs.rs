@@ -12,7 +12,7 @@
 use serde_json::{json, Value};
 
 use crate::lowest_mean_latency_common::{
-    assert_close, chain_table, cost_inputs, every, number, over_m, single_chain_plan,
+    assert_close, chain_table, cluster, cost_inputs, every, number, over_m, single_chain_plan,
     usage_over_time,
 };
 
@@ -239,5 +239,96 @@ async fn r2_stored_row_bytes_beside_state_is_a_deployment_input() {
         "disk at 4 bytes beside each state",
         four_bytes_disk,
         default_disk - 68.0 * 1000.0 * retained_windows,
+    );
+}
+
+/// Cost model 1 at the illustrative prices with disk costed at a fortieth of
+/// memory per byte-second.
+fn usage_over_time_with_disk() -> Value {
+    let mut cost_model = usage_over_time();
+    cost_model["usage_over_time"]["cost_per_disk_byte_second"] = json!(1.25e-7 / 40.0);
+    cost_model
+}
+
+/// The window cache of the measured deployment: windows in files of
+/// `file_span_ms`, kept `retention_margin_ms` past their retention.
+fn cache_with_files(file_span_ms: u64, retention_margin_ms: u64) -> Value {
+    json!({"view_window_cache": {
+        "idle_ms": 60_000, "file_span_ms": file_span_ms, "retention_margin_ms": retention_margin_ms}})
+}
+
+/// F1. A view's windows are in files of 15 min, deleted whole once their
+/// newest window is 60 s past retention: at the peak a chain keeps
+/// ⌈(retention + 60 s + 15 min) ÷ width⌉ windows on disk, and cost model 1
+/// charges the time-averaged (retention + 60 s + 7.5 min) ÷ width windows.
+/// `max_over_time(m[5m])` every 10 s over 1,000 series: a 10 s chain.
+#[tokio::test]
+async fn f1_file_slack_is_on_disk_and_costed_at_its_average() {
+    let workload = over_m(vec![every("max_over_time(m[5m])", 10_000, None)], 1000);
+    let planned = |data_plane: Value| {
+        let workload = workload.clone();
+        async move {
+            let inputs = cost_inputs(usage_over_time_with_disk(), max_table(), json!({}), data_plane);
+            single_chain_plan(&workload, &inputs).await
+        }
+    };
+    let (plan, without) = planned(json!({"view_window_cache": {"idle_ms": 60_000}}))
+        .await
+        .unwrap();
+    let (_, width_ms, retention_ms) = chain(&plan);
+    let retained = retention_ms.div_ceil(width_ms) as f64;
+    let bytes_per_window = number(&without["predicted_usage"], "disk_bytes") / retained;
+    let (_, with) = planned(cache_with_files(900_000, 60_000))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_close(
+        "peak disk with file slack",
+        number(&with["predicted_usage"], "disk_bytes"),
+        bytes_per_window * (retention_ms + 60_000 + 900_000).div_ceil(width_ms) as f64,
+    );
+    let average_windows = (retention_ms as f64 + 60_000.0 + 450_000.0) / width_ms as f64;
+    assert_close(
+        "cost of the slack",
+        number(&with, "cost_per_second") - number(&without, "cost_per_second"),
+        1.25e-7 / 40.0 * bytes_per_window * (average_windows - retained),
+    );
+}
+
+/// F2. Under cost model 3's `lowest_mean_latency`, the disk limit counts
+/// the file slack: with a limit of 1 byte, the least disk any plan needs
+/// (the only plan is the chain) is its peak with slack,
+/// ⌈(retention + 60 s + 15 min) ÷ width⌉ windows, as the refusal reports.
+#[tokio::test]
+async fn f2_lowest_mean_latency_counts_file_slack_in_the_disk_limit() {
+    let workload = over_m(vec![every("max_over_time(m[5m])", 10_000, None)], 1000);
+    let reference = cost_inputs(
+        usage_over_time(),
+        max_table(),
+        json!({}),
+        json!({"view_window_cache": {"idle_ms": 60_000}}),
+    );
+    let (plan, report) = single_chain_plan(&workload, &reference).await.unwrap();
+    let (_, width_ms, retention_ms) = chain(&plan);
+    let bytes_per_window =
+        number(&report["predicted_usage"], "disk_bytes") / retention_ms.div_ceil(width_ms) as f64;
+    let limited = cost_inputs(
+        cluster("lowest_mean_latency", None, Some(1), None),
+        max_table(),
+        json!({}),
+        cache_with_files(900_000, 60_000),
+    );
+    let error = single_chain_plan(&workload, &limited)
+        .await
+        .expect_err("no plan fits 1 byte of disk");
+    let needed: f64 = error
+        .split("disk: the least any plan needs is ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("no disk shortfall in: {error}"));
+    assert_close(
+        "least disk",
+        needed,
+        bytes_per_window * (retention_ms + 60_000 + 900_000).div_ceil(width_ms) as f64,
     );
 }
