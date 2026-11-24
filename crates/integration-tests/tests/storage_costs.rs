@@ -95,7 +95,9 @@ pub(crate) fn chain(plan: &Value) -> (u64, u64, u64) {
     (
         node["id"].as_u64().unwrap(),
         width,
-        node["retention_ms"].as_u64().expect("a chain has a retention"),
+        node["retention_ms"]
+            .as_u64()
+            .expect("a chain has a retention"),
     )
 }
 
@@ -199,7 +201,10 @@ async fn k2_a_report_without_storage_fields_still_loads() {
             node.as_object_mut().unwrap().remove(field);
         }
     }
-    for field in ["disk_written_bytes_per_second", "disk_read_bytes_per_second"] {
+    for field in [
+        "disk_written_bytes_per_second",
+        "disk_read_bytes_per_second",
+    ] {
         report["predicted_usage"]
             .as_object_mut()
             .unwrap()
