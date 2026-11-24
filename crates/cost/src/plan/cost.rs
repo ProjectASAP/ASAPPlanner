@@ -798,7 +798,10 @@ fn window_cache_charges(
     let mut reads_from_disk = ReadsFromDisk::default();
     for view in views {
         let (id, windows) = (view.id, view.windows);
+        // Decoded bytes are what the cache holds; stored bytes what a cold
+        // read reads from the view's files.
         let bytes = windows.bytes_per_window as f64;
+        let stored_bytes = windows.stored_bytes_per_window as f64;
         let node_cost = per_node.get_mut(&id).expect("every node is measured");
         let mean_resident = view.mean_resident_windows * mean_held_share;
         let most_resident = (view.most_resident_windows as f64 * most_held_share).floor() as u64;
@@ -820,12 +823,12 @@ fn window_cache_charges(
                     * (read.windows_read_per_second - read.windows_read_from_disk_per_second);
             if !counted.contains(&(*reader_node, reader)) {
                 counted.push((*reader_node, reader));
-                read_bytes_per_second += windows_from_disk_per_second * bytes;
+                read_bytes_per_second += windows_from_disk_per_second * stored_bytes;
             }
             if let (Some(reader_node), ReadTimes::Query { .. }) = (reader_node, reader.times) {
                 let runs_per_second =
                     reader.times.requests_per_second() * reader.times.runs_per_request();
-                let ms_per_run = windows_from_disk_per_second * bytes / runs_per_second
+                let ms_per_run = windows_from_disk_per_second * stored_bytes / runs_per_second
                     * settings.resource_speed.ms_per_scanned_byte;
                 let slowest = slowest_ms_per_run.entry(*reader_node).or_insert(0.0);
                 *slowest = slowest.max(ms_per_run);
@@ -1014,7 +1017,7 @@ pub fn partial_copy_merge_ms(
             let state_bytes = state_bytes_per_row(
                 usage.output_facts.statistics,
                 &node.output_schema,
-                settings.data_plane_execution.stored_row_bytes_beside_state,
+                &settings.data_plane_execution,
             );
             merge_terms_per_state(family, state_bytes, state_bytes, None, 1).operations()
                 * settings.resource_speed.ms_per_cpu_op

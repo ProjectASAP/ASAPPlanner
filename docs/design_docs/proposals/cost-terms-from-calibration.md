@@ -187,7 +187,11 @@ with `max_bytes`, `file_span_ms` and `retention_margin_ms` optional.
 ingestion-time view's node charges its windows in files (retained, plus
 the file slack) as disk and its
 window being built as memory, and reports `cached_windows:
-Option<CachedViewWindows { bytes_per_window, width_ms, retained }>`.
+Option<CachedViewWindows { bytes_per_window, stored_bytes_per_window,
+width_ms, retained }>`: decoded bytes per window for what the cache holds,
+and the bytes per window in the view's files (its states at the measured
+`stored_bytes_per_state`, else the decoded bytes) for disk, disk writes and
+cold reads.
 
 `crates/cost/src/plan/resident_windows.rs`: `ChainReader { read:
 WindowRead, times: ReadTimes }` with `retained_windows(width_ms)`;

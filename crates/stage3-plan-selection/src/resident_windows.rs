@@ -88,7 +88,8 @@ pub(crate) fn resident_reads(
             .div_ceil(width_ms)
             .max(1);
         let (mut mean, mut most) = written_resident_windows(width_ms, retained, idle_ms);
-        let bytes_per_window = windows.bytes_per_window as f64;
+        // A cold read reads a window's bytes in the view's files.
+        let stored_bytes_per_window = windows.stored_bytes_per_window as f64;
         let (mut bytes_read_from_disk_per_second, mut most_bytes_read_from_disk_per_run) =
             (0.0, 0.0);
         if let Reader::Edge(position) = reader {
@@ -188,7 +189,7 @@ pub(crate) fn resident_reads(
                 most = most.max(reader_most);
                 if let Some(reads) = window_reads {
                     let bytes_per_second =
-                        reads.windows_read_from_disk_per_second * bytes_per_window;
+                        reads.windows_read_from_disk_per_second * stored_bytes_per_window;
                     bytes_read_from_disk_per_second += bytes_per_second;
                     most_bytes_read_from_disk_per_run = f64::max(
                         most_bytes_read_from_disk_per_run,

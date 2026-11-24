@@ -163,6 +163,14 @@ pub struct OperatorCost {
     /// `None`: the bytes the formulas derive from the sketch's parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bytes_per_state: Option<f64>,
+    /// For a node that keeps summary state: the bytes one state's row takes
+    /// in a stored view's files, as the executor writes them (compressed):
+    /// its file bytes divided by its states, the row's keys and offset
+    /// included. It prices the view's disk, disk writes and cold reads; the
+    /// decoded state in memory is `memory_bytes_per_state`. `None`: a
+    /// window's stored bytes are its decoded bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_bytes_per_state: Option<f64>,
     /// At ingestion time: CPU nanoseconds per window state the node emits
     /// at a refresh (window close), charged beside `ns_per_unit` and
     /// `ns_per_invocation`. Default 0.
@@ -197,6 +205,8 @@ pub struct UnitPrice {
     pub ns_per_unit: f64,
     pub ns_per_invocation: f64,
     pub memory_bytes_per_state: Option<f64>,
+    /// File bytes per state's row (`OperatorCost::stored_bytes_per_state`).
+    pub stored_bytes_per_state: Option<f64>,
     /// CPU ns per window state emitted at a refresh.
     pub ns_per_state_emitted: f64,
     /// Whether the node's series count is outside the measured series
@@ -314,6 +324,10 @@ pub fn lookup_at_scale(
                     .memory_bytes_per_state
                     .zip(high.memory_bytes_per_state)
                     .map(|(a, b)| mix(a, b)),
+                stored_bytes_per_state: low
+                    .stored_bytes_per_state
+                    .zip(high.stored_bytes_per_state)
+                    .map(|(a, b)| mix(a, b)),
                 ns_per_state_emitted: mix(low.ns_per_state_emitted, high.ns_per_state_emitted),
                 outside_measured_scale: false,
             })
@@ -367,6 +381,10 @@ fn at_series_count(entries: &[&OperatorCost], series: Option<u64>) -> Option<Uni
                 memory_bytes_per_state: low
                     .memory_bytes_per_state
                     .zip(high.memory_bytes_per_state)
+                    .map(|(a, b)| mix(a, b)),
+                stored_bytes_per_state: low
+                    .stored_bytes_per_state
+                    .zip(high.stored_bytes_per_state)
                     .map(|(a, b)| mix(a, b)),
                 ns_per_state_emitted: mix(low.ns_per_state_emitted, high.ns_per_state_emitted),
                 outside_measured_scale: false,
@@ -431,6 +449,7 @@ pub(crate) fn aggregate_lookup(
         ns_per_unit: 0.0,
         ns_per_invocation: 0.0,
         memory_bytes_per_state: None,
+        stored_bytes_per_state: None,
         ns_per_state_emitted: 0.0,
         outside_measured_scale: false,
     };
@@ -465,6 +484,7 @@ fn price_of(entry: &OperatorCost) -> UnitPrice {
         ns_per_unit: entry.ns_per_unit,
         ns_per_invocation: entry.ns_per_invocation,
         memory_bytes_per_state: entry.memory_bytes_per_state,
+        stored_bytes_per_state: entry.stored_bytes_per_state,
         ns_per_state_emitted: entry.ns_per_state_emitted,
         outside_measured_scale: false,
     }
@@ -527,6 +547,9 @@ pub(crate) fn validate(
         )?;
         if let Some(bytes) = entry.memory_bytes_per_state {
             check("measured_operation_costs.memory_bytes_per_state", bytes)?;
+        }
+        if let Some(bytes) = entry.stored_bytes_per_state {
+            check("measured_operation_costs.stored_bytes_per_state", bytes)?;
         }
         let families = [
             entry.sketch.is_some(),

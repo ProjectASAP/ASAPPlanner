@@ -113,6 +113,7 @@ pub fn convert_rqe_atomic_costs(rows: &Value) -> Result<ConvertedCosts, String> 
                 ns_per_unit: seconds * 1e9,
                 ns_per_invocation: 0.0,
                 memory_bytes_per_state: None,
+                stored_bytes_per_state: None,
                 ns_per_state_emitted: 0.0,
                 measured_series_count: None,
                 measures: Vec::new(),
