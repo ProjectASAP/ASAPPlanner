@@ -179,6 +179,23 @@ class ResourceRows(unittest.TestCase):
         self.assertTrue(passed, lines)
         self.assertIn("not checked", line(lines, "view 3 disk peak B"))
 
+    def test_bytes_rows_read_stored_size(self):
+        """K10 (#1486). A view's measured bytes per window are what its files
+        hold, so the row compares them with the report's
+        `stored_bytes_per_window` when the report has it (a tenth of the
+        decoded 440 KB here: measured 44 KB passes), and with
+        `bytes_per_window` when it does not (the same 44 KB fails)."""
+        report = copy.deepcopy(REPORT)
+        report["predicted_usage"]["per_node"][0]["stored_bytes_per_window"] = 44_000
+        measured = copy.deepcopy(MEASURED)
+        measured["views"][0]["bytes_per_window"] = 44_000
+        _, lines = run(measured, report)
+        row = line(lines, "view 3 bytes/window")
+        self.assertIn("predicted 44000.000", row)
+        self.assertIn(" ok", row)
+        _, lines = run(measured)
+        self.assertIn("FAIL", line(lines, "view 3 bytes/window"))
+
     def test_missing_sections_are_not_checked(self):
         """K7 (guard). A measured file without `views` and `plan` checks only
         the refresh groups and queries, as before."""

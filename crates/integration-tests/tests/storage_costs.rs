@@ -13,8 +13,8 @@ use asap_cost::ResourceUnitCost;
 use serde_json::{json, Value};
 
 use crate::lowest_mean_latency_common::{
-    assert_close, chain_table, cluster, cost_inputs, every, number, over_m, single_chain_plan,
-    usage_over_time,
+    assert_close, chain_table, cluster, cost_inputs, entry, every, number, over_m,
+    single_chain_plan, usage_over_time,
 };
 
 /// The measured table: every node at 1 ns per unit, the chain and the
@@ -182,64 +182,252 @@ async fn p1_the_demo_inputs_plan_under_lowest_mean_latency() {
     assert!(number(&report["predicted_usage"], "disk_bytes") <= 101_456_000_000.0);
 }
 
-/// The plan's disk bytes and its chain (id, width, retention) for
-/// `query` every 10 s over 1,000 series of `m`, one chain under a window
-/// cache (so its retained windows are its disk), with
-/// `data_plane_execution` fields beside the cache.
-async fn chain_disk(
+/// The report's chain node (from `plan`'s one chain) and the chain's
+/// (id, width, retention) for `query` every `interval_ms` over 1,000
+/// series of `m`, under a 60 s window cache, the chain's measured entry
+/// carrying `chain_fields` (e.g. `memory_bytes_per_state`) and
+/// `data_plane_execution` carrying `extra_data_plane` beside the cache.
+async fn chain_node(
     query: &str,
+    interval_ms: u32,
+    chain_fields: Value,
     extra_data_plane: Value,
-) -> Result<(f64, (u64, u64, u64)), String> {
-    let workload = over_m(vec![every(query, 10_000, None)], 1000);
+) -> Result<(Value, (u64, u64, u64)), String> {
+    let workload = over_m(vec![every(query, interval_ms, None)], 1000);
     let mut data_plane = json!({"view_window_cache": {"idle_ms": 60_000}});
     for (key, value) in extra_data_plane.as_object().unwrap() {
         data_plane[key] = value.clone();
     }
-    let inputs = cost_inputs(usage_over_time(), max_table(), json!({}), data_plane);
+    let inputs = cost_inputs(
+        usage_over_time(),
+        chain_table(chain_fields, vec![]),
+        json!({}),
+        data_plane,
+    );
     let (plan, report) = single_chain_plan(&workload, &inputs).await?;
-    Ok((
-        number(&report["predicted_usage"], "disk_bytes"),
-        chain(&plan),
-    ))
+    let chain = chain(&plan);
+    Ok((report_node(&report, chain.0).clone(), chain))
 }
 
-/// R1. A stored per-series row holds its series key and its state, not the
-/// text of the labels its readers read: the labels are derived from the
-/// series identity. `topk by (job) (5, max_over_time(m[5m]))` keeps a
-/// per-series chain carrying `job`; `topk(5, max_over_time(m[5m]))` one
-/// carrying no label. Both keep the same bytes on disk.
+/// R1 (#1486). A stored per-series row holds, beside its state, a 4-byte
+/// offset of the state in its column and a 4-byte dictionary key per
+/// label column (the series identity is one); the label text is kept once
+/// per series per file, not per row, and the window time once per
+/// fragment. Measured: a per-series exact `Sum` carrying `job`, `region`
+/// and `service` stores 24 + 4 × 4 + 4 = 44 bytes per row.
+/// `topk(5, max_over_time(m[5m]))` keeps a chain carrying only the
+/// identity: 4 + 4 = 8 bytes beside each 16-byte state (measured),
+/// 1,000 × 24 bytes per window. Today: 72 beside it, 88,000.
 #[tokio::test]
-async fn r1_a_stored_per_series_row_holds_no_label_text() {
-    let (without_label, chain_without) = chain_disk("topk(5, max_over_time(m[5m]))", json!({}))
-        .await
-        .unwrap();
-    let (with_label, chain_with) = chain_disk("topk by (job) (5, max_over_time(m[5m]))", json!({}))
-        .await
-        .unwrap();
+async fn r1_an_identity_only_row_holds_an_offset_and_one_key() {
+    let (node, _) = chain_node(
+        "topk(5, max_over_time(m[5m]))",
+        10_000,
+        json!({"memory_bytes_per_state": 16.0}),
+        json!({}),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_close(
+        "bytes per window",
+        number(&node, "bytes_per_window"),
+        1000.0 * (16.0 + 4.0 + 4.0),
+    );
+}
+
+/// R2 (#1486). Each label column a per-series row carries is one more
+/// 4-byte key: `topk by (job) (5, max_over_time(m[5m]))` carries `job`
+/// beside the identity, 4 + 2 × 4 = 12 bytes beside each 16-byte state,
+/// 4,000 bytes per window more than the chain carrying no label (R1).
+/// Today both hold 72 beside it.
+#[tokio::test]
+async fn r2_each_carried_label_column_is_one_more_key() {
+    let state = json!({"memory_bytes_per_state": 16.0});
+    let (without_label, chain_without) = chain_node(
+        "topk(5, max_over_time(m[5m]))",
+        10_000,
+        state.clone(),
+        json!({}),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
+    let (with_label, chain_with) = chain_node(
+        "topk by (job) (5, max_over_time(m[5m]))",
+        10_000,
+        state,
+        json!({}),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         (chain_without.1, chain_without.2),
         (chain_with.1, chain_with.2),
         "the same width and retention"
     );
-    assert_close("disk with a carried label", with_label, without_label);
+    assert_close(
+        "bytes per window with job",
+        number(&with_label, "bytes_per_window"),
+        1000.0 * (16.0 + 4.0 + 2.0 * 4.0),
+    );
+    assert_close(
+        "one more key per row",
+        number(&with_label, "bytes_per_window") - number(&without_label, "bytes_per_window"),
+        1000.0 * 4.0,
+    );
 }
 
-/// R2. The bytes a stored row holds beside its state are a deployment
-/// input, `stored_row_bytes_beside_state` (default 72: an 8-byte window
-/// time and a 64-byte series key). At 4 bytes, each of the chain's 1,000
-/// rows per retained window holds 68 bytes less.
+/// R3 (#1486). The row layout's sizes are deployment inputs replacing
+/// `stored_row_bytes_beside_state`: `state_offset_bytes_per_row`
+/// (default 4) and `key_bytes_per_label_column` (default 4). At 8 and 2,
+/// the identity-only chain of R1 holds 8 + 2 = 10 bytes beside each
+/// 16-byte state; the old field is refused.
 #[tokio::test]
-async fn r2_stored_row_bytes_beside_state_is_a_deployment_input() {
+async fn r3_the_row_layout_is_a_deployment_input() {
     let query = "topk(5, max_over_time(m[5m]))";
-    let (default_disk, (_, width_ms, retention_ms)) = chain_disk(query, json!({})).await.unwrap();
-    let (four_bytes_disk, _) = chain_disk(query, json!({"stored_row_bytes_beside_state": 4}))
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-    let retained_windows = retention_ms.div_ceil(width_ms) as f64;
+    let state = json!({"memory_bytes_per_state": 16.0});
+    let (node, _) = chain_node(
+        query,
+        10_000,
+        state.clone(),
+        json!({"state_offset_bytes_per_row": 8, "key_bytes_per_label_column": 2}),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
     assert_close(
-        "disk at 4 bytes beside each state",
-        four_bytes_disk,
-        default_disk - 68.0 * 1000.0 * retained_windows,
+        "bytes per window",
+        number(&node, "bytes_per_window"),
+        1000.0 * (16.0 + 8.0 + 2.0),
+    );
+    let error = chain_node(
+        query,
+        10_000,
+        state,
+        json!({"stored_row_bytes_beside_state": 72}),
+    )
+    .await
+    .expect_err("the replaced field is refused");
+    assert!(error.contains("stored_row_bytes_beside_state"), "{error}");
+}
+
+/// S1 (#1486). A chain's measured entry gives the bytes one state's row
+/// takes in the view's files, `stored_bytes_per_state` (the executor's
+/// fragment bytes ÷ states, the row's keys and offset included, as
+/// compressed on disk), beside `memory_bytes_per_state`, the decoded
+/// state in memory. A window is `stored_bytes_per_window` = 1,000 × 3.2 in
+/// its files (disk peak, disk writes) and `bytes_per_window` = 1,000 ×
+/// (16 + 8) decoded; memory is charged as without the entry.
+/// `max_over_time(m[5m])` every 10 s: a 10 s chain.
+#[tokio::test]
+async fn s1_stored_bytes_are_disk_and_writes_not_memory() {
+    let query = "max_over_time(m[5m])";
+    let (decoded_only, _) = chain_node(
+        query,
+        10_000,
+        json!({"memory_bytes_per_state": 16.0}),
+        json!({}),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
+    let (node, (_, width_ms, retention_ms)) = chain_node(
+        query,
+        10_000,
+        json!({"memory_bytes_per_state": 16.0, "stored_bytes_per_state": 3.2}),
+        json!({}),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
+    let stored_per_window = 1000.0 * 3.2;
+    assert_close(
+        "stored bytes per window",
+        number(&node, "stored_bytes_per_window"),
+        stored_per_window,
+    );
+    assert_close(
+        "decoded bytes per window",
+        number(&node, "bytes_per_window"),
+        number(&decoded_only, "bytes_per_window"),
+    );
+    assert_close(
+        "disk at the peak",
+        number(&node, "disk_bytes"),
+        stored_per_window * retention_ms.div_ceil(width_ms) as f64,
+    );
+    assert_close(
+        "disk writes",
+        number(&node, "disk_written_bytes_per_second"),
+        stored_per_window * 1000.0 / width_ms as f64,
+    );
+    for memory in ["average_memory_bytes", "peak_memory_bytes"] {
+        assert_close(memory, number(&node, memory), number(&decoded_only, memory));
+    }
+}
+
+/// S2 (#1486, guard). Without `stored_bytes_per_state`, a window's stored
+/// bytes are its decoded bytes: the report's `stored_bytes_per_window`
+/// equals `bytes_per_window`, and disk is what it is today.
+#[tokio::test]
+async fn s2_without_a_measured_stored_size_stored_is_decoded() {
+    let (node, (_, width_ms, retention_ms)) =
+        chain_node("max_over_time(m[5m])", 10_000, json!({}), json!({}))
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+    let decoded = number(&node, "bytes_per_window");
+    assert_close(
+        "stored bytes per window",
+        number(&node, "stored_bytes_per_window"),
+        decoded,
+    );
+    assert_close(
+        "disk at the peak",
+        number(&node, "disk_bytes"),
+        decoded * retention_ms.div_ceil(width_ms) as f64,
+    );
+}
+
+/// S3 (#1486). `stored_bytes_per_state` is interpolated between measured
+/// series counts exactly as `memory_bytes_per_state` is (linearly in log
+/// bytes over log series): entries at 100 and 10,000 series storing 2 and
+/// 8 bytes per state give √(2 × 8) = 4 at 1,000 series. An entry pair
+/// where one lacks it leaves stored = decoded.
+#[tokio::test]
+async fn s3_stored_bytes_interpolate_like_memory_bytes() {
+    let at = |series: u64, stored: Option<f64>| {
+        let mut chain = json!({"exact": "Max", "ns_per_unit": 1.0,
+            "memory_bytes_per_state": 16.0, "measured_series_count": series});
+        if let Some(stored) = stored {
+            chain["stored_bytes_per_state"] = json!(stored);
+        }
+        chain
+    };
+    let planned = |entries: [Value; 2]| async move {
+        let workload = over_m(vec![every("max_over_time(m[5m])", 10_000, None)], 1000);
+        let mut table = chain_table(json!({}), vec![]);
+        table.retain(|entry| entry["operator"] != "SummaryTumblingWindowChain");
+        for chain in entries {
+            table.push(entry("SummaryTumblingWindowChain", "ingestion_time", chain));
+        }
+        let inputs = cost_inputs(
+            usage_over_time(),
+            table,
+            json!({}),
+            json!({"view_window_cache": {"idle_ms": 60_000}}),
+        );
+        let (plan, report) = single_chain_plan(&workload, &inputs)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        report_node(&report, chain(&plan).0).clone()
+    };
+    let node = planned([at(100, Some(2.0)), at(10_000, Some(8.0))]).await;
+    assert_close(
+        "interpolated stored bytes per window",
+        number(&node, "stored_bytes_per_window"),
+        1000.0 * 4.0,
+    );
+    let node = planned([at(100, Some(2.0)), at(10_000, None)]).await;
+    assert_close(
+        "one entry without it: stored is decoded",
+        number(&node, "stored_bytes_per_window"),
+        number(&node, "bytes_per_window"),
     );
 }
 
@@ -451,5 +639,91 @@ async fn d3_a_bounded_cache_holds_its_bound_and_reads_the_rest_cold() {
         number(&bounded["predicted_usage"], "scanned_bytes_per_second")
             > number(&unbounded["predicted_usage"], "scanned_bytes_per_second"),
         "no cold reads past the bound"
+    );
+}
+
+/// D4 (#1486). A read from disk reads a window's stored bytes, while the
+/// cache holds decoded ones. D1's `max_over_time(m[1h])` every 5 min with
+/// `stored_bytes_per_state` 2 (decoded 16 + 8 per row) reads its 11 cold
+/// windows at 1,000 × 2 bytes each, every 300 s; its memory is as without
+/// the entry.
+#[tokio::test]
+async fn d4_cold_reads_read_stored_bytes() {
+    let query = "max_over_time(m[1h])";
+    let (_, uncached) = one_chain(query, 300_000, 1000, json!({})).await;
+    let (decoded_only, _) = chain_node(
+        query,
+        300_000,
+        json!({"memory_bytes_per_state": 16.0}),
+        json!({}),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
+    let (node, (_, width_ms, _)) = chain_node(
+        query,
+        300_000,
+        json!({"memory_bytes_per_state": 16.0, "stored_bytes_per_state": 2.0}),
+        json!({}),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(width_ms, 300_000);
+    assert_close(
+        "cold read bytes per second",
+        number(&node, "disk_read_bytes_per_second"),
+        11.0 * 1000.0 * 2.0 / 300.0,
+    );
+    assert_close(
+        "memory",
+        number(&node, "average_memory_bytes"),
+        number(&decoded_only, "average_memory_bytes"),
+    );
+    // The uncached plan reads nothing from disk.
+    assert_eq!(
+        number(&uncached["predicted_usage"], "disk_read_bytes_per_second"),
+        0.0
+    );
+}
+
+/// D5 (#1486). The cache bound is compared with decoded resident bytes,
+/// not stored ones: D3's chain under a bound of half its decoded resident
+/// memory holds the same memory and reads the same windows cold whether
+/// its stored bytes are a tenth of decoded or equal to them; only the
+/// bytes each cold read takes scale, by the tenth.
+#[tokio::test]
+async fn d5_the_cache_bound_counts_decoded_bytes() {
+    let query = "max_over_time(m[5m] offset 1h)";
+    let decoded = json!({"memory_bytes_per_state": 20.0});
+    let (unbounded, _) = chain_node(query, 15_000, decoded.clone(), json!({}))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let bound = (number(&unbounded, "average_memory_bytes") / 2.0) as u64;
+    let bounded = |chain_fields: Value| async move {
+        chain_node(
+            query,
+            15_000,
+            chain_fields,
+            json!({"view_window_cache": {"idle_ms": 60_000, "max_bytes": bound}}),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+        .0
+    };
+    let same_size = bounded(json!({"memory_bytes_per_state": 20.0,
+        "stored_bytes_per_state": 28.0}))
+    .await;
+    let tenth = bounded(json!({"memory_bytes_per_state": 20.0,
+        "stored_bytes_per_state": 2.8}))
+    .await;
+    assert_close(
+        "memory under the bound",
+        number(&tenth, "average_memory_bytes"),
+        number(&same_size, "average_memory_bytes"),
+    );
+    assert!(number(&same_size, "disk_read_bytes_per_second") > 0.0);
+    assert_close(
+        "cold reads at a tenth of the bytes",
+        number(&tenth, "disk_read_bytes_per_second"),
+        number(&same_size, "disk_read_bytes_per_second") / 10.0,
     );
 }
