@@ -210,7 +210,7 @@ sharing; open one with **Open stage document or workload…**.
 ## Document format
 
 The `asap-stage-pipeline/v2` document is described in the header comment of
-`crates/devtools/src/bin/asap_planner.rs`.
+`crates/planner-cli/src/bin/asap_planner.rs`.
 
 ## Tests
 
@@ -224,7 +224,7 @@ node --test *.test.mjs
 The Python tests run the page's JavaScript through `py_mini_racer` (`pip
 install py-mini-racer==0.6.0`); without it those tests are skipped. Tests
 over a planned document need a built `asap_planner` (`cargo build -p
-asap-devtools --bin asap_planner`) and are skipped without it.
+asap-planner-cli --bin asap_planner`) and are skipped without it.
 
 `test-fixtures/p90-kll.json` is the document `asap_planner` writes for one
 p90 query with accuracy enforced; write it again when the document changes:

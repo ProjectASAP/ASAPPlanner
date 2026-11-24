@@ -1,8 +1,8 @@
 # ASAPPlanner CLI user guide
 
-Use the `asap-devtools` commands to plan a workload through the planning
-stages, inspect the logical DAG a query lowers into, and inspect corpus
-coverage. These commands do not deploy or execute a physical plan.
+Use `asap_planner` (package `asap-planner-cli`) to plan a workload through
+the planning stages, and the `asap-devtools` commands to inspect the logical
+DAG a query lowers into and corpus coverage. These commands do not deploy or execute a physical plan.
 
 To develop an application using the Rust library, start with
 [Library API: definitions, options, and examples](../develop_docs/library-api.md).
@@ -12,7 +12,7 @@ To develop an application using the Rust library, start with
 Run from the repository root with Rust/Cargo installed. Cargo builds the selected
 tool on first use.
 
-| Command (`cargo run -p asap-devtools --bin … -- …`) | Input / options | Result |
+| Command (`cargo run -p asap-devtools --bin … -- …`; `asap_planner` is `-p asap-planner-cli`) | Input / options | Result |
 | --- | --- | --- |
 | `asap_planner --workload <file> --run-until <stage>` | `PlanningWorkload` JSON files | Runs the planner's stages up to `<stage>` and prints each stage's output as text, or with `--format json` as the document the [Plan Viewer](plan-viewer.md) shows |
 | `convert_rqe_atomic_costs <rqe_atomic_costs.json> <out.json>` | sketch-bench's per-operation cost table | Writes a measured table to set as `measured_operation_costs` in an `asap_planner --cost-inputs` file; skipped rows are listed on stderr |
@@ -32,7 +32,7 @@ ASAP-aware optimization (Stage 1), physical ASAP-aware optimization
 each stage produced:
 
 ```sh
-cargo run --release -p asap-devtools --bin asap_planner -- \
+cargo run --release -p asap-planner-cli --bin asap_planner -- \
     --workload tools/dag-viewer/workloads/planner-layering/example1.json \
     --run-until stage3
 ```
@@ -59,7 +59,7 @@ frontends lowered it, and its memo groups. It never picks a sketch: it shows
 what a query means, with exact operators only.
 
 ```sh
-cargo run -p asap-devtools --bin asap_planner -- \
+cargo run -p asap-planner-cli --bin asap_planner -- \
     --workload tools/dag-viewer/workloads/planner-layering/example1.json \
     --run-until stage0
 ```

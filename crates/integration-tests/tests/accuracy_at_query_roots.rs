@@ -3,8 +3,8 @@
 //! "Example: allocation in a ratio"): A, the p95 of `latency` at rank
 //! error 0.01, and B, the ratio of its p99 and p50 at relative error 0.03.
 
-use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_planner::{DeploymentCapabilities, PlanningModels, PlanningRun};
+use asap_planner_cli::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::summary_type::SketchParams;

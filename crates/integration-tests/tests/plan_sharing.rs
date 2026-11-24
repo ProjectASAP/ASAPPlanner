@@ -359,12 +359,12 @@ fn per_series_states_over_different_labels_add_no_shared_chain() {
         .unwrap();
     let planning = w.planning_workload();
     let entries: Vec<_> = planning.query_workload.entries().collect();
-    let run = asap_devtools::planning_stages::run_stages_until(
+    let run = asap_planner_cli::planning_stages::run_stages_until(
         roots,
         &entries,
         &w.data,
         asap_planner::PlanningModels::builtin(),
-        asap_devtools::planning_stages::RunUntil::Pass2,
+        asap_planner_cli::planning_stages::RunUntil::Pass2,
     )
     .unwrap();
     let memo = run.run.logical_asap_candidates.unwrap().memo;

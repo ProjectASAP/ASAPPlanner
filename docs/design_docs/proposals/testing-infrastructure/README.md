@@ -37,7 +37,7 @@ detectors.
 ### Input sources
 
 - Hand-written workloads (curated goldens, per-rule cases).
-- Real corpora (`crates/devtools/tests/corpus_snapshots/`, frontend-sql corpora).
+- Real corpora (`crates/planner-cli/tests/corpus_snapshots/`, frontend-sql corpora).
 - Deterministic generators (seeded).
 - Fuzzer (`planner_fuzz`), with shrinking.
 
@@ -267,7 +267,7 @@ Logic: everything above plus `asap-stage3-plan-selection::select_plan`
   - Blocked by: the golden runner.
 - **T23 Corpus snapshots**
   - Tests: real-corpus plans do not change unless explained.
-  - Input → output: `crates/devtools/tests/corpus_snapshots/` corpora →
+  - Input → output: `crates/planner-cli/tests/corpus_snapshots/` corpora →
     selected plan per query.
   - Oracle: stability snapshot.
   - Today: Stage 3 only; nightly; failing since #1207 stubbed the later
@@ -322,7 +322,7 @@ proposed fate. Its lists, re-checked against main when the work starts:
 
 ## Existing infrastructure
 
-- `corpus_snapshots`, `sketch_plan_snapshots` (devtools): committed Stage 3
+- `corpus_snapshots`, `sketch_plan_snapshots` (planner-cli): committed Stage 3
   snapshots, nightly in release, `UPDATE_SNAPSHOTS=1` to regenerate.
 - `planner_fuzz`: metamorphic relations with witnesses and shrinking; seeds
   in `crates/devtools/tests/planner_fuzz_seeds/`.
@@ -610,6 +610,9 @@ mutations = ["shuffle"]  # rename would break the table-to-metric link
   `tests/goldens/corpus/o11y_bench/qNN/` with `--summary` (D18); the
   corpus's data facts are copied into each `workload.json` by the script
   that generates the corpus. `corpus_snapshots.rs` is then deleted.
+  `sketch_plan_snapshots` migrates the same way: each workload becomes
+  `tests/goldens/workloads/<name>/`, with its deployment's capabilities
+  as the case's `deployment_capabilities.json` (#1419).
 
 ## Open questions
 

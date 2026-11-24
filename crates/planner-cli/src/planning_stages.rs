@@ -1,7 +1,7 @@
-//! The planner stages run over one workload: [`run_search_over`] and
-//! [`run_planning_stages_over`] run the facade's search for the integration
-//! tests and `planner_fuzz`, and [`run_stages_until`] stops after a chosen
-//! stage for `asap_planner`.
+//! The planner stages run over one workload, from its query text:
+//! [`run_search_over`] and [`run_planning_stages_over`] run the full search
+//! (the integration tests and `planner_fuzz`), and [`run_stages_until`]
+//! stops after a chosen stage (`asap_planner`).
 
 use asap_frontend_sql::SqlCatalog;
 pub use asap_planner::RunUntil;

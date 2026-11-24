@@ -1,0 +1,47 @@
+[package]
+name = "asap-planner-cli"
+autotests = false
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+asap-types = { path = "../types" }
+asap-frontend-promql = { path = "../frontend-promql" }
+asap-frontend-metricsql = { path = "../frontend-metricsql" }
+asap-frontend-sql = { path = "../frontend-sql" }
+asap-stage1-pass1-per-computation-candidates = { path = "../stage1-pass1-per-computation-candidates" }
+asap-cost = { path = "../cost" }
+asap-stage3-plan-selection = { path = "../stage3-plan-selection" }
+# The installable plan of the selected candidate (`InstallablePlan`),
+# whose stored outputs and plan file `asap_planner` writes.
+asap-planner = { path = "../planner" }
+# The executor's supported summary families, which `asap_planner` plans
+# with when the deployment declares none, as `plan_installable` does.
+asap-executor = { path = "../executor" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+# `planning_stages` lowers SQL, whose frontend is async, on its own runtime.
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+asap-types = { path = "../types", features = ["test-support"] }
+# The golden runner (`tests/goldens.rs`): its own test harness, `case.toml`
+# parsing and the line diff it prints on failure.
+libtest-mimic = "0.8"
+toml = "0.9"
+similar = "2"
+
+[[test]]
+name = "planner_cli"
+path = "tests/main.rs"
+
+# The nightly corpus-snapshots workflow runs this binary by name.
+[[test]]
+name = "corpus_snapshots"
+path = "tests/corpus_snapshots.rs"
+
+# The golden runner: one trial per case directory under `tests/goldens/`.
+[[test]]
+name = "goldens"
+path = "tests/goldens.rs"
+harness = false

@@ -3,7 +3,7 @@ arguments, /api/plan-workload answers with the planner's document, and the
 example documents are written on demand.
 
 Run from tools/dag-viewer: `python3 -m unittest test_server`. The endpoint
-tests need a built asap_planner (`cargo build -p asap-devtools --bin
+tests need a built asap_planner (`cargo build -p asap-planner-cli --bin
 asap_planner`; CARGO_TARGET_DIR is honored).
 """
 

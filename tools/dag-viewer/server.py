@@ -25,7 +25,7 @@ COST_INPUTS = HERE / "cost-inputs"
 
 def build_planner() -> None:
     subprocess.run(
-        ["cargo", "build", "-q", "-p", "asap-devtools", "--bin", "asap_planner"],
+        ["cargo", "build", "-q", "-p", "asap-planner-cli", "--bin", "asap_planner"],
         cwd=REPO,
         check=True,
     )

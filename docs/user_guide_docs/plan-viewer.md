@@ -79,7 +79,7 @@ it. Or click **Workload sets** and pick a row.
 **From the command line:**
 
 ```sh
-cargo run --release -p asap-devtools --bin asap_planner -- \
+cargo run --release -p asap-planner-cli --bin asap_planner -- \
     --workload tools/dag-viewer/workloads/planner-layering/example1.json \
     --run-until stage3 --format json --out plan.json
 ```

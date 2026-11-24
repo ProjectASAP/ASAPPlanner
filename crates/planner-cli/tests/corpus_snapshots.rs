@@ -11,7 +11,7 @@
 //! Each `tests/corpus_snapshots/<corpus>/corpus.json` declares the shared
 //! planning inputs and the queries by stable id; `<id>.json` beside it is
 //! that query's snapshot. Regenerate with
-//! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored`.
+//! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-planner-cli --test corpus_snapshots -- --ignored`.
 //!
 //! Each query is planned by `asap_planner --run-until stage3`: one exact
 //! search over every legal tumbling-window width, with no time limit.

@@ -310,7 +310,7 @@ PlanningWorkload + frontend dependencies + PlanningModels
 |---|---|---|
 | Plan a workload end to end | `asap_planner::e2e_plan` | `PlanOutput` |
 | Plan already-lowered roots and inspect every stage | `asap_planner::run_planning` | `PlanningRun`, whose `selection` is the `Selection` |
-| Inspect a workload's stages as a document | `asap_planner` (devtools) | The stage document the [Plan Viewer](../../user_guide_docs/plan-viewer.md) shows |
+| Inspect a workload's stages as a document | `asap_planner` (planner-cli) | The stage document the [Plan Viewer](../../user_guide_docs/plan-viewer.md) shows |
 
 The integration associates each lowered root, by its position, with its
 workload entry (accuracy target, latency bound, recurrence). See the

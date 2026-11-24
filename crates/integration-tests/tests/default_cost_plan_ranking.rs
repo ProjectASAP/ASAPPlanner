@@ -18,10 +18,10 @@
 use std::collections::BTreeSet;
 
 use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
-use asap_devtools::planning_stages::{
+use asap_planner::{DeploymentCapabilities, PlanningModels};
+use asap_planner_cli::planning_stages::{
     lower_promql_roots, run_planning_stages_over, PlanningStagesRun,
 };
-use asap_planner::{DeploymentCapabilities, PlanningModels};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};

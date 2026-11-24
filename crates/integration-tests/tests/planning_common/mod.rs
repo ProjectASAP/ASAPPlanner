@@ -3,10 +3,10 @@
 //! SQL workloads through Pass 2.
 use asap_cost::CostInputs;
 use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Planner};
-use asap_devtools::planning_stages::{
+use asap_planner::{PlanSearchSettings, PlanningModels};
+use asap_planner_cli::planning_stages::{
     lower_promql_roots, lower_sql_roots, run_search_over, run_stages_until, sql_catalog, RunUntil,
 };
-use asap_planner::{PlanSearchSettings, PlanningModels};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::LogicalASAPMemoCandidates;
 use asap_types::workload::PlanningWorkload;

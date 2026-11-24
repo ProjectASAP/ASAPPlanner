@@ -8,12 +8,12 @@
 //! deleted); the counts of pruned candidates are the probe's.
 
 use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
-use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_planner::{
     CandidateExclusion, CounterSemanticsSupport, DeploymentCapabilities, ErrorSelectingPlan,
     ExclusionSource, OperatorKind, PlanningModels, PlanningRun, RejectionCause, Selection,
     SelectionError, SketchAlgorithm, SketchParameterRange, SketchParams, SummaryFamily,
 };
+use asap_planner_cli::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_types::deployment_capabilities::CandidateDescription;
 use asap_types::ir::flat::NodeId;
 use asap_types::ir::operator::arguments::Reduction;

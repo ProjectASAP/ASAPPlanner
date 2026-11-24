@@ -301,8 +301,8 @@ async fn a_cover_is_charged_on_its_readers_grid() {
     queries.push(serde_json::from_value(every_60_s).unwrap());
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap();
-    let run = asap_devtools::planning_stages::run_planning_stages_over(
-        asap_devtools::planning_stages::lower_promql_roots(&workload).unwrap(),
+    let run = asap_planner_cli::planning_stages::run_planning_stages_over(
+        asap_planner_cli::planning_stages::lower_promql_roots(&workload).unwrap(),
         &entries,
         &data,
         PlanningModels::builtin(),
