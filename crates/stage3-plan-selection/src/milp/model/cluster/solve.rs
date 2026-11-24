@@ -212,11 +212,24 @@ pub(super) fn quantity_expression(
                 .get(v)
                 .copied()
                 .unwrap_or(0.0);
-            rows.push(constraint!(r >= share * h));
+            if share > 0.0 {
+                rows.push(constraint!(r >= share * h));
+            }
         } else if let Some(&kept_bytes) = costs.unbounded_raw_data_on_disk_cost_per_second.get(v) {
             for &index in executions_of.get(v).into_iter().flatten() {
                 rows.push(constraint!(r >= kept_bytes * variables.x[index]));
             }
+        }
+    }
+    for read in &costs.raw_data_reads {
+        if let (Some(reader), true) = (
+            super::super::raw_data_read_variable(read, &variables.y, &variables.z),
+            read.raw_data_kept > 0.0,
+        ) {
+            let r = *most_of_source
+                .entry(format!("{:?}", read.source))
+                .or_insert_with(|| problem.add(variable().min(0)));
+            rows.push(constraint!(r >= read.raw_data_kept * reader));
         }
     }
     for r in most_of_source.into_values() {

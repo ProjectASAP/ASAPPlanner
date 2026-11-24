@@ -888,7 +888,12 @@ fn cached_final_query_results_retain_a_range_panel_for_its_refresh_interval() {
 /// memory.
 fn with_window_cache() -> CostInputs {
     let mut settings = CostInputs::default();
-    settings.data_plane_execution.view_window_cache = Some(ViewWindowCache { idle_ms: 60_000 });
+    settings.data_plane_execution.view_window_cache = Some(ViewWindowCache {
+        idle_ms: 60_000,
+        max_bytes: None,
+        file_span_ms: 0,
+        retention_margin_ms: 0,
+    });
     settings
 }
 

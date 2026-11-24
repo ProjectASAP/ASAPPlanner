@@ -7,6 +7,7 @@
 //! that pruned the same candidates in Stage 2 (a throwaway patch, since
 //! deleted); the counts of pruned candidates are the probe's.
 
+use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
 use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_planner::{
     CandidateExclusion, CounterSemanticsSupport, DeploymentCapabilities, ErrorSelectingPlan,
@@ -106,7 +107,20 @@ fn planned(workload: &PlanningWorkload, capabilities: &DeploymentCapabilities) -
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap();
     let roots = lower_promql_roots(workload).unwrap();
-    let models = PlanningModels::builtin().with_deployment_capabilities(capabilities);
+    // Disk at no cost: these plans differ in which candidates a
+    // deployment excludes, and the raw data a query-time scan keeps would
+    // make scan twins near-equal in cost, a tie the solver may break
+    // either way.
+    let cost_inputs = CostInputs {
+        cost_model: CostModel::UsageOverTime(ResourceUnitCost {
+            cost_per_disk_byte_second: 0.0,
+            ..ResourceUnitCost::illustrative()
+        }),
+        ..CostInputs::default()
+    };
+    let models = PlanningModels::builtin()
+        .with_cost_inputs(&cost_inputs)
+        .with_deployment_capabilities(capabilities);
     run_planning_stages_over(roots, &entries, &data, models)
         .unwrap()
         .run
@@ -191,7 +205,7 @@ fn some_node_matches(plan: &PhysicalASAPDAG, exclusion: &CandidateExclusion) -> 
 }
 
 /// Asserts the selected plan costs `expected` per second, as observed (six
-/// decimals).
+/// decimals), at the default costs with disk at no cost ([`planned`]).
 fn assert_cost(selection: &Selection, expected: f64) {
     let cost = selection
         .selected_plan_cost_per_second

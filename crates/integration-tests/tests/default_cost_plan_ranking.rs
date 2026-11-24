@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 
-use asap_cost::CostInputs;
+use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
 use asap_devtools::planning_stages::{
     lower_promql_roots, run_planning_stages_over, PlanningStagesRun,
 };
@@ -100,7 +100,7 @@ fn without_wider_levels() -> Vec<asap_planner::CandidateExclusion> {
 /// The planning stages' run over `workload` under the default cost inputs,
 /// with raw data kept or not.
 fn planning_run(workload: &PlanningWorkload, raw_data_retained: bool) -> PlanningStagesRun {
-    let settings = CostInputs::default();
+    let settings = cost_inputs_without_disk_cost();
     // The stored plans were measured with one tumbling-window chain per
     // range, before wider levels and covers: a deployment without both
     // operators plans those.
@@ -481,7 +481,7 @@ fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
                 &with_kll_k(plan, k),
                 &entries,
                 &data,
-                &CostInputs::default(),
+                &cost_inputs_without_disk_cost(),
             )
             .unwrap();
             cost.cost_per_second.unwrap()
@@ -891,4 +891,16 @@ fn identical_sum_over_time_pair_at_1_hz_keeps_stored_sum_windows() {
     .unwrap();
     let (plan, _) = selected(&workload, true);
     assert_eq!(plan_kind(&plan), PlanKind::StoredStates);
+}
+
+/// The default cost inputs with `cost_per_disk_byte_second` 0: the
+/// module's measurements are CPU, not the raw data a plan keeps on disk.
+fn cost_inputs_without_disk_cost() -> CostInputs {
+    CostInputs {
+        cost_model: CostModel::UsageOverTime(ResourceUnitCost {
+            cost_per_disk_byte_second: 0.0,
+            ..ResourceUnitCost::illustrative()
+        }),
+        ..CostInputs::default()
+    }
 }

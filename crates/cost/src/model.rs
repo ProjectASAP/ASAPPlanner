@@ -47,15 +47,18 @@ impl ResourceUnitCost {
     /// 1 ns of CPU per operation (one operation is one ns of the reference
     /// executor's work, [`ResourceSpeed::ms_per_cpu_op`]), 0.1 ns per scanned byte, 1 GB retained for a
     /// second costs 1/8 vCPU (125 CPU-ms), held or provisioned alike; one
-    /// provisioned core-second is 1,000 CPU-ms. Disk is not priced (0).
+    /// provisioned core-second is 1,000 CPU-ms. A byte on disk for a
+    /// second costs a fortieth of a byte in memory (3.125e-9), about what
+    /// block storage costs against memory.
     pub fn illustrative() -> Self {
+        const COST_PER_MEMORY_BYTE_SECOND: f64 = 1.25e-7;
         Self {
             cost_per_cpu_op: 1e-6,
             cost_per_scanned_byte: 1e-7,
-            cost_per_memory_byte_second: 1.25e-7,
-            cost_per_provisioned_memory_byte_second: 1.25e-7,
+            cost_per_memory_byte_second: COST_PER_MEMORY_BYTE_SECOND,
+            cost_per_provisioned_memory_byte_second: COST_PER_MEMORY_BYTE_SECOND,
             cost_per_provisioned_cpu_core_second: 1_000.0,
-            cost_per_disk_byte_second: 0.0,
+            cost_per_disk_byte_second: COST_PER_MEMORY_BYTE_SECOND / 40.0,
         }
     }
 
@@ -82,16 +85,14 @@ impl ResourceUnitCost {
     /// * `cost_per_memory_byte_second` = $0.000001235 per GB-second ÷ 2^30
     ///   bytes per GB ≈ $1.1502e-15: the page says "on this page GB =
     ///   1024^3 bytes".
-    /// * `cost_per_disk_byte_second` = 0: Fargate bills only ephemeral
-    ///   storage configured beyond the 20 GB every task gets, which a
-    ///   per-byte price cannot express, and the disk bytes plan selection
-    ///   counts (the raw data query-time scans read) are held by the data
-    ///   source, not by the task.
+    /// * `cost_per_disk_byte_second` = $0.0000000308 per GB-second of
+    ///   ephemeral storage ÷ 2^30 ≈ $2.87e-17. Fargate bills only the
+    ///   storage configured beyond the 20 GB every task gets; the per-byte
+    ///   cost ignores that allowance.
     /// * `cost_per_provisioned_memory_byte_second` and
     ///   `cost_per_provisioned_cpu_core_second` = 0: they belong to cost
     ///   model 2, and Fargate's per-task billing is cost model 1. Under
-    ///   [`CostModel::ProvisionedCapacity`] every price this preset gives
-    ///   is 0, which [`CostInputs::validate`] refuses.
+    ///   [`CostModel::ProvisionedCapacity`] this preset costs disk only.
     ///
     /// Not expressed by these per-second prices: the 1-minute billing
     /// minimum per task ("Pricing is calculated per second with a 1-minute
@@ -102,6 +103,7 @@ impl ResourceUnitCost {
         // page above.
         const DOLLARS_PER_VCPU_SECOND: f64 = 0.000_011_244;
         const DOLLARS_PER_MEMORY_GB_SECOND: f64 = 0.000_001_235;
+        const DOLLARS_PER_EPHEMERAL_STORAGE_GB_SECOND: f64 = 0.000_000_030_8;
         const BYTES_PER_GIB: f64 = (1u64 << 30) as f64;
         Self {
             cost_per_cpu_op: DOLLARS_PER_VCPU_SECOND * speed.ms_per_cpu_op / 1_000.0,
@@ -109,7 +111,7 @@ impl ResourceUnitCost {
             cost_per_memory_byte_second: DOLLARS_PER_MEMORY_GB_SECOND / BYTES_PER_GIB,
             cost_per_provisioned_memory_byte_second: 0.0,
             cost_per_provisioned_cpu_core_second: 0.0,
-            cost_per_disk_byte_second: 0.0,
+            cost_per_disk_byte_second: DOLLARS_PER_EPHEMERAL_STORAGE_GB_SECOND / BYTES_PER_GIB,
         }
     }
 }
@@ -307,15 +309,33 @@ pub struct AnswerCache {
     pub max_bytes: Option<u64>,
 }
 
-/// A cache of decoded view windows
-/// (`docs/design_docs/proposals/cost-terms-from-calibration.md`, section
-/// 1). In JSON `{"idle_ms": 60000}`.
+/// A cache of decoded view windows over the files every window of a view
+/// is kept in (`docs/design_docs/proposals/cost-terms-from-calibration.md`,
+/// section 1). In JSON `{"idle_ms": 60000}`, with `max_bytes`,
+/// `file_span_ms` and `retention_margin_ms` optional.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewWindowCache {
     /// Milliseconds after its last write or read at which a window leaves
     /// memory (stays in its file).
     pub idle_ms: u64,
+    /// The most bytes of decoded windows the cache holds; `None` (default):
+    /// no bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    /// The span of windows one file holds, in ms: a file is deleted whole,
+    /// once its newest window is past retention; 0 (default): each window
+    /// is deleted on its own.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub file_span_ms: u64,
+    /// How long past its retention a window is kept before its file may be
+    /// deleted, in ms; default 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub retention_margin_ms: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl Default for DataPlaneExecution {
@@ -356,6 +376,15 @@ impl DataPlaneExecution {
             if threads == 0 {
                 return Err(AnalyticalCostError::InvalidCalibration(name, 0.0));
             }
+        }
+        if self
+            .view_window_cache
+            .is_some_and(|cache| cache.max_bytes == Some(0))
+        {
+            return Err(AnalyticalCostError::InvalidCalibration(
+                "data_plane_execution.view_window_cache.max_bytes",
+                0.0,
+            ));
         }
         let utilization = self.max_thread_utilization;
         if !(utilization > 0.0 && utilization <= 1.0) {
@@ -643,9 +672,10 @@ mod tests {
     /// The AWS Fargate preset holds the page's prices converted as its doc
     /// says at the given speed: per vCPU-second × seconds per operation or
     /// per scanned byte (1e-9 and 1e-10 at the illustrative speed; twice
-    /// that at half the speed), per GB-second ÷ 2^30; disk and the
-    /// provisioned prices 0. It validates under cost model 1 and is
-    /// refused under cost model 2, where every price it gives is 0.
+    /// that at half the speed), per GB-second ÷ 2^30, disk at the
+    /// ephemeral-storage cost per GB-second ÷ 2^30; the provisioned
+    /// costs 0. It validates under cost models 1 and 2 (under cost model 2
+    /// it costs disk only).
     #[test]
     fn aws_fargate_us_east_1_converts_the_page_prices() {
         let preset = ResourceUnitCost::aws_fargate_us_east_1(ResourceSpeed::illustrative());
@@ -661,7 +691,10 @@ mod tests {
             preset.cost_per_memory_byte_second,
             1.235e-6 / 1_073_741_824.0,
         );
-        assert_eq!(preset.cost_per_disk_byte_second, 0.0);
+        close(
+            preset.cost_per_disk_byte_second,
+            0.000_000_030_8 / 1_073_741_824.0,
+        );
         assert_eq!(preset.cost_per_provisioned_memory_byte_second, 0.0);
         assert_eq!(preset.cost_per_provisioned_cpu_core_second, 0.0);
         // A core twice as slow takes twice the vCPU-seconds per operation and per byte.
@@ -686,7 +719,78 @@ mod tests {
         );
         assert_eq!(
             settings(CostModel::ProvisionedCapacity(preset)).validate(),
-            Err(AnalyticalCostError::ZeroCalibration)
+            Ok(())
+        );
+    }
+
+    /// Both presets cost disk (#1469): the illustrative preset at a fortieth
+    /// of its memory cost per byte-second (block storage against memory);
+    /// the Fargate preset at the page's ephemeral-storage cost,
+    /// $0.0000000308 per GB-second ÷ 2^30 bytes per GB, the free 20 GB per
+    /// task not expressed.
+    #[test]
+    fn presets_cost_disk() {
+        let illustrative = ResourceUnitCost::illustrative();
+        assert_eq!(
+            illustrative.cost_per_disk_byte_second,
+            illustrative.cost_per_memory_byte_second / 40.0
+        );
+        let fargate = ResourceUnitCost::aws_fargate_us_east_1(ResourceSpeed::illustrative());
+        let expected = 0.000_000_030_8 / (1u64 << 30) as f64;
+        assert!(
+            ((fargate.cost_per_disk_byte_second - expected) / expected).abs() < 1e-12,
+            "{} != {expected}",
+            fargate.cost_per_disk_byte_second
+        );
+    }
+
+    /// The demo deployment's inputs (#1469): cost model 3's lowest mean
+    /// latency within 96 GiB of memory, 101,456,000,000 bytes of disk and
+    /// 20 cores; view windows in files of 15 min, kept 60 s past their
+    /// retention, under a 2 GiB cache of decoded windows.
+    fn demo_inputs() -> serde_json::Value {
+        serde_json::json!({
+            "cost_model": {"cluster_capacity": {
+                "memory_bytes": 103_079_215_104u64,
+                "disk_bytes": 101_456_000_000u64,
+                "cpu_cores": 20,
+                "objective": "lowest_mean_latency"}},
+            "data_plane_execution": {"view_window_cache": {
+                "idle_ms": 60_000,
+                "max_bytes": 2_147_483_648u64,
+                "file_span_ms": 900_000,
+                "retention_margin_ms": 60_000}},
+            "latency_calibration": "uncalibrated_for_testing"
+        })
+    }
+
+    /// The demo deployment's inputs load and validate.
+    #[test]
+    fn the_demo_inputs_load_and_validate() {
+        let inputs: CostInputs =
+            serde_json::from_value(demo_inputs()).expect("the demo's cost inputs load");
+        assert_eq!(inputs.validate(), Ok(()));
+    }
+
+    /// A window cache that holds no bytes is refused.
+    #[test]
+    fn a_window_cache_of_zero_bytes_is_refused() {
+        let mut json = demo_inputs();
+        json["data_plane_execution"]["view_window_cache"]["max_bytes"] = serde_json::json!(0);
+        let inputs: CostInputs = serde_json::from_value(json).expect("loads");
+        assert!(inputs.validate().is_err());
+    }
+
+    /// Guard: a window cache of an idle time only, written before the new
+    /// fields, loads and writes back as it was.
+    #[test]
+    fn a_window_cache_of_an_idle_time_only_still_loads() {
+        let json =
+            serde_json::json!({"data_plane_execution": {"view_window_cache": {"idle_ms": 60_000}}});
+        let inputs: CostInputs = serde_json::from_value(json.clone()).expect("loads");
+        assert_eq!(
+            serde_json::to_value(&inputs).unwrap()["data_plane_execution"]["view_window_cache"],
+            json["data_plane_execution"]["view_window_cache"]
         );
     }
 }
