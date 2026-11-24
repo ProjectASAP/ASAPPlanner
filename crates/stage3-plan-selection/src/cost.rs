@@ -49,7 +49,7 @@
 //! consumers reads it unbounded (a `Scan` read whole, a `TimeShift`
 //! anchored with `@`) has no $h_v$: it is costed retaining everything.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use asap_cost::node::analytical::AnalyticalCostError;
 use asap_cost::plan::execution_demand::{
@@ -77,7 +77,7 @@ use crate::resident_windows::{resident_reads, ResidentRead};
 use crate::retention::{
     edge_retention_need_ms, edge_scan_read_ms, least_retention_ms_per_execution, ms_to_seconds,
 };
-use crate::selectable::{Execution, SelectableExecutions};
+use crate::selectable::{Execution, Reader, SelectableExecutions};
 
 /// The objective's coefficients
 /// (`docs/design_docs/concepts/memo-groups-properties-requirements.md`,
@@ -124,19 +124,15 @@ pub(crate) struct ExecutionCosts {
     /// disk, which a plan keeps once per source for the selected scan that
     /// keeps the most, as `plan_cost` charges it ($r_s$).
     pub(crate) raw_data_source: HashMap<PhysicalCandidateId, Source>,
-    /// The cost per second of the raw data a query-time `Scan` keeps on
-    /// disk whatever its retention, per execution: one without $h_v$
-    /// retaining everything, or a materialized one whose kept raw data does
-    /// not grow with its retention at its largest ($\pi_v = 0$: it keeps
-    /// every row the source holds), everything it may keep.
+    /// The cost per second of the raw data a query-time `Scan` without
+    /// $h_v$ keeps on disk, retaining everything.
     pub(crate) unbounded_raw_data_on_disk_cost_per_second: HashMap<PhysicalCandidateId, f64>,
-    /// Per edge out of a query-time `Scan` that is not materialized and
-    /// whose kept raw data does not grow with its retention at its largest
-    /// (it keeps at most the rows the source holds), by position in
-    /// `SelectableExecutions::edges`: the cost per second of the raw data
-    /// it keeps for that one reader, at the reader's retention need; `None`
-    /// for any other edge.
-    pub(crate) raw_data_on_disk_cost_per_second_per_edge: Vec<Option<f64>>,
+    /// Each read of a query-time `Scan` whose raw data on disk is not
+    /// linear in its retention, with what that read alone keeps: such a
+    /// scan keeps `min(rows per second × retention, rows the source holds)`
+    /// (`asap_cost`), so its $\pi_v$ is 0 and its raw data is charged per
+    /// read, $r_s \ge d_e w_e$ for the read's edge or output $w_e$.
+    pub(crate) raw_data_reads: Vec<RawDataRead>,
     /// Each query-time computation not offered because it would read
     /// fewer raw rows than arrive over its range
     /// ([`asap_cost::query_time_computation_short_of_source_rows`]), with that
@@ -200,6 +196,22 @@ impl ExecutionCosts {
                 per_retained_second * ms_to_seconds(retention_ms)
             })
     }
+}
+
+/// A read of a query-time `Scan` whose raw data on disk is not linear in
+/// its retention ([`ExecutionCosts::raw_data_reads`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RawDataRead {
+    /// The scan's execution, by position in
+    /// `SelectableExecutions::executions`.
+    pub(crate) execution: usize,
+    /// The edge or query output that reads it.
+    pub(crate) reader: Reader,
+    /// The source whose raw data it keeps.
+    pub(crate) source: Source,
+    /// The raw data it keeps for this reader alone, at the reader's
+    /// retention need, in the costed quantity (cost per second, or bytes).
+    pub(crate) raw_data_kept: f64,
 }
 
 /// The objective's coefficients of every execution and edge of
@@ -613,19 +625,69 @@ pub(crate) fn execution_quantities(
             continue;
         };
         raw_data_source.insert(v, source.clone());
-        let grows_with_retention = retention_cost_per_retained_second
-            .get(&v)
-            .is_some_and(|&per_retained_second| per_retained_second > 0.0);
-        if !grows_with_retention
-            && !(retention_cost_per_retained_second.contains_key(&v)
-                && nodes[v.0].lifetime == Lifetime::None)
-        {
+        if !retention_cost_per_retained_second.contains_key(&v) {
             if let Some(Ok((_, raw_data))) = baseline[v.0]
                 .as_ref()
                 .map(|inputs| cost(v, &nodes[v.0], inputs, 1.0))
             {
                 unbounded_raw_data_on_disk_cost_per_second.insert(v, raw_data);
             }
+        }
+    }
+    // A scan whose raw data is not linear in its retention: the source
+    // holds fewer rows than its largest retention keeps by rate, so
+    // `π_v h_v` would miss what it keeps. Its `π_v` becomes 0 and each of
+    // its reads is charged what that read alone keeps.
+    let raw_data_at = |v: PhysicalCandidateId, retention_ms: u64, scan_read_ms: Option<u64>| {
+        let inputs = baseline[v.0].as_ref()?;
+        cost_reading(
+            v,
+            &node_retaining(v, Some(retention_ms)),
+            inputs,
+            1.0,
+            scan_read_ms,
+            None,
+        )
+        .ok()
+        .map(|(_, raw_data)| raw_data)
+    };
+    let mut not_linear: HashSet<PhysicalCandidateId> = HashSet::new();
+    for (&v, per_retained_second) in retention_cost_per_retained_second.iter_mut() {
+        if !raw_data_source.contains_key(&v) {
+            continue;
+        }
+        let Some(Some(most_read_ms)) = most_read_ms.get(&v).copied() else {
+            continue;
+        };
+        let linear =
+            raw_data_at(v, most_read_ms, baseline_scan_read_of(v)).is_some_and(|raw_data| {
+                let charged = *per_retained_second * ms_to_seconds(most_read_ms);
+                *per_retained_second > 0.0
+                    && (raw_data - charged).abs() <= 1e-9 * raw_data.abs().max(charged.abs())
+            });
+        if !linear {
+            *per_retained_second = 0.0;
+            not_linear.insert(v);
+        }
+    }
+    let mut raw_data_reads = Vec::new();
+    for (execution, reader, need_ms) in selectable.reads_back(&retention_need_ms_per_edge) {
+        let v = executions[execution].candidate;
+        let (true, Some(need_ms)) = (not_linear.contains(&v), need_ms) else {
+            continue;
+        };
+        let scan_read_ms = match reader {
+            Reader::Edge(position) => scan_read_ms_per_edge[position].flatten(),
+            Reader::Output(_) => baseline_scan_read_of(v),
+        };
+        let retention_ms = need_ms.max(newest_output_retention_ms[&v]);
+        if let Some(raw_data_kept) = raw_data_at(v, retention_ms, scan_read_ms) {
+            raw_data_reads.push(RawDataRead {
+                execution,
+                reader,
+                source: raw_data_source[&v].clone(),
+                raw_data_kept,
+            });
         }
     }
     // Each execution's own share at its largest retention (no $\pi_v h_v$
@@ -666,16 +728,11 @@ pub(crate) fn execution_quantities(
             })
         })
         .collect();
-    // Raw data on disk read by the consumer of an edge out of a scan whose
-    // kept raw data does not grow with retention (`unbounded_...` above
-    // leaves those that are not materialized to their edges).
-    let mut raw_data_on_disk_cost_per_second_per_edge = vec![None; selectable.edges().len()];
     let per_edge: Vec<Option<f64>> = selectable
         .edges()
         .iter()
         .zip(&scan_read_ms_per_edge)
-        .enumerate()
-        .map(|(position, (edge, scan_read_ms))| {
+        .map(|(edge, scan_read_ms)| {
             let (consumer, producer) = (edge.consumer, edge.producer);
             let e = physical.edge(edge.edge);
             let (u, c) = (e.producer_candidate_id, e.consumer_candidate_id);
@@ -715,23 +772,6 @@ pub(crate) fn execution_quantities(
                         None,
                     )
                     .ok()?;
-                    // Its raw data on disk, kept for this reader alone: what
-                    // the reader's retention need keeps (at most the rows
-                    // the source holds, so not linear in the retention).
-                    if retention_cost_per_retained_second.get(&u) == Some(&0.0) {
-                        let retention_ms = retention_need_ms_per_edge[position]
-                            .map(|need_ms| need_ms.max(newest_output_retention_ms[&u]));
-                        let (_, kept_raw_data) = cost_reading(
-                            u,
-                            &node_retaining(u, retention_ms),
-                            baseline[u.0].as_ref()?,
-                            scan_per_second,
-                            *read_ms,
-                            None,
-                        )
-                        .ok()?;
-                        raw_data_on_disk_cost_per_second_per_edge[position] = Some(kept_raw_data);
-                    }
                     reading_own - scan_own
                 }
                 _ => 0.0,
@@ -749,7 +789,7 @@ pub(crate) fn execution_quantities(
         least_retention_ms_per_execution: Vec::new(),
         raw_data_source,
         unbounded_raw_data_on_disk_cost_per_second,
-        raw_data_on_disk_cost_per_second_per_edge,
+        raw_data_reads,
         short_of_source_rows,
         resident_reads: Vec::new(),
         per_resident_window: HashMap::new(),

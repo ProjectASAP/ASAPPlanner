@@ -191,7 +191,7 @@ fn some_node_matches(plan: &PhysicalASAPDAG, exclusion: &CandidateExclusion) -> 
 }
 
 /// Asserts the selected plan costs `expected` per second, as observed (six
-/// decimals).
+/// decimals), the raw data its query-time scans keep on disk included.
 fn assert_cost(selection: &Selection, expected: f64) {
     let cost = selection
         .selected_plan_cost_per_second

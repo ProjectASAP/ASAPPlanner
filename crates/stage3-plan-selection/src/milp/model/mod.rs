@@ -41,8 +41,8 @@ use super::retention::{
     retention_variables,
 };
 use super::upper_bound::dearer_than_a_feasible_plan;
-use crate::cost::ExecutionCosts;
-use crate::selectable::{Execution, QueryId, SelectableExecutions};
+use crate::cost::{ExecutionCosts, RawDataRead};
+use crate::selectable::{Execution, QueryId, Reader, SelectableExecutions};
 
 pub(crate) mod cluster;
 
@@ -304,12 +304,11 @@ fn use_constraints(
 
 /// The raw data of each source is kept on disk once, for the selected scan
 /// that keeps the most: $r_s \ge \pi_v h_v$ for each query-time `Scan` $v$
-/// of source $s$ with $h_v$, and $r_s \ge d_v x_{\kappa,v}$ for each kept
-/// execution of one whose raw data does not grow with retention (no
-/// $h_v$, or a materialized one with $\pi_v = 0$), $d_v$ its cost per
-/// second of the raw data it keeps whatever its retention, and $r_s \ge
-/// d_e y_e$ for each edge out of one with $\pi_v = 0$ that is not
-/// materialized, $d_e$ the raw data its one reader reads: each row as ($r_s$, its coefficient, the
+/// of source $s$ with $h_v$ (and $\pi_v > 0$), $r_s \ge d_v x_{\kappa,v}$
+/// for each kept execution of one without, $d_v$ its cost per second of
+/// the raw data it keeps retaining everything, and $r_s \ge d_e w_e$ for
+/// each read $e$ (edge $y$ or output $z$) of a scan whose raw data is not
+/// linear in its retention ([`ExecutionCosts::raw_data_reads`]): each row as ($r_s$, its coefficient, the
 /// variable it multiplies), unscaled.
 fn raw_data_disk_rows(
     inputs: &SelectionInputs<'_>,
@@ -332,31 +331,42 @@ fn raw_data_disk_rows(
     for (v, source) in scans {
         let r = variables.raw_data_on_disk[source];
         if let Some(&h) = variables.h.get(v) {
-            rows.push((r, costs.retention_cost_per_retained_second[v], h));
-        }
-        if let Some(&d) = costs.unbounded_raw_data_on_disk_cost_per_second.get(v) {
+            let per_retained_second = costs.retention_cost_per_retained_second[v];
+            if per_retained_second > 0.0 {
+                rows.push((r, per_retained_second, h));
+            }
+        } else if let Some(&d) = costs.unbounded_raw_data_on_disk_cost_per_second.get(v) {
             for &index in executions_of.get(v).into_iter().flatten() {
                 rows.push((r, d, variables.x[index]));
             }
         }
     }
-    for (&position, &y) in &variables.y {
-        if let Some(d) = costs
-            .raw_data_on_disk_cost_per_second_per_edge
-            .get(position)
-            .copied()
-            .flatten()
-        {
-            let scan = inputs.selectable.executions()[inputs.selectable.edges()[position].producer]
-                .candidate;
+    for read in &costs.raw_data_reads {
+        if let (Some(reader), true) = (
+            raw_data_read_variable(read, &variables.y, &variables.z),
+            read.raw_data_kept > 0.0,
+        ) {
             rows.push((
-                variables.raw_data_on_disk[&costs.raw_data_source[&scan]],
-                d,
-                y,
+                variables.raw_data_on_disk[&read.source],
+                read.raw_data_kept,
+                reader,
             ));
         }
     }
     rows
+}
+
+/// The variable of `read`'s reader: its edge's $y$ or its output's $z$;
+/// `None` when the reader is not selectable.
+fn raw_data_read_variable(
+    read: &RawDataRead,
+    y: &BTreeMap<usize, Variable>,
+    z: &BTreeMap<(QueryId, usize), Variable>,
+) -> Option<Variable> {
+    match read.reader {
+        Reader::Edge(position) => y.get(&position).copied(),
+        Reader::Output(query) => z.get(&(query, read.execution)).copied(),
+    }
 }
 
 /// Per execution, its selected edges to consumers and query outputs:
@@ -792,19 +802,14 @@ pub(crate) fn selection_cost_per_second(
             *kept = kept.max(cost);
         }
     }
-    for &position in edges {
-        if let Some(cost) = costs
-            .raw_data_on_disk_cost_per_second_per_edge
-            .get(position)
-            .copied()
-            .flatten()
-        {
-            let scan = inputs.selectable.executions()[inputs.selectable.edges()[position].producer]
-                .candidate;
-            let kept = raw_data_on_disk
-                .entry(&costs.raw_data_source[&scan])
-                .or_default();
-            *kept = kept.max(cost);
+    for read in &costs.raw_data_reads {
+        let selected = match read.reader {
+            Reader::Edge(position) => edges.contains(&position),
+            Reader::Output(query) => answering.contains(&(query, read.execution)),
+        };
+        if selected {
+            let kept = raw_data_on_disk.entry(&read.source).or_default();
+            *kept = kept.max(read.raw_data_kept);
         }
     }
     let cost = selected

@@ -100,7 +100,7 @@ fn without_wider_levels() -> Vec<asap_planner::CandidateExclusion> {
 /// The planning stages' run over `workload` under the default cost inputs,
 /// with raw data kept or not.
 fn planning_run(workload: &PlanningWorkload, raw_data_retained: bool) -> PlanningStagesRun {
-    let settings = cpu_ranked_cost_inputs();
+    let settings = cost_inputs_without_disk_cost();
     // The stored plans were measured with one tumbling-window chain per
     // range, before wider levels and covers: a deployment without both
     // operators plans those.
@@ -144,7 +144,7 @@ fn exact_query_time_cpu(query: Query, setting: Setting) -> f64 {
 fn predicted_cpu(plan: &PhysicalASAPDAG, workload: &PlanningWorkload) -> f64 {
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap();
-    let (cost, _) = asap_cost::plan_cost(plan, &entries, &data, &cpu_ranked_cost_inputs()).unwrap();
+    let (cost, _) = asap_cost::plan_cost(plan, &entries, &data, &CostInputs::default()).unwrap();
     cost.per_node
         .values()
         .map(|node| node.cpu_core_seconds_per_second)
@@ -481,7 +481,7 @@ fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
                 &with_kll_k(plan, k),
                 &entries,
                 &data,
-                &cpu_ranked_cost_inputs(),
+                &cost_inputs_without_disk_cost(),
             )
             .unwrap();
             cost.cost_per_second.unwrap()
@@ -724,7 +724,7 @@ fn compaction_latency_charges_each_merge_its_family_s_merge_time() {
         &plan,
         &entries,
         heavy.data_workload.as_ref().unwrap(),
-        &cpu_ranked_cost_inputs(),
+        &CostInputs::default(),
     )
     .unwrap();
     // The newest window's refresh, its compaction included.
@@ -808,7 +808,7 @@ fn compaction_latency_is_zero_for_ingestion_time_nodes_holding_no_states() {
         ("time range and max", kept_at_ingestion(true)),
     ] {
         let (cost, _) =
-            asap_cost::plan_cost(&plan, &entries, data, &cpu_ranked_cost_inputs()).unwrap();
+            asap_cost::plan_cost(&plan, &entries, data, &CostInputs::default()).unwrap();
         let ingest_ms_per_second: f64 = cost
             .per_node
             .values()
@@ -893,9 +893,9 @@ fn identical_sum_over_time_pair_at_1_hz_keeps_stored_sum_windows() {
     assert_eq!(plan_kind(&plan), PlanKind::StoredStates);
 }
 
-/// The default cost inputs with disk at no cost: the module's measurements
-/// are CPU only.
-fn cpu_ranked_cost_inputs() -> CostInputs {
+/// The default cost inputs with `cost_per_disk_byte_second` 0: the
+/// module's measurements are CPU, not the raw data a plan keeps on disk.
+fn cost_inputs_without_disk_cost() -> CostInputs {
     CostInputs {
         cost_model: CostModel::UsageOverTime(ResourceUnitCost {
             cost_per_disk_byte_second: 0.0,

@@ -673,8 +673,8 @@ mod tests {
     /// says at the given speed: per vCPU-second × seconds per operation or
     /// per scanned byte (1e-9 and 1e-10 at the illustrative speed; twice
     /// that at half the speed), per GB-second ÷ 2^30, disk at the
-    /// ephemeral-storage price per GB-second ÷ 2^30; the provisioned
-    /// prices 0. It validates under cost models 1 and 2 (under cost model 2
+    /// ephemeral-storage cost per GB-second ÷ 2^30; the provisioned
+    /// costs 0. It validates under cost models 1 and 2 (under cost model 2
     /// it costs disk only).
     #[test]
     fn aws_fargate_us_east_1_converts_the_page_prices() {
@@ -725,7 +725,7 @@ mod tests {
 
     /// Both presets cost disk (#1469): the illustrative preset at a fortieth
     /// of its memory cost per byte-second (block storage against memory);
-    /// the Fargate preset at the page's ephemeral-storage price,
+    /// the Fargate preset at the page's ephemeral-storage cost,
     /// $0.0000000308 per GB-second ÷ 2^30 bytes per GB, the free 20 GB per
     /// task not expressed.
     #[test]
