@@ -27,7 +27,7 @@
 #![allow(non_snake_case)]
 
 use asap_frontend_promql::PromqlError as LoweringError;
-#[path = "../support.rs"]
+#[path = "../../support.rs"]
 mod support;
 use std::rc::Rc;
 

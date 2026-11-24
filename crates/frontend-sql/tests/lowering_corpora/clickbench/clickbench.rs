@@ -1,7 +1,7 @@
 //! Real-world **SQL** conformance over the ClickBench corpus, parsed as
 //! `SqlDialect::ClickhouseSQL`.
 //!
-//! Source: ClickBench's 43 queries (`tests/clickbench/data/clickbench.sql`,
+//! Source: ClickBench's 43 queries (`tests/lowering_corpora/clickbench/data/clickbench.sql`,
 //! copied verbatim; provenance and license in that file's header). Every query
 //! reads one wide clickstream table, `hits`, and most are a filtered `COUNT`
 //! or `COUNT(DISTINCT ...)`, grouped and ranked top-k, which is the shape ASAP

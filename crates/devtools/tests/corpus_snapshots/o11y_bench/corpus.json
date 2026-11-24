@@ -1,5 +1,5 @@
 {
-  "source": "crates/frontend-promql/tests/observability/data/o11y_bench_promql.txt",
+  "source": "crates/frontend-promql/tests/lowering_corpora/o11y_bench/data/o11y_bench_promql.txt",
   "asap_planner_args": [],
   "query_workload": {
     "language": "promql",

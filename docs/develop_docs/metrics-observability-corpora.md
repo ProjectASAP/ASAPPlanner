@@ -28,7 +28,7 @@ rules into deduplicated, one-query-per-line fixtures:
 ```sh
 python3 tools/metrics_observability/extract_promql.py \
   <benchmark-root>/metrics_observability \
-  crates/frontend-promql/tests/observability/data/metrics_observability
+  crates/frontend-promql/tests/lowering_corpora/metrics_observability
 ```
 
 The generated corpora are CMU logs, CMU dashboards, CMU rules, Claude logs,
@@ -100,7 +100,7 @@ From the metrics-observability worktree:
 # Regenerate fixtures when benchmark source files change.
 python3 tools/metrics_observability/extract_promql.py \
   <benchmark-root>/metrics_observability \
-  crates/frontend-promql/tests/observability/data/metrics_observability
+  crates/frontend-promql/tests/lowering_corpora/metrics_observability
 
 # Re-run totals, errors, pre-ASAP, and sketch-only post-ASAP candidates.
 cargo test -p asap-frontend-promql --test metrics_observability -- --nocapture

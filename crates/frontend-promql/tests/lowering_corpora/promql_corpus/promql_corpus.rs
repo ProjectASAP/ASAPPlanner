@@ -14,7 +14,7 @@
 //! tanking how much of the corpus we can lower.
 
 use asap_frontend_promql::PromqlError as LoweringError;
-#[path = "../support.rs"]
+#[path = "../../support.rs"]
 mod support;
 use asap_types::accuracy::AccuracyTarget;
 

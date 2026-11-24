@@ -6,7 +6,7 @@
 #   Do not treat this file's provenance as cleared; it is tracked, not resolved.
 # One real-world PromQL expression per line, pulled from LLM-agent-benchmark grading
 # rubrics (SRE-style incident/investigation queries: error ratios, burn rate, cache
-# lag, retry backlog, capacity). Used by tests/observability/o11y_bench_promql.rs to
+# lag, retry backlog, capacity). Used by tests/lowering_corpora/o11y_bench/o11y_bench_promql.rs to
 # pin parse + lowering behaviour over real-world queries (totality; no execution).
 (sum by (job) (increase(http_requests_total{status=~"5..",job=~"user-service|order-service|payment-service"}[6h]))) / (sum by (job) (increase(http_requests_total{job=~"user-service|order-service|payment-service"}[6h])))
 histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job="order-service"}[5m])) by (le))
