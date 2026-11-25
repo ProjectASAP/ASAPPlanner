@@ -381,3 +381,30 @@ fn an_entry_for_a_readout_with_no_metric_is_never_returned() {
         None
     );
 }
+
+/// An entry for a DDSketch α outside (0, 1) is rejected: no sketch is
+/// built with it (the executor refuses it), so no measurement of one can
+/// stand for a θ the planner selects.
+#[test]
+fn an_entry_for_an_invalid_ddsketch_alpha_is_rejected() {
+    for alpha in [0.0, -0.01, 1.0, 1.5, f64::NAN] {
+        let table = MeasuredSketchAccuracy {
+            entries: vec![MeasuredAccuracyEntry {
+                sketch: SketchParams::DDSketch { alpha },
+                statistic: p99(),
+                accuracy_metric: AccuracyMetric::Relative,
+                trials: 1_000,
+                error_at: vec![point(0.01, 0.004)],
+            }],
+        };
+        // NaN != NaN, so match the variant and compare α by its bits.
+        assert!(
+            matches!(
+                table.validate(),
+                Err(MeasuredSketchAccuracyError::InvalidDDSketchAlpha { entry: 0, alpha: rejected })
+                    if rejected.to_bits() == alpha.to_bits()
+            ),
+            "α = {alpha}"
+        );
+    }
+}

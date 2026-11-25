@@ -24,6 +24,8 @@ mod guarantee;
 mod logical_edge;
 mod measured;
 mod metric_rule;
+#[cfg(test)]
+mod properties;
 mod readout;
 mod readout_caps;
 

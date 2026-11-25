@@ -67,6 +67,9 @@ pub struct ErrorAtFailureProbability {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum MeasuredSketchAccuracyError {
+    /// Entry `entry` measures a DDSketch α outside (0, 1), which no sketch
+    /// is built with.
+    InvalidDDSketchAlpha { entry: usize, alpha: f64 },
     /// Entry `entry` has a failure probability outside (0, 1] or below
     /// 3 / trials.
     FailureProbabilityOutOfRange {
@@ -86,7 +89,7 @@ pub enum MeasuredSketchAccuracyError {
 }
 
 impl MeasuredSketchAccuracy {
-    /// Check every entry: at least one point, failure probabilities in
+    /// Check every entry: a DDSketch α in (0, 1), at least one point, failure probabilities in
     /// (0, 1] and at least 3 / trials, errors finite and non-negative, ascending failure
     /// probability with non-increasing error, and no two entries for one
     /// (sketch, statistic, metric).
@@ -121,6 +124,14 @@ impl MeasuredSketchAccuracy {
 impl MeasuredAccuracyEntry {
     /// Check this entry, the `index`th of its table.
     fn validate(&self, index: usize) -> Result<(), MeasuredSketchAccuracyError> {
+        if let SketchParams::DDSketch { alpha } = self.sketch {
+            if !(alpha > 0.0 && alpha < 1.0) {
+                return Err(MeasuredSketchAccuracyError::InvalidDDSketchAlpha {
+                    entry: index,
+                    alpha,
+                });
+            }
+        }
         // Fewer than 3 failures in `trials` cannot estimate the (1 − δ)
         // quantile: 1,000 trials record δ ≥ 0.003.
         let smallest_failure_probability = 3.0 / f64::from(self.trials);
