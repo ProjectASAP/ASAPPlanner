@@ -12,6 +12,7 @@
 //! --test external_corpus -- --nocapture`
 
 use std::collections::HashMap;
+use std::panic::{catch_unwind, resume_unwind};
 use std::path::Path;
 use std::time::Duration;
 
@@ -30,12 +31,15 @@ fn queries(corpus: &str) -> impl Iterator<Item = &str> {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
 }
 
-/// The `# floor: N` line's `N`.
-fn floor(corpus: &str) -> Option<usize> {
-    corpus
+/// The `# floor: N` line's `N`, or why there is none.
+fn floor(corpus: &str) -> Result<usize, String> {
+    let n = corpus
         .lines()
         .find_map(|l| l.trim().strip_prefix("# floor:"))
-        .and_then(|n| n.trim().parse().ok())
+        .ok_or("no `# floor: N` line")?
+        .trim();
+    n.parse()
+        .map_err(|_| format!("`# floor: {n}`: not a whole number"))
 }
 
 #[derive(Default, Debug)]
@@ -45,8 +49,10 @@ struct Tally {
     rejected: usize,
 }
 
-/// `msg` with sanitized identifiers replaced by `_` and digit runs by `N`, so
-/// the same failure in different queries groups under one message.
+/// `msg` with sanitized identifiers replaced by `_` and all-digit words by
+/// `N`, so the same failure in different queries groups under one message.
+/// Digits inside a word (`5m`, `log2`) are kept: replacing them would merge
+/// different unsupported functions such as `log2` and `log10`.
 fn normalize(msg: &str) -> String {
     let mut out = String::new();
     let mut word = String::new();
@@ -69,11 +75,16 @@ fn normalize(msg: &str) -> String {
     out
 }
 
-/// Tally `corpus`, counting each failure's normalized message in `errors`.
-fn tally(corpus: &str, errors: &mut HashMap<String, usize>) -> Tally {
+/// Tally `corpus` (file `name`), counting each failure's normalized message
+/// in `errors`. A panic is re-raised after naming the file and query.
+fn tally(name: &str, corpus: &str, errors: &mut HashMap<String, usize>) -> Tally {
     let mut t = Tally::default();
     for q in queries(corpus) {
-        match lower_metricsql_query(q, INTERVAL) {
+        let lowered = catch_unwind(|| lower_metricsql_query(q, INTERVAL)).unwrap_or_else(|panic| {
+            eprintln!("{name}: lowering panicked on {q:?}");
+            resume_unwind(panic)
+        });
+        match lowered {
             Ok(_) => t.lowered += 1,
             Err(e) => {
                 if matches!(e, MetricsqlError::Parse(_)) {
@@ -94,7 +105,11 @@ fn tally(corpus: &str, errors: &mut HashMap<String, usize>) -> Tally {
 fn check_dir(dir: &Path) -> Vec<String> {
     let mut files: Vec<_> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
-        .map(|entry| entry.unwrap().path())
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+                .path()
+        })
         .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
         .collect();
     files.sort();
@@ -104,9 +119,10 @@ fn check_dir(dir: &Path) -> Vec<String> {
     let mut errors = HashMap::new();
     for path in files {
         let name = path.file_stem().unwrap().to_string_lossy();
-        let corpus = std::fs::read_to_string(&path).unwrap();
-        let min_lowered = floor(&corpus).unwrap_or_else(|| panic!("{name}: no `# floor: N` line"));
-        let t = tally(&corpus, &mut errors);
+        let corpus =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let min_lowered = floor(&corpus).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let t = tally(&name, &corpus, &mut errors);
         eprintln!("{name:24} {t:?}");
         if t.lowered < min_lowered {
             failures.push(format!("{name}: {t:?} (floor {min_lowered})"));
@@ -125,8 +141,8 @@ fn check_dir(dir: &Path) -> Vec<String> {
 /// each file lowers at least its floor.
 #[test]
 fn corpus_lowers() {
-    let Some(dir) = std::env::var_os(DIR_VAR) else {
-        eprintln!("{DIR_VAR} unset; skipping the external corpus");
+    let Some(dir) = std::env::var_os(DIR_VAR).filter(|dir| !dir.is_empty()) else {
+        eprintln!("{DIR_VAR} unset or empty; skipping the external corpus");
         return;
     };
     let failures = check_dir(Path::new(&dir));
@@ -137,7 +153,9 @@ fn corpus_lowers() {
 /// as unparseable, not lowered.
 #[test]
 fn floor_is_enforced_per_file() {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("external_corpus_sample");
+    // The process id keeps concurrent `cargo test` runs out of each other's files.
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("external_corpus_sample_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let corpus = "rate(http_requests_total[5m])\nsum by (job) (up)\nsum((\n";
@@ -154,13 +172,21 @@ fn floor_is_enforced_per_file() {
     );
 }
 
+/// The corpus file helpers: `floor` reads the `# floor: N` line and says
+/// whether it is missing or malformed, `queries` skips blank and `#` lines,
+/// and `normalize` blanks sanitized identifiers and all-digit words only.
 #[test]
 fn floor_line() {
-    assert_eq!(floor("# floor: 25\nrate(x[5m])"), Some(25));
-    assert_eq!(floor("rate(x[5m])"), None);
+    assert_eq!(floor("# floor: 25\nrate(x[5m])"), Ok(25));
+    assert_eq!(floor("rate(x[5m])"), Err("no `# floor: N` line".into()));
+    assert_eq!(
+        floor("# floor: ~40"),
+        Err("`# floor: ~40`: not a whole number".into())
+    );
     assert_eq!(
         queries("# floor: 3\n\n up \n# c").collect::<Vec<_>>(),
         ["up"]
     );
     assert_eq!(normalize("sanitized_foo at 123"), "_ at N");
+    assert_eq!(normalize("function `log2` at 5m"), "function `log2` at 5m");
 }
