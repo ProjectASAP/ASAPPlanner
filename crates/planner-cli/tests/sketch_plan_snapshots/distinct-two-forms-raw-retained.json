@@ -21,11 +21,11 @@
       }
     ],
     "cost": {
-      "cost_per_second": 1.80470290396e-8,
+      "cost_per_second": 1.82306113455e-8,
       "cpu_core_seconds_per_second": 0.00159692354113,
       "per_node": {
         "0": {
-          "cost_per_second": 1.57519056431e-10,
+          "cost_per_second": 3.41101362339e-10,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000014,
           "detail": "scan 200000 samples; x 0.0167/s; holds 6400000 bytes for 0.840 ms; keeps 6400000 bytes of raw data on disk",
@@ -815,7 +815,7 @@
           },
           "parameters": {
             "Kmv": {
-              "k": 106263
+              "k": 26656
             }
           },
           "payload": {
