@@ -29,23 +29,24 @@ use good_lp::{
 
 use asap_cost::plan::execution_demand::evaluation_rate;
 use asap_cost::plan::kept_results::computed_range;
-use asap_cost::{close_together, ClusterLimits, CostInputs};
+use asap_cost::{
+    refresh_queue, request_fixed_cost, requests_per_second, ClusterLimits, CostInputs,
+};
+use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::plan::materialized_view::RefreshWindow;
-use asap_types::stages::{MemoGroupId, PhysicalCandidateId};
+use asap_types::stages::MemoGroupId;
 use asap_types::workload::DataWorkload;
 
-use super::super::accuracy::{accuracy_constraints, AccuracyRules, AccuracyVariables, ErrorModel};
-use super::super::dominance::{dominated_in_every_quantity, dominated_theta_families, Pairing};
-use super::super::equivalent_contexts::copies_in_equivalent_contexts;
-use super::super::exact_only::exact_only_constraints;
-use super::super::graph::Components;
+use super::super::accuracy::AccuracyRules;
+use super::super::dominance::{dominated_in_every_quantity, dominated_theta_families};
 use super::super::kept_results::{kept_result_terms, KeptResultVariables};
-use super::super::retention::{resident_window_terms, retention_constraints};
+use super::super::retention::resident_window_terms;
 use super::{
-    acyclicity_constraints, input_satisfaction_constraints, producer_selection_constraints,
-    query_coverage_constraints, selection_cost_per_second, selection_variables, use_constraints,
-    SelectedEdge, SelectionInputs, SelectionMilpError, SelectionVariables, SolvedSelection,
+    answering_executions, column_of, objective_scale, selected_executions_and_edges,
+    selection_cost_per_second, selection_cost_terms, selection_model, solution_columns,
+    structure_constraints, SelectedEdge, SelectionInputs, SelectionMilpError, SelectionModel,
+    SelectionVariables, SolvedSelection,
 };
 use crate::cost::ExecutionCosts;
 use crate::selectable::QueryId;
@@ -193,7 +194,7 @@ pub(crate) fn solve_cluster_selection(
     // What can be costed, before any dominance: a feasible plan's
     // executions are all in it.
     let costable = costed.clone();
-    let dominated = dominated_in_every_quantity(selection, &quantities, Pairing::LifetimeTwin);
+    let dominated = dominated_in_every_quantity(selection, &quantities);
     for (costed, dominated) in costed.iter_mut().zip(dominated) {
         *costed &= !dominated;
     }
@@ -476,7 +477,7 @@ pub(crate) fn solve_cluster_selection(
     let first = match first {
         Ok(first) => first,
         Err(SelectionMilpError::Infeasible) => {
-            return Err(diagnose(&limits, |objective, active| {
+            return Err(diagnose(inputs, &limits, |objective, active| {
                 let (kept, _) = kept_for(active);
                 build_and_solve(
                     inputs,
@@ -507,14 +508,15 @@ pub(crate) fn solve_cluster_selection(
     // the plan so far.
     let full_tie_breaks = !checks.lazy_tie_breaks;
     let mut last = first;
-    for objective in [Objective::Memory, Objective::Disk] {
-        let current = match objective {
-            Objective::Memory => last.memory_bytes,
+    for limit in [ClusterLimit::MemoryBytes, ClusterLimit::DiskBytes] {
+        let objective = Objective::Limit(limit);
+        let current = match limit {
+            ClusterLimit::MemoryBytes => last.memory_bytes,
             _ => last.disk_bytes,
         };
         let fixed = Fixed {
             weighted_latency: Some(weighted),
-            memory: (objective == Objective::Disk).then_some(last.memory_bytes),
+            memory: (limit == ClusterLimit::DiskBytes).then_some(last.memory_bytes),
         };
         let tried = solve(
             model,
@@ -528,8 +530,8 @@ pub(crate) fn solve_cluster_selection(
         solve_count += 1;
         if let Ok(better) = tried {
             solve_ms += better.solve_ms;
-            let found = match objective {
-                Objective::Memory => better.memory_bytes,
+            let found = match limit {
+                ClusterLimit::MemoryBytes => better.memory_bytes,
                 _ => better.disk_bytes,
             };
             if tie_break_improves(
@@ -696,8 +698,10 @@ fn log_duplicates(inputs: &ClusterInputs<'_>, kept: &[bool]) {
 
 /// Which limits alone block every plan: for each, a solve without it that
 /// minimizes its quantity; a limit whose removal admits a plan is listed
-/// with that plan's least need. None: today's `Infeasible`.
+/// with that plan's least need and what the cluster offers of it
+/// ([`available`]). None: today's `Infeasible`.
 fn diagnose(
+    inputs: &ClusterInputs<'_>,
     limits: &[ClusterLimit],
     solve: impl Fn(Objective, &[ClusterLimit]) -> Option<Solution>,
 ) -> ClusterSelectionError {
@@ -717,10 +721,33 @@ fn diagnose(
             .map(|(limit, least_needed)| ClusterLimitShortfall {
                 limit,
                 least_needed,
-                available: f64::NAN,
+                available: available(inputs, limit),
             })
             .collect(),
     )
+}
+
+/// What the cluster offers of `limit`: its memory, disk or cores, the
+/// precompute load bound, or the query's `max_latency_ms`.
+fn available(inputs: &ClusterInputs<'_>, limit: ClusterLimit) -> f64 {
+    let limits = inputs.limits;
+    match limit {
+        ClusterLimit::MemoryBytes => limits.memory_bytes as f64,
+        ClusterLimit::DiskBytes => limits.disk_bytes as f64,
+        ClusterLimit::CpuCores => limits.cpu_cores.map_or(f64::INFINITY, f64::from),
+        ClusterLimit::PrecomputeLoad => {
+            inputs
+                .cost_inputs
+                .data_plane_execution
+                .max_thread_utilization
+        }
+        ClusterLimit::QueryLatencyMs { query } => inputs
+            .selection
+            .entries
+            .get(query)
+            .and_then(|entry| entry.requirements.max_latency_ms)
+            .unwrap_or(f64::INFINITY),
+    }
 }
 
 /// Each query's weight (its evaluations per second), fixed cost per
@@ -730,7 +757,6 @@ fn diagnose(
 fn query_shapes(inputs: &ClusterInputs<'_>) -> Result<Vec<QueryShape>, SelectionMilpError> {
     let selection = &inputs.selection;
     let selectable = selection.selectable;
-    let table = &inputs.cost_inputs.measured_operation_costs;
     let horizon = inputs.cost_inputs.non_repeating_query_horizon_seconds;
     let mut by_query: BTreeMap<QueryId, Vec<usize>> = BTreeMap::new();
     for (query, answering) in selectable.answering() {
@@ -751,15 +777,7 @@ fn query_shapes(inputs: &ClusterInputs<'_>) -> Result<Vec<QueryShape>, Selection
                 .map_err(|error| {
                     SelectionMilpError::Solver(format!("query {}: {error}", query.0))
                 })?;
-            let steps = range.map_or(1.0, |range| range.mean_evaluations_per_request());
-            let step_rounds = asap_cost::step_rounds(
-                steps,
-                inputs.cost_inputs.data_plane_execution.query_threads,
-            );
-            let request_ms =
-                (table.ns_per_evaluation + table.ns_per_evaluation_step * step_rounds) * 1e-6;
-            let request_cpu_ms =
-                (table.ns_per_evaluation + table.ns_per_evaluation_step * steps) * 1e-6;
+            let fixed = request_fixed_cost(entry, inputs.cost_inputs);
             let mut reach = BTreeSet::new();
             let mut edges = Vec::new();
             let mut stack = answering.clone();
@@ -779,9 +797,9 @@ fn query_shapes(inputs: &ClusterInputs<'_>) -> Result<Vec<QueryShape>, Selection
             Ok(QueryShape {
                 query,
                 weight,
-                request_ms,
-                step_rounds,
-                request_cpu_ms,
+                request_ms: fixed.latency_ms,
+                step_rounds: fixed.step_rounds,
+                request_cpu_ms: fixed.cpu_ms,
                 max_latency_ms: entry.and_then(|entry| entry.requirements.max_latency_ms),
                 answering,
                 reach,
