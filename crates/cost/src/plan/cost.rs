@@ -14,7 +14,7 @@ use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_state_bytes, state_bytes_per_row, StateInputRows};
 use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
-use crate::plan::kept_results::{computed_range, held_by_bounded_cache, kept_per_grid};
+use crate::plan::kept_results::{answers_kept, computed_range, held_by_bounded_cache};
 use crate::plan::resident_windows::{
     reader_window_reads_per_second, view_resident_windows, ChainReader, ReadTimes, WindowRead,
     WindowReadsPerSecond,
@@ -492,25 +492,21 @@ pub fn plan_cost(
     // evaluations read (its longest retention) plus a margin, charged to its
     // root; past the cache's bound, each query's share dropped.
     if let Some(answers) = settings.data_plane_execution.answer_cache {
-        let horizon_ms = dag
+        let longest_retention_ms = dag
             .nodes
             .iter()
             .filter_map(|node| node.retention_ms)
             .max()
-            .unwrap_or(0)
-            .saturating_add(answers.retention_margin_ms);
-        let pool: Vec<(PhysicalASAPNodeId, f64)> = dag
-            .roots
-            .iter()
-            .zip(entries)
-            .map(|(&root, entry)| {
-                let count = kept_per_grid(horizon_ms, entry.evaluation_grid().period_ms);
-                (root, output[&root].bytes as f64 * count)
-            })
-            .collect();
-        let total: f64 = pool.iter().map(|(_, bytes)| bytes).sum();
-        let held = held_by_bounded_cache(total, answers.max_bytes);
-        for (root, bytes) in pool {
+            .unwrap_or(0);
+        let (horizon_ms, kept_bytes, held) = answers_kept(
+            longest_retention_ms,
+            answers,
+            dag.roots.iter().zip(entries).map(|(root, entry)| {
+                (output[root].bytes as f64, entry.evaluation_grid().period_ms)
+            }),
+        );
+        let total: f64 = kept_bytes.iter().sum();
+        for (&root, bytes) in dag.roots.iter().zip(kept_bytes) {
             let bytes = if total > 0.0 {
                 bytes * held / total
             } else {

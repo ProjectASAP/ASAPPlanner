@@ -267,6 +267,7 @@ fn solve(
         entries,
         selectable: &selectable,
         costs: &costs,
+        data_plane_execution: &DataPlaneExecution::default(),
     });
     (solved, selectable)
 }
@@ -526,6 +527,7 @@ fn a_stored_result_read_at_its_newest_output_retains_one_output() {
             entries: &entries,
             selectable: &selectable,
             costs: &costs,
+            data_plane_execution: &DataPlaneExecution::default(),
         })
         .unwrap()
     };
@@ -814,6 +816,7 @@ fn contexts_whose_queries_read_different_groups_are_not_copies() {
         entries: &entries,
         selectable: &selectable,
         costs: &costs,
+        data_plane_execution: &DataPlaneExecution::default(),
     };
     let shared =
         copies_in_equivalent_contexts(&inputs, &vec![true; selectable.executions().len()], None);
@@ -840,6 +843,7 @@ fn queries_reading_different_groups_select_differently_in_contexts_alike() {
         entries: &entries,
         selectable: &selectable,
         costs: &costs,
+        data_plane_execution: &DataPlaneExecution::default(),
     })
     .unwrap();
     let outputs: Vec<usize> = solved
@@ -907,6 +911,7 @@ fn the_bound_leaves_out_of_each_query_only_what_it_must_not_read() {
         entries: &entries,
         selectable: &selectable,
         costs: &costs,
+        data_plane_execution: &DataPlaneExecution::default(),
     };
     let left_out = dearer_than_a_feasible_plan(&inputs, None);
     let unused: Vec<bool> = selectable
@@ -948,6 +953,7 @@ fn the_bound_counts_the_least_retention_an_execution_pays() {
             entries: &entries,
             selectable: &selectable,
             costs: &costs,
+            data_plane_execution: &DataPlaneExecution::default(),
         },
         None,
     );
@@ -994,6 +1000,7 @@ fn a_none_execution_its_one_evaluation_twin_dominates_is_left_out() {
             entries: &entries,
             selectable: &selectable,
             costs: &costs,
+            data_plane_execution: &DataPlaneExecution::default(),
         };
         let candidates: Vec<usize> = selectable
             .executions()
@@ -1044,6 +1051,7 @@ fn a_one_evaluation_execution_read_at_most_once_is_left_out_for_its_cheaper_none
             entries: &entries,
             selectable: &selectable,
             costs: &costs,
+            data_plane_execution: &DataPlaneExecution::default(),
         };
         let left_out: Vec<usize> = selectable
             .executions()
@@ -1113,6 +1121,7 @@ fn a_context_equivalent_to_another_shares_its_variables() {
             entries: &entries,
             selectable: &selectable,
             costs,
+            data_plane_execution: &DataPlaneExecution::default(),
         };
         copies_in_equivalent_contexts(&inputs, &kept, None)
     };
@@ -1142,6 +1151,7 @@ fn a_context_equivalent_to_another_shares_its_variables() {
         entries: &entries,
         selectable: &selectable,
         costs: &costs,
+        data_plane_execution: &DataPlaneExecution::default(),
     })
     .unwrap();
     assert_eq!(candidates(&solved), vec![1, 1, 2, 2]);
@@ -1162,6 +1172,7 @@ fn a_context_equivalent_to_another_shares_its_variables() {
             entries: &differing_targets,
             selectable: &selectable,
             costs: &costs,
+            data_plane_execution: &DataPlaneExecution::default(),
         },
         &kept,
         None,
@@ -1234,6 +1245,7 @@ fn contexts_whose_small_edge_costs_differ_by_rounding_are_copies() {
             entries: &entries,
             selectable: &selectable,
             costs: &costs,
+            data_plane_execution: &DataPlaneExecution::default(),
         },
         &vec![true; executions.len()],
         None,
@@ -1296,6 +1308,7 @@ fn a_left_out_execution_does_not_set_the_tolerance_of_context_copies() {
         entries: &entries,
         selectable: &selectable,
         costs: &costs,
+        data_plane_execution: &DataPlaneExecution::default(),
     })
     .unwrap();
     assert!(
@@ -1467,6 +1480,7 @@ fn k_allocates_a_ratio_s_error_among_its_readouts() {
             entries: &entries,
             selectable: &selectable,
             costs: &costs,
+            data_plane_execution: &DataPlaneExecution::default(),
         };
         let solved = solve_selection(&inputs).unwrap();
         let selected = candidates(&solved);
@@ -1626,6 +1640,7 @@ fn contexts_whose_queries_split_their_failure_probability_differently_are_not_co
         entries: &entries,
         selectable: &selectable,
         costs: &costs,
+        data_plane_execution: &DataPlaneExecution::default(),
     })
     .unwrap();
     let selected = candidates(&solved);
@@ -1892,6 +1907,7 @@ fn k_counts_an_exact_input_as_never_failing() {
         entries: &entries,
         selectable: &selectable,
         costs: &costs,
+        data_plane_execution: &DataPlaneExecution::default(),
     };
     let kept = vec![true; selectable.executions().len()];
     let rules = AccuracyRules::of(&inputs).unwrap();
@@ -2238,6 +2254,7 @@ fn contexts_whose_queries_bound_every_estimate_read_at_equal_delta_are_copies() 
         entries: &entries,
         selectable: &selectable,
         costs: &costs,
+        data_plane_execution: &DataPlaneExecution::default(),
     };
     let kept = vec![true; selectable.executions().len()];
     let rules = AccuracyRules::of(&inputs);
@@ -2312,6 +2329,7 @@ fn contexts_whose_queries_differ_only_in_values_not_split_by_k_are_copies() {
             entries: &entries,
             selectable: &selectable,
             costs: &costs,
+            data_plane_execution: &DataPlaneExecution::default(),
         };
         let kept = vec![true; selectable.executions().len()];
         let rules = AccuracyRules::of(&inputs);

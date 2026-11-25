@@ -9,6 +9,7 @@
 //! today's types: a field the design adds is refused when the JSON is
 //! loaded, or is missing from the report.
 
+use asap_cost::ResourceUnitCost;
 use serde_json::{json, Value};
 
 use crate::lowest_mean_latency_common::{
@@ -242,11 +243,12 @@ async fn r2_stored_row_bytes_beside_state_is_a_deployment_input() {
     );
 }
 
-/// Cost model 1 at the illustrative prices with disk costed at a fortieth of
-/// memory per byte-second.
+/// Cost model 1 at the illustrative prices with disk at the illustrative
+/// preset's cost (a fortieth of memory per byte-second).
 fn usage_over_time_with_disk() -> Value {
     let mut cost_model = usage_over_time();
-    cost_model["usage_over_time"]["cost_per_disk_byte_second"] = json!(1.25e-7 / 40.0);
+    cost_model["usage_over_time"]["cost_per_disk_byte_second"] =
+        json!(ResourceUnitCost::illustrative().cost_per_disk_byte_second);
     cost_model
 }
 

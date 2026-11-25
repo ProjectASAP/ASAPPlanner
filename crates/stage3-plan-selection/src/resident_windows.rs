@@ -23,16 +23,18 @@ use asap_types::workload::QueryWorkloadEntry;
 use crate::retention::edge_readers_need;
 use crate::selectable::{Reader, SelectableExecutions};
 
-/// One read of a cached view's execution: the windows it keeps resident,
-/// mean and most, and what its readers read from disk.
+/// One read of a cached view's execution: the windows it keeps resident
+/// and what its readers read from disk.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ResidentRead {
     /// The execution read, by position in
     /// `SelectableExecutions::executions`.
     pub(crate) execution: usize,
     pub(crate) reader: Reader,
-    pub(crate) mean_windows: f64,
-    pub(crate) most_windows: u64,
+    /// The windows it keeps resident: over time, the mean, or the most
+    /// for a quantity charging the peak (`resident_reads`'s
+    /// `most_windows`).
+    pub(crate) resident_windows: f64,
     /// Bytes its readers read from disk per second: each reader's windows
     /// read while not in the cache, summed, as `plan_cost` charges them.
     pub(crate) bytes_read_from_disk_per_second: f64,
@@ -50,7 +52,9 @@ pub(crate) struct ResidentRead {
 /// ([`reader_resident_windows`], each query reaching a query-time reader on
 /// the edge consumer's grid one reader, as `plan_cost` takes each query
 /// reaching it). A read the cost model does not follow keeps every window
-/// it needs retained.
+/// it needs retained. Each read carries its mean resident windows, or with
+/// `most_windows` (peak memory) the most.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resident_reads(
     physical: &PhysicalASAPMemoCandidates,
     selectable: &SelectableExecutions,
@@ -59,6 +63,7 @@ pub(crate) fn resident_reads(
     cached: &HashMap<PhysicalCandidateId, CachedViewWindows>,
     need_ms_per_edge: &[Option<u64>],
     retained_ms_of_read: impl Fn(PhysicalCandidateId, u64) -> u64,
+    most_windows: bool,
 ) -> Vec<ResidentRead> {
     let idle_ms = cache.idle_ms;
     let executions = selectable.executions();
@@ -193,8 +198,10 @@ pub(crate) fn resident_reads(
         reads.push(ResidentRead {
             execution: index,
             reader,
-            mean_windows: mean,
-            most_windows: most,
+            resident_windows: match most_windows {
+                true => most as f64,
+                false => mean,
+            },
             bytes_read_from_disk_per_second,
             most_bytes_read_from_disk_per_run,
         });

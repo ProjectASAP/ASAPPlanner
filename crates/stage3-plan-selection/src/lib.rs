@@ -188,6 +188,7 @@ pub fn select_plan(
         entries,
         selectable: &selectable,
         costs: &costs,
+        data_plane_execution: &cost_inputs.data_plane_execution,
     };
     let milp_error = |error| match error {
         SelectionMilpError::Infeasible => {

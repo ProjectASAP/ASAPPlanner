@@ -131,8 +131,9 @@ pub struct NodeMemoryAndDisk {
     /// Bytes it writes to disk per second: a view under the data plane's
     /// window cache writes each window to its file when the window closes.
     pub disk_written_bytes_per_second: f64,
-    /// Bytes it reads back from disk per second; 0 until reads of windows
-    /// not in the window cache are costed (#1469).
+    /// Bytes it reads back from disk per second: 0 for the node alone;
+    /// [`plan_cost`](crate::plan_cost) adds the windows a cached view's
+    /// readers read while they are not in the window cache.
     pub disk_read_bytes_per_second: f64,
 }
 
@@ -426,7 +427,7 @@ pub struct RawRowsShortOfRange {
 /// query-time chain, or a query-time `sum` over 60 s, of a source holding
 /// 80 rows that arrive at 8 a second: 80 of 480; the same chain built at
 /// ingestion time sees every row.
-pub fn query_time_computation_short_of_source_rows(
+fn query_time_computation_short_of_source_rows(
     node: &asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode,
     producers: &[ProducerOutput<'_>],
 ) -> Option<RawRowsShortOfRange> {
@@ -741,32 +742,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let raw_rows_materialized_at_ingestion =
         node.keeps_raw_rows_at_ingestion(producers.first().map(|producer| producer.payload));
     // The raw rows of its sources back `lookback_ms`: (by arrival rate,
-    // when known; the rows they hold, when declared).
-    let raw_rows = |lookback_ms: Option<u64>| -> (Option<u64>, Option<u64>) {
-        let by_rate = rows_per_ms
-            .zip(lookback_ms)
-            .map(|(rows_per_ms, lookback_ms)| (rows_per_ms * lookback_ms as f64).round() as u64);
-        let rows_held: Option<u64> = sources
-            .iter()
-            .map(|source| data.sources.get(*source).and_then(|facts| facts.rows_held))
-            .sum();
-        (by_rate, rows_held)
-    };
-    // The raw rows of its sources back `lookback_ms` (every row held
-    // without one), which a scan reads or keeps: by arrival rate, at most
-    // the rows they hold.
-    let raw_rows_back = |lookback_ms: Option<u64>| -> Option<u64> {
-        match raw_rows(lookback_ms) {
-            (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
-            (by_rate, rows_held) => by_rate.or(rows_held),
-        }
-        .map(|rows| rows.max(1))
-    };
-    // [`raw_rows_back`]'s rows by their exact rate, not rounded to whole
-    // rows: what a store of raw rows keeps on average over time, linear in
-    // `lookback_ms` (Stage 3 charges a retention at one slope per retained
-    // second, `π_v`, so the plan's cost must be linear in it too).
-    let raw_rows_back_exact = |lookback_ms: Option<u64>| -> Option<f64> {
+    // when known, by their exact rate, not rounded to whole rows; the rows
+    // they hold, when declared).
+    let raw_rows_exact = |lookback_ms: Option<u64>| -> (Option<f64>, Option<u64>) {
         let by_rate = rows_per_ms
             .zip(lookback_ms)
             .map(|(rows_per_ms, lookback_ms)| rows_per_ms * lookback_ms as f64);
@@ -774,11 +752,30 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             .iter()
             .map(|source| data.sources.get(*source).and_then(|facts| facts.rows_held))
             .sum();
+        (by_rate, rows_held)
+    };
+    // [`raw_rows_exact`] with the rows by rate rounded to whole rows.
+    let raw_rows = |lookback_ms: Option<u64>| -> (Option<u64>, Option<u64>) {
+        let (by_rate, rows_held) = raw_rows_exact(lookback_ms);
+        (by_rate.map(|rows| rows.round() as u64), rows_held)
+    };
+    // The raw rows of its sources back `lookback_ms` (every row held
+    // without one) by their exact rate, at most the rows they hold: what a
+    // store of raw rows keeps on average over time, linear in
+    // `lookback_ms` (Stage 3 charges a retention at one slope per retained
+    // second, `π_v`, so the plan's cost must be linear in it too).
+    let raw_rows_back_exact = |lookback_ms: Option<u64>| -> Option<f64> {
+        let (by_rate, rows_held) = raw_rows_exact(lookback_ms);
         match (by_rate, rows_held.map(|rows| rows as f64)) {
             (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
             (by_rate, rows_held) => by_rate.or(rows_held),
         }
         .map(|rows| rows.max(1.0))
+    };
+    // [`raw_rows_back_exact`] rounded to whole rows, which a scan reads or
+    // keeps.
+    let raw_rows_back = |lookback_ms: Option<u64>| -> Option<u64> {
+        raw_rows_back_exact(lookback_ms).map(|rows| rows.round() as u64)
     };
     // The shortfall of the raw rows held back `lookback_ms`: the rows held
     // when fewer than arrive over it, while rows keep arriving. Data at

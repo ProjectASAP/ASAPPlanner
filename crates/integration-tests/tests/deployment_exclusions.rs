@@ -7,7 +7,7 @@
 //! that pruned the same candidates in Stage 2 (a throwaway patch, since
 //! deleted); the counts of pruned candidates are the probe's.
 
-use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
+use crate::planning_common::cost_inputs_without_disk_cost;
 use asap_planner::{
     CandidateExclusion, CounterSemanticsSupport, DeploymentCapabilities, ErrorSelectingPlan,
     ExclusionSource, OperatorKind, PlanningModels, PlanningRun, RejectionCause, Selection,
@@ -111,13 +111,7 @@ fn planned(workload: &PlanningWorkload, capabilities: &DeploymentCapabilities) -
     // deployment excludes, and the raw data a query-time scan keeps would
     // make scan twins near-equal in cost, a tie the solver may break
     // either way.
-    let cost_inputs = CostInputs {
-        cost_model: CostModel::UsageOverTime(ResourceUnitCost {
-            cost_per_disk_byte_second: 0.0,
-            ..ResourceUnitCost::illustrative()
-        }),
-        ..CostInputs::default()
-    };
+    let cost_inputs = cost_inputs_without_disk_cost();
     let models = PlanningModels::builtin()
         .with_cost_inputs(&cost_inputs)
         .with_deployment_capabilities(capabilities);
