@@ -64,8 +64,10 @@ At query time, these are the only computed nodes that can have more than one con
 
 ### D4. Store interfaces: two traits, defined by this crate and implemented by the deployment
 
-- **`ViewStore::read(definition_id, selections) -> ViewBatch | NotReady`**
-  - Views are keyed by the plan's view `definition_id` plus a selection: the label constraints, the pane width and the window end. This is the keying ASAPQuery-backend's `SummaryStore` used.
+- **`ViewStore::read(view, windows) -> ViewBatch | NotReady`**
+  - A view is identified by `(PlanId, PhysicalASAPNodeId)`. `PlanId` is the installed plan's version, and the node fixes the view's sub-DAG, selection, θ and window widths. A stored window is keyed by `(PlanId, PhysicalASAPNodeId, window)`, where `window` is the absolute `(start, end]`. This follows the comment on ProjectASAP/ASAPQuery#935.
+  - ASAPPlanner's `definition_id` is not used as a key: it leaves out θ, the window width and the selection, so two different views in one plan can share it.
+  - Views cannot be reused across plans. That is fine while ASAPQuery installs one plan (the engine-boundaries doc's I14). Reusing views across plans would need a plan-independent id (ProjectASAP/ASAPPlanner#1429).
   - Reads are **exact**: a missing window means `NotReady`, never a silently shorter answer. ASAPQuery's `Store` returns sparse results today, so it cannot tell "no data" from "not built yet".
   - `ViewBatch` holds Arrow rows plus `Vec<Arc<dyn Sketch>>`.
 - **`ViewStore::write(...)`** is only for `OnFirstRead` views, which this engine computes. It is append-only, and the store applies retention.
@@ -76,7 +78,7 @@ At query time, these are the only computed nodes that can have more than one con
 
 ### D5. Sketch states as handles; exact states as plain columns
 
-- **Sketches:** the executor's `AggregateCore` kernels are ported as the `Sketch` trait. `merge_with` returns a new object, so shared sketches are never changed in place.
+- **Sketches:** the executor's `AggregateCore` kernels (`crates/executor/src/summary_kernels/`) move into their own crate as the `Sketch` trait, before either engine needs them. The executor, ASAPQuery's ingest engine and this engine all use that crate, so states built at ingestion are read with no conversion, and deleting the executor does not affect ingestion. `merge_with` returns a new object, so shared sketches are never changed in place.
 - **Inside a batch:** a sketch column is a `UInt64` column of ids into a per-batch, append-only registry of `Arc<dyn Sketch>`.
   - The column's Arrow field metadata records the sketch family and parameters.
   - The compiler checks that merge and estimate inputs have the same family and parameters.
@@ -128,6 +130,7 @@ At query time, these are the only computed nodes that can have more than one con
 ### D10. ASAPQuery sends batches through a new endpoint, and matches queries by parsed form
 
 - **New endpoint:** `POST /api/v1/query_batch` takes a list of `{query, time}` or `{query, start, end, step}`. It returns one Prometheus-format result per entry, in order, each marked as answered by the plan, answered by the fallback, or failed.
+- **Engine interface:** ASAPQuery's `QueryEngine` trait (engine-boundaries doc) gains `execute_batch`, and `QueryDispatcher` gains `dispatch_batch`; `execute` is a batch of one.
 - **The existing endpoints stay.** `/api/v1/query` and `/query_range` become batches of one, for Grafana and other clients. Sharing across queries happens only through the batch endpoint.
 - **Matching a query to a root:** at install, each of `query_texts[i]` is parsed with ASAPPlanner's frontend and printed back in a fixed canonical form, mapping to query i's root from `PhysicalASAPDAG::root_nodes_per_query()`. Incoming queries are canonicalized the same way and looked up. Matching by what a query can be answered from, rather than its text, is a separate later feature.
 - **Fallback per entry:** a query with no matching root, or one that gets `NotReady`, is sent to the fallback (Prometheus or ClickHouse) on its own, and its answer fills that query's slot.

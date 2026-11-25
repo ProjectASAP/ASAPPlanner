@@ -14,6 +14,8 @@ ASAPQuery's `.design_docs/asapplanner-engine-boundaries.md` (ProjectASAP/ASAPQue
 
 Three conflicts fix contracts that two tracks implement in parallel. They are expensive to change later.
 
+**Settled on 2026-11-25:** each one takes the proposed resolution in the table. The remaining work for A0 is updating the engine-boundaries doc to match.
+
 | Conflict | Engine-boundaries doc | This proposal | Proposed resolution | Blocks |
 |---|---|---|---|---|
 | Batches | `QueryEngine::execute(&AnswerSource, &QueryRequest)` takes one query, and the dispatcher handles queries one at a time | Batches of queries (D2, D10) | Add `execute_batch` to `QueryEngine` and `dispatch_batch` to `QueryDispatcher`; `execute` is a batch of one | E1, W0 |
@@ -37,14 +39,14 @@ Each of these has one owner and changes in one place:
 
 | Lane | Issue | Depends on | Notes |
 |---|---|---|---|
-| Decide | **A0.** Settle the three contract conflicts; update both docs | — | A person decides |
+| Decide | **A0.** Update the engine-boundaries doc with the three settled resolutions | — | Decisions settled 2026-11-25 |
 | Spike | **E0a.** Check that a compiled DataFusion `ExecutionPlan` can be run again per batch (D6) | — | Throwaway code; write-up only |
 | Spike | **E0b.** Check how the `TimeRange` cross join batches its output (D13 risk) | — | Throwaway code; write-up only |
-| Kernels | **E2.** Move `crates/executor/src/summary_kernels/` into a shared crate as the `Sketch` trait (D5); the executor depends on it | A0 (kernels row) | Also unblocks the engine-boundaries doc's step 8 |
-| Engine | **E1 (S1).** Crate skeleton: cutting and scheduler (D3), batch API (D2), read/write interfaces with in-memory implementations (D4), `Filter`, `Project`, `Values`, `Concat`, `Sort`, `Limit` | A0 (batch row), E0a | Sets the one-file-per-operator layout later issues follow |
+| Kernels | **E2.** Move `crates/executor/src/summary_kernels/` into a shared crate as the `Sketch` trait (D5); the executor depends on it | — | Also unblocks the engine-boundaries doc's step 8 |
+| Engine | **E1 (S1).** Crate skeleton: cutting and scheduler (D3), batch API (D2), read/write interfaces with in-memory implementations (D4), `Filter`, `Project`, `Values`, `Concat`, `Sort`, `Limit` | E0a | Sets the one-file-per-operator layout later issues follow |
 | Engine | **E7.** Corpus coverage report: compile every planner corpus plan and list the failures | E1 | Progress measure for later issues |
 | Engine | **E3 (S2).** `eval_time`, the `TimeRange` join, `TimeShift`, range functions (D7) | E1, E0b | |
-| Engine | **E5a.** Sketch handles and registry, build/merge/estimate functions, view-read leaf (D5) | E1, E2, A0 (view-key row) | |
+| Engine | **E5a.** Sketch handles and registry, build/merge/estimate functions, view-read leaf (D5) | E1, E2 | |
 | Engine | **E6 (S7).** SQL joins, set operations, window functions (D13) | E1 | Independent of PromQL |
 | Engine | **E4a.** PromQL aggregates with SQL functions, per-group top-k (D13) | E3 | |
 | Engine | **E4b.** `BinaryOp`, ported from the executor's `vector_binary.rs` (D13) | E3 | |
@@ -60,15 +62,15 @@ Each of these has one owner and changes in one place:
 ## What runs in parallel
 
 ```text
-Wave 1:  A0 (person)  ‖  E0a  ‖  E0b  ‖  engine-boundaries steps 1–7
-Wave 2:  E1  ‖  E2                       (after A0 and E0a)
+Wave 1:  A0 (doc update)  ‖  E0a  ‖  E0b  ‖  E2  ‖  engine-boundaries steps 1–7
+Wave 2:  E1                       (after E0a)
 Wave 3:  E3  ‖  E5a  ‖  E6  ‖  E7
 Wave 4:  E4a  ‖  E4b  ‖  E4c  ‖  E5b  ‖  W0
 Wave 5:  W1 → W2;  W3 once engine-boundaries step 8 lands
 Wave 6:  S8
 ```
 
-The critical path is A0 → E1 → E3 → E4a/b/c → W1 → W2. E2 is the only issue that unblocks the precompute track, so it starts as soon as A0 settles the kernels row.
+The critical path is E0a → E1 → E3 → E4a/b/c → W1 → W2. E2 is the only issue that unblocks the precompute track, so it starts in wave 1.
 
 ## How to run the agents
 
