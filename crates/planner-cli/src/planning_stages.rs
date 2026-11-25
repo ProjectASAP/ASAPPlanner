@@ -10,6 +10,7 @@ use asap_stage1_pass1_per_computation_candidates::PerComputationCandidateError;
 use asap_types::ir::schema::series_identity::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
+use asap_types::stages::InvariantViolation;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
 use serde_json::Value;
 
@@ -78,6 +79,9 @@ pub enum PlanningStagesError {
     Pass1(String),
     /// The frontends' roots or a composed candidate failed validation.
     Validation(String),
+    /// Stage 0's or Pass 1's memo breaks an invariant: a planner bug, not
+    /// an unplannable query.
+    Invariant(InvariantViolation),
 }
 
 impl std::fmt::Display for PlanningStagesError {
@@ -85,6 +89,7 @@ impl std::fmt::Display for PlanningStagesError {
         match self {
             Self::Pass1(error) => write!(f, "Pass 1: {error}"),
             Self::Validation(error) => write!(f, "validation: {error}"),
+            Self::Invariant(violation) => write!(f, "{violation}"),
         }
     }
 }
@@ -164,7 +169,10 @@ fn run_until(
                 PerComputationCandidateError::Structure(error) => {
                     PlanningStagesError::Validation(error.to_string())
                 }
-                error => PlanningStagesError::Pass1(error.to_string()),
+                error => match error.invariant_violation() {
+                    Some(violation) => PlanningStagesError::Invariant(violation.clone()),
+                    None => PlanningStagesError::Pass1(error.to_string()),
+                },
             }
         })?;
     Ok(PlanningStagesRun {

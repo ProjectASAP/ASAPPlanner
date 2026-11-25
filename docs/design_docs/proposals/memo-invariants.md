@@ -44,8 +44,10 @@ only reads the memo, so after it only check 12 runs.
 7. Every group is used by some query (no orphans).
 8. No two groups compute the same expression.
 9. No group holds the same candidate twice.
-10. A stage only adds: no group or candidate it was given is gone; the
-    queries are unchanged.
+10. A stage only adds: no group has fewer candidates, no group is gone,
+    and the queries are unchanged. Counts suffice: a stage changes the
+    memo only through methods that append (or edit input requirements), so
+    it cannot replace a candidate.
 11. After Stage 2: every physical candidate points to an existing memo
     candidate.
 12. After Stage 3: each query's plan output has its Stage 0 group's schema.

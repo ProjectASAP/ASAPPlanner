@@ -409,7 +409,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     });
     // A stage that failed: the output is still written, then the run exits 1.
     let mut failure = match &result {
-        Err(PlanningStagesError::Pass1(error)) => Some(format!("Pass 1: {error}")),
+        Err(error @ (PlanningStagesError::Pass1(_) | PlanningStagesError::Invariant(_))) => {
+            Some(error.to_string())
+        }
         Ok(run) => match &run.run.selection {
             Err(SelectionError::NotRun) | Ok(_) => None,
             Err(error) => Some(error.to_string()),
@@ -483,7 +485,9 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
                 materialized_views.as_ref(),
                 verbose,
             ),
-            Err(PlanningStagesError::Pass1(error)) => format!("error: Pass 1: {error}\n"),
+            Err(error @ (PlanningStagesError::Pass1(_) | PlanningStagesError::Invariant(_))) => {
+                format!("error: {error}\n")
+            }
             Err(error) => return Err(error.to_string().into()),
         };
         for warning in &warnings {
@@ -547,15 +551,17 @@ fn document_of(
     let queries = with_default_metrics(queries, roots);
     match result {
         Ok(run) => Ok(document(queries, &run, plan_cost, materialized_views)),
-        Err(PlanningStagesError::Pass1(error)) => Ok(json!({
-            "format": "asap-stage-pipeline/v2",
-            "run_until": run_until.name(),
-            "workload": { "queries": queries },
-            "stage0_query_language_frontends": { "dag": export(roots) },
-            "stage1_logical_asap_optimization": { "error": format!("Pass 1: {error}") },
-            "stage2_physical_asap_optimization": null,
-            "stage3_plan_selection": null,
-        })),
+        Err(error @ (PlanningStagesError::Pass1(_) | PlanningStagesError::Invariant(_))) => {
+            Ok(json!({
+                "format": "asap-stage-pipeline/v2",
+                "run_until": run_until.name(),
+                "workload": { "queries": queries },
+                "stage0_query_language_frontends": { "dag": export(roots) },
+                "stage1_logical_asap_optimization": { "error": error.to_string() },
+                "stage2_physical_asap_optimization": null,
+                "stage3_plan_selection": null,
+            }))
+        }
         Err(error @ PlanningStagesError::Validation(_)) => Err(error.to_string()),
     }
 }
@@ -1460,5 +1466,41 @@ mod tests {
         );
         assert_eq!(document["stage2_physical_asap_optimization"], Value::Null);
         assert_eq!(document["stage3_plan_selection"], Value::Null);
+    }
+
+    /// An invariant broken after Stage 0 or Pass 1 is written as the
+    /// invariant it breaks, not as a Pass 1 failure.
+    #[test]
+    fn an_invariant_violation_is_written_as_itself() {
+        let workload: PlanningWorkload = serde_json::from_value(json!({
+            "query_workload": {"language": "promql", "query_batch": [{
+                "query": "sum(rate(m[5m]))",
+                "requirements": {"accuracy": {"max_error": 0.0}},
+                "predictability": "unknown",
+                "invocations": 1,
+            }]},
+        }))
+        .unwrap();
+        let roots = lower_promql_roots(&workload).unwrap();
+        let violation = asap_types::stages::InvariantViolation {
+            check: asap_types::stages::InvariantCheck::OrphanGroup,
+            group: Some(asap_types::stages::MemoGroupId(3)),
+            origin: asap_types::stages::InvariantOrigin::Stage("stage1_pass1"),
+            detail: "no query reaches it".into(),
+        };
+        let document = document_of(
+            workload_queries(&workload),
+            &roots,
+            Err(PlanningStagesError::Invariant(violation.clone())),
+            RunUntil::Stage3,
+            None,
+            None,
+        )
+        .unwrap();
+        let error = document["stage1_logical_asap_optimization"]["error"]
+            .as_str()
+            .unwrap();
+        assert_eq!(error, violation.to_string());
+        assert!(error.starts_with("invariant orphan_group"), "{error}");
     }
 }

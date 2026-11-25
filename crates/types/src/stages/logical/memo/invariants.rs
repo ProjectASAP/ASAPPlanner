@@ -51,8 +51,12 @@ pub enum InvariantCheck {
     DuplicateGroup,
     /// 9. No group holds the same candidate twice.
     DuplicateCandidate,
-    /// 10. A stage only adds: no group or candidate it was given is gone,
-    ///     and the queries are unchanged.
+    /// 10. A stage only adds: no group has fewer candidates than it was
+    ///     given, the memo has no fewer groups, and the queries are
+    ///     unchanged. Counts suffice: outside this crate the memo changes
+    ///     only through methods that append (`find_or_add_group`,
+    ///     `add_candidate`, `add_query`) or edit a candidate's input
+    ///     requirements, so a stage cannot replace a candidate.
     StageRemoved,
     /// 11. Every Stage 2 physical candidate points to a memo candidate.
     MissingLogicalCandidate,
@@ -151,8 +155,8 @@ impl Memo {
         }
     }
 
-    /// Check 10: `stage` kept every group and candidate of `before`, and
-    /// the queries.
+    /// Check 10: after `stage`, no group has fewer candidates than in
+    /// `before`, no group is gone, and the query count is unchanged.
     pub fn check_stage_only_added(
         &self,
         before: &MemoContents,
