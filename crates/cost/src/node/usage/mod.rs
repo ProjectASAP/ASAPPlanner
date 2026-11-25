@@ -308,14 +308,23 @@ fn stat_model_state_family<'a>(
 }
 
 /// One producer of a node being costed ([`node_resource_usage_and_cost`]): its payload and
-/// schema, its output statistics, the sources it reads and its state
-/// family.
+/// schema, and what it outputs.
 #[derive(Debug, Clone)]
 pub struct ProducerOutput<'a> {
     /// Its payload.
     pub payload: &'a Payload,
     /// Its output schema.
     pub output_schema: &'a Schema,
+    /// What it outputs ([`OutputFacts`]).
+    pub output_facts: OutputFacts<'a>,
+}
+
+/// What a node outputs, as its consumers read it: its output statistics,
+/// the sources it reads, its state family, and the facts about its rows
+/// a consumer's cost depends on. [`node_resource_usage_and_cost`] computes
+/// it; [`ProducerOutput`] carries it to each consumer.
+#[derive(Debug, Clone)]
+pub struct OutputFacts<'a> {
     /// Its output rows and bytes.
     pub output: EdgeStatistics,
     /// The sources it reads.
@@ -397,7 +406,7 @@ pub struct ProducerOutput<'a> {
 }
 
 /// Raw rows fewer than arrive over the range they are read for
-/// ([`ProducerOutput::raw_rows_short_of_range`]). Example: a source
+/// ([`OutputFacts::raw_rows_short_of_range`]). Example: a source
 /// holding 80 rows, read back 60 s at 8 rows a second: 80 of 480.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawRowsShortOfRange {
@@ -429,7 +438,7 @@ pub fn query_time_computation_short_of_source_rows(
         .then(|| {
             producers
                 .iter()
-                .find_map(|producer| producer.raw_rows_short_of_range)
+                .find_map(|producer| producer.output_facts.raw_rows_short_of_range)
         })
         .flatten()
 }
@@ -448,7 +457,10 @@ impl ProducerOutput<'_> {
         };
         let index = resolve_column_ref(column, self.output_schema).ok()?;
         let name = self.output_schema.fields.get(index)?.name.as_str();
-        self.unchanged_columns.contains(name).then_some(name)
+        self.output_facts
+            .unchanged_columns
+            .contains(name)
+            .then_some(name)
     }
 }
 
@@ -461,49 +473,8 @@ impl ProducerOutput<'_> {
 /// calibration fit and its [`NodeCost`].
 #[derive(Debug, Clone)]
 pub struct NodeResourceUsageAndCost<'a> {
-    /// Its output rows and bytes.
-    pub output: EdgeStatistics,
-    /// The sources it reads.
-    pub sources: BTreeSet<&'a str>,
-    /// Its state family.
-    pub family: StateFamily<'a>,
-    /// Its output columns that still hold one source row's label (or
-    /// column) values unchanged ([`unchanged_source_columns`]).
-    pub unchanged_columns: BTreeSet<&'a str>,
-    /// The tumbling windows its rows span: those a `TimeRange` selects
-    /// from a chain (through the operators that keep each row's window),
-    /// 1 for any other node.
-    pub tumbling_windows: f64,
-    /// The tumbling-window width of the chain whose states its rows are
-    /// read from: a chain's own, kept through the operators over it that
-    /// keep each row's window (`Operator::keeps_input_window`: `TimeShift`,
-    /// `Filter`, `Project`), so a `TimeRange` over them selects windows;
-    /// `None` for any other node.
-    pub chain_tumbling_window_width_ms: Option<u64>,
-    /// What each summary state it outputs folds
-    /// ([`ProducerOutput::state_input_rows`]).
-    pub state_input_rows: Option<StateInputRows>,
-    /// Whether its states were last written by a merge
-    /// ([`ProducerOutput::states_last_merged`]).
-    pub states_last_merged: bool,
-    /// The time its raw output rows span
-    /// ([`ProducerOutput::raw_rows_span_ms`]).
-    pub raw_rows_span_ms: Option<u64>,
-    /// The exact rate its raw output rows arrive at
-    /// ([`ProducerOutput::raw_rows_per_ms`]).
-    pub raw_rows_per_ms: Option<f64>,
-    /// What each output row already folds
-    /// ([`ProducerOutput::folded_per_row`]).
-    pub folded_per_row: Option<StateInputRows>,
-    /// Its raw rows' shortfall against their range
-    /// ([`ProducerOutput::raw_rows_short_of_range`]).
-    pub raw_rows_short_of_range: Option<RawRowsShortOfRange>,
-    /// The time its states' source rows span
-    /// ([`ProducerOutput::state_data_span_ms`]).
-    pub state_data_span_ms: Option<u64>,
-    /// How far back its raw rows' window lies
-    /// ([`ProducerOutput::raw_rows_shifted_back_ms`]).
-    pub raw_rows_shifted_back_ms: u64,
+    /// What it outputs, as its consumers read it ([`OutputFacts`]).
+    pub output_facts: OutputFacts<'a>,
     /// Work of one execution, in ms on one core.
     pub work_ms_per_execution: f64,
     /// CPU operations per second.
@@ -546,20 +517,7 @@ impl<'a> NodeResourceUsageAndCost<'a> {
         ProducerOutput {
             payload,
             output_schema,
-            output: self.output,
-            sources: self.sources.clone(),
-            family: self.family,
-            unchanged_columns: self.unchanged_columns.clone(),
-            tumbling_windows: self.tumbling_windows,
-            chain_tumbling_window_width_ms: self.chain_tumbling_window_width_ms,
-            state_input_rows: self.state_input_rows,
-            states_last_merged: self.states_last_merged,
-            raw_rows_span_ms: self.raw_rows_span_ms,
-            raw_rows_per_ms: self.raw_rows_per_ms,
-            folded_per_row: self.folded_per_row,
-            raw_rows_short_of_range: self.raw_rows_short_of_range,
-            state_data_span_ms: self.state_data_span_ms,
-            raw_rows_shifted_back_ms: self.raw_rows_shifted_back_ms,
+            output_facts: self.output_facts.clone(),
         }
     }
 }
@@ -672,8 +630,8 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     if let Some(short) = query_time_computation_short_of_source_rows(node, producers) {
         let source = producers
             .iter()
-            .find(|producer| producer.raw_rows_short_of_range.is_some())
-            .and_then(|producer| producer.sources.first().copied())
+            .find(|producer| producer.output_facts.raw_rows_short_of_range.is_some())
+            .and_then(|producer| producer.output_facts.sources.first().copied())
             .unwrap_or("(none)");
         return Err(AnalyticalCostError::FewerSourceRowsThanItsRange {
             source_name: source.to_string(),
@@ -732,7 +690,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         .retention_ms
         .map_or(1, |retention_ms| retention_ms.div_ceil(output_interval_ms))
         .max(1);
-    let inputs: Vec<EdgeStatistics> = producers.iter().map(|p| p.output).collect();
+    let inputs: Vec<EdgeStatistics> = producers.iter().map(|p| p.output_facts.output).collect();
     // The tumbling windows its rows span: those a `TimeRange` selects from
     // a chain (through the operators that keep each row's window, which
     // pass them on: `Operator::keeps_input_window`), 1 otherwise.
@@ -757,7 +715,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             .max(1.0),
         payload if payload.keeps_input_window() => producers
             .first()
-            .map_or(1.0, |producer| producer.tumbling_windows),
+            .map_or(1.0, |producer| producer.output_facts.tumbling_windows),
         // Any other operator spans one window: `keeps_input_window`
         // answers per operator, so listing them here would decide nothing.
         Payload::NonASAP(_) | Payload::ASAP(_) => 1.0,
@@ -768,7 +726,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         } else {
             producers
                 .iter()
-                .flat_map(|p| p.sources.iter().copied())
+                .flat_map(|p| p.output_facts.sources.iter().copied())
                 .collect()
         };
     // The series its sources declare, when they all do.
@@ -849,12 +807,12 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         missing: "an arrival rate (the arrival's rows_per_second, or the \
                   source's series_count with sample_interval)",
     };
-    let family = state_family(node, producers.first().map(|p| p.family))?;
+    let family = state_family(node, producers.first().map(|p| p.output_facts.family))?;
     let unchanged_columns = unchanged_source_columns(
         node,
         &producers
             .iter()
-            .map(|p| (p.output_schema, &p.unchanged_columns))
+            .map(|p| (p.output_schema, &p.output_facts.unchanged_columns))
             .collect::<Vec<_>>(),
     );
     let operator = OperatorKind::of(&node.payload);
@@ -1005,7 +963,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let input_state_bytes = || {
         producers.first().map_or(0, |producer| {
             state_bytes_per_row(
-                producer.output,
+                producer.output_facts.output,
                 producer.output_schema,
                 series_row_bytes_beside_state,
             )
@@ -1056,7 +1014,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             || (column.is_none()
                 && producers
                     .first()
-                    .and_then(|producer| producer.folded_per_row)
+                    .and_then(|producer| producer.output_facts.folded_per_row)
                     .is_some_and(|folded| folded.non_negative));
         let input_rows = StateInputRows {
             folded_rows_per_state,
@@ -1121,9 +1079,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             keys,
             input_schema,
             &sources,
-            producers
-                .first()
-                .map_or(&BTreeSet::new(), |producer| &producer.unchanged_columns),
+            producers.first().map_or(&BTreeSet::new(), |producer| {
+                &producer.output_facts.unchanged_columns
+            }),
             data,
             rows_read,
         ))
@@ -1143,15 +1101,15 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // The time its input's raw rows span, when its input is raw rows.
     let input_raw_rows_span_ms = producers
         .first()
-        .and_then(|producer| producer.raw_rows_span_ms);
+        .and_then(|producer| producer.output_facts.raw_rows_span_ms);
     // How far back its input's raw rows' window lies.
     let input_shifted_back_ms = producers
         .first()
-        .map_or(0, |producer| producer.raw_rows_shifted_back_ms);
+        .map_or(0, |producer| producer.output_facts.raw_rows_shifted_back_ms);
     // Its input's raw-row shortfall against their range, when short.
     let input_short_of_range = producers
         .first()
-        .and_then(|producer| producer.raw_rows_short_of_range);
+        .and_then(|producer| producer.output_facts.raw_rows_short_of_range);
     // A range of `range_ms` checked against what its sources hold, whatever
     // its scan's other readers: its own window, ending its offset
     // (`raw_rows_shifted_back_ms`) before the newest row, needs the rows
@@ -1174,7 +1132,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // The exact rate its input's raw rows arrive at, when known.
     let input_raw_rows_per_ms = producers
         .first()
-        .and_then(|producer| producer.raw_rows_per_ms);
+        .and_then(|producer| producer.output_facts.raw_rows_per_ms);
     // Its input rows as a summary built over them counts them
     // ([`source_rows_in_window`]): each row the source rows behind it.
     let source_rows_input = SourceRowsInput {
@@ -1183,7 +1141,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         raw_rows_per_ms: input_raw_rows_per_ms,
         source_rows_per_row: producers
             .first()
-            .and_then(|producer| producer.folded_per_row)
+            .and_then(|producer| producer.output_facts.folded_per_row)
             .and_then(|folded| folded.folded_rows_per_state)
             .unwrap_or(1.0),
     };
@@ -1328,6 +1286,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                                         .all(|source| declared_non_negative(data, source, column))
                             }
                             None => producer
+                                .output_facts
                                 .folded_per_row
                                 .is_some_and(|folded| folded.non_negative),
                         }
@@ -1347,7 +1306,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 // every row's differs; at most each group's bound on
                 // distinct items, and the rows read.
                 let declared_together = |cols: &[usize]| -> Option<u64> {
-                    let unchanged = &producers.first()?.unchanged_columns;
+                    let unchanged = &producers.first()?.output_facts.unchanged_columns;
                     cols.iter().try_fold(1_u64, |product, &col| {
                         let name = input_schema?.fields.get(col)?.name.as_str();
                         let values =
@@ -1510,11 +1469,17 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 // groups times the windows selected, in rows; the bytes by
                 // each level's states.
                 let per_level = cover_windows.clone().unwrap_or_default();
-                let group_count = producers.iter().map(|p| p.output.rows).max().unwrap_or(1);
+                let group_count = producers
+                    .iter()
+                    .map(|p| p.output_facts.output.rows)
+                    .max()
+                    .unwrap_or(1);
                 let mut bytes = 0_u64;
                 for (producer, windows) in producers.iter().zip(&per_level) {
                     bytes = bytes
-                        .checked_add((producer.output.bytes as f64 * windows).round() as u64)
+                        .checked_add(
+                            (producer.output_facts.output.bytes as f64 * windows).round() as u64,
+                        )
                         .ok_or(AnalyticalCostError::Overflow)?;
                 }
                 let out = EdgeStatistics {
@@ -1524,8 +1489,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 // What each selected state folds on average: the range's
                 // rows of one group over the windows selected.
                 built_state_input_rows = producers.last().and_then(|narrowest| {
-                    let mut rows = narrowest.state_input_rows?;
-                    let narrowest_width_ms = narrowest.chain_tumbling_window_width_ms?.max(1);
+                    let mut rows = narrowest.output_facts.state_input_rows?;
+                    let narrowest_width_ms = narrowest
+                        .output_facts
+                        .chain_tumbling_window_width_ms?
+                        .max(1);
                     let range_ms = u64::try_from(range.as_millis()).unwrap_or(u64::MAX);
                     // Exact, rounded once where read (`rows_per_state`): the
                     // range's rows over the states per group it outputs
@@ -1585,7 +1553,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 read_raw_rows_short_of_range = Some(
                     producers
                         .first()
-                        .and_then(|producer| producer.state_data_span_ms)
+                        .and_then(|producer| producer.output_facts.state_data_span_ms)
                         .and_then(|_| {
                             range_short_of_rows_held(
                                 u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
@@ -1674,7 +1642,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         if outputs_states(&node.output_schema) =>
                     {
                         let state_bytes = state_bytes_per_row(
-                            producer.output,
+                            producer.output_facts.output,
                             producer.output_schema,
                             series_row_bytes_beside_state,
                         );
@@ -1922,12 +1890,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 .first()
                 .ok_or(AnalyticalCostError::UnsupportedCandidate)?;
             let narrower_width_ms = narrower
+                .output_facts
                 .chain_tumbling_window_width_ms
                 .ok_or(AnalyticalCostError::UnsupportedCandidate)?
                 .max(1);
             let width_ms = (*tumbling_window_width_ms).max(1);
             let windows_per_window = (width_ms / narrower_width_ms).max(1);
-            let group_count = narrower.output.rows.max(1);
+            let group_count = narrower.output_facts.output.rows.max(1);
             // Stage 2 offers it at ingestion time only.
             if !ingestion {
                 return Err(AnalyticalCostError::UnsupportedCandidate);
@@ -1935,7 +1904,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let merged = group_count as f64 * ONE_SECOND_MS as f64 / narrower_width_ms as f64;
             let emitted = group_count as f64 * ONE_SECOND_MS as f64 / width_ms as f64;
             narrower_states_merged_per_execution = merged.round() as u64;
-            let merged_input_rows = narrower.state_input_rows.map(|mut rows| {
+            let merged_input_rows = narrower.output_facts.state_input_rows.map(|mut rows| {
                 rows.folded_rows_per_state = rows
                     .folded_rows_per_state
                     .map(|per_window| per_window * (width_ms as f64 / narrower_width_ms as f64));
@@ -1943,7 +1912,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             });
             built_state_input_rows = merged_input_rows;
             let input_state_bytes = state_bytes_per_row(
-                narrower.output,
+                narrower.output_facts.output,
                 narrower.output_schema,
                 series_row_bytes_beside_state,
             );
@@ -1955,7 +1924,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 family,
                 input_state_bytes,
                 merged_state_bytes,
-                narrower.state_input_rows,
+                narrower.output_facts.state_input_rows,
                 windows_per_window,
             )
             .times(merged)
@@ -1998,10 +1967,10 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             for producer in producers {
                 // A cover's windows are a mean: its rows over that mean,
                 // rounded (its rows are the groups times the mean, rounded).
-                let windows = producer.tumbling_windows.max(1.0);
+                let windows = producer.output_facts.tumbling_windows.max(1.0);
                 group_count = group_count.max(match windows.fract() == 0.0 {
-                    true => producer.output.rows.div_ceil(windows as u64),
-                    false => (producer.output.rows as f64 / windows).round() as u64,
+                    true => producer.output_facts.output.rows.div_ceil(windows as u64),
+                    false => (producer.output_facts.output.rows as f64 / windows).round() as u64,
                 });
             }
             let states = merged_states(producers)?;
@@ -2018,17 +1987,17 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             // window.
             let input_state_bytes = |producer: &ProducerOutput<'_>| {
                 state_bytes_per_row(
-                    producer.output,
+                    producer.output_facts.output,
                     producer.output_schema,
                     series_row_bytes_beside_state,
                 )
             };
             // Each input's states per group, every one folding its rows.
             let merged_input_rows = StateInputRows::merged(producers.iter().map(|producer| {
-                producer.state_input_rows.map(|rows| {
+                producer.output_facts.state_input_rows.map(|rows| {
                     (
                         rows,
-                        producer.output.rows as f64 / group_count.max(1) as f64,
+                        producer.output_facts.output.rows as f64 / group_count.max(1) as f64,
                     )
                 })
             }));
@@ -2060,10 +2029,10 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                                 family,
                                 input_state_bytes(producer),
                                 merged_state_bytes,
-                                producer.state_input_rows,
+                                producer.output_facts.state_input_rows,
                                 states.div_ceil(group_count.max(1)),
                             )
-                            .times(producer.output.rows as f64),
+                            .times(producer.output_facts.output.rows as f64),
                         )
                     })
                     .plus_terms(&merge_output_terms(family, group_count)),
@@ -2088,11 +2057,14 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             // A merge leaves a KLL's levels sorted; a state built by
             // updates (a `SummaryAgg`, a chain's window) is sorted when read.
             let written_by = match producers.first() {
-                Some(producer) if producer.states_last_merged => StateLastWrittenBy::Merge {
-                    input_rows: producer.state_input_rows,
-                },
+                Some(producer) if producer.output_facts.states_last_merged => {
+                    StateLastWrittenBy::Merge {
+                        input_rows: producer.output_facts.state_input_rows,
+                    }
+                }
                 producer => StateLastWrittenBy::Updates {
-                    input_rows: producer.and_then(|producer| producer.state_input_rows),
+                    input_rows: producer
+                        .and_then(|producer| producer.output_facts.state_input_rows),
                 },
             };
             let per_group = match query {
@@ -2242,7 +2214,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // A node reading summary states or a chain's windows works on closed
     // windows: refresh work. One reading raw rows works per arriving row.
     let reads_closed_windows = producers.iter().any(|producer| {
-        producer.family != StateFamily::None || producer.chain_tumbling_window_width_ms.is_some()
+        producer.output_facts.family != StateFamily::None
+            || producer
+                .output_facts
+                .chain_tumbling_window_width_ms
+                .is_some()
     });
     let phase_times = phase_times(
         reads_closed_windows || settings.data_plane_execution.ingest_work_at_refresh,
@@ -2499,7 +2475,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             .then(|| {
                 producers
                     .first()
-                    .and_then(|producer| producer.state_input_rows)
+                    .and_then(|producer| producer.output_facts.state_input_rows)
             })
             .flatten()?;
         // A range of a chain's windows reaching past the rows the chain
@@ -2509,7 +2485,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         let width_ms = crate::node::usage::chain_tumbling_window_width_ms(producers);
         let data_span_ms = producers
             .first()
-            .and_then(|producer| producer.state_data_span_ms);
+            .and_then(|producer| producer.output_facts.state_data_span_ms);
         let filled = match (&node.payload, width_ms, data_span_ms) {
             (Payload::NonASAP(NonASAPOp::TimeRange { .. }), Some(width_ms), Some(span_ms)) => {
                 let covered_ms = tumbling_windows * width_ms as f64;
@@ -2530,7 +2506,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             .then(|| {
                 producers
                     .first()
-                    .and_then(|producer| producer.state_data_span_ms)
+                    .and_then(|producer| producer.output_facts.state_data_span_ms)
             })
             .flatten()
     });
@@ -2550,7 +2526,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         if matches!(node.payload, Payload::NonASAP(NonASAPOp::Concat { .. })) {
             return producers
                 .iter()
-                .map(|producer| producer.raw_rows_span_ms)
+                .map(|producer| producer.output_facts.raw_rows_span_ms)
                 .collect::<Option<Vec<_>>>()?
                 .into_iter()
                 .max();
@@ -2586,7 +2562,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         .then(|| {
             producers
                 .first()
-                .and_then(|producer| producer.folded_per_row)
+                .and_then(|producer| producer.output_facts.folded_per_row)
         })
         .flatten()?;
         let computes_a_column =
@@ -2629,25 +2605,27 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             outputs_states(&node.output_schema)
                 && producers
                     .first()
-                    .is_some_and(|producer| producer.states_last_merged)
+                    .is_some_and(|producer| producer.output_facts.states_last_merged)
         }
         Payload::NonASAP(_) | Payload::ASAP(_) => false,
     };
     let usage = NodeResourceUsageAndCost {
-        output: out,
-        sources,
-        family,
-        unchanged_columns,
-        tumbling_windows,
-        chain_tumbling_window_width_ms,
-        state_input_rows,
-        states_last_merged,
-        raw_rows_span_ms,
-        raw_rows_per_ms,
-        folded_per_row,
-        raw_rows_short_of_range,
-        state_data_span_ms,
-        raw_rows_shifted_back_ms,
+        output_facts: OutputFacts {
+            output: out,
+            sources,
+            family,
+            unchanged_columns,
+            tumbling_windows,
+            chain_tumbling_window_width_ms,
+            state_input_rows,
+            states_last_merged,
+            raw_rows_span_ms,
+            raw_rows_per_ms,
+            folded_per_row,
+            raw_rows_short_of_range,
+            state_data_span_ms,
+            raw_rows_shifted_back_ms,
+        },
         work_ms_per_execution: node_ms,
         cpu_ops_per_second: estimate.cpu_ops() * per_second,
         scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
@@ -2774,10 +2752,13 @@ pub(crate) fn cost_source(per_node: &BTreeMap<PhysicalASAPNodeId, NodeCost>) -> 
 }
 
 /// The tumbling-window width of the chain the first of `producers` reads
-/// from, if any ([`ProducerOutput::chain_tumbling_window_width_ms`]): a
+/// from, if any ([`OutputFacts::chain_tumbling_window_width_ms`]): a
 /// `TimeRange` over it selects windows.
 fn chain_tumbling_window_width_ms(producers: &[ProducerOutput<'_>]) -> Option<u64> {
-    producers.first()?.chain_tumbling_window_width_ms
+    producers
+        .first()?
+        .output_facts
+        .chain_tumbling_window_width_ms
 }
 
 /// The mean windows per evaluation a `TimeRangeCover` of `range` selects
@@ -2793,7 +2774,13 @@ fn cover_windows_per_level(
 ) -> Vec<f64> {
     let widths: Vec<u64> = producers
         .iter()
-        .map(|producer| producer.chain_tumbling_window_width_ms.unwrap_or(1).max(1))
+        .map(|producer| {
+            producer
+                .output_facts
+                .chain_tumbling_window_width_ms
+                .unwrap_or(1)
+                .max(1)
+        })
         .collect();
     let narrowest = widths.last().copied().unwrap_or(1);
     let grid = evaluation_grid
@@ -2832,11 +2819,11 @@ fn selected_tumbling_windows(
 pub(crate) struct SourceRowsInput {
     /// The rows of one execution's input.
     pub(crate) rows: u64,
-    /// The time they span ([`ProducerOutput::raw_rows_span_ms`]).
+    /// The time they span ([`OutputFacts::raw_rows_span_ms`]).
     pub(crate) raw_rows_span_ms: Option<u64>,
-    /// The exact rate they arrive at ([`ProducerOutput::raw_rows_per_ms`]).
+    /// The exact rate they arrive at ([`OutputFacts::raw_rows_per_ms`]).
     pub(crate) raw_rows_per_ms: Option<f64>,
-    /// The source rows behind each ([`ProducerOutput::folded_per_row`]),
+    /// The source rows behind each ([`OutputFacts::folded_per_row`]),
     /// 1 for source rows themselves.
     pub(crate) source_rows_per_row: f64,
 }
@@ -2876,7 +2863,7 @@ impl SourceRowsInput {
 /// rows at ingestion time, the rows over the `retained_windows` at query
 /// time. Each row counts the source rows behind it. A range of windows
 /// reaching past the rows a query-time chain read holds no rows there
-/// ([`ProducerOutput::state_data_span_ms`]). Example: 10,000 series
+/// ([`OutputFacts::state_data_span_ms`]). Example: 10,000 series
 /// every 15 s in 60 s windows: 40,000 rows, at ingestion time (667 rows a
 /// second) and at query time over 300 s (200,000 rows) alike; in 10 s
 /// windows 6,666.67, and 30 of them merged 200,000.
@@ -2990,7 +2977,7 @@ fn keys_are_input_keys(keys: &[ColumnId], input: &Schema) -> bool {
 fn merged_states(producers: &[ProducerOutput<'_>]) -> Result<u64, AnalyticalCostError> {
     producers.iter().try_fold(0_u64, |total, producer| {
         total
-            .checked_add(producer.output.rows)
+            .checked_add(producer.output_facts.output.rows)
             .ok_or(AnalyticalCostError::Overflow)
     })
 }

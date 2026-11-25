@@ -344,7 +344,7 @@ pub fn plan_cost(
         usage.scanned_bytes_per_second += node_costed.scanned_bytes_per_second;
         fit.add(node_costed.fit);
         work_ms.insert(node.id, node_costed.work_ms_per_execution);
-        output.insert(node.id, node_costed.output);
+        output.insert(node.id, node_costed.output_facts.output);
         if let Some(window) = node_costed.maintained {
             maintained.push((node.id, window));
         }
@@ -989,7 +989,7 @@ pub fn partial_copy_merge_ms(
     usage: &NodeResourceUsageAndCost<'_>,
     settings: &CostInputs,
 ) -> f64 {
-    let family = usage.family;
+    let family = usage.output_facts.family;
     if family == StateFamily::None {
         return 0.0;
     }
@@ -1007,7 +1007,7 @@ pub fn partial_copy_merge_ms(
         || {
             // A partial copy merges into a state of the same window.
             let state_bytes = state_bytes_per_row(
-                usage.output,
+                usage.output_facts.output,
                 &node.output_schema,
                 settings.data_plane_execution.stored_row_bytes_beside_state,
             );

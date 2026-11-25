@@ -520,7 +520,10 @@ pub(crate) fn execution_quantities(
                     cover_output_at(physical.edge(edge).producer_candidate_id, evaluation_grid)
                 })
                 .collect();
-            if let Some(largest) = at_grid.into_iter().max_by_key(|output| output.output.bytes) {
+            if let Some(largest) = at_grid
+                .into_iter()
+                .max_by_key(|output| output.output_facts.output.bytes)
+            {
                 *input = largest;
             }
         }
@@ -854,7 +857,12 @@ pub(crate) fn execution_quantities(
                         cost_inputs,
                     )
                     .ok()
-                    .map(|usage| (usage.kept_result_bytes, usage.output.bytes as f64))
+                    .map(|usage| {
+                        (
+                            usage.kept_result_bytes,
+                            usage.output_facts.output.bytes as f64,
+                        )
+                    })
                 });
                 usage.unwrap_or((0.0, 0.0))
             })
@@ -1081,26 +1089,26 @@ fn logical_output<'a: 'b, 'b, 'c>(
         Vec::new();
     for (candidate, usage) in usages {
         let folds_the_same = |first: &NodeResourceUsageAndCost<'_>| match (
-            first.state_input_rows,
-            usage.state_input_rows,
+            first.output_facts.state_input_rows,
+            usage.output_facts.state_input_rows,
         ) {
             (Some(a), Some(b)) => a.folds_the_same_as(&b),
             (a, b) => a.is_none() && b.is_none(),
         };
         match folded_by_family
             .iter()
-            .find(|(_, first)| first.family == usage.family)
+            .find(|(_, first)| first.output_facts.family == usage.output_facts.family)
         {
             Some((first_candidate, first)) => debug_assert!(
-                usage.family == asap_cost::StateFamily::None || folds_the_same(first),
+                usage.output_facts.family == asap_cost::StateFamily::None || folds_the_same(first),
                 "candidates with the same family and θ fold different rows: {:?}\n  {:?} {:?} {:?}\n  {:?} {:?} {:?}",
-                usage.family,
+                usage.output_facts.family,
                 first_candidate.output_state.timing,
                 first_candidate.payload,
-                first.state_input_rows,
+                first.output_facts.state_input_rows,
                 candidate.output_state.timing,
                 candidate.payload,
-                usage.state_input_rows,
+                usage.output_facts.state_input_rows,
             ),
             None => folded_by_family.push((candidate, usage)),
         }
@@ -1108,43 +1116,63 @@ fn logical_output<'a: 'b, 'b, 'c>(
             output = Some(usage.producer_output(payload, schema));
             continue;
         };
-        if known.raw_rows_per_ms != usage.raw_rows_per_ms {
-            known.raw_rows_per_ms = None;
+        if known.output_facts.raw_rows_per_ms != usage.output_facts.raw_rows_per_ms {
+            known.output_facts.raw_rows_per_ms = None;
         }
         // The source rows behind an aggregate's rows are the same for every
         // candidate of the group (each folds the same samples); kept as a
         // total so that the rows the baseline takes (the most any outputs)
         // times the rows each folds still count each source row once.
         let source_rows_behind = known
+            .output_facts
             .folded_per_row
             .and_then(|folded| folded.folded_rows_per_state)
-            .map(|per_row| per_row * known.output.rows as f64);
+            .map(|per_row| per_row * known.output_facts.output.rows as f64);
         // Short of its range only when every candidate is: a consumer may
         // read one that is not.
-        if usage.raw_rows_short_of_range.is_none() {
-            known.raw_rows_short_of_range = None;
+        if usage.output_facts.raw_rows_short_of_range.is_none() {
+            known.output_facts.raw_rows_short_of_range = None;
         }
         // States built at query time from raw rows only when every
         // candidate's are: a consumer may read an ingestion-time chain,
         // which saw every row. An edge to a query-time chain is checked
         // against that chain's own output (`per_edge`).
-        if usage.state_data_span_ms.is_none() {
-            known.state_data_span_ms = None;
+        if usage.output_facts.state_data_span_ms.is_none() {
+            known.output_facts.state_data_span_ms = None;
         }
-        if usage.output.bytes > known.output.bytes {
-            known.family = usage.family;
-            known.state_input_rows = usage.state_input_rows;
+        if usage.output_facts.output.bytes > known.output_facts.output.bytes {
+            known.output_facts.family = usage.output_facts.family;
+            known.output_facts.state_input_rows = usage.output_facts.state_input_rows;
         }
-        known.raw_rows_span_ms = known.raw_rows_span_ms.max(usage.raw_rows_span_ms);
-        known.output.rows = known.output.rows.max(usage.output.rows);
-        if let (Some(folded), Some(total)) = (known.folded_per_row.as_mut(), source_rows_behind) {
-            folded.folded_rows_per_state = Some(total / known.output.rows.max(1) as f64);
+        known.output_facts.raw_rows_span_ms = known
+            .output_facts
+            .raw_rows_span_ms
+            .max(usage.output_facts.raw_rows_span_ms);
+        known.output_facts.output.rows = known
+            .output_facts
+            .output
+            .rows
+            .max(usage.output_facts.output.rows);
+        if let (Some(folded), Some(total)) = (
+            known.output_facts.folded_per_row.as_mut(),
+            source_rows_behind,
+        ) {
+            folded.folded_rows_per_state =
+                Some(total / known.output_facts.output.rows.max(1) as f64);
         }
-        known.output.bytes = known.output.bytes.max(usage.output.bytes);
-        known.sources.extend(usage.sources.iter().copied());
+        known.output_facts.output.bytes = known
+            .output_facts
+            .output
+            .bytes
+            .max(usage.output_facts.output.bytes);
         known
+            .output_facts
+            .sources
+            .extend(usage.output_facts.sources.iter().copied());
+        known
+            .output_facts
             .unchanged_columns
-            .retain(|column| usage.unchanged_columns.contains(column));
+            .retain(|column| usage.output_facts.unchanged_columns.contains(column));
     }
     output
 }
@@ -1228,7 +1256,7 @@ fn quantity_of(
             let compaction = match refresh.refresh_window_width_ms {
                 Some(_) => {
                     copies()
-                        * usage.output.rows as f64
+                        * usage.output_facts.output.rows as f64
                         * asap_cost::partial_copy_merge_ms(node, usage, cost_inputs)
                 }
                 None => 0.0,
