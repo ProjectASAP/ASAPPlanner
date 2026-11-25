@@ -4,6 +4,3 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc caa629261cfa6460dfc4f42cd850b3df1598b89688b810dc5369b6ce98b6e7a0 # shrinks to limit = -2.2250738585072014e-308
-cc fc480c26c738e9ffbfcc32068f28d19087e97963e0f5561663bdb52cf3f1d29a # shrinks to (algorithm, parameters) = (DDSketch, DDSketch { alpha: -0.0 }), statistic = Quantile { q: NaN }, failure_probability = 2.2250738585072014e-308, sign = Some(NonNegative), bound = None
-cc 64ca32682156a464d9ff17913181a8f81b3a3d00b40cfe6454243865c3ea9cf9 # shrinks to (algorithm, parameters) = (DDSketch, DDSketch { alpha: -2.2250738585072014e-308 }), statistic = Quantile { q: -0.0 }, failure_probability = 0.0, sign = Some(NonNegative), bound = None
