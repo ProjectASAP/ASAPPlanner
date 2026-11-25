@@ -43,6 +43,8 @@ enum Role {
     Facade,
     /// `asap-executor`: the Planner's own runtime.
     Runtime,
+    /// `asap-planner-cli`: the `asap_planner` command line over the facade.
+    Cli,
     /// `asap-devtools`, `asap-integration-tests`: no restriction.
     Unrestricted,
 }
@@ -65,6 +67,7 @@ fn role_of(name: &str) -> Option<Role> {
         | "asap-stage3-plan-selection" => Role::Stage,
         "asap-planner" => Role::Facade,
         "asap-executor" => Role::Runtime,
+        "asap-planner-cli" => Role::Cli,
         "asap-devtools" | "asap-integration-tests" => Role::Unrestricted,
         _ => return None,
     })
@@ -77,6 +80,8 @@ fn rule_violated(from: Role, to: Role) -> Option<&'static str> {
     match (from, to) {
         (Unrestricted, _) => None,
         (_, Unrestricted) => Some("no crate depends on devtools or integration-tests"),
+        (Cli, _) => None,
+        (_, Cli) => Some("only devtools and integration-tests depend on the CLI"),
         (Types, _) => Some("asap-types depends on no workspace crate"),
         (SharedModel, Types) => None,
         (SharedModel, _) => Some("asap-accuracy and asap-cost depend only on asap-types"),
@@ -339,6 +344,26 @@ fn checker_rejects_an_unclassified_crate_and_shared_model_edges() {
             "workspace crate `asap-new-crate` has no role: add it to `role_of` in \
              crates/integration-tests/tests/crate_graph.rs"
                 .to_string(),
+        ]
+    );
+}
+
+/// The CLI may sit on the facade and devtools on the CLI, but the facade
+/// may not depend on the CLI.
+#[test]
+fn checker_allows_the_cli_over_the_facade_but_not_under_it() {
+    let metadata = serde_json::json!({"packages": [
+        package("asap-planner-cli", &["asap-planner"], &[]),
+        package("asap-devtools", &["asap-planner-cli"], &[]),
+        // Forbidden: the facade on the CLI.
+        package("asap-planner", &["asap-planner-cli"], &[]),
+    ]});
+    assert_eq!(
+        crate_graph_violations(&metadata),
+        vec![
+            "forbidden [dependencies] edge asap-planner -> asap-planner-cli: \
+             only devtools and integration-tests depend on the CLI"
+                .to_string()
         ]
     );
 }

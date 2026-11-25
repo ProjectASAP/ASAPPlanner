@@ -23,7 +23,7 @@
 //! accuracy guarantees are `ignored` (enforced otherwise). `<id>.json` beside it is its snapshot,
 //! the corpus snapshot of the selected plan plus every query's text. Workloads copied from elsewhere live in `workloads/`.
 //! Regenerate with
-//! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored sketch_plans_match_snapshots`.
+//! `UPDATE_SNAPSHOTS=1 cargo test --release -p asap-planner-cli --test corpus_snapshots -- --ignored sketch_plans_match_snapshots`.
 //!
 //! Each workload is planned by `asap_planner --run-until stage3`, with no
 //! time limit. A workload whose selection fails records its error, as a

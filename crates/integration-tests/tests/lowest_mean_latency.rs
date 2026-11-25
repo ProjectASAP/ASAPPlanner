@@ -11,8 +11,8 @@
 //! ingestion-time chain of 10 s windows whose refresh emits 1,000 states
 //! per window.
 
-use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_planner::{CostInputs, DeploymentCapabilities, PlanningModels};
+use asap_planner_cli::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_types::ir::NonASAPOp;
 use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
 use serde_json::{json, Value};

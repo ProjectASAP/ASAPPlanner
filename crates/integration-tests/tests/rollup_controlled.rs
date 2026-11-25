@@ -29,7 +29,7 @@ fn fixture() -> (PlanningWorkload, Vec<QueryRoot>) {
     ]);
     schema.time_index = Some(0);
     let catalog = asap_frontend_sql::SqlCatalog::new().with_table("http", schema);
-    let roots = asap_devtools::planning_stages::lower_sql_roots(&workload, &catalog).unwrap();
+    let roots = asap_planner_cli::planning_stages::lower_sql_roots(&workload, &catalog).unwrap();
     (workload, roots)
 }
 fn nodes(roots: &[QueryRoot]) -> Vec<Rc<OperatorNode>> {

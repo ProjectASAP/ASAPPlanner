@@ -15,20 +15,26 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-const DOCS: &str =
-    include_str!("../../../frontend-promql/tests/observability/data/promql_corpus_docs.txt");
-const TESTDATA: &str =
-    include_str!("../../../frontend-promql/tests/observability/data/promql_corpus_testdata.txt");
-const O11Y: &str =
-    include_str!("../../../frontend-promql/tests/observability/data/o11y_bench_promql.txt");
-const ALERTS: &str =
-    include_str!("../../../frontend-promql/tests/observability/data/awesome_prometheus_alerts.txt");
-const DQC: &str = include_str!(
-    "../../../frontend-sql/tests/data_quality_check/data/synthetic_packet_trace_queries.sql"
+const DOCS: &str = include_str!(
+    "../../../frontend-promql/tests/lowering_corpora/promql_corpus/data/promql_corpus_docs.txt"
 );
-const NETFLOW: &str = include_str!("../../../frontend-sql/tests/netflow/data/netflow.sql");
-const BGP: &str = include_str!("../../../frontend-sql/tests/bgp_analytics/data/bgp_analytics.sql");
-const BGP_WORKLOAD: &str = include_str!("../../../frontend-sql/tests/bgp_jan2024_workload/data/bgp_jan2024_rrc00_200_query_workload.yaml");
+const TESTDATA: &str = include_str!(
+    "../../../frontend-promql/tests/lowering_corpora/promql_corpus/data/promql_corpus_testdata.txt"
+);
+const O11Y: &str = include_str!(
+    "../../../frontend-promql/tests/lowering_corpora/o11y_bench/data/o11y_bench_promql.txt"
+);
+const ALERTS: &str =
+    include_str!("../../../frontend-promql/tests/lowering_corpora/awesome_prometheus_alerts/data/awesome_prometheus_alerts.txt");
+const DQC: &str = include_str!(
+    "../../../frontend-sql/tests/lowering_corpora/packet_trace/data/synthetic_packet_trace_queries.sql"
+);
+const NETFLOW: &str =
+    include_str!("../../../frontend-sql/tests/lowering_corpora/netflow/data/netflow.sql");
+const BGP: &str = include_str!(
+    "../../../frontend-sql/tests/lowering_corpora/bgp_analytics/data/bgp_analytics.sql"
+);
+const BGP_WORKLOAD: &str = include_str!("../../../frontend-sql/tests/lowering_corpora/bgp_jan2024/data/bgp_jan2024_rrc00_200_query_workload.yaml");
 
 #[derive(serde::Deserialize)]
 struct Workload {

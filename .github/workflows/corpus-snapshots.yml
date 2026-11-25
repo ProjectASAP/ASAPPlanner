@@ -31,7 +31,7 @@ jobs:
     - uses: Swatinem/rust-cache@v2
 
     - name: Check planner snapshots
-      run: cargo test --release --locked -p asap-devtools --test corpus_snapshots -- --include-ignored
+      run: cargo test --release --locked -p asap-planner-cli --test corpus_snapshots -- --include-ignored
 
     - name: Upload regenerated snapshots
       if: failure()

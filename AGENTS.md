@@ -34,7 +34,7 @@
   **Algorithm changes** (or "None"), **Decisions and open questions**,
   **Verification**, and **Follow-ups**.
 - A PR that changes planner snapshots
-  (`crates/devtools/tests/corpus_snapshots/`) says under **Verification**
+  (`crates/planner-cli/tests/corpus_snapshots/`) says under **Verification**
   which queries changed and why; a person confirms the why.
 - Agents must not complete fields reserved for human judgment, approval, or
   attestation.

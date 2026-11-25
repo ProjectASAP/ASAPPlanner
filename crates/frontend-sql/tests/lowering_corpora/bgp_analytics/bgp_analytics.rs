@@ -2,7 +2,7 @@
 //! corpus, parsed as `SqlDialect::ClickhouseSQL`.
 //!
 //! Source: 15 real ClickHouse queries against a `bgp_updates` /
-//! `bgp_rib_state` dataset (`tests/bgp_analytics/data/bgp_analytics.sql`) --
+//! `bgp_rib_state` dataset (`tests/lowering_corpora/bgp_analytics/data/bgp_analytics.sql`) --
 //! prefix update/withdrawal top-k, AS-path parsing for origin-ASN
 //! attribution, MOAS detection, prefix deaggregation, RIB visibility/churn.
 //!

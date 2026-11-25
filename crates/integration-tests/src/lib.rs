@@ -174,7 +174,7 @@ pub mod planning {
     pub fn run_all_stages(
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
-    ) -> asap_devtools::planning_stages::PlanningStagesRun {
+    ) -> asap_planner_cli::planning_stages::PlanningStagesRun {
         run_all_stages_with(root, accuracy, asap_planner::PlanningModels::builtin())
     }
 
@@ -183,9 +183,9 @@ pub mod planning {
         root: Rc<OperatorNode>,
         accuracy: AccuracyTarget,
         models: asap_planner::PlanningModels<'_>,
-    ) -> asap_devtools::planning_stages::PlanningStagesRun {
+    ) -> asap_planner_cli::planning_stages::PlanningStagesRun {
         let data = declared_data(&root);
-        asap_devtools::planning_stages::run_planning_stages_over(
+        asap_planner_cli::planning_stages::run_planning_stages_over(
             vec![QueryRoot::Operator(root)],
             &[single_query_entry(accuracy)],
             &data,
@@ -217,7 +217,7 @@ pub mod planning {
 
     /// The operator roots of the plan Stage 3 built in `run`, as IR.
     fn selected_operator_roots(
-        run: &asap_devtools::planning_stages::PlanningStagesRun,
+        run: &asap_planner_cli::planning_stages::PlanningStagesRun,
     ) -> Vec<Rc<OperatorNode>> {
         let (plan, _) = run.run.selection.as_ref().expect("a plan is selected");
         plan.query_roots()

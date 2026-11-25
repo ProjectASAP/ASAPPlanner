@@ -17,6 +17,9 @@ asap-stage3-plan-selection = { path = "../stage3-plan-selection" }
 # The installable plan of the selected candidate (`InstallablePlan`),
 # whose stored outputs and plan file `asap_planner` writes.
 asap-planner = { path = "../planner" }
+# The stage pipeline and operator labels `planner_fuzz` shares with
+# `asap_planner`.
+asap-planner-cli = { path = "../planner-cli" }
 # The executor's supported summary families, which `asap_planner` plans
 # with when the deployment declares none, as `plan_installable` does.
 asap-executor = { path = "../executor" }
@@ -28,7 +31,7 @@ asap-executor = { path = "../executor" }
 aqpbm-core = { git = "https://github.com/ProjectASAP/sketch-bench", rev = "7c0d121192beaf3b68b1b1ec36aab8aafc90d0ae", default-features = false }
 futures = "0.3"
 
-# Used by the asap_planner / variant_coverage bins (catalog schemas,
+# Used by the variant_coverage bin (catalog schemas,
 # async SQL path, JSON output) and by the topk_ir / canonical_examples
 # examples. Regular deps, not dev-deps: `[[bin]]` targets can't see dev-deps.
 asap-types = { path = "../types" }
@@ -42,11 +45,6 @@ tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 aqpbm-datagen = { git = "https://github.com/ProjectASAP/sketch-bench", rev = "7c0d121192beaf3b68b1b1ec36aab8aafc90d0ae" }
 asap-types = { path = "../types", features = ["test-support"] }
 asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
-# The golden runner (`tests/goldens.rs`): its own test harness, `case.toml`
-# parsing and the line diff it prints on failure.
-libtest-mimic = "0.8"
-toml = "0.9"
-similar = "2"
 
 
 [[test]]
@@ -57,14 +55,3 @@ path = "tests/main.rs"
 [[test]]
 name = "asap_lane_conformance"
 path = "tests/asap_lane_conformance.rs"
-
-# The nightly corpus-snapshots workflow runs this binary by name.
-[[test]]
-name = "corpus_snapshots"
-path = "tests/corpus_snapshots.rs"
-
-# The golden runner: one trial per case directory under `tests/goldens/`.
-[[test]]
-name = "goldens"
-path = "tests/goldens.rs"
-harness = false

@@ -19,7 +19,7 @@
 //! broke, not statistical noise.
 
 use asap_frontend_promql::PromqlError as LoweringError;
-#[path = "../support.rs"]
+#[path = "../../support.rs"]
 mod support;
 use asap_types::accuracy::AccuracyTarget;
 use support::lower_promql;

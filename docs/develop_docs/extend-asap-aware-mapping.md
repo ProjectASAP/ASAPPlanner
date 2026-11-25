@@ -49,7 +49,7 @@ A new sketch that Pass 1 can offer for an intent.
    `crates/executor/src/summary_kernels/` and register it in
    `factory.rs` and `capability.rs`. Gaps in the library are fixed upstream,
    not with a local copy.
-7. **Labels.** Name it in `asap_devtools::candidate_labels`.
+7. **Labels.** Name it in `asap_planner_cli::candidate_labels`.
 
 Tests: a Pass 1 test in `crates/stage1-pass1-per-computation-candidates/src/tests.rs`
 that the intent gets the new candidate (and that a deployment without it
@@ -122,7 +122,7 @@ tests in `planner_layering_example4.rs`.
   [Plan Viewer guide](../user_guide_docs/plan-viewer.md).
 
 Tests: a Stage 3 unit test that the check rejects exactly the candidates it
-should, and a `crates/devtools/tests/asap_planner.rs` test for the flag.
+should, and a `crates/planner-cli/tests/asap_planner.rs` test for the flag.
 
 ## 5. Add a query-language construct
 

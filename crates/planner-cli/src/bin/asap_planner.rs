@@ -1,13 +1,13 @@
-// cargo run -p asap-devtools --bin asap_planner -- \
+// cargo run -p asap-planner-cli --bin asap_planner -- \
 //     --workload dashboard.json --run-until stage3
-// cargo run -p asap-devtools --bin asap_planner -- \
+// cargo run -p asap-planner-cli --bin asap_planner -- \
 //     --workload promql.json --workload sql.json --sql-catalog-table '<json>' \
 //     --run-until stage1_pass2 --format json --out run.json
 //
 // Runs the planner stages over a workload up to and including
 // `--run-until` (`stage0`, `stage1_pass1`, `stage1_pass2`, `stage2` or
 // `stage3`) and writes each stage's output, as text (`--format text`, the default;
-// `asap_devtools::planning_stages_text`) or as an `asap-stage-pipeline/v2`
+// `asap_planner_cli::planning_stages_text`) or as an `asap-stage-pipeline/v2`
 // document for the Plan Viewer (`--format json`), to `--out` or standard
 // output. The text is terse by default (a legend per stage, folded θ
 // variants, producer ids per input, pruned counts per cause); `--verbose`
@@ -16,7 +16,7 @@
 //
 // The stages run through the facade's own pipeline
 // (`asap_planner::run_planning_until`, called by
-// `asap_devtools::planning_stages::run_stages_until`), so the selected plan
+// `asap_planner_cli::planning_stages::run_stages_until`), so the selected plan
 // is the one `run_planning` selects.
 //
 // Inputs, one flag per field of the planner's `UserInput`:
@@ -144,7 +144,7 @@
 //
 // The document is stable, so it can be compared as text: memo group,
 // candidate and physical candidate ids are canonical (renumbered depth
-// first from the query roots, `asap_devtools::stable_output::CanonicalIds`),
+// first from the query roots, `asap_planner_cli::stable_output::CanonicalIds`),
 // lists are in canonical id order, every non-integer number is rounded to
 // 12 significant digits, and the MILP's times and solve count are left
 // out. The text output keeps the planner's own ids, as in logs and error
@@ -154,19 +154,19 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use asap_cost::{CostInputs, PlanCost};
-use asap_devtools::candidate_labels::operator_label;
-use asap_devtools::planning_stages::{
+use asap_frontend_promql::{metric_type_warnings, promql_metric_names};
+use asap_frontend_sql::SqlCatalog;
+use asap_planner::{assumed_data_facts, InstallablePlan, PlanningModels, SelectionError};
+use asap_planner_cli::candidate_labels::operator_label;
+use asap_planner_cli::planning_stages::{
     lower_metricsql_roots, lower_promql_roots, lower_sql_roots, run_stages_until, sql_catalog,
     PlanningStagesError, PlanningStagesRun, RunUntil,
 };
-use asap_devtools::planning_stages_text::{
+use asap_planner_cli::planning_stages_text::{
     aggregate_coverage_text, column_lineage_text, edges_per_input, logical_edges_into,
     physical_edge_rejection, planning_stages_text, root_prune_reason_text, selected_edges,
 };
-use asap_devtools::stable_output::{rounded_to_12_significant_digits, CanonicalIds};
-use asap_devtools::SqlCatalog;
-use asap_frontend_promql::{metric_type_warnings, promql_metric_names};
-use asap_planner::{assumed_data_facts, InstallablePlan, PlanningModels, SelectionError};
+use asap_planner_cli::stable_output::{rounded_to_12_significant_digits, CanonicalIds};
 use asap_stage3_plan_selection::{large_peak_memory_warning, AcceptedAccuracy, Selection};
 use asap_types::accuracy::{default_metric_for_root, AccuracyTarget};
 use asap_types::deployment_capabilities::DeploymentCapabilities;

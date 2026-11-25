@@ -2426,7 +2426,7 @@ fn read_plan_file(path: &str) -> asap_planner::InstallablePlan {
 /// Whether `plan`'s DAG is the plan `document` selected; the document's
 /// numbers are rounded to 12 significant digits, so the file's are too.
 fn is_the_selected_plan(plan: &asap_planner::InstallablePlan, document: &Value) -> bool {
-    asap_devtools::stable_output::rounded_to_12_significant_digits(
+    asap_planner_cli::stable_output::rounded_to_12_significant_digits(
         serde_json::to_value(&plan.dag).unwrap(),
     ) == document["stage3_plan_selection"]["plan"]
 }

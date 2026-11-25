@@ -6,11 +6,11 @@
 //! Larger fixtures check validated behavior without asserting global optimality.
 
 use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel};
-use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots};
 use asap_planner::{
     run_planning, CandidateExclusion, ErrorSelectingPlan, PlanSearchSettings, PlanningModels,
     PlanningRun, RejectionCause, SelectionError,
 };
+use asap_planner_cli::planning_stages::{lower_promql_roots, lower_sql_roots};
 use asap_types::accuracy::AccuracyTarget;
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::operator::AggIntent;

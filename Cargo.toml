@@ -16,6 +16,7 @@ members = [
     "crates/metricsql-common-parser-support",
     "crates/frontend-sql",
     "crates/planner",
+    "crates/planner-cli",
     "crates/devtools",
     "crates/integration-tests",
 ]

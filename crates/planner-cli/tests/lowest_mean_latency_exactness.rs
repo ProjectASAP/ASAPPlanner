@@ -51,7 +51,7 @@ fn selected_with(
         .args(["--workload", workload, "--run-until", "stage3"])
         .args([
             "--deployment-capabilities",
-            &format!("crates/devtools/tests/sketch_plan_snapshots/deployments/{deployment}.capabilities.json"),
+            &format!("crates/planner-cli/tests/sketch_plan_snapshots/deployments/{deployment}.capabilities.json"),
         ])
         .args(["--cost-inputs", cost_inputs_of(workload)])
         .args(["--format", "json"]);
@@ -139,7 +139,7 @@ fn assert_same_optimum(workload: &str, deployment: &str, ignore_accuracy: bool) 
 /// slower without the speed-ups, is in the ignored test.
 #[test]
 fn the_speed_ups_keep_the_optimum() {
-    let workloads = "crates/devtools/tests/sketch_plan_snapshots/workloads";
+    let workloads = "crates/planner-cli/tests/sketch_plan_snapshots/workloads";
     for (workload, deployment, ignore_accuracy) in [
         ("topk-rate.json", "mvp", true),
         ("mixed-quantiles.json", "raw-retained", false),
@@ -157,14 +157,14 @@ fn the_speed_ups_keep_the_optimum() {
 
 /// Every PromQL sketch plan snapshot workload (minutes without the
 /// speed-ups), exact and with the default stop rule:
-/// `cargo test -p asap-devtools --test devtools -- --ignored the_speed_ups_keep_every`.
+/// `cargo test -p asap-planner-cli --test planner_cli -- --ignored the_speed_ups_keep_every`.
 #[test]
 #[ignore]
 fn the_speed_ups_keep_every_snapshot_workloads_optimum() {
     let root = root();
     let manifest: Value = serde_json::from_str(
         &std::fs::read_to_string(
-            root.join("crates/devtools/tests/sketch_plan_snapshots/manifest.json"),
+            root.join("crates/planner-cli/tests/sketch_plan_snapshots/manifest.json"),
         )
         .unwrap(),
     )
@@ -194,7 +194,7 @@ fn the_speed_ups_keep_every_snapshot_workloads_optimum() {
 /// moves the optimum fails here.
 #[test]
 fn the_measured_workloads_keep_their_optimum_in_a_bounded_model() {
-    let snapshots = "crates/devtools/tests/sketch_plan_snapshots/workloads";
+    let snapshots = "crates/planner-cli/tests/sketch_plan_snapshots/workloads";
     for (workload, deployment, ignore_accuracy, mean_latency_ms, variables, rows) in [
         (
             format!("{snapshots}/topk-rate.json"),
@@ -262,7 +262,7 @@ fn the_measured_workloads_keep_their_optimum_in_a_bounded_model() {
 /// too, off in both), at the same optimum.
 #[test]
 fn dominated_theta_families_are_left_out() {
-    let workload = "crates/devtools/tests/sketch_plan_snapshots/workloads/topk-rate.json";
+    let workload = "crates/planner-cli/tests/sketch_plan_snapshots/workloads/topk-rate.json";
     let run = |theta_dominance: &str| -> Value {
         let output = Command::new(env!("CARGO_BIN_EXE_asap_planner"))
             .current_dir(root())
@@ -272,7 +272,7 @@ fn dominated_theta_families_are_left_out() {
             .args(["--workload", workload, "--run-until", "stage3"])
             .args([
                 "--deployment-capabilities",
-                "crates/devtools/tests/sketch_plan_snapshots/deployments/mvp.capabilities.json",
+                "crates/planner-cli/tests/sketch_plan_snapshots/deployments/mvp.capabilities.json",
                 "--cost-inputs",
                 "tools/dag-viewer/cost-inputs/cluster-lowest-mean-latency.json",
                 "--ignore-accuracy-guarantees",
@@ -322,7 +322,7 @@ const SEED_ROWS: u64 = 2763;
 /// with the default stop rule, on the five measured workloads.
 #[test]
 fn the_milp_latencies_are_the_plan_costs() {
-    let snapshots = "crates/devtools/tests/sketch_plan_snapshots/workloads";
+    let snapshots = "crates/planner-cli/tests/sketch_plan_snapshots/workloads";
     for (workload, deployment, ignore_accuracy) in [
         (format!("{snapshots}/topk-rate.json"), "mvp", true),
         (
@@ -364,7 +364,7 @@ fn the_milp_latencies_are_the_plan_costs_on_every_snapshot_workload() {
 fn promql_snapshot_workloads() -> Vec<(String, String, bool)> {
     let manifest: Value = serde_json::from_str(
         &std::fs::read_to_string(
-            root().join("crates/devtools/tests/sketch_plan_snapshots/manifest.json"),
+            root().join("crates/planner-cli/tests/sketch_plan_snapshots/manifest.json"),
         )
         .unwrap(),
     )
@@ -414,7 +414,7 @@ fn assert_milp_latencies_are_plan_costs(
             .args(["--workload", workload, "--run-until", "stage3"])
             .args([
                 "--deployment-capabilities",
-                &format!("crates/devtools/tests/sketch_plan_snapshots/deployments/{deployment}.capabilities.json"),
+                &format!("crates/planner-cli/tests/sketch_plan_snapshots/deployments/{deployment}.capabilities.json"),
             ])
             .args(["--cost-inputs", cost_inputs_of(workload)])
             .args(extra);
@@ -499,7 +499,8 @@ fn assert_milp_latencies_are_plan_costs(
 #[test]
 fn a_solve_without_a_plan_in_its_node_limit_retries_from_cost_model_1_s_plan() {
     let root = root();
-    let workload = "crates/devtools/tests/sketch_plan_snapshots/workloads/distinct-two-forms.json";
+    let workload =
+        "crates/planner-cli/tests/sketch_plan_snapshots/workloads/distinct-two-forms.json";
     let cluster = "tools/dag-viewer/cost-inputs/cluster-lowest-mean-latency.json";
     let mut small_disk: Value =
         serde_json::from_str(&std::fs::read_to_string(root.join(cluster)).unwrap()).unwrap();
@@ -514,7 +515,7 @@ fn a_solve_without_a_plan_in_its_node_limit_retries_from_cost_model_1_s_plan() {
             .args(["--workload", workload, "--run-until", "stage3"])
             .args([
                 "--deployment-capabilities",
-                "crates/devtools/tests/sketch_plan_snapshots/deployments/raw-retained.capabilities.json",
+                "crates/planner-cli/tests/sketch_plan_snapshots/deployments/raw-retained.capabilities.json",
             ])
             .args(["--cost-inputs", cost_inputs, "--out", "/dev/stdout"]);
         if let Some(nodes) = node_limit {

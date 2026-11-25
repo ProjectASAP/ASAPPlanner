@@ -32,7 +32,8 @@ fn col(name: &str, dtype: DataType) -> Field {
     Field::plain(name, dtype, false)
 }
 
-/// The `packets` table of the data-quality-check corpus.
+/// The `packets` table of the packet-trace corpus
+/// (`frontend-sql/tests/lowering_corpora/packet_trace/`).
 pub fn dqc_catalog() -> SqlCatalog {
     SqlCatalog::new().with_table(
         "packets",

@@ -393,6 +393,7 @@ dependencies = [
  "asap-frontend-promql",
  "asap-frontend-sql",
  "asap-planner",
+ "asap-planner-cli",
  "asap-stage0-memo",
  "asap-stage1-pass1-per-computation-candidates",
  "asap-stage1-pass2-reuse-candidates",
@@ -400,13 +401,10 @@ dependencies = [
  "asap-stage3-plan-selection",
  "asap-types",
  "futures",
- "libtest-mimic",
  "serde",
  "serde_json",
  "serde_yaml",
- "similar",
  "tokio",
- "toml",
 ]
 
 [[package]]
@@ -485,6 +483,7 @@ dependencies = [
  "asap-frontend-promql",
  "asap-frontend-sql",
  "asap-planner",
+ "asap-planner-cli",
  "asap-stage0-memo",
  "asap-stage1-pass1-per-computation-candidates",
  "asap-stage2-physical-optimization",
@@ -518,6 +517,27 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "asap-planner-cli"
+version = "0.1.0"
+dependencies = [
+ "asap-cost",
+ "asap-executor",
+ "asap-frontend-metricsql",
+ "asap-frontend-promql",
+ "asap-frontend-sql",
+ "asap-planner",
+ "asap-stage1-pass1-per-computation-candidates",
+ "asap-stage3-plan-selection",
+ "asap-types",
+ "libtest-mimic",
+ "serde",
+ "serde_json",
+ "similar",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

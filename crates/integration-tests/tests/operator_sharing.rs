@@ -19,7 +19,7 @@ fn col(name: &str, dtype: DataType) -> Field {
     Field::plain(name, dtype, false)
 }
 
-/// TPC-H `lineitem`, as `frontend-sql/tests/data_quality_check/tpch_deequ.rs`
+/// TPC-H `lineitem`, as `frontend-sql/tests/lowering_corpora/tpch_deequ/tpch_deequ.rs`
 /// declares it (DECIMAL columns as `Float64`, no time index, no keys).
 fn catalog() -> SqlCatalog {
     SqlCatalog::new().with_table(

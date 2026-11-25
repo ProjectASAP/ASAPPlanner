@@ -42,35 +42,35 @@ tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 
-# Corpus tests in domain folders (data-quality-check, netflow); declared
+# The lowering corpora live in `tests/lowering_corpora/<source>/`; declared
 # explicitly since Cargo only auto-discovers `.rs` files directly in `tests/`.
 [[test]]
 name = "synthetic_packet_trace"
-path = "tests/data_quality_check/synthetic_packet_trace.rs"
+path = "tests/lowering_corpora/packet_trace/synthetic_packet_trace.rs"
 
 [[test]]
 name = "tpch_deequ"
-path = "tests/data_quality_check/tpch_deequ.rs"
+path = "tests/lowering_corpora/tpch_deequ/tpch_deequ.rs"
 
 [[test]]
 name = "tpch_rich"
-path = "tests/data_quality_check/tpch_rich.rs"
+path = "tests/lowering_corpora/tpch_rich/tpch_rich.rs"
 
 [[test]]
 name = "netflow"
-path = "tests/netflow/netflow.rs"
+path = "tests/lowering_corpora/netflow/netflow.rs"
 
 [[test]]
 name = "bgp_analytics"
-path = "tests/bgp_analytics/bgp_analytics.rs"
+path = "tests/lowering_corpora/bgp_analytics/bgp_analytics.rs"
 
 [[test]]
 name = "bgp_jan2024_workload"
-path = "tests/bgp_jan2024_workload/bgp_jan2024_workload.rs"
+path = "tests/lowering_corpora/bgp_jan2024/bgp_jan2024_workload.rs"
 
 [[test]]
 name = "clickbench"
-path = "tests/clickbench/clickbench.rs"
+path = "tests/lowering_corpora/clickbench/clickbench.rs"
 
 [[test]]
 name = "sql"

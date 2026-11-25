@@ -13,7 +13,7 @@
 //! file replaces the default file, and a workload without `data_workload`
 //! gets `defaults/data_workload.json`.
 //!
-//! Run a subset by name: `cargo test --release -p asap-devtools --test
+//! Run a subset by name: `cargo test --release -p asap-planner-cli --test
 //! goldens stage0/`. Regenerate `expected.json` with `UPDATE_SNAPSHOTS=1`:
 //! a case's file is rewritten only when the output no longer matches it,
 //! and the case's assertions still run, so a wrong output is not written.
@@ -189,7 +189,7 @@ fn run_case(name: &str, dir: &Path, update: bool) -> Result<(), String> {
     std::fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
     let command = planner_command(&case, dir, &scratch)?;
     let reproduce = format!(
-        "reproduce: {}\nregenerate: UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools \
+        "reproduce: {}\nregenerate: UPDATE_SNAPSHOTS=1 cargo test --release -p asap-planner-cli \
          --test goldens -- --exact {name}",
         shell_line(&command)
     );

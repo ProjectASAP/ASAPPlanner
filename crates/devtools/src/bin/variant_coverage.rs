@@ -175,23 +175,23 @@ async fn main() {
         (
             "promql/docs",
             include_str!(
-                "../../../frontend-promql/tests/observability/data/promql_corpus_docs.txt"
+                "../../../frontend-promql/tests/lowering_corpora/promql_corpus/data/promql_corpus_docs.txt"
             ),
         ),
         (
             "promql/testdata",
             include_str!(
-                "../../../frontend-promql/tests/observability/data/promql_corpus_testdata.txt"
+                "../../../frontend-promql/tests/lowering_corpora/promql_corpus/data/promql_corpus_testdata.txt"
             ),
         ),
         (
             "promql/o11y_bench",
-            include_str!("../../../frontend-promql/tests/observability/data/o11y_bench_promql.txt"),
+            include_str!("../../../frontend-promql/tests/lowering_corpora/o11y_bench/data/o11y_bench_promql.txt"),
         ),
         (
             "promql/awesome_alerts",
             include_str!(
-                "../../../frontend-promql/tests/observability/data/awesome_prometheus_alerts.txt"
+                "../../../frontend-promql/tests/lowering_corpora/awesome_prometheus_alerts/data/awesome_prometheus_alerts.txt"
             ),
         ),
     ];
@@ -219,8 +219,8 @@ async fn main() {
     // ── SQL corpora ──
     #[allow(clippy::type_complexity)]
     let sql_corpora: &[(&str, &str, fn() -> SqlCatalog)] = &[
-        ("sql/dqc_packet_trace", include_str!("../../../frontend-sql/tests/data_quality_check/data/synthetic_packet_trace_queries.sql"), dqc_catalog),
-        ("sql/netflow", include_str!("../../../frontend-sql/tests/netflow/data/netflow.sql"), netflow_catalog),
+        ("sql/dqc_packet_trace", include_str!("../../../frontend-sql/tests/lowering_corpora/packet_trace/data/synthetic_packet_trace_queries.sql"), dqc_catalog),
+        ("sql/netflow", include_str!("../../../frontend-sql/tests/lowering_corpora/netflow/data/netflow.sql"), netflow_catalog),
     ];
     for (name, corpus, catalog_fn) in sql_corpora {
         let catalog = catalog_fn();
@@ -247,8 +247,9 @@ async fn main() {
     // bgp_analytics: ClickHouse dialect, mostly-rejected corpus (documented in
     // its own test) — still worth walking whatever *does* lower.
     {
-        let corpus =
-            include_str!("../../../frontend-sql/tests/bgp_analytics/data/bgp_analytics.sql");
+        let corpus = include_str!(
+            "../../../frontend-sql/tests/lowering_corpora/bgp_analytics/data/bgp_analytics.sql"
+        );
         let catalog = bgp_catalog();
         let mut variants = Variants::default();
         let mut lowered = 0;
