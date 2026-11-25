@@ -19,6 +19,11 @@ test-support = []
 name = "metricsql"
 path = "tests/main.rs"
 
+# Reads a corpus kept outside this repository (`$ASAP_EXTERNAL_CORPUS_DIR`).
+[[test]]
+name = "external_corpus"
+path = "tests/lowering_corpora/external_corpus/external_corpus.rs"
+
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
 asap-frontend-metricsql = { path = ".", features = ["test-support"] }
