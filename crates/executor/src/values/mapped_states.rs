@@ -148,7 +148,7 @@ impl MappedSketches {
         let selected: Vec<&[u8]> = selected
             .map(|(column, index)| column.state_bytes(index))
             .collect();
-        Self::packed(kernel, selected.into_iter())
+        Self::packed(kernel, selected.iter().copied())
     }
 
     /// The `kernel` views `views` (each as `to_view_bytes` writes it)
@@ -278,19 +278,25 @@ impl MappedSketches {
     }
 }
 
-/// A sketch state's bytes in its view layout (8-byte aligned once placed
-/// at an 8-byte boundary); `None` for a state of a family with no view
-/// layout.
-pub(crate) fn state_view_bytes(state: &dyn AggregateCore) -> Option<Vec<u8>> {
+/// A `kernel` sketch state's bytes in its view layout (8-byte aligned once
+/// placed at an 8-byte boundary); `None` when `state` is not of `kernel`,
+/// so a column's views are all of its own kernel.
+pub(crate) fn state_view_bytes(
+    kernel: MappedSketchKernel,
+    state: &dyn AggregateCore,
+) -> Option<Vec<u8>> {
     let any = state.as_any();
-    if let Some(dd) = any.downcast_ref::<DDSketchAccumulator>() {
-        return Some(dd.inner.to_view_bytes());
+    match kernel {
+        MappedSketchKernel::DDSketch => any
+            .downcast_ref::<DDSketchAccumulator>()
+            .map(|dd| dd.inner.to_view_bytes()),
+        MappedSketchKernel::Kll => any
+            .downcast_ref::<DatasketchesKLLAccumulator>()
+            .map(|kll| kll.inner.to_view_bytes()),
+        MappedSketchKernel::CountMin => any
+            .downcast_ref::<CountMinSketchAccumulator>()
+            .map(|cms| cms.inner.to_view_bytes()),
     }
-    if let Some(kll) = any.downcast_ref::<DatasketchesKLLAccumulator>() {
-        return Some(kll.inner.to_view_bytes());
-    }
-    let cms = any.downcast_ref::<CountMinSketchAccumulator>()?;
-    Some(cms.inner.to_view_bytes())
 }
 
 #[cfg(test)]
@@ -303,6 +309,11 @@ mod tests {
     use arrow::array::UInt32Array;
     use planner_types::ir::schema::{Field, Schema};
     use planner_types::summary_type::SketchParams;
+
+    /// `state`'s view bytes, `state` of `family`.
+    fn view_of(family: &FieldDataType, state: &dyn AggregateCore) -> Vec<u8> {
+        state_view_bytes(MappedSketchKernel::of(family).unwrap(), state).unwrap()
+    }
 
     fn ddsketch_schema() -> Arc<Schema> {
         Arc::new(Schema {
@@ -378,9 +389,7 @@ mod tests {
             .to_rows()
             .iter()
             .map(|row| match &row[0] {
-                crate::values::Value::Summary { state, .. } => {
-                    state_view_bytes(state.as_ref()).unwrap()
-                }
+                crate::values::Value::Summary { family, state } => view_of(family, state.as_ref()),
                 _ => unreachable!(),
             })
             .collect()
@@ -521,6 +530,11 @@ mod tests {
     /// view layout (`sealed`, as `SummaryMergeWindows` seals a chain
     /// level) or not: its output batches.
     fn merge(batches: Vec<Batch>, sealed: bool) -> Vec<Batch> {
+        merge_with_peak(batches, sealed).0
+    }
+
+    /// [`merge`], and the most bytes the run held at once.
+    fn merge_with_peak(batches: Vec<Batch>, sealed: bool) -> (Vec<Batch>, usize) {
         use crate::operators::Operator;
         use crate::plan::PhysicalDAG;
         use crate::runtime::{Limits, RunContext, Scope};
@@ -549,14 +563,15 @@ mod tests {
             Limits { max_bytes: 1 << 30 },
         )
         .unwrap();
-        futures::executor::block_on(async {
-            let mut output = dag.execute(&[1], context).unwrap().remove(0);
+        let merged = futures::executor::block_on(async {
+            let mut output = dag.execute(&[1], context.clone()).unwrap().remove(0);
             let mut out = Vec::new();
             while let Some(batch) = output.next().await {
                 out.push(Batch::clone(&batch.unwrap()));
             }
             out
-        })
+        });
+        (merged, context.peak_bytes())
     }
 
     /// [`merge`] by series over `batches`: each series' merged state, as
@@ -572,7 +587,7 @@ mod tests {
         let mut by_series = Vec::new();
         for batch in merged {
             for row in batch.to_rows() {
-                let crate::values::Value::Summary { state, .. } = &row[1] else {
+                let crate::values::Value::Summary { family, state } = &row[1] else {
                     unreachable!()
                 };
                 let bytes = if readout {
@@ -586,7 +601,7 @@ mod tests {
                         })
                         .collect()
                 } else {
-                    state_view_bytes(state.as_ref()).unwrap()
+                    view_of(family, state.as_ref())
                 };
                 by_series.push((format!("{:?}", row[0]), bytes));
             }
@@ -708,10 +723,39 @@ mod tests {
         };
         let states = batch.state_column(1).unwrap();
         let views: Vec<Vec<u8>> = (0..states.len())
-            .map(|i| state_view_bytes(states.state(i).as_ref()).unwrap())
+            .map(|i| view_of(&family, states.state(i).as_ref()))
             .collect();
         assert_eq!(states.state_memory_bytes(), held_for(&views));
         let unsealed_bytes = unsealed[0].state_column(1).unwrap().state_memory_bytes();
         assert!(held_for(&views) * 2 < unsealed_bytes);
+    }
+
+    /// Stored view windows held outside the run are charged nothing until
+    /// merged: a merge over 12 DDSketch windows of 2,000 series in the view
+    /// layout, marked held outside the run (as a store of chain windows
+    /// marks them), peaks no higher than over the same windows as objects.
+    #[test]
+    fn a_merge_over_stored_view_windows_peaks_no_higher_than_over_objects() {
+        let family = FieldDataType::Sketch(SketchAlgorithm::DDSketch);
+        let parameters = SketchParams::DDSketch { alpha: 0.01 };
+        let windows = |views: bool| -> Vec<Batch> {
+            (0..12)
+                .map(|w| {
+                    let states = window_states(&family, &parameters, w, 2_000, 15);
+                    let batch = window_batch(&family, states, views);
+                    if views {
+                        batch.mark_states_held_outside_run();
+                    }
+                    batch
+                })
+                .collect()
+        };
+        let (_, object_peak) = merge_with_peak(windows(false), false);
+        let (_, view_peak) = merge_with_peak(windows(true), false);
+        assert!(object_peak > 0);
+        assert!(
+            view_peak <= object_peak,
+            "views {view_peak} B, objects {object_peak} B"
+        );
     }
 }

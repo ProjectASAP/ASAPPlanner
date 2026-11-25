@@ -283,7 +283,7 @@ impl StateColumn {
     ) -> Option<Self> {
         let kernel = MappedSketchKernel::of(&family)?;
         let views = states
-            .map(|state| super::mapped_states::state_view_bytes(state.as_ref()))
+            .map(|state| super::mapped_states::state_view_bytes(kernel, state.as_ref()))
             .collect::<Option<Vec<Vec<u8>>>>()?;
         let (sketches, state_memory_bytes) =
             MappedSketches::packed(kernel, views.iter().map(Vec::as_slice)).ok()?;

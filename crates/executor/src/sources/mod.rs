@@ -214,6 +214,8 @@ impl Scan {
                     width = i64::try_from(read.level_widths_ms[read.level]).map_err(|_| {
                         Error::Invalid("a cover level's width exceeds Int64".into())
                     })?;
+                    // Only checks: a range or offset past Int64 is refused
+                    // as before (`window_ends_at` would saturate instead).
                     i64::try_from(read.range_ms)
                         .map_err(|_| Error::Invalid("a cover's range exceeds Int64".into()))?;
                     i64::try_from(read.offset_ms)

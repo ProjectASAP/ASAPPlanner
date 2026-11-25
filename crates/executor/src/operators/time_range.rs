@@ -102,7 +102,10 @@ impl Operator {
                 "a cover level reads one of its positive-width levels",
             ));
         }
-        *slot = Some((level_widths_ms, level));
+        *slot = Some(CoverLevelSelection {
+            level_widths_ms,
+            level,
+        });
         Ok(self)
     }
 
@@ -148,6 +151,17 @@ impl Operator {
         self.output = Arc::new(output);
         Ok(self)
     }
+}
+
+/// Which windows a range window over a chain keeps as one level of a
+/// `TimeRangeCover` ([`Operator::with_cover_level`]): those the cover over
+/// chains of `level_widths_ms` takes from level `level`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct CoverLevelSelection {
+    /// The cover's level widths, widest first.
+    pub(super) level_widths_ms: Vec<u64>,
+    /// The index of this level in `level_widths_ms`.
+    pub(super) level: usize,
 }
 
 /// How a range window stamps each row with its tumbling window's end
@@ -291,12 +305,12 @@ pub(super) fn execute<'a>(
     let cover_ends: std::sync::Arc<Option<std::collections::BTreeSet<i64>>> = std::sync::Arc::new(
         cover_level
             .as_ref()
-            .map(|(level_widths_ms, level)| {
+            .map(|selection| {
                 planner_types::ir::operator::tumbling_window_chain::cover_level_window_ends(
                     start,
                     end,
-                    level_widths_ms,
-                    *level,
+                    &selection.level_widths_ms,
+                    selection.level,
                 )
                 .map(|window_ends| window_ends.into_iter().collect())
             })

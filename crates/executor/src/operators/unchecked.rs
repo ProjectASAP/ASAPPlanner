@@ -156,8 +156,8 @@ impl TryFrom<UncheckedOperator> for Operator {
                     None => time_range,
                 };
                 match cover_level {
-                    Some((level_widths_ms, level)) => {
-                        time_range.with_cover_level(level_widths_ms, level)?
+                    Some(selection) => {
+                        time_range.with_cover_level(selection.level_widths_ms, selection.level)?
                     }
                     None => time_range,
                 }

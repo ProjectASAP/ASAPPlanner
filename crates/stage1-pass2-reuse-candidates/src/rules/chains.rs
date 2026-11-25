@@ -34,6 +34,10 @@ use asap_types::workload::greatest_common_divisor;
 /// queries reaching S whose evaluation period at S, $g_q$, is known
 /// (`evaluation_period_ms_per_query`: below a subquery, its resolution),
 /// with the offsets $o_j$ on S's path; no query with a period, no chain.
+/// The wider levels (`add_wider_levels`) read S's evaluation grid from
+/// `evaluation_grid_of_group`, each group's grid as
+/// [`evaluation_grids`](crate::evaluation_grids::evaluation_grids)
+/// computes it over the memo before the chains are added.
 /// The edges from a chain whose width does not divide the evaluation grid
 /// of the group reading it (the gcd over all its readers) fail with
 /// `ChainWidthDoesNotDivideEvaluationGrid` (`candidate_edges`), so the

@@ -31,6 +31,8 @@ const WIDE_MS: i64 = 300 * SECOND_MS;
 const HOUR_MS: i64 = 3_600 * SECOND_MS;
 /// A cover's offset: 30 min, a multiple of both levels' widths.
 const OFFSET_MS: i64 = 1_800 * SECOND_MS;
+/// A cover's range that is not a whole number of 5 min windows.
+const RANGE_62M_MS: i64 = 62 * 60 * SECOND_MS;
 
 /// One sample per job every 5 s over 3 h, values varying with time.
 fn samples() -> Vec<(&'static str, i64, f64)> {
@@ -156,6 +158,8 @@ struct Plan {
     cover: PhysicalASAPNodeId,
     /// The same cover half an hour back (`offset_ms`), `(T - 90m, T - 30m]`.
     offset_cover: PhysicalASAPNodeId,
+    /// A cover of 62 min, not a whole number of 5 min windows.
+    cover_62m: PhysicalASAPNodeId,
     flat: PhysicalASAPNodeId,
     /// The newest 5 min window's sums, of `wide` and of `direct_wide`.
     newest_wide: [PhysicalASAPNodeId; 2],
@@ -180,6 +184,11 @@ fn plan(built: Built) -> Plan {
         range: Duration::from_millis(HOUR_MS as u64),
         levels: vec![wide.clone(), narrow.clone()],
     })));
+    let cover_62m = finalized_merge(node(Operator::NonASAP(NonASAPOp::TimeRangeCover {
+        offset_ms: 0,
+        range: Duration::from_millis(RANGE_62M_MS as u64),
+        levels: vec![wide.clone(), narrow.clone()],
+    })));
     let flat = finalized_merge(node(Operator::NonASAP(NonASAPOp::TimeRange {
         range: Duration::from_millis(HOUR_MS as u64),
         kind: TimeRangeKind::Range,
@@ -202,6 +211,7 @@ fn plan(built: Built) -> Plan {
         planner_types::test_support::forwarders::physical_asap_dag_at_query_time_with_node_ids(&[
             QueryRoot::Operator(cover.clone()),
             QueryRoot::Operator(offset_cover.clone()),
+            QueryRoot::Operator(cover_62m.clone()),
             QueryRoot::Operator(flat.clone()),
             QueryRoot::Operator(direct),
             QueryRoot::Operator(newest_wide[0].clone()),
@@ -227,6 +237,7 @@ fn plan(built: Built) -> Plan {
         direct_wide: ids[2],
         cover: id_of(&nodes, &cover),
         offset_cover: id_of(&nodes, &offset_cover),
+        cover_62m: id_of(&nodes, &cover_62m),
         flat: id_of(&nodes, &flat),
         newest_wide: [
             id_of(&nodes, &newest_wide[0]),
@@ -392,6 +403,55 @@ fn cover_answers_equal_flat_answers() {
         let expected = direct_sums(t - HOUR_MS, t);
         assert_eq!(sums_of(answers[0].clone()), expected, "cover at {t}");
         assert_eq!(sums_of(answers[1].clone()), expected, "flat at {t}");
+        t += NARROW_MS;
+    }
+}
+
+/// A cover of 62 min over the 5 min and 15 s levels: its range is not a
+/// whole number of 5 min windows, so the 5 min level built for it at query
+/// time (from the stored 15 s windows) reads a window with partial 5 min
+/// windows at its old edge, which the cover takes none of. Whether the
+/// 5 min level is stored or built for its readers, the sums equal those
+/// computed directly over `(T - 62m, T]`, on the 5 min grid and off it.
+#[test]
+fn a_cover_of_partial_wider_windows_answers_exactly() {
+    let plan = plan(Built::Sum);
+    let mut store = Arc::new(store_with_samples());
+    let view = |node| {
+        plan.views
+            .iter()
+            .find(|view| view.node_id == node)
+            .unwrap()
+            .clone()
+    };
+    refresh_all(&plan, &mut store, 3 * HOUR_MS);
+    let root = [plan.cover_62m as u64];
+    let stored_wide = compile(&plan.dag, &[view(plan.narrow), view(plan.wide)], &root).unwrap();
+    let wide_for_readers = compile(&plan.dag, &[view(plan.narrow)], &root).unwrap();
+    let mut t = 3 * HOUR_MS - WIDE_MS;
+    while t <= 3 * HOUR_MS {
+        let expected = direct_sums(t - RANGE_62M_MS, t);
+        for (query, how) in [
+            (&stored_wide, "stored"),
+            (&wide_for_readers, "built for readers"),
+        ] {
+            let context = RunContext::new(
+                Scope::Query {
+                    evaluation_time_ms: t,
+                },
+                Limits::default(),
+            )
+            .unwrap();
+            let answers = {
+                let query = query.instantiate(store.clone()).unwrap();
+                run(&query, &root, context)
+            };
+            assert_eq!(
+                sums_of(answers[0].clone()),
+                expected,
+                "{how} 5 min level at {t}"
+            );
+        }
         t += NARROW_MS;
     }
 }

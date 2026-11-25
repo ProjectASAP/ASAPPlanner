@@ -342,7 +342,13 @@ fn a_sealed_ddsketch_column_stores_view_layouts() {
         .collect();
     let view_bytes: Vec<Vec<u8>> = open
         .iter()
-        .map(|state| crate::values::state_view_bytes(state.as_ref()).unwrap())
+        .map(|state| {
+            crate::values::state_view_bytes(
+                crate::values::MappedSketchKernel::DDSketch,
+                state.as_ref(),
+            )
+            .unwrap()
+        })
         .collect();
     let sealed = updater.seal();
     assert!(matches!(sealed.storage(), StateStorage::Mapped(_)));

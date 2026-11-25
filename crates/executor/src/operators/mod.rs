@@ -157,11 +157,9 @@ enum Kind {
         /// [`Operator::with_tumbling_window_ends_from_epoch`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tumbling_window_ends: Option<time_range::TumblingWindowEnds>,
-        /// Set by [`Operator::with_cover_level`]: keep only the windows a
-        /// `TimeRangeCover` over chains of the widths `.0` (widest first)
-        /// takes from level `.1`.
+        /// Set by [`Operator::with_cover_level`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cover_level: Option<(Vec<u64>, usize)>,
+        cover_level: Option<time_range::CoverLevelSelection>,
     },
     Limit {
         n: u64,
