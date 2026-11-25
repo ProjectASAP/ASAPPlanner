@@ -371,15 +371,16 @@ pub fn plan_cost(
             continue;
         }
         let diagnostic_node = start.first().copied().unwrap_or(first);
-        let (requests_per_second, ops_per_second) = request_overhead(entries.get(query), settings)
-            .map_err(|error| (diagnostic_node, error))?;
+        let fixed = request_fixed_cost(entries.get(query), settings);
+        let (requests_per_second, ops_per_second) =
+            request_overhead(entries.get(query), fixed, settings)
+                .map_err(|error| (diagnostic_node, error))?;
         usage.cpu_ops_per_second += ops_per_second;
         request_ms_per_second += evaluation_ms * requests_per_second;
         if !usage.cpu_ops_per_second.is_finite() || !request_ms_per_second.is_finite() {
             return Err((diagnostic_node, AnalyticalCostError::Overflow));
         }
-        evaluation_ms_per_query[query] =
-            request_fixed_cost(entries.get(query), settings).latency_ms;
+        evaluation_ms_per_query[query] = fixed.latency_ms;
         let Some(&first_read) = start.first() else {
             has_unattached_request_overhead = true;
             if let Some(unit_cost) = unit_costs {
@@ -877,14 +878,15 @@ struct ReadsFromDisk {
 /// The runtime's fixed overhead of query `entry`'s requests: its requests
 /// per second (once per evaluation of its recurrence, a range query's
 /// steps in one request) and the CPU operations per second they cost,
-/// `measured_operation_costs.ns_per_evaluation` each. `(0, 0)` without an
-/// entry.
+/// `fixed.cpu_ms` each (`fixed`, [`request_fixed_cost`] of `entry`). `(0,
+/// 0)` without an entry.
 fn request_overhead(
     entry: Option<&QueryWorkloadEntry>,
+    fixed: RequestFixedCost,
     settings: &CostInputs,
 ) -> Result<(f64, f64), AnalyticalCostError> {
     let requests_per_second = requests_per_second(entry, settings)?;
-    let evaluation_ms = request_fixed_cost(entry, settings).cpu_ms;
+    let evaluation_ms = fixed.cpu_ms;
     Ok((
         requests_per_second,
         evaluation_ms / settings.resource_speed.ms_per_cpu_op * requests_per_second,
@@ -908,7 +910,8 @@ pub fn request_overhead_cost_per_second(
     }
     let mut cost = 0.0;
     for entry in entries {
-        cost += unit_cost.cost_per_cpu_op * request_overhead(Some(entry), settings)?.1;
+        let fixed = request_fixed_cost(Some(entry), settings);
+        cost += unit_cost.cost_per_cpu_op * request_overhead(Some(entry), fixed, settings)?.1;
     }
     match cost.is_finite() {
         true => Ok(cost),
@@ -1037,7 +1040,7 @@ pub fn ingest_threads_building_copies(settings: &CostInputs, ingest_cores: f64) 
 /// mean, and their rounds mixed alike.
 ///
 /// Example: 4/3 steps on one thread: 4/3 rounds; on two threads, 1.
-pub fn step_rounds(steps: f64, query_threads: u32) -> f64 {
+fn step_rounds(steps: f64, query_threads: u32) -> f64 {
     let threads = u64::from(query_threads.max(1));
     let (fewer, more) = (steps.floor(), steps.ceil());
     let rounds = |steps: f64| (steps as u64).div_ceil(threads) as f64;
@@ -1214,9 +1217,10 @@ pub(crate) fn group_waits(groups: &[RefreshGroup], precompute_threads: u32) -> V
             let mut queueing = 0.0;
             for (other, waits_whole_refresh) in refresh_queue(position, &windows, &group.reads) {
                 let other_ms = groups[other].wall_ms_per_window;
-                queueing += match waits_whole_refresh {
-                    true => other_ms,
-                    false => other_ms / f64::from(precompute_threads),
+                queueing += if waits_whole_refresh {
+                    other_ms
+                } else {
+                    other_ms / f64::from(precompute_threads)
                 };
             }
             (queueing, group.wall_ms_per_window)
@@ -1285,6 +1289,7 @@ fn query_latencies(
         .into_iter()
         .enumerate()
         .map(|(query, start)| {
+            let step_rounds = request_fixed_cost(entries.get(query), settings).step_rounds;
             let mut latency = QueryLatency {
                 allowed_lateness_ms: execution.allowed_lateness_ms as f64,
                 evaluations_per_second: evaluation_rate(
@@ -1320,9 +1325,7 @@ fn query_latencies(
                 // when kept across evaluations (as `computations` counts it).
                 let per_request = match nodes[&id].lifetime {
                     Lifetime::AcrossEvaluations(_) => 1.0,
-                    Lifetime::None | Lifetime::OneEvaluation(_) => {
-                        request_fixed_cost(entries.get(query), settings).step_rounds
-                    }
+                    Lifetime::None | Lifetime::OneEvaluation(_) => step_rounds,
                 };
                 latency.query_execution_ms += work_ms[&id] * per_request;
                 stack.extend(inputs(id));

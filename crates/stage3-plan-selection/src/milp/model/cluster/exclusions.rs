@@ -293,5 +293,6 @@ pub(super) fn over_a_limit_alone(inputs: &ClusterInputs<'_>, index: usize) -> bo
                 })
                 .sum::<f64>()
     };
-    !memory_and_disk_limits_over(inputs.limits, least(inputs.memory), least(inputs.disk)).is_empty()
+    least(inputs.memory) > inputs.limits.memory_bytes as f64 * (1.0 + 1e-9)
+        || least(inputs.disk) > inputs.limits.disk_bytes as f64 * (1.0 + 1e-9)
 }

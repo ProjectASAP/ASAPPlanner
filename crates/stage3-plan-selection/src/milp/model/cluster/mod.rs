@@ -140,7 +140,7 @@ struct QueryShape {
     /// The request's fixed latency, ms: its per-step part once per round.
     request_ms: f64,
     /// Rounds of steps per request, the steps split over the query
-    /// threads (`asap_cost::step_rounds`): a query-time execution not kept
+    /// threads (`asap_cost::RequestFixedCost::step_rounds`): a query-time execution not kept
     /// across evaluations adds its work once per round to the latency; a
     /// mean over its requests when they compute a fractional mean of steps.
     step_rounds: f64,

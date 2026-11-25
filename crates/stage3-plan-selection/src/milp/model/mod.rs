@@ -710,6 +710,23 @@ pub(crate) fn solve_selection(
         &mut problem,
         &mut resident_rows,
     );
+    // Cost model 1's objective is `costs` itself: every y is on a costed
+    // edge and every h_v has a retention share (`selection_cost_terms`
+    // reads a missing one as 0, which only cost model 3's quantities have).
+    assert!(
+        variables
+            .y
+            .keys()
+            .all(|&position| costs.per_edge[position].is_some()),
+        "a costed edge"
+    );
+    assert!(
+        variables
+            .h
+            .keys()
+            .all(|v| costs.retention_cost_per_retained_second.contains_key(v)),
+        "a retention share for each h_v"
+    );
     // The objective's terms per second, unscaled: (cost, variable). A
     // query-time scan's retention is in its source's r_s.
     let (mut terms, raw_data_rows) =

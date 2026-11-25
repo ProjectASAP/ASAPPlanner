@@ -139,9 +139,10 @@ pub(super) fn freshness_big_m(
         .map(|group| {
             let mut bound = refresh_bound[group];
             for (other, waits_whole_refresh) in refresh_queue(group, windows, &reads[group]) {
-                bound += match waits_whole_refresh {
-                    true => refresh_bound[other],
-                    false => refresh_bound[other] / threads,
+                bound += if waits_whole_refresh {
+                    refresh_bound[other]
+                } else {
+                    refresh_bound[other] / threads
                 };
             }
             bound
@@ -318,9 +319,10 @@ pub(super) fn build_and_solve(
             for (other, waits_whole_refresh) in
                 refresh_queue(group, &groups.windows, &groups.reads[group])
             {
-                expression += match waits_whole_refresh {
-                    true => refresh[other].clone(),
-                    false => refresh[other].clone() * (1.0 / threads),
+                expression += if waits_whole_refresh {
+                    refresh[other].clone()
+                } else {
+                    refresh[other].clone() * (1.0 / threads)
                 };
             }
             expression
