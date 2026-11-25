@@ -64,7 +64,7 @@ fn write_plan_file_with(
     let models = PlanningModels::builtin()
         .with_cost_inputs(&cost_inputs)
         .with_deployment_capabilities(&capabilities);
-    let run = run_stages_until(roots, &entries, &data, models, RunUntil::Stage3).unwrap();
+    let run = run_stages_until(roots, &entries, &data, models, RunUntil::Stage3, true).unwrap();
     let (plan, _) = run.run.selection.unwrap();
     let query_texts = entries.iter().map(|entry| entry.query.0.clone()).collect();
     let installable = InstallablePlan::of_dag(plan, query_texts).unwrap();

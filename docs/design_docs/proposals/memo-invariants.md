@@ -53,10 +53,11 @@ only reads the memo, so after it only check 12 runs.
 
 ## After every stage, behind `--check-invariants`
 
-These re-derive per candidate, so they are costly (D12). The golden runner
-and `planner_fuzz` always pass the flag.
+These re-derive per candidate, so they are costly (D12). The golden runner,
+`planner_fuzz` and the integration tests always pass the flag.
 
 13. Every candidate has its group's output schema.
 14. Every candidate has its group's `aggregate_coverage` (which rows of
-    which data it summarizes), compared exactly. A false alarm (0–10m vs.
-    0–5m + 5–10m) is reported before the comparison is loosened.
+    which data it summarizes), compared exactly. It fails today on #1493
+    (a finalized exact aggregate has no coverage) and #1494 (coverage
+    depends on where a filter sits).
