@@ -150,6 +150,8 @@ fn distinct_bound() -> impl Strategy<Value = Option<u64>> {
 
 /// The error θ guarantees for `statistic` at `failure_probability`, over
 /// values of one sign and a source of 10,000 distinct items, or `None`.
+/// The raw bound, not `evaluate()`'s: a NaN or negative error must fail
+/// the caller's comparison, not read as +Inf (no bound).
 fn error_at(
     algorithm: SketchAlgorithm,
     parameters: &SketchParams,
@@ -164,7 +166,16 @@ fn error_at(
         Some(ValueSign::NonNegative),
         Some(10_000),
     )
-    .map(|guarantee| guarantee.spec.error.evaluate().unwrap_or(f64::INFINITY))
+    .map(|guarantee| {
+        let asap_types::accuracy::BoundExpr::Constant { value } = guarantee.spec.error;
+        value
+    })
+}
+
+/// Whether `error` is a bound: not NaN and not negative (+Inf, no bound,
+/// is one).
+fn is_a_bound(error: Option<f64>) -> bool {
+    error.is_none_or(|error| error >= 0.0)
 }
 
 /// The statistic each algorithm's guarantee is for.
@@ -299,6 +310,7 @@ proptest! {
         let statistic = statistic_of(algorithm);
         if let Some(at_tight) = error_at(algorithm, &parameters, &statistic, tight) {
             let at_loose = error_at(algorithm, &parameters, &statistic, loose);
+            prop_assert!(is_a_bound(Some(at_tight)) && is_a_bound(at_loose), "{at_tight} / {at_loose:?}");
             prop_assert!(
                 at_loose.is_some_and(|at_loose| at_loose <= at_tight),
                 "{at_loose:?} at δ = {loose} vs {at_tight} at δ = {tight}"
@@ -318,6 +330,7 @@ proptest! {
         let larger = grown(&parameters, factor);
         if let Some(small) = error_at(algorithm, &parameters, &statistic, failure_probability) {
             let large = error_at(algorithm, &larger, &statistic, failure_probability);
+            prop_assert!(is_a_bound(Some(small)) && is_a_bound(large), "{small} / {large:?}");
             prop_assert!(
                 large.is_some_and(|large| large <= small),
                 "{larger:?}: {large:?} vs {parameters:?}: {small}"
@@ -408,32 +421,48 @@ proptest! {
 
     /// L3: a build that meets a readout level meets every looser one (a
     /// larger error, a larger failure probability) and a larger build meets
-    /// it too.
+    /// it too. The level is the build's own guarantee scaled by `slack`, so
+    /// about half the cases meet it, for every algorithm: a random level
+    /// would rarely be met by a Count Sketch, whose failure probability is
+    /// fixed by its depth.
     #[test]
     fn meeting_a_readout_level_is_monotone(
         (algorithm, parameters) in valid_parameters()
             .prop_filter("HLL needs a declared distinct bound", |(algorithm, _)| {
                 *algorithm != SketchAlgorithm::Hll
             }),
-        max_error in 1e-6..1.0f64,
         failure_probability in probability(),
+        slack in 0.5..2.0f64,
         looser in 1.0..10.0f64,
         factor in 1..8u32,
     ) {
         let (memo, summary_input) = state_memo(algorithm);
         let statistic = statistic_of(algorithm);
-        let metric = theoretical_guarantee(
-            &FieldDataType::Sketch(algorithm),
-            &parameters,
-            &statistic,
-            1.0,
-            Some(ValueSign::NonNegative),
-            None,
-        )
-        .map(|guarantee| guarantee.spec.accuracy_metric);
-        let Some(metric) = metric else {
-            return Ok(());
+        let guarantee_at = |failure_probability: f64| {
+            theoretical_guarantee(
+                &FieldDataType::Sketch(algorithm),
+                &parameters,
+                &statistic,
+                failure_probability,
+                Some(ValueSign::NonNegative),
+                None,
+            )
         };
+        // At the sampled δ, or, where θ cannot fail that rarely, at its own.
+        let Some(at_one) = guarantee_at(1.0) else {
+            return Err(TestCaseError::fail(format!("{parameters:?} has no guarantee")));
+        };
+        let failure_probability = match guarantee_at(failure_probability) {
+            Some(_) => failure_probability,
+            None => at_one.spec.failure_probability.evaluate().unwrap_or(1.0),
+        };
+        let Some(error) = guarantee_at(failure_probability)
+            .and_then(|guarantee| guarantee.spec.error.evaluate())
+        else {
+            return Err(TestCaseError::fail(format!("{parameters:?} at δ = {failure_probability}")));
+        };
+        let metric = at_one.spec.accuracy_metric;
+        let max_error = error * slack;
         let meets = |parameters: &SketchParams, max_error: f64, failure_probability: f64| {
             build_meets_level(
                 &memo,
