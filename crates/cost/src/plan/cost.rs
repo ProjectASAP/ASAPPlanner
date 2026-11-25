@@ -359,7 +359,6 @@ pub fn plan_cost(
     // The runtime's fixed cost per query request, charged to the node the
     // query reads first and added to its latency below.
     let evaluation_ms = table.ns_per_evaluation * 1e-6;
-    let step_ms = table.ns_per_evaluation_step * 1e-6;
     let starts = query_starts(dag);
     let mut evaluation_ms_per_query = vec![0.0; starts.len()];
     let mut request_ms_per_second = 0.0;
@@ -368,7 +367,7 @@ pub fn plan_cost(
     let mut unattached_request_cost = 0.0;
     let mut has_unattached_request_overhead = false;
     for (query, start) in starts.iter().enumerate() {
-        if evaluation_ms <= 0.0 && step_ms <= 0.0 {
+        if table.ns_per_evaluation <= 0.0 && table.ns_per_evaluation_step <= 0.0 {
             continue;
         }
         let diagnostic_node = start.first().copied().unwrap_or(first);
@@ -379,15 +378,8 @@ pub fn plan_cost(
         if !usage.cpu_ops_per_second.is_finite() || !request_ms_per_second.is_finite() {
             return Err((diagnostic_node, AnalyticalCostError::Overflow));
         }
-        evaluation_ms_per_query[query] = evaluation_ms
-            + step_ms
-                * step_rounds(
-                    steps_per_request(
-                        entries.get(query),
-                        settings.data_plane_execution.answer_cache,
-                    ),
-                    settings.data_plane_execution.query_threads,
-                );
+        evaluation_ms_per_query[query] =
+            request_fixed_cost(entries.get(query), settings).latency_ms;
         let Some(&first_read) = start.first() else {
             has_unattached_request_overhead = true;
             if let Some(unit_cost) = unit_costs {
@@ -891,16 +883,8 @@ fn request_overhead(
     entry: Option<&QueryWorkloadEntry>,
     settings: &CostInputs,
 ) -> Result<(f64, f64), AnalyticalCostError> {
-    let requests_per_second = evaluation_rate(
-        entry.map(|entry| (&entry.recurrence, None)),
-        settings.non_repeating_query_horizon_seconds,
-    )?;
-    let table = &settings.measured_operation_costs;
-    // The fixed cost per request and per step of it.
-    let evaluation_ms = (table.ns_per_evaluation
-        + table.ns_per_evaluation_step
-            * steps_per_request(entry, settings.data_plane_execution.answer_cache))
-        * 1e-6;
+    let requests_per_second = requests_per_second(entry, settings)?;
+    let evaluation_ms = request_fixed_cost(entry, settings).cpu_ms;
     Ok((
         requests_per_second,
         evaluation_ms / settings.resource_speed.ms_per_cpu_op * requests_per_second,
@@ -1071,6 +1055,50 @@ fn steps_per_request(entry: Option<&QueryWorkloadEntry>, answer_cache: Option<An
         .map_or(1.0, |range| range.mean_evaluations_per_request())
 }
 
+/// The runtime's fixed cost of one request of query `entry`:
+/// `MeasuredOperationCosts::ns_per_evaluation` once and
+/// `ns_per_evaluation_step` per step of its range as the data plane
+/// computes it (1 step without a range or an entry).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RequestFixedCost {
+    /// Rounds of the request's steps over the query threads
+    /// ([`step_rounds`]): a query-time node not kept across evaluations
+    /// runs once per round on the request's latency path.
+    pub step_rounds: f64,
+    /// The request's fixed latency, ms: its per-step part once per round.
+    pub latency_ms: f64,
+    /// The request's fixed CPU, ms: every step's.
+    pub cpu_ms: f64,
+}
+
+/// [`RequestFixedCost`] of one request of `entry` under `settings`'
+/// measured costs, answer cache and query threads.
+pub fn request_fixed_cost(
+    entry: Option<&QueryWorkloadEntry>,
+    settings: &CostInputs,
+) -> RequestFixedCost {
+    let table = &settings.measured_operation_costs;
+    let steps = steps_per_request(entry, settings.data_plane_execution.answer_cache);
+    let step_rounds = step_rounds(steps, settings.data_plane_execution.query_threads);
+    RequestFixedCost {
+        step_rounds,
+        latency_ms: (table.ns_per_evaluation + table.ns_per_evaluation_step * step_rounds) * 1e-6,
+        cpu_ms: (table.ns_per_evaluation + table.ns_per_evaluation_step * steps) * 1e-6,
+    }
+}
+
+/// Requests per second of query `entry`: once per evaluation of its
+/// recurrence (a range query's steps in one request); 0 without an entry.
+pub fn requests_per_second(
+    entry: Option<&QueryWorkloadEntry>,
+    settings: &CostInputs,
+) -> Result<f64, AnalyticalCostError> {
+    evaluation_rate(
+        entry.map(|entry| (&entry.recurrence, None)),
+        settings.non_repeating_query_horizon_seconds,
+    )
+}
+
 /// Core-seconds per second of the decode and append of arriving samples
 /// outside every plan node (`MeasuredOperationCosts::ns_per_ingested_sample`
 /// × the data's arriving rows per second); 0 when either is unknown.
@@ -1178,24 +1206,52 @@ fn refresh_groups(
 /// the same instant divided among `precompute_threads` (the v1 linear
 /// upper bound).
 pub(crate) fn group_waits(groups: &[RefreshGroup], precompute_threads: u32) -> Vec<(f64, f64)> {
+    let windows: Vec<RefreshWindow> = groups.iter().map(|group| group.window).collect();
     groups
         .iter()
         .enumerate()
         .map(|(position, group)| {
             let mut queueing = 0.0;
-            for (other_position, other) in groups.iter().enumerate() {
-                if other_position == position {
-                    continue;
-                }
-                if group.reads.contains(&other_position) {
-                    queueing += other.wall_ms_per_window;
-                } else if close_together(group.window, other.window) {
-                    queueing += other.wall_ms_per_window / f64::from(precompute_threads);
-                }
+            for (other, waits_whole_refresh) in refresh_queue(position, &windows, &group.reads) {
+                let other_ms = groups[other].wall_ms_per_window;
+                queueing += match waits_whole_refresh {
+                    true => other_ms,
+                    false => other_ms / f64::from(precompute_threads),
+                };
             }
             (queueing, group.wall_ms_per_window)
         })
         .collect()
+}
+
+/// The other refresh groups that refresh group `group` queues behind, in
+/// group order (the v1 linear upper bound on its queueing): each with
+/// `true` when `group` reads it (`reads`, the groups `group` reads), so
+/// `group` waits for its whole refresh, and `false` when it only closes at
+/// the same instant ([`close_together`] over `windows`, each group's
+/// window), so `group` waits for its refresh divided among the precompute
+/// threads. Groups neither read nor closing together are left out.
+///
+/// Example: groups of windows 60 s and 300 s at phase 0, neither reading
+/// the other: each queues behind the other with `false`.
+pub fn refresh_queue<'a>(
+    group: usize,
+    windows: &'a [RefreshWindow],
+    reads: &'a BTreeSet<usize>,
+) -> impl Iterator<Item = (usize, bool)> + 'a {
+    windows
+        .iter()
+        .enumerate()
+        .filter(move |&(other, _)| other != group)
+        .filter_map(move |(other, &other_window)| {
+            if reads.contains(&other) {
+                Some((other, true))
+            } else if close_together(windows[group], other_window) {
+                Some((other, false))
+            } else {
+                None
+            }
+        })
 }
 
 /// Each query's latency per request ([`QueryLatency`]), without its fixed
@@ -1264,13 +1320,9 @@ fn query_latencies(
                 // when kept across evaluations (as `computations` counts it).
                 let per_request = match nodes[&id].lifetime {
                     Lifetime::AcrossEvaluations(_) => 1.0,
-                    Lifetime::None | Lifetime::OneEvaluation(_) => step_rounds(
-                        steps_per_request(
-                            entries.get(query),
-                            settings.data_plane_execution.answer_cache,
-                        ),
-                        settings.data_plane_execution.query_threads,
-                    ),
+                    Lifetime::None | Lifetime::OneEvaluation(_) => {
+                        request_fixed_cost(entries.get(query), settings).step_rounds
+                    }
                 };
                 latency.query_execution_ms += work_ms[&id] * per_request;
                 stack.extend(inputs(id));

@@ -14,7 +14,7 @@
 //! CPU per computation is `units × ns_per_unit + ns_per_invocation`, its
 //! units being what the operator processes ([`OperatorKind`]). A sketch
 //! entry also applies to the same sketch with other parameters,
-//! interpolated between the two nearest measured sizes ([`lookup`]). A
+//! interpolated between the two nearest measured sizes ([`lookup_at_scale`]). A
 //! node without an entry is priced from the formulas, scaled by one
 //! calibration factor fitted from the nodes that have one, so measured and
 //! formula-priced nodes stay on one scale. The factor is a global
@@ -113,7 +113,7 @@ pub struct OperatorCost {
     pub phase: Option<ExecutionTiming>,
     /// For a summary operator over a sketch: the sketch and its parameters,
     /// e.g. `{"Kll": {"k": 200}}`. Other parameters of the same sketch are
-    /// priced by interpolation ([`lookup`]).
+    /// priced by interpolation ([`lookup_at_scale`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sketch: Option<SketchParams>,
     /// For a summary operator over an exact accumulator: its kind, e.g.
@@ -170,7 +170,7 @@ pub struct OperatorCost {
     pub ns_per_state_emitted: f64,
     /// The series the node's sources held when it was measured. Entries of
     /// one class at several counts are interpolated by the node's own
-    /// series count, linearly in log(price) over log(series) ([`lookup`]);
+    /// series count, linearly in log(price) over log(series) ([`lookup_at_scale`]);
     /// `None`: one price at every scale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_series_count: Option<u64>,
@@ -204,26 +204,16 @@ pub struct UnitPrice {
     pub outside_measured_scale: bool,
 }
 
-/// The price of `operator` at `phase` on `family`, if the table has an
+/// The price of `operator` at `phase` on `family`, for a node whose
+/// sources hold `series` series (`None` when unknown), if the table has an
 /// entry for them. Entries for the node's own phase win over entries for
 /// both phases. A sketch with exactly an entry's parameters takes that
 /// entry; otherwise, among the entries for the same sketch algorithm, the
 /// two whose sizes (`size_of`: the bytes one state allocates) are nearest
 /// below and above the node's are interpolated linearly in log size, and a
-/// size outside the measured ones takes the nearest entry's price.
-pub fn lookup(
-    table: &MeasuredOperationCosts,
-    operator: OperatorKind,
-    phase: ExecutionTiming,
-    family: StateFamily<'_>,
-    size_of: impl Fn(&SketchParams) -> f64,
-) -> Option<UnitPrice> {
-    lookup_at_scale(table, operator, phase, family, size_of, None)
-}
-
-/// [`lookup`] for a node whose sources hold `series` series. When some of
+/// size outside the measured ones takes the nearest entry's price. When some of
 /// the matching entries name a `measured_series_count`, only those are
-/// used: the sketch parameters are chosen as [`lookup`] chooses them (the
+/// used: the sketch parameters are chosen as above (the
 /// exact parameters, else the nearest size), then the two entries of those
 /// parameters whose series counts are nearest below and above `series`
 /// are interpolated linearly in log(price) over log(series); a count
