@@ -226,11 +226,16 @@ fn run_case(name: &str, dir: &Path, update: bool) -> Result<(), String> {
 }
 
 /// The `asap_planner` command line for `case`, with absolute paths: the
-/// case's `args`, then its inputs, each from the case or the defaults.
+/// case's `args`, `--check-invariants` (every case runs the costly memo
+/// invariants, D12), then its inputs, each from the case or the defaults.
 fn planner_command(case: &Case, dir: &Path, scratch: &Path) -> Result<Vec<String>, String> {
     let mut command = vec![env!("CARGO_BIN_EXE_asap_planner").to_owned()];
     command.extend(case.args.iter().cloned());
-    command.extend(["--format".into(), "json".into()]);
+    command.extend([
+        "--check-invariants".into(),
+        "--format".into(),
+        "json".into(),
+    ]);
     for (index, file) in case.workloads.iter().enumerate() {
         command.push("--workload".into());
         command.push(workload_path(index, &dir.join(file), scratch)?);

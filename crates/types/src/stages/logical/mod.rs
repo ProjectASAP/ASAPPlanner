@@ -25,6 +25,8 @@ pub use group::{
     ranked_column_of_group, AggregateCoverage, AggregateDefinition, ColumnLineage, CoverageError,
     GroupProperties, MemoGroup, MemoGroupError, MemoGroupId, ValueSign,
 };
-pub use memo::{Memo, MemoQuery};
+pub use memo::{
+    InvariantCheck, InvariantOrigin, InvariantViolation, Memo, MemoContents, MemoQuery,
+};
 pub use memo_candidates::{EvaluationGrid, LogicalASAPMemoCandidates};
 pub use requirements::{LogicalRequirements, RequiredAccuracy};

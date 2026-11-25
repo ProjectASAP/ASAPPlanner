@@ -365,6 +365,7 @@ fn per_series_states_over_different_labels_add_no_shared_chain() {
         &w.data,
         asap_planner::PlanningModels::builtin(),
         asap_planner_cli::planning_stages::RunUntil::Pass2,
+        true,
     )
     .unwrap();
     let memo = run.run.logical_asap_candidates.unwrap().memo;

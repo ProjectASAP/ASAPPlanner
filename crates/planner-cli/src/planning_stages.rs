@@ -10,6 +10,7 @@ use asap_stage1_pass1_per_computation_candidates::PerComputationCandidateError;
 use asap_types::ir::schema::series_identity::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
+use asap_types::stages::InvariantViolation;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
 use serde_json::Value;
 
@@ -78,6 +79,9 @@ pub enum PlanningStagesError {
     Pass1(String),
     /// The frontends' roots or a composed candidate failed validation.
     Validation(String),
+    /// Stage 0's or Pass 1's memo breaks an invariant: a planner bug, not
+    /// an unplannable query.
+    Invariant(InvariantViolation),
 }
 
 impl std::fmt::Display for PlanningStagesError {
@@ -85,6 +89,7 @@ impl std::fmt::Display for PlanningStagesError {
         match self {
             Self::Pass1(error) => write!(f, "Pass 1: {error}"),
             Self::Validation(error) => write!(f, "validation: {error}"),
+            Self::Invariant(violation) => write!(f, "{violation}"),
         }
     }
 }
@@ -112,7 +117,10 @@ pub fn run_planning_stages_over(
         entries,
         data,
         models,
-        PlanSearchSettings { inspect: true },
+        PlanSearchSettings {
+            inspect: true,
+            check_invariants: false,
+        },
     )
 }
 
@@ -128,16 +136,22 @@ pub fn run_search_over(
 }
 
 /// The stages over `roots` up to and including `until`, as the facade runs
-/// them (`run_planning_until`), each stage's output kept. A failure after
-/// Pass 1 is reported in the run, as the facade does.
+/// them (`run_planning_until`), each stage's output kept, the costly memo
+/// invariants run when `check_invariants`
+/// (`PlanSearchSettings::check_invariants`). A failure after Pass 1 is
+/// reported in the run, as the facade does.
 pub fn run_stages_until(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
     until: RunUntil,
+    check_invariants: bool,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
-    let settings = PlanSearchSettings { inspect: true };
+    let settings = PlanSearchSettings {
+        inspect: true,
+        check_invariants,
+    };
     run_until(roots, entries, data, models, settings, until)
 }
 
@@ -155,7 +169,10 @@ fn run_until(
                 PerComputationCandidateError::Structure(error) => {
                     PlanningStagesError::Validation(error.to_string())
                 }
-                error => PlanningStagesError::Pass1(error.to_string()),
+                error => match error.invariant_violation() {
+                    Some(violation) => PlanningStagesError::Invariant(violation.clone()),
+                    None => PlanningStagesError::Pass1(error.to_string()),
+                },
             }
         })?;
     Ok(PlanningStagesRun {

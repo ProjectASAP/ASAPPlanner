@@ -152,7 +152,10 @@ fn add_candidate_rejects_a_candidate_whose_inputs_fail_validation() {
             readout(SketchStatistic::Quantile { q: 0.95 }, g1),
             None
         ),
-        Err(CandidateError::NotValidOverInputGroups(_))
+        Err(CandidateError::Invariant(InvariantViolation {
+            check: InvariantCheck::CandidateNotValidOverInputs,
+            ..
+        }))
     ));
     assert_eq!(
         format!("{memo:?}"),
@@ -286,9 +289,8 @@ fn a_merge_carries_the_parameters_of_the_states_it_reads() {
     let g3 = memo.find_or_add_group(merge.clone()).unwrap();
     assert!(matches!(
         try_candidate(&mut memo, g3, merge.clone(), None),
-        Err(CandidateError::LogicalProperties(
-            LogicalPropertiesError::SketchBuildWithoutParameters
-        ))
+        Err(CandidateError::Invariant(InvariantViolation { check: InvariantCheck::CandidateParametersDoNotFit, detail, .. }))
+            if detail == LogicalPropertiesError::SketchBuildWithoutParameters.to_string()
     ));
     let merged = try_candidate(&mut memo, g3, merge, kll_k(547)).unwrap();
     assert_eq!(
@@ -404,9 +406,14 @@ fn add_candidate_checks_parameters_against_the_groups_output() {
             let added = try_candidate(&mut memo, group, operator.clone(), parameters.clone());
             let added = match added {
                 Ok(_) => Ok(()),
-                Err(CandidateError::LogicalProperties(error)) => Err(error),
+                Err(CandidateError::Invariant(InvariantViolation {
+                    check: InvariantCheck::CandidateParametersDoNotFit,
+                    detail,
+                    ..
+                })) => Err(detail),
                 Err(error) => panic!("{error}"),
             };
+            let expected = expected.map_err(|error: LogicalPropertiesError| error.to_string());
             assert_eq!(added, expected, "{:?} {parameters:?}", operator.kind_name());
         }
     }

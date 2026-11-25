@@ -9,14 +9,17 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use asap_stage1_pass1_per_computation_candidates::{pass1_memo, PerComputationCandidateError};
-use asap_stage1_pass2_reuse_candidates::generate_logical_asap_memo_candidates;
+use asap_stage1_pass2_reuse_candidates::{generate_logical_asap_memo_candidates, Pass2RuleError};
 use asap_stage2_physical_optimization::generate_physical_asap_memo_candidates;
 use asap_stage3_plan_selection::{select_plan, ErrorSelectingPlan, Selection};
 use asap_types::deployment_capabilities::DeploymentCapabilitiesError;
 use asap_types::ir::schema::series_identity::{with_promql_series_identity, SeriesIdentityError};
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
-use asap_types::stages::{LogicalASAPMemoCandidates, Memo, PhysicalASAPMemoCandidates};
+use asap_types::stages::{
+    CandidateError, InvariantViolation, LogicalASAPMemoCandidates, Memo, MemoGroupError,
+    PhysicalASAPMemoCandidates,
+};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
 use crate::models::PlanningModels;
@@ -30,6 +33,12 @@ pub struct PlanSearchSettings {
     /// [`PlanningRun::pass1_memo`]. Default off:
     /// production planning copies no memo.
     pub inspect: bool,
+    /// Also run the costly memo invariants after each stage: every
+    /// candidate's schema and coverage re-derived
+    /// (`Memo::check_consistency`). The cheap ones always run. Default off;
+    /// `asap_planner --check-invariants`, the golden runner and
+    /// `planner_fuzz` turn it on.
+    pub check_invariants: bool,
 }
 
 /// Why the facade selected no plan.
@@ -46,6 +55,10 @@ pub enum SelectionError {
     /// Stage 3 selected no plan.
     #[error("plan selection: {0}")]
     Selection(ErrorSelectingPlan),
+    /// Pass 2's or a later stage's output breaks a memo invariant: a
+    /// planner bug.
+    #[error(transparent)]
+    Invariant(InvariantViolation),
     /// The run stopped before plan selection ([`run_planning_until`]).
     #[error("plan selection did not run")]
     NotRun,
@@ -135,7 +148,9 @@ pub struct PlanningRun {
 
 /// Run the planning stages over the frontends' `roots` (query `i` is
 /// `roots[i]`, with workload entry `entries[i]`). Only a Stage 0 or Pass 1
-/// failure is an error; a failed selection is reported in the run.
+/// failure, an invariant they break included, is an error; a failed
+/// selection, or an invariant a later stage breaks
+/// ([`SelectionError::Invariant`]), is reported in the run.
 pub fn run_planning(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
@@ -169,6 +184,12 @@ pub fn run_planning_until(
         })
         .collect();
     let initial = memo_of_queries(roots, &accuracy_targets, data)?;
+    // The memo invariants after each stage (D12): always on, the costly
+    // ones with `check_invariants`.
+    let check = |memo: &Memo, stage: RunUntil| {
+        memo.check_consistency(stage.name(), settings.check_invariants)
+    };
+    check(&initial, RunUntil::Stage0)?;
     let mut run = PlanningRun {
         stage0_memo: settings.inspect.then(|| initial.clone()),
         pass1_memo: None,
@@ -186,7 +207,10 @@ pub fn run_planning_until(
     // Pass 1: the initial candidates, without the summaries the deployment
     // excludes outright (Stage 2 prunes the rest it cannot run). A query
     // Pass 1 cannot plan is an input error.
+    let stage0 = initial.contents();
     let pass1 = pass1_memo(initial, &exclusions)?;
+    pass1.check_stage_only_added(&stage0, RunUntil::Pass1.name())?;
+    check(&pass1, RunUntil::Pass1)?;
     run.report.pass1_ms = elapsed_ms(started);
     let report = &mut run.report;
     let kept_pass1_memo = &mut run.pass1_memo;
@@ -207,11 +231,16 @@ pub fn run_planning_until(
         }
         // Pass 2: the reuse rules, readout requirements and logical edges.
         let started = Instant::now();
+        let pass1_contents = pass1.contents();
         let logical = generate_logical_asap_memo_candidates(pass1, entries, models.evidence);
         report.pass2_ms = elapsed_ms(started);
-        let logical = logical_asap_candidates.insert(
-            logical.map_err(|error| SelectionError::LogicalASAPCandidates(error.to_string()))?,
-        );
+        let logical = logical_asap_candidates.insert(logical.map_err(pass2_error)?);
+        let invariant = SelectionError::Invariant;
+        logical
+            .memo
+            .check_stage_only_added(&pass1_contents, RunUntil::Pass2.name())
+            .map_err(invariant)?;
+        check(&logical.memo, RunUntil::Pass2).map_err(invariant)?;
         report.memo_groups = logical.memo.groups().len();
         report.logical_candidates = logical
             .memo
@@ -223,10 +252,29 @@ pub fn run_planning_until(
             return Err(SelectionError::NotRun);
         }
         // Stage 2.
+        let pass2_contents = logical.memo.contents();
         let started = Instant::now();
         let physical = generate_physical_asap_memo_candidates(logical, data, &exclusions);
         report.stage2_ms = elapsed_ms(started);
         let physical = physical_asap_candidates.insert(physical);
+        let memo = &physical.logical_candidates.memo;
+        memo.check_stage_only_added(&pass2_contents, RunUntil::Stage2.name())
+            .map_err(invariant)?;
+        check(memo, RunUntil::Stage2).map_err(invariant)?;
+        memo.check_candidates_exist(
+            physical
+                .physical_candidates
+                .iter()
+                .chain(
+                    physical
+                        .pruned_candidates
+                        .iter()
+                        .map(|pruned| &pruned.candidate),
+                )
+                .map(|candidate| candidate.logical_candidate_id),
+            RunUntil::Stage2.name(),
+        )
+        .map_err(invariant)?;
         report.physical_candidates = physical.physical_candidates.len();
         report.stage2_pruned_candidates = physical.pruned_candidates.len();
         if until == RunUntil::Stage2 {
@@ -242,9 +290,34 @@ pub fn run_planning_until(
             models.deployment_capabilities.final_results_cache(),
         );
         report.stage3_ms = elapsed_ms(started);
-        selection.map_err(SelectionError::Selection)
+        let (plan, selection) = selection.map_err(SelectionError::Selection)?;
+        // Stage 3 reads the memo, so only its plan is new.
+        memo.check_plan_output_schemas(
+            &plan.root_nodes_per_query(),
+            |&node| {
+                plan.nodes
+                    .iter()
+                    .find(|n| n.id == node)
+                    .map(|n| &n.output_schema)
+            },
+            RunUntil::Stage3.name(),
+        )
+        .map_err(invariant)?;
+        Ok((plan, selection))
     })();
     Ok(run)
+}
+
+/// Pass 2's failure: an invariant a rule broke when it added a group or
+/// candidate, or any other failure, as text.
+fn pass2_error(error: Pass2RuleError) -> SelectionError {
+    match error {
+        Pass2RuleError::Group(MemoGroupError::Invariant(violation))
+        | Pass2RuleError::Candidate(CandidateError::Invariant(violation)) => {
+            SelectionError::Invariant(violation)
+        }
+        error => SelectionError::LogicalASAPCandidates(error.to_string()),
+    }
 }
 
 fn elapsed_ms(started: Instant) -> f64 {

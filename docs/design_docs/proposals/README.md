@@ -18,5 +18,6 @@ extensions. A design document is not a promise of downstream runtime support.
 - [Schema and physical data for ASAP primitives](asap-primitive-schema.md)
 - [Stage 3: lowest mean latency under cluster limits](stage3-lowest-mean-latency.md)
 - [Cost terms from calibration](cost-terms-from-calibration.md)
+- [Memo invariants](memo-invariants.md)
 
 - [Joint planning implementation plan](joint-planning-implementation-plan.md)

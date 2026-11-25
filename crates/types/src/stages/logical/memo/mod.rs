@@ -5,6 +5,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod hash_consing;
+mod invariants;
+
+pub use invariants::{InvariantCheck, InvariantOrigin, InvariantViolation, MemoContents};
 
 use super::candidate::parameters_fit;
 use super::group::{
@@ -467,11 +470,26 @@ impl Memo {
     /// for another expression, so such an expression always gets a new
     /// group. Fails, leaving the memo unchanged, when the expression is not
     /// valid over its input groups (its output schema does not derive, an
-    /// input fails validation, or a merge reads states it may not merge).
+    /// input fails validation, or a merge reads states it may not merge),
+    /// or with an [`InvariantViolation`] (checks 1–2).
     pub fn find_or_add_group(
         &mut self,
         expression: Operator<MemoGroupId>,
     ) -> Result<MemoGroupId, MemoGroupError> {
+        let violation = |check, detail| {
+            MemoGroupError::Invariant(InvariantViolation {
+                check,
+                group: None,
+                origin: InvariantOrigin::GroupInsertion,
+                detail,
+            })
+        };
+        if let Some(missing) = self.first_missing_group(expression.children()) {
+            return Err(violation(
+                InvariantCheck::ReadsMissingGroup,
+                format!("reads {missing:?} of {} groups", self.groups.len()),
+            ));
+        }
         let serialized = serialized_expression(&expression);
         let hash = expression_hash(&serialized);
         // Only shareable groups are listed by hash, and an equal expression
@@ -494,6 +512,7 @@ impl Memo {
             u32::try_from(self.groups.len()).expect("a memo has at most u32::MAX groups"),
         );
         let group_properties = derive_group_properties(self, id, &expression)?;
+        invariants::check_column_facts(&group_properties, &expression)?;
         let shareable = group_properties.shareable_when_equal;
         for &input in expression.children() {
             add_parent(&mut self.groups[input.0 as usize], id);
@@ -574,12 +593,44 @@ impl Memo {
     /// does not compute the group's result), or when its θ does not fit the
     /// group's output: a candidate of a sketch state group (a build, or a
     /// merge, `Filter`, `TimeRange` or `TimeShift` passing states on) has a
-    /// θ from that algorithm's list, any other candidate none.
+    /// θ from that algorithm's list, any other candidate none. Only the
+    /// output mismatch is an ordinary rejection (Pass 2's rules rely on
+    /// it); the rest are [`InvariantViolation`]s (checks 2–4) naming the
+    /// candidate's rule.
     pub fn add_candidate(
         &mut self,
         group: MemoGroupId,
         candidate: CandidateForMemoGroup,
     ) -> Result<CandidateForMemoGroupId, CandidateError> {
+        let violation = |check, detail| {
+            CandidateError::Invariant(InvariantViolation {
+                check,
+                group: Some(group),
+                origin: InvariantOrigin::Rule(candidate.origin.clone()),
+                detail,
+            })
+        };
+        let inputs = candidate.expression.operator.children();
+        if let Some(missing) = self.first_missing_group(
+            std::iter::once(&group)
+                .chain(inputs.iter().copied())
+                .collect(),
+        ) {
+            return Err(violation(
+                InvariantCheck::ReadsMissingGroup,
+                format!("reads {missing:?} of {} groups", self.groups.len()),
+            ));
+        }
+        if candidate.input_requirements.len() != inputs.len() {
+            return Err(violation(
+                InvariantCheck::InputRequirementsPerInput,
+                format!(
+                    "{} input requirements for {} inputs",
+                    candidate.input_requirements.len(),
+                    inputs.len()
+                ),
+            ));
+        }
         if let Some(index_in_group) = self.groups[group.0 as usize]
             .candidates
             .iter()
@@ -597,8 +648,12 @@ impl Memo {
                 memo: self,
                 group_id,
             });
-        let (schema, _) = validate_expression_over_input_groups(&operator)
-            .map_err(CandidateError::NotValidOverInputGroups)?;
+        let (schema, _) = validate_expression_over_input_groups(&operator).map_err(|error| {
+            violation(
+                InvariantCheck::CandidateNotValidOverInputs,
+                error.to_string(),
+            )
+        })?;
         let result_kind = operator.output_kind();
         let group_properties = &self.groups[group.0 as usize].group_properties;
         if schema != group_properties.schema || result_kind != group_properties.result_kind {
@@ -608,7 +663,12 @@ impl Memo {
             group_properties.sketch_algorithm_of_state(),
             candidate.logical_properties.parameters(),
         )
-        .map_err(CandidateError::LogicalProperties)?;
+        .map_err(|error| {
+            violation(
+                InvariantCheck::CandidateParametersDoNotFit,
+                error.to_string(),
+            )
+        })?;
         let candidates = &mut self.groups[group.0 as usize].candidates;
         let input_groups: Vec<MemoGroupId> = candidate
             .expression
@@ -628,6 +688,14 @@ impl Memo {
             group,
             index_in_group,
         })
+    }
+
+    /// The first of `groups` not in the memo.
+    fn first_missing_group(&self, groups: Vec<&MemoGroupId>) -> Option<MemoGroupId> {
+        groups
+            .into_iter()
+            .find(|group| group.0 as usize >= self.groups.len())
+            .copied()
     }
 
     /// Adds `queries` to each of `groups` and every group below them, through

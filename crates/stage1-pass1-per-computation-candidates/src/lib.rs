@@ -36,7 +36,7 @@ mod tests;
 use asap_types::deployment_capabilities::DeploymentExclusion;
 use asap_types::ir::schema::Schema;
 use asap_types::ir::{Operator, SchemaDerivationError};
-use asap_types::stages::{CandidateError, Memo, MemoGroupError, MemoGroupId};
+use asap_types::stages::{CandidateError, InvariantViolation, Memo, MemoGroupError, MemoGroupId};
 use thiserror::Error;
 
 use candidates::add_pass1_candidates;
@@ -61,6 +61,23 @@ pub enum PerComputationCandidateError {
     Candidate(#[from] CandidateError),
     #[error("unsupported substitution in logical ASAP-aware optimization: {0}")]
     Unsupported(&'static str),
+    /// Stage 0's or Pass 1's memo breaks an invariant, found after the
+    /// stage (`Memo::check_consistency`): a planner bug.
+    #[error(transparent)]
+    Invariant(#[from] InvariantViolation),
+}
+
+impl PerComputationCandidateError {
+    /// The invariant it breaks, found after the stage or when a group or
+    /// candidate was added.
+    pub fn invariant_violation(&self) -> Option<&InvariantViolation> {
+        match self {
+            Self::Invariant(violation) => Some(violation),
+            Self::MemoGroup(error) => error.invariant_violation(),
+            Self::Candidate(error) => error.invariant_violation(),
+            Self::Structure(_) | Self::ContainsAsap | Self::Unsupported(_) => None,
+        }
+    }
 }
 
 /// Stage 1, Pass 1: the initial candidates of the memo groups of `memo`

@@ -4,7 +4,7 @@
 use crate::ir::operator::asap::summary_type_of_operator;
 use crate::ir::schema::FieldDataType;
 use crate::ir::Operator;
-use crate::stages::{LogicalRequirements, MemoGroupError, MemoGroupId, RequiredAccuracy};
+use crate::stages::{InvariantViolation, LogicalRequirements, MemoGroupId, RequiredAccuracy};
 use crate::summary_type::{parameter_list, SketchAlgorithm, SketchParams};
 
 /// One candidate: position `index_in_group` in group `group`'s candidates
@@ -120,19 +120,26 @@ pub struct CandidateExpression {
 /// A candidate [`Memo::add_candidate`](crate::stages::Memo::add_candidate) rejects; the memo is unchanged.
 #[derive(Debug, thiserror::Error)]
 pub enum CandidateError {
-    /// The candidate's expression is not valid over its input groups (its
-    /// output schema does not derive, an input fails validation, or a merge
-    /// reads states it may not merge): a bug in the rule that built it.
-    #[error("the candidate's expression is not valid over its input groups: {0}")]
-    NotValidOverInputGroups(MemoGroupError),
     /// Its output schema or output kind differs from the group's: it does
-    /// not compute the group's result (a bug in the rule that built it).
+    /// not compute the group's result. An ordinary rejection: Pass 2's
+    /// rules match shapes and let the memo decide.
     #[error("the candidate's output differs from group {group:?}'s")]
     OutputDiffersFromGroup { group: MemoGroupId },
-    /// Its θ does not fit the group's output (a bug in the rule that built
-    /// it).
-    #[error("the candidate's parameters do not fit its group's output: {0}")]
-    LogicalProperties(LogicalPropertiesError),
+    /// A bug in the rule that built it: it reads a missing group, has the
+    /// wrong number of input requirements, is not valid over its input
+    /// groups, or has θ its group's output cannot have.
+    #[error(transparent)]
+    Invariant(#[from] InvariantViolation),
+}
+
+impl CandidateError {
+    /// The invariant it breaks, if any.
+    pub fn invariant_violation(&self) -> Option<&InvariantViolation> {
+        match self {
+            Self::Invariant(violation) => Some(violation),
+            Self::OutputDiffersFromGroup { .. } => None,
+        }
+    }
 }
 
 /// $p^{\log}_v = \boldsymbol\theta_v$. The summary type is the operator's
