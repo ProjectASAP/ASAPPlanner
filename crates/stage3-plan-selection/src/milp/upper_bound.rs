@@ -63,7 +63,6 @@ pub(crate) fn dearer_than_a_feasible_plan(
     // is what it surely pays.
     let bounded_kept_results_cost = |index: usize| {
         let bounded = inputs
-            .data_plane_execution
             .kept_query_time_results
             .is_some_and(|results| results.max_bytes.is_some());
         match (bounded, costs.per_kept_byte) {

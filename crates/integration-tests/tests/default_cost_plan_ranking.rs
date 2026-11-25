@@ -18,8 +18,6 @@
 use std::collections::BTreeSet;
 
 use asap_cost::CostInputs;
-
-use crate::planning_common::cost_inputs_without_disk_cost;
 use asap_planner::{DeploymentCapabilities, PlanningModels};
 use asap_planner_cli::planning_stages::{
     lower_promql_roots, run_planning_stages_over, PlanningStagesRun,
@@ -29,6 +27,8 @@ use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
 use asap_types::workload::PlanningWorkload;
+
+use crate::planning_common::cost_inputs_without_disk_cost;
 
 /// Data rate and evaluation interval of one measured setting, over 1,000
 /// series of each source.

@@ -156,9 +156,10 @@ pub(crate) struct ExecutionCosts {
     /// it answers (`DataPlaneExecution::answer_cache`), by position; empty
     /// without an answer cache.
     pub(crate) answer_bytes_per_execution: Vec<f64>,
-    /// The quantity of one byte kept in the data plane's result and answer
-    /// caches: the memory cost per byte-second (cost model 1), 1 (peak
-    /// memory); `None` for the other quantities.
+    /// The quantity of one byte kept in memory by the data plane's result
+    /// and answer caches, and of a cached view's resident windows
+    /// ([`Self::per_resident_window`]): the memory cost per byte-second
+    /// (cost model 1), 1 (peak memory); `None` for the other quantities.
     pub(crate) per_kept_byte: Option<f64>,
 }
 
@@ -206,11 +207,12 @@ pub(crate) struct RawDataRead {
     pub(crate) raw_data_kept: f64,
 }
 
-/// One execution costed at its rate (`execution_quantities`'s `at_rate`):
-/// its own quantity and a query-time scan's raw data on disk apart
-/// ([`quantity_of`]), its executions per second, and the bytes of results
-/// it keeps and of its output, which the result and answer caches hold.
-struct ExecutionAtRate {
+/// A candidate costed at a rate (`execution_quantities`'s `cost_reading`;
+/// its `at_rate` per execution): its own quantity and a query-time scan's
+/// raw data on disk apart ([`quantity_of`]), the executions per second it
+/// was costed at, and the bytes of results it keeps and of its output,
+/// which the result and answer caches hold.
+struct QuantityAtRate {
     own: f64,
     raw_data: f64,
     per_second: f64,
@@ -407,8 +409,9 @@ pub(crate) fn execution_quantities(
     let order = memo
         .topological_order()
         .unwrap_or_else(|| (0..memo.groups().len() as u32).map(MemoGroupId).collect());
-    // A candidate's (own, raw data on disk) cost per second as `node` over
-    // `inputs`, a query-time `Scan` reading `scan_read_ms` per execution.
+    // A candidate's quantity as `node` over `inputs` at `per_second`
+    // executions per second ([`QuantityAtRate`]), a query-time `Scan`
+    // reading `scan_read_ms` per execution.
     // `evaluation_grid`: the grid of the context it runs in, which a
     // `TimeRangeCover`'s windows are averaged over.
     let cost_reading = |v: PhysicalCandidateId,
@@ -429,7 +432,16 @@ pub(crate) fn execution_quantities(
             cost_inputs,
         )
         .map_err(|error| error.to_string())
-        .and_then(|usage| quantity_of(quantity, &usage, node, cost_inputs))
+        .and_then(|usage| {
+            let (own, raw_data) = quantity_of(quantity, &usage, node, cost_inputs)?;
+            Ok(QuantityAtRate {
+                own,
+                raw_data,
+                per_second,
+                kept_result_bytes: usage.kept_result_bytes,
+                output_bytes: usage.output_facts.statistics.bytes as f64,
+            })
+        })
     };
     // The evaluation grid of a context, which a cover's windows are
     // averaged over; `None` for a context not on one evaluation grid.
@@ -526,7 +538,7 @@ pub(crate) fn execution_quantities(
                 .collect();
             if let Some(largest) = at_grid
                 .into_iter()
-                .max_by_key(|output| output.output_facts.output.bytes)
+                .max_by_key(|output| output.output_facts.statistics.bytes)
             {
                 *input = largest;
             }
@@ -535,7 +547,7 @@ pub(crate) fn execution_quantities(
     };
     // Each execution costed at its rate, over its baseline inputs (covers
     // at its context's grid).
-    let at_rate: Vec<Result<ExecutionAtRate, String>> = executions
+    let at_rate: Vec<Result<QuantityAtRate, String>> = executions
         .iter()
         .zip(&execution_read_ms)
         .map(|(&execution, &read_ms)| {
@@ -555,27 +567,14 @@ pub(crate) fn execution_quantities(
             let evaluation_grid = context_grid(execution.context);
             let inputs =
                 inputs_at(v, evaluation_grid).ok_or("it reads a group on a cycle of candidates")?;
-            let node = &nodes[v.0];
-            let usage = cost_node(
-                physical,
+            cost_reading(
                 v,
-                node,
+                &nodes[v.0],
                 &inputs,
                 per_second,
                 read_ms,
                 evaluation_grid,
-                data,
-                cost_inputs,
             )
-            .map_err(|error| error.to_string())?;
-            let (own, raw_data) = quantity_of(quantity, &usage, node, cost_inputs)?;
-            Ok(ExecutionAtRate {
-                own,
-                raw_data,
-                per_second,
-                kept_result_bytes: usage.kept_result_bytes,
-                output_bytes: usage.output_facts.output.bytes as f64,
-            })
         })
         .collect();
     // The one execution of each candidate materialized across evaluations,
@@ -609,23 +608,23 @@ pub(crate) fn execution_quantities(
             .is_across_evaluations()
         {
             true => own_execution.get(&v).and_then(|&index| {
-                let &ExecutionAtRate {
+                let &QuantityAtRate {
                     own,
                     raw_data,
                     per_second,
                     ..
                 } = at_rate[index].as_ref().ok()?;
                 let inputs = baseline[v.0].as_ref()?;
-                let (longer_own, longer_raw_data) = cost(v, &longer, inputs, per_second).ok()?;
-                Some((longer_own + longer_raw_data - own - raw_data) / delta_seconds)
+                let longer = cost(v, &longer, inputs, per_second).ok()?;
+                Some((longer.own + longer.raw_data - own - raw_data) / delta_seconds)
             }),
             false => usage[v.0]
                 .as_ref()
                 .and_then(|usage| usage.as_ref().ok())
                 .and_then(|_| {
                     let inputs = baseline[v.0].as_ref()?;
-                    let (_, raw_data) = cost(v, &nodes[v.0], inputs, 1.0).ok()?;
-                    let (_, longer_raw_data) = cost(v, &longer, inputs, 1.0).ok()?;
+                    let raw_data = cost(v, &nodes[v.0], inputs, 1.0).ok()?.raw_data;
+                    let longer_raw_data = cost(v, &longer, inputs, 1.0).ok()?.raw_data;
                     Some((longer_raw_data - raw_data) / delta_seconds)
                 }),
         };
@@ -649,11 +648,11 @@ pub(crate) fn execution_quantities(
         };
         raw_data_source.insert(v, source.clone());
         if !retention_cost_per_retained_second.contains_key(&v) {
-            if let Some(Ok((_, raw_data))) = baseline[v.0]
+            if let Some(Ok(at_rate)) = baseline[v.0]
                 .as_ref()
                 .map(|inputs| cost(v, &nodes[v.0], inputs, 1.0))
             {
-                unbounded_raw_data_on_disk_cost_per_second.insert(v, raw_data);
+                unbounded_raw_data_on_disk_cost_per_second.insert(v, at_rate.raw_data);
             }
         }
     }
@@ -672,7 +671,7 @@ pub(crate) fn execution_quantities(
             None,
         )
         .ok()
-        .map(|(_, raw_data)| raw_data)
+        .map(|at_rate| at_rate.raw_data)
     };
     let mut not_linear: HashSet<PhysicalCandidateId> = HashSet::new();
     // A not-linear scan's raw data at its largest retention: what a read
@@ -739,7 +738,7 @@ pub(crate) fn execution_quantities(
         .iter()
         .zip(&at_rate)
         .map(|(execution, at_rate)| {
-            let &ExecutionAtRate { own, raw_data, .. } = at_rate.as_ref().map_err(Clone::clone)?;
+            let &QuantityAtRate { own, raw_data, .. } = at_rate.as_ref().map_err(Clone::clone)?;
             Ok(match query_time_scan[execution.candidate.0] {
                 true => own,
                 false => own + raw_data,
@@ -750,7 +749,7 @@ pub(crate) fn execution_quantities(
         .iter()
         .zip(&at_rate)
         .map(|(execution, at_rate)| {
-            let &ExecutionAtRate { own, raw_data, .. } = at_rate.as_ref().map_err(Clone::clone)?;
+            let &QuantityAtRate { own, raw_data, .. } = at_rate.as_ref().map_err(Clone::clone)?;
             let v = execution.candidate;
             let per_retained_second = retention_cost_per_retained_second.get(&v);
             Ok(if query_time_scan[v.0] {
@@ -779,7 +778,7 @@ pub(crate) fn execution_quantities(
             let e = physical.edge(edge.edge);
             let (u, c) = (e.producer_candidate_id, e.consumer_candidate_id);
             per_execution[producer].as_ref().ok()?;
-            let &ExecutionAtRate {
+            let &QuantityAtRate {
                 own,
                 raw_data,
                 per_second,
@@ -795,7 +794,7 @@ pub(crate) fn execution_quantities(
                         produced.producer_output(&nodes[u.0].payload, &nodes[u.0].output_schema)
                     });
             }
-            let (with_u_own, with_u_raw_data) = cost_reading(
+            let with_u = cost_reading(
                 c,
                 &nodes[c.0],
                 &inputs,
@@ -808,12 +807,12 @@ pub(crate) fn execution_quantities(
             // run, what that consumer reads: on this edge.
             let scan_read = match scan_read_ms {
                 Some(read_ms) if nodes[u.0].lifetime == Lifetime::None => {
-                    let &ExecutionAtRate {
+                    let &QuantityAtRate {
                         own: scan_own,
                         per_second: scan_per_second,
                         ..
                     } = at_rate[producer].as_ref().ok()?;
-                    let (reading_own, _) = cost_reading(
+                    let reading_own = cost_reading(
                         u,
                         &nodes[u.0],
                         baseline[u.0].as_ref()?,
@@ -822,12 +821,13 @@ pub(crate) fn execution_quantities(
                         // A scan's cost does not depend on its readers' grid.
                         None,
                     )
-                    .ok()?;
+                    .ok()?
+                    .own;
                     reading_own - scan_own
                 }
                 _ => 0.0,
             };
-            Some(with_u_own + with_u_raw_data - own - raw_data + scan_read)
+            Some(with_u.own + with_u.raw_data - own - raw_data + scan_read)
         })
         .collect();
     let mut costs = ExecutionCosts {
@@ -902,8 +902,7 @@ pub(crate) fn execution_quantities(
                 entries,
                 (cache, cost_inputs.data_plane_execution.answer_cache),
                 &cached,
-                &costs.retention_need_ms_per_edge,
-                |v, need_ms| costs.retention_ms_for_need(v, need_ms),
+                &costs,
                 quantity == Quantity::PeakMemoryBytes,
             )
         };
@@ -1126,7 +1125,7 @@ fn logical_output<'a: 'b, 'b, 'c>(
             .output_facts
             .folded_per_row
             .and_then(|folded| folded.folded_rows_per_state)
-            .map(|per_row| per_row * known.output_facts.output.rows as f64);
+            .map(|per_row| per_row * known.output_facts.statistics.rows as f64);
         // Short of its range only when every candidate is: a consumer may
         // read one that is not.
         if usage.output_facts.raw_rows_short_of_range.is_none() {
@@ -1139,7 +1138,7 @@ fn logical_output<'a: 'b, 'b, 'c>(
         if usage.output_facts.state_data_span_ms.is_none() {
             known.output_facts.state_data_span_ms = None;
         }
-        if usage.output_facts.output.bytes > known.output_facts.output.bytes {
+        if usage.output_facts.statistics.bytes > known.output_facts.statistics.bytes {
             known.output_facts.family = usage.output_facts.family;
             known.output_facts.state_input_rows = usage.output_facts.state_input_rows;
         }
@@ -1147,23 +1146,23 @@ fn logical_output<'a: 'b, 'b, 'c>(
             .output_facts
             .raw_rows_span_ms
             .max(usage.output_facts.raw_rows_span_ms);
-        known.output_facts.output.rows = known
+        known.output_facts.statistics.rows = known
             .output_facts
-            .output
+            .statistics
             .rows
-            .max(usage.output_facts.output.rows);
+            .max(usage.output_facts.statistics.rows);
         if let (Some(folded), Some(total)) = (
             known.output_facts.folded_per_row.as_mut(),
             source_rows_behind,
         ) {
             folded.folded_rows_per_state =
-                Some(total / known.output_facts.output.rows.max(1) as f64);
+                Some(total / known.output_facts.statistics.rows.max(1) as f64);
         }
-        known.output_facts.output.bytes = known
+        known.output_facts.statistics.bytes = known
             .output_facts
-            .output
+            .statistics
             .bytes
-            .max(usage.output_facts.output.bytes);
+            .max(usage.output_facts.statistics.bytes);
         known
             .output_facts
             .sources
@@ -1255,7 +1254,7 @@ fn quantity_of(
             let compaction = match refresh.refresh_window_width_ms {
                 Some(_) => {
                     copies()
-                        * usage.output_facts.output.rows as f64
+                        * usage.output_facts.statistics.rows as f64
                         * asap_cost::partial_copy_merge_ms(node, usage, cost_inputs)
                 }
                 None => 0.0,

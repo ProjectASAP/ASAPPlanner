@@ -54,7 +54,6 @@ pub(crate) fn kept_result_terms(
     let mut terms = Vec::new();
     // Kept query-time results under a bound: min(S, B) in place of S.
     if let Some(max_bytes) = inputs
-        .data_plane_execution
         .kept_query_time_results
         .and_then(|results| results.max_bytes)
     {
@@ -75,7 +74,7 @@ pub(crate) fn kept_result_terms(
         }
     }
     // Answers, over the plan's longest retention H.
-    if let Some(answers) = inputs.data_plane_execution.answer_cache {
+    if let Some(answers) = inputs.answer_cache {
         let longest = variables
             .h
             .keys()
@@ -181,22 +180,22 @@ pub(crate) fn kept_results_quantity(
         return 0.0;
     };
     let mut quantity = 0.0;
-    if let Some(results) = inputs.data_plane_execution.kept_query_time_results {
+    if let Some(results) = inputs.kept_query_time_results {
         let sum: f64 = selected
             .iter()
             .filter_map(|&index| costs.kept_result_bytes_per_execution.get(index))
             .sum();
         quantity += per_byte * (held_by_bounded_cache(sum, results.max_bytes) - sum);
     }
-    if let Some(answers) = inputs.data_plane_execution.answer_cache {
+    if let Some(answers) = inputs.answer_cache {
         let longest_retention_ms = retention_ms.values().copied().max().unwrap_or(0);
         let answer_bytes_and_period_ms = answering.iter().filter_map(|&(query, index)| {
             let entry = inputs.entries.get(query.0)?;
             let bytes = costs.answer_bytes_per_execution.get(index)?;
             Some((*bytes, entry.evaluation_grid().period_ms))
         });
-        let (_, _, held) = answers_kept(longest_retention_ms, answers, answer_bytes_and_period_ms);
-        quantity += per_byte * held;
+        let kept = answers_kept(longest_retention_ms, answers, answer_bytes_and_period_ms);
+        quantity += per_byte * kept.held_bytes;
     }
     quantity
 }

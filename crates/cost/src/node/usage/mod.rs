@@ -327,7 +327,7 @@ pub struct ProducerOutput<'a> {
 #[derive(Debug, Clone)]
 pub struct OutputFacts<'a> {
     /// Its output rows and bytes.
-    pub output: EdgeStatistics,
+    pub statistics: EdgeStatistics,
     /// The sources it reads.
     pub sources: BTreeSet<&'a str>,
     /// Its state family (with θ).
@@ -691,7 +691,10 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         .retention_ms
         .map_or(1, |retention_ms| retention_ms.div_ceil(output_interval_ms))
         .max(1);
-    let inputs: Vec<EdgeStatistics> = producers.iter().map(|p| p.output_facts.output).collect();
+    let inputs: Vec<EdgeStatistics> = producers
+        .iter()
+        .map(|p| p.output_facts.statistics)
+        .collect();
     // The tumbling windows its rows span: those a `TimeRange` selects from
     // a chain (through the operators that keep each row's window, which
     // pass them on: `Operator::keeps_input_window`), 1 otherwise.
@@ -960,7 +963,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let input_state_bytes = || {
         producers.first().map_or(0, |producer| {
             state_bytes_per_row(
-                producer.output_facts.output,
+                producer.output_facts.statistics,
                 producer.output_schema,
                 series_row_bytes_beside_state,
             )
@@ -1468,14 +1471,15 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 let per_level = cover_windows.clone().unwrap_or_default();
                 let group_count = producers
                     .iter()
-                    .map(|p| p.output_facts.output.rows)
+                    .map(|p| p.output_facts.statistics.rows)
                     .max()
                     .unwrap_or(1);
                 let mut bytes = 0_u64;
                 for (producer, windows) in producers.iter().zip(&per_level) {
                     bytes = bytes
                         .checked_add(
-                            (producer.output_facts.output.bytes as f64 * windows).round() as u64,
+                            (producer.output_facts.statistics.bytes as f64 * windows).round()
+                                as u64,
                         )
                         .ok_or(AnalyticalCostError::Overflow)?;
                 }
@@ -1639,7 +1643,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         if outputs_states(&node.output_schema) =>
                     {
                         let state_bytes = state_bytes_per_row(
-                            producer.output_facts.output,
+                            producer.output_facts.statistics,
                             producer.output_schema,
                             series_row_bytes_beside_state,
                         );
@@ -1893,7 +1897,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 .max(1);
             let width_ms = (*tumbling_window_width_ms).max(1);
             let windows_per_window = (width_ms / narrower_width_ms).max(1);
-            let group_count = narrower.output_facts.output.rows.max(1);
+            let group_count = narrower.output_facts.statistics.rows.max(1);
             // Stage 2 offers it at ingestion time only.
             if !ingestion {
                 return Err(AnalyticalCostError::UnsupportedCandidate);
@@ -1909,7 +1913,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             });
             built_state_input_rows = merged_input_rows;
             let input_state_bytes = state_bytes_per_row(
-                narrower.output_facts.output,
+                narrower.output_facts.statistics,
                 narrower.output_schema,
                 series_row_bytes_beside_state,
             );
@@ -1966,8 +1970,14 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 // rounded (its rows are the groups times the mean, rounded).
                 let windows = producer.output_facts.tumbling_windows.max(1.0);
                 group_count = group_count.max(match windows.fract() == 0.0 {
-                    true => producer.output_facts.output.rows.div_ceil(windows as u64),
-                    false => (producer.output_facts.output.rows as f64 / windows).round() as u64,
+                    true => producer
+                        .output_facts
+                        .statistics
+                        .rows
+                        .div_ceil(windows as u64),
+                    false => {
+                        (producer.output_facts.statistics.rows as f64 / windows).round() as u64
+                    }
                 });
             }
             let states = merged_states(producers)?;
@@ -1984,7 +1994,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             // window.
             let input_state_bytes = |producer: &ProducerOutput<'_>| {
                 state_bytes_per_row(
-                    producer.output_facts.output,
+                    producer.output_facts.statistics,
                     producer.output_schema,
                     series_row_bytes_beside_state,
                 )
@@ -1994,7 +2004,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 producer.output_facts.state_input_rows.map(|rows| {
                     (
                         rows,
-                        producer.output_facts.output.rows as f64 / group_count.max(1) as f64,
+                        producer.output_facts.statistics.rows as f64 / group_count.max(1) as f64,
                     )
                 })
             }));
@@ -2029,7 +2039,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                                 producer.output_facts.state_input_rows,
                                 states.div_ceil(group_count.max(1)),
                             )
-                            .times(producer.output_facts.output.rows as f64),
+                            .times(producer.output_facts.statistics.rows as f64),
                         )
                     })
                     .plus_terms(&merge_output_terms(family, group_count)),
@@ -2608,7 +2618,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     };
     let usage = NodeResourceUsageAndCost {
         output_facts: OutputFacts {
-            output: out,
+            statistics: out,
             sources,
             family,
             unchanged_columns,
@@ -2974,7 +2984,7 @@ fn keys_are_input_keys(keys: &[ColumnId], input: &Schema) -> bool {
 fn merged_states(producers: &[ProducerOutput<'_>]) -> Result<u64, AnalyticalCostError> {
     producers.iter().try_fold(0_u64, |total, producer| {
         total
-            .checked_add(producer.output_facts.output.rows)
+            .checked_add(producer.output_facts.statistics.rows)
             .ok_or(AnalyticalCostError::Overflow)
     })
 }

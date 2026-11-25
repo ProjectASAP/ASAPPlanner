@@ -52,7 +52,7 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         payload: &chain.payload,
         output_schema: &chain.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 1_000,
                 bytes: 16_000,
             },
@@ -86,7 +86,7 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         &settings,
     )
     .unwrap();
-    assert_eq!(windows_usage.output_facts.output.rows, 5_000);
+    assert_eq!(windows_usage.output_facts.statistics.rows, 5_000);
     assert_eq!(windows_usage.output_facts.tumbling_windows, 5.0);
     let merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
         children: vec![0],
@@ -102,8 +102,8 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         &settings,
     )
     .unwrap();
-    assert_eq!(merge_usage.output_facts.output.rows, 1_000);
-    assert_eq!(merge_usage.output_facts.output.bytes, 16_000);
+    assert_eq!(merge_usage.output_facts.statistics.rows, 1_000);
+    assert_eq!(merge_usage.output_facts.statistics.bytes, 16_000);
     assert!(
         merge_usage
             .cost
@@ -169,7 +169,7 @@ fn an_operator_keeping_its_input_window_over_a_chain_or_its_windows_selects_what
             payload: &chain.payload,
             output_schema: &chain.output_schema,
             output_facts: OutputFacts {
-                output: EdgeStatistics {
+                statistics: EdgeStatistics {
                     rows: 1_000,
                     bytes: 16_000,
                 },
@@ -204,7 +204,7 @@ fn an_operator_keeping_its_input_window_over_a_chain_or_its_windows_selects_what
         let usage =
             node_resource_usage_and_cost(&merge, &[below], (1, 1.0), None, None, &data, &settings)
                 .unwrap();
-        (usage.cost.detail, usage.output_facts.output)
+        (usage.cost.detail, usage.output_facts.statistics)
     };
     let direct = merge_over(&[&range]);
     assert!(
@@ -236,7 +236,7 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
         payload: &windows.payload,
         output_schema: &windows.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 5_000,
                 bytes: 5_000 * 4_096,
             },
@@ -317,7 +317,7 @@ fn a_project_or_filter_over_states_passes_their_family_on() {
         payload: &states.payload,
         output_schema: &states.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 1_000,
                 bytes: 1_000 * 4_844,
             },
@@ -377,7 +377,7 @@ fn a_project_or_filter_over_states_passes_their_family_on() {
         assert!(usage.output_facts.states_last_merged, "{name}");
         // The same 4,828-byte states, without `job`'s 16 bytes a row.
         assert_eq!(
-            usage.output_facts.output.bytes,
+            usage.output_facts.statistics.bytes,
             1_000 * (4_844 - 16),
             "{name}"
         );
@@ -402,7 +402,7 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
         payload: &windows.payload,
         output_schema: &windows.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 5_000,
                 bytes: 5_000 * asap_types::summary_type::ExactKind::Counter.sealed_state_bytes(),
             },
@@ -482,7 +482,7 @@ fn raw_rows<'a>(
         payload: &producer.payload,
         output_schema: &producer.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows,
                 bytes: rows * 48,
             },
@@ -757,7 +757,7 @@ fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
         payload: &scan.payload,
         output_schema: &scan.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 36_000,
                 bytes: 36_000 * 16,
             },
@@ -816,7 +816,7 @@ fn a_grouping_counts_raw_batches_from_the_time_its_input_spans() {
     let scan_usage =
         node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), None, &data, &settings)
             .unwrap();
-    assert_eq!(scan_usage.output_facts.output.rows, 300_000);
+    assert_eq!(scan_usage.output_facts.statistics.rows, 300_000);
     let filter = node(Payload::NonASAP(NonASAPOp::Filter {
         pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
         child: 0,
@@ -834,8 +834,8 @@ fn a_grouping_counts_raw_batches_from_the_time_its_input_spans() {
     // The filter keeps a tenth of the rows; the cost model passes every
     // row on, so the test sets what it keeps.
     let mut kept = produced(&filter, &filter_usage);
-    kept.output_facts.output.rows = 30_000;
-    kept.output_facts.output.bytes /= 10;
+    kept.output_facts.statistics.rows = 30_000;
+    kept.output_facts.statistics.bytes /= 10;
     let aggregate = node(Payload::NonASAP(NonASAPOp::Aggregate {
         reduction: Reduction::PerEntity,
         measures: vec![AggIntent::Max { col: None }],
@@ -958,8 +958,8 @@ fn a_query_time_chain_sizes_its_windows_from_the_time_its_input_spans() {
         node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), None, &data, &settings)
             .unwrap();
     let mut kept = produced(&scan, &scan_usage);
-    kept.output_facts.output.rows = 30_000;
-    kept.output_facts.output.bytes /= 10;
+    kept.output_facts.statistics.rows = 30_000;
+    kept.output_facts.statistics.bytes /= 10;
     let chain = PhysicalASAPDAGNode {
         retention_ms: Some(300_000),
         ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -1019,7 +1019,7 @@ fn a_merge_reading_one_state_per_group_passes_it_through() {
             payload: &window.payload,
             output_schema: &window.output_schema,
             output_facts: OutputFacts {
-                output: EdgeStatistics {
+                statistics: EdgeStatistics {
                     rows: 1_000,
                     bytes: 1_000 * state_bytes,
                 },
@@ -1669,7 +1669,7 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
         payload: &build.payload,
         output_schema: &build.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 1_000,
                 bytes: 1_000 * (state_bytes + 32),
             },
@@ -1698,7 +1698,7 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
     let usage =
         node_resource_usage_and_cost(&rollup, &[states], (1, 1.0), None, None, &data, &settings)
             .unwrap();
-    assert_eq!(usage.output_facts.output.rows, 100);
+    assert_eq!(usage.output_facts.statistics.rows, 100);
     let charged_s = usage.work_ms_per_execution / 1_000.0;
     assert!(
         (0.8..=1.25).contains(&(299.0 / charged_s)),
@@ -1749,7 +1749,7 @@ fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
         payload: &build.payload,
         output_schema: &build.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 1_000,
                 bytes: 1_000 * (state_bytes + 32),
             },
@@ -1787,7 +1787,7 @@ fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
         )
         .unwrap();
         assert_eq!(
-            usage.output_facts.output.rows, 1_000,
+            usage.output_facts.statistics.rows, 1_000,
             "{}",
             usage.cost.detail
         );
@@ -1822,7 +1822,7 @@ fn query_time_memory_is_held_only_while_the_node_computes() {
         payload: &input.payload,
         output_schema: &input.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 5_000,
                 bytes: 80_000,
             },
@@ -1934,9 +1934,12 @@ fn a_query_time_scan_reads_what_its_consumers_read_and_keeps_its_retention() {
     assert_eq!(read_ms, Some(1_000));
     let usage = node_resource_usage_and_cost(&scan, &[], (1, 1.0), read_ms, None, &data, &settings)
         .unwrap();
-    assert_eq!(usage.output_facts.output.rows, 1_000);
+    assert_eq!(usage.output_facts.statistics.rows, 1_000);
     let (_, kept_bytes) = usage.raw_scan.expect("a query-time scan keeps raw data");
-    assert_eq!(kept_bytes, (usage.output_facts.output.bytes * 3_601) as f64);
+    assert_eq!(
+        kept_bytes,
+        (usage.output_facts.statistics.bytes * 3_601) as f64
+    );
 }
 
 /// Raw rows materialized at ingestion time behind an offset (a
@@ -1963,7 +1966,7 @@ fn an_ingestion_time_view_of_raw_rows_keeps_the_rows_its_retention_covers() {
         payload: &scan.payload,
         output_schema: &scan.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 1_000,
                 bytes: 64_000,
             },
@@ -2038,7 +2041,7 @@ fn a_view_without_retention_is_not_costed() {
         payload: &scan.payload,
         output_schema: &scan.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 1_000,
                 bytes: 64_000,
             },
@@ -2121,7 +2124,7 @@ fn a_view_over_an_ingestion_time_chain_keeps_one_output_per_chain_window() {
         payload: &chain.payload,
         output_schema: &chain.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 1_000,
                 bytes: 16_000,
             },
@@ -2197,7 +2200,7 @@ fn ddsketch_build_cost(
         payload: &producer.payload,
         output_schema: &producer.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 600,
                 bytes: 9_600,
             },
@@ -2227,7 +2230,7 @@ fn ddsketch_build_cost(
         &settings,
     )
     .unwrap();
-    (usage.output_facts.output.bytes, usage.cost)
+    (usage.output_facts.statistics.bytes, usage.cost)
 }
 
 /// The bytes `sketch_state_bytes` gives a DDSketch state at α = 0.01 over 600
@@ -2429,7 +2432,7 @@ fn ddsketch_assumed_facts_over_sources(
         payload: &producer.payload,
         output_schema: &producer.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 600,
                 bytes: 9_600,
             },
@@ -2629,7 +2632,7 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
         payload: &scan.payload,
         output_schema: &scan.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 1_000,
                 bytes: 48_000,
             },
@@ -2691,7 +2694,7 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
     )
     .unwrap();
     assert_eq!(
-        windows_usage.output_facts.output.rows,
+        windows_usage.output_facts.statistics.rows,
         1_000 * range_s * 1_000 / window_ms
     );
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
@@ -2710,7 +2713,7 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
         &settings,
     )
     .unwrap();
-    assert_eq!(merge_usage.output_facts.output.rows, 1_000);
+    assert_eq!(merge_usage.output_facts.statistics.rows, 1_000);
     merge_usage.cpu_ops_per_second
 }
 
@@ -2758,7 +2761,7 @@ fn a_finalize_charges_each_group_its_measured_time() {
         payload: &merged.payload,
         output_schema: &merged.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 1_000,
                 bytes: 56_000,
             },
@@ -2817,7 +2820,7 @@ fn a_per_series_aggregate_charges_the_labels_it_carries() {
         payload: &rows.payload,
         output_schema: &rows.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 300_000,
                 bytes: 300_000 * 48,
             },
@@ -2942,7 +2945,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         payload: &windows.payload,
         output_schema: &windows.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 360_000,
                 bytes: 360_000 * 944,
             },
@@ -2963,7 +2966,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
     };
     let wider = ProducerOutput {
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 60_000,
                 bytes: 60_000 * 1_328,
             },
@@ -3000,7 +3003,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         &settings,
     )
     .unwrap();
-    assert_eq!(usage.output_facts.output.rows, 1_000);
+    assert_eq!(usage.output_facts.statistics.rows, 1_000);
     let merged = StateInputRows {
         folded_rows_per_state: Some((9_600) as f64),
         ..rows
@@ -3021,7 +3024,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
             > sketch_state_bytes(&SketchParams::Kll { k }, from_first_alone)
     );
     assert!(
-        usage.output_facts.output.bytes_per_row()
+        usage.output_facts.statistics.bytes_per_row()
             > sketch_state_bytes(&SketchParams::Kll { k }, merged),
         "merged state sized for 9,600 rows"
     );
@@ -3040,7 +3043,7 @@ fn kll_estimate_us_per_group(producer: Payload, rows_per_state: u64, state_bytes
         payload: &states.payload,
         output_schema: &states.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 1_000,
                 bytes: 1_000 * state_bytes,
             },
@@ -3522,7 +3525,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             payload: &chain.payload,
             output_schema: &chain.output_schema,
             output_facts: OutputFacts {
-                output: EdgeStatistics {
+                statistics: EdgeStatistics {
                     rows: 1_000,
                     bytes: 1_000 * state_bytes,
                 },
@@ -3673,7 +3676,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             payload: &kmv_build.payload,
             output_schema: &kmv_build.output_schema,
             output_facts: OutputFacts {
-                output: EdgeStatistics {
+                statistics: EdgeStatistics {
                     rows: 1_000,
                     bytes: 1_000 * (kmv_state_bytes + 32),
                 },
@@ -3751,7 +3754,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
                 payload: &states.payload,
                 output_schema: &states.output_schema,
                 output_facts: OutputFacts {
-                    output: EdgeStatistics {
+                    statistics: EdgeStatistics {
                         rows: 1_000,
                         bytes: 1_000 * state_bytes,
                     },
@@ -3792,7 +3795,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             payload: &kll_merge.payload,
             output_schema: &kll_merge.output_schema,
             output_facts: OutputFacts {
-                output: EdgeStatistics {
+                statistics: EdgeStatistics {
                     rows: 1_000,
                     bytes: 56_000,
                 },
@@ -3885,7 +3888,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
         }))
     };
     let mut one_second_of_rows = raw_rows(&m_scan, "m", 1_000, 1_000);
-    one_second_of_rows.output_facts.output.bytes = 64_000;
+    one_second_of_rows.output_facts.statistics.bytes = 64_000;
     one_second_of_rows.output_facts.raw_rows_span_ms = None;
     check(
         "ingestion-time view of raw rows",
@@ -3987,7 +3990,7 @@ fn terms_fail_where_the_node_cannot_be_costed() {
     let data = DataWorkload::default();
     let scan = node(metric_scan("m"));
     let mut one_second_of_rows = raw_rows(&scan, "m", 1_000, 1_000);
-    one_second_of_rows.output_facts.output.bytes = 64_000;
+    one_second_of_rows.output_facts.statistics.bytes = 64_000;
     one_second_of_rows.output_facts.sources = BTreeSet::new();
     one_second_of_rows.output_facts.raw_rows_span_ms = None;
     let view = PhysicalASAPDAGNode {
@@ -4044,7 +4047,7 @@ fn rows_of<'a>(producer: &'a PhysicalASAPDAGNode, rows: u64) -> ProducerOutput<'
         payload: &producer.payload,
         output_schema: &producer.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows,
                 bytes: rows * 16,
             },
@@ -4273,7 +4276,7 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
         payload: &rows_node.payload,
         output_schema: &rows_node.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: count,
                 bytes: count * 48,
             },
@@ -4319,7 +4322,7 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
         &settings,
     )
     .unwrap();
-    assert_eq!(build_usage.output_facts.output.rows, shape.groups);
+    assert_eq!(build_usage.output_facts.statistics.rows, shape.groups);
     let readout = node(Payload::ASAP(ASAPOp::SummaryEstimate {
         summary_input: 0,
         query: statistic,
@@ -4351,7 +4354,7 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
         &settings,
     )
     .unwrap();
-    assert_eq!(merge_usage.output_facts.output.rows, 1);
+    assert_eq!(merge_usage.output_facts.statistics.rows, 1);
     // At ingestion time, one second of a 60 s window's rows.
     let mut chain = PhysicalASAPDAGNode {
         parameters: Some(shape.parameters.clone()),
@@ -4565,7 +4568,7 @@ fn a_ddsketch_build_holds_open_states_and_keeps_sealed_ones() {
         payload: &producer.payload,
         output_schema: &producer.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows,
                 bytes: rows * 16,
             },
@@ -4617,7 +4620,7 @@ fn a_ddsketch_build_holds_open_states_and_keeps_sealed_ones() {
     )
     .unwrap();
     assert_eq!(
-        usage.output_facts.output.bytes, sealed,
+        usage.output_facts.statistics.bytes, sealed,
         "{}",
         usage.cost.detail
     );
@@ -4651,7 +4654,7 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
         payload: &producer.payload,
         output_schema: &producer.output_schema,
         output_facts: OutputFacts {
-            output: EdgeStatistics {
+            statistics: EdgeStatistics {
                 rows: 600,
                 bytes: 9_600,
             },
@@ -4722,12 +4725,12 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
     )
     .unwrap();
     assert_ne!(
-        estimated.output_facts.output.bytes, 900,
+        estimated.output_facts.statistics.bytes, 900,
         "{}",
         estimated.cost.detail
     );
     assert_eq!(
-        usage.output_facts.output.bytes, 900,
+        usage.output_facts.statistics.bytes, 900,
         "{}",
         usage.cost.detail
     );
@@ -4861,7 +4864,7 @@ fn ingestion_and_query_time_chains_over_a_fractional_rate_fold_the_same_rows() {
         )
         .unwrap();
         (
-            scan_usage.output_facts.output.rows,
+            scan_usage.output_facts.statistics.rows,
             usage
                 .output_facts
                 .state_input_rows

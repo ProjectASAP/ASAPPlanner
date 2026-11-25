@@ -7,7 +7,6 @@
 //! that pruned the same candidates in Stage 2 (a throwaway patch, since
 //! deleted); the counts of pruned candidates are the probe's.
 
-use crate::planning_common::cost_inputs_without_disk_cost;
 use asap_planner::{
     CandidateExclusion, CounterSemanticsSupport, DeploymentCapabilities, ErrorSelectingPlan,
     ExclusionSource, OperatorKind, PlanningModels, PlanningRun, RejectionCause, Selection,
@@ -25,6 +24,8 @@ use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGNode};
 use asap_types::stages::{PhysicalProperties, PruneReason};
 use asap_types::summary_type::ExactKind;
 use asap_types::workload::PlanningWorkload;
+
+use crate::planning_common::cost_inputs_without_disk_cost;
 
 // ---------------------------------------------------------------------------
 // Workloads.

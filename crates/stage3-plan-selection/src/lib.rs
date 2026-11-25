@@ -188,7 +188,8 @@ pub fn select_plan(
         entries,
         selectable: &selectable,
         costs: &costs,
-        data_plane_execution: &cost_inputs.data_plane_execution,
+        kept_query_time_results: cost_inputs.data_plane_execution.kept_query_time_results,
+        answer_cache: cost_inputs.data_plane_execution.answer_cache,
     };
     let milp_error = |error| match error {
         SelectionMilpError::Infeasible => {

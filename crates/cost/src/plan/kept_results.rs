@@ -26,12 +26,32 @@ pub fn held_by_bounded_cache(total: f64, max_bytes: Option<u64>) -> f64 {
     }
 }
 
-/// The answers an answer cache keeps, each query's answer per evaluation
-/// time as far back as the plan's evaluations read (its
-/// `longest_retention_ms`) plus `answers.retention_margin_ms`: the horizon
-/// in ms, the bytes kept of each query of `answer_bytes_and_period_ms` (its
-/// answer's bytes and its evaluation period), in order, and the bytes the
-/// cache holds of their sum ([`held_by_bounded_cache`]).
+/// The answers an answer cache keeps ([`answers_kept`]): each query's
+/// answer per evaluation time as far back as the plan's evaluations read
+/// (its longest retention) plus the cache's margin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnswersKept {
+    /// How far back answers are kept, in ms: the longest retention plus
+    /// `AnswerCache::retention_margin_ms`.
+    pub horizon_ms: u64,
+    /// The bytes of every query's kept answers.
+    pub total_bytes: f64,
+    /// The bytes the cache holds of them: at most its bound
+    /// ([`held_by_bounded_cache`]).
+    pub held_bytes: f64,
+}
+
+impl AnswersKept {
+    /// The bytes kept of one query whose answer is `answer_bytes`,
+    /// evaluated every `period_ms`, before the cache's bound.
+    pub fn bytes_of(&self, answer_bytes: f64, period_ms: u64) -> f64 {
+        answer_bytes * kept_per_grid(self.horizon_ms, period_ms)
+    }
+}
+
+/// What an answer cache keeps of the queries' answers, each given by its
+/// answer's bytes and its evaluation period in ms, under a plan whose
+/// longest retention is `longest_retention_ms` ([`AnswersKept`]).
 ///
 /// Example: a 1 h retention, a 1 min margin, one query every 15 s whose
 /// answer is 1,000 bytes: a 3,660,000 ms horizon, 245,000 bytes kept.
@@ -39,14 +59,18 @@ pub fn answers_kept(
     longest_retention_ms: u64,
     answers: AnswerCache,
     answer_bytes_and_period_ms: impl IntoIterator<Item = (f64, u64)>,
-) -> (u64, Vec<f64>, f64) {
-    let horizon_ms = longest_retention_ms.saturating_add(answers.retention_margin_ms);
-    let kept_bytes: Vec<f64> = answer_bytes_and_period_ms
+) -> AnswersKept {
+    let mut kept = AnswersKept {
+        horizon_ms: longest_retention_ms.saturating_add(answers.retention_margin_ms),
+        total_bytes: 0.0,
+        held_bytes: 0.0,
+    };
+    kept.total_bytes = answer_bytes_and_period_ms
         .into_iter()
-        .map(|(bytes, period_ms)| bytes * kept_per_grid(horizon_ms, period_ms))
-        .collect();
-    let held_bytes = held_by_bounded_cache(kept_bytes.iter().sum(), answers.max_bytes);
-    (horizon_ms, kept_bytes, held_bytes)
+        .map(|(bytes, period_ms)| kept.bytes_of(bytes, period_ms))
+        .sum();
+    kept.held_bytes = held_by_bounded_cache(kept.total_bytes, answers.max_bytes);
+    kept
 }
 
 /// Steps one request of a query every `interval_ms` evaluating `range`

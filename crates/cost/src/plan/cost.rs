@@ -344,7 +344,7 @@ pub fn plan_cost(
         usage.scanned_bytes_per_second += node_costed.scanned_bytes_per_second;
         fit.add(node_costed.fit);
         work_ms.insert(node.id, node_costed.work_ms_per_execution);
-        output.insert(node.id, node_costed.output_facts.output);
+        output.insert(node.id, node_costed.output_facts.statistics);
         if let Some(window) = node_costed.maintained {
             maintained.push((node.id, window));
         }
@@ -498,17 +498,20 @@ pub fn plan_cost(
             .filter_map(|node| node.retention_ms)
             .max()
             .unwrap_or(0);
-        let (horizon_ms, kept_bytes, held) = answers_kept(
+        let kept = answers_kept(
             longest_retention_ms,
             answers,
             dag.roots.iter().zip(entries).map(|(root, entry)| {
                 (output[root].bytes as f64, entry.evaluation_grid().period_ms)
             }),
         );
-        let total: f64 = kept_bytes.iter().sum();
-        for (&root, bytes) in dag.roots.iter().zip(kept_bytes) {
-            let bytes = if total > 0.0 {
-                bytes * held / total
+        for (&root, entry) in dag.roots.iter().zip(entries) {
+            let bytes = kept.bytes_of(
+                output[&root].bytes as f64,
+                entry.evaluation_grid().period_ms,
+            );
+            let bytes = if kept.total_bytes > 0.0 {
+                bytes * kept.held_bytes / kept.total_bytes
             } else {
                 0.0
             };
@@ -518,7 +521,10 @@ pub fn plan_cost(
                 .memory_and_disk
                 .peak_memory_bytes
                 .saturating_add(bytes as u64);
-            node_cost.detail += &format!("; keeps {bytes:.0} bytes of answers ({horizon_ms} ms)");
+            node_cost.detail += &format!(
+                "; keeps {bytes:.0} bytes of answers ({} ms)",
+                kept.horizon_ms
+            );
             if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs) {
                 *cost += unit_cost.cost_per_memory_byte_second * bytes;
             }
@@ -1003,7 +1009,7 @@ pub fn partial_copy_merge_ms(
         || {
             // A partial copy merges into a state of the same window.
             let state_bytes = state_bytes_per_row(
-                usage.output_facts.output,
+                usage.output_facts.statistics,
                 &node.output_schema,
                 settings.data_plane_execution.stored_row_bytes_beside_state,
             );

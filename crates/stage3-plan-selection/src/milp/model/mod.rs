@@ -25,7 +25,7 @@ use good_lp::{
     constraint, variable, Constraint, Expression, ProblemVariables, SolverModel, Variable,
 };
 
-use asap_cost::DataPlaneExecution;
+use asap_cost::{AnswerCache, KeptQueryTimeResults};
 use asap_types::accuracy::FailureProbabilityBound;
 use asap_types::ir::operator::Source;
 use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId};
@@ -61,9 +61,14 @@ pub(crate) struct SelectionInputs<'a> {
     /// not cost, $y$ exists only on an edge it costs, $h_v$ only for a
     /// candidate with a retention cost.
     pub(crate) costs: &'a ExecutionCosts,
-    /// The data plane's execution settings: its result cache and answer
-    /// cache, charged as `plan_cost` charges them (`super::kept_results`).
-    pub(crate) data_plane_execution: &'a DataPlaneExecution,
+    /// The data plane's result cache
+    /// (`DataPlaneExecution::kept_query_time_results`), charged as
+    /// `plan_cost` charges it (`super::kept_results`); `None` without one.
+    pub(crate) kept_query_time_results: Option<KeptQueryTimeResults>,
+    /// The data plane's answer cache (`DataPlaneExecution::answer_cache`):
+    /// what a query's request computes and the answers it keeps
+    /// (`super::kept_results`); `None` without one.
+    pub(crate) answer_cache: Option<AnswerCache>,
 }
 
 /// The variables (sections 3 and 5). Executions are by position in
