@@ -70,9 +70,9 @@ At query time, these are the only computed nodes that can have more than one con
   - Views cannot be reused across plans. That is fine while ASAPQuery installs one plan (the engine-boundaries doc's I14). Reusing views across plans would need a plan-independent id (ProjectASAP/ASAPPlanner#1429).
   - Reads are **exact**: a missing window means `NotReady`, never a silently shorter answer. ASAPQuery's `Store` returns sparse results today, so it cannot tell "no data" from "not built yet".
   - `ViewBatch` holds Arrow rows plus `Vec<Arc<dyn Sketch>>`.
-- **`ViewStore::write(...)`** is only for `OnFirstRead` views, which this engine computes. It is append-only, and the store applies retention.
+- **`ViewStore::write(...)`** is only for `OnFirstRead` views, which this engine computes. It is append-only. Eviction is not this crate's job: ASAPQuery's `QueryEngine` wrapper evicts by time after each query (the engine-boundaries doc's I17).
 - **`RawDataStore::read(source, time_range, columns, predicate_hint)`** returns Arrow record batches. The predicates are a hint; the engine always re-filters.
-  - ASAPQuery stores no raw data, so its first implementation fetches from Prometheus, or ClickHouse for SQL, the way ASAPQuery-backend did.
+  - In ASAPQuery, the ingest engine writes the raw data the plan retains to `RawDataStore` (the engine-boundaries doc's decision 23). If S4 is ready before that, a reader that fetches from Prometheus, or ClickHouse for SQL, is a stopgap.
 - **Not DataFusion's `TableProvider`:** plans are compiled once but bound to the stores per batch, and view rows carry sketch objects. The leaf operators look up the store handles from the session context when they run.
 - **No snapshot:** a stored window never changes once written. So a read either sees it or doesn't. If a window is evicted mid-batch, the queries that read it get `NotReady`.
 
@@ -117,23 +117,23 @@ At query time, these are the only computed nodes that can have more than one con
 
 `OnFirstRead` is ASAPPlanner's term (`MaterializedViewRefresh::OnFirstRead`). It marks a view that is kept across evaluations but not built at ingestion: the first batch that needs one of its tumbling windows computes that window from its inputs, uses it, and saves it, and later batches read the saved copy. Because the query engine computes these windows, the query engine also writes them.
 
-- **Only finished windows are saved.** `RawDataStore` exposes a *watermark*: the time up to which raw data is complete, after allowing for samples that arrive late.
+- **Only finished windows are saved.** The ingest engine owns the *watermark*: the time up to which raw data is complete, after allowing for samples that arrive late (the engine-boundaries doc's decision 20). ASAPQuery's wrapper passes it in with each batch.
   - A window that ends at or before the watermark is saved.
   - A newer window is computed for this batch only and not saved, so a later batch recomputes it.
   - Saved windows never change (D4), so saving a window that is still missing samples would make the answer wrong for as long as it is kept.
   - ASAPQuery-backend used the same rule.
-  - ASAPQuery's Prometheus-backed raw store needs a watermark; the simplest is "now minus a configured lag".
+  - With the Prometheus stopgap reader (D4) there is no ingest engine, so the wrapper uses "now minus a configured lag".
 - **If two batches compute the same window concurrently, the first save wins.** The store ignores the second write. That is safe because the contents of a finished window are fixed. The cost is one duplicate computation.
   - Making the second batch wait for the first is a later optimization, if measurements show it matters.
-- **Retention:** the store drops windows older than the view's `retention_ms`, measured from the newest finished window.
+- **Retention:** ASAPQuery's wrapper evicts saved windows older than the latest evaluation time served minus the view's `retention_ms`, as for ingested views (I17).
 
-### D10. ASAPQuery sends batches through a new endpoint, and matches queries by parsed form
+### D10. ASAPQuery sends batches through a new endpoint, and matches queries by exact text
 
 - **New endpoint:** `POST /api/v1/query_batch` takes a list of `{query, time}` or `{query, start, end, step}`. It returns one Prometheus-format result per entry, in order, each marked as answered by the plan, answered by the fallback, or failed.
 - **Engine interface:** ASAPQuery's `QueryEngine` trait (engine-boundaries doc) gains `execute_batch`, and `QueryDispatcher` gains `dispatch_batch`; `execute` is a batch of one.
 - **The existing endpoints stay.** `/api/v1/query` and `/query_range` become batches of one, for Grafana and other clients. Sharing across queries happens only through the batch endpoint.
-- **Matching a query to a root:** at install, each of `query_texts[i]` is parsed with ASAPPlanner's frontend and printed back in a fixed canonical form, mapping to query i's root from `PhysicalASAPDAG::root_nodes_per_query()`. Incoming queries are canonicalized the same way and looked up. Matching by what a query can be answered from, rather than its text, is a separate later feature.
-- **Fallback per entry:** a query with no matching root, or one that gets `NotReady`, is sent to the fallback (Prometheus or ClickHouse) on its own, and its answer fills that query's slot.
+- **Matching a query to a root:** at install, each of `query_texts[i]`, trimmed, maps to query i's root from `PhysicalASAPDAG::root_nodes_per_query()`. An incoming query matches by exact text after trimming (the engine-boundaries doc's I18), so cosmetic variants fall back. Matching by a canonical parsed form, or by what a query can be answered from (capability matching, ProjectASAP/ASAPPlanner#1430), comes later.
+- **Fallback per entry:** a query with no matching root, one that gets `NotReady`, or one whose evaluation fails (D16) is sent to the fallback (Prometheus or ClickHouse) on its own, and its answer fills that query's slot.
 - **SQL** follows the same path with the SQL frontend, after PromQL works.
 
 ### D11. Labels are plain string columns
@@ -193,7 +193,7 @@ Each step is a short stack of PRs; each PR compiles and passes tests. Progress i
 | S1. Skeleton | Crate; cutting and running trees (D3); batch API (D2); store traits with in-memory implementations (D4); `Filter`, `Project`, `Values`, `Concat`, `Sort`, `Limit` over raw reads | hand-built plans running end to end |
 | S2. Time | `eval_time`; the `TimeRange` join and instant lookback; `TimeShift`; range functions | `rate(m[5m])`, instant and range, from planner output |
 | S3. Exact PromQL | Aggregates (D13); per-group top-k; `BinaryOp`; the remaining PromQL operators; label functions (D11) | the corpus's exact-only PromQL plans |
-| S4. ASAPQuery, raw data only | `RawDataStore` over Prometheus; batch endpoint, query matching and fallback (D10); a mode of ASAPQuery's `promql-compliance` harness that plans with ASAPPlanner and runs the new engine | the existing suites comparing against Prometheus |
+| S4. ASAPQuery, raw data only | raw data from the ingest engine's `RawDataStore`, or the Prometheus stopgap reader (D4); batch endpoint, query matching and fallback (D10); a mode of ASAPQuery's `promql-compliance` harness that plans with ASAPPlanner and runs the new engine | the existing suites comparing against Prometheus |
 | S5. Sketches | `Sketch` trait and handle registry (D5); sketch functions; view-read leaf; the test switch that treats every view as `OnFirstRead`; saving `OnFirstRead` views (D9) | sketch plans from the corpus |
 | S6. Views from precompute | ASAPQuery's `ViewStore` over the precompute engine's output | depends on the precompute work |
 | S7. SQL | joins, set operations, window functions, SQL matching | SQL corpus plans |
@@ -207,11 +207,11 @@ Each step is a short stack of PRs; each PR compiles and passes tests. Progress i
 - **Sidra's patches are not taken up front.** Sidra patches memory accounting for sliced batches in joins and sorts, and the cross join that emits one batch per left row (`sidra/patches/`). A patch is applied through `[patch]` only when a test or benchmark hits its problem. The cross join is the most likely, through `TimeRange` (D13).
 - **Features:** default features minus file formats we don't read, such as parquet, avro and compression.
 
-### D16. No resource limits yet; which failures go to the fallback
+### D16. No resource limits yet; every per-query failure goes to the fallback
 
 - **No memory limit, timeout or spilling for now.** A runaway batch can take down the process; that is acceptable while only we run it. Per-batch memory pools and timeouts come later.
-- **Only two cases go to the fallback:** a query with no matching root (D10), and `NotReady` (D2). Each one is marked as fallback in the response and counted.
-- **Every other error is returned to the caller with no fallback,** so engine bugs stay visible. That covers a failed compile, a kernel error, a type mismatch and an internal error. This is ASAPQuery's existing rule.
+- **The engine returns errors; ASAPQuery's dispatcher decides what to do with them.** The engine returns `NotReady` or `Err` per query and never falls back itself.
+- **In ASAPQuery, every per-query failure goes to the fallback:** no matching root (D10), `NotReady` (D2), and engine errors such as a kernel error, a type mismatch or an internal error (the engine-boundaries doc's I12). Each is marked as fallback in the response and counted by cause, so engine bugs stay visible in logs and counters rather than as failed queries. Only a failing fallback is an error response.
 - **At install, a plan the engine cannot compile is refused as a whole,** never installed in part. Until S8, the planner's `check_compiles` still uses the old executor, so a plan can pass the planner and still be refused here.
 
 ### D17. Standalone scalar queries are out of scope for now

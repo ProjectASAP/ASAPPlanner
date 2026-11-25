@@ -8,13 +8,13 @@ This plan splits the work into issues across ASAPPlanner (the new engine crate) 
 
 ## Relation to ASAPQuery's engine-boundaries design
 
-ASAPQuery's `.design_docs/asapplanner-engine-boundaries.md` (ProjectASAP/ASAPQuery#935, merged) defines the deployment side: `QueryEngine` and `IngestEngine` traits, `QueryDispatcher`, `PlanInstaller`, `ViewStore` and `RawDataStore`, and a 14-step plan. The new engine replaces that doc's executor-backed `QueryEngine` (its I1, I15 and step 9) behind the same `QueryEngine` trait. Its decision 1 already keeps the traits independent of the executor's runtime, for this reason.
+ASAPQuery's `.design_docs/asapplanner-engine-boundaries.md` (ProjectASAP/ASAPQuery#935, updated by #941; both merged) defines the deployment side: `QueryEngine` and `IngestEngine` traits, `QueryDispatcher`, `PlanInstaller`, `ViewStore` and `RawDataStore`, and a 14-step plan. The new engine replaces that doc's executor-backed `QueryEngine` (its I1, I15 and step 9) behind the same `QueryEngine` trait. Its decision 1 already keeps the traits independent of the executor's runtime, for this reason.
 
 ### Conflicts to settle before the dependent work starts (issue A0)
 
 Three conflicts fix contracts that two tracks implement in parallel. They are expensive to change later.
 
-**Settled on 2026-11-25:** each one takes the proposed resolution in the table. The remaining work for A0 is updating the engine-boundaries doc to match.
+**Settled on 2026-11-25:** each one takes the proposed resolution in the table. ProjectASAP/ASAPQuery#941 updated the engine-boundaries doc to match, which completes A0.
 
 | Conflict | Engine-boundaries doc | This proposal | Proposed resolution | Blocks |
 |---|---|---|---|---|
@@ -22,16 +22,18 @@ Three conflicts fix contracts that two tracks implement in parallel. They are ex
 | View key | Decisions 43/44: `(ViewDefinitionId, ViewInputDataScope)`. The later comment on #935 proposes `(PlanId, PhysicalASAPNodeId, window)`, because `definition_id` omits θ, window width and selection | `(definition_id, selection)` (D4), which is wrong for the same reason | `(PlanId, PhysicalASAPNodeId, window)`; update both docs | E5a, W3 |
 | Sketch kernels | The ingest engine builds states with the executor's kernel factory (I7) | Port the kernels into the new crate (D5); the executor is deleted | Move the kernels into a shared crate first (E2), and have both engines use it | E2, E5a, #935 step 8 |
 
-### Conflicts to settle while implementing
+### Smaller conflicts
 
-Each of these has one owner and changes in one place:
+The design doc now follows the engine-boundaries doc on these:
 
-- **Engine-error policy.** The engine-boundaries doc's I12 sends engine errors to the fallback; D16 returns them. The engine returns `Err` either way, and the policy lives only in `QueryDispatcher`.
-- **Query matching.** The engine-boundaries doc's I18 matches exact text after trimming; D10 matches the parsed form. Start with exact text; the matching code is private to the dispatcher.
-- **Raw data source.** In the engine-boundaries doc, ASAPQuery's ingest engine writes the raw data the plan retains to `RawDataStore` (decision 23, I7). D4 assumed reading from Prometheus. Use the engine-boundaries model; a Prometheus-backed reader is a stopgap if W1 is ready before the ingest engine writes raw data.
+- **Engine-error policy:** engine errors go to the fallback (I12, D16).
+- **Query matching:** exact text after trimming (I18, D10).
+- **Raw data source:** the ingest engine writes `RawDataStore` (decision 23, D4); a Prometheus-backed reader is a stopgap if W1 is ready first.
+- **Eviction and watermark:** the wrapper evicts after each query (I17) and passes in the ingest engine's watermark (decision 20, D9).
+
+These are settled while implementing; each has one owner and changes in one place:
+
 - **Store traits.** The new crate defines only the narrow read/write interface it needs. ASAPQuery's `QueryEngine` implementation adapts `ViewStore` and `RawDataStore` to it, so dependencies point one way.
-- **Eviction.** It follows the engine-boundaries doc's I17: the query engine evicts by time after each query. That happens in ASAPQuery's wrapper, not in the new crate.
-- **Watermark.** The ingest engine owns it (decision 20). The wrapper passes it to the engine for `OnFirstRead` saves (D9).
 - **Threads.** I15's thread pool existed because the executor's `RunContext` cannot move between threads. It does not apply to the new engine.
 - **`OnFirstRead`.** The engine-boundaries doc does not cover the query engine writing views. D9 adds it, using the existing `ViewStore::put`.
 
@@ -39,7 +41,7 @@ Each of these has one owner and changes in one place:
 
 | Lane | Issue | Depends on | Notes |
 |---|---|---|---|
-| Decide | **A0.** Update the engine-boundaries doc with the three settled resolutions | — | Decisions settled 2026-11-25 |
+| Decide | **A0.** Update the engine-boundaries doc with the three settled resolutions | — | Done: ProjectASAP/ASAPQuery#941 |
 | Spike | **E0a.** Check that a compiled DataFusion `ExecutionPlan` can be run again per batch (D6) | — | Throwaway code; write-up only |
 | Spike | **E0b.** Check how the `TimeRange` cross join batches its output (D13 risk) | — | Throwaway code; write-up only |
 | Kernels | **E2.** Move `crates/executor/src/summary_kernels/` into a shared crate as the `Sketch` trait (D5); the executor depends on it | — | Also unblocks the engine-boundaries doc's step 8 |
@@ -62,7 +64,7 @@ Each of these has one owner and changes in one place:
 ## What runs in parallel
 
 ```text
-Wave 1:  A0 (doc update)  ‖  E0a  ‖  E0b  ‖  E2  ‖  engine-boundaries steps 1–7
+Wave 1:  E0a  ‖  E0b  ‖  E2  ‖  engine-boundaries steps 1–7
 Wave 2:  E1                       (after E0a)
 Wave 3:  E3  ‖  E5a  ‖  E6  ‖  E7
 Wave 4:  E4a  ‖  E4b  ‖  E4c  ‖  E5b  ‖  W0
