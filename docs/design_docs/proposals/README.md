@@ -19,5 +19,6 @@ extensions. A design document is not a promise of downstream runtime support.
 - [Stage 3: lowest mean latency under cluster limits](stage3-lowest-mean-latency.md)
 - [Cost terms from calibration](cost-terms-from-calibration.md)
 - [DataFusion query-time engine](datafusion-query-engine.md)
+  - [Agent orchestration plan](datafusion-query-engine-orchestration.md)
 
 - [Joint planning implementation plan](joint-planning-implementation-plan.md)
