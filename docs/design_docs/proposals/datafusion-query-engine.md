@@ -38,18 +38,27 @@ The executor stays until the new crate compiles the same plans. Then `plan_insta
 
 - **A batch is a list of `(root, evaluation)` pairs.** An evaluation is an instant time T or a range `(start, end, step)`. The pairs in one batch may have different evaluations.
 - **Sharing is by (node, T).** A node's output depends only on its definition and T, so sharing is correct whatever evaluation grid the queries came from. The engine takes the union of the batch's evaluation times, and computes each needed `OneEvaluation` node once for all of them.
-- **No cache across batches.** Grouping queries that are due at the same time into one batch is the caller's job.
+- **Grouping queries that are due at the same time into one batch is the caller's job.**
 - **Results are per query.** If a needed view is not ready, only the queries that need it fail with "not ready" and go to the fallback, as in ASAPQuery's `Ok(None)` today.
 
 ### D3. Cut the DAG at kept nodes, then run the trees in dependency order
 
-- **Cutting:** the DAG is cut at every `OneEvaluation` and `AcrossEvaluations` node. Each piece is a tree and becomes one DataFusion plan.
+A **kept node** is a node whose output the plan says to keep, not just stream to its one consumer:
+- `Lifetime::OneEvaluation`: kept for one evaluation, so every query evaluated at the same time can read it.
+- `Lifetime::AcrossEvaluations`: a view, kept in the view store across evaluations (D4).
+
+At query time, these are the only computed nodes that can have more than one consumer.
+
+- **Cutting:** the DAG is cut at every kept node. Each piece is a tree and becomes one DataFusion plan.
 - **Refusal:** a plan with a query-time `Lifetime::None` node that has two consumers is refused.
 - **Running a batch:**
   - Trees run one at a time, in dependency order: a tree starts only after every tree it reads has finished. Running independent trees concurrently is a later optimization.
-  - A kept output is collected fully into a per-batch scratch store, re-packed into normal-sized batches.
+  - A kept output is collected fully into the batch's scratch store, re-packed into normal-sized batches.
   - Root results are streamed to the caller.
   - A failed tree fails only the queries that depend on it.
+- **The scratch store** is an in-memory map, created per batch, from a kept node to its collected Arrow batches for the batch's evaluation times. A leaf operator in each consuming tree reads from it. It is dropped when the batch finishes.
+  - It holds every `OneEvaluation` output.
+  - For an `AcrossEvaluations` node, the consuming trees read the view store instead (D4). An `OnFirstRead` view that the batch computes is written to the view store if its window is finished (D9). It is also put in the scratch store, so the batch can use windows that are not yet finished, which are never saved.
 - **The scratch store and the sketch registry (D5) live for the whole batch.**
 - **Not done here:** a fan-out operator that streams one output to several parents, such as a `SharedExec` with per-consumer buffers. It can deadlock, for example when both sides of one join read the same upstream, and with a spillable buffer it amounts to materialization anyway. It may come later as an optimization for large `OneEvaluation` outputs.
 
