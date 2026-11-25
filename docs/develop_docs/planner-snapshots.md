@@ -9,7 +9,7 @@ regenerated and the change is explained.
 
 ## Layout
 
-`crates/devtools/tests/corpus_snapshots/<corpus>/`:
+`crates/planner-cli/tests/corpus_snapshots/<corpus>/`:
 
 - `corpus.json`: the inputs shared by the corpus's queries (`asap_planner_args`,
   the repeating-query entry and the `data_workload`), and the queries, each
@@ -39,7 +39,7 @@ was found, not the plan.
 ## Sketch plan snapshots
 
 The corpus queries carry no accuracy target, so their plans are exact.
-`crates/devtools/tests/sketch_plan_snapshots/` pins the plans of workloads
+`crates/planner-cli/tests/sketch_plan_snapshots/` pins the plans of workloads
 that select sketches: `manifest.json` lists each workload (a workload file, its deployment
 capabilities and cost inputs files, and whether accuracy guarantees are
 enforced), and `<id>.json` is its snapshot, holding the same fields as a
@@ -50,7 +50,7 @@ with status `optimal`, unless the manifest gives it a
 `deadline_reached_reason`; any other status fails. Regenerate with:
 
 ```sh
-UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored sketch_plans_match_snapshots
+UPDATE_SNAPSHOTS=1 cargo test --release -p asap-planner-cli --test corpus_snapshots -- --ignored sketch_plans_match_snapshots
 ```
 
 ## When the check fails
@@ -63,7 +63,7 @@ opens), as the `corpus-snapshots` artifact.
 If the change is intended, regenerate the snapshots and commit them:
 
 ```sh
-UPDATE_SNAPSHOTS=1 cargo test --release -p asap-devtools --test corpus_snapshots -- --ignored
+UPDATE_SNAPSHOTS=1 cargo test --release -p asap-planner-cli --test corpus_snapshots -- --ignored
 ```
 
 Then list each changed query and why it changed under **Snapshot changes** in

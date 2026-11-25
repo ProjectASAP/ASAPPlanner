@@ -9,7 +9,9 @@
 //! section 5, "Cost and retention").
 
 use asap_types::ir::Operator;
-use asap_types::plan::time_window::{InputTimeAccess, TimeIndexedPlan};
+use asap_types::plan::time_window::{
+    windows_readers_need, InputTimeAccess, TimeIndexedPlan, TimeWindow,
+};
 use asap_types::stages::{
     MemoGroupId, PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdge, PhysicalEdgeId,
 };
@@ -82,6 +84,22 @@ pub(crate) fn least_retention_ms_per_execution(
         }
     }
     least_retention_ms
+}
+
+/// The readers of `edge`'s producer through `edge` and the window each
+/// reads ([`asap_types::plan::time_window::windows_readers_need`] over
+/// candidates, `edge`'s consumer its producer's only reader, every
+/// candidate that may read it above); `None` when read unbounded. What
+/// `plan_cost` takes of a plan's view, per edge of the memo.
+pub(crate) fn edge_readers_need(
+    physical: &PhysicalASAPMemoCandidates,
+    edge: PhysicalEdgeId,
+) -> Option<Vec<(PhysicalCandidateId, TimeWindow)>> {
+    let candidates = Candidates {
+        physical,
+        edge: physical.edge(edge),
+    };
+    windows_readers_need(&candidates, candidates.edge.producer_candidate_id)
 }
 
 /// `ms` in seconds, the unit of $h_v$ in the MILP and of the costs per

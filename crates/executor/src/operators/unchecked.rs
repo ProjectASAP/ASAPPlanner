@@ -138,6 +138,8 @@ impl TryFrom<UncheckedOperator> for Operator {
                 sample_value,
                 latest_per_series,
                 tumbling_window_width_ms,
+                cover_level,
+                tumbling_window_ends_from_epoch,
             } => {
                 let time_range = Operator::time_range(
                     input(0)?,
@@ -147,8 +149,15 @@ impl TryFrom<UncheckedOperator> for Operator {
                     sample_value,
                     latest_per_series,
                 )?;
-                match tumbling_window_width_ms {
-                    Some(width_ms) => time_range.with_tumbling_window_ends(width_ms)?,
+                let time_range = match (tumbling_window_width_ms, tumbling_window_ends_from_epoch) {
+                    (Some(width_ms), true) => {
+                        time_range.with_tumbling_window_ends_from_epoch(width_ms)?
+                    }
+                    (Some(width_ms), false) => time_range.with_tumbling_window_ends(width_ms)?,
+                    (None, _) => time_range,
+                };
+                match cover_level {
+                    Some(cover_level) => time_range.with_cover_level(cover_level)?,
                     None => time_range,
                 }
             }
@@ -266,14 +275,20 @@ impl TryFrom<UncheckedOperator> for Operator {
                 groups,
                 emit_empty_global,
                 parameters,
+                seal_output,
             } => {
                 if !emit_empty_global && parameters.is_some() {
                     return Err(invalid(
                         "only a merge that outputs an empty global state takes parameters θ",
                     ));
                 }
-                Operator::summary_merge(input(0)?, state, groups)?
-                    .with_emit_empty_global(emit_empty_global, parameters)?
+                let merge = Operator::summary_merge(input(0)?, state, groups)?
+                    .with_emit_empty_global(emit_empty_global, parameters)?;
+                if seal_output {
+                    merge.with_sealed_output()
+                } else {
+                    merge
+                }
             }
             Kind::Evaluation { state, query } => Operator::evaluation(input(0)?, state, query)?,
         }

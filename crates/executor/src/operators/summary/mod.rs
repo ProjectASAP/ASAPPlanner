@@ -301,6 +301,7 @@ impl Operator {
                 groups,
                 emit_empty_global: false,
                 parameters: None,
+                seal_output: false,
             },
             inputs: vec![input],
             output: schema(fields),
@@ -520,6 +521,7 @@ pub(super) fn execute_merge<'a>(
             groups,
             emit_empty_global,
             parameters,
+            seal_output,
         } = &operator.kind
         else {
             unreachable!()
@@ -528,7 +530,10 @@ pub(super) fn execute_merge<'a>(
             input,
             *state,
             groups,
-            emit_empty_global.then_some(parameters.as_ref()),
+            MergeOutput {
+                empty_global: emit_empty_global.then_some(parameters.as_ref()),
+                seal: *seal_output,
+            },
             &input_schema,
             &output,
             &context,
@@ -884,14 +889,23 @@ fn state_indices(batch: &Batch, state: usize) -> Result<(&StateColumn, &UInt32Ar
     Ok((states, indices))
 }
 
-/// Merge the states of each group across all input rows; with
-/// `empty_global` (`Some` of the states' θ), one empty state when there is
-/// no input state.
+/// What a `SummaryMerge` outputs beyond the merged states.
+#[derive(Clone, Copy)]
+struct MergeOutput<'a> {
+    /// `Some` of the states' θ: one empty state when there is no input
+    /// state, as a global SQL aggregate has one row over no input rows.
+    empty_global: Option<Option<&'a SketchParams>>,
+    /// Whether the merged states are a stored level's windows, sealed as a
+    /// chain seals its own.
+    seal: bool,
+}
+
+/// Merge the states of each group across all input rows, as `shape` says.
 async fn merge_summary(
     mut input: Input<'_, Batch>,
     state_column: usize,
     groups: &[usize],
-    empty_global: Option<Option<&SketchParams>>,
+    shape: MergeOutput<'_>,
     input_schema: &SchemaRef,
     output: &SchemaRef,
     context: &RunContext,
@@ -899,6 +913,22 @@ async fn merge_summary(
     use crate::summary_kernels::exact::ScalarState;
     use crate::values::StateStorage;
     let family = &input_schema.fields[state_column].dtype;
+    // Every family but the counter merges in any order: fold the input
+    // batch by batch, holding one batch at a time. Counter states join
+    // consecutive windows pairwise, in time order, so they are collected
+    // and ordered first (stored counter records are mapped, not copied).
+    if SummaryTypeCapability::of(family).merge_inputs != Some(MergeInputRule::DisjointInTime) {
+        return merge_summary_streaming(
+            input,
+            state_column,
+            groups,
+            shape,
+            input_schema,
+            output,
+            context,
+        )
+        .await;
+    }
     let mut batches = Vec::new();
     let mut reservations = Vec::new();
     while let Some(batch) = input.next().await {
@@ -919,7 +949,7 @@ async fn merge_summary(
         );
     }
     // A global SQL aggregate's one row over no input rows: one empty state.
-    if let (true, Some(parameters)) = (entries.is_empty(), empty_global) {
+    if let (true, Some(parameters)) = (entries.is_empty(), shape.empty_global) {
         table.add_empty_group()?;
         let mut updater = StateColumnUpdater::new(family, parameters)?;
         updater.add_group()?;
@@ -933,20 +963,20 @@ async fn merge_summary(
         let (states, indices) = columns[batch];
         (states, indices.value(row) as usize)
     };
-    // Counter states join consecutive windows pairwise, which is exact only
-    // in time order: order the inputs by their window start.
-    if SummaryTypeCapability::of(family).merge_inputs == Some(MergeInputRule::DisjointInTime) {
-        entries.sort_by_cached_key(|&entry| {
-            let (states, index) = state_of(entry);
-            match states.storage() {
-                StateStorage::Exact(records) => records.get(index).earliest_sample_ms(),
-                StateStorage::Objects(objects) => objects[index]
-                    .as_any()
-                    .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
-                    .and_then(|state| state.earliest_sample_ms()),
-            }
-        });
-    }
+    // Counter states (the only family this path merges) join consecutive
+    // windows pairwise, which is exact only in time order: order the inputs
+    // by their window start.
+    entries.sort_by_cached_key(|&entry| {
+        let (states, index) = state_of(entry);
+        match states.storage() {
+            StateStorage::Exact(records) => records.get(index).earliest_sample_ms(),
+            _ => states
+                .state(index)
+                .as_any()
+                .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
+                .and_then(|state| state.earliest_sample_ms()),
+        }
+    });
     let all_exact = columns
         .iter()
         .all(|(states, _)| matches!(states.storage(), StateStorage::Exact(_)));
@@ -1015,29 +1045,128 @@ async fn merge_objects<'b>(
     context: &RunContext,
     work: &mut Cooperative,
 ) -> Result<Vec<(Arc<dyn crate::AggregateCore>, bool)>, Error> {
-    use crate::summary_kernels::{HydraCms, HydraCmsGroup};
-    let mut merged: Vec<Option<(Arc<dyn crate::AggregateCore>, bool)>> = vec![None; group_count];
-    // The group table is held while the states merge.
-    let mut memory = context.reserve(table_memory_bytes)?;
-    let mut retained = table_memory_bytes;
-    // States shared by several groups (Hydra grids) are reserved once each.
-    let mut shared = BTreeMap::<usize, usize>::new();
-    // The inputs are kept so their addresses stay unique while they key the memo.
-    type GridPair = (Arc<HydraCms>, Arc<HydraCms>, Arc<HydraCms>);
-    let mut grids = BTreeMap::<(usize, usize), GridPair>::new();
+    let mut merger = ObjectMerger::new(table_memory_bytes, context)?;
     for &entry in entries {
         work.checkpoint().await?;
         let (states, index) = state_of(entry);
+        // Counter states are records or objects, never mapped sketches: no
+        // KLL accumulator is seeded here.
+        merger.add(states, index, entry.2 as usize, group_count, &|| 0)?;
+    }
+    Ok(merger.finish())
+}
+
+/// The input pair of a merged Hydra grid, kept so their addresses stay
+/// unique while they key the memo, and the merged grid.
+type GridPair = (
+    Arc<crate::summary_kernels::HydraCms>,
+    Arc<crate::summary_kernels::HydraCms>,
+    Arc<crate::summary_kernels::HydraCms>,
+);
+
+/// Kernel-object states merged per group, one input state at a time.
+struct ObjectMerger {
+    merged: Vec<Option<(Arc<dyn crate::AggregateCore>, bool)>>,
+    memory: crate::runtime::Reservation,
+    retained: usize,
+    /// States shared by several groups (Hydra grids) are reserved once each.
+    shared: BTreeMap<usize, usize>,
+    grids: BTreeMap<(usize, usize), GridPair>,
+}
+
+impl ObjectMerger {
+    /// A merger holding a group table of `table_memory_bytes`.
+    fn new(table_memory_bytes: usize, context: &RunContext) -> Result<Self, Error> {
+        Ok(Self {
+            merged: Vec::new(),
+            memory: context.reserve(table_memory_bytes)?,
+            retained: table_memory_bytes,
+            shared: BTreeMap::new(),
+            grids: BTreeMap::new(),
+        })
+    }
+
+    /// The group table grew to `table_memory_bytes`.
+    fn table_grew(&mut self, old_bytes: usize, table_memory_bytes: usize) -> Result<(), Error> {
+        self.retained = self
+            .retained
+            .saturating_sub(old_bytes)
+            .checked_add(table_memory_bytes)
+            .ok_or(Error::MemoryLimit)?;
+        self.memory.resize(self.retained)
+    }
+
+    /// Merges state `index` of `states` into group `group` (of `group_count`
+    /// so far). `seed` is the group's seed for a KLL accumulator built from
+    /// a mapped state, so the merge is the same on every run.
+    fn add(
+        &mut self,
+        states: &StateColumn,
+        index: usize,
+        group: usize,
+        group_count: usize,
+        seed: &dyn Fn() -> u64,
+    ) -> Result<(), Error> {
+        use crate::summary_kernels::HydraCmsGroup;
+        use crate::values::StateStorage;
+        if self.merged.len() < group_count {
+            self.merged.resize(group_count, None);
+        }
+        // A mapped state is folded into the group's accumulator where it is
+        // stored: the accumulator is the only allocation.
+        if let StateStorage::Mapped(mapped) = states.storage() {
+            let slot = &mut self.merged[group];
+            let Some((existing, existing_held_outside_run)) = slot else {
+                let accumulator = mapped.accumulator(index, seed());
+                self.retained = self
+                    .retained
+                    .checked_add(accumulator.approx_memory_bytes() + 64)
+                    .ok_or(Error::MemoryLimit)?;
+                self.memory.resize(self.retained)?;
+                *slot = Some((accumulator, false));
+                return Ok(());
+            };
+            // An accumulator shared with an input (passed through from an
+            // owned column) is copied once, then merged into in place.
+            if *existing_held_outside_run || Arc::strong_count(existing) != 1 {
+                let owned: Arc<dyn crate::AggregateCore> = Arc::from(existing.clone_boxed_core());
+                if !*existing_held_outside_run {
+                    self.retained = self.retained.saturating_sub(existing.approx_memory_bytes());
+                }
+                *existing = owned;
+                *existing_held_outside_run = false;
+                self.retained = self
+                    .retained
+                    .checked_add(existing.approx_memory_bytes())
+                    .ok_or(Error::MemoryLimit)?;
+            }
+            let old_bytes = existing.approx_memory_bytes();
+            // Reserved before merging: a merge grows the accumulator by at
+            // most the merged state's size.
+            self.memory.resize(
+                self.retained
+                    .checked_add(mapped.state_len(index))
+                    .ok_or(Error::MemoryLimit)?,
+            )?;
+            let accumulator = Arc::get_mut(existing).expect("the accumulator is the merger's own");
+            mapped.merge_into(index, accumulator)?;
+            self.retained = self
+                .retained
+                .saturating_sub(old_bytes)
+                .checked_add(existing.approx_memory_bytes())
+                .ok_or(Error::MemoryLimit)?;
+            return self.memory.resize(self.retained);
+        }
         let state = states.state(index);
         let held_outside_run = states.state_held_outside_run(index);
         // A stored state, and the grid it shares, are held outside the run.
         if let Some((id, bytes)) = state.shared_state().filter(|_| !held_outside_run) {
-            if shared.insert(id, bytes).is_none() {
-                retained = retained.checked_add(bytes).ok_or(Error::MemoryLimit)?;
-                memory.resize(retained)?;
+            if self.shared.insert(id, bytes).is_none() {
+                self.retained = self.retained.checked_add(bytes).ok_or(Error::MemoryLimit)?;
+                self.memory.resize(self.retained)?;
             }
         }
-        let slot = &mut merged[entry.2 as usize];
+        let slot = &mut self.merged[group];
         let Some((existing, existing_held_outside_run)) = slot else {
             // Passed through: its slot, and the state unless stored.
             let own_bytes = if held_outside_run {
@@ -1045,12 +1174,13 @@ async fn merge_objects<'b>(
             } else {
                 state.approx_memory_bytes()
             };
-            retained = retained
+            self.retained = self
+                .retained
                 .checked_add(own_bytes + 64)
                 .ok_or(Error::MemoryLimit)?;
-            memory.resize(retained)?;
+            self.memory.resize(self.retained)?;
             *slot = Some((state, held_outside_run));
-            continue;
+            return Ok(());
         };
         // Whatever follows replaces the slot's state with a new one.
         let was_held_outside_run = std::mem::replace(existing_held_outside_run, false);
@@ -1065,7 +1195,7 @@ async fn merge_objects<'b>(
                 Arc::as_ptr(&left.grid) as usize,
                 Arc::as_ptr(&right.grid) as usize,
             );
-            let grid = match grids.entry(pair) {
+            let grid = match self.grids.entry(pair) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.get().2.clone(),
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     let grid = Arc::new(
@@ -1074,9 +1204,9 @@ async fn merge_objects<'b>(
                             .map_err(|e| Error::Operator(e.to_string()))?,
                     );
                     let bytes = grid.approx_memory_bytes();
-                    shared.insert(Arc::as_ptr(&grid) as usize, bytes);
-                    retained = retained.checked_add(bytes).ok_or(Error::MemoryLimit)?;
-                    memory.resize(retained)?;
+                    self.shared.insert(Arc::as_ptr(&grid) as usize, bytes);
+                    self.retained = self.retained.checked_add(bytes).ok_or(Error::MemoryLimit)?;
+                    self.memory.resize(self.retained)?;
                     entry
                         .insert((left.grid.clone(), right.grid.clone(), grid))
                         .2
@@ -1087,7 +1217,7 @@ async fn merge_objects<'b>(
                 grid,
                 group: left.group.clone(),
             });
-            continue;
+            return Ok(());
         }
         // A stored state was charged only its slot.
         let old_bytes = if was_held_outside_run {
@@ -1096,8 +1226,8 @@ async fn merge_objects<'b>(
             existing.approx_memory_bytes()
         };
         // Reserve an estimate for the replacement while both input states remain live.
-        memory.resize(
-            retained
+        self.memory.resize(
+            self.retained
                 .checked_add(old_bytes)
                 .and_then(|n| n.checked_add(state.approx_memory_bytes()))
                 .ok_or(Error::MemoryLimit)?,
@@ -1107,16 +1237,170 @@ async fn merge_objects<'b>(
                 .merge_with(state.as_ref())
                 .map_err(|e| Error::Operator(e.to_string()))?,
         );
-        retained = retained
+        self.retained = self
+            .retained
             .checked_sub(old_bytes)
             .and_then(|n| n.checked_add(existing.approx_memory_bytes()))
             .ok_or(Error::MemoryLimit)?;
-        memory.resize(retained)?;
+        self.memory.resize(self.retained)
     }
-    Ok(merged
-        .into_iter()
-        .map(|state| state.expect("every group has a row"))
-        .collect())
+
+    /// Each group's merged state so far, `None` for a group it merged none.
+    fn finish_partial(mut self) -> Vec<Option<(Arc<dyn crate::AggregateCore>, bool)>> {
+        std::mem::take(&mut self.merged)
+    }
+
+    /// Each group's merged state, with whether something outside the run
+    /// holds it.
+    fn finish(self) -> Vec<(Arc<dyn crate::AggregateCore>, bool)> {
+        self.merged
+            .into_iter()
+            .map(|state| state.expect("every group has a row"))
+            .collect()
+    }
+}
+
+/// [`merge_summary`] for a family that merges in any order: each input
+/// batch is folded into the groups' states as it arrives and then dropped,
+/// so the merge holds one input batch at a time plus its accumulators.
+async fn merge_summary_streaming(
+    mut input: Input<'_, Batch>,
+    state_column: usize,
+    groups: &[usize],
+    shape: MergeOutput<'_>,
+    input_schema: &SchemaRef,
+    output: &SchemaRef,
+    context: &RunContext,
+) -> Result<Batch, Error> {
+    use crate::summary_kernels::exact::{ExactAccumulator, ScalarState};
+    use crate::values::StateStorage;
+    let family = &input_schema.fields[state_column].dtype;
+    let exact_family = matches!(family, SummaryFamilyType::ExactAggregate(..));
+    let mut table = GroupTable::new(groups.to_vec());
+    let mut work = Cooperative::new(context);
+    // Exact records merge in place, one record per group; a group with a
+    // keyed exact state (an object, not a record) merges as objects.
+    let mut exact: Vec<Option<ScalarState>> = Vec::new();
+    let mut as_objects: Vec<bool> = Vec::new();
+    let mut workspace = Workspace::new(context)?;
+    let mut objects = ObjectMerger::new(0, context)?;
+    let mut table_bytes = 0;
+    while let Some(batch) = input.next().await {
+        let batch = batch?;
+        let _held = context.reserve(batch.memory_bytes())?;
+        let ids = table.group_ids(&batch)?;
+        let (states, indices) = state_indices(&batch, state_column)?;
+        objects.table_grew(table_bytes, table.memory_bytes())?;
+        table_bytes = table.memory_bytes();
+        exact.resize(table.len(), None);
+        as_objects.resize(table.len(), false);
+        if exact_family {
+            workspace.set_bytes(exact.len() * std::mem::size_of::<Option<ScalarState>>())?;
+        }
+        for (row, &group) in ids.iter().enumerate() {
+            let (index, group) = (indices.value(row) as usize, group as usize);
+            let seed = || group_seed(&table, group as u32, groups.len());
+            if !exact_family {
+                objects.add(states, index, group, table.len(), &seed)?;
+                continue;
+            }
+            let record = match states.storage() {
+                StateStorage::Exact(records) => Some(records.get(index)),
+                _ => states
+                    .state(index)
+                    .as_any()
+                    .downcast_ref::<ExactAccumulator>()
+                    .and_then(ExactAccumulator::scalar)
+                    .cloned(),
+            };
+            match (record, as_objects[group]) {
+                (Some(record), false) => {
+                    let slot = &mut exact[group];
+                    *slot = Some(match slot.take() {
+                        None => record,
+                        Some(existing) => existing
+                            .merge(&record)
+                            .map_err(|e| Error::Operator(e.to_string()))?,
+                    });
+                }
+                _ => {
+                    // A keyed state: this group merges as objects from now
+                    // on, starting from the records merged so far.
+                    if !as_objects[group] {
+                        as_objects[group] = true;
+                        if let Some(record) = exact[group].take() {
+                            let column = StateColumn::from_exact(family.clone(), vec![record]);
+                            objects.add(&column, 0, group, table.len(), &seed)?;
+                        }
+                    }
+                    objects.add(states, index, group, table.len(), &seed)?;
+                }
+            }
+        }
+        work.checkpoint_rows(batch.num_rows()).await?;
+    }
+    if table.len() == 0 {
+        if let Some(parameters) = shape.empty_global {
+            // A global SQL aggregate's one row over no input rows: one empty state.
+            table.add_empty_group()?;
+            let mut updater = StateColumnUpdater::new(family, parameters)?;
+            updater.add_group()?;
+            return grouped_states(&table, updater.seal(), input_schema, output);
+        }
+    }
+    let states = if exact_family && !as_objects.contains(&true) {
+        StateColumn::from_exact(
+            family.clone(),
+            exact
+                .into_iter()
+                .map(|record| record.expect("every group has a row"))
+                .collect(),
+        )
+    } else if exact_family {
+        // Some groups merged as objects: every group as an object.
+        let mut merged = objects.finish_partial();
+        merged.resize(exact.len(), None);
+        for (group, record) in exact.into_iter().enumerate() {
+            if let Some(record) = record {
+                merged[group] = Some((
+                    Arc::new(ExactAccumulator::from_scalar(family.clone(), record))
+                        as Arc<dyn crate::AggregateCore>,
+                    false,
+                ));
+            }
+        }
+        StateColumn::from_objects_of(
+            family.clone(),
+            merged
+                .into_iter()
+                .map(|state| state.expect("every group has a row"))
+                .collect(),
+        )
+    } else if shape.seal {
+        // A stored level's windows, sealed as a chain seals its own.
+        let merged: Vec<_> = objects
+            .finish()
+            .into_iter()
+            .map(|(state, _)| state)
+            .collect();
+        StateColumn::from_sealed_views(family.clone(), merged.iter().cloned())
+            .unwrap_or_else(|| StateColumn::from_objects(family.clone(), merged))
+    } else {
+        StateColumn::from_objects_of(family.clone(), objects.finish())
+    };
+    grouped_states(&table, states, input_schema, output)
+}
+
+/// The seed of group `group`'s KLL accumulator: a hash of its key values,
+/// so the same group merges the same way on every run.
+fn group_seed(table: &GroupTable, group: u32, key_columns: usize) -> u64 {
+    (0..key_columns).fold(0xcbf2_9ce4_8422_2325u64, |hash, column| {
+        format!("{:?}", table.label(group, column))
+            .bytes()
+            .fold(hash, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            })
+    })
 }
 
 /// `SummaryEstimate` / `FinalizeExactAccumulator`: each row's state read
@@ -1183,6 +1467,7 @@ fn evaluate_states(
                     evaluation.statistic,
                 )
             }
+            StateStorage::Mapped(_) => false,
         }
     };
     let mut keep = Vec::with_capacity(batch.num_rows());
@@ -1198,8 +1483,9 @@ fn evaluate_states(
             (SummaryEvaluation::Exact(evaluation), StateStorage::Exact(records)) => {
                 exact_value(&records.get(index), evaluation)?
             }
-            (SummaryEvaluation::Exact(evaluation), StateStorage::Objects(objects)) => {
-                let exact = objects[index]
+            (SummaryEvaluation::Exact(evaluation), _) => {
+                let state = states.state(index);
+                let exact = state
                     .as_any()
                     .downcast_ref::<ExactAccumulator>()
                     .ok_or_else(|| invalid("exact evaluation requires exact state"))?;
@@ -1208,10 +1494,32 @@ fn evaluate_states(
                     .ok_or_else(|| invalid("exact evaluation requires an unkeyed state"))?;
                 exact_value(record, evaluation)?
             }
+            // A mapped DDSketch's quantile, read on its view: no owned
+            // sketch is built.
+            (
+                SummaryEvaluation::Sketch(planner_types::summary_type::SketchStatistic::Quantile {
+                    q,
+                }),
+                StateStorage::Mapped(mapped),
+            ) if !integral && mapped.kernel() == crate::values::MappedSketchKernel::DDSketch => {
+                match mapped
+                    .ddsketch_quantile(index, *q)
+                    .map_err(Error::Operator)?
+                {
+                    Some(value) => Some(Value::Float64(value)),
+                    // A filtered or NULL-only group's quantile is SQL NULL.
+                    None if nullable => None,
+                    None => {
+                        return Err(Error::Operator(
+                            "DDSketch quantile of an empty population".into(),
+                        ))
+                    }
+                }
+            }
             (SummaryEvaluation::Sketch(query), storage) => {
                 let summary = match storage {
                     StateStorage::Objects(objects) => objects[index].clone(),
-                    StateStorage::Exact(_) => states.state(index),
+                    StateStorage::Exact(_) | StateStorage::Mapped(_) => states.state(index),
                 };
                 // A filtered or NULL-only group's quantile is SQL NULL.
                 if nullable && summary.is_empty() {

@@ -31,11 +31,11 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots, sql_catalog};
 use asap_executor::physical_planner::{compile, promql_rows};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, SchemaRef, Value};
+use asap_planner_cli::planning_stages::{lower_promql_roots, lower_sql_roots, sql_catalog};
 use asap_types::ir::operator::Source;
 use asap_types::ir::schema::{DataType, FieldDataType};
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, QueryRoot};

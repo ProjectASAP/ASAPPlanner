@@ -40,6 +40,7 @@ const memoStepName = (step) => MEMO_STEP_NAMES[step.step] || step.title;
 const MEMO_ORIGINS = {
   pass1: { name: 'Pass1', color: '#4f7bd9' },
   tumbling_windows: { name: 'TumblingWindows', color: '#d4524c' },
+  multi_level_windows: { name: 'MultiLevelWindows', color: '#7a5cc4' },
   rollup: { name: 'Rollup', color: '#1d9fb0' },
   top_k_reuse: { name: 'TopKReuse', color: '#b8931c' },
 };

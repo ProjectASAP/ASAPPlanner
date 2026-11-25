@@ -58,9 +58,15 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         sources: BTreeSet::new(),
         family: StateFamily::Exact(&ExactKind::Sum),
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: Some(60_000),
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let windows = node(Payload::NonASAP(NonASAPOp::TimeRange {
@@ -68,11 +74,18 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         kind: TimeRangeKind::Range,
         child: 0,
     }));
-    let windows_usage =
-        node_resource_usage_and_cost(&windows, &[chain_output], (1, 1.0), None, &data, &settings)
-            .unwrap();
+    let windows_usage = node_resource_usage_and_cost(
+        &windows,
+        &[chain_output],
+        (1, 1.0),
+        None,
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
     assert_eq!(windows_usage.output.rows, 5_000);
-    assert_eq!(windows_usage.tumbling_windows, 5);
+    assert_eq!(windows_usage.tumbling_windows, 5.0);
     let merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
         children: vec![0],
         group_by: None,
@@ -81,6 +94,7 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         &merge,
         &[produced(&windows, &windows_usage)],
         (1, 1.0),
+        None,
         None,
         &data,
         &settings,
@@ -159,19 +173,32 @@ fn an_operator_keeping_its_input_window_over_a_chain_or_its_windows_selects_what
             sources: BTreeSet::new(),
             family: StateFamily::Exact(&ExactKind::Sum),
             unchanged_columns: BTreeSet::new(),
-            tumbling_windows: 1,
+            tumbling_windows: 1.0,
             chain_tumbling_window_width_ms: Some(60_000),
             raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
             state_input_rows: None,
         };
         for &step in path {
-            let usage =
-                node_resource_usage_and_cost(step, &[below], (1, 1.0), None, &data, &settings)
-                    .unwrap();
+            let usage = node_resource_usage_and_cost(
+                step,
+                &[below],
+                (1, 1.0),
+                None,
+                None,
+                &data,
+                &settings,
+            )
+            .unwrap();
             below = produced(step, &usage);
         }
         let usage =
-            node_resource_usage_and_cost(&merge, &[below], (1, 1.0), None, &data, &settings)
+            node_resource_usage_and_cost(&merge, &[below], (1, 1.0), None, None, &data, &settings)
                 .unwrap();
         (usage.cost.detail, usage.output)
     };
@@ -211,9 +238,15 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
         sources: BTreeSet::new(),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 5,
+        tumbling_windows: 5.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
@@ -221,9 +254,16 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
         group_by: None,
     }));
     merge.parameters = Some(SketchParams::DDSketch { alpha: 0.01 });
-    let merge_usage =
-        node_resource_usage_and_cost(&merge, &[windows_output], (1, 1.0), None, &data, &settings)
-            .unwrap();
+    let merge_usage = node_resource_usage_and_cost(
+        &merge,
+        &[windows_output],
+        (1, 1.0),
+        None,
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
     assert!(matches!(
         merge_usage.family,
         StateFamily::Sketch(SketchParams::DDSketch { .. })
@@ -234,6 +274,96 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
             + crate::node::operations_per_unit::merge_output_terms(merge_usage.family, 1_000)
                 .operations()
     );
+}
+
+/// A `Project` or `Filter` over merged KLL states passes them on
+/// unchanged: its states keep the KLL family and stay merged, so an
+/// estimate reading them is costed as a KLL quantile over sorted levels,
+/// as over the merge itself, and each row holds only the columns it keeps
+/// beside its state (a `Project` dropping `job` drops its 16 bytes).
+#[test]
+fn a_project_or_filter_over_states_passes_their_family_on() {
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let kll = SketchParams::Kll { k: 547 };
+    let state_field = Field {
+        name: "state".into(),
+        dtype: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+        nullable: false,
+    };
+    let states = PhysicalASAPDAGNode {
+        output_schema: Schema {
+            fields: vec![
+                state_field.clone(),
+                Field::plain("job", asap_types::ir::schema::DataType::Utf8, false),
+            ],
+            ..Schema::default()
+        },
+        ..node(Payload::ASAP(ASAPOp::SummaryMerge {
+            children: vec![0],
+            group_by: None,
+        }))
+    };
+    let states_output = ProducerOutput {
+        payload: &states.payload,
+        output_schema: &states.output_schema,
+        output: EdgeStatistics {
+            rows: 1_000,
+            bytes: 1_000 * 4_844,
+        },
+        sources: BTreeSet::new(),
+        family: StateFamily::Sketch(&kll),
+        unchanged_columns: BTreeSet::new(),
+        tumbling_windows: 1.0,
+        chain_tumbling_window_width_ms: None,
+        raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: true,
+        state_input_rows: None,
+    };
+    for passing in [
+        Payload::NonASAP(NonASAPOp::Project {
+            cols: Vec::new(),
+            child: 0,
+        }),
+        Payload::NonASAP(NonASAPOp::Filter {
+            pred: asap_types::ir::scalar::Predicate(asap_types::ir::ScalarExpr::Literal(
+                asap_types::ir::scalar::ScalarValue::Boolean(true),
+            )),
+            child: 0,
+        }),
+    ] {
+        let mut passing = node(passing);
+        // Without `job`, as a `Project` keeping only the state.
+        passing.output_schema = Schema {
+            fields: vec![state_field.clone()],
+            ..Schema::default()
+        };
+        let usage = node_resource_usage_and_cost(
+            &passing,
+            std::slice::from_ref(&states_output),
+            (1, 1.0),
+            None,
+            None,
+            &data,
+            &settings,
+        )
+        .unwrap();
+        let name = passing.payload.kind_name();
+        assert!(
+            matches!(usage.family, StateFamily::Sketch(SketchParams::Kll { .. })),
+            "{name}"
+        );
+        // Merged states stay merged: an estimate over them reads sorted
+        // levels.
+        assert!(usage.states_last_merged, "{name}");
+        // The same 4,828-byte states, without `job`'s 16 bytes a row.
+        assert_eq!(usage.output.bytes, 1_000 * (4_844 - 16), "{name}");
+    }
 }
 
 /// A merge over a time range of a counter chain's windows reads counter
@@ -260,9 +390,15 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
         sources: BTreeSet::new(),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 5,
+        tumbling_windows: 5.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
@@ -274,9 +410,16 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
         FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter),
         false,
     )]);
-    let merge_usage =
-        node_resource_usage_and_cost(&merge, &[windows_output], (1, 1.0), None, &data, &settings)
-            .unwrap();
+    let merge_usage = node_resource_usage_and_cost(
+        &merge,
+        &[windows_output],
+        (1, 1.0),
+        None,
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
     assert_eq!(merge_usage.family, StateFamily::Exact(&ExactKind::Counter));
     assert_eq!(
         merge_usage.cpu_ops_per_second,
@@ -319,9 +462,15 @@ fn raw_rows<'a>(
         sources: BTreeSet::from([metric]),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: Some(span_ms),
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     }
 }
@@ -378,6 +527,7 @@ fn an_ingestion_time_chain_costs_more_per_row_at_a_lower_sample_rate() {
             &chain,
             &[raw_rows(&scan, "requests_total", rows_per_second, 1_000)],
             (1, 1.0),
+            None,
             None,
             &thousand_series_sampled_every(sample_interval_ms),
             &settings,
@@ -442,6 +592,7 @@ fn a_per_series_aggregate_costs_more_per_row_at_a_lower_sample_rate() {
             &[raw_rows(&range, "latency", rows, 300_000)],
             (1, 1.0),
             None,
+            None,
             &thousand_series_sampled_every(sample_interval_ms),
             &settings,
         )
@@ -487,6 +638,7 @@ fn a_grouping_visits_each_group_once_per_raw_batch_of_the_declared_width() {
             &[raw_rows(&range, "latency", 300_000, 300_000)],
             (1, 1.0),
             None,
+            None,
             &thousand_series_sampled_every(1_000),
             &settings,
         )
@@ -530,6 +682,7 @@ fn a_query_time_rate_build_costs_more_per_row_at_a_lower_sample_rate() {
             &build,
             &[raw_rows(&range, "requests_total", rows, 300_000)],
             (1, 1.0),
+            None,
             None,
             &thousand_series_sampled_every(sample_interval_ms),
             &settings,
@@ -582,9 +735,15 @@ fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
         sources: BTreeSet::new(),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let chain = PhysicalASAPDAGNode {
@@ -599,7 +758,8 @@ fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
         }))
     };
     let usage =
-        node_resource_usage_and_cost(&chain, &[rows], (1, 1.0), None, &data, &settings).unwrap();
+        node_resource_usage_and_cost(&chain, &[rows], (1, 1.0), None, None, &data, &settings)
+            .unwrap();
     assert_eq!(
         usage.cpu_ops_per_second,
         36_000.0 * (EXACT_UPDATE_OPERATIONS_PER_ROW + TIME_RANGE_OPERATIONS_PER_ROW)
@@ -624,7 +784,7 @@ fn a_grouping_counts_raw_batches_from_the_time_its_input_spans() {
     let data = thousand_series_sampled_every(1_000);
     let scan = node(metric_scan("latency"));
     let scan_usage =
-        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), &data, &settings)
+        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), None, &data, &settings)
             .unwrap();
     assert_eq!(scan_usage.output.rows, 300_000);
     let filter = node(Payload::NonASAP(NonASAPOp::Filter {
@@ -635,6 +795,7 @@ fn a_grouping_counts_raw_batches_from_the_time_its_input_spans() {
         &filter,
         &[produced(&scan, &scan_usage)],
         (1, 1.0),
+        None,
         None,
         &data,
         &settings,
@@ -653,8 +814,9 @@ fn a_grouping_counts_raw_batches_from_the_time_its_input_spans() {
         having: None,
         child: 0,
     }));
-    let usage = node_resource_usage_and_cost(&aggregate, &[kept], (1, 1.0), None, &data, &settings)
-        .unwrap();
+    let usage =
+        node_resource_usage_and_cost(&aggregate, &[kept], (1, 1.0), None, None, &data, &settings)
+            .unwrap();
     assert!(
         usage.cost.detail.contains(", 30000 group visits"),
         "{}",
@@ -676,14 +838,23 @@ fn a_sort_limit_dedup_and_concat_pass_on_the_time_their_raw_rows_span() {
     let data = thousand_series_sampled_every(1_000);
     let scan = node(metric_scan("latency"));
     let scan_usage =
-        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), &data, &settings)
+        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), None, &data, &settings)
             .unwrap();
     let short_scan_usage =
-        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(60_000), &data, &settings).unwrap();
+        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(60_000), None, &data, &settings)
+            .unwrap();
     let span_of = |payload: Payload, producers: Vec<ProducerOutput<'_>>| {
-        node_resource_usage_and_cost(&node(payload), &producers, (1, 1.0), None, &data, &settings)
-            .unwrap()
-            .raw_rows_span_ms
+        node_resource_usage_and_cost(
+            &node(payload),
+            &producers,
+            (1, 1.0),
+            None,
+            None,
+            &data,
+            &settings,
+        )
+        .unwrap()
+        .raw_rows_span_ms
     };
     let raw = || produced(&scan, &scan_usage);
     for payload in [
@@ -732,7 +903,7 @@ fn a_sort_limit_dedup_and_concat_pass_on_the_time_their_raw_rows_span() {
         child: 0,
     }));
     let aggregate_usage =
-        node_resource_usage_and_cost(&aggregate, &[raw()], (1, 1.0), None, &data, &settings)
+        node_resource_usage_and_cost(&aggregate, &[raw()], (1, 1.0), None, None, &data, &settings)
             .unwrap();
     assert_eq!(
         span_of(
@@ -753,7 +924,7 @@ fn a_query_time_chain_sizes_its_windows_from_the_time_its_input_spans() {
     let data = thousand_series_sampled_every(1_000);
     let scan = node(metric_scan("latency"));
     let scan_usage =
-        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), &data, &settings)
+        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), None, &data, &settings)
             .unwrap();
     let mut kept = produced(&scan, &scan_usage);
     kept.output.rows = 30_000;
@@ -774,9 +945,12 @@ fn a_query_time_chain_sizes_its_windows_from_the_time_its_input_spans() {
         ..chain
     };
     let usage =
-        node_resource_usage_and_cost(&chain, &[kept], (1, 1.0), None, &data, &settings).unwrap();
+        node_resource_usage_and_cost(&chain, &[kept], (1, 1.0), None, None, &data, &settings)
+            .unwrap();
     assert_eq!(
-        usage.state_input_rows.and_then(|rows| rows.rows_per_state),
+        usage
+            .state_input_rows
+            .and_then(|rows| rows.rows_per_state()),
         Some(6)
     );
 }
@@ -803,7 +977,7 @@ fn a_merge_reading_one_state_per_group_passes_it_through() {
         let state_bytes = crate::node::state_bytes::sketch_state_bytes(
             &parameters,
             StateInputRows {
-                rows_per_state: Some(100),
+                folded_rows_per_state: Some((100) as f64),
                 non_negative: true,
                 value_magnitude_range: None,
                 distinct_values: None,
@@ -819,11 +993,17 @@ fn a_merge_reading_one_state_per_group_passes_it_through() {
             sources: BTreeSet::new(),
             family: StateFamily::None,
             unchanged_columns: BTreeSet::new(),
-            tumbling_windows: 1,
+            tumbling_windows: 1.0,
             chain_tumbling_window_width_ms: None,
             raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
             state_input_rows: Some(StateInputRows {
-                rows_per_state: Some(100),
+                folded_rows_per_state: Some((100) as f64),
                 non_negative: true,
                 value_magnitude_range: None,
                 distinct_values: None,
@@ -836,9 +1016,16 @@ fn a_merge_reading_one_state_per_group_passes_it_through() {
                 group_by: None,
             }))
         };
-        let usage =
-            node_resource_usage_and_cost(&merge, &[one_window], (1, 1.0), None, &data, &settings)
-                .unwrap();
+        let usage = node_resource_usage_and_cost(
+            &merge,
+            &[one_window],
+            (1, 1.0),
+            None,
+            None,
+            &data,
+            &settings,
+        )
+        .unwrap();
         let charged_ms = usage.work_ms_per_execution;
         assert!(
             (0.8..=1.25).contains(&(measured_ms / charged_ms)),
@@ -901,8 +1088,9 @@ fn sql_aggregate_operations_per_row(
         having: None,
         child: 0,
     }));
-    let usage = node_resource_usage_and_cost(&aggregate, &[rows], (1, 1.0), None, &data, &settings)
-        .unwrap();
+    let usage =
+        node_resource_usage_and_cost(&aggregate, &[rows], (1, 1.0), None, None, &data, &settings)
+            .unwrap();
     usage.cpu_ops_per_second / 300_000.0
 }
 
@@ -1063,7 +1251,7 @@ fn http_distinct_count_operations_per_row(
         child: 0,
     }));
     let usage =
-        node_resource_usage_and_cost(&aggregate, &[input], (1, 1.0), None, &data, &settings)
+        node_resource_usage_and_cost(&aggregate, &[input], (1, 1.0), None, None, &data, &settings)
             .unwrap();
     usage.cpu_ops_per_second / rows as f64
 }
@@ -1163,8 +1351,9 @@ fn a_kmv_build_costs_per_retained_hash_it_compares() {
                 filter: None,
             }))
         };
-        let usage = node_resource_usage_and_cost(&build, &[rows], (1, 1.0), None, &data, &settings)
-            .unwrap();
+        let usage =
+            node_resource_usage_and_cost(&build, &[rows], (1, 1.0), None, None, &data, &settings)
+                .unwrap();
         let charged = usage.cpu_ops_per_second / 300_000.0;
         assert!(
             (0.75..=1.33).contains(&(charged / measured)),
@@ -1218,7 +1407,7 @@ fn user_id_sketch_detail(
             }
         }))
     };
-    node_resource_usage_and_cost(&build, &[rows], (1, 1.0), None, &data, &settings)
+    node_resource_usage_and_cost(&build, &[rows], (1, 1.0), None, None, &data, &settings)
         .unwrap()
         .cost
         .detail
@@ -1313,7 +1502,7 @@ fn a_kmv_build_charges_its_measured_time_per_row() {
             }))
         };
         let usage =
-            node_resource_usage_and_cost(&build, &[input], (1, 1.0), None, &data, &settings)
+            node_resource_usage_and_cost(&build, &[input], (1, 1.0), None, None, &data, &settings)
                 .unwrap();
         let charged = usage.cpu_ops_per_second / rows as f64;
         assert!(
@@ -1349,7 +1538,7 @@ fn a_kmv_merge_charges_its_measured_time_per_state() {
     ] {
         let parameters = SketchParams::Kmv { k };
         let input_rows = StateInputRows {
-            rows_per_state: Some(rows),
+            folded_rows_per_state: Some((rows) as f64),
             distinct_values: Some(users),
             ..StateInputRows::UNKNOWN
         };
@@ -1377,13 +1566,13 @@ fn a_kmv_merge_charges_its_measured_time_per_state() {
 fn a_kmv_merge_of_states_with_unknown_rows_retains_at_most_the_column_s_values() {
     use crate::node::operations_per_unit::merge_terms_per_state;
     let parameters = SketchParams::Kmv { k: 4_323 };
-    let charge = |rows_per_state, distinct_values| {
+    let charge = |rows_per_state: Option<u64>, distinct_values| {
         merge_terms_per_state(
             StateFamily::Sketch(&parameters),
             0,
             0,
             Some(StateInputRows {
-                rows_per_state,
+                folded_rows_per_state: rows_per_state.map(|rows: u64| rows as f64),
                 distinct_values,
                 ..StateInputRows::UNKNOWN
             }),
@@ -1419,7 +1608,7 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
     .unwrap();
     let parameters = SketchParams::Kmv { k: 106_263 };
     let rows = StateInputRows {
-        rows_per_state: Some(12_000),
+        folded_rows_per_state: Some((12_000) as f64),
         non_negative: false,
         value_magnitude_range: None,
         distinct_values: Some(1_000_000),
@@ -1450,9 +1639,15 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
         sources: BTreeSet::from(["http"]),
         family: StateFamily::Sketch(&parameters),
         unchanged_columns: ["region", "service"].into(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: Some(rows),
     };
     let rollup = PhysicalASAPDAGNode {
@@ -1463,7 +1658,8 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
         }))
     };
     let usage =
-        node_resource_usage_and_cost(&rollup, &[states], (1, 1.0), None, &data, &settings).unwrap();
+        node_resource_usage_and_cost(&rollup, &[states], (1, 1.0), None, None, &data, &settings)
+            .unwrap();
     assert_eq!(usage.output.rows, 100);
     let charged_s = usage.work_ms_per_execution / 1_000.0;
     assert!(
@@ -1490,7 +1686,7 @@ fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
     .unwrap();
     let parameters = SketchParams::Kmv { k: 26_656 };
     let rows = StateInputRows {
-        rows_per_state: Some(12_000),
+        folded_rows_per_state: Some((12_000) as f64),
         non_negative: false,
         value_magnitude_range: None,
         distinct_values: None,
@@ -1521,9 +1717,15 @@ fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
         sources: BTreeSet::from(["http"]),
         family: StateFamily::Sketch(&parameters),
         unchanged_columns: ["region", "service"].into(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: Some(rows),
     };
     let merge_ms = |group_by: Option<Vec<usize>>| {
@@ -1538,6 +1740,7 @@ fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
             &merge,
             std::slice::from_ref(&states),
             (1, 1.0),
+            None,
             None,
             &data,
             &settings,
@@ -1581,9 +1784,15 @@ fn query_time_memory_is_held_only_while_the_node_computes() {
         sources: BTreeSet::new(),
         family: StateFamily::Exact(&ExactKind::Sum),
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let merge = PhysicalASAPDAGNode {
@@ -1594,7 +1803,8 @@ fn query_time_memory_is_held_only_while_the_node_computes() {
         }))
     };
     let usage =
-        node_resource_usage_and_cost(&merge, &[states], (1, 0.1), None, &data, &settings).unwrap();
+        node_resource_usage_and_cost(&merge, &[states], (1, 0.1), None, None, &data, &settings)
+            .unwrap();
     let held: u64 = usage
         .cost
         .detail
@@ -1606,9 +1816,9 @@ fn query_time_memory_is_held_only_while_the_node_computes() {
     assert!(held > 0);
     let expected = held as f64 * usage.work_ms_per_execution / 1_000.0 * 0.1;
     assert!(
-        (usage.average_memory_bytes - expected).abs() <= 1e-9 * expected,
+        (usage.cost.memory_and_disk.average_memory_bytes - expected).abs() <= 1e-9 * expected,
         "{} vs {expected}",
-        usage.average_memory_bytes
+        usage.cost.memory_and_disk.average_memory_bytes
     );
 }
 
@@ -1676,11 +1886,11 @@ fn a_query_time_scan_reads_what_its_consumers_read_and_keeps_its_retention() {
     }
     let read_ms = read_back_ms(&ScanReadByRange([&scan, &instant]), 0, |_| 0);
     assert_eq!(read_ms, Some(1_000));
-    let usage =
-        node_resource_usage_and_cost(&scan, &[], (1, 1.0), read_ms, &data, &settings).unwrap();
+    let usage = node_resource_usage_and_cost(&scan, &[], (1, 1.0), read_ms, None, &data, &settings)
+        .unwrap();
     assert_eq!(usage.output.rows, 1_000);
     let (_, kept_bytes) = usage.raw_scan.expect("a query-time scan keeps raw data");
-    assert_eq!(kept_bytes, usage.output.bytes * 3_601);
+    assert_eq!(kept_bytes, (usage.output.bytes * 3_601) as f64);
 }
 
 /// Raw rows materialized at ingestion time behind an offset (a
@@ -1713,9 +1923,15 @@ fn an_ingestion_time_view_of_raw_rows_keeps_the_rows_its_retention_covers() {
         sources: ["m"].into(),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let row_schema = Schema::new(vec![
@@ -1741,10 +1957,13 @@ fn an_ingestion_time_view_of_raw_rows_keeps_the_rows_its_retention_covers() {
             std::slice::from_ref(&one_second_of_rows),
             (1, 1.0),
             None,
+            None,
             &data,
             &settings,
         )
         .unwrap()
+        .cost
+        .memory_and_disk
         .peak_memory_bytes
     };
     let row_width_bytes = row_bytes(&row_schema);
@@ -1777,9 +1996,15 @@ fn a_view_without_retention_is_not_costed() {
         sources: BTreeSet::new(),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let shift = PhysicalASAPDAGNode {
@@ -1798,6 +2023,7 @@ fn a_view_without_retention_is_not_costed() {
         &shift,
         std::slice::from_ref(&one_second_of_rows),
         (1, 1.0),
+        None,
         None,
         &data,
         &settings,
@@ -1851,9 +2077,15 @@ fn a_view_over_an_ingestion_time_chain_keeps_one_output_per_chain_window() {
         sources: BTreeSet::new(),
         family: StateFamily::Exact(&ExactKind::Sum),
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: Some(60_000),
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let usage = node_resource_usage_and_cost(
@@ -1861,11 +2093,12 @@ fn a_view_over_an_ingestion_time_chain_keeps_one_output_per_chain_window() {
         &[one_window_of_states],
         (1, 1.0),
         window_ms,
+        None,
         &data,
         &settings,
     )
     .unwrap();
-    assert_eq!(usage.peak_memory_bytes, 16_000 * 66);
+    assert_eq!(usage.cost.memory_and_disk.peak_memory_bytes, 16_000 * 66);
 }
 
 /// The bytes of a DDSketch state at α = 0.01 built over `column` of the
@@ -1918,15 +2151,28 @@ fn ddsketch_build_cost(
         sources: BTreeSet::from([source]),
         family: StateFamily::None,
         unchanged_columns,
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let settings = CostInputs::default();
-    let usage =
-        node_resource_usage_and_cost(&build, &[producer_output], (1, 1.0), None, data, &settings)
-            .unwrap();
+    let usage = node_resource_usage_and_cost(
+        &build,
+        &[producer_output],
+        (1, 1.0),
+        None,
+        None,
+        data,
+        &settings,
+    )
+    .unwrap();
     (usage.output.bytes, usage.cost)
 }
 
@@ -1940,7 +2186,7 @@ fn ddsketch_costed_bytes(
     sketch_state_bytes(
         &SketchParams::DDSketch { alpha: 0.01 },
         StateInputRows {
-            rows_per_state: Some(600),
+            folded_rows_per_state: Some((600) as f64),
             non_negative,
             value_magnitude_range,
             distinct_values: None,
@@ -2012,10 +2258,10 @@ fn a_ddsketch_over_a_scan_is_costed_at_its_declared_value_magnitude_range() {
         state_bytes(&data(Some(latency)), BTreeSet::from(["ts"])),
         ddsketch_costed_bytes(false, None)
     );
-    // A declared range floors a state's spread at its rows' log-uniform
-    // spread over it: 600 rows within seven decades are charged nearly all
-    // of them, more than their undeclared wide-spread margin.
-    assert!(ddsketch_costed_bytes(false, Some(latency)) > ddsketch_costed_bytes(false, None));
+    // A stored state is charged at most the buckets its column's range
+    // spans: 600 rows within a declared seven decades are charged less
+    // than within the assumed nine.
+    assert!(ddsketch_costed_bytes(false, Some(latency)) < ddsketch_costed_bytes(false, None));
 }
 
 /// A DDSketch over a scan of `latency` whose `value` declares no
@@ -2135,16 +2381,30 @@ fn ddsketch_assumed_facts_over_sources(
         sources: sources.iter().copied().collect(),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::from(["ts", "value"]),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         state_input_rows: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
     };
     let settings = CostInputs::default();
-    node_resource_usage_and_cost(&build, &[producer_output], (1, 1.0), None, data, &settings)
-        .unwrap()
-        .cost
-        .assumed_data_facts
+    node_resource_usage_and_cost(
+        &build,
+        &[producer_output],
+        (1, 1.0),
+        None,
+        None,
+        data,
+        &settings,
+    )
+    .unwrap()
+    .cost
+    .assumed_data_facts
 }
 
 /// A DDSketch over a SQL table's `latency` column that the table declares
@@ -2319,9 +2579,15 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
         sources: ["latency"].into(),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let mut chain = node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -2345,6 +2611,7 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
         &[scan_output],
         (1, 1.0),
         Some(window_ms),
+        None,
         &data,
         &settings,
     )
@@ -2359,6 +2626,7 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
         &windows,
         &[produced(&chain, &chain_usage)],
         (1, 0.1),
+        None,
         None,
         &data,
         &settings,
@@ -2378,6 +2646,7 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
         &merge,
         &[produced(&windows, &windows_usage)],
         (1, 0.1),
+        None,
         None,
         &data,
         &settings,
@@ -2437,9 +2706,15 @@ fn a_finalize_charges_each_group_its_measured_time() {
         sources: BTreeSet::new(),
         family: StateFamily::Exact(&ExactKind::Sum),
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let finalize = node(Payload::ASAP(ASAPOp::FinalizeExactAccumulator {
@@ -2450,6 +2725,7 @@ fn a_finalize_charges_each_group_its_measured_time() {
         &finalize,
         &[merged_output],
         (1, 1.0),
+        None,
         None,
         &data,
         &settings,
@@ -2487,9 +2763,15 @@ fn a_per_series_aggregate_charges_the_labels_it_carries() {
         sources: BTreeSet::new(),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let ms_per_row = |labels: &[&str]| {
@@ -2515,6 +2797,7 @@ fn a_per_series_aggregate_charges_the_labels_it_carries() {
             &aggregate,
             std::slice::from_ref(&rows_output),
             (1, 1.0),
+            None,
             None,
             &data,
             &settings,
@@ -2588,7 +2871,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         }))
     };
     let rows = StateInputRows {
-        rows_per_state: Some(10),
+        folded_rows_per_state: Some((10) as f64),
         non_negative: true,
         value_magnitude_range: None,
         distinct_values: None,
@@ -2603,9 +2886,15 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         sources: BTreeSet::new(),
         family: StateFamily::Sketch(&SketchParams::Kll { k }),
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 360,
+        tumbling_windows: 360.0,
         chain_tumbling_window_width_ms: Some(10_000),
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: Some(rows),
     };
     let wider = ProducerOutput {
@@ -2613,11 +2902,17 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
             rows: 60_000,
             bytes: 60_000 * 1_328,
         },
-        tumbling_windows: 60,
+        tumbling_windows: 60.0,
         chain_tumbling_window_width_ms: Some(60_000),
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: Some(StateInputRows {
-            rows_per_state: Some(100),
+            folded_rows_per_state: Some((100) as f64),
             ..rows
         }),
         ..input.clone()
@@ -2628,20 +2923,29 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
     }));
     merge.parameters = Some(SketchParams::Kll { k });
     merge.output_schema = windows.output_schema.clone();
-    let usage =
-        node_resource_usage_and_cost(&merge, &[input, wider], (1, 0.1), None, &data, &settings)
-            .unwrap();
+    let usage = node_resource_usage_and_cost(
+        &merge,
+        &[input, wider],
+        (1, 0.1),
+        None,
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
     assert_eq!(usage.output.rows, 1_000);
     let merged = StateInputRows {
-        rows_per_state: Some(9_600),
+        folded_rows_per_state: Some((9_600) as f64),
         ..rows
     };
     assert_eq!(
-        usage.state_input_rows.and_then(|rows| rows.rows_per_state),
+        usage
+            .state_input_rows
+            .and_then(|rows| rows.rows_per_state()),
         Some(9_600)
     );
     let from_first_alone = StateInputRows {
-        rows_per_state: Some(4_200),
+        folded_rows_per_state: Some((4_200) as f64),
         ..rows
     };
     assert!(
@@ -2673,11 +2977,18 @@ fn kll_estimate_us_per_group(producer: Payload, rows_per_state: u64, state_bytes
         sources: BTreeSet::new(),
         family: StateFamily::Sketch(&kll),
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        // A merge leaves its states merged.
+        states_last_merged: matches!(states.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. })),
         state_input_rows: Some(StateInputRows {
-            rows_per_state: Some(rows_per_state),
+            folded_rows_per_state: Some((rows_per_state) as f64),
             non_negative: true,
             value_magnitude_range: None,
             distinct_values: None,
@@ -2687,9 +2998,16 @@ fn kll_estimate_us_per_group(producer: Payload, rows_per_state: u64, state_bytes
         summary_input: 0,
         query: SketchStatistic::Quantile { q: 0.99 },
     }));
-    let usage =
-        node_resource_usage_and_cost(&estimate, &[state_output], (1, 1.0), None, &data, &settings)
-            .unwrap();
+    let usage = node_resource_usage_and_cost(
+        &estimate,
+        &[state_output],
+        (1, 1.0),
+        None,
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
     usage.work_ms_per_execution * 1e3 / 1_000.0
 }
 
@@ -2755,7 +3073,7 @@ fn formula_cpu_per_execution<'a>(
     data: &DataWorkload,
     settings: &'a CostInputs,
 ) -> f64 {
-    node_resource_usage_and_cost(node, producers, (1, 1.0), window_ms, data, settings)
+    node_resource_usage_and_cost(node, producers, (1, 1.0), window_ms, None, data, settings)
         .unwrap()
         .cpu_ops_per_second
 }
@@ -3117,7 +3435,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             }))
         };
         let rows_per_state = StateInputRows {
-            rows_per_state: Some(60),
+            folded_rows_per_state: Some((60) as f64),
             non_negative: true,
             value_magnitude_range: None,
             distinct_values: None,
@@ -3136,9 +3454,15 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             sources: BTreeSet::from(["latency"]),
             family,
             unchanged_columns: BTreeSet::new(),
-            tumbling_windows: 1,
+            tumbling_windows: 1.0,
             chain_tumbling_window_width_ms: Some(60_000),
             raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
             state_input_rows: Some(rows_per_state),
         };
         let windows = PhysicalASAPDAGNode {
@@ -3156,6 +3480,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             &windows,
             &[chain_output],
             (1, 1.0),
+            None,
             None,
             &gauge,
             &settings,
@@ -3236,7 +3561,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
     .unwrap();
     let kmv = SketchParams::Kmv { k: 106_263 };
     let kmv_rows = StateInputRows {
-        rows_per_state: Some(12_000),
+        folded_rows_per_state: Some((12_000) as f64),
         non_negative: false,
         value_magnitude_range: None,
         distinct_values: None,
@@ -3277,9 +3602,15 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             sources: BTreeSet::from(["http"]),
             family: StateFamily::Sketch(&kmv),
             unchanged_columns: ["region", "service"].into(),
-            tumbling_windows: 1,
+            tumbling_windows: 1.0,
             chain_tumbling_window_width_ms: None,
             raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
             state_input_rows: Some(kmv_rows),
         }],
         None,
@@ -3347,11 +3678,17 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
                 sources: BTreeSet::new(),
                 family: StateFamily::Sketch(&kll_547),
                 unchanged_columns: BTreeSet::new(),
-                tumbling_windows: 1,
+                tumbling_windows: 1.0,
                 chain_tumbling_window_width_ms: None,
                 raw_rows_span_ms: None,
+                raw_rows_per_ms: None,
+                folded_per_row: None,
+                raw_rows_short_of_range: None,
+                state_data_span_ms: None,
+                raw_rows_shifted_back_ms: 0,
+                states_last_merged: false,
                 state_input_rows: Some(StateInputRows {
-                    rows_per_state: Some(rows_per_state),
+                    folded_rows_per_state: Some((rows_per_state) as f64),
                     non_negative: true,
                     value_magnitude_range: None,
                     distinct_values: None,
@@ -3380,9 +3717,15 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             sources: BTreeSet::new(),
             family: StateFamily::Exact(&ExactKind::Sum),
             unchanged_columns: BTreeSet::new(),
-            tumbling_windows: 1,
+            tumbling_windows: 1.0,
             chain_tumbling_window_width_ms: None,
             raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
             state_input_rows: None,
         }],
         None,
@@ -3392,7 +3735,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
     // `Sort`, `Limit`, `Dedup` and `Concat` over a 5 min scan.
     let scan = node(metric_scan("latency"));
     let scan_usage =
-        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), &gauge, &settings)
+        node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), None, &gauge, &settings)
             .unwrap();
     for payload in [
         Payload::NonASAP(NonASAPOp::Sort {
@@ -3533,6 +3876,9 @@ fn terms_ignore_the_measured_table_and_the_calibration_factor() {
                 ns_per_unit: 10.0,
                 ns_per_invocation: 0.0,
                 memory_bytes_per_state: None,
+                ns_per_state_emitted: 0.0,
+                measured_series_count: None,
+                measures: Vec::new(),
             }],
             ..MeasuredOperationCosts::default()
         },
@@ -3540,7 +3886,8 @@ fn terms_ignore_the_measured_table_and_the_calibration_factor() {
         ..CostInputs::default()
     };
     let usage =
-        node_resource_usage_and_cost(&build, &rows(), (1, 1.0), None, &data, &measured).unwrap();
+        node_resource_usage_and_cost(&build, &rows(), (1, 1.0), None, None, &data, &measured)
+            .unwrap();
     assert_eq!(usage.cost.cost_source, NodeCostSource::Measured);
     assert_eq!(
         crate::node_cost_terms(&build, &rows(), None, &data, &measured).unwrap(),
@@ -3620,10 +3967,16 @@ fn rows_of<'a>(producer: &'a PhysicalASAPDAGNode, rows: u64) -> ProducerOutput<'
         sources: BTreeSet::new(),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         state_input_rows: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
     }
 }
 
@@ -3656,6 +4009,9 @@ fn node_priced_by_hand() {
             ns_per_unit: 10.0,
             ns_per_invocation: 500.0,
             memory_bytes_per_state: None,
+            ns_per_state_emitted: 0.0,
+            measured_series_count: None,
+            measures: Vec::new(),
         });
     let data = DataWorkload::default();
     let range = one_minute_range();
@@ -3670,6 +4026,7 @@ fn node_priced_by_hand() {
         &build,
         &[rows_of(&range, 600)],
         (1, 1.0),
+        None,
         None,
         &data,
         &settings,
@@ -3708,6 +4065,9 @@ fn aggregate_needs_every_measure() {
             ns_per_unit: 10.0,
             ns_per_invocation: 0.0,
             memory_bytes_per_state: None,
+            ns_per_state_emitted: 0.0,
+            measured_series_count: None,
+            measures: Vec::new(),
         });
     let data = DataWorkload::default();
     let range = one_minute_range();
@@ -3730,6 +4090,7 @@ fn aggregate_needs_every_measure() {
         &[rows_of(&range, 600)],
         (1, 1.0),
         None,
+        None,
         &data,
         &settings,
     )
@@ -3740,6 +4101,7 @@ fn aggregate_needs_every_measure() {
         &sum,
         &[rows_of(&range, 600)],
         (1, 1.0),
+        None,
         None,
         &data,
         &settings,
@@ -3832,9 +4194,15 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
         sources: BTreeSet::from(["t"]),
         family: StateFamily::None,
         unchanged_columns: ["g", "key", "value"].into(),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
         state_input_rows: None,
     };
     let family = FieldDataType::Sketch(algorithm);
@@ -3854,9 +4222,16 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
         }))
     };
     let all_rows = shape.groups * shape.rows_per_state;
-    let build_usage =
-        node_resource_usage_and_cost(&build, &[rows(all_rows)], (1, 1.0), None, &data, &settings)
-            .unwrap();
+    let build_usage = node_resource_usage_and_cost(
+        &build,
+        &[rows(all_rows)],
+        (1, 1.0),
+        None,
+        None,
+        &data,
+        &settings,
+    )
+    .unwrap();
     assert_eq!(build_usage.output.rows, shape.groups);
     let readout = node(Payload::ASAP(ASAPOp::SummaryEstimate {
         summary_input: 0,
@@ -3866,6 +4241,7 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
         &readout,
         &[produced(&build, &build_usage)],
         (1, 1.0),
+        None,
         None,
         &data,
         &settings,
@@ -3882,6 +4258,7 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
         &merge,
         &[produced(&build, &build_usage)],
         (1, 1.0),
+        None,
         None,
         &data,
         &settings,
@@ -3909,6 +4286,7 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
         &[rows(all_rows.div_ceil(60))],
         (1, 1.0),
         Some(60_000),
+        None,
         &data,
         &settings,
     )
@@ -4106,13 +4484,19 @@ fn a_ddsketch_build_holds_open_states_and_keeps_sealed_ones() {
         sources: BTreeSet::from(["a"]),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::from(["ts", "value"]),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         state_input_rows: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
     };
     let rows = StateInputRows {
-        rows_per_state: Some(600),
+        folded_rows_per_state: Some((600) as f64),
         // The scan's values are of unknown sign: two stores.
         non_negative: false,
         value_magnitude_range: None,
@@ -4138,12 +4522,17 @@ fn a_ddsketch_build_holds_open_states_and_keeps_sealed_ones() {
         &[producer_output(600)],
         (1, 1.0),
         None,
+        None,
         &data,
         &settings,
     )
     .unwrap();
     assert_eq!(usage.output.bytes, sealed, "{}", usage.cost.detail);
-    assert_eq!(usage.peak_memory_bytes, open, "{}", usage.cost.detail);
+    assert_eq!(
+        usage.cost.memory_and_disk.peak_memory_bytes, open,
+        "{}",
+        usage.cost.detail
+    );
 }
 
 /// A measured table's bytes per state replace the DDSketch estimate: a
@@ -4175,10 +4564,16 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
         sources: BTreeSet::from(["a"]),
         family: StateFamily::None,
         unchanged_columns: BTreeSet::from(["ts", "value"]),
-        tumbling_windows: 1,
+        tumbling_windows: 1.0,
         chain_tumbling_window_width_ms: None,
         state_input_rows: None,
         raw_rows_span_ms: None,
+        raw_rows_per_ms: None,
+        folded_per_row: None,
+        raw_rows_short_of_range: None,
+        state_data_span_ms: None,
+        raw_rows_shifted_back_ms: 0,
+        states_last_merged: false,
     };
     let build = PhysicalASAPDAGNode {
         parameters: Some(params.clone()),
@@ -4196,28 +4591,241 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
         std::slice::from_ref(&producer_output),
         (1, 1.0),
         None,
+        None,
         &data,
         &analytical,
     )
     .unwrap();
-    let mut measured = CostInputs::default();
-    measured.measured_operation_costs = MeasuredOperationCosts {
-        operators: vec![OperatorCost {
-            operator: OperatorKind::SummaryAgg,
-            phase: None,
-            sketch: Some(params.clone()),
-            exact: None,
-            measure: None,
-            ns_per_unit: 100.0,
-            ns_per_invocation: 0.0,
-            memory_bytes_per_state: Some(900.0),
-        }],
-        ns_per_evaluation: 0.0,
+    let measured = CostInputs {
+        measured_operation_costs: MeasuredOperationCosts {
+            operators: vec![OperatorCost {
+                operator: OperatorKind::SummaryAgg,
+                phase: None,
+                sketch: Some(params.clone()),
+                exact: None,
+                measure: None,
+                ns_per_unit: 100.0,
+                ns_per_invocation: 0.0,
+                memory_bytes_per_state: Some(900.0),
+                ns_per_state_emitted: 0.0,
+                measured_series_count: None,
+                measures: Vec::new(),
+            }],
+            ns_per_evaluation: 0.0,
+            ..MeasuredOperationCosts::default()
+        },
+        ..CostInputs::default()
     };
-    let usage =
-        node_resource_usage_and_cost(&build, &[producer_output], (1, 1.0), None, &data, &measured)
-            .unwrap();
+    let usage = node_resource_usage_and_cost(
+        &build,
+        &[producer_output],
+        (1, 1.0),
+        None,
+        None,
+        &data,
+        &measured,
+    )
+    .unwrap();
     assert_ne!(estimated.output.bytes, 900, "{}", estimated.cost.detail);
     assert_eq!(usage.output.bytes, 900, "{}", usage.cost.detail);
-    assert_eq!(usage.peak_memory_bytes, 900, "{}", usage.cost.detail);
+    assert_eq!(
+        usage.cost.memory_and_disk.peak_memory_bytes, 900,
+        "{}",
+        usage.cost.detail
+    );
+}
+
+/// A chain folds the same rows per window whether it is built at
+/// ingestion time (one second of rows) or at query time (a range of
+/// them), at a fractional arrival rate and over a share of it, as a filter
+/// keeping a third of the series would pass on: 10,000 series every 15 s
+/// (666.67 rows a second, which one second's rows rounds to 667) in 60 s
+/// windows hold 40,000 rows, not 40,020; a third of them 13,333.33, not
+/// 13,320 (222 rows a second). Without the rate the rounded rows are all
+/// there is, and the two timings differ. In 10 s windows a window holds
+/// 6,666.67 rows, not rounded, so 30 of them merged are the 200,000 a
+/// 300 s build folds.
+#[test]
+fn a_chain_folds_the_same_rows_at_ingestion_and_at_query_time() {
+    let width_ms = 60_000;
+    let rows_over =
+        |rows_per_ms: f64, span_ms: u64| ((rows_per_ms * span_ms as f64).round() as u64).max(1);
+    let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1.0);
+    for (rows_per_ms, expected) in [
+        (10_000.0 / 15_000.0, 40_000.0),
+        (10_000.0 / 15_000.0 / 3.0, 40_000.0 / 3.0),
+    ] {
+        let input = |span_ms: u64, rate: Option<f64>| SourceRowsInput {
+            rows: rows_over(rows_per_ms, span_ms),
+            raw_rows_span_ms: Some(span_ms),
+            raw_rows_per_ms: rate,
+            source_rows_per_row: 1.0,
+        };
+        let at_ingestion =
+            source_rows_in_window(input(1_000, Some(rows_per_ms)), width_ms, true, 5);
+        let at_query_time =
+            source_rows_in_window(input(300_000, Some(rows_per_ms)), width_ms, false, 5);
+        assert!(
+            close(at_ingestion, expected) && close(at_query_time, expected),
+            "{rows_per_ms} rows per ms: {at_ingestion} and {at_query_time}, not {expected}"
+        );
+        // The rounded rows alone: 667 x 60 and 222 x 60.
+        let rounded = source_rows_in_window(input(1_000, None), width_ms, true, 5);
+        assert!(!close(rounded, expected), "{rows_per_ms} rows per ms");
+        // Thirty 10 s windows hold what 300 s do.
+        let ten_seconds =
+            source_rows_in_window(input(300_000, Some(rows_per_ms)), 10_000, false, 30);
+        assert!(close(30.0 * ten_seconds, rows_per_ms * 300_000.0));
+    }
+    // A rate its rows do not match (they were narrowed after it) is not
+    // used: the rows over the window's share of their span.
+    let narrowed = SourceRowsInput {
+        rows: 30_000,
+        raw_rows_span_ms: Some(300_000),
+        raw_rows_per_ms: Some(1.0),
+        source_rows_per_row: 1.0,
+    };
+    assert!(close(
+        source_rows_in_window(narrowed, width_ms, false, 5),
+        6_000.0
+    ));
+    // Rows an `Aggregate` built count the source rows behind them: 1,000
+    // per-series sums of 300 samples each over 300 s hold 60,000 source
+    // rows a 60 s window.
+    let sums = SourceRowsInput {
+        rows: 1_000,
+        raw_rows_span_ms: Some(300_000),
+        raw_rows_per_ms: None,
+        source_rows_per_row: 300.0,
+    };
+    assert!(close(
+        source_rows_in_window(sums, width_ms, false, 5),
+        60_000.0
+    ));
+}
+
+/// End to end: an ingestion-time chain over one second of a scan's rows
+/// and a query-time chain over a 300 s scan, 10,000 series every 15 s,
+/// fold the same rows per state (4: 40,000 rows a 60 s window over 10,000
+/// series), as a merge above either is then costed alike.
+#[test]
+fn ingestion_and_query_time_chains_over_a_fractional_rate_fold_the_same_rows() {
+    let settings = CostInputs::default();
+    let data: DataWorkload = serde_json::from_value(serde_json::json!({
+        "arrival": {"ingesting": {"rows_per_second": 10_000.0 / 15.0}},
+        "sources": {
+            "latency": {"series_count": 10_000, "metric_type": "gauge",
+                "column_signs": {"value": "non_negative"}, "sample_interval": 15_000}
+        }
+    }))
+    .unwrap();
+    let chain_at = |output_state: ExecutionDataState| PhysicalASAPDAGNode {
+        retention_ms: Some(300_000),
+        output_state,
+        parameters: Some(SketchParams::Kll { k: 547 }),
+        ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: 0,
+            summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+            tumbling_window_width_ms: 60_000,
+        }))
+    };
+    let folded = |scan_state: ExecutionDataState, window_ms: u64, chain: PhysicalASAPDAGNode| {
+        let scan = PhysicalASAPDAGNode {
+            output_state: scan_state,
+            ..node(metric_scan("latency"))
+        };
+        let scan_usage = node_resource_usage_and_cost(
+            &scan,
+            &[],
+            (1, 1.0),
+            Some(window_ms),
+            None,
+            &data,
+            &settings,
+        )
+        .unwrap();
+        let usage = node_resource_usage_and_cost(
+            &chain,
+            &[produced(&scan, &scan_usage)],
+            (1, 1.0),
+            None,
+            None,
+            &data,
+            &settings,
+        )
+        .unwrap();
+        (
+            scan_usage.output.rows,
+            usage
+                .state_input_rows
+                .and_then(|rows| rows.rows_per_state()),
+        )
+    };
+    let at_ingestion = folded(
+        ExecutionDataState::INGESTION_ROWS,
+        60_000,
+        chain_at(ExecutionDataState::INGESTION_SUMMARY),
+    );
+    let at_query_time = folded(
+        ExecutionDataState::QUERY_ROWS,
+        300_000,
+        chain_at(ExecutionDataState::QUERY_ROWS),
+    );
+    assert_eq!(at_ingestion, (667, Some(4)));
+    assert_eq!(at_query_time, (200_000, Some(4)));
+}
+
+/// A projection that computes a column keeps the rows an `Aggregate` folded
+/// but not their sign fact: `-sum_over_time(m[5m])` of non-negative samples
+/// is not non-negative, so a summary over it is not costed as one. A
+/// projection leaving its columns as they are passes the fact on.
+#[test]
+fn a_negating_projection_drops_the_non_negative_fact() {
+    use asap_types::ir::scalar::{ExprSemantics, ProjectItem};
+    let settings = CostInputs::default();
+    let data = DataWorkload::default();
+    let sums = node(Payload::NonASAP(NonASAPOp::Aggregate {
+        reduction: Reduction::PerEntity,
+        measures: vec![AggIntent::Sum { col: None }],
+        output_names: vec![String::new()],
+        filters: vec![],
+        having: None,
+        child: 0,
+    }));
+    let summed = ProducerOutput {
+        folded_per_row: Some(StateInputRows {
+            folded_rows_per_state: Some(300.0),
+            non_negative: true,
+            ..StateInputRows::UNKNOWN
+        }),
+        ..raw_rows(&sums, "latency", 1_000, 300_000)
+    };
+    let projected = |expr| {
+        let project = node(Payload::NonASAP(NonASAPOp::Project {
+            cols: vec![ProjectItem { alias: None, expr }],
+            child: 0,
+        }));
+        node_resource_usage_and_cost(
+            &project,
+            std::slice::from_ref(&summed),
+            (1, 1.0),
+            None,
+            None,
+            &data,
+            &settings,
+        )
+        .unwrap()
+        .folded_per_row
+        .unwrap()
+    };
+    let negated = projected(ScalarExpr::Negative {
+        expr: Box::new(ScalarExpr::Column(0)),
+        semantics: ExprSemantics::Promql,
+    });
+    assert!(!negated.non_negative);
+    assert_eq!(negated.rows_per_state(), Some(300));
+    assert!(projected(ScalarExpr::Column(0)).non_negative);
 }

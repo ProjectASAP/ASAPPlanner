@@ -11,6 +11,7 @@ use good_lp::{constraint, variable, Constraint, ProblemVariables, Variable};
 use asap_types::stages::PhysicalCandidateId;
 
 use super::model::SelectionInputs;
+use crate::cost::ExecutionCosts;
 use crate::retention::ms_to_seconds;
 use crate::selectable::QueryId;
 use crate::selectable::Reader;
@@ -130,4 +131,88 @@ pub(crate) fn least_retention_ms(
         }
     }
     retention_ms
+}
+
+/// $r_v$, the windows a view under the data plane's window cache keeps
+/// resident in memory (`docs/design_docs/proposals/cost-terms-from-calibration.md`,
+/// section 1), one per view with a read kept: (W) $r_v \ge
+/// \operatorname{res}_{e}\, \mathrm{read}_e$ for each read $e$ of its
+/// executions (`ExecutionCosts::resident_reads`: an edge $y$ or a query
+/// output $z$; the read's mean windows, its most when `costs` is peak
+/// memory). Its quantity per window is positive, so at the optimum $r_v$ is
+/// the most over the selected reads, what `plan_cost` charges. The
+/// variables are added to `problem` and (W) to `rows`; returns each
+/// $r_v$'s term (quantity per window, $r_v$), unscaled.
+pub(crate) fn resident_window_terms(
+    costs: &ExecutionCosts,
+    selectable: &crate::selectable::SelectableExecutions,
+    y: &BTreeMap<usize, Variable>,
+    z: &BTreeMap<(QueryId, usize), Variable>,
+    problem: &mut ProblemVariables,
+    rows: &mut Vec<Constraint>,
+) -> Vec<(f64, Variable)> {
+    let mut resident: BTreeMap<PhysicalCandidateId, Variable> = BTreeMap::new();
+    for read in &costs.resident_reads {
+        let v = selectable.executions()[read.execution].candidate;
+        let Some(&per_window) = costs.per_resident_window.get(&v) else {
+            continue;
+        };
+        let read_variable = match read.reader {
+            Reader::Edge(position) => y.get(&position),
+            Reader::Output(query) => z.get(&(query, read.execution)),
+        };
+        let Some(&read_variable) = read_variable else {
+            continue;
+        };
+        let windows = match costs.resident_at_most {
+            true => read.most_windows as f64,
+            false => read.mean_windows,
+        };
+        if per_window <= 0.0 || windows <= 0.0 {
+            continue;
+        }
+        let r = *resident
+            .entry(v)
+            .or_insert_with(|| problem.add(variable().min(0)));
+        rows.push(constraint!(r >= windows * read_variable));
+    }
+    resident
+        .into_iter()
+        .map(|(v, r)| (costs.per_resident_window[&v], r))
+        .collect()
+}
+
+/// The quantity of the windows the selected reads keep resident: per view,
+/// its quantity per window times the most windows any selected read keeps
+/// (`edges` by position in `SelectableExecutions::edges`, `outputs` the
+/// query outputs and the executions answering them): $\sum_v$ of its
+/// $r_v$ term at the optimum.
+pub(crate) fn resident_windows_quantity(
+    costs: &ExecutionCosts,
+    selectable: &crate::selectable::SelectableExecutions,
+    edges: &[usize],
+    outputs: &[(QueryId, usize)],
+) -> f64 {
+    let edges: HashSet<usize> = edges.iter().copied().collect();
+    let outputs: HashSet<(QueryId, usize)> = outputs.iter().copied().collect();
+    let mut most: HashMap<PhysicalCandidateId, f64> = HashMap::new();
+    for read in &costs.resident_reads {
+        let selected = match read.reader {
+            Reader::Edge(position) => edges.contains(&position),
+            Reader::Output(query) => outputs.contains(&(query, read.execution)),
+        };
+        if !selected {
+            continue;
+        }
+        let v = selectable.executions()[read.execution].candidate;
+        let windows = match costs.resident_at_most {
+            true => read.most_windows as f64,
+            false => read.mean_windows,
+        };
+        let kept = most.entry(v).or_default();
+        *kept = kept.max(windows);
+    }
+    most.into_iter()
+        .map(|(v, windows)| costs.per_resident_window.get(&v).copied().unwrap_or(0.0) * windows)
+        .sum()
 }

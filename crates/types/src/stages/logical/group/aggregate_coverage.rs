@@ -27,7 +27,7 @@ use thiserror::Error;
 
 use super::column_properties::{project_lineage, ColumnLineage};
 use super::MemoGroupAsInput;
-use crate::ir::operator::arguments::{AtModifier, Reduction, SourceColumn};
+use crate::ir::operator::arguments::{AtModifier, Reduction, SourceColumn, TimeShift};
 use crate::ir::operator::asap::{selected_from, summary_agg_layout, ASAPOp};
 use crate::ir::operator::input::{InputOrTemporaryBuild, OperatorInput};
 use crate::ir::operator::node::{Operator, OperatorResultKind};
@@ -176,6 +176,30 @@ pub(super) fn aggregate_coverage<'m>(
         {
             of_window_selection(operator)
         }
+        // The windows tiling the range, from levels of one build: what the
+        // same range over its narrowest level selects, under its offset as
+        // under a `TimeShift` by it.
+        Operator::NonASAP(NonASAPOp::TimeRangeCover {
+            range,
+            offset_ms,
+            levels,
+        }) => {
+            let narrowest = *levels.last().ok_or(CoverageError::NoCoverage)?;
+            let offset_ms = i64::try_from(*offset_ms).map_err(|_| CoverageError::NoCoverage)?;
+            of_window_selection_shifted(
+                &Operator::NonASAP(NonASAPOp::TimeRange {
+                    range: *range,
+                    kind: TimeRangeKind::Range,
+                    child: narrowest,
+                }),
+                offset_ms,
+            )
+        }
+        // The narrower chain's states merged into wider windows: the same
+        // build, its time unconstrained.
+        Operator::ASAP(ASAPOp::SummaryMergeWindows { child, .. }) => stored_coverage(child)
+            .cloned()
+            .ok_or(CoverageError::NoCoverage),
         Operator::NonASAP(_) => match selected_build(operator)? {
             Some(build) => of_summary_agg(&build),
             None => Err(CoverageError::NoCoverage),
@@ -746,7 +770,26 @@ fn time_constraint<C>(links: &[Operator<C>]) -> Option<Constraint> {
 fn of_window_selection(
     selection: &Operator<MemoGroupAsInput<'_>>,
 ) -> Result<AggregateCoverage, CoverageError> {
+    of_window_selection_shifted(selection, 0)
+}
+
+/// [`of_window_selection`] of `selection` moved `offset_ms` earlier, as by a
+/// `TimeShift` of that offset just below it: a `TimeRangeCover`'s range
+/// over its narrowest level, under the cover's offset.
+fn of_window_selection_shifted(
+    selection: &Operator<MemoGroupAsInput<'_>>,
+    offset_ms: i64,
+) -> Result<AggregateCoverage, CoverageError> {
     let mut links = vec![selection.clone()];
+    if offset_ms != 0 {
+        links.push(Operator::NonASAP(NonASAPOp::TimeShift {
+            shift: TimeShift {
+                offset_ms,
+                at: None,
+            },
+            child: *selection.children()[0],
+        }));
+    }
     let mut below = *selection.children()[0];
     while let Some(child) = selected_from(&below) {
         links.push(below.operator());

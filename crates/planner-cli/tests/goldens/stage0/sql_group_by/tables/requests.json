@@ -1,0 +1,21 @@
+{
+  "name": "requests",
+  "time_index": 0,
+  "columns": [
+    {
+      "name": "ts",
+      "type": "timestamp",
+      "nullable": false
+    },
+    {
+      "name": "service",
+      "type": "utf8",
+      "nullable": false
+    },
+    {
+      "name": "latency_ms",
+      "type": "float64",
+      "nullable": false
+    }
+  ]
+}

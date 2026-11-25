@@ -1,0 +1,1347 @@
+{
+  "accuracy_guarantees": "enforced",
+  "materialized_views": [
+    {
+      "coverage": {
+        "definition_id": "a446d509bf79a41e64d4c7dc4e541037",
+        "selection": [
+          {
+            "columns": []
+          }
+        ]
+      },
+      "inputs": {
+        "materialized_views": []
+      },
+      "node_id": 5,
+      "refresh": "at_ingestion",
+      "retention_ms": 300000
+    }
+  ],
+  "planner_executor_error": "the executor cannot refresh materialized view 5 from its inputs: invalid DAG: summary time column must be a timestamp",
+  "queries": [
+    "SELECT job, approx_percentile_cont(value, 0.9) AS value FROM data WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY job",
+    "SELECT job, host, approx_percentile_cont(value, 0.9) AS value FROM data WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY job, host"
+  ],
+  "selected": {
+    "accepted": [
+      {
+        "accepted_metric": "rank",
+        "sketches": [
+          "Kll"
+        ],
+        "summary": "accepted rank (Kll)"
+      },
+      {
+        "accepted_metric": null,
+        "sketches": [],
+        "summary": "accepted exact"
+      }
+    ],
+    "cost": {
+      "cost_per_second": 1.67482660912e-8,
+      "cpu_core_seconds_per_second": 0.0013631887,
+      "per_node": {
+        "0": {
+          "cost_per_second": 4.9275745993e-10,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 0.0000193333333333,
+          "detail": "scan 200000 samples; x 0.0167/s; holds 48 bytes for 1.160 ms; keeps 9600000 bytes of raw data on disk",
+          "ingest_cpu_core_seconds_per_second": 0.0,
+          "multiplier": 1,
+          "operator": "Scan",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 1.16,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
+          "timing": "query_time"
+        },
+        "1": {
+          "cost_per_second": 4.12280002024e-10,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 0.0000366666666667,
+          "detail": "time range 300s: keep 200000 of 200000 rows; x 0.0167/s; holds 48 bytes for 2.200 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
+          "multiplier": 1,
+          "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 2.2,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
+          "timing": "query_time"
+        },
+        "10": {
+          "cost_per_second": 1.8740000046e-15,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 1.66666666667e-10,
+          "detail": "operator: pass 10 rows; x 0.0167/s; holds 24 bytes for 0.000 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
+          "multiplier": 1,
+          "operator": "Project",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.00001,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
+          "timing": "query_time"
+        },
+        "2": {
+          "cost_per_second": 1.37580866799e-8,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 0.00122333333333,
+          "detail": "hash aggregate 200000 rows into 10000 groups: 72 ops per row, 200000 group visits; x 0.0167/s; holds 2080000 bytes for 73.400 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
+          "multiplier": 1,
+          "operator": "Aggregate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 73.4,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
+          "timing": "query_time"
+        },
+        "3": {
+          "cost_per_second": 1.87400000767e-12,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 1.66666666667e-7,
+          "detail": "operator: pass 10000 rows; x 0.0167/s; holds 40 bytes for 0.010 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
+          "multiplier": 1,
+          "operator": "Project",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.01,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
+          "timing": "query_time"
+        },
+        "4": {
+          "cost_per_second": 4.34985384e-11,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 3.8686e-6,
+          "detail": "scan 667 samples; x 1.0000/s",
+          "ingest_cpu_core_seconds_per_second": 3.8686e-6,
+          "multiplier": 1,
+          "operator": "Scan",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.0,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
+          "timing": "ingestion_time"
+        },
+        "5": {
+          "cost_per_second": 1.883841902e-9,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 0.0000659526666667,
+          "detail": "build Kll in tumbling windows of 60000 ms for 10 groups: 667 rows x 84 ops, 1 group visits, 0.2 states emitted; x 1.0000/s; keeps 993120 bytes",
+          "ingest_cpu_core_seconds_per_second": 0.000065536,
+          "multiplier": 1,
+          "operator": "SummaryTumblingWindowChain",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.0,
+          "refresh_cpu_ms_per_window": 0.025,
+          "refresh_wall_ms_per_window": 0.025,
+          "timing": "ingestion_time"
+        },
+        "6": {
+          "cost_per_second": 1.03070174513e-13,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 9.16666666667e-9,
+          "detail": "time range 300s: 5 tumbling windows of states; x 0.0167/s; holds 16552 bytes for 0.001 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
+          "multiplier": 1,
+          "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.00055,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
+          "timing": "query_time"
+        },
+        "7": {
+          "cost_per_second": 1.23219087472e-10,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 0.0000109584666667,
+          "detail": "merge 50 states into 10; x 0.0167/s; holds 165680 bytes for 0.658 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
+          "multiplier": 1,
+          "operator": "SummaryMerge",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.657508,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
+          "timing": "query_time"
+        },
+        "8": {
+          "cost_per_second": 3.26016032e-11,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 2.89946666667e-6,
+          "detail": "estimate 10 groups x 1; x 0.0167/s",
+          "ingest_cpu_core_seconds_per_second": 0.0,
+          "multiplier": 1,
+          "operator": "SummaryEstimate",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.173968,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
+          "timing": "query_time"
+        },
+        "9": {
+          "cost_per_second": 1.8740000046e-15,
+          "cost_source": "analytical",
+          "cpu_core_seconds_per_second": 1.66666666667e-10,
+          "detail": "operator: pass 10 rows; x 0.0167/s; holds 24 bytes for 0.000 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
+          "multiplier": 1,
+          "operator": "Project",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.00001,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
+          "timing": "query_time"
+        }
+      },
+      "source": "analytical-cost-v2 (illustrative statistics)",
+      "usage": {
+        "average_memory_bytes": 995666.351778,
+        "cpu_ops_per_second": 1343987.1,
+        "disk_bytes": 9600000,
+        "latency_per_query": [
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.0166666666667,
+            "latency_ms": 0.857046,
+            "precompute_execution_ms": 0.025,
+            "precompute_queueing_ms": 0.0,
+            "query_execution_ms": 0.832046
+          },
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 0.0166666666667,
+            "latency_ms": 76.77,
+            "precompute_execution_ms": 0.0,
+            "precompute_queueing_ms": 0.0,
+            "query_execution_ms": 76.77
+          }
+        ],
+        "peak_cpu_cores": 3,
+        "peak_memory_bytes": 3255584,
+        "precompute_load": 4.16666666667e-7,
+        "recommended_configuration": {
+          "ingest": {
+            "predicted_busy_thread_seconds_per_second": 0.0000694046,
+            "recommended_threads": 1
+          },
+          "precompute": {
+            "predicted_busy_thread_seconds_per_second": 4.16666666667e-7,
+            "recommended_threads": 1
+          },
+          "query": {
+            "predicted_busy_thread_seconds_per_second": 0.00129336743333,
+            "recommended_threads": 1
+          }
+        },
+        "scanned_bytes_per_second": 192016.0
+      }
+    },
+    "dag": {
+      "edges": [
+        {
+          "consumer": 1,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "host",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": true
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "producer": 0,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 2,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "host",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": true
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "producer": 1,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 3,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "host",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "approx_percentile_cont(data.value,Float64(0.9))",
+                "nullable": true
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0,
+                1
+              ]
+            ]
+          },
+          "producer": 2,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 5,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "ingestion_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "host",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": true
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "producer": 4,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 6,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "window_end",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Sketch": "Kll"
+                },
+                "name": "state",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                0,
+                1
+              ]
+            ]
+          },
+          "producer": 5,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 7,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "window_end",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Sketch": "Kll"
+                },
+                "name": "state",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                0,
+                1
+              ]
+            ]
+          },
+          "producer": 6,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 8,
+          "data_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Sketch": "Kll"
+                },
+                "name": "state",
+                "nullable": false
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 7,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 9,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "quantile",
+                "nullable": true
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 8,
+          "role": "Input",
+          "window": "NotApplicable"
+        },
+        {
+          "consumer": 10,
+          "data_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "grouping": "NotApplicable",
+          "intermediate_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "approx_percentile_cont(data.value,Float64(0.9))",
+                "nullable": true
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "producer": 9,
+          "role": "Input",
+          "window": "NotApplicable"
+        }
+      ],
+      "nodes": [
+        {
+          "id": 0,
+          "lifetime": "None",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "host",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": true
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": true
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "job",
+                      "nullable": true
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "host",
+                      "nullable": true
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": true
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "source": {
+                  "Table": {
+                    "table_ref": "data"
+                  }
+                }
+              }
+            }
+          },
+          "retention_ms": 300000
+        },
+        {
+          "id": 1,
+          "lifetime": "None",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "host",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": true
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 0,
+                "kind": "range",
+                "range": {
+                  "nanos": 0,
+                  "secs": 300
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": 2,
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "host",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "approx_percentile_cont(data.value,Float64(0.9))",
+                "nullable": true
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0,
+                1
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Aggregate": {
+                "child": 1,
+                "filters": [],
+                "having": null,
+                "measures": [
+                  {
+                    "col": 3,
+                    "kind": "quantile",
+                    "q": 0.9
+                  }
+                ],
+                "output_names": [
+                  "approx_percentile_cont(data.value,Float64(0.9))"
+                ],
+                "reduction": {
+                  "Reduce": [
+                    1,
+                    2
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": 3,
+          "lifetime": "None",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "host",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": true
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0,
+                1
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 2,
+                "cols": [
+                  {
+                    "alias": null,
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": null,
+                    "expr": {
+                      "Column": 1
+                    }
+                  },
+                  {
+                    "alias": "value",
+                    "expr": {
+                      "Column": 2
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 4,
+          "lifetime": "None",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "ts",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "host",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": true
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": []
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "ingestion_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Scan": {
+                "predicates": [],
+                "schema": {
+                  "closed": true,
+                  "fields": [
+                    {
+                      "dtype": {
+                        "Plain": "timestamp"
+                      },
+                      "name": "ts",
+                      "nullable": true
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "job",
+                      "nullable": true
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "utf8"
+                      },
+                      "name": "host",
+                      "nullable": true
+                    },
+                    {
+                      "dtype": {
+                        "Plain": "float64"
+                      },
+                      "name": "value",
+                      "nullable": true
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "source": {
+                  "Table": {
+                    "table_ref": "data"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": 5,
+          "lifetime": {
+            "AcrossEvaluations": "Memory"
+          },
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "window_end",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Sketch": "Kll"
+                },
+                "name": "state",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                0,
+                1
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "ingestion_time"
+          },
+          "parameters": {
+            "Kll": {
+              "k": 547
+            }
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryTumblingWindowChain": {
+                "child": 4,
+                "filter": null,
+                "input": {
+                  "item": null,
+                  "weight": {
+                    "Column": {
+                      "Named": "value"
+                    }
+                  }
+                },
+                "reduction": {
+                  "Reduce": [
+                    1
+                  ]
+                },
+                "summary_type": {
+                  "Sketch": "Kll"
+                },
+                "tumbling_window_width_ms": 60000
+              }
+            }
+          },
+          "retention_ms": 300000,
+          "view_coverage": {
+            "definition_id": "a446d509bf79a41e64d4c7dc4e541037",
+            "selection": [
+              {
+                "columns": []
+              }
+            ]
+          }
+        },
+        {
+          "id": 6,
+          "lifetime": "None",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "timestamp"
+                },
+                "name": "window_end",
+                "nullable": false
+              },
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Sketch": "Kll"
+                },
+                "name": "state",
+                "nullable": false
+              }
+            ],
+            "time_index": 0,
+            "unique_keys": [
+              [
+                0,
+                1
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "parameters": {
+            "Kll": {
+              "k": 547
+            }
+          },
+          "payload": {
+            "NonASAP": {
+              "TimeRange": {
+                "child": 5,
+                "kind": "range",
+                "range": {
+                  "nanos": 0,
+                  "secs": 300
+                }
+              }
+            }
+          }
+        },
+        {
+          "id": 7,
+          "lifetime": {
+            "OneEvaluation": "Memory"
+          },
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Sketch": "Kll"
+                },
+                "name": "state",
+                "nullable": false
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "SummaryState",
+            "timing": "query_time"
+          },
+          "parameters": {
+            "Kll": {
+              "k": 547
+            }
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryMerge": {
+                "children": [
+                  6
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 8,
+          "lifetime": "None",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "quantile",
+                "nullable": true
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "ASAP": {
+              "SummaryEstimate": {
+                "query": {
+                  "Quantile": {
+                    "q": 0.9
+                  }
+                },
+                "summary_input": 7
+              }
+            }
+          }
+        },
+        {
+          "id": 9,
+          "lifetime": "None",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "approx_percentile_cont(data.value,Float64(0.9))",
+                "nullable": true
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 8,
+                "cols": [
+                  {
+                    "alias": "job",
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": "approx_percentile_cont(data.value,Float64(0.9))",
+                    "expr": {
+                      "Column": 1
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 10,
+          "lifetime": "None",
+          "output_schema": {
+            "closed": true,
+            "fields": [
+              {
+                "dtype": {
+                  "Plain": "utf8"
+                },
+                "name": "job",
+                "nullable": true
+              },
+              {
+                "dtype": {
+                  "Plain": "float64"
+                },
+                "name": "value",
+                "nullable": true
+              }
+            ],
+            "time_index": null,
+            "unique_keys": [
+              [
+                0
+              ]
+            ]
+          },
+          "output_state": {
+            "primitive": "Raw",
+            "timing": "query_time"
+          },
+          "payload": {
+            "NonASAP": {
+              "Project": {
+                "child": 9,
+                "cols": [
+                  {
+                    "alias": null,
+                    "expr": {
+                      "Column": 0
+                    }
+                  },
+                  {
+                    "alias": "value",
+                    "expr": {
+                      "Column": 1
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "roots": [
+        10,
+        3
+      ],
+      "scalar_roots": []
+    }
+  }
+}

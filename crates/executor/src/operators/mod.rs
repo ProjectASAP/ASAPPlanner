@@ -156,6 +156,16 @@ enum Kind {
         /// Set by [`Operator::with_tumbling_window_ends`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tumbling_window_width_ms: Option<i64>,
+        /// Set by [`Operator::with_cover_level`]: keep only the windows a
+        /// `TimeRangeCover` over chains of these widths (widest first) takes
+        /// from level `.1`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cover_level: Option<planner_types::ir::operator::tumbling_window_chain::CoverLevel>,
+        /// Set by [`Operator::with_tumbling_window_ends_from_epoch`]: the
+        /// tumbling windows are anchored at the epoch, not at the range's
+        /// end.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        tumbling_window_ends_from_epoch: bool,
     },
     Limit {
         n: u64,
@@ -268,6 +278,11 @@ enum Kind {
         /// exact family, and without `emit_empty_global`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parameters: Option<SketchParams>,
+        /// Whether the merged states are a stored chain level's windows
+        /// (`SummaryMergeWindows`), sealed as a chain seals its windows (a
+        /// DDSketch into its view layout); `false` for a query-time merge.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        seal_output: bool,
     },
     Evaluation {
         state: usize,
@@ -437,6 +452,7 @@ impl Operator {
                 groups,
                 emit_empty_global,
                 parameters: slot,
+                ..
             } if groups.is_empty() => {
                 // An empty state of this family and θ can be built.
                 crate::StateColumnUpdater::new(
@@ -454,6 +470,16 @@ impl Operator {
             }
         }
         Ok(self)
+    }
+
+    /// A `SummaryMerge` whose output states are a stored chain level's
+    /// windows (`SummaryMergeWindows`), sealed as a chain seals its windows;
+    /// any other operator is returned unchanged.
+    pub fn with_sealed_output(mut self) -> Self {
+        if let Kind::SummaryMerge { seal_output, .. } = &mut self.kind {
+            *seal_output = true;
+        }
+        self
     }
 }
 impl PhysicalOperator<Batch, SchemaRef> for Operator {

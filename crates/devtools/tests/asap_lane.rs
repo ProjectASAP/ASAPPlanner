@@ -1,5 +1,5 @@
 //! The in-process ASAP lane of the engine comparison: `AsapEngine` installs a
-//! plan file `asap_planner --plan-file` wrote and runs it with the Planner's
+//! plan file `asap_planner --plan-file` writes and runs it with the Planner's
 //! executor under the harness of sketch-bench (`aqpbm_core::harness`), as one
 //! lane of `asap_run bench-external`.
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,7 +18,12 @@ use aqpbm_core::harness::protocol::{
 use aqpbm_core::harness::records::ArmResult;
 use aqpbm_core::harness::rundir::RunDir;
 use aqpbm_datagen::{DataDistribution, SeriesLabelSpec, TimeSeriesDescription, UniformParameter};
+use asap_cost::CostInputs;
 use asap_devtools::asap_lane::AsapEngine;
+use asap_planner::{InstallablePlan, PlanningModels};
+use asap_planner_cli::planning_stages::{lower_promql_roots, run_stages_until, RunUntil};
+use asap_types::deployment_capabilities::DeploymentCapabilities;
+use asap_types::workload::PlanningWorkload;
 
 #[path = "asap_lane_support.rs"]
 mod support;
@@ -36,22 +41,41 @@ impl LoadProbe for IdleProbe {
     }
 }
 
-/// Writes `plan_file` with `asap_planner --plan-file` for `planning`, which
-/// must select a plan; returns the planner's standard error, which notes
-/// when the Planner's executor cannot run the plan.
-fn write_plan_file(planning: &str, plan_file: &Path) -> String {
-    let workload_file = plan_file.with_extension("planning.json");
-    std::fs::write(&workload_file, planning).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_asap_planner"))
-        .args(["--workload", workload_file.to_str().unwrap()])
-        .args(["--run-until", "stage3", "--format", "json"])
-        .args(["--plan-file", plan_file.to_str().unwrap()])
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(output.status.success(), "{stderr}");
-    assert!(plan_file.exists(), "{stderr}");
-    stderr
+/// Writes `plan_file`, the plan `asap_planner --run-until stage3
+/// --plan-file` selects for the PromQL workload `planning` under
+/// `capabilities`, through the same pipeline in-process (the binary lives in
+/// `asap-planner-cli`, beyond this package's `CARGO_BIN_EXE_*`). `planning`
+/// must select a plan. Returns whether the Planner's executor compiles it,
+/// which `asap_planner` reports as a note.
+fn write_plan_file_with(
+    planning: &str,
+    mut capabilities: DeploymentCapabilities,
+    plan_file: &Path,
+) -> Result<(), String> {
+    let workload: PlanningWorkload = serde_json::from_str(planning).unwrap();
+    workload.validate().unwrap();
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let data = workload.data_workload.clone().unwrap_or_default();
+    if capabilities.supported_summaries.is_none() {
+        capabilities.supported_summaries = Some(asap_executor::supported_summary_families());
+    }
+    let cost_inputs = CostInputs::default();
+    let models = PlanningModels::builtin()
+        .with_cost_inputs(&cost_inputs)
+        .with_deployment_capabilities(&capabilities);
+    let run = run_stages_until(roots, &entries, &data, models, RunUntil::Stage3).unwrap();
+    let (plan, _) = run.run.selection.unwrap();
+    let query_texts = entries.iter().map(|entry| entry.query.0.clone()).collect();
+    let installable = InstallablePlan::of_dag(plan, query_texts).unwrap();
+    let json = serde_json::to_string_pretty(&installable).unwrap();
+    std::fs::write(plan_file, json + "\n").unwrap();
+    installable.check_compiles()
+}
+
+/// [`write_plan_file_with`] under the default deployment capabilities.
+fn write_plan_file(planning: &str, plan_file: &Path) -> Result<(), String> {
+    write_plan_file_with(planning, DeploymentCapabilities::default(), plan_file)
 }
 
 /// The query of workload `w`: a 5-minute window, so a plan built at
@@ -214,7 +238,7 @@ fn the_asap_lane_runs_a_planned_sum_over_time_and_answers_exactly() {
         (&at_rest, r#""at_rest""#),
     ] {
         let planning = planning_workload(SUM_QUERY, "m", 1_000, 1_000, arrival);
-        write_plan_file(&planning, plan_file);
+        let _ = write_plan_file(&planning, plan_file);
     }
     let run = run_dir(
         &temp,
@@ -296,22 +320,9 @@ fn write_counter_plan_file(queries: &[&str], plan_file: &Path) {
                 "column_signs": {"value": "non_negative"}, "sample_interval": 1000}},
         },
     });
-    let workload_file = plan_file.with_extension("planning.json");
-    let capabilities_file = plan_file.with_extension("capabilities.json");
-    std::fs::write(&workload_file, planning.to_string()).unwrap();
-    std::fs::write(&capabilities_file, r#"{"raw_data_retained": false}"#).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_asap_planner"))
-        .args(["--workload", workload_file.to_str().unwrap()])
-        .args([
-            "--deployment-capabilities",
-            capabilities_file.to_str().unwrap(),
-        ])
-        .args(["--run-until", "stage3", "--format", "json"])
-        .args(["--plan-file", plan_file.to_str().unwrap()])
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(output.status.success(), "{stderr}");
+    let capabilities: DeploymentCapabilities =
+        serde_json::from_str(r#"{"raw_data_retained": false}"#).unwrap();
+    write_plan_file_with(&planning.to_string(), capabilities, plan_file).unwrap();
 }
 
 /// The summary types of the tumbling-window chains in `plan_file`.
@@ -408,12 +419,36 @@ fn answers_json(answers: &AnswersOverTime) -> serde_json::Value {
 /// from `run_installed` over `counter_workload("both", ...)`.
 const COUNTER_ANSWERS_BEFORE_SHARING: &str = "asap_lane_fixtures/rate_and_increase_two_chains.json";
 
+/// How far, in units in the last place, an answer may be from the one in
+/// `COUNTER_ANSWERS_BEFORE_SHARING`. Those answers come from a plan that
+/// merged the thirty 10 s windows of each 5 min range one after another.
+/// Since multi-level chains, the plan also keeps 60 s windows merged from
+/// the 10 s ones and covers the range with both, so a counter state's
+/// `total_increase` adds the same window increases in a different order:
+/// the floating-point sum can differ in its last bits, while the merge is
+/// the same. Two plans of today (shared chain, chain alone) still agree bit
+/// for bit.
+const MAX_ULPS_FROM_BEFORE_SHARING: u64 = 4;
+
+/// How many representable `f64`s apart `a` and `b` are; `u64::MAX` when
+/// their signs differ (and they are not both zero).
+fn ulps_apart(a: f64, b: f64) -> u64 {
+    if a == b {
+        return 0;
+    }
+    if a.is_sign_negative() != b.is_sign_negative() {
+        return u64::MAX;
+    }
+    a.to_bits().abs_diff(b.to_bits())
+}
+
 /// `rate(c[5m])` and `increase(c[5m])` planned together read one chain of
 /// counter states, which the executor finalizes as `rate` and as
-/// `increase`. Their answers are bit-identical to those of the two chains
-/// the same workload planned before (`COUNTER_ANSWERS_BEFORE_SHARING`) and
-/// to each query's planned alone (one chain each), and the shared
-/// chain's stored views take at most half the bytes of the two.
+/// `increase`. Their answers are within `MAX_ULPS_FROM_BEFORE_SHARING` of
+/// those of the two chains the same workload planned before
+/// (`COUNTER_ANSWERS_BEFORE_SHARING`), bit-identical to each query's
+/// planned alone (one chain each), and the shared chain's stored views take
+/// at most half the bytes of the two.
 #[test]
 fn rate_and_increase_of_one_counter_share_one_chain_and_answer_as_apart() {
     const RATE: &str = "rate(c[5m])";
@@ -438,7 +473,23 @@ fn rate_and_increase_of_one_counter_share_one_chain_and_answer_as_apart() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(answers_json(&answers), before);
+    let before = before.as_array().unwrap();
+    let now = answers_json(&answers);
+    let now = now.as_array().unwrap();
+    assert_eq!(now.len(), before.len());
+    let bits = |entry: &serde_json::Value| {
+        let hex = entry["bits"].as_str().unwrap().trim_start_matches("0x");
+        f64::from_bits(u64::from_str_radix(hex, 16).unwrap())
+    };
+    for (now, then) in now.iter().zip(before) {
+        for key in ["at_ms", "query", "series"] {
+            assert_eq!(now[key], then[key], "{now} vs {then}");
+        }
+        assert!(
+            ulps_apart(bits(now), bits(then)) <= MAX_ULPS_FROM_BEFORE_SHARING,
+            "{now} vs {then}"
+        );
+    }
 
     let mut apart_bytes = 0;
     for (id, query) in [("rate", RATE), ("increase", INCREASE)] {
@@ -484,11 +535,8 @@ fn a_plan_the_executor_cannot_compile_is_a_not_executable_cell() {
     let plan_file = temp.0.join("absent.plan.json");
     // Precondition: an executor-only gap. Once the executor runs
     // `absent_over_time`, pick another query it plans but cannot compile.
-    let stderr = write_plan_file(&planning, &plan_file);
-    assert!(
-        stderr.contains("note: the Planner's executor cannot run this plan: "),
-        "{stderr}"
-    );
+    let compiles = write_plan_file(&planning, &plan_file);
+    assert!(compiles.is_err(), "the executor compiles the plan");
     let workload = harness_workload("w", QUERY, 10_000);
     let run = run_dir(&temp, &[&workload], &[("exact", "w", plan_file)]);
     let cells = run_asap_lane(&run, 0, 1);
@@ -512,7 +560,7 @@ fn a_plan_for_other_queries_is_refused_naming_the_query() {
     let temp = TempDir::new("refusals");
     let planning = planning_workload(SUM_QUERY, "m", 2, 1_000, r#""at_rest""#);
     let plan_file = temp.0.join("sum.plan.json");
-    write_plan_file(&planning, &plan_file);
+    let _ = write_plan_file(&planning, &plan_file);
     let arm = |options: serde_json::Value| ArmSpec {
         name: "exact".into(),
         raw_data_retained: true,
@@ -578,7 +626,7 @@ fn asap_run_runs_the_asap_lane_over_a_run_dir() {
     let workload = harness_workload("w", SUM_QUERY, 300_000);
     let plan_file = temp.0.join("sum.plan.json");
     let planning = planning_workload(SUM_QUERY, "m", 2, 1_000, r#""at_rest""#);
-    write_plan_file(&planning, &plan_file);
+    let _ = write_plan_file(&planning, &plan_file);
     let run = run_dir(&temp, &[&workload], &[("exact", "w", plan_file)]);
     let asap_run = |lane: &str| {
         Command::new(env!("CARGO_BIN_EXE_asap_run"))

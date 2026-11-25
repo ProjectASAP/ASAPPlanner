@@ -109,6 +109,11 @@ fn non_asap_samples() -> Vec<NonASAPOp<()>> {
             shift: TimeShift::default(),
             child: (),
         },
+        NonASAPOp::TimeRangeCover {
+            offset_ms: 0,
+            range: Duration::from_secs(3_600),
+            levels: vec![(), ()],
+        },
         NonASAPOp::PromqlVectorFromScalar(ScalarExpr::Literal(ScalarValue::Float64(1.0))),
         NonASAPOp::PromqlRelabel {
             dst: "l".into(),
@@ -147,6 +152,7 @@ fn non_asap_samples() -> Vec<NonASAPOp<()>> {
             | NonASAPOp::SQLWindowFunc { .. }
             | NonASAPOp::TimeRange { .. }
             | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::TimeRangeCover { .. }
             | NonASAPOp::PromqlVectorFromScalar(_)
             | NonASAPOp::PromqlRelabel { .. }
             | NonASAPOp::PromqlInfoEnrich { .. }
@@ -211,6 +217,10 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
             filter: None,
             tumbling_window_width_ms: 60_000,
         },
+        ASAPOp::SummaryMergeWindows {
+            child: (),
+            tumbling_window_width_ms: 300_000,
+        },
         ASAPOp::SummarySubtract {
             left: (),
             right: (),
@@ -239,6 +249,7 @@ fn asap_samples() -> Vec<ASAPOp<()>> {
             | ASAPOp::EvaluatePopulation { .. }
             | ASAPOp::SummaryMerge { .. }
             | ASAPOp::SummaryTumblingWindowChain { .. }
+            | ASAPOp::SummaryMergeWindows { .. }
             | ASAPOp::SummarySubtract { .. }
             | ASAPOp::SummaryDelete { .. }
             | ASAPOp::SummaryJoin { .. }

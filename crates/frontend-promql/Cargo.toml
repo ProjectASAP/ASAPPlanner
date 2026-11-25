@@ -19,19 +19,19 @@ promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", rev = "1
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
 
-# Corpus tests live in domain folders (observability) but must still be declared
-# as test targets — Cargo only auto-discovers `.rs` files directly in `tests/`.
+# The lowering corpora live in `tests/lowering_corpora/<source>/`; declared
+# explicitly since Cargo only auto-discovers `.rs` files directly in `tests/`.
 [[test]]
 name = "awesome_prometheus_alerts"
-path = "tests/observability/awesome_prometheus_alerts.rs"
+path = "tests/lowering_corpora/awesome_prometheus_alerts/awesome_prometheus_alerts.rs"
 
 [[test]]
 name = "promql_corpus"
-path = "tests/observability/promql_corpus.rs"
+path = "tests/lowering_corpora/promql_corpus/promql_corpus.rs"
 
 [[test]]
 name = "o11y_bench_promql"
-path = "tests/observability/o11y_bench_promql.rs"
+path = "tests/lowering_corpora/o11y_bench/o11y_bench_promql.rs"
 
 [[test]]
 name = "promql"

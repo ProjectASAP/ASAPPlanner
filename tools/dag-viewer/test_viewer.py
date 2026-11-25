@@ -5,7 +5,7 @@ a stub DOM, plus the page's files and the example list.
 Run from tools/dag-viewer: `python3 -m unittest test_viewer`. The JS tests
 are skipped without py_mini_racer (`pip install py-mini-racer==0.6.0`); the
 ones over a planned document need a built asap_planner (`cargo build -p
-asap-devtools --bin asap_planner`; CARGO_TARGET_DIR is honored).
+asap-planner-cli --bin asap_planner`; CARGO_TARGET_DIR is honored).
 """
 
 from __future__ import annotations
@@ -642,7 +642,7 @@ class WorkloadSetTests(unittest.TestCase):
                 self.assertNotIn("document", entry)
         self.assertEqual(files, {path for path in WORKLOADS.glob("*/*.json")
                                  if path.name != server.TABLES_FILE and path.parent.name != "planner-layering"})
-        self.assertEqual(len(files), 30)
+        self.assertEqual(len(files), 31)
 
 
 class PageTests(unittest.TestCase):

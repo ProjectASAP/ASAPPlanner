@@ -1,11 +1,12 @@
 //! Workloads whose queries share computation, planned through the production
 //! stages: adding a query that can read an existing result must not cost
 //! more than planning the first query alone.
-use crate::planning_common::{cost, cost_with, fuzz_workload, selected_plan};
+use crate::planning_common::{cost, cost_with, fuzz_workload, selected_plan, with_queries};
 use asap_cost::CostInputs;
 use asap_devtools::planner_fuzz::{FuzzQuery, FuzzWorkload};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp};
+use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
 use asap_types::summary_type::{CounterReadout, ExactKind};
 use serde_json::json;
@@ -293,4 +294,84 @@ fn different_exact_percentiles_share_the_input_window() {
         .filter(|edge| edge.producer == shared)
         .count();
     assert_eq!(readers, 2, "both percentiles read node {shared}: {plan:#?}");
+}
+
+/// The chains `plan` maintains at ingestion, each with its retention.
+fn chains_with_retention(plan: &PhysicalASAPDAG) -> Vec<(usize, Option<u64>)> {
+    plan.nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.payload,
+                Payload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+        })
+        .map(|node| (node.id, node.retention_ms))
+        .collect()
+}
+
+/// `queries` over the 10,000 series of `queue_depth` and `requests_total`,
+/// sampled every second and evaluated every 15 s, with no raw data kept.
+fn per_series_workload(queries: &[&str]) -> FuzzWorkload {
+    let mut w = with_queries(
+        fuzz_workload("per_series_states_over_different_labels", false),
+        &queries.iter().map(|q| q.to_string()).collect::<Vec<_>>(),
+    );
+    w.raw_data_retained = false;
+    w
+}
+
+/// Three queries keep a per-series `max_over_time` of `queue_depth`: over
+/// 1 h by `region` and `service`, over 1 m by `job`, and over 1 h and 1 h
+/// offset 1 h by `job`. The front end scans `queue_depth` with the labels
+/// each query reads. A chain over the scan of every label would serve all
+/// three, but its readers would read it through a `Project` back to their
+/// own labels, which costs each of them more than its own chain does, so
+/// it could replace their chains in no plan exactly: Pass 2 does not offer
+/// it, and each label set keeps its own chain.
+#[test]
+fn per_series_states_over_different_labels_keep_their_own_chains() {
+    let w = per_series_workload(&[
+        "sum by (region) (max by (region, service) (max_over_time(queue_depth[1h])))",
+        "topk(10, max by (job) (max_over_time(queue_depth[1m])))",
+        "max by (job) (max_over_time(queue_depth[1h])) \
+         > max by (job) (max_over_time(queue_depth[1h] offset 1h))",
+    ]);
+    let plan = selected_plan(&w, &CostInputs::default());
+    let chains = chains_with_retention(&plan);
+    assert_eq!(chains.len(), 2, "a chain per label set: {chains:?}");
+    let planning = w.planning_workload();
+    let entries: Vec<_> = planning.query_workload.entries().collect();
+    asap_planner::installable_plan_of(plan, &entries).expect("the executor compiles the plan");
+}
+
+/// `sum by (region, service) (increase(c[30m]))` and `increase(c[6h])`
+/// scan `c` with different labels. Pass 2 adds no scan of both label sets
+/// and no chain both queries reach: the memo does not grow for them.
+#[test]
+fn per_series_states_over_different_labels_add_no_shared_chain() {
+    let w = per_series_workload(&[
+        "count by (region) (sum by (region, service) (increase(requests_total[30m])) > 1000)",
+        "increase(requests_total[6h])",
+    ]);
+    let roots = asap_devtools::planner_fuzz::Planner::new(Default::default())
+        .lower(&w)
+        .unwrap();
+    let planning = w.planning_workload();
+    let entries: Vec<_> = planning.query_workload.entries().collect();
+    let run = asap_planner_cli::planning_stages::run_stages_until(
+        roots,
+        &entries,
+        &w.data,
+        asap_planner::PlanningModels::builtin(),
+        asap_planner_cli::planning_stages::RunUntil::Pass2,
+    )
+    .unwrap();
+    let memo = run.run.logical_asap_candidates.unwrap().memo;
+    let reached_by_both = memo
+        .groups()
+        .iter()
+        .filter(|group| group.reached_by_queries() == [0, 1])
+        .count();
+    assert_eq!(reached_by_both, 0, "no group both queries reach");
 }

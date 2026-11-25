@@ -19,11 +19,15 @@ asap-stage3-plan-selection = { path = "../stage3-plan-selection" }
 # enumeration.
 asap-planner = { path = "../planner" }
 asap-devtools = { path = "../devtools" }
+# The stage pipeline the tests plan through (`planning_stages`).
+asap-planner-cli = { path = "../planner-cli" }
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }
 asap-stage2-physical-optimization = { path = "../stage2-physical-optimization" }
 asap-devtools = { path = "../devtools" }
+# The stage pipeline the tests plan through (`planning_stages`).
+asap-planner-cli = { path = "../planner-cli" }
 # The tests plan PromQL and SQL workloads through the facade.
 asap-planner = { path = "../planner" }
 asap_sketchlib = { workspace = true }

@@ -21,7 +21,7 @@ sudo apt-get install build-essential cmake libclang-dev
 Run it through Cargo; a checkout does not put `asap_planner` on your `PATH`:
 
 ```sh
-cargo run --release -p asap-devtools --bin asap_planner -- \
+cargo run --release -p asap-planner-cli --bin asap_planner -- \
   --workload tools/dag-viewer/workloads/planner-layering/example1.json \
   --run-until stage3
 ```
@@ -148,7 +148,7 @@ with raw data retained and AWS Fargate costs:
 
 ```sh
 echo '{"raw_data_retained": true, "query_time_results_retained": false}' > capabilities.json
-cargo run --release -p asap-devtools --bin asap_planner -- \
+cargo run --release -p asap-planner-cli --bin asap_planner -- \
   --workload tools/dag-viewer/memo-examples/promql/rangeheavy-t8-t5-1h.json \
   --deployment-capabilities capabilities.json \
   --cost-inputs tools/dag-viewer/cost-inputs/aws-fargate-us-east-1.json \
@@ -158,7 +158,7 @@ cargo run --release -p asap-devtools --bin asap_planner -- \
 A SQL workload also needs its tables:
 
 ```sh
-cargo run --release -p asap-devtools --bin asap_planner -- \
+cargo run --release -p asap-planner-cli --bin asap_planner -- \
   --workload tools/dag-viewer/memo-examples/sql/rollupheavy-t11-service-endpoint-5m.json \
   $(python3 -c 'import json; [print("--sql-catalog-table", json.dumps(t, separators=(",", ":"))) for t in json.load(open("tools/dag-viewer/memo-examples/sql/tables.json"))]') \
   --run-until stage3
@@ -176,7 +176,7 @@ plan file is written whether or not the Planner's executor can run the plan:
 another runtime may run it.
 
 ```sh
-cargo run --release -p asap-devtools --bin asap_planner -- \
+cargo run --release -p asap-planner-cli --bin asap_planner -- \
   --workload tools/dag-viewer/workloads/planner-layering/example1.json \
   --run-until stage3 --plan-file plan.json
 ```
@@ -196,7 +196,7 @@ With `--format json`, open the document in the
 [Plan Viewer](plan-viewer.md), or read Stage 3 directly:
 
 ```sh
-cargo run --release -p asap-devtools --bin asap_planner -- \
+cargo run --release -p asap-planner-cli --bin asap_planner -- \
   --workload tools/dag-viewer/workloads/planner-layering/example1.json \
   --run-until stage3 --format json --out plan.json
 python3 -c 'import json; print(json.dumps(json.load(open("plan.json"))["stage3_plan_selection"]["cost"], indent=2))'
@@ -215,7 +215,7 @@ text.
 ## Troubleshooting
 
 - **`asap_planner: command not found`:** use `cargo run ... -- ...`, or the
-  binary's path after `cargo build --release -p asap-devtools --bin asap_planner`.
+  binary's path after `cargo build --release -p asap-planner-cli --bin asap_planner`.
 - **`unknown argument ...`:** the option does not exist. Earlier
   `stage_pipeline` options such as `--promql`, `--example`, `--table`,
   `--cost-model` and `--milp-time-limit-s` were removed: write a workload

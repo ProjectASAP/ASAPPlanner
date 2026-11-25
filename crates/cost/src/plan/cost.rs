@@ -6,7 +6,7 @@
 //! [`request_overhead_cost_per_second`]), so its objective is the
 //! `plan_cost` of the plan it selects.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::node::analytical::AnalyticalCostError;
 use crate::node::operations_per_unit::merge_terms_per_state;
@@ -14,23 +14,33 @@ use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_state_bytes, state_bytes_per_row, StateInputRows};
 use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
-use crate::{lookup, StateFamily};
-use crate::{node_resource_usage_and_cost, NodeResourceUsageAndCost, ProducerOutput};
+use crate::plan::kept_results::{computed_range, held_by_bounded_cache, kept_per_grid};
+use crate::plan::resident_windows::{
+    reader_window_reads_per_second, view_resident_windows, ChainReader, ReadTimes, WindowRead,
+    WindowReadsPerSecond,
+};
+use crate::{lookup_at_scale, StateFamily};
 use crate::{
-    CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind, ResourceUsage,
-    MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
+    node_resource_usage_and_cost, CachedViewWindows, NodeResourceUsageAndCost, ProducerOutput,
+};
+use crate::{
+    AnswerCache, CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind,
+    ResourceUsage, ViewWindowCache, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::NonASAPOp;
+use asap_types::plan::materialized_view::RefreshWindow;
 use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
     PhysicalASAPOperatorPayload as Payload,
 };
-use asap_types::plan::time_window::read_back_ms;
-use asap_types::stages::Lifetime;
+use asap_types::plan::time_window::{read_back_ms, windows_readers_need};
+use asap_types::stages::{anchor_is_evaluation_time, Lifetime};
 use asap_types::summary_type::SketchParams;
-use asap_types::workload::{AssumedDataFact, DataWorkload, QueryWorkloadEntry};
+use asap_types::workload::{
+    greatest_common_divisor, AssumedDataFact, DataWorkload, QueryWorkloadEntry,
+};
 
 /// One candidate's usage and cost over the whole workload: `usage` is
 /// the whole candidate's, `per_node` one cost per operator node of its
@@ -72,19 +82,78 @@ impl PlanCost {
     }
 }
 
-/// One query's latency per evaluation, its longest chain of work (module
-/// doc, "Latency"): the compaction of the newest window of a state it reads
-/// from ingestion time, then the query's own work, each on a full core.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// One query's latency per request: the freshness wait (the allowed
+/// lateness, then the refresh of the newest window of every ingestion-time
+/// view it reads, queued behind the refreshes closing at the same instant),
+/// then the request's execution on one query thread
+/// (`docs/design_docs/proposals/stage3-lowest-mean-latency.md`, section
+/// 2.1).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct QueryLatency {
-    /// Milliseconds to merge the ingest workers' partial copies of the
-    /// newest window of the largest ingestion-time state the query reads;
-    /// 0 when ingestion fits on one core or the query reads no state (only
-    /// raw rows or an exact `Aggregate`'s values kept at ingestion time).
-    pub compaction_ms: f64,
-    /// Milliseconds of the query-time work the query reaches, each node
-    /// once.
-    pub query_ms: f64,
+    /// The data plane's allowed lateness
+    /// ([`DataPlaneExecution::allowed_lateness_ms`](crate::DataPlaneExecution)).
+    pub allowed_lateness_ms: f64,
+    /// Queueing of the refresh group it waits longest for: behind the other
+    /// groups closing at the same instant (divided among the precompute
+    /// threads) and the groups it reads; 0 when it reads no view.
+    pub precompute_queueing_ms: f64,
+    /// The wall time of that group's refresh (its nodes' refresh CPU, the
+    /// merging of the ingest threads' partial copies and the I/O wait); 0
+    /// when it reads no view.
+    pub precompute_execution_ms: f64,
+    /// The request's query-time work, each node it reaches once, plus the
+    /// fixed cost per request and per step.
+    pub query_execution_ms: f64,
+    /// Its evaluations per second (a range request's steps each count),
+    /// its weight in the mean latency.
+    pub evaluations_per_second: f64,
+}
+
+impl QueryLatency {
+    /// The latency per request: the four parts' sum.
+    pub fn latency_ms(&self) -> f64 {
+        self.allowed_lateness_ms
+            + self.precompute_queueing_ms
+            + self.precompute_execution_ms
+            + self.query_execution_ms
+    }
+}
+
+/// The CPU a plan's work of one thread role uses, and the threads that
+/// serve it at the target utilisation
+/// ([`DataPlaneExecution::max_thread_utilization`](crate::DataPlaneExecution)).
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleThreads {
+    /// Thread-seconds per second the role keeps its threads busy: its CPU
+    /// core-seconds, and for the precompute role a refresh's I/O wait too
+    /// (a waiting thread is busy).
+    pub predicted_busy_thread_seconds_per_second: f64,
+    /// ceil(busy thread-seconds per second / max_thread_utilization), at
+    /// least 1.
+    pub recommended_threads: u32,
+}
+
+impl RoleThreads {
+    fn of(cores: f64, utilization: f64) -> Self {
+        Self {
+            predicted_busy_thread_seconds_per_second: cores,
+            recommended_threads: ((cores / utilization).ceil() as u32).max(1),
+        }
+    }
+}
+
+/// The threads a deployment needs to serve a plan, per role.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecommendedThreads {
+    /// Inserting arriving rows, the decode and append outside the plan
+    /// included (`MeasuredOperationCosts::ns_per_ingested_sample`).
+    pub ingest: RoleThreads,
+    /// Window-close refreshes.
+    pub precompute: RoleThreads,
+    /// Query requests.
+    pub query: RoleThreads,
 }
 
 /// Measure every node of `dag` per second of wall time (module doc, "Cost
@@ -106,17 +175,21 @@ pub fn plan_cost(
     settings: &CostInputs,
 ) -> Result<(PlanCost, CalibrationFit), (PhysicalASAPNodeId, AnalyticalCostError)> {
     let nodes = &node_map(dag);
-    let formula_scale = settings.frozen_calibration_factor.unwrap_or(1.0);
     let first = dag.nodes.first().map(|n| n.id).unwrap_or_default();
     let table = &settings.measured_operation_costs;
     let mut fit = CalibrationFit::default();
-    let speed = settings.resource_speed;
     // Cost model 1 costs each node as it is measured.
     let unit_costs = settings.cost_model.per_node_unit_costs();
     // Each node's `(multiplier, per_second)` ([`computations`]), then its
     // usage and cost ([`node_resource_usage_and_cost`]), children first.
-    let multipliers = computations(dag, entries, settings.non_repeating_query_horizon_seconds)
-        .map_err(|error| (first, error))?;
+    let answer_cache = settings.data_plane_execution.answer_cache;
+    let multipliers = computations(
+        dag,
+        entries,
+        answer_cache,
+        settings.non_repeating_query_horizon_seconds,
+    )
+    .map_err(|error| (first, error))?;
     // Each node's producers in its payload's input order, whatever order
     // the DAG lists its edges in (`PhysicalASAPDAGNode::producers`): its
     // first producer is its child.
@@ -143,6 +216,70 @@ pub fn plan_cost(
             (node.id, one_batch)
         })
         .collect();
+    // The queries whose roots reach each node.
+    let mut queries_of: HashMap<PhysicalASAPNodeId, BTreeSet<usize>> = HashMap::new();
+    for (query, &root) in dag.roots.iter().enumerate() {
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if queries_of.entry(id).or_default().insert(query) {
+                pending.extend(producers_of.get(&id).into_iter().flatten().copied());
+            }
+        }
+    }
+    // Each node's readers' evaluation grid, as Stage 3's context of it has
+    // it: the gcd of the grids of the queries whose roots reach it, each its
+    // evaluation context's grid (`QueryWorkloadEntry::evaluation_grid`);
+    // below a `TimeShift` anchored with `@ end()` or `@ start()` that is not
+    // at an evaluation time, the gcd of those queries' request times
+    // (`QueryWorkloadEntry::request_time_grid_ms`), as Stage 3 runs its
+    // inputs. A cover is charged its windows over it, and a kept result is
+    // kept per its evaluation times.
+    let mut grid_of: HashMap<PhysicalASAPNodeId, u64> = HashMap::new();
+    for (query, &root) in dag.roots.iter().enumerate() {
+        let Some(entry) = entries.get(query) else {
+            continue;
+        };
+        let mut seen = HashSet::new();
+        let mut pending = vec![(root, entry.evaluation_grid().period_ms)];
+        while let Some((id, period_ms)) = pending.pop() {
+            if !seen.insert((id, period_ms)) {
+                continue;
+            }
+            let known = grid_of.entry(id).or_insert(0);
+            *known = greatest_common_divisor(*known, period_ms);
+            let inputs_period_ms = match nodes[&id].payload.request_anchor() {
+                Some(at) => {
+                    let queries: Vec<&QueryWorkloadEntry> = queries_of[&id]
+                        .iter()
+                        .filter_map(|&query| entries.get(query))
+                        .collect();
+                    match anchor_is_evaluation_time(at, queries.iter().copied()) {
+                        true => period_ms,
+                        false => queries.iter().fold(0, |grid_ms, entry| {
+                            greatest_common_divisor(grid_ms, entry.request_time_grid_ms(at))
+                        }),
+                    }
+                }
+                None => period_ms,
+            };
+            pending.extend(
+                producers_of
+                    .get(&id)
+                    .into_iter()
+                    .flatten()
+                    .map(|&producer| (producer, inputs_period_ms)),
+            );
+        }
+    }
+    let evaluation_grid_of = |id: PhysicalASAPNodeId| {
+        grid_of
+            .get(&id)
+            .filter(|&&period_ms| period_ms > 0)
+            .map(|&period_ms| asap_types::stages::EvaluationGrid {
+                period_ms,
+                phase_ms: 0,
+            })
+    };
     let mut costed: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'_>> = HashMap::new();
     let mut one_batch: HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'_>> = HashMap::new();
     for node in &dag.nodes {
@@ -167,6 +304,7 @@ pub fn plan_cost(
             &views,
             multipliers[&node.id],
             window_ms,
+            evaluation_grid_of(node.id),
             data,
             settings,
         )
@@ -177,6 +315,7 @@ pub fn plan_cost(
                 &views,
                 multipliers[&node.id],
                 window_ms,
+                evaluation_grid_of(node.id),
                 data,
                 settings,
             )
@@ -195,32 +334,17 @@ pub fn plan_cost(
     let mut work_ms: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
     // The raw data query-time scans read, retained on disk: per source, the
     // largest scan's (bytes, node).
-    let mut raw_data: HashMap<&Source, (u64, PhysicalASAPNodeId)> = HashMap::new();
+    let mut raw_data: HashMap<&Source, (f64, PhysicalASAPNodeId)> = HashMap::new();
     // Each in-memory ingestion-time state's bytes per window (what it keeps
     // for one window, its output or an exact aggregate's values).
     let mut maintained: Vec<(PhysicalASAPNodeId, u64)> = Vec::new();
-    // Each summary node's state family, to look up in the measured table:
-    // a build's own (one sketch instance per group; a shared Hydra
-    // structure is not that sketch), inherited by the merges, estimates and
-    // finalizations over it.
-    let mut family_of: HashMap<PhysicalASAPNodeId, StateFamily<'_>> = HashMap::new();
-    let sketch_size =
-        |params: &SketchParams| sketch_state_bytes(params, StateInputRows::UNKNOWN) as f64;
     for node in &dag.nodes {
         let node_costed = &costed[&node.id];
         usage.cpu_ops_per_second += node_costed.cpu_ops_per_second;
         usage.scanned_bytes_per_second += node_costed.scanned_bytes_per_second;
-        usage.average_memory_bytes += node_costed.average_memory_bytes;
-        usage.peak_memory_bytes = usage
-            .peak_memory_bytes
-            .saturating_add(node_costed.peak_memory_bytes);
-        usage.disk_bytes = usage.disk_bytes.saturating_add(node_costed.disk_bytes);
         fit.add(node_costed.fit);
         work_ms.insert(node.id, node_costed.work_ms_per_execution);
         output.insert(node.id, node_costed.output);
-        if node_costed.family != StateFamily::None {
-            family_of.insert(node.id, node_costed.family);
-        }
         if let Some(window) = node_costed.maintained {
             maintained.push((node.id, window));
         }
@@ -235,6 +359,7 @@ pub fn plan_cost(
     // The runtime's fixed cost per query request, charged to the node the
     // query reads first and added to its latency below.
     let evaluation_ms = table.ns_per_evaluation * 1e-6;
+    let step_ms = table.ns_per_evaluation_step * 1e-6;
     let starts = query_starts(dag);
     let mut evaluation_ms_per_query = vec![0.0; starts.len()];
     let mut request_ms_per_second = 0.0;
@@ -243,7 +368,7 @@ pub fn plan_cost(
     let mut unattached_request_cost = 0.0;
     let mut has_unattached_request_overhead = false;
     for (query, start) in starts.iter().enumerate() {
-        if evaluation_ms <= 0.0 {
+        if evaluation_ms <= 0.0 && step_ms <= 0.0 {
             continue;
         }
         let diagnostic_node = start.first().copied().unwrap_or(first);
@@ -254,7 +379,15 @@ pub fn plan_cost(
         if !usage.cpu_ops_per_second.is_finite() || !request_ms_per_second.is_finite() {
             return Err((diagnostic_node, AnalyticalCostError::Overflow));
         }
-        evaluation_ms_per_query[query] = evaluation_ms;
+        evaluation_ms_per_query[query] = evaluation_ms
+            + step_ms
+                * step_rounds(
+                    steps_per_request(
+                        entries.get(query),
+                        settings.data_plane_execution.answer_cache,
+                    ),
+                    settings.data_plane_execution.query_threads,
+                );
         let Some(&first_read) = start.first() else {
             has_unattached_request_overhead = true;
             if let Some(unit_cost) = unit_costs {
@@ -286,8 +419,11 @@ pub fn plan_cost(
     }
     for (bytes, id) in raw_data.into_values() {
         let node = per_node.get_mut(&id).expect("every node is measured");
-        usage.disk_bytes = usage.disk_bytes.saturating_add(bytes);
-        node.detail += &format!("; keeps {bytes} bytes of raw data on disk");
+        node.memory_and_disk.disk_bytes = node
+            .memory_and_disk
+            .disk_bytes
+            .saturating_add(bytes.round() as u64);
+        node.detail += &format!("; keeps {bytes:.0} bytes of raw data on disk");
         if let (Some(cost), Some(disk_cost)) = (
             &mut node.cost_per_second,
             raw_data_disk_cost_per_second(bytes, settings),
@@ -299,53 +435,167 @@ pub fn plan_cost(
     // own partial copy of an in-memory ingestion-time state's newest window
     // (merged at query time, [`query_latencies`]), held at the peak too.
     for (id, window) in maintained {
-        let copies = ingest_workers(dag, &work_ms, id) - 1;
+        let copies = ingest_workers(dag, &work_ms, id, settings) - 1;
         if copies == 0 {
             continue;
         }
         let bytes = copies.saturating_mul(window);
-        let measured = per_node.get_mut(&id).expect("every node is measured");
-        usage.peak_memory_bytes = usage.peak_memory_bytes.saturating_add(bytes);
-        measured.detail +=
+        let node_cost = per_node.get_mut(&id).expect("every node is measured");
+        node_cost.memory_and_disk.peak_memory_bytes = node_cost
+            .memory_and_disk
+            .peak_memory_bytes
+            .saturating_add(bytes);
+        node_cost.detail +=
             &format!("; {copies} partial copies of its newest window, {bytes} bytes");
     }
-    // Milliseconds of one merge of a node's state when the newest window's
-    // partial copies are compacted: its measured query-time merge entry
-    // (ns · 10⁻⁶) when the table has one, else the merge formula of its
-    // family and bytes per state, as a `SummaryMerge` over it is costed (a
-    // DDSketch state: 2,500 operations). 0 for a node holding no states,
-    // such as the raw rows a `Filter` or `TimeRange` keeps or an exact
-    // `Aggregate`'s values: the executor merges ingest shards only of
-    // summary state columns, and partial copies of rows are concatenated.
-    // No per-group term (`merge_output_terms`, 19,000 per KLL group):
-    // the executor merges a shard's states into the existing states in
-    // place, group by group, and creates no group's state or output row.
-    let merge_ms = |id: PhysicalASAPNodeId| {
-        let Some(&family) = family_of.get(&id) else {
-            return 0.0;
-        };
-        lookup(
-            table,
-            OperatorKind::SummaryMerge,
-            ExecutionTiming::QueryTime,
-            family,
-            sketch_size,
-        )
-        .map_or_else(
-            || {
-                // A partial copy merges into a state of the same window.
-                let state_bytes = state_bytes_per_row(output[&id], &nodes[&id].output_schema);
-                merge_terms_per_state(family, state_bytes, state_bytes, None, 1).operations()
-                    * speed.ms_per_cpu_op
-                    * formula_scale
-            },
-            |unit| (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6,
-        )
+    // With a window cache, a stored view's windows are on disk (charged by
+    // its node) and the windows written or read within the cache's idle
+    // time also in memory.
+    let reads_from_disk = match settings.data_plane_execution.view_window_cache {
+        Some(cache) => window_cache_charges(
+            dag,
+            nodes,
+            &costed,
+            &producers_of,
+            &queries_of,
+            entries,
+            answer_cache,
+            cache,
+            settings,
+            &mut per_node,
+        ),
+        None => ReadsFromDisk::default(),
     };
-    let mut latency = query_latencies(dag, nodes, &output, &work_ms, merge_ms);
-    for (latency, evaluation_ms) in latency.iter_mut().zip(evaluation_ms_per_query) {
-        latency.query_ms += evaluation_ms;
+    usage.scanned_bytes_per_second += reads_from_disk.bytes_per_second;
+
+    // Query-time results the data plane keeps between requests: each node
+    // charged its own (`NodeResourceUsageAndCost::kept_result_bytes`); past
+    // the cache's bound they are not held, each node's share dropped.
+    if let Some(results) = settings.data_plane_execution.kept_query_time_results {
+        let total: f64 = costed.values().map(|node| node.kept_result_bytes).sum();
+        let dropped = total - held_by_bounded_cache(total, results.max_bytes);
+        if dropped > 0.0 {
+            for node in &dag.nodes {
+                let kept = costed[&node.id].kept_result_bytes;
+                if kept <= 0.0 {
+                    continue;
+                }
+                let share = kept / total * dropped;
+                let node_cost = per_node.get_mut(&node.id).expect("every node is measured");
+                node_cost.memory_and_disk.average_memory_bytes -= share;
+                node_cost.memory_and_disk.peak_memory_bytes = node_cost
+                    .memory_and_disk
+                    .peak_memory_bytes
+                    .saturating_sub(share as u64);
+                node_cost.detail += &format!("; {share:.0} of them past the cache's bound");
+                if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs)
+                {
+                    *cost -= unit_cost.cost_per_memory_byte_second * share;
+                }
+            }
+        }
     }
+    // Each query's answer per evaluation time, as far back as the plan's
+    // evaluations read (its longest retention) plus a margin, charged to its
+    // root; past the cache's bound, each query's share dropped.
+    if let Some(answers) = settings.data_plane_execution.answer_cache {
+        let horizon_ms = dag
+            .nodes
+            .iter()
+            .filter_map(|node| node.retention_ms)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(answers.retention_margin_ms);
+        let pool: Vec<(PhysicalASAPNodeId, f64)> = dag
+            .roots
+            .iter()
+            .zip(entries)
+            .map(|(&root, entry)| {
+                let count = kept_per_grid(horizon_ms, entry.evaluation_grid().period_ms);
+                (root, output[&root].bytes as f64 * count)
+            })
+            .collect();
+        let total: f64 = pool.iter().map(|(_, bytes)| bytes).sum();
+        let held = held_by_bounded_cache(total, answers.max_bytes);
+        for (root, bytes) in pool {
+            let bytes = if total > 0.0 {
+                bytes * held / total
+            } else {
+                0.0
+            };
+            let node_cost = per_node.get_mut(&root).expect("every node is measured");
+            node_cost.memory_and_disk.average_memory_bytes += bytes;
+            node_cost.memory_and_disk.peak_memory_bytes = node_cost
+                .memory_and_disk
+                .peak_memory_bytes
+                .saturating_add(bytes as u64);
+            node_cost.detail += &format!("; keeps {bytes:.0} bytes of answers ({horizon_ms} ms)");
+            if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs) {
+                *cost += unit_cost.cost_per_memory_byte_second * bytes;
+            }
+        }
+    }
+    // The plan's memory, disk and disk traffic: its nodes' (each charged
+    // above what the whole plan adds to it).
+    for node_cost in per_node.values() {
+        let memory_and_disk = node_cost.memory_and_disk;
+        usage.average_memory_bytes += memory_and_disk.average_memory_bytes;
+        usage.peak_memory_bytes = usage
+            .peak_memory_bytes
+            .saturating_add(memory_and_disk.peak_memory_bytes);
+        usage.disk_bytes = usage.disk_bytes.saturating_add(memory_and_disk.disk_bytes);
+        usage.disk_written_bytes_per_second += memory_and_disk.disk_written_bytes_per_second;
+        usage.disk_read_bytes_per_second += memory_and_disk.disk_read_bytes_per_second;
+    }
+    let merge_ms =
+        |id: PhysicalASAPNodeId| partial_copy_merge_ms(nodes[&id], &costed[&id], settings);
+    let groups = refresh_groups(
+        dag,
+        nodes,
+        &output,
+        &work_ms,
+        merge_ms,
+        &mut per_node,
+        settings,
+    );
+    // A query-time reader's time reading windows from disk, per run: in the
+    // work each query's latency counts per run of its steps (not its CPU).
+    let mut latency_work_ms = work_ms.clone();
+    for (&reader, &ms) in &reads_from_disk.ms_per_run_by_reader {
+        if let Some(work) = latency_work_ms.get_mut(&reader) {
+            *work += ms;
+        }
+    }
+    let mut latency = query_latencies(dag, nodes, &latency_work_ms, &groups, entries, settings)
+        .map_err(|error| (first, error))?;
+    for (latency, evaluation_ms) in latency.iter_mut().zip(evaluation_ms_per_query) {
+        latency.query_execution_ms += evaluation_ms;
+    }
+
+    let execution = &settings.data_plane_execution;
+    let refresh_cores: f64 = groups
+        .iter()
+        .map(|group| group.wall_ms_per_window / group.window.width_ms as f64)
+        .sum();
+    usage.precompute_load = refresh_cores / f64::from(execution.precompute_threads);
+    let ingest_cores: f64 = per_node
+        .values()
+        .map(|node| node.phase_times.ingest_cpu_core_seconds_per_second)
+        .sum::<f64>()
+        + ingest_decode_cpu_core_seconds_per_second(data, settings);
+    let query_cores: f64 = dag
+        .nodes
+        .iter()
+        .filter(|node| node.output_state.timing == ExecutionTiming::QueryTime)
+        .map(|node| work_ms[&node.id] * multipliers[&node.id].1 / 1_000.0)
+        .sum::<f64>()
+        + request_ms_per_second / 1_000.0;
+    let utilization = execution.max_thread_utilization;
+    usage.recommended_configuration = RecommendedThreads {
+        ingest: RoleThreads::of(ingest_cores, utilization),
+        precompute: RoleThreads::of(refresh_cores, utilization),
+        query: RoleThreads::of(query_cores, utilization),
+    };
     usage.peak_cpu_cores = peak_cpu_cores(
         dag,
         nodes,
@@ -398,6 +648,240 @@ pub fn plan_cost(
     ))
 }
 
+/// Charges each in-memory ingestion-time view under `cache`
+/// (`NodeResourceUsageAndCost::cached_windows`) its resident windows as
+/// memory and its reads from disk, in the view's node cost: the most any
+/// one of its readers keeps resident ([`view_resident_windows`]), mean for
+/// the average and the cost, most for the peak; and each distinct reader's
+/// windows read while not in the cache ([`reader_window_reads_per_second`];
+/// two queries reading the same windows at the same times read them once),
+/// as scanned bytes. With `cache.max_bytes` below the plan's resident
+/// bytes, the resident memory is cut to the bound and the reads it served
+/// in that proportion are read from disk. Returns the scanned bytes per
+/// second added, and per query-time reader node the most ms one run spends
+/// reading from disk (`ms_per_scanned_byte` per byte).
+#[allow(clippy::too_many_arguments)]
+fn window_cache_charges(
+    dag: &PhysicalASAPDAG,
+    nodes: &NodeMap<'_>,
+    costed: &HashMap<PhysicalASAPNodeId, NodeResourceUsageAndCost<'_>>,
+    producers_of: &HashMap<PhysicalASAPNodeId, Vec<PhysicalASAPNodeId>>,
+    queries_of: &HashMap<PhysicalASAPNodeId, BTreeSet<usize>>,
+    entries: &[QueryWorkloadEntry],
+    answer_cache: Option<AnswerCache>,
+    cache: ViewWindowCache,
+    settings: &CostInputs,
+    per_node: &mut BTreeMap<PhysicalASAPNodeId, NodeCost>,
+) -> ReadsFromDisk {
+    let unit_costs = settings.cost_model.per_node_unit_costs();
+    let width_of = |id: PhysicalASAPNodeId| dag.refresh_window(id).map(|window| window.width_ms);
+    let mut views = Vec::new();
+    for node in &dag.nodes {
+        let Some(windows) = costed[&node.id].cached_windows else {
+            continue;
+        };
+        // Each reader, with its node (none for a reader the model does not
+        // follow).
+        let readers: Vec<(ChainReader, Option<PhysicalASAPNodeId>)> =
+            match windows_readers_need(dag, node.id) {
+                None => vec![(
+                    ChainReader {
+                        read: WindowRead::Every,
+                        times: ReadTimes::Refresh {
+                            width_ms: windows.width_ms,
+                        },
+                    },
+                    None,
+                )],
+                Some(reads) => reads
+                    .into_iter()
+                    .flat_map(|(reader, window)| {
+                        let reader_node = nodes[&reader];
+                        let read = match &reader_node.payload {
+                            Payload::NonASAP(NonASAPOp::TimeRangeCover { .. }) => {
+                                let levels = &producers_of[&reader];
+                                match (
+                                    levels.iter().position(|&level| level == node.id),
+                                    levels.iter().map(|&level| width_of(level)).collect(),
+                                ) {
+                                    (Some(level), Some(level_widths_ms)) => WindowRead::Cover {
+                                        range_ms: window.length_ms,
+                                        offset_ms: window.ends_before_evaluation_ms,
+                                        level_widths_ms,
+                                        level,
+                                    },
+                                    _ => WindowRead::Every,
+                                }
+                            }
+                            _ => WindowRead::Range {
+                                range_ms: window.length_ms,
+                                offset_ms: window.ends_before_evaluation_ms,
+                            },
+                        };
+                        let times: Vec<(ReadTimes, Option<PhysicalASAPNodeId>)> =
+                            match reader_node.output_state.timing {
+                                ExecutionTiming::IngestionTime => vec![(
+                                    ReadTimes::Refresh {
+                                        width_ms: width_of(reader).unwrap_or(windows.width_ms),
+                                    },
+                                    Some(reader),
+                                )],
+                                ExecutionTiming::QueryTime => queries_of
+                                    .get(&reader)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|&query| {
+                                        entries.get(query).map(|entry| {
+                                            (ReadTimes::of_query(entry, answer_cache), Some(reader))
+                                        })
+                                    })
+                                    .collect(),
+                            };
+                        times.into_iter().map(move |(times, reader)| {
+                            (
+                                ChainReader {
+                                    read: read.clone(),
+                                    times,
+                                },
+                                reader,
+                            )
+                        })
+                    })
+                    .collect(),
+            };
+        let chain_readers: Vec<ChainReader> =
+            readers.iter().map(|(reader, _)| reader.clone()).collect();
+        let (mean, most) = view_resident_windows(
+            windows.width_ms,
+            windows.retained,
+            cache.idle_ms,
+            &chain_readers,
+        );
+        // Distinct readers: the same windows read at the same times are
+        // read once; each reader node keeps its own time.
+        let mut reads: Vec<(
+            ChainReader,
+            Option<PhysicalASAPNodeId>,
+            WindowReadsPerSecond,
+        )> = Vec::new();
+        for (reader, reader_node) in readers {
+            if let Some(read) =
+                reader_window_reads_per_second(windows.width_ms, cache.idle_ms, &reader)
+            {
+                reads.push((reader, reader_node, read));
+            }
+        }
+        views.push(CachedView {
+            id: node.id,
+            windows,
+            mean_resident_windows: mean,
+            most_resident_windows: most,
+            reads,
+        });
+    }
+    // The share of resident bytes the cache holds: all of them within its
+    // bound; past it, the bound's share, the other reads served from disk.
+    let held_share = |resident_bytes: f64| match cache.max_bytes {
+        Some(bound) if resident_bytes > bound as f64 => bound as f64 / resident_bytes,
+        _ => 1.0,
+    };
+    let (mean_resident_bytes, most_resident_bytes) =
+        views.iter().fold((0.0, 0.0), |(mean, most), view| {
+            let bytes = view.windows.bytes_per_window as f64;
+            (
+                mean + bytes * view.mean_resident_windows,
+                most + bytes * view.most_resident_windows as f64,
+            )
+        });
+    let (mean_held_share, most_held_share) = (
+        held_share(mean_resident_bytes),
+        held_share(most_resident_bytes),
+    );
+    let mut reads_from_disk = ReadsFromDisk::default();
+    for view in views {
+        let (id, windows) = (view.id, view.windows);
+        let bytes = windows.bytes_per_window as f64;
+        let node_cost = per_node.get_mut(&id).expect("every node is measured");
+        let mean_resident = view.mean_resident_windows * mean_held_share;
+        let most_resident = (view.most_resident_windows as f64 * most_held_share).floor() as u64;
+        node_cost.memory_and_disk.average_memory_bytes += bytes * mean_resident;
+        node_cost.memory_and_disk.peak_memory_bytes = node_cost
+            .memory_and_disk
+            .peak_memory_bytes
+            .saturating_add(windows.bytes_per_window.saturating_mul(most_resident));
+        let mut read_bytes_per_second = 0.0;
+        // Each reader node's reads counted once per distinct read (queries
+        // reading the same windows at the same times through one node read
+        // them once), as Stage 3 counts each edge's.
+        let mut counted: Vec<(Option<PhysicalASAPNodeId>, &ChainReader)> = Vec::new();
+        // Per query-time reader node, its slowest read of this view per run.
+        let mut slowest_ms_per_run: HashMap<PhysicalASAPNodeId, f64> = HashMap::new();
+        for (reader, reader_node, read) in &view.reads {
+            let windows_from_disk_per_second = read.windows_read_from_disk_per_second
+                + (1.0 - mean_held_share)
+                    * (read.windows_read_per_second - read.windows_read_from_disk_per_second);
+            if !counted.contains(&(*reader_node, reader)) {
+                counted.push((*reader_node, reader));
+                read_bytes_per_second += windows_from_disk_per_second * bytes;
+            }
+            if let (Some(reader_node), ReadTimes::Query { .. }) = (reader_node, reader.times) {
+                let runs_per_second =
+                    reader.times.requests_per_second() * reader.times.runs_per_request();
+                let ms_per_run = windows_from_disk_per_second * bytes / runs_per_second
+                    * settings.resource_speed.ms_per_scanned_byte;
+                let slowest = slowest_ms_per_run.entry(*reader_node).or_insert(0.0);
+                *slowest = slowest.max(ms_per_run);
+            }
+        }
+        // A node reading several views (a cover's levels) reads each.
+        for (reader_node, ms) in slowest_ms_per_run {
+            *reads_from_disk
+                .ms_per_run_by_reader
+                .entry(reader_node)
+                .or_insert(0.0) += ms;
+        }
+        node_cost.memory_and_disk.disk_read_bytes_per_second += read_bytes_per_second;
+        reads_from_disk.bytes_per_second += read_bytes_per_second;
+        node_cost.detail += &format!(
+            "; {mean_resident:.1} of {} windows resident in memory (most {most_resident}; \
+             window cache, idle {} ms); reads {read_bytes_per_second:.0} bytes/s from disk",
+            windows.retained, cache.idle_ms
+        );
+        if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs) {
+            *cost += unit_cost.cost_per_memory_byte_second * bytes * mean_resident
+                + unit_cost.cost_per_scanned_byte * read_bytes_per_second;
+        }
+    }
+    reads_from_disk
+}
+
+/// A view under the window cache, with what its readers keep and read
+/// ([`window_cache_charges`]).
+struct CachedView {
+    id: PhysicalASAPNodeId,
+    windows: CachedViewWindows,
+    mean_resident_windows: f64,
+    most_resident_windows: u64,
+    /// Each reader (its node, when known) and what it reads.
+    reads: Vec<(
+        ChainReader,
+        Option<PhysicalASAPNodeId>,
+        WindowReadsPerSecond,
+    )>,
+}
+
+/// What the views under the window cache read from disk
+/// ([`window_cache_charges`]).
+#[derive(Debug, Default)]
+struct ReadsFromDisk {
+    /// Bytes read from disk per second, all views.
+    bytes_per_second: f64,
+    /// Per query-time reader node, the ms one of its runs spends reading
+    /// windows from disk: per view, its slowest reader's, summed over the
+    /// views it reads.
+    ms_per_run_by_reader: HashMap<PhysicalASAPNodeId, f64>,
+}
+
 /// The runtime's fixed overhead of query `entry`'s requests: its requests
 /// per second (once per evaluation of its recurrence, a range query's
 /// steps in one request) and the CPU operations per second they cost,
@@ -411,7 +895,12 @@ fn request_overhead(
         entry.map(|entry| (&entry.recurrence, None)),
         settings.non_repeating_query_horizon_seconds,
     )?;
-    let evaluation_ms = settings.measured_operation_costs.ns_per_evaluation * 1e-6;
+    let table = &settings.measured_operation_costs;
+    // The fixed cost per request and per step of it.
+    let evaluation_ms = (table.ns_per_evaluation
+        + table.ns_per_evaluation_step
+            * steps_per_request(entry, settings.data_plane_execution.answer_cache))
+        * 1e-6;
     Ok((
         requests_per_second,
         evaluation_ms / settings.resource_speed.ms_per_cpu_op * requests_per_second,
@@ -429,7 +918,8 @@ pub fn request_overhead_cost_per_second(
     let Some(unit_cost) = settings.cost_model.per_node_unit_costs() else {
         return Ok(0.0);
     };
-    if settings.measured_operation_costs.ns_per_evaluation <= 0.0 {
+    let table = &settings.measured_operation_costs;
+    if table.ns_per_evaluation <= 0.0 && table.ns_per_evaluation_step <= 0.0 {
         return Ok(0.0);
     }
     let mut cost = 0.0;
@@ -445,11 +935,11 @@ pub fn request_overhead_cost_per_second(
 /// Cost model 1's cost per second of keeping `bytes` of raw data on disk;
 /// `None` under cost models 2 and 3. A plan keeps each source once, for its
 /// scan that keeps the most ([`plan_cost`]).
-pub fn raw_data_disk_cost_per_second(bytes: u64, settings: &CostInputs) -> Option<f64> {
+pub fn raw_data_disk_cost_per_second(bytes: f64, settings: &CostInputs) -> Option<f64> {
     settings
         .cost_model
         .per_node_unit_costs()
-        .map(|unit_cost| unit_cost.cost_per_disk_byte_second * bytes as f64)
+        .map(|unit_cost| unit_cost.cost_per_disk_byte_second * bytes)
 }
 
 /// The window a query-time `Scan` `node` of `dag` reads per execution: the
@@ -488,44 +978,269 @@ fn peak_cpu_cores(
         }
     }
     let cores = |ms_per_second: f64| (ms_per_second / 1_000.0).ceil() as u32;
-    let evaluating = latency.iter().filter(|l| l.query_ms > 0.0).count() as u32;
+    let evaluating = latency
+        .iter()
+        .filter(|l| l.query_execution_ms > 0.0)
+        .count() as u32;
     cores(ingestion_ms_per_second) + evaluating.max(cores(query_ms_per_second))
 }
 
-/// Each query's latency per evaluation (module doc, "Latency"): the sum of
-/// the query-time work it reaches, each node once, plus the longest
-/// compaction among the ingestion-time states it reads. Compacting a
-/// state's newest window merges, for each of its `I` states per window,
-/// the `k` ingest workers' partial copies, `(k − 1)·I` merges, where `k`
-/// is the cores its ingestion work takes, at least one. Each merge takes
-/// `merge_ms` of the state: measured, or its family's merge formula, 0 for
-/// a node holding no states (its partial copies are concatenated).
-fn query_latencies(
+/// Milliseconds of one merge of `node`'s state (with its `usage`) when the
+/// newest window's partial copies are compacted: its measured query-time
+/// merge entry (ns · 10⁻⁶, at its series count) when the table has one,
+/// else the merge formula of its family and bytes per state, as a
+/// `SummaryMerge` over it is costed (a DDSketch state: 2,500 operations).
+/// 0 for a node holding no states, such as the raw rows a `Filter` or
+/// `TimeRange` keeps or an exact `Aggregate`'s values: the executor merges
+/// ingest shards only of summary state columns, and partial copies of rows
+/// are concatenated. No per-group term (`merge_output_terms`, 19,000 per
+/// KLL group): the executor merges a shard's states into the existing
+/// states in place, group by group, and creates no group's state or output
+/// row.
+pub fn partial_copy_merge_ms(
+    node: &PhysicalASAPDAGNode,
+    usage: &NodeResourceUsageAndCost<'_>,
+    settings: &CostInputs,
+) -> f64 {
+    let family = usage.family;
+    if family == StateFamily::None {
+        return 0.0;
+    }
+    let sketch_size =
+        |params: &SketchParams| sketch_state_bytes(params, StateInputRows::UNKNOWN) as f64;
+    lookup_at_scale(
+        &settings.measured_operation_costs,
+        OperatorKind::SummaryMerge,
+        ExecutionTiming::QueryTime,
+        family,
+        sketch_size,
+        usage.series,
+    )
+    .map_or_else(
+        || {
+            // A partial copy merges into a state of the same window.
+            let state_bytes = state_bytes_per_row(
+                usage.output,
+                &node.output_schema,
+                settings.data_plane_execution.stored_row_bytes_beside_state,
+            );
+            merge_terms_per_state(family, state_bytes, state_bytes, None, 1).operations()
+                * settings.resource_speed.ms_per_cpu_op
+                * settings.frozen_calibration_factor.unwrap_or(1.0)
+        },
+        |unit| (unit.ns_per_unit + unit.ns_per_invocation) * 1e-6,
+    )
+}
+
+/// The ingest threads that each build a partial copy of an in-memory
+/// ingestion-time state's newest window, for a state whose ingestion work
+/// takes `ingest_cores`: the deployment's `ingest_threads` when set, else
+/// one per core that work takes, at least one.
+pub fn ingest_threads_building_copies(settings: &CostInputs, ingest_cores: f64) -> u64 {
+    match settings.data_plane_execution.ingest_threads {
+        Some(threads) => u64::from(threads),
+        None => ingest_cores.ceil().max(1.0) as u64,
+    }
+}
+
+/// Steps one request of `entry` evaluates: its range evaluation's, 1
+/// without one (or without an entry).
+/// The rounds a request's `steps` take when they split over
+/// `query_threads` query threads, on average: ⌈steps ÷ threads⌉ for whole
+/// steps, the latency's multiplier of per-step work (its CPU stays `steps`
+/// times). A fractional mean (a range as a data plane keeping its answers
+/// computes it) is requests of ⌊steps⌋ and ⌈steps⌉ steps mixed to that
+/// mean, and their rounds mixed alike.
+///
+/// Example: 4/3 steps on one thread: 4/3 rounds; on two threads, 1.
+pub fn step_rounds(steps: f64, query_threads: u32) -> f64 {
+    let threads = u64::from(query_threads.max(1));
+    let (fewer, more) = (steps.floor(), steps.ceil());
+    let rounds = |steps: f64| (steps as u64).div_ceil(threads) as f64;
+    let share_of_more = steps - fewer;
+    (1.0 - share_of_more) * rounds(fewer) + share_of_more * rounds(more)
+}
+
+/// Steps one request of `entry` evaluates on average: its range as the
+/// data plane computes it ([`computed_range`] under `answer_cache`;
+/// `RangeEvaluation::mean_evaluations_per_request`), 1 without one (or
+/// without an entry).
+fn steps_per_request(entry: Option<&QueryWorkloadEntry>, answer_cache: Option<AnswerCache>) -> f64 {
+    entry
+        .and_then(|entry| computed_range(entry, answer_cache))
+        .map_or(1.0, |range| range.mean_evaluations_per_request())
+}
+
+/// Core-seconds per second of the decode and append of arriving samples
+/// outside every plan node (`MeasuredOperationCosts::ns_per_ingested_sample`
+/// × the data's arriving rows per second); 0 when either is unknown.
+pub fn ingest_decode_cpu_core_seconds_per_second(
+    data: &DataWorkload,
+    settings: &CostInputs,
+) -> f64 {
+    data.arrival.rows_per_second().unwrap_or(0.0)
+        * settings.measured_operation_costs.ns_per_ingested_sample
+        * 1e-9
+}
+
+/// One refresh group of a plan: its ingestion-time nodes with one refresh
+/// window, refreshed together once per window close on one precompute
+/// thread (`PhysicalASAPDAG::ingestion_refresh_groups`).
+#[derive(Debug, Clone)]
+pub(crate) struct RefreshGroup {
+    pub(crate) window: RefreshWindow,
+    pub(crate) nodes: Vec<PhysicalASAPNodeId>,
+    /// Wall ms of one refresh: its nodes' refresh wall time, the merging
+    /// of the ingest threads' partial copies, and the I/O wait per run.
+    pub(crate) wall_ms_per_window: f64,
+    /// The other groups whose nodes its nodes read, by position.
+    pub(crate) reads: BTreeSet<usize>,
+}
+
+/// Whether windows `a` and `b` can close at one instant: their phases agree
+/// modulo the gcd of their widths.
+pub fn close_together(a: RefreshWindow, b: RefreshWindow) -> bool {
+    let gcd = greatest_common_divisor(a.width_ms, b.width_ms).max(1);
+    a.phase_ms % gcd == b.phase_ms % gcd
+}
+
+/// The plan's refresh groups ([`RefreshGroup`]). Each ingestion-time node
+/// with a refresh window joins its window's group; the merging of the
+/// ingest threads' `(k − 1)·I` partial copies of its `I` states (`merge_ms`
+/// each) is refresh work of that node, and each group's run pays
+/// `refresh_io_wait.ns_per_refresh` once, on its first node. Both are added
+/// to the nodes' `phase_times` in `per_node`.
+fn refresh_groups(
     dag: &PhysicalASAPDAG,
     nodes: &HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode>,
     output: &HashMap<PhysicalASAPNodeId, EdgeStatistics>,
     work_ms: &HashMap<PhysicalASAPNodeId, f64>,
     merge_ms: impl Fn(PhysicalASAPNodeId) -> f64,
-) -> Vec<QueryLatency> {
+    per_node: &mut BTreeMap<PhysicalASAPNodeId, NodeCost>,
+    settings: &CostInputs,
+) -> Vec<RefreshGroup> {
+    let mut groups: Vec<RefreshGroup> = Vec::new();
+    let mut group_of: HashMap<PhysicalASAPNodeId, usize> = HashMap::new();
+    let wait_per_run_ms = settings
+        .measured_operation_costs
+        .refresh_io_wait
+        .ns_per_refresh
+        * 1e-6;
+    for node in &dag.nodes {
+        if nodes[&node.id].output_state.timing != ExecutionTiming::IngestionTime {
+            continue;
+        }
+        let measured = per_node.get_mut(&node.id).expect("every node is measured");
+        // A refresh group refreshes views, and the nodes doing refresh work.
+        let refreshes = node.is_view() || measured.phase_times.refresh_cpu_ms_per_window > 0.0;
+        if measured.phase_times.refresh_window_width_ms.is_none() || !refreshes {
+            continue;
+        }
+        let Some(window) = dag.refresh_window(node.id) else {
+            continue;
+        };
+        let workers = ingest_workers(dag, work_ms, node.id, settings) as f64;
+        let compaction_ms = (workers - 1.0) * output[&node.id].rows as f64 * merge_ms(node.id);
+        measured.phase_times.refresh_cpu_ms_per_window += compaction_ms;
+        measured.phase_times.refresh_wall_ms_per_window += compaction_ms;
+        let group = match groups.iter().position(|group| group.window == window) {
+            Some(group) => group,
+            None => {
+                measured.phase_times.refresh_wall_ms_per_window += wait_per_run_ms;
+                groups.push(RefreshGroup {
+                    window,
+                    nodes: Vec::new(),
+                    wall_ms_per_window: 0.0,
+                    reads: BTreeSet::new(),
+                });
+                groups.len() - 1
+            }
+        };
+        groups[group].nodes.push(node.id);
+        groups[group].wall_ms_per_window += measured.phase_times.refresh_wall_ms_per_window;
+        group_of.insert(node.id, group);
+    }
+    for edge in &dag.edges {
+        if let (Some(&consumer), Some(&producer)) =
+            (group_of.get(&edge.consumer), group_of.get(&edge.producer))
+        {
+            if consumer != producer {
+                groups[consumer].reads.insert(producer);
+            }
+        }
+    }
+    groups
+}
+
+/// The freshness wait of each group beyond the allowed lateness, as
+/// (queueing, execution) in ms: execution its own refresh wall time;
+/// queueing the groups it reads in full, plus the other groups closing at
+/// the same instant divided among `precompute_threads` (the v1 linear
+/// upper bound).
+pub(crate) fn group_waits(groups: &[RefreshGroup], precompute_threads: u32) -> Vec<(f64, f64)> {
+    groups
+        .iter()
+        .enumerate()
+        .map(|(position, group)| {
+            let mut queueing = 0.0;
+            for (other_position, other) in groups.iter().enumerate() {
+                if other_position == position {
+                    continue;
+                }
+                if group.reads.contains(&other_position) {
+                    queueing += other.wall_ms_per_window;
+                } else if close_together(group.window, other.window) {
+                    queueing += other.wall_ms_per_window / f64::from(precompute_threads);
+                }
+            }
+            (queueing, group.wall_ms_per_window)
+        })
+        .collect()
+}
+
+/// Each query's latency per request ([`QueryLatency`]), without its fixed
+/// cost per request and step (added by [`plan_cost`]): the query-time work
+/// it reaches, each node once per step of the request (once per request
+/// for a node kept across evaluations), after the allowed lateness and the longest
+/// freshness wait among the refresh groups of the ingestion-time nodes it
+/// reads.
+fn query_latencies(
+    dag: &PhysicalASAPDAG,
+    nodes: &HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode>,
+    work_ms: &HashMap<PhysicalASAPNodeId, f64>,
+    groups: &[RefreshGroup],
+    entries: &[QueryWorkloadEntry],
+    settings: &CostInputs,
+) -> Result<Vec<QueryLatency>, AnalyticalCostError> {
+    let execution = &settings.data_plane_execution;
+    let waits = group_waits(groups, execution.precompute_threads);
+    let group_of: HashMap<PhysicalASAPNodeId, usize> = groups
+        .iter()
+        .enumerate()
+        .flat_map(|(position, group)| group.nodes.iter().map(move |&id| (id, position)))
+        .collect();
     let inputs = |id: PhysicalASAPNodeId| {
         dag.edges
             .iter()
             .filter(move |e| e.consumer == id)
             .map(|e| e.producer)
     };
-    let at_ingestion =
-        |id: PhysicalASAPNodeId| nodes[&id].output_state.timing == ExecutionTiming::IngestionTime;
-    let compaction_ms = |state: PhysicalASAPNodeId| {
-        let workers = ingest_workers(dag, work_ms, state) as f64;
-        let states = output[&state].rows as f64;
-        (workers - 1.0) * states * merge_ms(state)
-    };
     query_starts(dag)
         .into_iter()
-        .map(|start| {
+        .enumerate()
+        .map(|(query, start)| {
             let mut latency = QueryLatency {
-                compaction_ms: 0.0,
-                query_ms: 0.0,
+                allowed_lateness_ms: execution.allowed_lateness_ms as f64,
+                evaluations_per_second: evaluation_rate(
+                    entries.get(query).map(|entry| {
+                        (
+                            &entry.recurrence,
+                            computed_range(entry, execution.answer_cache),
+                        )
+                    }),
+                    settings.non_repeating_query_horizon_seconds,
+                )?,
+                ..QueryLatency::default()
             };
             let mut seen = HashSet::new();
             let mut stack = start;
@@ -533,24 +1248,46 @@ fn query_latencies(
                 if !seen.insert(id) {
                     continue;
                 }
-                if at_ingestion(id) {
-                    latency.compaction_ms = latency.compaction_ms.max(compaction_ms(id));
+                if nodes[&id].output_state.timing == ExecutionTiming::IngestionTime {
+                    if let Some(&group) = group_of.get(&id) {
+                        let (queueing, refresh) = waits[group];
+                        if queueing + refresh
+                            > latency.precompute_queueing_ms + latency.precompute_execution_ms
+                        {
+                            latency.precompute_queueing_ms = queueing;
+                            latency.precompute_execution_ms = refresh;
+                        }
+                    }
                     continue;
                 }
-                latency.query_ms += work_ms[&id];
+                // Computed once per step of the request, once per request
+                // when kept across evaluations (as `computations` counts it).
+                let per_request = match nodes[&id].lifetime {
+                    Lifetime::AcrossEvaluations(_) => 1.0,
+                    Lifetime::None | Lifetime::OneEvaluation(_) => step_rounds(
+                        steps_per_request(
+                            entries.get(query),
+                            settings.data_plane_execution.answer_cache,
+                        ),
+                        settings.data_plane_execution.query_threads,
+                    ),
+                };
+                latency.query_execution_ms += work_ms[&id] * per_request;
                 stack.extend(inputs(id));
             }
-            latency
+            Ok(latency)
         })
         .collect()
 }
 
-/// The cores `state`'s ingestion work takes, at least one: the ingest
-/// workers that each build a partial copy of its newest window.
+/// The ingest threads building partial copies of `state`'s newest window:
+/// the deployment's `ingest_threads` when set, else the cores `state`'s
+/// ingestion work takes, at least one.
 fn ingest_workers(
     dag: &PhysicalASAPDAG,
     work_ms: &HashMap<PhysicalASAPNodeId, f64>,
     state: PhysicalASAPNodeId,
+    settings: &CostInputs,
 ) -> u64 {
     let mut ingest_ms_per_s = 0.0;
     let mut seen = HashSet::new();
@@ -566,7 +1303,7 @@ fn ingest_workers(
             );
         }
     }
-    (ingest_ms_per_s / 1_000.0).ceil().max(1.0) as u64
+    ingest_threads_building_copies(settings, ingest_ms_per_s / 1_000.0)
 }
 
 /// The nodes of `dag` by id.

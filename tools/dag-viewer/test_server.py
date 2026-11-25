@@ -3,7 +3,7 @@ arguments, /api/plan-workload answers with the planner's document, and the
 example documents are written on demand.
 
 Run from tools/dag-viewer: `python3 -m unittest test_server`. The endpoint
-tests need a built asap_planner (`cargo build -p asap-devtools --bin
+tests need a built asap_planner (`cargo build -p asap-planner-cli --bin
 asap_planner`; CARGO_TARGET_DIR is honored).
 """
 
@@ -122,9 +122,10 @@ class WorkloadArgsTests(unittest.TestCase):
                 self.assertEqual(args[-3:], ["--ignore-accuracy-guarantees", "--out", "out.json"])
 
     def test_every_cost_model_has_its_cost_inputs(self):
-        """The cost models a request may name are the three files in
+        """The cost models a request may name are the four files in
         cost-inputs/."""
-        self.assertEqual(server.COST_MODELS, ("aws-fargate-us-east-1", "usage-over-time"))
+        self.assertEqual(server.COST_MODELS, ("aws-fargate-us-east-1", "cluster-lowest-mean-latency",
+                                              "cluster-lowest-mean-latency-measured", "usage-over-time"))
 
     def test_sql_tables_become_catalog_table_flags(self):
         """A SQL workload's tables, which a PlanningWorkload does not

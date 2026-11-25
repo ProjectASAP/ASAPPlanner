@@ -166,8 +166,19 @@ impl InputTimeAccess {
                 },
                 Some(_) => reads(InputRows::AllRows),
             },
+            // A cover reads each level's windows ending in its range, the
+            // whole range from the narrowest level at its edges, its offset
+            // before its evaluation time.
             Operator::NonASAP(NonASAPOp::TimeRange { .. }) => last_window(),
-            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }) => match timing {
+            Operator::NonASAP(NonASAPOp::TimeRangeCover { offset_ms, .. }) => Self {
+                shifts_back_ms: i64::try_from(*offset_ms).unwrap_or(i64::MAX),
+                ..last_window()
+            },
+            // Wider windows merged from a narrower chain: at ingestion time
+            // the narrower windows inside its newest window.
+            Operator::ASAP(
+                ASAPOp::SummaryTumblingWindowChain { .. } | ASAPOp::SummaryMergeWindows { .. },
+            ) => match timing {
                 ExecutionTiming::IngestionTime => last_window(),
                 ExecutionTiming::QueryTime => reads(InputRows::WhatItsReadersRead),
             },
@@ -322,10 +333,15 @@ pub fn windows_readers_need<P: TimeIndexedPlan>(
                     pending.push((reader, offset_ms.checked_add(access.shifts_back_ms)?));
                     continue;
                 }
-                InputRows::LastWindow { length_ms } => length_ms,
-                InputRows::CurrentTimeOnly if !needs_every_row => 0,
+                // A window read back from the reader's own time shifted
+                // back (a cover read under an offset).
+                InputRows::LastWindow { length_ms } => {
+                    (length_ms, offset_ms.checked_add(access.shifts_back_ms)?)
+                }
+                InputRows::CurrentTimeOnly if !needs_every_row => (0, offset_ms),
                 InputRows::CurrentTimeOnly | InputRows::AllRows => return None,
             };
+            let (length_ms, offset_ms) = length_ms;
             windows.push((
                 reader,
                 TimeWindow {

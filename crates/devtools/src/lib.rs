@@ -1,9 +1,8 @@
-//! Developer tools over the planner: the `asap_planner` inspection CLI and
-//! the other bins, plus the helpers they and the integration tests share.
+//! Developer tools over the planner: corpus coverage and inspection bins,
+//! the planner fuzzer and the benchmark lane. The `asap_planner` command
+//! line is `asap-planner-cli`.
 //!
-//! [`planning_stages`] holds the one pipeline that `asap_planner` and the
-//! integration tests share; [`candidate_labels`] names the
-//! candidates for the viewer document. [`corpora`] splits the checked-in
+//! [`corpora`] splits the checked-in
 //! query corpora and holds their SQL catalogs. [`rqe_atomic_costs`] converts
 //! sketch-bench's measured per-operation costs into plan selection's
 //! measured table. [`planner_fuzz`] is the metamorphic fuzz tester for
@@ -12,13 +11,9 @@
 //! bin.
 
 pub mod asap_lane;
-pub mod candidate_labels;
 pub mod corpora;
 pub mod planner_fuzz;
-pub mod planning_stages;
-pub mod planning_stages_text;
 pub mod rqe_atomic_costs;
-pub mod stable_output;
 
 use asap_frontend_promql::lower_promql_query_workload;
 pub use asap_frontend_promql::PromqlError;

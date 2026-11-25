@@ -97,6 +97,9 @@ pub enum OriginOfCandidateForMemoGroup {
     Pass1,
     /// A tumbling-window chain, or a merge reading one, of a summary state group.
     TumblingWindows,
+    /// A wider chain level merged from the next narrower one, a cover over
+    /// levels, or a merge reading a cover.
+    MultiLevelWindows,
     /// A coarse group rolled up from a finer one, the compensating `Filter`
     /// it reads, a build of a finest common group, or a slice: a `Filter`
     /// over a group of the same keys over more rows, or over a row-wise

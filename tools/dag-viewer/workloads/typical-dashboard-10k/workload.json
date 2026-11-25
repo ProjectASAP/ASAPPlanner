@@ -1,0 +1,261 @@
+{
+  "data_workload": {
+    "arrival": {
+      "ingesting": {
+        "rows_per_second": 20000.0
+      }
+    },
+    "sources": {
+      "data": {
+        "column_signs": {
+          "value": "non_negative"
+        },
+        "metric_type": "gauge",
+        "sample_interval": 1000,
+        "series_count": 10000
+      },
+      "data_total": {
+        "metric_type": "counter",
+        "sample_interval": 1000,
+        "series_count": 10000
+      }
+    }
+  },
+  "query_workload": {
+    "language": "promql",
+    "query_batch": null,
+    "repeating_queries": [
+      {
+        "demand": {
+          "fixed_interval_at": {
+            "evaluation_phase": 0,
+            "interval": 10000
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "query": "sum by (job) (rate(data_total[5m]))",
+        "requirements": {
+          "accuracy": {
+            "failure_probability": 0.3,
+            "max_error": 0.05
+          },
+          "max_latency_ms": null
+        }
+      },
+      {
+        "demand": {
+          "fixed_interval_at": {
+            "evaluation_phase": 0,
+            "interval": 30000
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "query": "sum by (region) (increase(data_total[1h]))",
+        "requirements": {
+          "accuracy": {
+            "failure_probability": 0.3,
+            "max_error": 0.05
+          },
+          "max_latency_ms": null
+        }
+      },
+      {
+        "demand": {
+          "fixed_interval_at": {
+            "evaluation_phase": 0,
+            "interval": 10000
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "query": "avg by (job) (avg_over_time(data[5m]))",
+        "requirements": {
+          "accuracy": {
+            "failure_probability": 0.3,
+            "max_error": 0.05
+          },
+          "max_latency_ms": null
+        }
+      },
+      {
+        "demand": {
+          "fixed_interval_at": {
+            "evaluation_phase": 0,
+            "interval": 15000
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "query": "max by (job) (max_over_time(data[15m]))",
+        "requirements": {
+          "accuracy": {
+            "failure_probability": 0.3,
+            "max_error": 0.05
+          },
+          "max_latency_ms": null
+        }
+      },
+      {
+        "demand": {
+          "fixed_interval_at": {
+            "evaluation_phase": 0,
+            "interval": 15000
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "query": "topk(5, sum by (job) (rate(data_total[5m])))",
+        "requirements": {
+          "accuracy": {
+            "failure_probability": 0.3,
+            "max_error": 0.05
+          },
+          "max_latency_ms": null
+        }
+      },
+      {
+        "demand": {
+          "fixed_interval_at": {
+            "evaluation_phase": 0,
+            "interval": 20000
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "query": "avg by (job) (quantile_over_time(0.99, data[15m]))",
+        "requirements": {
+          "accuracy": {
+            "failure_probability": 0.3,
+            "max_error": 0.05
+          },
+          "max_latency_ms": null
+        }
+      },
+      {
+        "demand": {
+          "fixed_interval_at": {
+            "evaluation_phase": 0,
+            "interval": 30000
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "query": "avg by (region, service) (avg_over_time(data[30m]))",
+        "requirements": {
+          "accuracy": {
+            "failure_probability": 0.3,
+            "max_error": 0.05
+          },
+          "max_latency_ms": null
+        }
+      },
+      {
+        "demand": {
+          "fixed_interval_at": {
+            "evaluation_phase": 0,
+            "interval": 30000
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "query": "sum by (service) (rate(data_total[1h]))",
+        "requirements": {
+          "accuracy": {
+            "failure_probability": 0.3,
+            "max_error": 0.05
+          },
+          "max_latency_ms": null
+        }
+      },
+      {
+        "demand": {
+          "fixed_interval_at": {
+            "evaluation_phase": 0,
+            "interval": 30000
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "query": "max by (region) (max_over_time(data[1h]))",
+        "requirements": {
+          "accuracy": {
+            "failure_probability": 0.3,
+            "max_error": 0.05
+          },
+          "max_latency_ms": null
+        }
+      },
+      {
+        "demand": {
+          "fixed_interval_at": {
+            "evaluation_phase": 0,
+            "interval": 20000
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "query": "topk(10, sum by (service, job) (increase(data_total[15m])))",
+        "requirements": {
+          "accuracy": {
+            "failure_probability": 0.3,
+            "max_error": 0.05
+          },
+          "max_latency_ms": null
+        }
+      },
+      {
+        "demand": {
+          "fixed_interval_at": {
+            "evaluation_phase": 0,
+            "interval": 30000
+          }
+        },
+        "predictability": {
+          "predictable": {
+            "known_at": null
+          }
+        },
+        "query": "avg by (region) (quantile_over_time(0.5, data[1h]))",
+        "requirements": {
+          "accuracy": {
+            "failure_probability": 0.3,
+            "max_error": 0.05
+          },
+          "max_latency_ms": null
+        }
+      }
+    ]
+  }
+}

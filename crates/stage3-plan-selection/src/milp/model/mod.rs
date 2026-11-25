@@ -6,15 +6,18 @@
 //! |---|---|---|
 //! | baseline (section 3) over execution contexts (section 5) | $x_{\kappa,v}$ (with $x^{\mathrm{mat}}_v = x_{\mathrm{Materialized}(v),v}$), $y_{\kappa,u,c,i}$, $z_{q,v}$, $t$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) and one consumer per context of a query-time result that is not materialized [`use_constraints`], each source's raw data on disk once [`raw_data_disk_rows`]; (G), (H): $y$ exists only on admissible edges where the producer delivers on the consumer's context |
 //! | retention (section 5) | $h_v$ | (R) [`super::retention::retention_constraints`] |
+//! | result and answer caches (`cost-terms-from-calibration.md`, section 2) | $t$, $b$, $H$, $w_{q,e}$ | [`super::kept_results::kept_result_terms`] |
+//! | resident windows under a window cache (`cost-terms-from-calibration.md`, section 1) | $r_v$ | (W) [`super::retention::resident_window_terms`] |
 //! | exact-only reads per query | $a_{q,e}$ | (X) [`super::exact_only::exact_only_constraints`] |
 //! | accuracy (`accuracy-models.md`, constraint (K)), per execution | $E_{\kappa,c,m}$, $D_{\kappa,c}$ ([`AccuracyVariables`]); $F_{\kappa,c,i,m}$, $H_{\kappa,c,i}$ | (K) [`accuracy_constraints`], over [`ErrorModel`] |
 //!
 //! The strongly connected components (E) needs are in [`super::graph`]; the
 //! executions left out before scaling, those dearer than a feasible plan
-//! and those their `OneEvaluation` twin dominates, in
+//! and those their lifetime twin dominates (`None` by `OneEvaluation`, or
+//! a `OneEvaluation` read at most once by `None`), in
 //! [`super::upper_bound`] and [`super::dominance`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use good_lp::solvers::highs::highs;
@@ -28,16 +31,23 @@ use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, Physic
 use asap_types::workload::QueryWorkloadEntry;
 
 use super::accuracy::{accuracy_constraints, AccuracyRules, AccuracyVariables, ErrorModel};
-use super::dominance::dominated_by_one_evaluation_twin;
+use super::dominance::dominated_by_lifetime_twin;
 use super::equivalent_contexts::{copies_in_equivalent_contexts, SharedVariables};
 use super::exact_only::{exact_only_constraints, exact_only_variables};
 use super::graph::Components;
-use super::retention::{least_retention_ms, retention_constraints, retention_variables};
+use super::kept_results::{kept_result_terms, kept_results_quantity, KeptResultVariables};
+use super::retention::{
+    least_retention_ms, resident_window_terms, resident_windows_quantity, retention_constraints,
+    retention_variables,
+};
 use super::upper_bound::dearer_than_a_feasible_plan;
-use crate::cost::ExecutionCosts;
-use crate::selectable::{Execution, QueryId, SelectableExecutions};
+use crate::cost::{ExecutionCosts, RawDataRead};
+use crate::selectable::{Execution, QueryId, Reader, SelectableExecutions};
+
+pub(crate) mod cluster;
 
 /// What the MILP is built over.
+#[derive(Clone, Copy)]
 pub(crate) struct SelectionInputs<'a> {
     pub(crate) physical: &'a PhysicalASAPMemoCandidates,
     /// Each query's workload entry, for the retention needs of (R).
@@ -57,7 +67,7 @@ pub(crate) struct SelectionInputs<'a> {
 /// `SelectableExecutions::edges`.
 pub(crate) struct SelectionVariables {
     /// $x_{\kappa,v}$, by execution.
-    x: Vec<Variable>,
+    pub(super) x: Vec<Variable>,
     /// $y_{\kappa,u,c,i}$, by edge, on the edges costed between executions
     /// kept, in edge order.
     pub(super) y: BTreeMap<usize, Variable>,
@@ -68,7 +78,7 @@ pub(crate) struct SelectionVariables {
     t: Vec<Option<Variable>>,
     /// $h_v$ in seconds retained, for a candidate with a retention cost and
     /// an execution kept ([`retention_variables`]).
-    h: BTreeMap<PhysicalCandidateId, Variable>,
+    pub(super) h: BTreeMap<PhysicalCandidateId, Variable>,
     /// Per raw-data source a query-time scan keeps on disk at a cost: the
     /// cost per second of keeping it, at least each selected scan's,
     /// scaled by the objective's scale ([`raw_data_disk_rows`]).
@@ -294,9 +304,11 @@ fn use_constraints(
 
 /// The raw data of each source is kept on disk once, for the selected scan
 /// that keeps the most: $r_s \ge \pi_v h_v$ for each query-time `Scan` $v$
-/// of source $s$ with $h_v$, and $r_s \ge d_v x_{\kappa,v}$ for each kept
-/// execution of one without, $d_v$ its cost per second of the raw data it
-/// keeps retaining everything: each row as ($r_s$, its coefficient, the
+/// of source $s$ with $h_v$ (and $\pi_v > 0$), $r_s \ge d_v x_{\kappa,v}$
+/// for each kept execution of one without, $d_v$ its cost per second of
+/// the raw data it keeps retaining everything, and $r_s \ge d_e w_e$ for
+/// each read $e$ (edge $y$ or output $z$) of a scan whose raw data is not
+/// linear in its retention ([`ExecutionCosts::raw_data_reads`]): each row as ($r_s$, its coefficient, the
 /// variable it multiplies), unscaled.
 fn raw_data_disk_rows(
     inputs: &SelectionInputs<'_>,
@@ -319,14 +331,42 @@ fn raw_data_disk_rows(
     for (v, source) in scans {
         let r = variables.raw_data_on_disk[source];
         if let Some(&h) = variables.h.get(v) {
-            rows.push((r, costs.retention_cost_per_retained_second[v], h));
+            let per_retained_second = costs.retention_cost_per_retained_second[v];
+            if per_retained_second > 0.0 {
+                rows.push((r, per_retained_second, h));
+            }
         } else if let Some(&d) = costs.unbounded_raw_data_on_disk_cost_per_second.get(v) {
             for &index in executions_of.get(v).into_iter().flatten() {
                 rows.push((r, d, variables.x[index]));
             }
         }
     }
+    for read in &costs.raw_data_reads {
+        if let (Some(reader), true) = (
+            raw_data_read_variable(read, &variables.y, &variables.z),
+            read.raw_data_kept > 0.0,
+        ) {
+            rows.push((
+                variables.raw_data_on_disk[&read.source],
+                read.raw_data_kept,
+                reader,
+            ));
+        }
+    }
     rows
+}
+
+/// The variable of `read`'s reader: its edge's $y$ or its output's $z$;
+/// `None` when the reader is not selectable.
+fn raw_data_read_variable(
+    read: &RawDataRead,
+    y: &BTreeMap<usize, Variable>,
+    z: &BTreeMap<(QueryId, usize), Variable>,
+) -> Option<Variable> {
+    match read.reader {
+        Reader::Edge(position) => y.get(&position).copied(),
+        Reader::Output(query) => z.get(&(query, read.execution)).copied(),
+    }
 }
 
 /// Per execution, its selected edges to consumers and query outputs:
@@ -361,6 +401,11 @@ pub(crate) struct SolvedSelection {
     /// The optimum, unscaled: the selected plan's cost per second, less
     /// the request overhead every plan pays.
     pub(crate) cost_per_second_without_request_overhead: f64,
+    /// The MILP's own optimum, unscaled, less the request overhead, under
+    /// cost model 1: in debug builds `crate::select_plan` checks it against
+    /// `asap_cost::plan_cost` of the selected plan. `None` under cost model
+    /// 3, whose objective is latency.
+    pub(crate) milp_optimum_per_second: Option<f64>,
     /// The MILP's variables and constraint rows.
     pub(crate) variable_count: usize,
     pub(crate) constraint_count: usize,
@@ -432,8 +477,8 @@ const LARGEST_SCALED_OBJECTIVE_COEFFICIENT: f64 = 1e6;
 /// query-time scan is in $r_s$) under (A)–(F), [`use_constraints`],
 /// [`raw_data_disk_rows`], (R), (X) and (K), with HiGHS at gap 0 on one
 /// thread. The executions dearer than a feasible plan
-/// ([`dearer_than_a_feasible_plan`]) or dominated by their `OneEvaluation`
-/// twin ([`dominated_by_one_evaluation_twin`]) are left out first (and a
+/// ([`dearer_than_a_feasible_plan`]) or dominated by their lifetime twin
+/// ([`dominated_by_lifetime_twin`]) are left out first (and a
 /// copy of an equivalent context shares its original's variables,
 /// [`copies_in_equivalent_contexts`]), with
 /// the $h_v$ of a candidate whose
@@ -453,7 +498,7 @@ pub(crate) fn solve_selection(
     let rules = AccuracyRules::of(inputs);
     let kept: Vec<bool> = dearer_than_a_feasible_plan(inputs, rules.as_ref())
         .iter()
-        .zip(dominated_by_one_evaluation_twin(inputs))
+        .zip(dominated_by_lifetime_twin(inputs))
         .zip(&costs.per_execution)
         .map(|((&dearer, dominated), cost)| cost.is_ok() && !dearer && !dominated)
         .collect();
@@ -478,6 +523,29 @@ pub(crate) fn solve_selection(
             )
         })
         .unwrap_or_default();
+    // The windows cached views keep resident in memory, $r_v$ and (W).
+    let mut resident_rows = Vec::new();
+    let resident_terms = resident_window_terms(
+        costs,
+        inputs.selectable,
+        &variables.y,
+        &variables.z,
+        &mut problem,
+        &mut resident_rows,
+    );
+    // The data plane's result and answer caches.
+    let kept_terms = kept_result_terms(
+        inputs,
+        costs,
+        &KeptResultVariables {
+            x: &variables.x,
+            z: &variables.z,
+            h: &variables.h,
+        },
+        &kept,
+        &mut problem,
+        &mut resident_rows,
+    );
     // The objective's terms per second, unscaled: (cost, variable). A
     // query-time scan's retention is in its source's r_s.
     let terms: Vec<(f64, Variable)> = costs
@@ -500,6 +568,8 @@ pub(crate) fn solve_selection(
                 .filter(|(v, _)| !costs.raw_data_source.contains_key(v))
                 .map(|(v, &h)| (costs.retention_cost_per_retained_second[v], h)),
         )
+        .chain(resident_terms)
+        .chain(kept_terms)
         .collect();
     // Scaled by the largest coefficient kept, the raw-data rows' included.
     let raw_data_rows = raw_data_disk_rows(inputs, &variables, &kept);
@@ -532,6 +602,7 @@ pub(crate) fn solve_selection(
             &variables.z,
         ),
         exact_only_constraints(inputs, &variables.read_by_query, &variables.y, &variables.z),
+        resident_rows,
         accuracy_rows,
     ]
     .into_iter()
@@ -581,6 +652,8 @@ pub(crate) fn solve_selection(
             .logical_candidates
             .failure_probability_bound(query.0),
     };
+    // The MILP's optimum, unscaled, to check against `plan_cost`.
+    let mut optimum_per_second = 0.0;
     let (selected, selected_edges, answering) = loop {
         let started = Instant::now();
         let solved = model
@@ -596,6 +669,7 @@ pub(crate) fn solve_selection(
             HighsModelStatus::Optimal
                 if solved.primal_solution_status() == HighsSolutionStatus::Feasible =>
             {
+                optimum_per_second = solved.objective_value() / scale;
                 solved.get_solution().columns().to_vec()
             }
             // At LEAST_HIGHS_FEASIBILITY_TOLERANCE no plan meets every
@@ -682,6 +756,7 @@ pub(crate) fn solve_selection(
             .collect(),
         retention_ms,
         cost_per_second_without_request_overhead,
+        milp_optimum_per_second: Some(optimum_per_second),
         variable_count,
         constraint_count,
         construction_ms,
@@ -727,6 +802,18 @@ pub(crate) fn selection_cost_per_second(
             *kept = kept.max(cost);
         }
     }
+    let selected_edges: HashSet<usize> = edges.iter().copied().collect();
+    let selected_outputs: HashSet<(QueryId, usize)> = answering.iter().copied().collect();
+    for read in &costs.raw_data_reads {
+        let selected = match read.reader {
+            Reader::Edge(position) => selected_edges.contains(&position),
+            Reader::Output(query) => selected_outputs.contains(&(query, read.execution)),
+        };
+        if selected {
+            let kept = raw_data_on_disk.entry(&read.source).or_default();
+            *kept = kept.max(read.raw_data_kept);
+        }
+    }
     let cost = selected
         .iter()
         .filter_map(|&index| costs.per_execution[index].as_ref().ok())
@@ -736,7 +823,9 @@ pub(crate) fn selection_cost_per_second(
             .filter_map(|&position| costs.per_edge[position])
             .sum::<f64>()
         + retention_cost_per_second
-        + raw_data_on_disk.values().sum::<f64>();
+        + raw_data_on_disk.values().sum::<f64>()
+        + resident_windows_quantity(costs, inputs.selectable, edges, answering)
+        + kept_results_quantity(inputs, costs, selected, answering, &retention_ms);
     (cost, retention_ms)
 }
 

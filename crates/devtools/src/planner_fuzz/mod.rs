@@ -65,7 +65,9 @@ use asap_types::workload::{
     SqlDialect,
 };
 
-use crate::planning_stages::{lower_promql_roots, lower_sql_roots, run_search_over, sql_catalog};
+use asap_planner_cli::planning_stages::{
+    lower_promql_roots, lower_sql_roots, run_search_over, sql_catalog,
+};
 use generate::QuerySpec;
 
 /// The language of a fuzz workload: one per workload, as one
@@ -237,7 +239,7 @@ impl FuzzWorkload {
     pub fn asap_planner_command(&self, workload_file: &str) -> String {
         let mut command = String::new();
         command.push_str(&format!(
-            "cargo run -p asap-devtools --bin asap_planner -- --workload {workload_file} \
+            "cargo run -p asap-planner-cli --bin asap_planner -- --workload {workload_file} \
              --run-until stage3 --format json --check-invariants"
         ));
         for table in &self.tables {
@@ -439,7 +441,7 @@ fn plan_label(plan: &PhysicalASAPDAG) -> String {
             if matches!(node.lifetime, Lifetime::AcrossEvaluations(_)) {
                 marks.push("materialized");
             }
-            let label = crate::candidate_labels::operator_label(&node.payload);
+            let label = asap_planner_cli::candidate_labels::operator_label(&node.payload);
             match marks.is_empty() {
                 true => label,
                 false => format!("{label} ({})", marks.join(", ")),

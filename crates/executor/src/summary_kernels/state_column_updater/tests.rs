@@ -320,3 +320,55 @@ fn sealed_ddsketch_windows_answer_alike_and_hold_less() {
         "{sealed_bytes} vs {open_bytes}"
     );
 }
+
+/// Sealing a DDSketch column stores each state in its view layout
+/// (`DdSketch::to_view_bytes`), the layout a stored window is priced at:
+/// the column holds the views, each padded to 8 bytes, and one 4-byte
+/// offset per state plus one; every state answers and merges as the open
+/// sketch it was sealed from.
+#[test]
+fn a_sealed_ddsketch_column_stores_view_layouts() {
+    use crate::values::StateStorage;
+    use planner_types::summary_type::{SketchAlgorithm, SketchStatistic};
+    let ddsketch = FieldDataType::Sketch(SketchAlgorithm::DDSketch);
+    let alpha = SketchParams::DDSketch { alpha: 0.01 };
+    let updater = ten_thousand_series(&ddsketch, Some(&alpha));
+    let GroupStates::Sketches(open) = &updater.states else {
+        unreachable!()
+    };
+    let open: Vec<_> = open
+        .iter()
+        .map(|state| state.snapshot_accumulator())
+        .collect();
+    let view_bytes: Vec<Vec<u8>> = open
+        .iter()
+        .map(|state| crate::values::state_view_bytes(state.as_ref()).unwrap())
+        .collect();
+    let sealed = updater.seal();
+    assert!(matches!(sealed.storage(), StateStorage::Mapped(_)));
+    assert!(!sealed.is_held_outside_run());
+    let expected_bytes: usize = view_bytes
+        .iter()
+        .map(|bytes| bytes.len().div_ceil(8) * 8)
+        .sum::<usize>()
+        + 4 * (open.len() + 1);
+    assert_eq!(sealed.state_memory_bytes(), expected_bytes);
+    assert_eq!(sealed.charged_state_bytes(), expected_bytes);
+    let quantiles = [0.0, 0.01, 0.5, 0.99, 1.0];
+    let answers = |state: &dyn AggregateCore| {
+        quantiles.map(|q| {
+            state
+                .estimate(&SketchStatistic::Quantile { q })
+                .unwrap()
+                .to_bits()
+        })
+    };
+    for (group, state) in open.iter().enumerate() {
+        assert_eq!(
+            answers(sealed.state(group).as_ref()),
+            answers(state.as_ref()),
+            "group {group}"
+        );
+    }
+    println!("DDSketch alpha=0.01, 10k series x 15 samples: views {expected_bytes} B");
+}

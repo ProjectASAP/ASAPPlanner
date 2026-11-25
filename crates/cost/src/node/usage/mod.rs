@@ -36,19 +36,22 @@ use crate::node::state_bytes::{
     row_bytes, sketch_state_bytes, state_bytes_per_row, state_row_bytes_beside_state,
     summary_state_bytes, StateInputRows,
 };
-use crate::{aggregate_lookup, lookup, StateFamily};
+use crate::plan::kept_results::kept_per_grid;
+use crate::{aggregate_lookup, lookup_at_scale, StateFamily};
 use crate::{
     CalibrationFit, CostInputs, NodeCostSource, OperatorKind, COST_SOURCE, MEASURED_COST_SOURCE,
     MIXED_COST_SOURCE,
 };
+use asap_types::ir::operator::tumbling_window_chain::mean_cover_windows_per_level;
 use asap_types::ir::operator::{AggIntent, GroupKeys, Reduction, Source};
 use asap_types::ir::properties::ExecutionTiming;
-use asap_types::ir::scalar::resolve_column_ref;
+use asap_types::ir::scalar::{resolve_column_ref, ColumnRef, ScalarExpr};
 use asap_types::ir::schema::{ColumnId, FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, TimeRangeKind};
 use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAGNode, PhysicalASAPNodeId, PhysicalASAPOperatorPayload as Payload,
 };
+use asap_types::stages::EvaluationGrid;
 use asap_types::stages::{Lifetime, StorageMedium};
 use asap_types::summary_type::{
     SamplingKind, SamplingParams, SketchParams, SketchStatistic, StatModelKind, StatModelParams,
@@ -58,7 +61,9 @@ use asap_types::workload::bounds::{
     declared_non_negative, declared_series, declared_value_magnitude_range, group_count_bound,
     source_name, source_rows_per_ms, unchanged_source_columns,
 };
-use asap_types::workload::{AssumedDataFact, DataFactAssumption, DataWorkload, ONE_SECOND_MS};
+use asap_types::workload::{
+    AssumedDataFact, DataArrival, DataFactAssumption, DataWorkload, ONE_SECOND_MS,
+};
 
 /// One node's cost per second of wall time, with how it was measured. A
 /// node is one operator node of the candidate's physical plan DAG
@@ -95,6 +100,70 @@ pub struct NodeCost {
     /// The data facts the data workload does not declare that its cost
     /// assumed, each once, e.g. a DDSketch's value magnitude range.
     pub assumed_data_facts: Vec<AssumedDataFact>,
+    /// Its time by phase ([`PhaseTimes`]).
+    pub phase_times: PhaseTimes,
+    /// Whether its measured price was taken from the nearest measured
+    /// series count, its own being outside them
+    /// ([`lookup_at_scale`](crate::lookup_at_scale)).
+    pub priced_outside_measured_scale: bool,
+    /// Its memory, disk and disk traffic ([`NodeMemoryAndDisk`]).
+    pub memory_and_disk: NodeMemoryAndDisk,
+}
+
+/// One node's memory, disk and disk traffic, per second of wall time
+/// unless the name says otherwise: what a data plane measures per view.
+/// [`plan_cost`](crate::plan_cost) adds what is charged once the whole
+/// plan is known (resident cached windows, partial copies, kept results
+/// and answers, raw data on disk), and the plan's
+/// [`ResourceUsage`](crate::ResourceUsage) memory, disk and disk traffic
+/// are the sums over its nodes. `bytes_per_window` is a size, not summed.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct NodeMemoryAndDisk {
+    /// Memory it holds, averaged over time.
+    pub average_memory_bytes: f64,
+    /// The most memory it holds at once.
+    pub peak_memory_bytes: u64,
+    /// An ingestion-time view's bytes per window (one output); 0 for any
+    /// other node.
+    pub bytes_per_window: u64,
+    /// Bytes it keeps on disk at the peak.
+    pub disk_bytes: u64,
+    /// Bytes it writes to disk per second: a view under the data plane's
+    /// window cache writes each window to its file when the window closes.
+    pub disk_written_bytes_per_second: f64,
+    /// Bytes it reads back from disk per second; 0 until reads of windows
+    /// not in the window cache are costed (#1469).
+    pub disk_read_bytes_per_second: f64,
+}
+
+/// One node's time by phase, what a runtime measures per phase. An
+/// ingestion-time node's work splits into ingest work, per arriving row on
+/// the ingest threads, and refresh work, once per window close on the
+/// precompute threads: the states a build or chain emits, and all the
+/// work of an ingestion-time node that reads closed windows (summary
+/// states or a chain's windows, not raw rows). A query-time node has only
+/// its time per step.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PhaseTimes {
+    /// Ingest work: core-seconds per second.
+    pub ingest_cpu_core_seconds_per_second: f64,
+    /// Refresh work: CPU ms per window close; 0 without a refresh window.
+    pub refresh_cpu_ms_per_window: f64,
+    /// Refresh work's wall time per window close: its CPU plus the I/O
+    /// wait per state emitted
+    /// ([`RefreshIoWait`](crate::RefreshIoWait)); the wait per refresh run
+    /// is the plan's, once per refresh group.
+    pub refresh_wall_ms_per_window: f64,
+    /// The refresh window's width in ms; `None` without one.
+    pub refresh_window_width_ms: Option<u64>,
+    /// At query time: ms of one computation (one step).
+    pub query_ms_per_step: f64,
+}
+
+/// Whether a row of `schema` holds a summary state (a sketch or an exact
+/// aggregate column), as a `Filter` or `Project` over states outputs.
+fn outputs_states(schema: &Schema) -> bool {
+    schema.fields.iter().any(|field| !field.is_plain())
 }
 
 /// The state family of `node` whose first producer has `producer_family`:
@@ -138,18 +207,26 @@ fn state_family<'a>(
         // A merge over a time range of a chain's windows reads states whose
         // producer (the time range) has no family: they are its own θ's, or
         // the exact accumulator its output column holds.
-        Payload::ASAP(ASAPOp::SummaryMerge { .. }) => match producer_family {
-            None | Some(StateFamily::None) => merged_state_family(node),
-            Some(family) => family,
-        },
+        Payload::ASAP(ASAPOp::SummaryMerge { .. } | ASAPOp::SummaryMergeWindows { .. }) => {
+            match producer_family {
+                None | Some(StateFamily::None) => merged_state_family(node),
+                Some(family) => family,
+            }
+        }
         Payload::ASAP(ASAPOp::SummaryEstimate { .. } | ASAPOp::FinalizeExactAccumulator { .. }) => {
             producer_family.unwrap_or(StateFamily::None)
         }
+        // A `Filter` or `Project` outputting states passes them on as they
+        // are: an estimate reading them is costed by their family.
+        Payload::NonASAP(NonASAPOp::Filter { .. } | NonASAPOp::Project { .. })
+            if outputs_states(&node.output_schema) =>
+        {
+            producer_family.unwrap_or(StateFamily::None)
+        }
+        Payload::NonASAP(NonASAPOp::Filter { .. } | NonASAPOp::Project { .. }) => StateFamily::None,
         Payload::NonASAP(
             NonASAPOp::Scan { .. }
             | NonASAPOp::Values { .. }
-            | NonASAPOp::Filter { .. }
-            | NonASAPOp::Project { .. }
             | NonASAPOp::Aggregate { .. }
             | NonASAPOp::Join { .. }
             | NonASAPOp::SetOp { .. }
@@ -161,6 +238,7 @@ fn state_family<'a>(
             | NonASAPOp::SQLWindowFunc { .. }
             | NonASAPOp::TimeRange { .. }
             | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::TimeRangeCover { .. }
             | NonASAPOp::PromqlVectorFromScalar(..)
             | NonASAPOp::PromqlRelabel { .. }
             | NonASAPOp::PromqlInfoEnrich { .. }
@@ -250,7 +328,7 @@ pub struct ProducerOutput<'a> {
     /// The tumbling windows its rows span: those a `TimeRange` selects
     /// from a chain (through the operators that keep each row's window),
     /// 1 for any other node.
-    pub tumbling_windows: u64,
+    pub tumbling_windows: f64,
     /// The tumbling-window width of the chain whose states its rows are
     /// read from: a chain's own, kept through the operators over it that
     /// keep each row's window (`Operator::keeps_input_window`: `TimeShift`,
@@ -265,6 +343,11 @@ pub struct ProducerOutput<'a> {
     /// windows of a 1 Hz series passes on 10 rows per state, and a merge
     /// over it outputs states of 3,600 rows.
     pub state_input_rows: Option<StateInputRows>,
+    /// Whether the summary states it outputs were last written by a
+    /// merge (a `SummaryMerge`'s, passed on by a `Filter` or `Project` over
+    /// them), which leaves a KLL's levels sorted; `false` for states built
+    /// by updates and for any other node.
+    pub states_last_merged: bool,
     /// The time, in ms, that the raw rows it outputs span: a scan's
     /// lookback (one second of arriving rows at ingestion time, the
     /// retained rows of raw data materialized at ingestion), narrowed by a
@@ -276,6 +359,79 @@ pub struct ProducerOutput<'a> {
     /// a 5 min scan spans 300,000 ms, 30 batches of 10 s, however few rows
     /// it keeps.
     pub raw_rows_span_ms: Option<u64>,
+    /// The exact rate, in rows per ms, at which its raw output rows
+    /// arrive, while its rows are that rate over their span
+    /// (`raw_rows_span_ms`): a scan's sources' arrival rate, passed on by a
+    /// `TimeRange` and the operators that keep each row's window; `None`
+    /// once a node outputs other rows (a `Limit`, a `Dedup`, rows bounded
+    /// by `rows_held`). Example: 10,000 series every 15 s arrive at
+    /// 0.6667 rows per ms, which one second's `rows` rounds to 667.
+    pub raw_rows_per_ms: Option<f64>,
+    /// What each of its output rows already folds when an `Aggregate`
+    /// built them from source rows (the source rows behind each, and
+    /// whether their values are proven non-negative), passed on by a
+    /// `TimeRange` and the operators that keep each row's window; `None`
+    /// when each row is one source row. A summary built over it counts the
+    /// source rows behind its rows. Example: a per-series sum over 5 min of
+    /// 1 Hz samples: 300 source rows a row.
+    pub folded_per_row: Option<StateInputRows>,
+    /// When its raw rows are fewer than arrive over the range they are read
+    /// for, because the sources hold fewer (`rows_held`): how many it has
+    /// and how many the range holds. Set by a scan (or raw data
+    /// materialized at ingestion time), narrowed by a `TimeRange`, passed on
+    /// by the operators that keep each row's window; `None` otherwise.
+    pub raw_rows_short_of_range: Option<RawRowsShortOfRange>,
+    /// The time the source rows its states fold span, when a query-time
+    /// chain built them from rows spanning less than its windows may cover
+    /// (data at rest held over 15 min, read in 1 min windows over 1 h): a
+    /// `TimeRange` selecting windows past it averages the rows over the
+    /// windows it selects. Passed on by the operators that keep each row's
+    /// window; `None` otherwise.
+    pub state_data_span_ms: Option<u64>,
+    /// How far back of the newest row its raw rows' window lies: the sum
+    /// of the `offset`s of the `TimeShift`s below it (0 without one), passed
+    /// on by the operators that keep each row's window. A time range over
+    /// them needs rows held this far back plus its range. Example: `m[5m]
+    /// offset 5m` reads the 5 min that end 5 min ago.
+    pub raw_rows_shifted_back_ms: u64,
+}
+
+/// Raw rows fewer than arrive over the range they are read for
+/// ([`ProducerOutput::raw_rows_short_of_range`]). Example: a source
+/// holding 80 rows, read back 60 s at 8 rows a second: 80 of 480.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawRowsShortOfRange {
+    /// The raw rows read.
+    pub rows: u64,
+    /// The raw rows that arrive over the range.
+    pub rows_in_range: u64,
+}
+
+/// A query-time computation over raw rows its sources hold fewer of than
+/// arrive over the range it reads would answer from fewer samples than its
+/// query asks for, so it is not offered: the shortfall of its input
+/// (`producers`), or `None` when it is not such a computation. Every node
+/// that computes from rows counts (a summary build, an aggregate, a sort, a
+/// join); a scan, a time range and the operators that keep each row's
+/// window only pass the rows (and their shortfall) on. Example: a
+/// query-time chain, or a query-time `sum` over 60 s, of a source holding
+/// 80 rows that arrive at 8 a second: 80 of 480; the same chain built at
+/// ingestion time sees every row.
+pub fn query_time_computation_short_of_source_rows(
+    node: &asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode,
+    producers: &[ProducerOutput<'_>],
+) -> Option<RawRowsShortOfRange> {
+    let passes_rows_on = matches!(
+        node.payload,
+        Payload::NonASAP(NonASAPOp::Scan { .. } | NonASAPOp::TimeRange { .. })
+    ) || node.payload.keeps_input_window();
+    (!passes_rows_on && node.output_state.timing == ExecutionTiming::QueryTime)
+        .then(|| {
+            producers
+                .iter()
+                .find_map(|producer| producer.raw_rows_short_of_range)
+        })
+        .flatten()
 }
 
 impl ProducerOutput<'_> {
@@ -317,7 +473,7 @@ pub struct NodeResourceUsageAndCost<'a> {
     /// The tumbling windows its rows span: those a `TimeRange` selects
     /// from a chain (through the operators that keep each row's window),
     /// 1 for any other node.
-    pub tumbling_windows: u64,
+    pub tumbling_windows: f64,
     /// The tumbling-window width of the chain whose states its rows are
     /// read from: a chain's own, kept through the operators over it that
     /// keep each row's window (`Operator::keeps_input_window`: `TimeShift`,
@@ -327,28 +483,54 @@ pub struct NodeResourceUsageAndCost<'a> {
     /// What each summary state it outputs folds
     /// ([`ProducerOutput::state_input_rows`]).
     pub state_input_rows: Option<StateInputRows>,
+    /// Whether its states were last written by a merge
+    /// ([`ProducerOutput::states_last_merged`]).
+    pub states_last_merged: bool,
     /// The time its raw output rows span
     /// ([`ProducerOutput::raw_rows_span_ms`]).
     pub raw_rows_span_ms: Option<u64>,
+    /// The exact rate its raw output rows arrive at
+    /// ([`ProducerOutput::raw_rows_per_ms`]).
+    pub raw_rows_per_ms: Option<f64>,
+    /// What each output row already folds
+    /// ([`ProducerOutput::folded_per_row`]).
+    pub folded_per_row: Option<StateInputRows>,
+    /// Its raw rows' shortfall against their range
+    /// ([`ProducerOutput::raw_rows_short_of_range`]).
+    pub raw_rows_short_of_range: Option<RawRowsShortOfRange>,
+    /// The time its states' source rows span
+    /// ([`ProducerOutput::state_data_span_ms`]).
+    pub state_data_span_ms: Option<u64>,
+    /// How far back its raw rows' window lies
+    /// ([`ProducerOutput::raw_rows_shifted_back_ms`]).
+    pub raw_rows_shifted_back_ms: u64,
     /// Work of one execution, in ms on one core.
     pub work_ms_per_execution: f64,
     /// CPU operations per second.
     pub cpu_ops_per_second: f64,
     /// Bytes scanned per second.
     pub scanned_bytes_per_second: f64,
-    /// Average memory, including memory a query-time node holds while it
-    /// computes.
-    pub average_memory_bytes: f64,
-    /// Peak memory.
-    pub peak_memory_bytes: u64,
-    /// Disk bytes.
-    pub disk_bytes: u64,
     /// An in-memory ingestion-time state's bytes per window.
     pub maintained: Option<u64>,
-    /// A query-time scan's source and the raw bytes it reads.
-    pub raw_scan: Option<(&'a Source, u64)>,
+    /// An in-memory ingestion-time view's windows under the data plane's
+    /// window cache (`DataPlaneExecution::view_window_cache`): every
+    /// retained window is on disk (its `cost.memory_and_disk.disk_bytes`), only the window being
+    /// built is in its memory, and the caller charges the resident windows
+    /// as memory (`plan_cost` per its readers, Stage 3's selection per
+    /// selected reader). `None` without the cache.
+    pub cached_windows: Option<CachedViewWindows>,
+    /// The bytes of its outputs the data plane keeps after their evaluation
+    /// times (`DataPlaneExecution::kept_query_time_results`), in its
+    /// average and peak memory and its cost; 0 for any other node.
+    pub kept_result_bytes: f64,
+    /// A query-time scan's source and the raw bytes it keeps, by their exact
+    /// rate (fractional rows; linear in its retention).
+    pub raw_scan: Option<(&'a Source, f64)>,
     /// Its calibration fit.
     pub fit: CalibrationFit,
+    /// The series its sources declare, when they all do: the scale its
+    /// measured prices are taken at.
+    pub series: Option<u64>,
     /// Its cost.
     pub cost: NodeCost,
 }
@@ -371,7 +553,13 @@ impl<'a> NodeResourceUsageAndCost<'a> {
             tumbling_windows: self.tumbling_windows,
             chain_tumbling_window_width_ms: self.chain_tumbling_window_width_ms,
             state_input_rows: self.state_input_rows,
+            states_last_merged: self.states_last_merged,
             raw_rows_span_ms: self.raw_rows_span_ms,
+            raw_rows_per_ms: self.raw_rows_per_ms,
+            folded_per_row: self.folded_per_row,
+            raw_rows_short_of_range: self.raw_rows_short_of_range,
+            state_data_span_ms: self.state_data_span_ms,
+            raw_rows_shifted_back_ms: self.raw_rows_shifted_back_ms,
         }
     }
 }
@@ -390,6 +578,21 @@ pub fn reads_one_batch_of<C>(
 ) -> bool {
     consumer.output_state.timing == ExecutionTiming::IngestionTime
         && producer.keeps_raw_rows_at_ingestion(producer_input)
+}
+
+/// An in-memory ingestion-time view's windows under a window cache
+/// ([`NodeResourceUsageAndCost::cached_windows`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachedViewWindows {
+    /// The bytes of one window.
+    pub bytes_per_window: u64,
+    /// The width of its windows, the time between two outputs
+    /// ([`output_interval_ms`]).
+    pub width_ms: u64,
+    /// The windows it retains (its `retention_ms` over `width_ms`, at least
+    /// one), all on disk; its disk also holds the file slack
+    /// (`ViewWindowCache::file_span_ms`, `retention_margin_ms`).
+    pub retained: u64,
 }
 
 /// The time between two outputs of a node running `payload` that keeps
@@ -421,17 +624,32 @@ pub fn output_interval_ms<C>(payload: &Operator<C>, window_ms: Option<u64>) -> u
 /// it (one second of rows when it maintains no window). The formulas' CPU is scaled by
 /// `settings.frozen_calibration_factor` (1 when unset).
 ///
+/// `evaluation_grid` is the grid of the evaluation times the node runs at
+/// (its readers'; `None` when not one grid): a `TimeRangeCover` is charged
+/// its mean windows over those times. Example: a cover of 1 h over 5 min
+/// and 15 s windows read every 60 s takes 27.2 windows per evaluation,
+/// every 15 s 30.05.
+///
 /// [`executions_per_second`]: crate::plan::execution_demand::executions_per_second
 pub fn node_resource_usage_and_cost<'a>(
     node: &'a asap_types::plan::physical_asap_dag::PhysicalASAPDAGNode,
     producers: &[ProducerOutput<'a>],
     rate: (u64, f64),
     window_ms: Option<u64>,
+    evaluation_grid: Option<EvaluationGrid>,
     data: &DataWorkload,
     settings: &'a CostInputs,
 ) -> Result<NodeResourceUsageAndCost<'a>, AnalyticalCostError> {
-    node_usage_and_cost_terms(node, producers, rate, window_ms, data, settings)
-        .map(|(usage, _)| usage)
+    node_usage_and_cost_terms(
+        node,
+        producers,
+        rate,
+        window_ms,
+        evaluation_grid,
+        data,
+        settings,
+    )
+    .map(|(usage, _)| usage)
 }
 
 /// [`node_resource_usage_and_cost`] and the terms of its formula CPU per
@@ -443,9 +661,26 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     producers: &[ProducerOutput<'a>],
     rate: (u64, f64),
     window_ms: Option<u64>,
+    evaluation_grid: Option<EvaluationGrid>,
     data: &DataWorkload,
     settings: &'a CostInputs,
 ) -> Result<(NodeResourceUsageAndCost<'a>, NodeCostTerms), AnalyticalCostError> {
+    // What a per-series state's row holds beside its state.
+    let series_row_bytes_beside_state = settings.data_plane_execution.stored_row_bytes_beside_state;
+    // A query-time computation over raw rows short of their range is not
+    // offered.
+    if let Some(short) = query_time_computation_short_of_source_rows(node, producers) {
+        let source = producers
+            .iter()
+            .find(|producer| producer.raw_rows_short_of_range.is_some())
+            .and_then(|producer| producer.sources.first().copied())
+            .unwrap_or("(none)");
+        return Err(AnalyticalCostError::FewerSourceRowsThanItsRange {
+            source_name: source.to_string(),
+            rows: short.rows,
+            rows_in_range: short.rows_in_range,
+        });
+    }
     // The formulas' CPU scaled by the deployment's calibration, 1 unset.
     let formula_scale = settings.frozen_calibration_factor.unwrap_or(1.0);
     let table = &settings.measured_operation_costs;
@@ -463,10 +698,19 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // What each summary state it outputs folds, when it builds or merges
     // states (else passed on below).
     let mut built_state_input_rows: Option<StateInputRows> = None;
+    // What each output row of an `Aggregate` folds (else passed on below).
+    let mut built_folded_per_row: Option<StateInputRows> = None;
+    // The time a query-time chain's input rows span (else passed on below).
+    let mut built_state_data_span_ms: Option<u64> = None;
+    // A scan's or a time range's raw-row shortfall, `Some` when the node
+    // reads raw rows itself (else passed on below).
+    let mut read_raw_rows_short_of_range: Option<Option<RawRowsShortOfRange>> = None;
     // A summary build's output while its states still receive values
     // (each state open): what a query-time build holds while it runs and
     // what an ingestion-time chain's current window holds.
     let mut open_output_bytes: Option<u64> = None;
+    // The narrower states a `SummaryMergeWindows` merges per execution.
+    let mut narrower_states_merged_per_execution: u64 = 0;
     // The time its raw output rows span, when it reads or narrows raw rows
     // (else passed on below).
     let mut read_raw_rows_span_ms: Option<u64> = None;
@@ -492,18 +736,31 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // The tumbling windows its rows span: those a `TimeRange` selects from
     // a chain (through the operators that keep each row's window, which
     // pass them on: `Operator::keeps_input_window`), 1 otherwise.
-    let tumbling_windows = match &node.payload {
+    // A cover's mean windows per level ([`cover_windows_per_level`]).
+    let cover_windows =
+        if let Payload::NonASAP(NonASAPOp::TimeRangeCover { range, .. }) = &node.payload {
+            Some(cover_windows_per_level(range, producers, evaluation_grid))
+        } else {
+            None
+        };
+    // A cover's is its mean over the evaluation times it runs at, not a
+    // whole number.
+    let tumbling_windows: f64 = match &node.payload {
         Payload::NonASAP(NonASAPOp::TimeRange { range, .. })
             if chain_tumbling_window_width_ms(producers).is_some() =>
         {
-            selected_tumbling_windows(range, producers)?
+            selected_tumbling_windows(range, producers)? as f64
         }
+        Payload::NonASAP(NonASAPOp::TimeRangeCover { .. }) => cover_windows
+            .as_ref()
+            .map_or(1.0, |per_level| per_level.iter().sum::<f64>())
+            .max(1.0),
         payload if payload.keeps_input_window() => producers
             .first()
-            .map_or(1, |producer| producer.tumbling_windows),
+            .map_or(1.0, |producer| producer.tumbling_windows),
         // Any other operator spans one window: `keeps_input_window`
         // answers per operator, so listing them here would decide nothing.
-        Payload::NonASAP(_) | Payload::ASAP(_) => 1,
+        Payload::NonASAP(_) | Payload::ASAP(_) => 1.0,
     };
     let sources: BTreeSet<&str> =
         if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {
@@ -547,6 +804,41 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         }
         .map(|rows| rows.max(1))
     };
+    // [`raw_rows_back`]'s rows by their exact rate, not rounded to whole
+    // rows: what a store of raw rows keeps on average over time, linear in
+    // `lookback_ms` (Stage 3 charges a retention at one slope per retained
+    // second, `π_v`, so the plan's cost must be linear in it too).
+    let raw_rows_back_exact = |lookback_ms: Option<u64>| -> Option<f64> {
+        let by_rate = rows_per_ms
+            .zip(lookback_ms)
+            .map(|(rows_per_ms, lookback_ms)| rows_per_ms * lookback_ms as f64);
+        let rows_held: Option<u64> = sources
+            .iter()
+            .map(|source| data.sources.get(*source).and_then(|facts| facts.rows_held))
+            .sum();
+        match (by_rate, rows_held.map(|rows| rows as f64)) {
+            (Some(by_rate), Some(rows_held)) => Some(by_rate.min(rows_held)),
+            (by_rate, rows_held) => by_rate.or(rows_held),
+        }
+        .map(|rows| rows.max(1.0))
+    };
+    // The shortfall of the raw rows held back `lookback_ms`: the rows held
+    // when fewer than arrive over it, while rows keep arriving. Data at
+    // rest (or of unknown arrival) is all held: what a source holds is
+    // every row there is, never short.
+    let rows_keep_arriving = matches!(
+        data.arrival,
+        DataArrival::Ingesting { .. } | DataArrival::Mixed { .. }
+    );
+    let short_of = |lookback_ms: Option<u64>| match raw_rows(lookback_ms) {
+        (Some(by_rate), Some(held)) if rows_keep_arriving && held < by_rate => {
+            Some(RawRowsShortOfRange {
+                rows: held.max(1),
+                rows_in_range: by_rate,
+            })
+        }
+        _ => None,
+    };
     // The fact a rate needs, named when it is missing.
     let retained_without_a_bound = |source: &str| AnalyticalCostError::MissingSourceFact {
         source_name: source.to_string(),
@@ -568,7 +860,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let operator = OperatorKind::of(&node.payload);
     let measured_unit_cost = match &node.payload {
         Payload::NonASAP(NonASAPOp::Aggregate { measures, .. }) => {
-            aggregate_lookup(table, node.output_state.timing, measures)
+            aggregate_lookup(table, node.output_state.timing, measures, series)
         }
         Payload::NonASAP(
             NonASAPOp::Scan { .. }
@@ -585,6 +877,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             | NonASAPOp::SQLWindowFunc { .. }
             | NonASAPOp::TimeRange { .. }
             | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::TimeRangeCover { .. }
             | NonASAPOp::PromqlVectorFromScalar(..)
             | NonASAPOp::PromqlRelabel { .. }
             | NonASAPOp::PromqlInfoEnrich { .. }
@@ -599,16 +892,26 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             | ASAPOp::EvaluatePopulation { .. }
             | ASAPOp::SummaryMerge { .. }
             | ASAPOp::SummaryTumblingWindowChain { .. }
+            | ASAPOp::SummaryMergeWindows { .. }
             | ASAPOp::SummarySubtract { .. }
             | ASAPOp::SummaryDelete { .. }
             | ASAPOp::SummaryJoin { .. }
             | ASAPOp::Extension { .. },
-        ) => lookup(
+        ) => lookup_at_scale(
             table,
             operator,
             node.output_state.timing,
-            family,
+            // A `Filter` or `Project` passes states on without touching
+            // them: it is measured as one over plain rows, whatever the
+            // family of the states it passes on.
+            match &node.payload {
+                Payload::NonASAP(NonASAPOp::Filter { .. } | NonASAPOp::Project { .. }) => {
+                    StateFamily::None
+                }
+                Payload::NonASAP(_) | Payload::ASAP(_) => family,
+            },
             sketch_size,
+            series,
         ),
     };
     // The kernel's measured bytes per state, when the table has them.
@@ -618,6 +921,10 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let mut cost_source = NodeCostSource::Analytical;
     // The undeclared data facts its cost assumed.
     let mut assumed_data_facts = Vec::new();
+    // At ingestion time, the states it emits per second at window closes,
+    // and the formula's CPU operations per second for emitting them.
+    let mut states_emitted_per_second = 0.0;
+    let mut formula_emit_ops_per_second = 0.0;
     let input = inputs
         .first()
         .copied()
@@ -697,7 +1004,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // The bytes of each summary state its first input holds.
     let input_state_bytes = || {
         producers.first().map_or(0, |producer| {
-            state_bytes_per_row(producer.output, producer.output_schema)
+            state_bytes_per_row(
+                producer.output,
+                producer.output_schema,
+                series_row_bytes_beside_state,
+            )
         })
     };
     // The magnitude range a summary built here over `input_rows` of
@@ -737,11 +1048,18 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let summary_state_build = |family: &FieldDataType,
                                update: &SummaryUpdate,
                                reduction: &Reduction,
-                               rows_per_state: Option<u64>|
+                               folded_rows_per_state: Option<f64>|
      -> Result<SummaryStateBuild, AnalyticalCostError> {
         let (column, non_negative, value_magnitude_range) = folded_values(update);
+        // Over rows an `Aggregate` built, their sign is what it proved.
+        let non_negative = non_negative
+            || (column.is_none()
+                && producers
+                    .first()
+                    .and_then(|producer| producer.folded_per_row)
+                    .is_some_and(|folded| folded.non_negative));
         let input_rows = StateInputRows {
-            rows_per_state,
+            folded_rows_per_state,
             non_negative,
             value_magnitude_range,
             distinct_values: folded_distinct_values(update),
@@ -759,7 +1077,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         let update_terms_per_row = update_terms_per_row(
             family,
             node.parameters.as_ref(),
-            input_rows.rows_per_state,
+            input_rows.rows_per_state(),
             input_rows.distinct_values,
         )
         .plus_terms(&carried_label_terms_per_row(&node.output_schema, reduction));
@@ -826,6 +1144,49 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let input_raw_rows_span_ms = producers
         .first()
         .and_then(|producer| producer.raw_rows_span_ms);
+    // How far back its input's raw rows' window lies.
+    let input_shifted_back_ms = producers
+        .first()
+        .map_or(0, |producer| producer.raw_rows_shifted_back_ms);
+    // Its input's raw-row shortfall against their range, when short.
+    let input_short_of_range = producers
+        .first()
+        .and_then(|producer| producer.raw_rows_short_of_range);
+    // A range of `range_ms` checked against what its sources hold, whatever
+    // its scan's other readers: its own window, ending its offset
+    // (`raw_rows_shifted_back_ms`) before the newest row, needs the rows
+    // arriving over the offset and the range held; those inside it are the
+    // rows held less the ones after it, and at most `rows_read`. `None` when
+    // every row is held (or nothing arrives). Example: 5 min held, `[5m]
+    // offset 5m`: none of the 2,400 rows its range needs; 10 min held,
+    // `[1h]`: 4,800 of 28,800.
+    let range_short_of_rows_held = |range_ms: u64, rows_read: u64| {
+        short_of(Some(input_shifted_back_ms.saturating_add(range_ms)))
+            .map(|reach| {
+                let rows_after_range = raw_rows(Some(input_shifted_back_ms)).0.unwrap_or(0);
+                RawRowsShortOfRange {
+                    rows: reach.rows.saturating_sub(rows_after_range).min(rows_read),
+                    rows_in_range: reach.rows_in_range - rows_after_range.min(reach.rows_in_range),
+                }
+            })
+            .filter(|short| short.rows < short.rows_in_range)
+    };
+    // The exact rate its input's raw rows arrive at, when known.
+    let input_raw_rows_per_ms = producers
+        .first()
+        .and_then(|producer| producer.raw_rows_per_ms);
+    // Its input rows as a summary built over them counts them
+    // ([`source_rows_in_window`]): each row the source rows behind it.
+    let source_rows_input = SourceRowsInput {
+        rows: input.rows,
+        raw_rows_span_ms: input_raw_rows_span_ms,
+        raw_rows_per_ms: input_raw_rows_per_ms,
+        source_rows_per_row: producers
+            .first()
+            .and_then(|producer| producer.folded_per_row)
+            .and_then(|folded| folded.folded_rows_per_state)
+            .unwrap_or(1.0),
+    };
     // The times a grouping into `group_count` groups visits a group's
     // state: once per group per batch of raw rows its input arrives in
     // (`group_raw_batch_visits`).
@@ -899,6 +1260,20 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 // the retention of raw data materialized there, at query
                 // time the rows read at the sources' rate (its lookback,
                 // less when fewer rows are held).
+                read_raw_rows_short_of_range =
+                    Some(match (ingestion, raw_rows_materialized_at_ingestion) {
+                        (_, true) => short_of(node.retention_ms),
+                        (true, false) => None,
+                        // How far back its reads reach: its retention (back
+                        // to the oldest row read, an offset or a subquery's
+                        // look-back included), at least one execution's read.
+                        (false, false) => short_of(match (node.retention_ms, lookback) {
+                            (Some(retention_ms), Some(lookback_ms)) => {
+                                Some(retention_ms.max(lookback_ms))
+                            }
+                            (retention_ms, lookback_ms) => retention_ms.or(lookback_ms),
+                        }),
+                    });
                 read_raw_rows_span_ms = match (ingestion, raw_rows_materialized_at_ingestion) {
                     (_, true) => node.retention_ms,
                     (true, false) => Some(ONE_SECOND_MS),
@@ -918,6 +1293,54 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 let keys = grouping_key_count(reduction);
                 let out = edge(group_count)?;
                 let held = input.rows.div_ceil(group_count.max(1));
+                // Each output row folds its group's share of the source
+                // rows read; its values are proven non-negative when every
+                // measure keeps its input's sign (a sum, a min, a max, an
+                // average of non-negative values) or counts.
+                let measure_non_negative = |measure: &AggIntent| {
+                    if matches!(measure, AggIntent::Count) {
+                        return true;
+                    }
+                    let (AggIntent::Sum { col }
+                    | AggIntent::Min { col }
+                    | AggIntent::Max { col }
+                    | AggIntent::Avg { col }) = measure
+                    else {
+                        return false;
+                    };
+                    let column = match col {
+                        None => SummaryInputExpr::Column(ColumnRef::SampleValue),
+                        Some(index) => {
+                            match input_schema.and_then(|schema| schema.fields.get(*index)) {
+                                Some(field) => {
+                                    SummaryInputExpr::Column(ColumnRef::Named(field.name.clone()))
+                                }
+                                None => return false,
+                            }
+                        }
+                    };
+                    producers.first().is_some_and(|producer| {
+                        match producer.unchanged_column(&column) {
+                            Some(column) => {
+                                !sources.is_empty()
+                                    && sources
+                                        .iter()
+                                        .all(|source| declared_non_negative(data, source, column))
+                            }
+                            None => producer
+                                .folded_per_row
+                                .is_some_and(|folded| folded.non_negative),
+                        }
+                    })
+                };
+                built_folded_per_row = Some(StateInputRows {
+                    folded_rows_per_state: Some(
+                        source_rows_input.source_rows_read() / group_count.max(1) as f64,
+                    ),
+                    non_negative: !measures.is_empty() && measures.iter().all(measure_non_negative),
+                    value_magnitude_range: None,
+                    distinct_values: None,
+                });
                 // The values its distinct counts and frequency statistics
                 // read: the most any one's columns take together, as
                 // declared for source columns passed on unchanged, else
@@ -1062,6 +1485,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 let out = match raw_rows_materialized_at_ingestion {
                     true => {
                         read_raw_rows_span_ms = node.retention_ms;
+                        read_raw_rows_short_of_range = Some(short_of(node.retention_ms));
                         raw_retained_rows = raw_rows_back(node.retention_ms);
                         let source = sources.first().copied().unwrap_or("(none)");
                         edge(raw_retained_rows.ok_or(retained_without_a_bound(source))?)?
@@ -1079,12 +1503,71 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                     format!("time shift: pass {} rows, free", input.rows),
                 )
             }
+            NonASAPOp::TimeRangeCover { range, .. } => {
+                // Each level's mean windows per evaluation, its states per
+                // window each: wider levels' states are fewer and larger.
+                // Every level holds one state per group per window: the
+                // groups times the windows selected, in rows; the bytes by
+                // each level's states.
+                let per_level = cover_windows.clone().unwrap_or_default();
+                let group_count = producers.iter().map(|p| p.output.rows).max().unwrap_or(1);
+                let mut bytes = 0_u64;
+                for (producer, windows) in producers.iter().zip(&per_level) {
+                    bytes = bytes
+                        .checked_add((producer.output.bytes as f64 * windows).round() as u64)
+                        .ok_or(AnalyticalCostError::Overflow)?;
+                }
+                let out = EdgeStatistics {
+                    rows: ((group_count as f64 * tumbling_windows).round() as u64).max(1),
+                    bytes,
+                };
+                // What each selected state folds on average: the range's
+                // rows of one group over the windows selected.
+                built_state_input_rows = producers.last().and_then(|narrowest| {
+                    let mut rows = narrowest.state_input_rows?;
+                    let narrowest_width_ms = narrowest.chain_tumbling_window_width_ms?.max(1);
+                    let range_ms = u64::try_from(range.as_millis()).unwrap_or(u64::MAX);
+                    // Exact, rounded once where read (`rows_per_state`): the
+                    // range's rows over the states per group it outputs
+                    // (`out.rows` over the groups, as a merge reading it
+                    // counts them), so the merge sums the range's rows.
+                    let states_per_group = (out.rows as f64 / group_count.max(1) as f64).max(1.0);
+                    rows.folded_rows_per_state = rows.folded_rows_per_state.map(|per_window| {
+                        per_window * (range_ms as f64 / narrowest_width_ms as f64)
+                            / states_per_group
+                    });
+                    Some(rows)
+                });
+                let estimate = estimate_operator_with_terms(
+                    PhysicalOperator::TimeRange,
+                    OperatorStatistics::PassThrough {
+                        edges: UnaryEdgeStatistics {
+                            input: out,
+                            output: out,
+                            promql: None,
+                        },
+                    },
+                );
+                let windows_text = per_level
+                    .iter()
+                    .map(|windows| format!("{windows:.2}"))
+                    .collect::<Vec<_>>()
+                    .join(" + ");
+                (
+                    out,
+                    estimate,
+                    format!(
+                        "time range cover {range:?}: {windows_text} tumbling windows of states \
+                         per level"
+                    ),
+                )
+            }
             NonASAPOp::TimeRange { range, .. }
                 if chain_tumbling_window_width_ms(producers).is_some() =>
             {
                 // Over a chain, the windows inside the range: one
                 // window's states per window.
-                let windows = tumbling_windows;
+                let windows = tumbling_windows as u64;
                 let out = EdgeStatistics {
                     rows: input
                         .rows
@@ -1095,6 +1578,21 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         .checked_mul(windows)
                         .ok_or(AnalyticalCostError::Overflow)?,
                 };
+                // States a query-time chain built from raw rows
+                // (`state_data_span_ms`) hold the rows its sources held: a
+                // range of them is checked as a range of those rows is.
+                // An ingestion-time chain saw every row.
+                read_raw_rows_short_of_range = Some(
+                    producers
+                        .first()
+                        .and_then(|producer| producer.state_data_span_ms)
+                        .and_then(|_| {
+                            range_short_of_rows_held(
+                                u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
+                                u64::MAX,
+                            )
+                        }),
+                );
                 // It reads those windows' states from the chain's store.
                 let estimate = estimate_operator_with_terms(
                     PhysicalOperator::TimeRange,
@@ -1132,6 +1630,15 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 read_raw_rows_span_ms = Some(
                     input_raw_rows_span_ms.map_or(range_ms, |input_ms| input_ms.min(range_ms)),
                 );
+                // Every range of raw rows is checked against what its
+                // sources hold (`range_short_of_rows_held`).
+                read_raw_rows_short_of_range = Some(match kind {
+                    TimeRangeKind::Range => range_short_of_rows_held(
+                        u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
+                        out.rows,
+                    ),
+                    TimeRangeKind::Instant => None,
+                });
                 let estimate = estimate_operator_with_terms(
                     PhysicalOperator::TimeRange,
                     OperatorStatistics::PassThrough { edges: unary(out) },
@@ -1159,17 +1666,47 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             | NonASAPOp::PromqlInfoEnrich { .. }
             | NonASAPOp::PromqlSeriesSample { .. }
             | NonASAPOp::PromqlSubquery { .. } => {
+                // A `Filter` or `Project` outputting states passes each
+                // state on as it is, its row holding only its own columns
+                // beside it: a `Project` dropping a label drops its bytes.
+                let out = match (operator, producers.first()) {
+                    (NonASAPOp::Filter { .. } | NonASAPOp::Project { .. }, Some(producer))
+                        if outputs_states(&node.output_schema) =>
+                    {
+                        let state_bytes = state_bytes_per_row(
+                            producer.output,
+                            producer.output_schema,
+                            series_row_bytes_beside_state,
+                        );
+                        EdgeStatistics {
+                            rows: input.rows,
+                            bytes: input
+                                .rows
+                                .checked_mul(
+                                    state_bytes
+                                        + state_row_bytes_beside_state(
+                                            &node.output_schema,
+                                            series_row_bytes_beside_state,
+                                        ),
+                                )
+                                .ok_or(AnalyticalCostError::Overflow)?,
+                        }
+                    }
+                    _ => input,
+                };
+                // It reads and passes on the same rows, each as it outputs
+                // it.
                 let estimate = estimate_operator_with_terms(
                     PhysicalOperator::PassThrough,
                     OperatorStatistics::PassThrough {
-                        edges: unary(input),
+                        edges: UnaryEdgeStatistics {
+                            input: out,
+                            output: out,
+                            promql: None,
+                        },
                     },
                 );
-                (
-                    input,
-                    estimate,
-                    format!("operator: pass {} rows", input.rows),
-                )
+                (out, estimate, format!("operator: pass {} rows", input.rows))
             }
         },
         Payload::ASAP(ASAPOp::SummaryAgg {
@@ -1179,9 +1716,23 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             ..
         }) => {
             let group_count = groups(reduction)?;
-            // At query time, each state sees its group's input rows; at
-            // ingestion time, the rows of a window one second of
-            // arriving rows does not bound.
+            // The source rows each state folds: at query time its group's
+            // share of the rows read; at ingestion time of those arriving
+            // over the window it maintains, or without one of every row
+            // its sources hold ([`source_rows_in_window`]; unbounded,
+            // `None`, when they declare none).
+            let folded_rows = match (ingestion, window_ms) {
+                (false, _) => Some(source_rows_input.source_rows_read()),
+                (true, Some(window_ms)) => Some(source_rows_in_window(
+                    source_rows_input,
+                    window_ms,
+                    true,
+                    retained_output_count,
+                )),
+                (true, None) => raw_rows(None).1.map(|rows_held| {
+                    rows_held as f64 * source_rows_input.share_of_one_second(rows_per_ms)
+                }),
+            };
             let SummaryStateBuild {
                 input_rows,
                 state_bytes,
@@ -1192,13 +1743,17 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 family,
                 update,
                 reduction,
-                (!ingestion).then(|| input.rows.div_ceil(group_count.max(1))),
+                folded_rows.map(|rows| rows / group_count.max(1) as f64),
             )?;
             built_state_input_rows = Some(input_rows);
             open_output_bytes = Some(
                 group_count
                     .checked_mul(
-                        open_state_bytes + state_row_bytes_beside_state(&node.output_schema),
+                        open_state_bytes
+                            + state_row_bytes_beside_state(
+                                &node.output_schema,
+                                series_row_bytes_beside_state,
+                            ),
                     )
                     .ok_or(AnalyticalCostError::Overflow)?,
             );
@@ -1207,7 +1762,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
-                    .checked_mul(state_bytes + state_row_bytes_beside_state(&node.output_schema))
+                    .checked_mul(
+                        state_bytes
+                            + state_row_bytes_beside_state(
+                                &node.output_schema,
+                                series_row_bytes_beside_state,
+                            ),
+                    )
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             let group_visits = visits(group_count);
@@ -1247,26 +1808,18 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             ..
         }) => {
             // One window's states: each input row updates the window its
-            // time falls in. At ingestion time the rows of one window
-            // arrive at the rate of one second's `input.rows`; at query
-            // time one window holds its width's share of the time its
-            // input's raw rows span (without a span, its share of the
-            // retained windows).
+            // time falls in ([`source_rows_in_window`], the same rows
+            // whether the chain is built at ingestion or at query time).
             let group_count = groups(reduction)?;
-            let rows_per_tumbling_window = match ingestion {
-                true => u64::try_from(
-                    (u128::from(input.rows) * u128::from(*tumbling_window_width_ms))
-                        .div_ceil(u128::from(ONE_SECOND_MS)),
-                )
-                .map_err(|_| AnalyticalCostError::Overflow)?,
-                false => input_raw_rows_span_ms
-                    .filter(|span_ms| *span_ms > 0)
-                    .map_or(input.rows.div_ceil(retained_output_count), |span_ms| {
-                        ((input.rows as f64 * *tumbling_window_width_ms as f64 / span_ms as f64)
-                            .round() as u64)
-                            .clamp(1, input.rows.max(1))
-                    }),
-            };
+            let rows_per_tumbling_window = source_rows_in_window(
+                source_rows_input,
+                *tumbling_window_width_ms,
+                ingestion,
+                retained_output_count,
+            );
+            // At query time its windows hold rows only over the time its
+            // input spans.
+            built_state_data_span_ms = (!ingestion).then_some(input_raw_rows_span_ms).flatten();
             let SummaryStateBuild {
                 input_rows,
                 state_bytes,
@@ -1277,13 +1830,17 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 family,
                 update,
                 reduction,
-                Some(rows_per_tumbling_window.div_ceil(group_count.max(1))),
+                Some(rows_per_tumbling_window / group_count.max(1) as f64),
             )?;
             built_state_input_rows = Some(input_rows);
             open_output_bytes = Some(
                 group_count
                     .checked_mul(
-                        open_state_bytes + state_row_bytes_beside_state(&node.output_schema),
+                        open_state_bytes
+                            + state_row_bytes_beside_state(
+                                &node.output_schema,
+                                series_row_bytes_beside_state,
+                            ),
                     )
                     .ok_or(AnalyticalCostError::Overflow)?,
             );
@@ -1307,12 +1864,25 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 true => CostConstant::ChainOperationsPerArrivingRow,
                 false => CostConstant::TimeRangeOperationsPerRow,
             };
+            if ingestion {
+                states_emitted_per_second = emitted_states;
+                formula_emit_ops_per_second = chain_emit_terms_per_state(family)
+                    .plus_terms(&state_allocation_terms(node.parameters.as_ref()))
+                    .times(emitted_states)
+                    .operations();
+            }
             // Each group's state found once per raw batch.
             let group_visits = visits(group_count);
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: group_count
-                    .checked_mul(state_bytes + state_row_bytes_beside_state(&node.output_schema))
+                    .checked_mul(
+                        state_bytes
+                            + state_row_bytes_beside_state(
+                                &node.output_schema,
+                                series_row_bytes_beside_state,
+                            ),
+                    )
                     .ok_or(AnalyticalCostError::Overflow)?,
             };
             (
@@ -1340,6 +1910,83 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 ),
             )
         }
+        Payload::ASAP(ASAPOp::SummaryMergeWindows {
+            tumbling_window_width_ms,
+            ..
+        }) => {
+            // Each wider window, when it ends, merges the narrower windows
+            // inside it, per group: at ingestion time one second's share,
+            // `group_count · 1000 / narrower width` merges and
+            // `group_count · 1000 / width` states emitted per second.
+            let narrower = producers
+                .first()
+                .ok_or(AnalyticalCostError::UnsupportedCandidate)?;
+            let narrower_width_ms = narrower
+                .chain_tumbling_window_width_ms
+                .ok_or(AnalyticalCostError::UnsupportedCandidate)?
+                .max(1);
+            let width_ms = (*tumbling_window_width_ms).max(1);
+            let windows_per_window = (width_ms / narrower_width_ms).max(1);
+            let group_count = narrower.output.rows.max(1);
+            // Stage 2 offers it at ingestion time only.
+            if !ingestion {
+                return Err(AnalyticalCostError::UnsupportedCandidate);
+            }
+            let merged = group_count as f64 * ONE_SECOND_MS as f64 / narrower_width_ms as f64;
+            let emitted = group_count as f64 * ONE_SECOND_MS as f64 / width_ms as f64;
+            narrower_states_merged_per_execution = merged.round() as u64;
+            let merged_input_rows = narrower.state_input_rows.map(|mut rows| {
+                rows.folded_rows_per_state = rows
+                    .folded_rows_per_state
+                    .map(|per_window| per_window * (width_ms as f64 / narrower_width_ms as f64));
+                rows
+            });
+            built_state_input_rows = merged_input_rows;
+            let input_state_bytes = state_bytes_per_row(
+                narrower.output,
+                narrower.output_schema,
+                series_row_bytes_beside_state,
+            );
+            let merged_state_bytes = match (family, merged_input_rows) {
+                (StateFamily::Sketch(params), Some(rows)) => sketch_state_bytes(params, rows),
+                _ => input_state_bytes,
+            };
+            let terms = merge_terms_per_state(
+                family,
+                input_state_bytes,
+                merged_state_bytes,
+                narrower.state_input_rows,
+                windows_per_window,
+            )
+            .times(merged)
+            .plus_terms(
+                &node
+                    .output_schema
+                    .summary_state_type()
+                    .map_or_else(NodeCostTerms::default, chain_emit_terms_per_state)
+                    .times(emitted),
+            );
+            let out = EdgeStatistics {
+                rows: group_count,
+                bytes: group_count
+                    .checked_mul(
+                        merged_state_bytes
+                            + state_row_bytes_beside_state(
+                                &node.output_schema,
+                                series_row_bytes_beside_state,
+                            ),
+                    )
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            };
+            (
+                out,
+                Ok(charged(terms, out.bytes, 0)),
+                format!(
+                    "merge tumbling windows of {narrower_width_ms} ms into {width_ms} ms for \
+                     {group_count} groups: {merged:.1} states merged, {emitted:.1} states emitted"
+                ),
+            )
+        }
         Payload::ASAP(ASAPOp::SummaryMerge { group_by, .. }) => {
             // Each input state read is merged into its group's (by the
             // states' family, `merge_ops` below); one state per group
@@ -1349,12 +1996,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             // groups.
             let mut group_count = 0;
             for producer in producers {
-                group_count = group_count.max(
-                    producer
-                        .output
-                        .rows
-                        .div_ceil(producer.tumbling_windows.max(1)),
-                );
+                // A cover's windows are a mean: its rows over that mean,
+                // rounded (its rows are the groups times the mean, rounded).
+                let windows = producer.tumbling_windows.max(1.0);
+                group_count = group_count.max(match windows.fract() == 0.0 {
+                    true => producer.output.rows.div_ceil(windows as u64),
+                    false => (producer.output.rows as f64 / windows).round() as u64,
+                });
             }
             let states = merged_states(producers)?;
             if let Some(keys) = group_by {
@@ -1369,13 +2017,20 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             // read through an operator that does not keep each row's
             // window.
             let input_state_bytes = |producer: &ProducerOutput<'_>| {
-                state_bytes_per_row(producer.output, producer.output_schema)
+                state_bytes_per_row(
+                    producer.output,
+                    producer.output_schema,
+                    series_row_bytes_beside_state,
+                )
             };
             // Each input's states per group, every one folding its rows.
             let merged_input_rows = StateInputRows::merged(producers.iter().map(|producer| {
-                producer
-                    .state_input_rows
-                    .map(|rows| (rows, producer.output.rows.div_ceil(group_count.max(1))))
+                producer.state_input_rows.map(|rows| {
+                    (
+                        rows,
+                        producer.output.rows as f64 / group_count.max(1) as f64,
+                    )
+                })
             }));
             built_state_input_rows = merged_input_rows;
             // A merge target receives its inputs' states: priced open.
@@ -1415,9 +2070,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             };
             let out = EdgeStatistics {
                 rows: group_count,
-                bytes: (merged_state_bytes + state_row_bytes_beside_state(&node.output_schema))
-                    .checked_mul(group_count)
-                    .ok_or(AnalyticalCostError::Overflow)?,
+                bytes: (merged_state_bytes
+                    + state_row_bytes_beside_state(
+                        &node.output_schema,
+                        series_row_bytes_beside_state,
+                    ))
+                .checked_mul(group_count)
+                .ok_or(AnalyticalCostError::Overflow)?,
             };
             (
                 out,
@@ -1429,13 +2088,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             // A merge leaves a KLL's levels sorted; a state built by
             // updates (a `SummaryAgg`, a chain's window) is sorted when read.
             let written_by = match producers.first() {
-                Some(producer)
-                    if matches!(producer.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. })) =>
-                {
-                    StateLastWrittenBy::Merge {
-                        input_rows: producer.state_input_rows,
-                    }
-                }
+                Some(producer) if producer.states_last_merged => StateLastWrittenBy::Merge {
+                    input_rows: producer.state_input_rows,
+                },
                 producer => StateLastWrittenBy::Updates {
                     input_rows: producer.and_then(|producer| producer.state_input_rows),
                 },
@@ -1494,6 +2149,12 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     };
     let (estimate, terms) = estimate?;
     let (multiplier, per_second) = rate;
+    // The formula's ms of emitting states at window closes, per execution,
+    // scaled by the calibration: charged whether the node is priced from
+    // the formulas or from a measured entry (whose `ns_per_state_emitted`
+    // adds to it).
+    let formula_emit_ms_per_execution =
+        formula_emit_ops_per_second * speed.ms_per_cpu_op * formula_scale;
     let formula_ms = estimate.cpu_ops() * speed.ms_per_cpu_op
         + estimate.scan_bytes() as f64 * speed.ms_per_scanned_byte;
     // What one computation processes, the unit its entry is costed per
@@ -1502,6 +2163,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let units = match &node.payload {
         Payload::NonASAP(NonASAPOp::Scan { .. }) => out.rows,
         Payload::ASAP(ASAPOp::SummaryMerge { .. }) => merged_states(producers)?,
+        // The narrower states it merges in one execution (one second at
+        // ingestion time).
+        Payload::ASAP(ASAPOp::SummaryMergeWindows { .. }) => narrower_states_merged_per_execution,
         Payload::NonASAP(
             NonASAPOp::Values { .. }
             | NonASAPOp::Filter { .. }
@@ -1517,6 +2181,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             | NonASAPOp::SQLWindowFunc { .. }
             | NonASAPOp::TimeRange { .. }
             | NonASAPOp::TimeShift { .. }
+            | NonASAPOp::TimeRangeCover { .. }
             | NonASAPOp::PromqlVectorFromScalar(..)
             | NonASAPOp::PromqlRelabel { .. }
             | NonASAPOp::PromqlInfoEnrich { .. }
@@ -1544,7 +2209,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     let estimate = match measured_unit_cost {
         Some(unit) => {
             cost_source = NodeCostSource::Measured;
-            let measured_ms = (units as f64 * unit.ns_per_unit + unit.ns_per_invocation) * 1e-6;
+            // At ingestion time, the states emitted at window closes too:
+            // the formula's emit term, plus the measured cost per state.
+            let measured_ms = (units as f64 * unit.ns_per_unit
+                + unit.ns_per_invocation
+                + states_emitted_per_second * unit.ns_per_state_emitted)
+                * 1e-6
+                + formula_emit_ms_per_execution;
             fit.record(measured_ms * per_second, formula_ms * per_second);
             detail += &format!(
                 "; measured {units} x {:.3} ns + {:.3} ns",
@@ -1568,6 +2239,24 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     };
     let node_ms = estimate.cpu_ops() * speed.ms_per_cpu_op
         + estimate.scan_bytes() as f64 * speed.ms_per_scanned_byte;
+    // A node reading summary states or a chain's windows works on closed
+    // windows: refresh work. One reading raw rows works per arriving row.
+    let reads_closed_windows = producers.iter().any(|producer| {
+        producer.family != StateFamily::None || producer.chain_tumbling_window_width_ms.is_some()
+    });
+    let phase_times = phase_times(
+        reads_closed_windows || settings.data_plane_execution.ingest_work_at_refresh,
+        ingestion,
+        window_ms,
+        node_ms,
+        node_ms * per_second,
+        (formula_emit_ms_per_execution
+            + measured_unit_cost.map_or(0.0, |unit| {
+                states_emitted_per_second * unit.ns_per_state_emitted * 1e-6
+            }))
+            * per_second,
+        states_emitted_per_second * per_second * table.refresh_io_wait.ns_per_state_emitted * 1e-6,
+    );
 
     // What this node keeps: memory averaged over time (byte-seconds per
     // second), its peak memory and its disk bytes, added to the
@@ -1588,7 +2277,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // build holds while it runs, and the newest window an ingestion-time
     // view keeps besides its sealed ones.
     let open_state = open_output_bytes.map_or(state, |open| state.max(open));
-    let (materialized_bytes, medium) = match (ingestion, node.lifetime, &node.payload) {
+    let (mut materialized_bytes, medium) = match (ingestion, node.lifetime, &node.payload) {
         (_, Lifetime::None, _) => {
             // A summary build holds its states open while it runs.
             let working_memory_bytes = match open_output_bytes {
@@ -1635,7 +2324,8 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             }
             (0, medium)
         }
-        // Raw rows materialized at ingestion time: the rows it retains.
+        // Raw rows materialized at ingestion time: the rows it retains,
+        // charged by their exact rate (`retained_raw_bytes`).
         (_, Lifetime::AcrossEvaluations(medium), _) if raw_rows_materialized_at_ingestion => {
             (edge(raw_retained_rows.unwrap_or(out.rows))?.bytes, medium)
         }
@@ -1662,21 +2352,89 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     if ingestion && node.lifetime == Lifetime::AcrossEvaluations(StorageMedium::Memory) {
         maintained = Some(state);
     }
+    // A view's bytes per window: one output of an ingestion-time view kept
+    // across evaluations; raw rows kept at ingestion are not windows.
+    let view_bytes_per_window = match (ingestion, node.lifetime) {
+        (true, Lifetime::AcrossEvaluations(_)) if !raw_rows_materialized_at_ingestion => state,
+        _ => 0,
+    };
+    // Under a window cache, an in-memory view's retained windows are in its
+    // files, and only the one being built in memory here: the caller adds
+    // the resident ones.
+    let mut cached_windows = None;
+    let mut disk_bytes_charged: Option<f64> = None;
+    if let (true, Some(cache), Lifetime::AcrossEvaluations(StorageMedium::Memory), false) = (
+        ingestion,
+        settings.data_plane_execution.view_window_cache,
+        node.lifetime,
+        raw_rows_materialized_at_ingestion,
+    ) {
+        if materialized_bytes > 0 {
+            // Its files: a file of `file_span_ms` is deleted whole once its
+            // newest window is `retention_margin_ms` past retention, so at
+            // the peak the files hold the retention, the margin and a whole
+            // span of windows, half a span on average.
+            let retention_ms = node.retention_ms.unwrap_or(output_interval_ms);
+            let kept_ms = retention_ms
+                .saturating_add(cache.retention_margin_ms)
+                .saturating_add(cache.file_span_ms);
+            let windows_on_disk = kept_ms
+                .div_ceil(output_interval_ms)
+                .max(retained_output_count);
+            disk_bytes = state
+                .checked_mul(windows_on_disk)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            let average_kept_ms = retention_ms as f64
+                + cache.retention_margin_ms as f64
+                + cache.file_span_ms as f64 / 2.0;
+            disk_bytes_charged = Some(
+                state as f64
+                    * (average_kept_ms / output_interval_ms as f64)
+                        .max(retained_output_count as f64),
+            );
+            average_memory_bytes = open_state as f64;
+            peak_memory_bytes = open_state;
+            detail += &format!(
+                "; keeps {windows_on_disk} windows of {state} bytes on disk \
+                 ({retained_output_count} retained), {open_state} bytes building in memory"
+            );
+            cached_windows = Some(CachedViewWindows {
+                bytes_per_window: state,
+                width_ms: output_interval_ms,
+                retained: retained_output_count,
+            });
+            materialized_bytes = 0;
+        }
+    }
+    // The raw rows a store retains back its `retention_ms`, in bytes, by
+    // their exact rate: what its average memory and its cost charge, so both
+    // are linear in the retention; its peak and disk bytes are whole rows.
+    let retained_raw_bytes = |rows: Option<u64>| -> Option<f64> {
+        rows.and(raw_rows_back_exact(node.retention_ms))
+            .map(|rows| rows * width as f64)
+    };
     if materialized_bytes > 0 {
+        let exact_bytes = match raw_rows_materialized_at_ingestion {
+            true => retained_raw_bytes(raw_retained_rows),
+            false => None,
+        };
         match medium {
             StorageMedium::Memory => {
-                average_memory_bytes = materialized_bytes as f64;
+                average_memory_bytes = exact_bytes.unwrap_or(materialized_bytes as f64);
                 peak_memory_bytes = materialized_bytes;
             }
-            StorageMedium::Disk => disk_bytes = materialized_bytes,
+            StorageMedium::Disk => {
+                disk_bytes = materialized_bytes;
+                disk_bytes_charged = exact_bytes;
+            }
         }
         detail += &format!("; keeps {materialized_bytes} bytes");
     }
     if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {
         if !ingestion {
-            let retained = match raw_retained_rows {
-                Some(rows) => edge(rows)?.bytes,
-                None => out.bytes,
+            let retained = match retained_raw_bytes(raw_retained_rows) {
+                Some(bytes) => bytes,
+                None => out.bytes as f64,
             };
             raw_scan = Some((source, retained));
         }
@@ -1690,6 +2448,27 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         average_memory_bytes += bytes as f64 * node_ms / 1_000.0 * per_second;
         detail += &format!("; holds {bytes} bytes for {node_ms:.3} ms");
     }
+    // A query-time `OneEvaluation` output the data plane keeps after its
+    // evaluation time (`DataPlaneExecution::kept_query_time_results`): one
+    // per evaluation time of its readers' grid within the retention
+    // (`docs/design_docs/proposals/cost-terms-from-calibration.md`, section
+    // 2). A bound on them all is the plan's
+    // (`crate::plan::kept_results::held_by_bounded_cache`).
+    let mut kept_result_bytes = 0.0;
+    if let (Some(results), Some(grid), false, Lifetime::OneEvaluation(StorageMedium::Memory)) = (
+        settings.data_plane_execution.kept_query_time_results,
+        evaluation_grid,
+        ingestion,
+        node.lifetime,
+    ) {
+        kept_result_bytes = out.bytes as f64 * kept_per_grid(results.retention_ms, grid.period_ms);
+        average_memory_bytes += kept_result_bytes;
+        peak_memory_bytes = peak_memory_bytes.saturating_add(kept_result_bytes as u64);
+        detail += &format!(
+            "; keeps {kept_result_bytes:.0} bytes of results after its evaluations ({} ms)",
+            results.retention_ms
+        );
+    }
     // One computation's CPU and scan cost times its rate, then the
     // materialized state's.
     let cost = unit_costs.map(|unit_cost| {
@@ -1697,7 +2476,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             + estimate.scan_bytes() as f64 * unit_cost.cost_per_scanned_byte)
             * per_second
             + unit_cost.cost_per_memory_byte_second * average_memory_bytes
-            + unit_cost.cost_per_disk_byte_second * disk_bytes as f64
+            + unit_cost.cost_per_disk_byte_second * disk_bytes_charged.unwrap_or(disk_bytes as f64)
     });
     if cost.is_some_and(|cost| !cost.is_finite()) {
         return Err(AnalyticalCostError::Overflow);
@@ -1716,11 +2495,42 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         let passes_states_on =
             matches!(node.payload, Payload::NonASAP(NonASAPOp::TimeRange { .. }))
                 || node.payload.keeps_input_window();
-        passes_states_on
+        let passed = passes_states_on
             .then(|| {
                 producers
                     .first()
                     .and_then(|producer| producer.state_input_rows)
+            })
+            .flatten()?;
+        // A range of a chain's windows reaching past the rows the chain
+        // read: those windows hold none, so each selected state folds, on
+        // average, the rows over the time they span. Example: 15 min of
+        // rows in sixty 1 min windows: a quarter of a full window's rows.
+        let width_ms = crate::node::usage::chain_tumbling_window_width_ms(producers);
+        let data_span_ms = producers
+            .first()
+            .and_then(|producer| producer.state_data_span_ms);
+        let filled = match (&node.payload, width_ms, data_span_ms) {
+            (Payload::NonASAP(NonASAPOp::TimeRange { .. }), Some(width_ms), Some(span_ms)) => {
+                let covered_ms = tumbling_windows * width_ms as f64;
+                (span_ms as f64 / covered_ms.max(1.0)).min(1.0)
+            }
+            _ => 1.0,
+        };
+        Some(StateInputRows {
+            folded_rows_per_state: passed.folded_rows_per_state.map(|rows| rows * filled),
+            ..passed
+        })
+    });
+    // A query-time chain says the time its rows span; an operator keeping
+    // each row's window passes it on (a time range has accounted for it).
+    let state_data_span_ms = built_state_data_span_ms.or_else(|| {
+        node.payload
+            .keeps_input_window()
+            .then(|| {
+                producers
+                    .first()
+                    .and_then(|producer| producer.state_data_span_ms)
             })
             .flatten()
     });
@@ -1749,6 +2559,80 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             .then_some(input_raw_rows_span_ms)
             .flatten()
     });
+    // A scan's rows arrive at its sources' rate; a time range and the
+    // operators that keep each row's window pass on their input's. The
+    // rate holds while its rows are that rate over their span.
+    let raw_rows_per_ms = if matches!(node.payload, Payload::NonASAP(NonASAPOp::Scan { .. })) {
+        rows_per_ms
+    } else if matches!(node.payload, Payload::NonASAP(NonASAPOp::TimeRange { .. }))
+        || node.payload.keeps_input_window()
+    {
+        input_raw_rows_per_ms
+    } else {
+        None
+    }
+    .filter(|&rows_per_ms| {
+        raw_rows_span_ms.is_some_and(|span_ms| {
+            out.rows == ((rows_per_ms * span_ms as f64).round() as u64).max(1)
+        })
+    });
+    // An `Aggregate` says what its rows fold; a time range and an operator
+    // keeping each row's window pass on their input's.
+    // A projection computing a column (`-x`) keeps the rows' count but not
+    // their sign fact: it is passed on only through columns left as they are.
+    let folded_per_row = built_folded_per_row.or_else(|| {
+        let input = (matches!(node.payload, Payload::NonASAP(NonASAPOp::TimeRange { .. }))
+            || node.payload.keeps_input_window())
+        .then(|| {
+            producers
+                .first()
+                .and_then(|producer| producer.folded_per_row)
+        })
+        .flatten()?;
+        let computes_a_column =
+            if let Payload::NonASAP(NonASAPOp::Project { cols, .. }) = &node.payload {
+                cols.iter()
+                    .any(|item| !matches!(item.expr, ScalarExpr::Column(_)))
+            } else {
+                false
+            };
+        Some(StateInputRows {
+            non_negative: input.non_negative && !computes_a_column,
+            ..input
+        })
+    });
+    // A scan or a time range over raw rows says its shortfall; an operator
+    // keeping each row's window passes on its input's.
+    let raw_rows_short_of_range = read_raw_rows_short_of_range.unwrap_or_else(|| {
+        node.payload
+            .keeps_input_window()
+            .then_some(input_short_of_range)
+            .flatten()
+    });
+    // A `TimeShift` adds its offset back; the operators that keep each
+    // row's window pass it on; any other node starts its own window.
+    let raw_rows_shifted_back_ms =
+        if let Payload::NonASAP(NonASAPOp::TimeShift { shift, .. }) = &node.payload {
+            match shift.at {
+                None => input_shifted_back_ms
+                    .saturating_add(u64::try_from(shift.offset_ms).unwrap_or(0)),
+                Some(_) => 0,
+            }
+        } else if node.payload.keeps_input_window() {
+            input_shifted_back_ms
+        } else {
+            0
+        };
+    let states_last_merged = match &node.payload {
+        Payload::ASAP(ASAPOp::SummaryMerge { .. }) => true,
+        Payload::NonASAP(NonASAPOp::Filter { .. } | NonASAPOp::Project { .. }) => {
+            outputs_states(&node.output_schema)
+                && producers
+                    .first()
+                    .is_some_and(|producer| producer.states_last_merged)
+        }
+        Payload::NonASAP(_) | Payload::ASAP(_) => false,
+    };
     let usage = NodeResourceUsageAndCost {
         output: out,
         sources,
@@ -1757,16 +2641,22 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
         tumbling_windows,
         chain_tumbling_window_width_ms,
         state_input_rows,
+        states_last_merged,
         raw_rows_span_ms,
+        raw_rows_per_ms,
+        folded_per_row,
+        raw_rows_short_of_range,
+        state_data_span_ms,
+        raw_rows_shifted_back_ms,
         work_ms_per_execution: node_ms,
         cpu_ops_per_second: estimate.cpu_ops() * per_second,
         scanned_bytes_per_second: estimate.scan_bytes() as f64 * per_second,
-        average_memory_bytes,
-        peak_memory_bytes,
-        disk_bytes,
         maintained,
+        cached_windows,
+        kept_result_bytes,
         raw_scan,
         fit,
+        series,
         cost: NodeCost {
             operator,
             timing: node.output_state.timing,
@@ -1776,9 +2666,73 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             detail,
             cost_source,
             assumed_data_facts,
+            phase_times,
+            priced_outside_measured_scale: measured_unit_cost
+                .is_some_and(|unit| unit.outside_measured_scale),
+            memory_and_disk: NodeMemoryAndDisk {
+                average_memory_bytes,
+                peak_memory_bytes,
+                bytes_per_window: view_bytes_per_window,
+                disk_bytes,
+                // Each window is written to disk when it closes: a view on
+                // disk, or one under the window cache, which keeps every
+                // window in its file.
+                disk_written_bytes_per_second: match cached_windows.is_some()
+                    || node.lifetime == Lifetime::AcrossEvaluations(StorageMedium::Disk)
+                {
+                    true => view_bytes_per_window as f64 * 1_000.0 / output_interval_ms as f64,
+                    false => 0.0,
+                },
+                disk_read_bytes_per_second: 0.0,
+            },
         },
     };
     Ok((usage, terms))
+}
+
+/// A node's time by phase ([`PhaseTimes`]): at query time, one
+/// computation's `ms_per_execution`; at ingestion time, `ms_per_second` is its CPU
+/// per second, of which `emit_ms_per_second` emits states at window
+/// closes, waiting `emit_wait_ms_per_second` on I/O. A node reading raw
+/// rows (not `reads_closed_windows`) does ingest work but for the states
+/// it emits; one reading closed windows does refresh work only. A node
+/// without a refresh window (`window_ms` `None`) does only ingest work.
+fn phase_times(
+    reads_closed_windows: bool,
+    ingestion: bool,
+    window_ms: Option<u64>,
+    ms_per_execution: f64,
+    ms_per_second: f64,
+    emit_ms_per_second: f64,
+    emit_wait_ms_per_second: f64,
+) -> PhaseTimes {
+    if !ingestion {
+        return PhaseTimes {
+            query_ms_per_step: ms_per_execution,
+            ..PhaseTimes::default()
+        };
+    }
+    let per_arriving_row = !reads_closed_windows;
+    let Some(width_ms) = window_ms.filter(|&width| width > 0) else {
+        return PhaseTimes {
+            ingest_cpu_core_seconds_per_second: ms_per_second / 1_000.0,
+            ..PhaseTimes::default()
+        };
+    };
+    let refresh_ms_per_second = match per_arriving_row {
+        true => emit_ms_per_second.min(ms_per_second),
+        false => ms_per_second,
+    };
+    let windows_per_second = 1_000.0 / width_ms as f64;
+    let refresh_cpu_ms_per_window = refresh_ms_per_second / windows_per_second;
+    PhaseTimes {
+        ingest_cpu_core_seconds_per_second: (ms_per_second - refresh_ms_per_second) / 1_000.0,
+        refresh_cpu_ms_per_window,
+        refresh_wall_ms_per_window: refresh_cpu_ms_per_window
+            + emit_wait_ms_per_second / windows_per_second,
+        refresh_window_width_ms: Some(width_ms),
+        query_ms_per_step: 0.0,
+    }
 }
 
 /// A summary build's per-state results shared by `SummaryAgg` and
@@ -1826,6 +2780,39 @@ fn chain_tumbling_window_width_ms(producers: &[ProducerOutput<'_>]) -> Option<u6
     producers.first()?.chain_tumbling_window_width_ms
 }
 
+/// The mean windows per evaluation a `TimeRangeCover` of `range` selects
+/// from each of its levels, `producers` (widest first), averaged over the
+/// evaluation times of `evaluation_grid` (the readers' grid) or, without
+/// one on the narrowest level's grid, every step of the narrowest width
+/// ([`mean_cover_windows_per_level`]). Example: 1 h over 5 min and 15 s:
+/// `[11.05, 19.0]` every 15 s, `[11.2, 16.0]` every 60 s.
+fn cover_windows_per_level(
+    range: &std::time::Duration,
+    producers: &[ProducerOutput<'_>],
+    evaluation_grid: Option<EvaluationGrid>,
+) -> Vec<f64> {
+    let widths: Vec<u64> = producers
+        .iter()
+        .map(|producer| producer.chain_tumbling_window_width_ms.unwrap_or(1).max(1))
+        .collect();
+    let narrowest = widths.last().copied().unwrap_or(1);
+    let grid = evaluation_grid
+        .filter(|grid| {
+            grid.period_ms > 0
+                && grid.period_ms.is_multiple_of(narrowest)
+                && grid.phase_ms.is_multiple_of(narrowest)
+        })
+        .unwrap_or(EvaluationGrid {
+            period_ms: narrowest,
+            phase_ms: 0,
+        });
+    mean_cover_windows_per_level(
+        u64::try_from(range.as_millis()).unwrap_or(u64::MAX),
+        grid,
+        &widths,
+    )
+}
+
 /// The windows a `TimeRange` of `range` selects from the chain
 /// `producers` starts with: those inside the range, at least one.
 fn selected_tumbling_windows(
@@ -1838,6 +2825,86 @@ fn selected_tumbling_windows(
     Ok(u64::try_from(range.as_millis() / u128::from(width_ms))
         .map_err(|_| AnalyticalCostError::Overflow)?
         .max(1))
+}
+
+/// The rows a summary is built over ([`source_rows_in_window`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SourceRowsInput {
+    /// The rows of one execution's input.
+    pub(crate) rows: u64,
+    /// The time they span ([`ProducerOutput::raw_rows_span_ms`]).
+    pub(crate) raw_rows_span_ms: Option<u64>,
+    /// The exact rate they arrive at ([`ProducerOutput::raw_rows_per_ms`]).
+    pub(crate) raw_rows_per_ms: Option<f64>,
+    /// The source rows behind each ([`ProducerOutput::folded_per_row`]),
+    /// 1 for source rows themselves.
+    pub(crate) source_rows_per_row: f64,
+}
+
+impl SourceRowsInput {
+    /// The source rows these rows hold, exactly: the exact rate over the
+    /// time they span when their rows are that rate over it
+    /// ([`source_rows_in_window`] over that span), else the rows, each
+    /// counting the source rows behind it. Example: one series every 25 s
+    /// read over 60 s: 2.4 rows, not the 2 a time range rounds to, as a
+    /// chain's 60 s window holds.
+    pub(crate) fn source_rows_read(&self) -> f64 {
+        source_rows_in_window(*self, self.raw_rows_span_ms.unwrap_or(0), false, 1)
+    }
+
+    /// The share of one second of its sources' rows (arriving at
+    /// `rows_per_ms`) these rows are, when they are one second of them; 1
+    /// otherwise. Example: 222 rows of 666.67 a second: a third.
+    pub(crate) fn share_of_one_second(&self, rows_per_ms: Option<f64>) -> f64 {
+        match (rows_per_ms, self.raw_rows_span_ms) {
+            (Some(rows_per_ms), Some(ONE_SECOND_MS)) if rows_per_ms > 0.0 => {
+                self.rows as f64 / (rows_per_ms * ONE_SECOND_MS as f64).round().max(1.0)
+            }
+            _ => 1.0,
+        }
+    }
+}
+
+/// The source rows one tumbling window of `width_ms` holds, exactly (not
+/// rounded), for a summary built over `input` at ingestion time
+/// (`ingestion`) or at query time, so that the same states fold the same
+/// rows whichever builds them: every state's rows come from this one
+/// function. With the exact arrival rate of its input's rows, when its
+/// rows are that rate over their span: that rate over the window, at query
+/// time at most over the time the rows span. Without it: its input's rows
+/// over the window's share of their span; without a span, one second's
+/// rows at ingestion time, the rows over the `retained_windows` at query
+/// time. Each row counts the source rows behind it. A range of windows
+/// reaching past the rows a query-time chain read holds no rows there
+/// ([`ProducerOutput::state_data_span_ms`]). Example: 10,000 series
+/// every 15 s in 60 s windows: 40,000 rows, at ingestion time (667 rows a
+/// second) and at query time over 300 s (200,000 rows) alike; in 10 s
+/// windows 6,666.67, and 30 of them merged 200,000.
+pub(crate) fn source_rows_in_window(
+    input: SourceRowsInput,
+    width_ms: u64,
+    ingestion: bool,
+    retained_windows: u64,
+) -> f64 {
+    let span_ms = input.raw_rows_span_ms.filter(|span_ms| *span_ms > 0);
+    let rows_per_ms = input.raw_rows_per_ms.filter(|&rows_per_ms| {
+        span_ms.is_some_and(|span_ms| {
+            input.rows == ((rows_per_ms * span_ms as f64).round() as u64).max(1)
+        })
+    });
+    let window_ms = match (ingestion, span_ms) {
+        (false, Some(span_ms)) => width_ms.min(span_ms),
+        _ => width_ms,
+    };
+    let rows = match (rows_per_ms, span_ms) {
+        (Some(rows_per_ms), _) => rows_per_ms * window_ms as f64,
+        (None, Some(span_ms)) => input.rows as f64 * window_ms as f64 / span_ms as f64,
+        (None, None) => match ingestion {
+            true => input.rows as f64 * width_ms as f64 / ONE_SECOND_MS as f64,
+            false => input.rows as f64 / retained_windows.max(1) as f64,
+        },
+    };
+    rows * input.source_rows_per_row
 }
 
 /// The times a grouping into `group_count` groups visits a group's state

@@ -3,9 +3,11 @@
 //! `asap_cost::plan_cost` of the selected plan, under the default unit
 //! costs and under unit costs that charge per-request overhead and disk.
 
-use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
-use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
+use asap_cost::{
+    AnswerCache, CostInputs, CostModel, KeptQueryTimeResults, ResourceUnitCost, ViewWindowCache,
+};
 use asap_planner::{DeploymentCapabilities, PlanningModels};
+use asap_planner_cli::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::NonASAPOp;
 use asap_types::plan::physical_asap_dag::{
@@ -78,7 +80,9 @@ fn selected_plan_objective_and_plan_cost_with(
     (
         plan.clone(),
         (
-            selection.selected_plan_cost_per_second,
+            selection
+                .selected_plan_cost_per_second
+                .expect("cost model 1"),
             cost.cost_per_second.expect("cost model 1"),
         ),
     )
@@ -574,10 +578,10 @@ fn the_objective_is_the_plan_cost_on_anchored_and_plain_queries_on_one_grid() {
 /// most one row in a batch narrower than 15 s, so at the 10 s default every
 /// row is a visit, the raw scan costs more than the views and the two
 /// plans are the same. With 30 min batches, a series has 120 rows in a
-/// batch. Stored DDSketch windows priced sealed (as the executor keeps
-/// them), the views are the cheapest plan (4.3e5/s) with raw data kept or
-/// not; with memory priced 100x higher, reading the raw rows is cheaper
-/// and is selected.
+/// batch. Stored DDSketch windows priced at their view layout, the views
+/// are the cheapest plan with raw data kept or not. The same deployment
+/// asked one p99 over the last hour reads the raw rows at query time,
+/// which costs less than maintaining views for it.
 #[test]
 fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     let query = |query: &str| {
@@ -633,20 +637,20 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
         plan_cost <= views_only_plan_cost,
         "selected {plan_cost} is above the ingestion-time views plan, {views_only_plan_cost}"
     );
-    // When memory is priced 100x higher (each byte-second of the views'
-    // years of windows), reading the raw rows at query time beats the
-    // views: the selection costs strictly less than the views-only plan.
-    let mut costly_memory = settings.clone();
-    let CostModel::UsageOverTime(unit_costs) = &mut costly_memory.cost_model else {
-        unreachable!("the default cost model is cost model 1")
-    };
-    unit_costs.cost_per_memory_byte_second *= 100.0;
+    // Stored DDSketch windows are priced at their view layout, lighter
+    // than the raw rows they summarize, so no memory price makes reading
+    // years of raw rows cheaper. One p99 over the last hour, once, is the
+    // case where raw rows win: the selection reads them at query time and
+    // costs less than maintaining the views for it.
+    let mut last_hour = serde_json::to_value(&w).unwrap();
+    last_hour["query_workload"]["query_batch"] =
+        serde_json::json!([query("quantile_over_time(0.99, latency_ms[1h])")]);
+    let last_hour: PlanningWorkload = serde_json::from_value(last_hour).unwrap();
     let raw_kept = PlanningModels::builtin()
         .with_ignore_accuracy_guarantees(true)
-        .with_cost_inputs(&costly_memory);
+        .with_cost_inputs(&settings);
     let (raw_kept_plan, (_, raw_kept_plan_cost)) =
-        selected_plan_objective_and_plan_cost_with(&w, raw_kept, &costly_memory);
-    // The selection reads raw rows at query time.
+        selected_plan_objective_and_plan_cost_with(&last_hour, raw_kept, &settings);
     assert!(
         raw_kept_plan.nodes.iter().any(|node| {
             matches!(
@@ -654,17 +658,22 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
                 PhysicalASAPOperatorPayload::NonASAP(NonASAPOp::Scan { .. })
             ) && node.output_state.timing == ExecutionTiming::QueryTime
         }),
-        "memory at 100x: the selection scans no raw rows at query time"
+        "one-off last hour: the selection scans no raw rows at query time"
     );
+    let mut last_hour_ingesting = serde_json::to_value(&last_hour).unwrap();
+    last_hour_ingesting["data_workload"]["arrival"] =
+        serde_json::json!({"ingesting": {"rows_per_second": 1_000_000.0 / 15.0}});
+    let last_hour_ingesting: PlanningWorkload =
+        serde_json::from_value(last_hour_ingesting).unwrap();
     let views_only = PlanningModels::builtin()
         .with_ignore_accuracy_guarantees(true)
-        .with_cost_inputs(&costly_memory)
+        .with_cost_inputs(&settings)
         .with_deployment_capabilities(&capabilities);
     let (_, (_, views_only_plan_cost)) =
-        selected_plan_objective_and_plan_cost_with(&ingesting, views_only, &costly_memory);
+        selected_plan_objective_and_plan_cost_with(&last_hour_ingesting, views_only, &settings);
     assert!(
         raw_kept_plan_cost < views_only_plan_cost,
-        "memory at 100x: selected {raw_kept_plan_cost}, views {views_only_plan_cost}"
+        "one-off last hour: selected {raw_kept_plan_cost}, views {views_only_plan_cost}"
     );
 }
 
@@ -871,5 +880,313 @@ fn cached_final_query_results_retain_a_range_panel_for_its_refresh_interval() {
     assert!(
         cached_cost.1 < uncached_cost.1,
         "{cached_cost:?} vs {uncached_cost:?}"
+    );
+}
+
+/// The default cost inputs with the data plane's window cache, idle 60 s:
+/// a view's windows on disk, the recently written or read ones also in
+/// memory.
+fn with_window_cache() -> CostInputs {
+    let mut settings = CostInputs::default();
+    settings.data_plane_execution.view_window_cache = Some(ViewWindowCache {
+        idle_ms: 60_000,
+        max_bytes: None,
+        file_span_ms: 0,
+        retention_margin_ms: 0,
+    });
+    settings
+}
+
+/// Under a window cache of 60 s idle time, without raw data: a 15 s chain
+/// read by `max_over_time(m[5m] offset 1h)` and by `max_over_time(m[5m])`
+/// every 15 s keeps resident the windows of the reader that keeps the most
+/// (24 of 261), in the MILP ($r_v$, (W)) and in `plan_cost` alike, and
+/// costs less than with every retained window in memory; so do a 1 h
+/// quantile (wider levels, a cover, where cheaper) and a 1 h range at 15 s
+/// steps of a 5 min max.
+#[test]
+fn the_objective_is_the_plan_cost_with_a_window_cache() {
+    let offset_and_recent = over_m(vec![
+        requested("max_over_time(m[5m] offset 1h)", 15_000, None),
+        requested("max_over_time(m[5m])", 15_000, None),
+    ]);
+    let (objective, plan_cost) =
+        objective_and_plan_cost(&offset_and_recent, &with_window_cache(), false);
+    assert_equal("offset and recent readers", (objective, plan_cost));
+    let (_, without_cache) =
+        objective_and_plan_cost(&offset_and_recent, &CostInputs::default(), false);
+    assert!(
+        plan_cost < without_cache,
+        "with the cache {plan_cost} is not below {without_cache}"
+    );
+    for (name, entries) in [
+        (
+            "1 h quantile within 1 %",
+            vec![{
+                let mut quantile = requested("quantile_over_time(0.99, m[1h])", 15_000, None);
+                quantile["requirements"] = serde_json::json!({"accuracy": {"max_error": 0.01, "failure_probability": 0.01}});
+                quantile
+            }],
+        ),
+        (
+            "1 h range of a 5 min max",
+            vec![requested(
+                "max_over_time(m[5m])",
+                15_000,
+                Some((15_000, 3_600_000)),
+            )],
+        ),
+    ] {
+        assert_equal(
+            name,
+            objective_and_plan_cost(&over_m(entries), &with_window_cache(), false),
+        );
+    }
+}
+
+/// The default cost inputs with the data plane's window cache (idle 60 s),
+/// its query-time results kept 60 s and its answers kept 60 s beyond the
+/// plan's longest retention, each cache bounded by `max_bytes`.
+fn with_result_caches(max_bytes: Option<u64>) -> CostInputs {
+    let mut settings = with_window_cache();
+    settings.data_plane_execution.kept_query_time_results = Some(KeptQueryTimeResults {
+        retention_ms: 60_000,
+        max_bytes,
+    });
+    settings.data_plane_execution.answer_cache = Some(AnswerCache {
+        retention_margin_ms: 60_000,
+        max_bytes,
+    });
+    settings
+}
+
+/// With the result and answer caches, unbounded and bounded at 64 KiB
+/// (below what they keep): the MILP charges each `OneEvaluation`
+/// execution's kept results, each query's answers over the plan's longest
+/// retention ($H$, $w_{q,e}$), each bound as the least of the pool and the
+/// bound ($t$, $b$), and a range request's new steps only, as `plan_cost`
+/// does. Workloads: two windowed quantiles sharing a query-time scan (raw
+/// data retained), a 1 h range at 15 s steps every 15 s, and a 1 h range of
+/// `rate(..[5m] offset 1h)` every 60 s. Under the bound the shared-scan
+/// plan costs less than without it.
+#[test]
+fn the_objective_is_the_plan_cost_with_result_and_answer_caches() {
+    let quantiles = over_m(vec![
+        every_10s("quantile_over_time(0.5, m[1m])"),
+        every_10s("quantile_over_time(0.9, m[5m])"),
+    ]);
+    let range = over_m(vec![requested(
+        "max_over_time(m[5m])",
+        15_000,
+        Some((15_000, 3_600_000)),
+    )]);
+    let offset_range = over_m(vec![requested(
+        "max_over_time(m[5m] offset 1h)",
+        60_000,
+        Some((60_000, 3_600_000)),
+    )]);
+    for (name, workload, raw_data_retained) in [
+        ("shared scan", &quantiles, true),
+        ("1 h range every 15 s", &range, false),
+        ("offset 1 h range every 60 s", &offset_range, false),
+    ] {
+        for max_bytes in [None, Some(64 * 1024)] {
+            assert_equal(
+                &format!("{name}, caches bounded at {max_bytes:?}"),
+                objective_and_plan_cost(
+                    workload,
+                    &with_result_caches(max_bytes),
+                    raw_data_retained,
+                ),
+            );
+        }
+    }
+    let (_, unbounded) = objective_and_plan_cost(&quantiles, &with_result_caches(None), true);
+    let (_, bounded) =
+        objective_and_plan_cost(&quantiles, &with_result_caches(Some(64 * 1024)), true);
+    assert!(
+        bounded < unbounded,
+        "bounded {bounded} is not below unbounded {unbounded}"
+    );
+}
+
+/// With an answer cache, a 1 h range at 15 s steps requested every 20 s
+/// computes 4/3 steps per request on average, in the MILP and in
+/// `plan_cost` alike (the debug check in `select_plan` compares the MILP's
+/// optimum with `plan_cost`). So does one every 10 s, computing 1 step per
+/// request on its 5 s evaluation grid (the query's, not its requests'), and
+/// one below `@ end()` every 15 s (raw data retained).
+#[test]
+fn the_objective_is_the_plan_cost_when_a_range_computes_fractional_steps() {
+    for (name, query, interval_ms, raw_data_retained) in [
+        ("every 20 s", "max_over_time(m[5m])", 20_000, false),
+        ("every 10 s", "max_over_time(m[5m])", 10_000, false),
+        (
+            "@ end() every 15 s",
+            "sum_over_time(m[5m] @ end())",
+            15_000,
+            true,
+        ),
+    ] {
+        let range = over_m(vec![requested(
+            query,
+            interval_ms,
+            Some((15_000, 3_600_000)),
+        )]);
+        assert_equal(
+            &format!("1 h range at 15 s steps {name}"),
+            objective_and_plan_cost(&range, &with_result_caches(None), raw_data_retained),
+        );
+    }
+}
+
+/// The two equality gaps the selection side's construction leaves open,
+/// checked with the result and answer caches and the window cache on:
+/// - Stage 3 takes a query-time reader's read times from the queries
+///   reaching its memo group on its grid, `plan_cost` from the queries
+///   reaching its node in the plan: an instant and a 1 h range of one
+///   5 min max on one grid, reading one chain;
+/// - kept results of a `OneEvaluation` node in a context anchored by `@`,
+///   whose grid is the requests', not the queries' evaluation grid: two
+///   range queries sharing a `@ end()` subtree, and two of different spans
+///   below `@ start()`.
+#[test]
+fn the_objective_is_the_plan_cost_on_shared_readers_and_anchored_results_with_caches() {
+    let instant_and_range = over_m(vec![
+        requested("max_over_time(m[5m])", 15_000, None),
+        requested("max_over_time(m[5m])", 15_000, Some((15_000, 3_600_000))),
+    ]);
+    let shared_at_end = over_m(vec![
+        requested(
+            "sum_over_time(m[5m] @ end())",
+            300_000,
+            Some((30_000, 600_000)),
+        ),
+        requested(
+            "max_over_time(m[5m] @ end())",
+            300_000,
+            Some((30_000, 600_000)),
+        ),
+    ]);
+    let at_start_of_two_spans = over_m(vec![
+        requested(
+            "sum_over_time(m[1m] @ start())",
+            60_000,
+            Some((30_000, 3_600_000)),
+        ),
+        requested(
+            "max_over_time(m[1m] @ start())",
+            60_000,
+            Some((30_000, 90_000)),
+        ),
+    ]);
+    for (name, workload, raw_data_retained) in [
+        (
+            "an instant and a range on one grid",
+            &instant_and_range,
+            false,
+        ),
+        ("a shared @ end() subtree", &shared_at_end, true),
+        (
+            "@ start() subtrees of two spans",
+            &at_start_of_two_spans,
+            true,
+        ),
+    ] {
+        for max_bytes in [None, Some(64 * 1024)] {
+            assert_equal(
+                &format!("{name}, caches bounded at {max_bytes:?}"),
+                objective_and_plan_cost(
+                    workload,
+                    &with_result_caches(max_bytes),
+                    raw_data_retained,
+                ),
+            );
+        }
+    }
+}
+
+/// A query that reaches a memo group the selected plan answers it another
+/// way. `quantile_over_time(0.9, m[5m])` within 1 % every 15 s reads a KLL
+/// chain through a cover and a merge. The median of the same window exactly,
+/// as a 1 h range on the same grid, is answered from raw rows (an exact
+/// quantile priced high, so the approximate one does not share them; 1,000
+/// series every 100 ms). Both quantiles reach the merge's memo group, so
+/// Stage 3 runs the merge at both queries' evaluations (241 steps every
+/// 15 s and one), while in the plan only the approximate query reads it,
+/// once every 15 s: the MILP charges 1,256/s more than `plan_cost`
+/// (485,519 against 484,263). Ignored: a known gap, which the debug check
+/// in `select_plan` reports; closing it needs a query's own reads in the
+/// selection's rates (`cost-terms-from-calibration.md`, section 1).
+#[test]
+#[ignore = "known gap: a query reaching a group it is answered another way counts in its rates"]
+fn the_objective_is_the_plan_cost_when_a_query_reaches_a_group_it_reads_another_way() {
+    let mut approximate = requested("quantile_over_time(0.9, m[5m])", 15_000, None);
+    approximate["requirements"] =
+        serde_json::json!({"accuracy": {"max_error": 0.01, "failure_probability": 0.01}});
+    let mut exact = requested(
+        "quantile_over_time(0.5, m[5m])",
+        15_000,
+        Some((15_000, 3_600_000)),
+    );
+    exact["requirements"] =
+        serde_json::json!({"accuracy": {"max_error": 0.0, "failure_probability": 0.0}});
+    let workload: PlanningWorkload = serde_json::from_value(serde_json::json!({
+        "query_workload": {"language": "promql", "repeating_queries": [approximate, exact]},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 10000.0}},
+            "sources": {"m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 100}},
+        },
+    }))
+    .unwrap();
+    let settings = CostInputs {
+        measured_operation_costs: serde_json::from_value(serde_json::json!({
+        "operators": [
+            {"operator": "Aggregate", "phase": "query_time", "measure": "quantile", "ns_per_unit": 1e4},
+            {"operator": "SummaryAgg", "phase": "query_time", "sketch": {"Kll": {"k": 200}}, "ns_per_unit": 1e4},
+            {"operator": "SummaryAgg", "phase": "query_time", "sketch": {"DDSketch": {"alpha": 0.01}}, "ns_per_unit": 1e4},
+        ],
+    }))
+    .unwrap(),
+        ..Default::default()
+    };
+    assert_equal(
+        "an approximate and an exact quantile on one grid",
+        objective_and_plan_cost(&workload, &settings, true),
+    );
+}
+
+/// `(sum by (job) (increase(http_errors_total[1h])) / on(job) group_left()
+/// sum by (job) (increase(http_requests_total[1h]))) > 0.01` every 15 s over
+/// two counters of 6 series sampled every 10 s (0.6 rows per second each),
+/// raw data retained. Each side keeps its counter's raw rows at ingestion
+/// for 15 s and reads them through a chain. The MILP charged each raw-row
+/// store at a slope taken over one more second of retention at its longest
+/// (1 h), where the rounded row count steps by a whole row: 1 row per
+/// second, not 0.6. Its optimum was 0.0595/s against `plan_cost`'s
+/// 0.0767/s. Retained raw rows are charged by their exact rate, so the
+/// cost is linear in the retention and the optimum is the plan's cost (the
+/// debug check in `select_plan`).
+#[test]
+fn the_objective_is_the_plan_cost_on_a_group_left_join_of_two_hour_increases() {
+    let counter =
+        serde_json::json!({"series_count": 6, "sample_interval": 10000, "metric_type": "counter"});
+    let w: PlanningWorkload = serde_json::from_value(serde_json::json!({
+        "query_workload": {"language": "promql", "repeating_queries": [{
+            "query": "(sum by (job) (increase(http_errors_total[1h])) / on(job) group_left() \
+                      sum by (job) (increase(http_requests_total[1h]))) > 0.01",
+            "demand": {"fixed_interval_at": {"interval": 15000, "evaluation_phase": 0}},
+            "requirements": {},
+            "predictability": {"predictable": {"known_at": null}},
+        }]},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 1.2}},
+            "sources": {"http_errors_total": counter, "http_requests_total": counter},
+        },
+    }))
+    .unwrap();
+    assert_equal(
+        "group_left join of two 1 h increases",
+        objective_and_plan_cost(&w, &CostInputs::default(), true),
     );
 }

@@ -149,7 +149,7 @@ fn arithmetic_union_matches_small_explicit_offset_sets() {
                     }
                     assert_eq!(
                         distinct_instants_per_request(&ranges),
-                        oracle.len() as u64,
+                        oracle.len() as f64,
                         "{ranges:?}"
                     );
                 }
@@ -255,7 +255,7 @@ fn a_not_materialized_node_is_computed_once_per_evaluation_grid() {
     )
     .unwrap();
     let recurrence = [fixed(10_000, 0), fixed(10_000, 0), fixed(30_000, 0)];
-    let rates = computations(&dag, &entries(&recurrence, None), 3600.0).unwrap();
+    let rates = computations(&dag, &entries(&recurrence, None), None, 3600.0).unwrap();
     for id in [0, 1] {
         assert_eq!(rates[&id].0, 2);
         close(rates[&id].1, 1.0 / 10.0 + 1.0 / 30.0);
@@ -291,7 +291,13 @@ fn a_range_query_computes_its_at_end_subtree_once_per_request() {
         step_ms: 10_000,
         span_ms: 3_600_000,
     };
-    let rates = computations(&dag, &entries(&[fixed(60_000, 0)], Some(hour)), 3600.0).unwrap();
+    let rates = computations(
+        &dag,
+        &entries(&[fixed(60_000, 0)], Some(hour)),
+        None,
+        3600.0,
+    )
+    .unwrap();
     close(rates[&2].1, 361.0 / 60.0);
     for id in [0, 1] {
         assert_eq!(rates[&id].0, 1);
@@ -343,6 +349,7 @@ fn a_shared_one_evaluation_at_end_shift_runs_its_input_once_per_request() {
     let rates = computations(
         &anchored_dag(AtModifier::End, vec![2, 2]),
         &entries(&recurrence, Some(span)),
+        None,
         3600.0,
     )
     .unwrap();
@@ -377,6 +384,7 @@ fn at_start_inputs_run_once_per_request_of_each_span() {
     let rates = computations(
         &anchored_dag(AtModifier::Start, vec![2, 2]),
         &entries,
+        None,
         3600.0,
     )
     .unwrap();
@@ -385,17 +393,17 @@ fn at_start_inputs_run_once_per_request_of_each_span() {
         close(rates[&id].1, 2.0 / 60.0);
     }
     close(
-        context_executions_per_second(Some(AtModifier::End), &entries, 3600.0).unwrap(),
+        context_executions_per_second(Some(AtModifier::End), &entries, None, 3600.0).unwrap(),
         1.0 / 60.0,
     );
     let same_start = [with_span(3_600_000), with_span(120_000)];
     close(
-        context_executions_per_second(Some(AtModifier::Start), &same_start, 3600.0).unwrap(),
+        context_executions_per_second(Some(AtModifier::Start), &same_start, None, 3600.0).unwrap(),
         2.0 / 60.0,
     );
     let twice = [with_span(120_000), with_span(120_000)];
     close(
-        context_executions_per_second(Some(AtModifier::Start), &twice, 3600.0).unwrap(),
+        context_executions_per_second(Some(AtModifier::Start), &twice, None, 3600.0).unwrap(),
         1.0 / 60.0,
     );
     let mut phase_70s = with_span(120_000);
@@ -403,8 +411,13 @@ fn at_start_inputs_run_once_per_request_of_each_span() {
     let mut phase_10s = with_span(120_000);
     phase_10s.recurrence = fixed(60_000, 10_000);
     close(
-        context_executions_per_second(Some(AtModifier::Start), &[phase_10s, phase_70s], 3600.0)
-            .unwrap(),
+        context_executions_per_second(
+            Some(AtModifier::Start),
+            &[phase_10s, phase_70s],
+            None,
+            3600.0,
+        )
+        .unwrap(),
         1.0 / 60.0,
     );
 }
@@ -436,6 +449,7 @@ fn an_instant_at_end_input_runs_in_the_evaluation_context() {
     let rates = computations(
         &anchored_dag(AtModifier::End, vec![2, 1]),
         &entries(&[fixed(60_000, 0), fixed(60_000, 0)], None),
+        None,
         3600.0,
     )
     .unwrap();
@@ -507,4 +521,39 @@ fn an_ingestion_time_reader_of_raw_rows_kept_at_ingestion_reads_one_batch() {
         Some(3_600_000),
     );
     close(over_kept_rows, over_arriving_rows);
+}
+
+/// A query-time node computed once per evaluation (not kept across
+/// evaluations) read by a 1 h range at 15 s steps every 20 s runs at every
+/// step of every request, 241 per 20 s; with an answer cache, at the steps
+/// a request computes, 4 per 20 s, as `context_executions_per_second`
+/// counts them (`computed_range`). A node kept across evaluations runs once
+/// per request either way.
+#[test]
+fn a_query_time_node_runs_at_the_steps_a_request_computes() {
+    let range = RangeEvaluation {
+        step_ms: 15_000,
+        span_ms: 3_600_000,
+    };
+    let entries = entries(&[fixed(20_000, 0)], Some(range));
+    let answers = Some(crate::AnswerCache {
+        retention_margin_ms: 60_000,
+        max_bytes: None,
+    });
+    let one_evaluation = Lifetime::OneEvaluation(asap_types::stages::StorageMedium::Memory);
+    let across = Lifetime::AcrossEvaluations(asap_types::stages::StorageMedium::Memory);
+    let rate = |lifetime, answer_cache| {
+        executions_per_second(
+            ExecutionTiming::QueryTime,
+            lifetime,
+            &entries,
+            answer_cache,
+            3600.0,
+        )
+        .unwrap()
+    };
+    close(rate(one_evaluation, None), 241.0 / 20.0);
+    close(rate(one_evaluation, answers), 4.0 / 20.0);
+    close(rate(across, None), 1.0 / 20.0);
+    close(rate(across, answers), 1.0 / 20.0);
 }

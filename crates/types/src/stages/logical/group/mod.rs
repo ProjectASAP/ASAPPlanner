@@ -234,6 +234,8 @@ fn depends_on_evaluation_time(operator: &Operator<MemoGroupAsInput<'_>>) -> bool
             !is_at_timestamp(&child.group().expression)
                 || child.group_properties().depends_on_evaluation_time
         }
+        // Selects the windows of the range before the evaluation time.
+        Operator::NonASAP(NonASAPOp::TimeRangeCover { .. }) => true,
         Operator::NonASAP(NonASAPOp::TimeShift { child, .. }) if is_at_timestamp(operator) => {
             reads_time_not_pinned_by_at(child)
         }

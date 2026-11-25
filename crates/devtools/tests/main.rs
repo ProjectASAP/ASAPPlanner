@@ -3,8 +3,6 @@
 //! One file: `cargo test -p asap-devtools --test devtools <file>::`.
 
 mod asap_lane;
-mod asap_planner;
-mod asap_planner_acceptance;
 mod cross_language;
 mod planner_fuzz;
 mod viewer_contract;

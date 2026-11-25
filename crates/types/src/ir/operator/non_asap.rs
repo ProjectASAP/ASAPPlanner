@@ -155,6 +155,26 @@ pub enum NonASAPOp<C = Rc<OperatorNode>> {
     },
     /// PromQL `offset` / `@`: moves when `child` is evaluated.
     TimeShift { shift: TimeShift, child: C },
+    /// The windows of `levels` (tumbling-window chains, widest first, each
+    /// width a multiple of the next) that tile `(T - offset - range,
+    /// T - offset]` at evaluation time `T`: the widest whole windows inside
+    /// it, then, in each edge left over, the next level's whole windows, down
+    /// to the narrowest level
+    /// ([`cover_windows`](crate::ir::operator::tumbling_window_chain::cover_windows)).
+    /// Output: the selected windows' rows, a time-indexed state with the
+    /// levels' schema. Example: `range` 1 h over chains of 5 min and 15 s at
+    /// `T` = 100 h + 105 s selects 11 windows of 5 min and 20 of 15 s; with
+    /// `offset_ms` 1 h (PromQL `[1h] offset 1h`), the same windows an hour
+    /// earlier.
+    TimeRangeCover {
+        range: Duration,
+        /// How far before the evaluation time the range ends, in ms: a
+        /// PromQL `offset` the cover reads under, a multiple of every level's
+        /// width; 0 (default) without one.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        offset_ms: u64,
+        levels: Vec<C>,
+    },
     /// PromQL `vector(s)`: a label-less instant vector carrying a scalar.
     PromqlVectorFromScalar(ScalarExpr<C>),
     /// ρ — PromQL `label_replace` / `label_join`.
@@ -219,6 +239,7 @@ impl<C> NonASAPOp<C> {
             Join { left, right, .. } | SetOp { left, right, .. } => vec![left, right],
             BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
             Concat { children, .. } => children.iter().collect(),
+            TimeRangeCover { levels, .. } => levels.iter().collect(),
         }
     }
 
@@ -266,6 +287,7 @@ impl<C> NonASAPOp<C> {
             | Limit { .. }
             | BinaryOp { .. }
             | TimeRange { .. }
+            | TimeRangeCover { .. }
             | TimeShift { .. }
             | PromqlInfoEnrich { .. }
             | PromqlSeriesSample { .. }
@@ -497,6 +519,15 @@ impl<C> NonASAPOp<C> {
                 shift: *shift,
                 child: f(child),
             },
+            TimeRangeCover {
+                range,
+                offset_ms,
+                levels,
+            } => TimeRangeCover {
+                range: *range,
+                offset_ms: *offset_ms,
+                levels: levels.iter().map(&mut *f).collect(),
+            },
             PromqlRelabel { dst, value, child } => {
                 let child = f(child);
                 PromqlRelabel {
@@ -544,6 +575,7 @@ impl<C> NonASAPOp<C> {
             BinaryOp { .. } => "BinaryOp",
             SQLWindowFunc { .. } => "SQLWindowFunc",
             TimeRange { .. } => "TimeRange",
+            TimeRangeCover { .. } => "TimeRangeCover",
             TimeShift { .. } => "TimeShift",
             PromqlVectorFromScalar(_) => "PromqlVectorFromScalar",
             PromqlRelabel { .. } => "PromqlRelabel",
@@ -634,6 +666,7 @@ impl<I: OperatorInput> NonASAPOp<I> {
             | BinaryOp { .. }
             | TimeRange { .. }
             | TimeShift { .. }
+            | TimeRangeCover { .. }
             | PromqlVectorFromScalar(_)
             | PromqlRelabel { .. }
             | PromqlInfoEnrich { .. }
@@ -752,6 +785,11 @@ impl<I: OperatorInput> NonASAPOp<I> {
             | PromqlInfoEnrich { child, .. }
             | TimeRange { child, .. }
             | TimeShift { child, .. } => child.schema().clone(),
+            // The levels' rows, which share one schema (`validate_inputs`).
+            TimeRangeCover { levels, .. } => {
+                self.validate_inputs()?;
+                levels[0].schema().clone()
+            }
 
             // ρ — relabel preserves every input column and writes one label
             // `dst` (Utf8): overwritten in place if it already exists, else
@@ -988,6 +1026,8 @@ impl<I: OperatorInput> NonASAPOp<I> {
                 Source::Table { .. } => OperatorResultKind::Relation,
             },
             Values { .. } | SQLWindowFunc { .. } => OperatorResultKind::Relation,
+            // The windows it selects from time-indexed states.
+            TimeRangeCover { .. } => OperatorResultKind::State,
             TimeRange { child, .. } if child.result_kind() == OperatorResultKind::Relation => {
                 OperatorResultKind::Relation
             }
@@ -1156,6 +1196,45 @@ impl<I: OperatorInput> NonASAPOp<I> {
             Concat { children, .. } => {
                 for child in children {
                     no_state(child, "Concat")?;
+                }
+            }
+            TimeRangeCover { range, levels, .. } => {
+                let range_ms = u64::try_from(range.as_millis()).unwrap_or(u64::MAX);
+                let widths: Vec<u64> = levels
+                    .iter()
+                    .map(|level| {
+                        level
+                            .operator()
+                            .chain_tumbling_window_width_ms()
+                            .ok_or_else(|| {
+                                invalid("a time-range cover reads tumbling-window chains")
+                            })
+                    })
+                    .collect::<Result<_, _>>()?;
+                if widths.len() < 2 {
+                    return Err(invalid(
+                        "a time-range cover reads at least two chain levels",
+                    ));
+                }
+                for pair in widths.windows(2) {
+                    if pair[1] == 0 || pair[0] <= pair[1] || !pair[0].is_multiple_of(pair[1]) {
+                        return Err(invalid(
+                            "a time-range cover's levels are widest first, each a multiple of the next",
+                        ));
+                    }
+                }
+                if !range_ms.is_multiple_of(widths[widths.len() - 1]) {
+                    return Err(invalid(
+                        "a time-range cover's range is whole windows of its narrowest level",
+                    ));
+                }
+                if levels
+                    .iter()
+                    .any(|level| level.schema() != levels[0].schema())
+                {
+                    return Err(invalid(
+                        "a time-range cover's levels have different schemas",
+                    ));
                 }
             }
             Aggregate {
@@ -1424,6 +1503,12 @@ fn default_proj_name<I: OperatorInput>(
 /// Whether any aggregate measure has its own input predicate.
 pub fn any_measure_filtered<C>(filters: &[Option<Predicate<C>>]) -> bool {
     filters.iter().any(Option::is_some)
+}
+
+/// Whether `value` is 0, for `skip_serializing_if`: a cover without an offset
+/// serializes as before the field existed.
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[cfg(test)]

@@ -309,6 +309,8 @@ impl Memo {
             // Its child's rows at each step of its range, which no declared
             // fact bounds here.
             NonASAPOp::PromqlSubquery { .. } => None,
+            // States, not rows.
+            NonASAPOp::TimeRangeCover { .. } => None,
         }
     }
 

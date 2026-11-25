@@ -285,8 +285,16 @@ fn one_range_free_chain_group_serves_every_range_and_offset() {
     }
     let logical = pass2(memo, &vec![entry(60_000); 3]);
     let memo = &logical.memo;
+    // C's hour also gets wider levels (5 and 15 min, built from this
+    // chain; `multi_level_windows`): one chain group of 60 s.
     let chains = groups_where(memo, |e| {
-        matches!(e, Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }))
+        matches!(
+            e,
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                tumbling_window_width_ms: 60_000,
+                ..
+            })
+        )
     });
     let [chain] = chains[..] else {
         panic!("one chain group, found {chains:?}");

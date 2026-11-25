@@ -331,6 +331,7 @@ fn non_asap_columns(
         }
         SetOp { left, right, .. } => agreed(&[columns_of(left), columns_of(right)]),
         Concat { children } => agreed(&children.iter().map(columns_of).collect::<Vec<_>>()),
+        TimeRangeCover { levels, .. } => agreed(&levels.iter().map(columns_of).collect::<Vec<_>>()),
         SQLWindowFunc { child, .. } => {
             let mut columns = columns_of(child);
             columns.push(ColumnProperties::default());
@@ -467,6 +468,8 @@ fn asap_columns(op: &ASAPOp<Input<'_>>, output: &Schema) -> Vec<ColumnProperties
             }
             None => all_computed(output.fields.len()),
         },
+        // The narrower chain's windows merged: its columns.
+        SummaryMergeWindows { child, .. } => columns_of(child),
         SummaryMerge { children, group_by } => {
             // The windows a `TimeRange` over a chain selects merge into the
             // chain's build over that range.

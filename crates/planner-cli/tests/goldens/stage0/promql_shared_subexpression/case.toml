@@ -1,0 +1,4 @@
+why = "identical queries hash-cons to one root group; sum(rate(x)) and rate(x) have different root groups"
+args = ["--run-until", "stage0"]
+same_group = [["q1", "q3"]]
+different_group = [["q1", "q2"]]

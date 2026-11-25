@@ -7,12 +7,13 @@
 //! that pruned the same candidates in Stage 2 (a throwaway patch, since
 //! deleted); the counts of pruned candidates are the probe's.
 
-use asap_devtools::planning_stages::{lower_promql_roots, run_planning_stages_over};
+use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
 use asap_planner::{
     CandidateExclusion, CounterSemanticsSupport, DeploymentCapabilities, ErrorSelectingPlan,
     ExclusionSource, OperatorKind, PlanningModels, PlanningRun, RejectionCause, Selection,
     SelectionError, SketchAlgorithm, SketchParameterRange, SketchParams, SummaryFamily,
 };
+use asap_planner_cli::planning_stages::{lower_promql_roots, run_planning_stages_over};
 use asap_types::deployment_capabilities::CandidateDescription;
 use asap_types::ir::flat::NodeId;
 use asap_types::ir::operator::arguments::Reduction;
@@ -106,7 +107,20 @@ fn planned(workload: &PlanningWorkload, capabilities: &DeploymentCapabilities) -
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap();
     let roots = lower_promql_roots(workload).unwrap();
-    let models = PlanningModels::builtin().with_deployment_capabilities(capabilities);
+    // Disk at no cost: these plans differ in which candidates a
+    // deployment excludes, and the raw data a query-time scan keeps would
+    // make scan twins near-equal in cost, a tie the solver may break
+    // either way.
+    let cost_inputs = CostInputs {
+        cost_model: CostModel::UsageOverTime(ResourceUnitCost {
+            cost_per_disk_byte_second: 0.0,
+            ..ResourceUnitCost::illustrative()
+        }),
+        ..CostInputs::default()
+    };
+    let models = PlanningModels::builtin()
+        .with_cost_inputs(&cost_inputs)
+        .with_deployment_capabilities(capabilities);
     run_planning_stages_over(roots, &entries, &data, models)
         .unwrap()
         .run
@@ -191,9 +205,11 @@ fn some_node_matches(plan: &PhysicalASAPDAG, exclusion: &CandidateExclusion) -> 
 }
 
 /// Asserts the selected plan costs `expected` per second, as observed (six
-/// decimals).
+/// decimals), at the default costs with disk at no cost ([`planned`]).
 fn assert_cost(selection: &Selection, expected: f64) {
-    let cost = selection.selected_plan_cost_per_second;
+    let cost = selection
+        .selected_plan_cost_per_second
+        .expect("cost model 1");
     assert!(
         (cost - expected).abs() <= 5e-7,
         "cost {cost} per second, expected {expected}"
@@ -549,23 +565,33 @@ fn a_target_without_mergeable_rate_state_builds_rate_within_one_evaluation() {
     };
     let cases = [
         ("rate", "5m", ExactKind::Counter, 0.274034, 0.367670),
-        ("increase", "1h", ExactKind::Counter, 1.436831, 3.953712),
+        ("increase", "1h", ExactKind::Counter, 1.374738, 3.953712),
     ];
     for (function, range, kind, unrestricted_cost, restricted_cost) in cases {
         let workload = counter_workload(function, range);
         let unrestricted = planned(&workload, &DeploymentCapabilities::default());
         let (plan, selection) = selected(&unrestricted);
-        assert_eq!(
-            operators(plan),
-            [
-                (OperatorKind::Scan, IngestionTime),
-                (OperatorKind::SummaryTumblingWindowChain, IngestionTime),
-                (OperatorKind::TimeRange, QueryTime),
-                (OperatorKind::SummaryMerge, QueryTime),
-                (OperatorKind::FinalizeExactAccumulator, QueryTime),
+        // Over an hour, a 1 min level merged from the chain and a cover
+        // over both (`multi_level_window_chains.md`); over 5 min, the chain.
+        let windows: &[(OperatorKind, ExecutionTiming)] = match range {
+            "1h" => &[
+                (OperatorKind::SummaryMergeWindows, IngestionTime),
+                (OperatorKind::TimeRangeCover, QueryTime),
             ],
-            "{function}"
-        );
+            _ => &[(OperatorKind::TimeRange, QueryTime)],
+        };
+        let expected: Vec<(OperatorKind, ExecutionTiming)> = [
+            (OperatorKind::Scan, IngestionTime),
+            (OperatorKind::SummaryTumblingWindowChain, IngestionTime),
+        ]
+        .into_iter()
+        .chain(windows.iter().copied())
+        .chain([
+            (OperatorKind::SummaryMerge, QueryTime),
+            (OperatorKind::FinalizeExactAccumulator, QueryTime),
+        ])
+        .collect();
+        assert_eq!(operators(plan), expected, "{function}");
         assert_eq!(builds(plan), vec![(FieldDataType::exact(kind), None)]);
         assert_cost(selection, unrestricted_cost);
 

@@ -43,6 +43,17 @@ test('the fixture is a valid memo; a document without one has nothing to check',
   assert.deepEqual(call('validateMemo', undefined, 1), []);
 });
 
+test('every candidate origin the planner emits is accepted, multi_level_windows included', () => {
+  for (const origin of ['pass1', 'tumbling_windows', 'multi_level_windows', 'rollup', 'top_k_reuse']) {
+    const memo = fixture();
+    memo.steps[1].groups[4].candidates[0].origin = origin;
+    const counts = {};
+    for (const c of memo.steps[1].groups[4].candidates) counts[c.origin] = (counts[c.origin] || 0) + 1;
+    memo.steps[1].groups[4].candidate_count_by_origin = counts;
+    assert.deepEqual(call('validateMemo', memo, 1), [], origin);
+  }
+});
+
 test('memo violations are reported', () => {
   const broken = (edit) => { const memo = fixture(); edit(memo); return call('validateMemo', memo, 1).join('\n'); };
   assert.match(broken((m) => { m.steps = []; }), /memo.steps must be a non-empty array/);

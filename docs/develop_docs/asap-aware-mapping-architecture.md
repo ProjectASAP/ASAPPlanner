@@ -28,7 +28,8 @@ in `asap-integration-tests` (`crate_graph`) checks these edges with
 | `asap-stage3-plan-selection` (`crates/stage3-plan-selection`) | Stage 3: `select_plan` over Stage 2's output; costs each candidate and selectable edge with `asap-cost`, selects with the baseline MILP and builds the plan (`PhysicalASAPDAG`) |
 | `asap-planner` (`crates/planner`) | The facade: `e2e_plan` runs Stage 0, then the optimization pass (`Stage1ToStage3Pass` by default), which orchestrates Stages 1–3 (`run_planning`); the planning models (`PlanningModels`) and the `OptimizationPass` trait |
 | `asap-executor` (`crates/executor`) | Stage 4, the reference executor: operators and summary kernels over `asap_sketchlib`; it runs a `PhysicalASAPDAG` |
-| `asap-devtools` | `asap_planner` and the other inspection tools and the candidate labels |
+| `asap-planner-cli` (`crates/planner-cli`) | `asap_planner` and its output: the stage text, the JSON document and the candidate labels |
+| `asap-devtools` | The inspection tools: corpus coverage, the planner fuzzer, the benchmark lane |
 
 ```text
 asap-types ◄── frontends (Stage 0)
@@ -130,6 +131,6 @@ No stage caps the candidates it plans, and neither does `asap_planner`.
   the design document's examples through every stage;
   `reuse_rules.rs`, `deployment_exclusions.rs`, `physical_properties_e2e.rs`
   and `pass1_candidates.rs` cover single rules end to end.
-- `crates/devtools/tests/asap_planner.rs` checks the stage document and the
+- `crates/planner-cli/tests/asap_planner.rs` checks the stage document and the
   committed viewer examples; `asap_planner_acceptance.rs` checks
   `--run-until` and the refused flags.

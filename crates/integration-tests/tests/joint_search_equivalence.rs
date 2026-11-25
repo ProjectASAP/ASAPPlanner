@@ -6,11 +6,11 @@
 //! Larger fixtures check validated behavior without asserting global optimality.
 
 use asap_cost::{ClusterLimits, ClusterObjective, CostInputs, CostModel};
-use asap_devtools::planning_stages::{lower_promql_roots, lower_sql_roots};
 use asap_planner::{
     run_planning, CandidateExclusion, ErrorSelectingPlan, PlanSearchSettings, PlanningModels,
     PlanningRun, RejectionCause, SelectionError,
 };
+use asap_planner_cli::planning_stages::{lower_promql_roots, lower_sql_roots};
 use asap_types::accuracy::AccuracyTarget;
 use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::operator::AggIntent;
@@ -60,7 +60,10 @@ fn workload_of(queries: &[(&str, u32)], accuracy: AccuracyTarget) -> PlanningWor
                         metric.into(),
                         SourceFacts {
                             series_count: Some(8),
-                            rows_held: Some(80),
+                            // Five minutes of each series, the longest
+                            // range these queries read: a query-time plan
+                            // reads every row it asks for.
+                            rows_held: Some(2_400),
                             sample_interval: Some(DurationMs(1000)),
                             metric_type: Some(if metric == "c_total" {
                                 PrometheusMetricType::Counter
@@ -348,7 +351,9 @@ fn rootless_request_overhead_is_charged() {
     );
     let (plan, selection) = result.selection.as_ref().unwrap();
     assert!(plan.nodes.is_empty(), "a literal needs no operator node");
-    let cost = selection.selected_plan_cost_per_second;
+    let cost = selection
+        .selected_plan_cost_per_second
+        .expect("cost model 1");
     assert!((cost - 2_000.0).abs() < 1e-6, "{cost}");
 }
 
@@ -473,4 +478,399 @@ fn seeded_small_mixed_workloads_return_validated_plans() {
             &DeploymentCapabilities::default(),
         );
     }
+}
+
+/// A query-time computation over raw rows its source holds fewer of than
+/// arrive over the range it needs is not offered: it would answer from fewer
+/// samples than asked. `sum_over_time(m[1m])` every 60 s over 8 series at one
+/// sample a second needs 60 rows a series per state, 480 over the minute,
+/// but `m` holds 80 rows: every query-time chain (and the query-time exact
+/// sum) is pruned with `ReadsFewerSourceRowsThanItsRange { rows: 80,
+/// rows_in_range: 480 }`, and the selected plan builds the chain at
+/// ingestion time, where it sees every row.
+#[test]
+fn a_query_time_computation_short_of_its_source_rows_is_not_offered() {
+    use asap_types::ir::properties::ExecutionTiming;
+    use asap_types::ir::ASAPOp;
+    use asap_types::ir::Operator;
+    use asap_types::stages::PruneReason;
+    let mut workload = workload_of(&[("sum_over_time(m[1m])", 60_000)], AccuracyTarget::exact());
+    // `m` holds 80 rows, ten seconds of its 8 series.
+    workload
+        .data_workload
+        .as_mut()
+        .unwrap()
+        .sources
+        .get_mut("m")
+        .unwrap()
+        .rows_held = Some(80);
+    let run = run_workload(
+        &workload,
+        &CostInputs::default(),
+        &DeploymentCapabilities {
+            raw_data_retained: true,
+            ..Default::default()
+        },
+    );
+    let physical = run.physical_asap_candidates.as_ref().unwrap();
+    let is_chain = |candidate: &asap_types::stages::PhysicalCandidate| {
+        matches!(
+            physical
+                .logical_candidates
+                .memo
+                .candidate(candidate.logical_candidate_id)
+                .expression
+                .operator,
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+        )
+    };
+    let (plan, selection) = run.selection.as_ref().unwrap();
+    // Every query-time chain the selection could have read is pruned for
+    // reading 80 of the 480 rows of its minute.
+    let query_time_chains: Vec<_> = physical
+        .physical_candidates
+        .iter()
+        .filter(|candidate| {
+            is_chain(candidate)
+                && candidate.physical_properties.timing() == ExecutionTiming::QueryTime
+        })
+        .collect();
+    assert!(
+        !query_time_chains.is_empty(),
+        "Stage 2 offers a query-time chain"
+    );
+    for chain in &query_time_chains {
+        assert!(
+            selection.pruned_candidates.iter().any(|pruned| {
+                pruned.candidate == **chain
+                    && pruned.reason
+                        == PruneReason::ReadsFewerSourceRowsThanItsRange {
+                            rows: 80,
+                            rows_in_range: 480,
+                        }
+            }),
+            "{chain:?} is not pruned for its source rows: {:?}",
+            selection.pruned_candidates
+        );
+    }
+    // The selected plan builds the chain at ingestion time.
+    let chains: Vec<_> = plan
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+        })
+        .collect();
+    assert!(
+        !chains.is_empty(),
+        "the plan builds a chain: {:#?}",
+        plan.nodes
+            .iter()
+            .map(|n| (
+                format!("{:?}", n.payload)
+                    .chars()
+                    .take(90)
+                    .collect::<String>(),
+                n.output_state.timing
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert!(chains
+        .iter()
+        .all(|node| node.output_state.timing == ExecutionTiming::IngestionTime));
+}
+
+/// One query every `every_ms` over `m` alone: `series` series sampled every
+/// `sample_interval_ms`, holding `rows_held` rows, arriving as `arrival`.
+fn one_source_workload(
+    query: &str,
+    every_ms: u32,
+    accuracy: AccuracyTarget,
+    series: u64,
+    sample_interval_ms: u64,
+    rows_held: u64,
+    arrival: DataArrival,
+) -> PlanningWorkload {
+    one_source_workload_of(
+        &[(query, every_ms)],
+        accuracy,
+        series,
+        sample_interval_ms,
+        rows_held,
+        arrival,
+    )
+}
+
+/// Queries (each every so many ms) over `m` alone, as [`one_source_workload`].
+fn one_source_workload_of(
+    queries: &[(&str, u32)],
+    accuracy: AccuracyTarget,
+    series: u64,
+    sample_interval_ms: u64,
+    rows_held: u64,
+    arrival: DataArrival,
+) -> PlanningWorkload {
+    let mut workload = workload_of(queries, accuracy);
+    let data = workload.data_workload.as_mut().unwrap();
+    data.arrival = arrival;
+    data.sources.retain(|source, _| source == "m");
+    let m = data.sources.get_mut("m").unwrap();
+    m.series_count = Some(series);
+    m.sample_interval = Some(DurationMs(sample_interval_ms));
+    m.rows_held = Some(rows_held);
+    workload
+}
+
+/// Whether any candidate was pruned for reading fewer raw rows than its
+/// range.
+fn pruned_for_too_few_rows(run: &PlanningRun) -> bool {
+    use asap_types::stages::PruneReason;
+    run.selection.as_ref().is_ok_and(|(_, selection)| {
+        selection.pruned_candidates.iter().any(|pruned| {
+            matches!(
+                pruned.reason,
+                PruneReason::ReadsFewerSourceRowsThanItsRange { .. }
+            )
+        })
+    })
+}
+
+/// Data at rest is all held: 1,000 series every 15 s holding 60,000 rows
+/// (fifteen minutes) answer `sum_over_time(m[1h])` from every row there is,
+/// so its query-time plan is offered (nothing arrives to build at
+/// ingestion time).
+#[test]
+fn data_at_rest_is_never_short_of_its_range() {
+    let workload = one_source_workload(
+        "sum_over_time(m[1h])",
+        60_000,
+        AccuracyTarget::exact(),
+        1_000,
+        15_000,
+        60_000,
+        DataArrival::AtRest,
+    );
+    let run = run_workload(
+        &workload,
+        &CostInputs::default(),
+        &DeploymentCapabilities::default(),
+    );
+    assert!(!pruned_for_too_few_rows(&run));
+}
+
+/// A query-time build counts the rows it reads at the exact rate, as a
+/// chain does: one series every 25 s over 1 min holds 2.4 rows (a time
+/// range rounds it to 2, a chain's window to 3 before); every 3 s over
+/// 10 s, 3.33 (3 and 4). Planning runs `logical_output`'s debug assertion
+/// that candidates of the same states fold the same rows.
+#[test]
+fn query_time_builds_fold_the_exact_rows_of_their_range() {
+    for (query, every_ms, sample_interval_ms) in [
+        ("quantile_over_time(0.9, m[1m])", 60_000, 25_000),
+        ("quantile_over_time(0.9, m[10s])", 10_000, 3_000),
+    ] {
+        let workload = one_source_workload(
+            query,
+            every_ms,
+            AccuracyTarget::max_error(0.05),
+            1,
+            sample_interval_ms,
+            1_000_000,
+            DataArrival::Ingesting {
+                rows_per_second: 1_000.0 / sample_interval_ms as f64,
+                max_out_of_order_ms: None,
+            },
+        );
+        run_workload(
+            &workload,
+            &CostInputs::default(),
+            &DeploymentCapabilities::default(),
+        );
+    }
+}
+
+/// A label filter passes a share of the rows on; the states over it still
+/// fold alike whichever candidate builds them (the debug assertion).
+#[test]
+fn a_filtered_quantile_folds_the_same_rows_at_every_timing() {
+    let workload = one_source_workload(
+        r#"quantile_over_time(0.9, m{job="a"}[5m])"#,
+        60_000,
+        AccuracyTarget::max_error(0.05),
+        1_000,
+        15_000,
+        100_000_000,
+        DataArrival::Ingesting {
+            rows_per_second: 1_000.0 / 15.0,
+            max_out_of_order_ms: None,
+        },
+    );
+    run_workload(
+        &workload,
+        &CostInputs::default(),
+        &DeploymentCapabilities::default(),
+    );
+}
+
+/// An offset reaches further back than its range: with five minutes held,
+/// `sum_over_time(m[5m] offset 5m)` needs the five before them, none of
+/// which are held, so its query-time plans are not offered (the plan builds
+/// a chain at ingestion time, which keeps ten minutes).
+#[test]
+fn an_offset_counts_in_the_range_a_read_needs() {
+    use asap_types::ir::properties::ExecutionTiming;
+    use asap_types::ir::ASAPOp;
+    let query = "sum_over_time(m[5m] offset 5m)";
+    let workload = one_source_workload(
+        query,
+        60_000,
+        AccuracyTarget::exact(),
+        8,
+        1_000,
+        8 * 300,
+        DataArrival::Ingesting {
+            rows_per_second: 8.0,
+            max_out_of_order_ms: None,
+        },
+    );
+    let roots = lower_promql_roots(&workload).unwrap();
+    let entries: Vec<_> = workload.query_workload.entries().collect();
+    let settings = CostInputs::default();
+    let deployment = DeploymentCapabilities {
+        raw_data_retained: true,
+        ..Default::default()
+    };
+    let run = run(
+        &roots,
+        &entries,
+        workload.data_workload.as_ref().unwrap(),
+        PlanningModels::builtin()
+            .with_cost_inputs(&settings)
+            .with_deployment_capabilities(&deployment),
+        false,
+    );
+    let (plan, _) = run
+        .selection
+        .as_ref()
+        .unwrap_or_else(|error| panic!("{query}: {error}"));
+    assert!(pruned_for_too_few_rows(&run), "{query}");
+    // The plan builds its chain at ingestion time.
+    let chains: Vec<_> = plan
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.payload,
+                PhysicalASAPOperatorPayload::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+        })
+        .collect();
+    assert!(!chains.is_empty(), "{query}: the plan builds no chain");
+    assert!(chains
+        .iter()
+        .all(|node| node.output_state.timing == ExecutionTiming::IngestionTime));
+}
+
+/// A short range sharing its scan with a longer one reads the newest rows,
+/// not the oldest part of the longer reach: with 30 min of 8 series held,
+/// `absent_over_time(m[5m])` (only a query-time plan) reads its 5 min in
+/// full, while `sum_over_time(m[1h])` short of its hour builds at ingestion
+/// time.
+#[test]
+fn a_short_range_sharing_a_scan_with_a_longer_one_reads_its_newest_rows() {
+    let workload = one_source_workload_of(
+        &[
+            ("absent_over_time(m[5m])", 60_000),
+            ("sum_over_time(m[1h])", 60_000),
+        ],
+        AccuracyTarget::exact(),
+        8,
+        1_000,
+        8 * 1_800,
+        DataArrival::Ingesting {
+            rows_per_second: 8.0,
+            max_out_of_order_ms: None,
+        },
+    );
+    run_workload(
+        &workload,
+        &CostInputs::default(),
+        &DeploymentCapabilities::default(),
+    );
+}
+
+/// A per-series aggregate feeding a build counts each source row once:
+/// `sum(sum_over_time(m[10s]))` over 1,000 series every 15 s folds 666.67
+/// samples per 10 s whether its sum is built over the per-series sums or
+/// over the samples (the debug assertion in `logical_output`).
+#[test]
+fn a_per_series_aggregate_under_a_build_counts_each_source_row_once() {
+    for accuracy in [AccuracyTarget::exact(), AccuracyTarget::max_error(0.05)] {
+        let workload = one_source_workload(
+            "sum(sum_over_time(m[10s]))",
+            10_000,
+            accuracy,
+            1_000,
+            15_000,
+            100_000_000,
+            DataArrival::Ingesting {
+                rows_per_second: 1_000.0 / 15.0,
+                max_out_of_order_ms: None,
+            },
+        );
+        run_workload(
+            &workload,
+            &CostInputs::default(),
+            &DeploymentCapabilities::default(),
+        );
+    }
+}
+
+/// Every range read of raw rows is checked against what its sources hold,
+/// whatever the other readers of its scan: with 10 min of 8 series held
+/// while rows keep arriving, `sum_over_time(m[1h])` beside
+/// `sum_over_time(m[5m] offset 5m)` is not offered at query time (it would
+/// read 4,800 of the 28,800 rows of its hour), and the plan builds it at
+/// ingestion time.
+#[test]
+fn a_long_range_beside_an_offset_one_is_checked_against_the_rows_held() {
+    use asap_types::stages::PruneReason;
+    let workload = one_source_workload_of(
+        &[
+            ("sum_over_time(m[1h])", 60_000),
+            ("sum_over_time(m[5m] offset 5m)", 60_000),
+        ],
+        AccuracyTarget::exact(),
+        8,
+        1_000,
+        8 * 600,
+        DataArrival::Ingesting {
+            rows_per_second: 8.0,
+            max_out_of_order_ms: None,
+        },
+    );
+    let run = run_workload(
+        &workload,
+        &CostInputs::default(),
+        &DeploymentCapabilities::default(),
+    );
+    let (_, selection) = run.selection.as_ref().unwrap();
+    assert!(
+        selection.pruned_candidates.iter().any(|pruned| matches!(
+            pruned.reason,
+            PruneReason::ReadsFewerSourceRowsThanItsRange {
+                rows_in_range: 28_800,
+                ..
+            }
+        )),
+        "the hour's query-time read is not pruned: {:?}",
+        selection
+            .pruned_candidates
+            .iter()
+            .map(|pruned| pruned.reason)
+            .collect::<Vec<_>>()
+    );
 }

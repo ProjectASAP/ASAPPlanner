@@ -25,40 +25,58 @@ fn column_bytes(field: &Field) -> u64 {
     }
 }
 
-/// Bytes a summary state's output row holds beside its state: its labels
-/// and its window's time, each at [`column_bytes`] except the series
-/// identity, which a state's row holds its own copy of, at
-/// `SERIES_IDENTITY_BYTES`. Example: a stored per-series Sum carrying
-/// `job` holds its window time, `job` and the series identity: 8 + 16 + 64
-/// = 88 bytes beside its 24-byte sealed state, 112 in all.
-pub(crate) fn state_row_bytes_beside_state(schema: &Schema) -> u64 {
-    schema
-        .fields
-        .iter()
-        .map(|field| match &field.dtype {
-            FieldDataType::Sketch(..) | FieldDataType::ExactAggregate(..) => 0,
-            FieldDataType::Plain(DataType::Utf8) if field.name == PROMQL_SERIES_IDENTITY => {
-                SERIES_IDENTITY_BYTES
-            }
-            _ => column_bytes(field),
+/// Bytes a summary state's output row holds beside its state. A
+/// per-series row (one with the series identity) holds
+/// [`DataPlaneExecution::stored_row_bytes_beside_state`](crate::DataPlaneExecution)
+/// (its window's time and its series key) and no label text, its labels
+/// being derived from the identity; a plain column beside them other than
+/// the 8-byte window time (a value) is counted at [`column_bytes`]. Any
+/// other row holds its window's time and its group keys, each at
+/// [`column_bytes`]. Example: a per-series Sum carrying `job` holds 72
+/// bytes beside its 24-byte sealed state (at the default), 96 in all; a
+/// Sum grouped by `job` holds 8 + 16 = 24.
+pub(crate) fn state_row_bytes_beside_state(
+    schema: &Schema,
+    stored_row_bytes_beside_state: u64,
+) -> u64 {
+    let not_state = || {
+        schema.fields.iter().filter(|field| {
+            !matches!(
+                field.dtype,
+                FieldDataType::Sketch(..) | FieldDataType::ExactAggregate(..)
+            )
         })
-        .sum()
+    };
+    if !not_state().any(|field| field.name == PROMQL_SERIES_IDENTITY) {
+        return not_state().map(column_bytes).sum();
+    }
+    // Text columns are the identity and labels derived from it; the
+    // window time is in `stored_row_bytes_beside_state`.
+    let other_plain_bytes: u64 = not_state()
+        .filter(|field| field.dtype != FieldDataType::Plain(DataType::Utf8))
+        .map(column_bytes)
+        .sum();
+    stored_row_bytes_beside_state + other_plain_bytes.saturating_sub(WINDOW_TIME_BYTES)
 }
+
+/// Bytes of a state row's window time, a timestamp at [`column_bytes`].
+const WINDOW_TIME_BYTES: u64 = 8;
 
 /// Bytes of the state one row of `edge` holds: its bytes per row without
 /// what the row holds beside its state ([`state_row_bytes_beside_state`] of
 /// the producer's `schema`). Example: 1,000 rows of stored per-series Sums
-/// carrying `job`, 112,000 bytes, hold 112 − 88 = 24 bytes of state each.
-pub(crate) fn state_bytes_per_row(edge: EdgeStatistics, schema: &Schema) -> u64 {
+/// carrying `job`, 96,000 bytes, hold 96 − 72 = 24 bytes of state each.
+pub(crate) fn state_bytes_per_row(
+    edge: EdgeStatistics,
+    schema: &Schema,
+    stored_row_bytes_beside_state: u64,
+) -> u64 {
     edge.bytes_per_row()
-        .saturating_sub(state_row_bytes_beside_state(schema))
+        .saturating_sub(state_row_bytes_beside_state(
+            schema,
+            stored_row_bytes_beside_state,
+        ))
 }
-
-/// Bytes of one series identity in a state's row: its serialized label
-/// set, e.g. `{"instance":"host-17:9100","job":"api","region":"r1"}`
-/// (about 55 bytes), and the column's 4-byte offset, rounded up. An
-/// assumption: the data workload declares no label lengths.
-const SERIES_IDENTITY_BYTES: u64 = 64;
 
 /// Exact state that keeps every value or item of its group, so grows with
 /// the data; other exact accumulators are fixed-size.
@@ -119,10 +137,13 @@ pub fn summary_state_bytes(
 /// not a summary sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StateInputRows {
-    /// Input rows one state folds, the average over its states rounded up;
-    /// `None` when unknown, which sizes it for every value it can be assumed
-    /// to see.
-    pub rows_per_state: Option<u64>,
+    /// Source rows one state folds, on average over its states, exactly
+    /// (not rounded: a merge of 30 windows of 0.67 rows folds 20, not 30);
+    /// [`StateInputRows::rows_per_state`] rounds it once. A state over
+    /// rows another node already folded (a sum of per-series sums) counts
+    /// the source rows behind them. `None` when unknown, which sizes it
+    /// for every value it can be assumed to see.
+    pub folded_rows_per_state: Option<f64>,
     /// Whether every value folded is proven non-negative (a source column
     /// passed on unchanged, which every source declares non-negative), so a
     /// DDSketch fills no negative store.
@@ -146,28 +167,48 @@ pub struct StateInputRows {
 }
 
 impl StateInputRows {
+    /// The source rows one state folds, rounded up once from
+    /// [`StateInputRows::folded_rows_per_state`] (within a relative 1e-9,
+    /// so 200,001.000000001 rows are 200,001), at least 1; `None` when
+    /// unknown. Every formula reads the rows through this.
+    pub fn rows_per_state(&self) -> Option<u64> {
+        self.folded_rows_per_state
+            .map(|rows| ((rows - 1e-9 * rows.abs().max(1.0)).ceil().max(1.0)) as u64)
+    }
+
+    /// Whether `other` folds what this does: the same rows once rounded,
+    /// sign, magnitude range and distinct values. Candidates of one input
+    /// group computing the same states fold the same.
+    pub fn folds_the_same_as(&self, other: &Self) -> bool {
+        self.rows_per_state() == other.rows_per_state()
+            && self.non_negative == other.non_negative
+            && self.value_magnitude_range == other.value_magnitude_range
+            && self.distinct_values == other.distinct_values
+    }
+
     /// What one state folds when each group merges, from every input, that
-    /// input's states (`Some((rows each folds, states per group))`): their
-    /// rows summed, non-negative when all are, within the magnitude range
+    /// input's states (`Some((rows each folds, states per group))`, the
+    /// states per group exact, not rounded): their rows summed,
+    /// non-negative when all are, within the magnitude range
     /// spanning all of theirs, of the most distinct values any declares.
     /// `None` when any input's is unknown. Example:
     /// 360 states of 10 rows and 60 of 100 merge into one of 9,600 rows.
-    pub(crate) fn merged(inputs: impl IntoIterator<Item = Option<(Self, u64)>>) -> Option<Self> {
+    pub(crate) fn merged(inputs: impl IntoIterator<Item = Option<(Self, f64)>>) -> Option<Self> {
         let mut merged: Option<Self> = None;
         for (rows, states) in inputs.into_iter().collect::<Option<Vec<_>>>()? {
             let input = Self {
-                rows_per_state: rows
-                    .rows_per_state
-                    .map(|per_state| per_state.saturating_mul(states)),
+                folded_rows_per_state: rows
+                    .folded_rows_per_state
+                    .map(|per_state| per_state * states),
                 ..rows
             };
             merged = Some(match merged {
                 None => input,
                 Some(sum) => Self {
-                    rows_per_state: sum
-                        .rows_per_state
-                        .zip(input.rows_per_state)
-                        .map(|(a, b)| a.saturating_add(b)),
+                    folded_rows_per_state: sum
+                        .folded_rows_per_state
+                        .zip(input.folded_rows_per_state)
+                        .map(|(a, b)| a + b),
                     non_negative: sum.non_negative && input.non_negative,
                     value_magnitude_range: sum
                         .value_magnitude_range
@@ -188,7 +229,7 @@ impl StateInputRows {
 
     /// Unknown rows of unknown sign: the most a state is assumed to hold.
     pub const UNKNOWN: Self = Self {
-        rows_per_state: None,
+        folded_rows_per_state: None,
         non_negative: false,
         value_magnitude_range: None,
         distinct_values: None,
@@ -235,7 +276,7 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
         DdSketch, HyperLogLog, Kmv, RegularPath, UnivMon, Vector2D,
     };
     let heap_key = DataInput::Bytes(&[0; ASSUMED_HEAP_KEY_BYTES]);
-    let rows = input_rows.rows_per_state.map_or(usize::MAX, |rows| {
+    let rows = input_rows.rows_per_state().map_or(usize::MAX, |rows| {
         usize::try_from(rows.max(1)).unwrap_or(usize::MAX)
     });
     match params {
@@ -313,7 +354,7 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
 /// 248 + 8 · 2 + 8 · 15 = 384 bytes.
 fn kll_sealed_bytes(k: u32, input_rows: StateInputRows) -> u64 {
     let k = u64::from(k.clamp(8, KLL_MAX_K));
-    let (levels, items) = match input_rows.rows_per_state {
+    let (levels, items) = match input_rows.rows_per_state() {
         None => (KLL_MAX_LEVELS as u64, kll_capacity_items(k, KLL_MAX_LEVELS)),
         Some(rows) => {
             let rows = rows.max(1);
@@ -509,26 +550,28 @@ fn standard_normal_quantile(p: f64) -> f64 {
 /// not under-charged at a few rows per state; per-series values narrower
 /// than their column (latencies of one service, levels of one series) are
 /// over-charged instead, which a measured table's bytes per state corrects.
+/// Buckets a ratio of `ratio` between the largest and smallest magnitude
+/// spans at relative accuracy `alpha`, from a bucket boundary: at least
+/// one.
+fn ddsketch_buckets_spanned(alpha: f64, ratio: f64) -> u64 {
+    let sketch = asap_sketchlib::DdSketch::new(alpha);
+    let ratio = ratio.max(1.0);
+    match (sketch.bucket_index_for(ratio), sketch.bucket_index_for(1.0)) {
+        (Some(high), Some(low)) => u64::try_from(i64::from(high) - i64::from(low) + 1)
+            .unwrap_or(1)
+            .max(1),
+        _ => 1,
+    }
+}
+
 fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
-    use asap_sketchlib::DdSketch;
-    let sketch = DdSketch::new(alpha);
-    // Buckets a ratio of `ratio` between the largest and smallest
-    // magnitude spans, at least one.
-    let buckets_spanned = |ratio: f64| -> u64 {
-        let ratio = ratio.max(1.0);
-        match (sketch.bucket_index_for(ratio), sketch.bucket_index_for(1.0)) {
-            (Some(high), Some(low)) => u64::try_from(i64::from(high) - i64::from(low) + 1)
-                .unwrap_or(1)
-                .max(1),
-            _ => 1,
-        }
-    };
-    let stores = match (input_rows.non_negative, input_rows.rows_per_state) {
+    let buckets_spanned = |ratio: f64| ddsketch_buckets_spanned(alpha, ratio);
+    let stores = match (input_rows.non_negative, input_rows.rows_per_state()) {
         (true, _) | (false, Some(0 | 1)) => 1,
         (false, _) => 2,
     };
     let rows_per_store = input_rows
-        .rows_per_state
+        .rows_per_state()
         .map(|rows| rows.div_ceil(stores).max(1));
     if rows_per_store == Some(1) {
         return (1, stores);
@@ -554,50 +597,100 @@ fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
     (buckets_spanned(ratio), stores)
 }
 
-/// The bytes a DDSketch of relative accuracy `alpha` holds sealed after
-/// folding `input_rows`, as the executor keeps a stored window (it shrinks
-/// every DDSketch when it seals a window, `DdSketch::shrink_to_fit`): its
-/// struct and one 8-byte counter per bucket each store spans
-/// ([`ddsketch_span`]). [`ddsketch_open_state_bytes`] prices one still
-/// receiving values or merges. A measured table's bytes per state
-/// (`memory_bytes_per_state`, fitted from a deployment's sealed states)
-/// replace this estimate.
+/// The bytes a DDSketch of relative accuracy `alpha` takes stored after
+/// folding `input_rows`: the executor seals a DDSketch window into the
+/// sketch's view layout (`DdSketch::to_view_bytes`, one buffer per column,
+/// read in place), so its price is that layout's size, an upper bound on
+/// it whatever the values within the column's range:
 ///
-/// How it compares with what a sealed `asap_sketchlib` sketch holds, at
+/// - an 88-byte header (scalars, count width, form, each store's offset and
+///   length) and the state's 4-byte offset in its column;
+/// - its counts at the narrowest width holding every count (1, 2, 4 or 8
+///   bytes; no count exceeds the state's rows, so the width follows from
+///   them; unknown rows take 8);
+/// - the counts dense over the buckets the column's range spans (declared
+///   in `column_magnitudes`, or the assumed nine decades; plus one bucket
+///   for a range that does not start on a bucket boundary) per store (one
+///   when its values are proven non-negative or it folds one row, else
+///   two), or sparse as a 4-byte index and a count per occupied bucket, at
+///   most one bucket per row, whichever is smaller;
+/// - each array padded to 8 bytes.
+///
+/// [`ddsketch_open_state_bytes`] prices one still receiving values or
+/// merging (an owned sketch with 8-byte counts). A measured table's bytes
+/// per state (`memory_bytes_per_state`, fitted from a deployment's stored
+/// states) replace this estimate.
+///
+/// How it compares with what the executor holds for a sealed state, at
 /// α = 0.01, the mean of 20 series of 10 to 36,000 values each (the bands
-/// `state_bytes::tests` pins):
+/// `state_bytes::tests` pins; a grid over α 0.001–0.1, 1–140,000 rows and
+/// 15 shapes checks it never falls below 0.99):
 ///
 /// | values | range declared | charged ÷ held |
 /// |---|---|---|
-/// | exponential (latency-like) | no | 1.5–2.0 |
-/// | exponential (latency-like) | the generator's [2.7e-8, 1104] | 1.8–5.1 |
-/// | lognormal σ = 1 | no | 2.3–2.5 |
-/// | lognormal σ = 2 | no | 1.2–1.3 |
-/// | log-uniform over 7 decades | no | 0.59–1.28 |
-/// | log-uniform over 7 decades | [0.001, 1e4] | 0.99–1.0 |
-/// | Zipf(1.1) integers in [1, 1e6] | no | 0.70–1.49 |
-/// | Zipf(1.1) integers in [1, 1e6] | [1, 1e6] | 1.0–1.01 |
-/// | narrow gauge 100 ± 10 | no | 15–35 |
-/// | narrow gauge 100 ± 10 | [90, 110] | 0.97–1.06 |
-/// | counter readings near 1e6 | no | 21–46 |
-/// | per-series levels ± 10%, levels over [1, 1e5] | no | 15–36 |
-/// | per-series levels ± 10%, levels over [1, 1e5] | [1, 1e5] | 18–21 |
+/// | exponential (latency-like) | no | 1.0–4.0 |
+/// | exponential (latency-like) | the generator's [2.7e-8, 1104] | 1.0–4.7 |
+/// | lognormal σ = 1 | no | 1.0–5.4 |
+/// | lognormal σ = 2 | no | 1.0–3.0 |
+/// | log-uniform over 7 decades | no | 1.0–2.4 |
+/// | log-uniform over 7 decades | [0.001, 1e4] | 1.0–1.9 |
+/// | Zipf(1.1) integers in [1, 1e6] | no | 1.02–2.8 |
+/// | Zipf(1.1) integers in [1, 1e6] | [1, 1e6] | 1.0–1.9 |
+/// | narrow gauge 100 ± 10 | no | 1.4–20 |
+/// | narrow gauge 100 ± 10 | [90, 110] | 1.0–1.07 |
+/// | counter readings near 1e6 | no | 1.5–22 |
+/// | per-series levels ± 10%, levels over [1, 1e5] | no | 1.4–20 |
+/// | per-series levels ± 10%, levels over [1, 1e5] | [1, 1e5] | 1.4–12 |
 ///
-/// A declared range never lets values that fill it be under-charged, and
-/// prices a narrow one (a gauge, a counter's readings) close; a narrow
-/// per-state spread within a wide column range (per-series levels, the
-/// benchmark's Zipf-scaled series) is over-charged. Where this estimate is
-/// far from a deployment's states, its measured table's bytes per state,
-/// fitted from its sealed states per family, replace it.
+/// Few rows per state are stored sparse and priced closely. Past them the
+/// price is the whole column range dense: values narrower than it (without
+/// a declared range, anything narrower than nine decades) are
+/// over-charged. The count width follows the rows: from 256 to 65,535 rows
+/// a state whose largest count fits a byte is charged 2 bytes per count.
+/// Values outside the assumed nine decades with no declared range can be
+/// under-charged. Where this estimate is far from a deployment's states,
+/// its measured table's bytes per state, fitted from its stored states per
+/// family, replace it.
 ///
 /// Example: at α = 0.01, a state of 10 values with no declared range is
-/// charged the spread 2.3e3, 387 buckets: 144 + 8 × 387 = 3,240 bytes. A
-/// gauge declared within
-/// [90, 110] spans a ratio of 1.22, 11 buckets: 232 bytes for any number
-/// of rows.
+/// stored sparse in at most 10 buckets at 1-byte counts: 88 + 4 + 40 + 16 =
+/// 148 bytes. A gauge declared within [90, 110] spans 12 buckets: 600 rows,
+/// dense at 2-byte counts, 88 + 4 + 24 = 116 bytes.
 fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
-    let (span, stores) = ddsketch_span(alpha, input_rows);
-    std::mem::size_of::<asap_sketchlib::DdSketch>() as u64 + stores * 8 * span
+    // The view's header, and the state's 4-byte offset in its column.
+    const HEADER_BYTES: u64 = 88;
+    const OFFSET_BYTES: u64 = 4;
+    let padded = |bytes: u64| bytes.div_ceil(8) * 8;
+    let (_, stores) = ddsketch_span(alpha, input_rows);
+    // The most buckets a store's values can occupy: the declared (or
+    // assumed) range's, plus one for a range that does not start on a
+    // bucket boundary.
+    let column_span = match input_rows.rows_per_state() {
+        Some(0 | 1) => 1,
+        _ => {
+            let ratio = input_rows
+                .value_magnitude_range
+                .unwrap_or(DDSKETCH_ASSUMED_MAGNITUDE_RANGE)
+                .magnitude_ratio();
+            ddsketch_buckets_spanned(alpha, ratio) + 1
+        }
+    };
+    let Some(rows) = input_rows.rows_per_state() else {
+        return HEADER_BYTES + OFFSET_BYTES + stores * padded(8 * column_span);
+    };
+    // No count exceeds the rows, so they bound the width.
+    let count_bytes = match rows {
+        0..=0xff => 1,
+        0x100..=0xffff => 2,
+        0x1_0000..=0xffff_ffff => 4,
+        _ => 8,
+    };
+    let dense = stores * padded(count_bytes * column_span);
+    // At most one occupied bucket per row, however the rows split between
+    // the stores; each further store pads its two arrays.
+    let occupied = rows.max(1).min(stores * column_span);
+    let sparse = padded(4 * occupied) + padded(count_bytes * occupied) + (stores - 1) * 16;
+    HEADER_BYTES + OFFSET_BYTES + dense.min(sparse)
 }
 
 /// The bytes a DDSketch still receiving values holds (the current window

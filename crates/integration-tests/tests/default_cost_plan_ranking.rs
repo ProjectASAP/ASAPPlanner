@@ -17,11 +17,11 @@
 
 use std::collections::BTreeSet;
 
-use asap_cost::CostInputs;
-use asap_devtools::planning_stages::{
+use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
+use asap_planner::{DeploymentCapabilities, PlanningModels};
+use asap_planner_cli::planning_stages::{
     lower_promql_roots, run_planning_stages_over, PlanningStagesRun,
 };
-use asap_planner::{DeploymentCapabilities, PlanningModels};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
@@ -89,12 +89,24 @@ fn workload(query: Query, setting: Setting) -> PlanningWorkload {
     .unwrap()
 }
 
+/// The exclusions of a deployment that runs neither wider tumbling-window
+/// levels nor covers over them: both operators, as a runtime lacking them
+/// declares.
+fn without_wider_levels() -> Vec<asap_planner::CandidateExclusion> {
+    serde_json::from_str(r#"[{"operator": "SummaryMergeWindows"}, {"operator": "TimeRangeCover"}]"#)
+        .unwrap()
+}
+
 /// The planning stages' run over `workload` under the default cost inputs,
 /// with raw data kept or not.
 fn planning_run(workload: &PlanningWorkload, raw_data_retained: bool) -> PlanningStagesRun {
-    let settings = CostInputs::default();
+    let settings = cost_inputs_without_disk_cost();
+    // The stored plans were measured with one tumbling-window chain per
+    // range, before wider levels and covers: a deployment without both
+    // operators plans those.
     let capabilities = DeploymentCapabilities {
         raw_data_retained,
+        excluded_candidates: without_wider_levels(),
         ..Default::default()
     };
     let models = PlanningModels::builtin()
@@ -326,18 +338,21 @@ fn quantile_at_10_hz_with_raw_data_keeps_stored_ddsketch_windows() {
 /// With the default (Pareto) and Zipf modes' declared ranges, ten and nine
 /// decades across every series' scale, a stored DDSketch state is charged
 /// at least the spread of its rows log-uniform over that range (the
-/// declared range's floor, so values that fill it are not under-charged):
-/// the stored plan is then priced above the exact one at 10 s and 300 s.
+/// declared range's floor, so values that fill it are not under-charged).
+/// Priced at the view layout a stored window takes (narrow counts, sparse
+/// when few buckets are occupied), the stored plan stays below the exact
+/// one at every interval even at that floor; at 8 bytes per bucket of an
+/// owned sketch it was priced above it at 10 s and 300 s.
 /// Per-series values of these modes may span much less than the column
 /// does; which plan is cheaper for them is for a measured table's bytes
 /// per state (fitted from the data plane's stored states) to settle. These
 /// pin the selection the floor gives until calibration.
 #[test]
 fn quantile_at_10_hz_under_column_wide_declared_ranges_follows_the_floor() {
-    use PlanKind::{ExactScan, StoredStates};
+    use PlanKind::StoredStates;
     let expected = [
-        (BENCHMARK_RANGES[1], [ExactScan, ExactScan, ExactScan]),
-        (BENCHMARK_RANGES[2], [ExactScan, StoredStates, ExactScan]),
+        (BENCHMARK_RANGES[1], [StoredStates; 3]),
+        (BENCHMARK_RANGES[2], [StoredStates; 3]),
     ];
     for ((gauge, counter), kinds) in expected {
         let settings = [TEN_HZ_EVERY_10_S, TEN_HZ_EVERY_60_S, TEN_HZ_EVERY_300_S];
@@ -353,10 +368,14 @@ fn quantile_at_10_hz_under_column_wide_declared_ranges_follows_the_floor() {
     }
 }
 
+/// A declared `column_magnitudes` entry: the (min, max) of the values'
+/// magnitudes.
+type MagnitudeRange = (f64, f64);
+
 /// The `column_magnitudes` (min, max of the values' magnitudes) the
 /// benchmark's value modes declare for its gauge and its counter: none; the
 /// default (Pareto gauge) mode; Zipf integers; the realistic mode.
-const BENCHMARK_RANGES: [(Option<(f64, f64)>, Option<(f64, f64)>); 4] = [
+const BENCHMARK_RANGES: [(Option<MagnitudeRange>, Option<MagnitudeRange>); 4] = [
     (None, None),
     (Some((0.0603, 1.51e9)), Some((0.0603, 1.64e8))),
     (Some((1.0, 1.51e9)), Some((1.0, 5.6e9))),
@@ -462,7 +481,7 @@ fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
                 &with_kll_k(plan, k),
                 &entries,
                 &data,
-                &CostInputs::default(),
+                &cost_inputs_without_disk_cost(),
             )
             .unwrap();
             cost.cost_per_second.unwrap()
@@ -708,7 +727,8 @@ fn compaction_latency_charges_each_merge_its_family_s_merge_time() {
         &CostInputs::default(),
     )
     .unwrap();
-    let compaction_ms = cost.usage.latency_per_query[0].compaction_ms;
+    // The newest window's refresh, its compaction included.
+    let compaction_ms = cost.usage.latency_per_query[0].precompute_execution_ms;
     assert!(
         compaction_ms >= 100_000.0 * 1.8e-3,
         "predicted compaction {compaction_ms} ms, measured merges take at least 180 ms"
@@ -800,7 +820,7 @@ fn compaction_latency_is_zero_for_ingestion_time_nodes_holding_no_states() {
             "{kept}: ingestion takes {ingest_ms_per_second} ms per second, one core"
         );
         assert_eq!(
-            cost.usage.latency_per_query[0].compaction_ms, 0.0,
+            cost.usage.latency_per_query[0].precompute_execution_ms, 0.0,
             "{kept} kept at ingestion time"
         );
     }
@@ -871,4 +891,16 @@ fn identical_sum_over_time_pair_at_1_hz_keeps_stored_sum_windows() {
     .unwrap();
     let (plan, _) = selected(&workload, true);
     assert_eq!(plan_kind(&plan), PlanKind::StoredStates);
+}
+
+/// The default cost inputs with `cost_per_disk_byte_second` 0: the
+/// module's measurements are CPU, not the raw data a plan keeps on disk.
+fn cost_inputs_without_disk_cost() -> CostInputs {
+    CostInputs {
+        cost_model: CostModel::UsageOverTime(ResourceUnitCost {
+            cost_per_disk_byte_second: 0.0,
+            ..ResourceUnitCost::illustrative()
+        }),
+        ..CostInputs::default()
+    }
 }

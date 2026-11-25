@@ -1,0 +1,8 @@
+{
+  "arrival": {
+    "ingesting": {
+      "rows_per_second": 1000.0
+    }
+  },
+  "sources": {}
+}
