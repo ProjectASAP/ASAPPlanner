@@ -11,16 +11,21 @@
       }
     ],
     "cost": {
-      "cost_per_second": 0.0170800001025,
+      "cost_per_second": 0.557230000102,
       "cpu_core_seconds_per_second": 0.00001708,
       "per_node": {
         "0": {
-          "cost_per_second": 0.00589666670205,
+          "cost_per_second": 0.546046666702,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 5.89666666667e-6,
           "detail": "scan 1000 samples; x 1.0167/s; holds 48 bytes for 0.006 ms; keeps 172848000 bytes of raw data on disk",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Scan",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.0058,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "1": {
@@ -28,8 +33,13 @@
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000111833333333,
           "detail": "time range 1s: keep 1000 of 1000 rows; x 1.0167/s; holds 48 bytes for 0.011 ms",
+          "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
+          "priced_outside_measured_scale": false,
+          "query_ms_per_step": 0.011,
+          "refresh_cpu_ms_per_window": 0.0,
+          "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         }
       },
@@ -38,8 +48,33 @@
         "average_memory_bytes": 0.00081984,
         "cpu_ops_per_second": 12200.0,
         "disk_bytes": 172848000,
+        "latency_per_query": [
+          {
+            "allowed_lateness_ms": 0.0,
+            "evaluations_per_second": 1.01666666667,
+            "latency_ms": 1.0248,
+            "precompute_execution_ms": 0.0,
+            "precompute_queueing_ms": 0.0,
+            "query_execution_ms": 1.0248
+          }
+        ],
         "peak_cpu_cores": 1,
         "peak_memory_bytes": 96,
+        "precompute_load": -0.0,
+        "recommended_configuration": {
+          "ingest": {
+            "predicted_busy_thread_seconds_per_second": 0.0,
+            "recommended_threads": 1
+          },
+          "precompute": {
+            "predicted_busy_thread_seconds_per_second": -0.0,
+            "recommended_threads": 1
+          },
+          "query": {
+            "predicted_busy_thread_seconds_per_second": 0.00001708,
+            "recommended_threads": 1
+          }
+        },
         "scanned_bytes_per_second": 48800.0
       }
     },

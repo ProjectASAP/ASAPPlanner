@@ -13,11 +13,11 @@
       }
     ],
     "cost": {
-      "cost_per_second": 3.21715414712e-8,
+      "cost_per_second": 3.23551237771e-8,
       "cpu_core_seconds_per_second": 0.00286066666667,
       "per_node": {
         "0": {
-          "cost_per_second": 1.57416000515e-10,
+          "cost_per_second": 3.40998306423e-10,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000014,
           "detail": "scan 200000 samples; x 0.0167/s; holds 32 bytes for 0.840 ms; keeps 6400000 bytes of raw data on disk",
